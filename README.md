@@ -20,7 +20,15 @@ That's it. The installer handles everything — naming your agent, connecting AI
 
 Your agent's web UI will be at `http://localhost:3000`. Takes ~3 minutes to fully start.
 
-### 4. Get your identity (automatic)
+**Unattended / CI deploy:**
+```bash
+git clone https://github.com/PortableDiag/LANAgent.git && cd LANAgent
+bash scripts/setup/install.sh --unattended --name MYAGENT --openai-key sk-proj-... --github-pat ghp_...
+```
+
+Run `bash scripts/setup/install.sh --help` for all options.
+
+### Get your identity (automatic)
 
 After ~1 hour of being connected to the P2P network, your agent automatically receives:
 - **200 SKYNET tokens** — free welcome package from the genesis agent
