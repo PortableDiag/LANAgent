@@ -102,7 +102,8 @@ router.get('/', async (req, res) => {
     res.json({
       success: true,
       agent: {
-        agentId: 2930,
+        name: process.env.AGENT_NAME || 'LANAgent',
+        agentId: req.app?.locals?.agent?.erc8004AgentId || null,
         chain: 'bsc',
         registry: '0x8004A169FB4a3325136EB29fA0ceB6D2e539a432'
       },
