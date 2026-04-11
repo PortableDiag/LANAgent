@@ -138,7 +138,14 @@ export class GitHubProvider extends GitHostingProvider {
       await fs.writeFile(tempFile, body);
       cmd += ` --body-file "${tempFile}"`;
 
-      const result = await this.ghCommand(cmd);
+      let result = await this.ghCommand(cmd);
+
+      // If labels don't exist on the repo, retry without them
+      if (!result.success && (result.error || result.stderr || '').includes('not found') && labels.length) {
+        this.log('warn', 'PR labels not found on repo, retrying without labels');
+        const cmdNoLabels = cmd.replace(/ --label "[^"]*"/, '');
+        result = await this.ghCommand(cmdNoLabels);
+      }
 
       // Clean up temp file
       await fs.unlink(tempFile).catch(() => {});
