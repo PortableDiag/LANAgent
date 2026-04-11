@@ -4031,9 +4031,18 @@ ${upgrade.safeForProduction ? '- [x] Safe for production deployment' : '- [ ] Re
         
         logger.info(`[SelfMod-${this.constructorId}] Self-modification configuration loaded from database`);
       } else {
-        logger.info(`[SelfMod-${this.constructorId}] No saved self-modification configuration found, using defaults`);
+        logger.info(`[SelfMod-${this.constructorId}] No saved self-modification configuration found, saving defaults`);
+        // Ensure defaults are saved so they don't get lost
+        this.enabled = this.config.enabled;
+        this.analysisOnly = this.config.analysisOnly;
+        await this.saveConfig();
       }
-      logger.info(`[SelfMod-${this.constructorId}] LoadConfig() complete`);
+
+      // Always ensure instance state matches config
+      this.enabled = this.config.enabled;
+      this.analysisOnly = this.config.analysisOnly;
+
+      logger.info(`[SelfMod-${this.constructorId}] LoadConfig() complete (enabled: ${this.enabled}, analysisOnly: ${this.analysisOnly})`);
     } catch (error) {
       logger.warn(`[SelfMod-${this.constructorId}] Failed to load self-modification configuration from database:`, error.message);
     }
