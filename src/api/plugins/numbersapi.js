@@ -29,3 +29,4 @@ export default class NumbersApiPlugin extends BasePlugin {
 
   getCommands() { return { fact: "Get a random number fact" }; }
 }
+// test
