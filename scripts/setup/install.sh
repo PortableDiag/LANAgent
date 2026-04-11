@@ -184,7 +184,9 @@ if [ "$UNATTENDED" = "true" ]; then
         exit 1
     fi
     _NAME="${_NAME:-LANAgent}"
-    _PORT="${_PORT:-3000}"
+    if [ -z "$_PORT" ]; then
+        _PORT=$( [ "$(id -u)" = "0" ] && echo "80" || echo "3000" )
+    fi
     _SSH_PORT="${_SSH_PORT:-2222}"
 fi
 
@@ -463,7 +465,8 @@ else
     echo ""
 
     ask "Agent name" "${_NAME:-LANAgent}" AGENT_NAME
-    ask "Web UI port" "${_PORT:-3000}" AGENT_PORT
+    DEFAULT_PORT="${_PORT:-$( [ "$(id -u)" = "0" ] && echo "80" || echo "3000" )}"
+    ask "Web UI port" "$DEFAULT_PORT" AGENT_PORT
     ask "SSH interface port" "${_SSH_PORT:-2222}" AGENT_SSH_PORT
 fi
 
