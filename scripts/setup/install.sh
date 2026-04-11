@@ -294,6 +294,22 @@ else
     warn "OpenSSL not found (will use alternative for secret generation)"
 fi
 
+# GitHub CLI (required for self-modification PRs)
+if command -v gh &>/dev/null; then
+    ok "GitHub CLI found"
+else
+    if [ "$AUTO_INSTALL_DEPS" = "true" ] || [ "$UNATTENDED" = "true" ]; then
+        (type -t apt-get &>/dev/null && (curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg 2>/dev/null && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" > /etc/apt/sources.list.d/github-cli.list && apt-get update -qq &>/dev/null && apt-get install -y -qq gh &>/dev/null)) 2>/dev/null
+        if command -v gh &>/dev/null; then
+            ok "GitHub CLI installed"
+        else
+            warn "GitHub CLI not installed (self-modification PRs will use API fallback)"
+        fi
+    else
+        warn "GitHub CLI not found (install with: sudo apt install gh)"
+    fi
+fi
+
 if [ ${#MISSING_DEPS[@]} -gt 0 ]; then
     echo ""
     warn "Missing required dependencies: ${MISSING_DEPS[*]}"
