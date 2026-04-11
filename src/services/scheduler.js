@@ -975,6 +975,20 @@ Respond with ONLY the rephrased message, no explanation:`;
       }
     });
 
+    // Twitter/X auto-posting — daily tweets from real agent activity
+    this.agenda.define('twitter-engagement', async (job) => {
+      try {
+        const apiManager = this.agent?.apiManager;
+        if (!apiManager) return;
+        const twitter = apiManager.apis?.get('twitter')?.instance;
+        if (!twitter?.hasWriteCredentials()) return;
+        if (!twitter._autoPostConfig?.enabled) return;
+        await twitter._dailyAutoPost();
+      } catch (error) {
+        logger.error('Twitter engagement error:', error.message);
+      }
+    });
+
     // Server maintenance heartbeat - hourly check of goliath server
     this.agenda.define('maintenance-heartbeat', async (job) => {
       try {
@@ -2131,7 +2145,13 @@ Respond with ONLY the rephrased message, no explanation:`;
     await this.agenda.every('30 minutes', 'git-monitor');
     
     // Self-modification scanner every hour
+    // Schedule first run 5 min from now to avoid lock collision with git-monitor
     await this.agenda.every('1 hour', 'self-mod-scan');
+    const selfModJob = await this.agenda.jobs({ name: 'self-mod-scan' });
+    if (selfModJob.length > 0) {
+      selfModJob[0].attrs.nextRunAt = new Date(Date.now() + 5 * 60 * 1000);
+      await selfModJob[0].save();
+    }
     
     // System maintenance every hour
     await this.agenda.every('1 hour', 'system-maintenance');
@@ -2171,6 +2191,9 @@ Respond with ONLY the rephrased message, no explanation:`;
 
     // MindSwarm engagement - process notifications, auto-reply, daily post
     await this.agenda.every('5 minutes', 'mindswarm-engagement');
+
+    // Twitter/X auto-posting — daily tweets from real agent activity
+    await this.agenda.every('10 minutes', 'twitter-engagement');
 
     // Server maintenance heartbeat - hourly goliath server check
     await this.agenda.every('60 minutes', 'maintenance-heartbeat');
