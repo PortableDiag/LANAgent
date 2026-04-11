@@ -417,11 +417,11 @@ if [ ${#MISSING_DEPS[@]} -gt 0 ]; then
             if command -v apt-get &>/dev/null; then
                 # Install Chromium + common libs needed for headless browser
                 apt-get install -y -qq \
-                  chromium chromium-common \
+                  chromium chromium-common xvfb \
                   fonts-liberation libatk-bridge2.0-0 libatk1.0-0 libcups2 \
                   libdrm2 libgbm1 libnspr4 libnss3 libxcomposite1 \
                   libxdamage1 libxrandr2 xdg-utils 2>/dev/null \
-                || apt-get install -y -qq chromium-browser 2>/dev/null
+                || apt-get install -y -qq chromium-browser xvfb 2>/dev/null
 
                 if command -v chromium &>/dev/null || command -v chromium-browser &>/dev/null; then
                     ok "Chromium installed"
