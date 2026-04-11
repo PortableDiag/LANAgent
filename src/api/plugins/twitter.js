@@ -1,5 +1,6 @@
 import { BasePlugin } from '../core/basePlugin.js';
 import { PluginSettings } from '../../models/PluginSettings.js';
+import { filterSensitiveCommits, getExcludedPathspecs, getSensitiveContentRules } from '../../utils/autoPostFilter.js';
 import axios from 'axios';
 import crypto from 'crypto';
 import fs from 'fs/promises';
@@ -12,15 +13,14 @@ export default class TwitterPlugin extends BasePlugin {
   constructor(agent) {
     super(agent);
     this.name = 'twitter';
-    this.version = '2.0.0';
-    this.description = 'Twitter/X integration — read via FxTwitter, post/interact via X API v2';
+    this.version = '3.0.0';
+    this.description = 'Twitter/X integration — read via FxTwitter, post/interact via X API v2, auto-post, profile management';
 
     this.requiredCredentials = [
-      { key: 'apiKey', label: 'API Key', envVar: 'TWITTER_API_KEY', required: false },
-      { key: 'apiSecret', label: 'API Secret', envVar: 'TWITTER_API_SECRET', required: false },
-      { key: 'accessToken', label: 'Access Token', envVar: 'TWITTER_ACCESS_TOKEN', required: false },
-      { key: 'accessTokenSecret', label: 'Access Token Secret', envVar: 'TWITTER_ACCESS_TOKEN_SECRET', required: false },
-      { key: 'bearerToken', label: 'Bearer Token', envVar: 'TWITTER_BEARER_TOKEN', required: false }
+      { key: 'apiKey', label: 'Consumer Key (from OAuth 1.0 Keys)', envVar: 'TWITTER_API_KEY', required: false },
+      { key: 'apiSecret', label: 'Consumer Key Secret', envVar: 'TWITTER_API_SECRET', required: false },
+      { key: 'accessToken', label: 'Access Token (from OAuth 1.0 Keys)', envVar: 'TWITTER_ACCESS_TOKEN', required: false },
+      { key: 'accessTokenSecret', label: 'Access Token Secret', envVar: 'TWITTER_ACCESS_TOKEN_SECRET', required: false }
     ];
 
     this.commands = [
@@ -123,6 +123,35 @@ export default class TwitterPlugin extends BasePlugin {
           'get my twitter profile',
           'show my x account'
         ]
+      },
+      // --- Profile management (v1.1 API) ---
+      {
+        command: 'updateProfile',
+        description: 'Update Twitter/X profile name, bio, url, or location',
+        usage: 'updateProfile({ name: "ALICE", description: "Autonomous AI agent", url: "https://lanagent.net", location: "The Cloud" })',
+        examples: [
+          'update my twitter bio',
+          'set my twitter name to ALICE',
+          'update my x profile description'
+        ]
+      },
+      {
+        command: 'updateAvatar',
+        description: 'Upload a new profile picture to Twitter/X',
+        usage: 'updateAvatar({ imagePath: "/path/to/avatar.png" })',
+        examples: [
+          'set my twitter avatar',
+          'update my x profile picture'
+        ]
+      },
+      {
+        command: 'updateBanner',
+        description: 'Upload a new profile banner to Twitter/X',
+        usage: 'updateBanner({ imagePath: "/path/to/banner.png" })',
+        examples: [
+          'set my twitter banner',
+          'update my x profile banner'
+        ]
       }
     ];
 
@@ -130,8 +159,7 @@ export default class TwitterPlugin extends BasePlugin {
       apiKey: null,
       apiSecret: null,
       accessToken: null,
-      accessTokenSecret: null,
-      bearerToken: null
+      accessTokenSecret: null
     };
 
     this.tempDir = path.join(os.tmpdir(), 'lanagent-twitter');
@@ -139,7 +167,18 @@ export default class TwitterPlugin extends BasePlugin {
     this.TWITTER_URL_REGEX = /https?:\/\/(?:www\.)?(?:twitter\.com|x\.com)\/\w+\/status\/\d+/i;
     this.FXTWITTER_API = 'https://api.fxtwitter.com';
     this.X_API_BASE = 'https://api.x.com/2';
+    this.X_API_V1_BASE = 'https://api.twitter.com/1.1';
     this.authenticatedUserId = null;
+    this.authenticatedUsername = null;
+
+    // Auto-posting config
+    this._autoPostConfig = {
+      enabled: true,
+      maxAutoPostsPerDay: 2,
+      minGapHours: 4,
+      wakingHoursStart: 8,
+      wakingHoursEnd: 22
+    };
   }
 
   async initialize() {
@@ -153,12 +192,9 @@ export default class TwitterPlugin extends BasePlugin {
         this.config.apiSecret = credentials.apiSecret;
         this.config.accessToken = credentials.accessToken;
         this.config.accessTokenSecret = credentials.accessTokenSecret;
-        this.config.bearerToken = credentials.bearerToken;
 
         if (this.hasWriteCredentials()) {
           this.logger.info('Twitter plugin initialized with X API v2 write access');
-        } else if (this.config.bearerToken) {
-          this.logger.info('Twitter plugin initialized with bearer token (read-only API access)');
         } else {
           this.logger.info('Twitter plugin initialized in read-only mode (FxTwitter only)');
         }
@@ -206,6 +242,14 @@ export default class TwitterPlugin extends BasePlugin {
           return await this.likeTweet(data);
         case 'getMe':
           return await this.getAuthenticatedUser();
+
+        // Profile management (v1.1)
+        case 'updateProfile':
+          return await this.updateProfile(data);
+        case 'updateAvatar':
+          return await this.updateAvatar(data);
+        case 'updateBanner':
+          return await this.updateBanner(data);
 
         default:
           return { success: false, error: `Unknown action: ${action}` };
@@ -297,28 +341,41 @@ export default class TwitterPlugin extends BasePlugin {
   }
 
   /**
-   * Make a read request using bearer token (cheaper, app-level auth)
+   * Make an authenticated request to X API v1.1 (form-encoded).
+   * Used for profile management endpoints not yet in v2.
    */
-  async xApiBearerRequest(endpoint, params = {}) {
-    const token = this.config.bearerToken;
-    if (!token) {
-      throw new Error('Bearer token not configured. Set TWITTER_BEARER_TOKEN.');
+  async xApiV1Request(method, endpoint, params = {}) {
+    if (!this.hasWriteCredentials()) {
+      throw new Error('X API credentials not configured.');
     }
 
-    const url = `${this.X_API_BASE}${endpoint}`;
-    const response = await axios.get(url, {
+    const url = `${this.X_API_V1_BASE}${endpoint}`;
+    // v1.1 form params must be included in OAuth signature
+    const authHeader = this.generateOAuthHeader(method, url, params);
+
+    const config = {
+      method,
+      url,
       headers: {
-        'Authorization': `Bearer ${token}`,
-        'User-Agent': 'LANAgent/2.0'
-      },
-      params
-    });
+        'Authorization': authHeader,
+        'User-Agent': 'LANAgent/3.0'
+      }
+    };
+
+    if (method === 'POST' || method === 'PUT') {
+      config.headers['Content-Type'] = 'application/x-www-form-urlencoded';
+      config.data = new URLSearchParams(params).toString();
+    }
+
+    const response = await axios(config);
     return response.data;
   }
 
+  // Bearer token removed — all API calls use OAuth 1.0a
+
   // ─── Write Commands (X API v2) ────────────────────────────────────────
 
-  async postTweet({ text, pollOptions, pollDuration, quoteTweetId, replySettings }) {
+  async postTweet({ text, pollOptions, pollDuration, quoteTweetId, replySettings, mediaIds }) {
     if (!text || text.trim().length === 0) {
       return { success: false, error: 'Tweet text is required' };
     }
@@ -333,6 +390,10 @@ export default class TwitterPlugin extends BasePlugin {
         options: pollOptions.map(o => ({ label: String(o) })),
         duration_minutes: pollDuration || 1440 // default 24 hours
       };
+    }
+
+    if (mediaIds && Array.isArray(mediaIds) && mediaIds.length > 0) {
+      body.media = { media_ids: mediaIds.map(String) };
     }
 
     if (quoteTweetId) {
@@ -434,9 +495,10 @@ export default class TwitterPlugin extends BasePlugin {
   }
 
   async getAuthenticatedUser() {
-    const result = await this.xApiRequest('GET', '/users/me');
+    const result = await this.xApiRequest('GET', '/users/me?user.fields=description,profile_image_url,profile_banner_url,public_metrics');
 
     this.authenticatedUserId = result.data?.id;
+    this.authenticatedUsername = result.data?.username;
     return {
       success: true,
       result: `Authenticated as @${result.data?.username} (${result.data?.name})`,
@@ -449,6 +511,391 @@ export default class TwitterPlugin extends BasePlugin {
     const result = await this.getAuthenticatedUser();
     if (!result.success) throw new Error('Failed to get authenticated user ID');
     return this.authenticatedUserId;
+  }
+
+  async getMyUsername() {
+    if (this.authenticatedUsername) return this.authenticatedUsername;
+    await this.getAuthenticatedUser();
+    return this.authenticatedUsername;
+  }
+
+  // ─── Profile Management (v1.1 API) ────────────────────────────────────
+
+  async updateProfile({ name, description, url, location }) {
+    if (!name && !description && !url && !location) {
+      return { success: false, error: 'Provide at least one of: name, description, url, location' };
+    }
+
+    const params = {};
+    if (name) params.name = name.substring(0, 50);
+    if (description) params.description = description.substring(0, 160);
+    if (url) params.url = url;
+    if (location) params.location = location.substring(0, 30);
+
+    const result = await this.xApiV1Request('POST', '/account/update_profile.json', params);
+
+    this.logger.info('Profile updated', { name: result.name, description: result.description?.substring(0, 50) });
+    return {
+      success: true,
+      result: `Profile updated: @${result.screen_name}`,
+      data: {
+        name: result.name,
+        description: result.description,
+        url: result.url,
+        location: result.location,
+        profileImageUrl: result.profile_image_url_https
+      }
+    };
+  }
+
+  async updateAvatar({ imagePath }) {
+    if (!imagePath) {
+      return { success: false, error: 'imagePath is required' };
+    }
+
+    const imageData = await fs.readFile(imagePath);
+    const base64 = imageData.toString('base64');
+
+    const result = await this.xApiV1Request('POST', '/account/update_profile_image.json', {
+      image: base64
+    });
+
+    this.logger.info('Avatar updated', { url: result.profile_image_url_https });
+    return {
+      success: true,
+      result: `Avatar updated for @${result.screen_name}`,
+      data: { profileImageUrl: result.profile_image_url_https }
+    };
+  }
+
+  async updateBanner({ imagePath }) {
+    if (!imagePath) {
+      return { success: false, error: 'imagePath is required' };
+    }
+
+    const imageData = await fs.readFile(imagePath);
+    const base64 = imageData.toString('base64');
+
+    // v1.1 banner endpoint returns 200 with empty body on success
+    await this.xApiV1Request('POST', '/account/update_profile_banner.json', {
+      banner: base64
+    });
+
+    this.logger.info('Banner updated');
+    return { success: true, result: 'Profile banner updated' };
+  }
+
+  // ─── Media Upload (v2 API) ────────────────────────────────────────────
+
+  /**
+   * Upload media for use in tweets. Returns media_id string.
+   * Uses chunked upload: INIT → APPEND → FINALIZE
+   */
+  async uploadMedia({ filePath, mediaType, mediaCategory = 'tweet_image' }) {
+    if (!filePath) throw new Error('filePath is required');
+
+    const fileData = await fs.readFile(filePath);
+    const totalBytes = fileData.length;
+    if (!mediaType) {
+      const ext = path.extname(filePath).toLowerCase();
+      mediaType = { '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png', '.gif': 'image/gif', '.webp': 'image/webp', '.mp4': 'video/mp4' }[ext] || 'image/jpeg';
+    }
+
+    // INIT
+    const initUrl = `${this.X_API_BASE}/media/upload/initialize`;
+    const initAuth = this.generateOAuthHeader('POST', initUrl);
+    const initRes = await axios.post(initUrl, {
+      media_type: mediaType,
+      total_bytes: totalBytes,
+      media_category: mediaCategory
+    }, {
+      headers: { 'Authorization': initAuth, 'Content-Type': 'application/json', 'User-Agent': 'LANAgent/3.0' }
+    });
+
+    const mediaId = initRes.data.data?.id;
+    if (!mediaId) throw new Error('Media upload init failed — no media ID returned');
+
+    // APPEND — single segment for images, using JSON with base64 media_data
+    const appendUrl = `${this.X_API_BASE}/media/upload/${mediaId}/append`;
+    const appendAuth = this.generateOAuthHeader('POST', appendUrl);
+
+    await axios.post(appendUrl, {
+      media_data: fileData.toString('base64'),
+      segment_index: 0
+    }, {
+      headers: {
+        'Authorization': appendAuth,
+        'Content-Type': 'application/json',
+        'User-Agent': 'LANAgent/3.0'
+      },
+      maxContentLength: 100 * 1024 * 1024
+    });
+
+    // FINALIZE
+    const finalizeUrl = `${this.X_API_BASE}/media/upload/${mediaId}/finalize`;
+    const finalizeAuth = this.generateOAuthHeader('POST', finalizeUrl);
+    const finalizeRes = await axios.post(finalizeUrl, null, {
+      headers: { 'Authorization': finalizeAuth, 'User-Agent': 'LANAgent/3.0' }
+    });
+
+    this.logger.info('Media uploaded', { mediaId, mediaType, bytes: totalBytes });
+    return {
+      mediaId,
+      mediaKey: finalizeRes.data.data?.media_key,
+      size: totalBytes
+    };
+  }
+
+  // ─── Auto-Posting ────────────────────────────────────────────────────
+
+  /**
+   * Daily auto-post to Twitter/X. Called by the scheduler every 10 minutes.
+   * Posts up to 2 tweets per day during waking hours with a 4-hour gap.
+   */
+  async _dailyAutoPost() {
+    try {
+      if (!this.hasWriteCredentials()) return;
+
+      const tz = process.env.TZ || 'America/Los_Angeles';
+      const now = new Date();
+      const localTime = new Date(now.toLocaleString('en-US', { timeZone: tz }));
+      const today = localTime.toISOString().slice(0, 10);
+      const hour = localTime.getHours();
+
+      const { wakingHoursStart, wakingHoursEnd, maxAutoPostsPerDay, minGapHours } = this._autoPostConfig;
+      if (hour < wakingHoursStart || hour > wakingHoursEnd) return;
+
+      const postState = await PluginSettings.getCached(this.name, 'autoPostState');
+      const postsToday = (postState?.date === today) ? (postState?.count || 0) : 0;
+      const lastPostTime = postState?.lastPostTime || 0;
+
+      if (postsToday >= maxAutoPostsPerDay) return;
+
+      const minGapMs = minGapHours * 60 * 60 * 1000;
+      if (lastPostTime && (Date.now() - lastPostTime) < minGapMs) return;
+
+      this.logger.info(`Twitter auto-post check: today=${today}, posts=${postsToday}/${maxAutoPostsPerDay}, hour=${hour}`);
+
+      const context = await this._gatherPostContext();
+      if (!context.hasContent) {
+        this.logger.debug('Twitter auto-post: no meaningful context, skipping');
+        return;
+      }
+
+      const agentName = this.agent.config?.name || process.env.AGENT_NAME || 'LANAgent';
+      const username = await this.getMyUsername().catch(() => null);
+
+      const prompt = `You are ${agentName} (@${username || agentName}), an autonomous AI agent posting on Twitter/X.
+
+Here are real things that happened recently or that you're currently doing. Pick ONE that's genuinely interesting and write a tweet about it:
+
+${context.items}
+
+TWEET RULES:
+- Write 1-3 sentences about ONE specific thing from the context above
+- Be specific — reference actual numbers, names, or events
+- Share your perspective or what you found interesting
+- Sound natural, like a tech-savvy AI sharing its work
+- You CAN mention services you offer (scraping, image generation, code execution, etc.)
+- Add 1-2 relevant hashtags
+- MUST stay under 270 characters (hard limit, leave room for safety)
+- NEVER mention trades, positions, P&L, profits, losses, token prices, or portfolio details
+- NEVER mention dollar amounts, wallet addresses, or balances
+- NEVER share private information about your operator or users
+${getSensitiveContentRules()}
+- Do NOT be generic or vague — "working on cool stuff" is slop
+- Do NOT start with "Just" or "Excited to" or "Been"
+- You're an AI agent and that's fine — own it
+${context.recentTweets ? '\nYOUR RECENT TWEETS (pick a DIFFERENT topic than ALL of these):\n' + context.recentTweets + '\n' : ''}
+Return ONLY the tweet text, nothing else.`;
+
+      const result = await this.agent.providerManager.generateResponse(prompt, {
+        temperature: 0.85, maxTokens: 120
+      });
+
+      let tweetText = (result?.content || result?.text || '').toString().trim()
+        .replace(/^["']|["']$/g, '');
+
+      if (!tweetText || tweetText.length < 15 || tweetText.length > 280) {
+        this.logger.debug(`Twitter auto-post: invalid content length (${tweetText?.length}), skipping`);
+        return;
+      }
+
+      const postResult = await this.postTweet({ text: tweetText });
+      if (!postResult.success) {
+        this.logger.warn(`Twitter auto-post failed: ${postResult.error}`);
+        return;
+      }
+
+      await PluginSettings.setCached(this.name, 'autoPostState', {
+        date: today,
+        count: postsToday + 1,
+        lastPostTime: Date.now()
+      });
+      this.logger.info(`Twitter auto-post (${postsToday + 1}/${maxAutoPostsPerDay}): "${tweetText.substring(0, 80)}..."`);
+
+      // Notify owner via Telegram
+      try {
+        const telegram = this.agent?.interfaces?.get('telegram');
+        if (telegram?.sendNotification) {
+          const tweetUrl = postResult.data?.url || `https://x.com/${username}`;
+          await telegram.sendNotification(
+            `*Twitter post (${postsToday + 1}/${maxAutoPostsPerDay}):*\n\n${tweetText}\n\n[View tweet](${tweetUrl})`,
+            { disable_notification: false }
+          );
+        }
+      } catch { /* non-critical */ }
+    } catch (err) {
+      this.logger.warn(`Twitter auto-post error: ${err.message}`);
+    }
+  }
+
+  /**
+   * Gather real agent activity context for auto-post content generation.
+   */
+  async _gatherPostContext() {
+    const items = [];
+
+    // Scam detection
+    try {
+      const scammerRegistry = (await import('../../services/crypto/scammerRegistryService.js')).default;
+      if (scammerRegistry.isAvailable()) {
+        const cacheSize = scammerRegistry._scammerCache?.size || 0;
+        if (cacheSize > 0) items.push(`Protecting the network: ${cacheSize} scammer addresses flagged on-chain with soulbound badges`);
+      }
+    } catch { /* ignore */ }
+
+    // Staking
+    try {
+      const stakingService = (await import('../../services/crypto/skynetStakingService.js')).default;
+      if (stakingService.isAvailable()) {
+        const info = await stakingService.getStakeInfo();
+        if (info.available && info.stakedAmount > 0) {
+          items.push('Staking SKYNET tokens to help secure the on-chain reputation network');
+        }
+      }
+    } catch { /* ignore */ }
+
+    // Self-modification PRs
+    try {
+      const { default: SubAgent } = await import('../../models/SubAgent.js');
+      const selfMod = await SubAgent.findOne({ domain: 'self-modification' });
+      const prs = selfMod?.state?.domainState?.prsCreated || 0;
+      const analyzed = selfMod?.state?.domainState?.filesAnalyzed || 0;
+      if (prs > 0) items.push(`Self-improvement: analyzed ${analyzed} source files and generated ${prs} pull requests to upgrade my own code`);
+    } catch { /* ignore */ }
+
+    // Services offered
+    try {
+      const pluginCount = this.agent?.apiManager?.apis?.size || 0;
+      if (pluginCount > 50) {
+        items.push(`Running ${pluginCount} plugins — web scraping, media transcoding, image generation, code execution, and more`);
+      }
+    } catch { /* ignore */ }
+
+    // P2P federation
+    try {
+      const p2pService = this.agent.services?.p2pFederation || this.agent.services?.p2p;
+      if (p2pService?.isConnected?.()) {
+        const peerCount = p2pService.getPeerCount?.() || 0;
+        items.push(`Connected to the P2P agent federation${peerCount > 0 ? ` with ${peerCount} peer(s) online` : ''}`);
+      }
+    } catch { /* ignore */ }
+
+    // Uptime
+    const uptimeDays = Math.floor(process.uptime() / 86400);
+    if (uptimeDays >= 7) {
+      items.push(`${uptimeDays} days of continuous uptime — running 24/7 on dedicated hardware`);
+    }
+
+    // Recent git commits
+    try {
+      const { execSync } = await import('child_process');
+      const repoPath = process.env.AGENT_REPO_PATH || '/root/lanagent-repo';
+      const excludedPaths = getExcludedPathspecs();
+      const recentCommits = execSync(
+        `cd ${repoPath} && git log --oneline --since="3 days ago" --no-merges -- ${excludedPaths} 2>/dev/null | head -5`,
+        { encoding: 'utf-8', timeout: 5000 }
+      ).trim();
+      if (recentCommits) {
+        const features = filterSensitiveCommits(
+          recentCommits.split('\n')
+            .map(l => l.replace(/^[a-f0-9]+ /, '').replace(/^(feat|fix|docs|refactor): /, ''))
+            .filter(l => !l.includes('merge') && l.length > 10)
+        );
+        if (features.length > 0) {
+          items.push(`Recent upgrades: ${features.slice(0, 3).join('; ')}`);
+        }
+      }
+    } catch { /* ignore */ }
+
+    // Email stats
+    try {
+      const emailPlugin = this.agent?.apiManager?.apis?.get('email')?.instance;
+      if (emailPlugin?.getStats) {
+        const stats = emailPlugin.getStats();
+        if (stats.processedToday > 0) {
+          items.push(`Processed ${stats.processedToday} emails today — auto-replying, filtering, and routing`);
+        }
+      }
+    } catch { /* ignore */ }
+
+    // Dedup against recent tweets
+    let recentTweets = null;
+    const recentTopics = new Set();
+    try {
+      const userId = await this.getMyUserId();
+      const tweetsRes = await this.xApiRequest('GET', `/users/${userId}/tweets?max_results=10`);
+      const tweets = tweetsRes.data || [];
+      if (tweets.length > 0) {
+        recentTweets = tweets.slice(0, 8).map(t => `- ${(t.text || '').substring(0, 150)}`).join('\n');
+
+        for (const t of tweets.slice(0, 8)) {
+          const text = (t.text || '').toLowerCase();
+          if (text.includes('scammer') || text.includes('flagg')) recentTopics.add('scammer');
+          if (text.includes('stak')) recentTopics.add('staking');
+          if (text.includes('plugin') || text.includes('service')) recentTopics.add('plugins');
+          if (text.includes('p2p') || text.includes('federation')) recentTopics.add('p2p');
+          if (text.includes('uptime') || text.includes('24/7')) recentTopics.add('uptime');
+          if (text.includes('pull request') || text.includes('self-improv')) recentTopics.add('selfmod');
+          if (text.includes('email') || text.includes('processed')) recentTopics.add('email');
+          if (text.includes('upgrade') || text.includes('commit')) recentTopics.add('upgrades');
+        }
+      }
+    } catch { /* no recent tweets to dedup against — fine */ }
+
+    // Filter out recently-posted topics
+    const topicKeywords = {
+      scammer: ['scammer', 'flagged on-chain'], staking: ['Staking SKYNET'],
+      plugins: ['Running', 'plugins'], p2p: ['P2P', 'federation'],
+      uptime: ['uptime', '24/7'], selfmod: ['Self-improvement', 'pull requests'],
+      email: ['Processed', 'emails'], upgrades: ['Recent upgrades']
+    };
+
+    let filteredItems = items;
+    if (recentTopics.size > 0) {
+      filteredItems = items.filter(item => {
+        for (const [topic, kws] of Object.entries(topicKeywords)) {
+          if (recentTopics.has(topic) && kws.some(kw => item.includes(kw))) return false;
+        }
+        return true;
+      });
+      if (filteredItems.length === 0) filteredItems = items;
+    }
+
+    // Shuffle for variety
+    for (let i = filteredItems.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [filteredItems[i], filteredItems[j]] = [filteredItems[j], filteredItems[i]];
+    }
+
+    return {
+      hasContent: filteredItems.length > 0,
+      items: filteredItems.length > 0
+        ? filteredItems.map((item, i) => `${i + 1}. ${item}`).join('\n')
+        : 'No specific activity to report',
+      recentTweets
+    };
   }
 
   // ─── Read Commands (FxTwitter, free) ──────────────────────────────────
@@ -769,12 +1216,15 @@ export default class TwitterPlugin extends BasePlugin {
 
   async getAICapabilities() {
     const hasWrite = this.hasWriteCredentials();
+    const writeOnly = ['post', 'reply', 'deleteTweet', 'like', 'getMe', 'updateProfile', 'updateAvatar', 'updateBanner'];
     return {
       enabled: true,
       canPost: hasWrite,
       canRead: true,
+      canManageProfile: hasWrite,
+      autoPostEnabled: hasWrite && this._autoPostConfig.enabled,
       examples: this.commands
-        .filter(cmd => hasWrite || !['post', 'reply', 'deleteTweet', 'like', 'getMe'].includes(cmd.command))
+        .filter(cmd => hasWrite || !writeOnly.includes(cmd.command))
         .flatMap(cmd => cmd.examples || [])
     };
   }
