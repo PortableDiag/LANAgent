@@ -18,7 +18,7 @@ That's it. The installer handles everything — naming your agent, connecting AI
 
 > **You just need:** An API key for [Anthropic](https://console.anthropic.com/) or [OpenAI](https://platform.openai.com/), and a [GitHub PAT](https://github.com/settings/tokens) for the self-modification pipeline.
 
-Your agent's web UI will be at `http://localhost:3000`. Takes ~3 minutes to fully start.
+Your agent's web UI will be at `http://localhost:3000` (or `https://yourdomain.com` if you used `--domain`). Takes ~3 minutes to fully start.
 
 **Unattended / CI deploy:**
 ```bash
