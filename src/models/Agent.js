@@ -506,11 +506,11 @@ const agentSchema = new mongoose.Schema({
     selfModification: {
       enabled: {
         type: Boolean,
-        default: false
+        default: true
       },
       analysisOnly: {
         type: Boolean,
-        default: true
+        default: false
       },
       maxChangesPerSession: {
         type: Number,
