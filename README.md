@@ -26,6 +26,11 @@ git clone https://github.com/PortableDiag/LANAgent.git && cd LANAgent
 bash scripts/setup/install.sh --unattended --name MYAGENT --openai-key sk-proj-... --github-pat ghp_...
 ```
 
+**With HTTPS (auto-SSL via Caddy):**
+```bash
+bash scripts/setup/install.sh --docker --unattended --name MYAGENT --openai-key sk-proj-... --domain myagent.example.com
+```
+
 Run `bash scripts/setup/install.sh --help` for all options.
 
 ### Get your identity (automatic)

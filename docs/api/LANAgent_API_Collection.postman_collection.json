@@ -2,9 +2,9 @@
   "info": {
     "_postman_id": "9b5edc66-ea34-4329-a9d5-baca5366e76d",
     "name": "LANAgent API Collection",
-    "description": "LANAgent API v2.24.8 \u2014 Installer auto-fork & auto-deps, Docker self-modification, PancakeSwap slippage protection, MIT license. Dual VPN, scammer registry auto-pricer, image tools, token profiler, wallet profiler, contract audit, challenge questions, HuggingFace 13 AI tasks, Twitter v2 write, 97+ services. Updated April 10, 2026.",
+    "description": "LANAgent API v2.24.9 \u2014 Docker SSL/Caddy fix, gateway balance alerts, installer E2E tested (native, Docker, interactive). Installer auto-fork & auto-deps, Docker self-modification, PancakeSwap slippage protection, MIT license. Dual VPN, scammer registry auto-pricer, image tools, token profiler, wallet profiler, contract audit, challenge questions, HuggingFace 13 AI tasks, Twitter v2 write, 97+ services. Updated April 11, 2026.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
-    "version": "2.24.8"
+    "version": "2.24.9"
   },
   "auth": {
     "type": "bearer",

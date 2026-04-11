@@ -2,6 +2,16 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.24.9] - 2026-04-11
+
+### Fixed
+- **Docker installer SSL/Caddy port conflict** — The SSL/HTTPS step (Step 10) was skipped for `--docker` installs, so `AGENT_PORT` was never changed from 80 to 3000 when Caddy was configured. Docker containers failed silently because Caddy already occupied port 80. The SSL step now runs for both native and Docker install modes.
+- **Gateway low balance Telegram alert silently failing** — The alert used `parse_mode: "Markdown"` which caused Telegram API parse failures because the wallet address contains underscores (interpreted as italic markers). Removed Markdown parse mode so alerts send as plain text. Added success logging to confirm delivery.
+- **Production self-modification pushing to wrong repo** — Alice was pushing auto-improvement branches to the public `PortableDiag/LANAgent` repo instead of the private `LANAgent-genesis` repo, causing 403 permission errors. Fixed git remote and `GITHUB_REPO` env var on production.
+
+### Changed
+- **Gateway balance alert** — Cooldown reduced from 6 hours to 4 hours for faster notification when BNB runs low.
+
 ## [2.24.8] - 2026-04-10
 
 ### Added

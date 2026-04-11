@@ -1923,8 +1923,10 @@ Fixed 5 bugs preventing Ethereum token deposits from being sold:
 LANAgent is now installable by anyone. Interactive install wizard, Docker support, cross-fork upstream contributions, and full credential isolation between instances.
 
 **Install:**
-- `scripts/setup/install.sh` — 9-step interactive wizard (agent name, AI keys, wallet, Telegram, P2P, self-mod)
-- `--docker` mode skips host checks, auto-builds and launches containers
+- `scripts/setup/install.sh` — 10-step interactive wizard (agent name, AI keys, wallet, Telegram, P2P, self-mod, SSL/HTTPS)
+- `--docker` mode auto-builds and launches containers with Docker Compose
+- `--unattended` mode for non-interactive CI/scripted installs
+- `--domain` flag for automatic HTTPS via Caddy (works with both native and Docker)
 - `--quick` mode for minimal setup (agent name + AI key only)
 
 **Cross-Fork Upstream PRs:**
@@ -1935,6 +1937,7 @@ LANAgent is now installable by anyone. Interactive install wizard, Docker suppor
 **Docker:**
 - `Dockerfile` + `docker-compose.yml` — agent + MongoDB 7 with health checks
 - Configurable ports via `AGENT_PORT` and `AGENT_SSH_PORT` env vars
+- SSL/Caddy support: installer auto-detects Caddy, changes `AGENT_PORT` to 3000 so Docker doesn't conflict with Caddy on port 80/443
 
 **Security:**
 - `.gitleaks.toml` + GitHub Actions CI to scan PRs for credential leaks
