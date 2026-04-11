@@ -394,6 +394,37 @@ if [ ${#MISSING_DEPS[@]} -gt 0 ]; then
                 apt-get install -y -qq ffmpeg &>/dev/null && ok "FFmpeg installed" || warn "FFmpeg install failed (optional)"
             fi
         fi
+
+        # Install yt-dlp (YouTube downloads, media services)
+        if ! command -v yt-dlp &>/dev/null; then
+            info "Installing yt-dlp..."
+            if curl -sL https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp && chmod +x /usr/local/bin/yt-dlp; then
+                ok "yt-dlp installed"
+            else
+                warn "yt-dlp install failed (optional — YouTube features disabled)"
+            fi
+        fi
+
+        # Install Chromium + dependencies (web scraping, screenshots, PDF generation)
+        # Puppeteer needs a system Chromium or will download its own
+        if ! command -v chromium &>/dev/null && ! command -v chromium-browser &>/dev/null && ! command -v google-chrome &>/dev/null; then
+            info "Installing Chromium and dependencies..."
+            if command -v apt-get &>/dev/null; then
+                # Install Chromium + common libs needed for headless browser
+                apt-get install -y -qq \
+                  chromium chromium-common \
+                  fonts-liberation libatk-bridge2.0-0 libatk1.0-0 libcups2 \
+                  libdrm2 libgbm1 libnspr4 libnss3 libxcomposite1 \
+                  libxdamage1 libxrandr2 xdg-utils 2>/dev/null \
+                || apt-get install -y -qq chromium-browser 2>/dev/null
+
+                if command -v chromium &>/dev/null || command -v chromium-browser &>/dev/null; then
+                    ok "Chromium installed"
+                else
+                    warn "Chromium install failed (optional — scraping/screenshot features disabled)"
+                fi
+            fi
+        fi
     else
         echo ""
         echo -e "  Install manually:"
@@ -830,6 +861,10 @@ SSH_PASSWORD=${SSH_PASS}
 
 # VPN
 EXPRESSVPN_ENABLED=false
+
+# Browser (Puppeteer) — use system Chromium if available
+PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
+PUPPETEER_EXECUTABLE_PATH=$(command -v chromium 2>/dev/null || command -v chromium-browser 2>/dev/null || echo "")
 
 # Vector Intent
 ENABLE_VECTOR_INTENT=true
