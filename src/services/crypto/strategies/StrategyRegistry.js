@@ -1,14 +1,7 @@
 import { logger as baseLogger } from '../../../utils/logger.js';
-import { NativeMaximizerStrategy } from './NativeMaximizerStrategy.js';
 import { DCAStrategy } from './DCAStrategy.js';
-import { GridTradingStrategy } from './GridTradingStrategy.js';
 import { MeanReversionStrategy } from './MeanReversionStrategy.js';
-import { VolatilityAdjustedStrategy } from './VolatilityAdjustedStrategy.js';
 import { MomentumStrategy } from './MomentumStrategy.js';
-import { DollarMaximizerStrategy } from './DollarMaximizerStrategy.js';
-import { TokenTraderStrategy } from './TokenTraderStrategy.js';
-import { RuleBasedStrategy } from './RuleBasedStrategy.js';
-import { ArbitrageStrategy } from './ArbitrageStrategy.js';
 
 const logger = baseLogger.child({ service: 'strategy-registry' });
 
@@ -30,23 +23,9 @@ class StrategyRegistry {
      * Register all built-in strategies
      */
     registerBuiltInStrategies() {
-        // Core strategies
-        this.register(new NativeMaximizerStrategy());
         this.register(new DCAStrategy());
-
-        // Advanced strategies
-        this.register(new GridTradingStrategy());
         this.register(new MeanReversionStrategy());
-        this.register(new VolatilityAdjustedStrategy());
         this.register(new MomentumStrategy());
-        this.register(new DollarMaximizerStrategy());
-        this.register(new TokenTraderStrategy());
-
-        // Rule-based strategy (custom user-defined rules)
-        this.register(new RuleBasedStrategy());
-
-        // Cross-DEX arbitrage
-        this.register(new ArbitrageStrategy());
 
         logger.info(`Registered ${this.strategies.size} built-in strategies`);
     }
