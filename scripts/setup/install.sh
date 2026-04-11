@@ -869,6 +869,14 @@ if [ "$DOCKER_MODE" != "true" ]; then
     fi
 
     if [ "$SETUP_SSL" = "true" ] && command -v caddy &>/dev/null; then
+        # Caddy needs ports 80 (ACME/redirect) and 443 (HTTPS)
+        # Move the agent to an internal port so they don't conflict
+        INTERNAL_PORT=3000
+        if [ "$AGENT_PORT" = "80" ] || [ "$AGENT_PORT" = "443" ]; then
+            AGENT_PORT=$INTERNAL_PORT
+            ok "Agent port changed to ${AGENT_PORT} (Caddy handles 80/443)"
+        fi
+
         # Write Caddyfile
         if [ -n "$SSL_DOMAIN" ]; then
             # Domain mode — Let's Encrypt auto-SSL
@@ -881,7 +889,6 @@ CADDYEOF
             info "Make sure your DNS A record points ${SSL_DOMAIN} to this server's IP"
         else
             # No domain — self-signed cert on the server's IP
-            SELF_SIGNED_ADDR="${DETECTED_IP:-0.0.0.0}"
             cat > /etc/caddy/Caddyfile << CADDYEOF
 :443 {
     tls internal
