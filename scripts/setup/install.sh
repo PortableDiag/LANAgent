@@ -112,21 +112,81 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 # ─── Parse Arguments ─────────────────────────────────────────────────
 DOCKER_MODE=false
 QUICK_MODE=false
+UNATTENDED=false
 
-for arg in "$@"; do
-    case $arg in
-        --docker) DOCKER_MODE=true ;;
-        --quick)  QUICK_MODE=true ;;
+# Unattended mode pre-set values
+_NAME="" _PORT="" _SSH_PORT=""
+_ANTHROPIC_KEY="" _OPENAI_KEY="" _GITHUB_PAT=""
+_P2P_URL="" _MONGO_URI="" _NO_P2P=false _NO_START=false
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --docker)       DOCKER_MODE=true ;;
+        --quick)        QUICK_MODE=true ;;
+        --unattended)   UNATTENDED=true; QUICK_MODE=true ;;
+        --name)         _NAME="$2"; shift ;;
+        --name=*)       _NAME="${1#*=}" ;;
+        --port)         _PORT="$2"; shift ;;
+        --port=*)       _PORT="${1#*=}" ;;
+        --ssh-port)     _SSH_PORT="$2"; shift ;;
+        --ssh-port=*)   _SSH_PORT="${1#*=}" ;;
+        --anthropic-key) _ANTHROPIC_KEY="$2"; shift ;;
+        --anthropic-key=*) _ANTHROPIC_KEY="${1#*=}" ;;
+        --openai-key)   _OPENAI_KEY="$2"; shift ;;
+        --openai-key=*) _OPENAI_KEY="${1#*=}" ;;
+        --github-pat)   _GITHUB_PAT="$2"; shift ;;
+        --github-pat=*) _GITHUB_PAT="${1#*=}" ;;
+        --p2p-url)      _P2P_URL="$2"; shift ;;
+        --p2p-url=*)    _P2P_URL="${1#*=}" ;;
+        --mongo-uri)    _MONGO_URI="$2"; shift ;;
+        --mongo-uri=*)  _MONGO_URI="${1#*=}" ;;
+        --no-p2p)       _NO_P2P=true ;;
+        --no-start)     _NO_START=true ;;
         --help|-h)
-            echo "Usage: $0 [--docker] [--quick] [--help]"
+            echo "Usage: $0 [OPTIONS]"
             echo ""
-            echo "  --docker  Configure for Docker deployment"
-            echo "  --quick   Minimal setup (agent name + AI key only)"
-            echo "  --help    Show this help"
+            echo "Modes:"
+            echo "  --docker        Configure for Docker deployment"
+            echo "  --quick         Minimal setup (agent name + AI key only)"
+            echo "  --unattended    Non-interactive install (requires --name + an AI key)"
+            echo ""
+            echo "Options (for --unattended or to pre-fill interactive prompts):"
+            echo "  --name NAME             Agent name (default: LANAgent)"
+            echo "  --port PORT             Web UI port (default: 3000)"
+            echo "  --ssh-port PORT         SSH port (default: 2222)"
+            echo "  --anthropic-key KEY     Anthropic API key"
+            echo "  --openai-key KEY        OpenAI API key"
+            echo "  --github-pat TOKEN      GitHub PAT for self-modification + auto-fork"
+            echo "  --p2p-url URL           Public URL for P2P (auto-detected if omitted)"
+            echo "  --mongo-uri URI         MongoDB URI (default: mongodb://localhost:27017/agentname)"
+            echo "  --no-p2p                Disable P2P networking"
+            echo "  --no-start              Don't start the agent after install"
+            echo ""
+            echo "Examples:"
+            echo "  # Interactive install"
+            echo "  ./install.sh"
+            echo ""
+            echo "  # Docker, fully automated"
+            echo "  ./install.sh --unattended --docker --name MYAGENT --openai-key sk-proj-..."
+            echo ""
+            echo "  # Native, with GitHub self-mod"
+            echo "  ./install.sh --unattended --name MYAGENT --openai-key sk-proj-... --github-pat ghp_..."
             exit 0
             ;;
     esac
+    shift
 done
+
+# Validate unattended mode
+if [ "$UNATTENDED" = "true" ]; then
+    if [ -z "$_ANTHROPIC_KEY" ] && [ -z "$_OPENAI_KEY" ]; then
+        fail "Unattended mode requires --anthropic-key or --openai-key"
+        exit 1
+    fi
+    _NAME="${_NAME:-LANAgent}"
+    _PORT="${_PORT:-3000}"
+    _SSH_PORT="${_SSH_PORT:-2222}"
+fi
 
 # ─── Main ─────────────────────────────────────────────────────────────
 print_header
@@ -134,7 +194,11 @@ print_header
 # Check if .env already exists
 if [ -f "$PROJECT_ROOT/.env" ]; then
     warn ".env file already exists!"
-    ask_yn "Overwrite existing configuration?" "n" OVERWRITE
+    if [ "$UNATTENDED" = "true" ]; then
+        OVERWRITE=true
+    else
+        ask_yn "Overwrite existing configuration?" "n" OVERWRITE
+    fi
     if [ "$OVERWRITE" != "true" ]; then
         info "Keeping existing .env. Exiting."
         exit 0
@@ -230,7 +294,11 @@ if [ ${#MISSING_DEPS[@]} -gt 0 ]; then
     warn "Missing required dependencies: ${MISSING_DEPS[*]}"
     echo ""
 
-    ask_yn "Install missing dependencies automatically?" "y" AUTO_INSTALL_DEPS
+    if [ "$UNATTENDED" = "true" ]; then
+        AUTO_INSTALL_DEPS=true
+    else
+        ask_yn "Install missing dependencies automatically?" "y" AUTO_INSTALL_DEPS
+    fi
 
     if [ "$AUTO_INSTALL_DEPS" = "true" ]; then
         # Install Node.js via nvm
@@ -349,13 +417,19 @@ fi
 # ═══════════════════════════════════════════════════
 print_step 2 $TOTAL_STEPS "Agent Identity"
 
-echo -e "  ${DIM}Give your agent a name. This will be used in the UI,${NC}"
-echo -e "  ${DIM}database, logs, and P2P network.${NC}"
-echo ""
+if [ "$UNATTENDED" = "true" ]; then
+    AGENT_NAME="$_NAME"
+    AGENT_PORT="$_PORT"
+    AGENT_SSH_PORT="$_SSH_PORT"
+else
+    echo -e "  ${DIM}Give your agent a name. This will be used in the UI,${NC}"
+    echo -e "  ${DIM}database, logs, and P2P network.${NC}"
+    echo ""
 
-ask "Agent name" "LANAgent" AGENT_NAME
-ask "Web UI port" "3000" AGENT_PORT
-ask "SSH interface port" "2222" AGENT_SSH_PORT
+    ask "Agent name" "${_NAME:-LANAgent}" AGENT_NAME
+    ask "Web UI port" "${_PORT:-3000}" AGENT_PORT
+    ask "SSH interface port" "${_SSH_PORT:-2222}" AGENT_SSH_PORT
+fi
 
 ok "Agent: ${BOLD}${AGENT_NAME}${NC} on port ${AGENT_PORT}"
 
@@ -364,24 +438,26 @@ ok "Agent: ${BOLD}${AGENT_NAME}${NC} on port ${AGENT_PORT}"
 # ═══════════════════════════════════════════════════
 print_step 3 $TOTAL_STEPS "AI Providers"
 
-echo -e "  ${DIM}At least one AI provider API key is required.${NC}"
-echo -e "  ${DIM}Anthropic Claude is recommended for best results.${NC}"
-echo ""
-
-ask_secret "Anthropic API key (sk-ant-...)" ANTHROPIC_KEY
-if [ -z "$ANTHROPIC_KEY" ]; then
-    warn "No Anthropic key provided"
-fi
-
-ask_secret "OpenAI API key (sk-..., optional, press Enter to skip)" OPENAI_KEY
-
-if [ -z "$ANTHROPIC_KEY" ] && [ -z "$OPENAI_KEY" ]; then
+if [ "$UNATTENDED" = "true" ]; then
+    ANTHROPIC_KEY="$_ANTHROPIC_KEY"
+    OPENAI_KEY="$_OPENAI_KEY"
+else
+    echo -e "  ${DIM}At least one AI provider API key is required.${NC}"
+    echo -e "  ${DIM}Anthropic Claude or OpenAI — either works.${NC}"
     echo ""
-    fail "At least one AI provider key is required!"
-    ask_secret "Enter an API key (Anthropic or OpenAI)" ANTHROPIC_KEY
-    if [ -z "$ANTHROPIC_KEY" ]; then
-        fail "Cannot proceed without an AI provider. Exiting."
-        exit 1
+
+    ask_secret "Anthropic API key (sk-ant-..., or Enter to skip)" ANTHROPIC_KEY
+
+    ask_secret "OpenAI API key (sk-..., or Enter to skip)" OPENAI_KEY
+
+    if [ -z "$ANTHROPIC_KEY" ] && [ -z "$OPENAI_KEY" ]; then
+        echo ""
+        fail "At least one AI provider key is required!"
+        ask_secret "Enter an API key (Anthropic or OpenAI)" ANTHROPIC_KEY
+        if [ -z "$ANTHROPIC_KEY" ]; then
+            fail "Cannot proceed without an AI provider. Exiting."
+            exit 1
+        fi
     fi
 fi
 
@@ -392,7 +468,9 @@ ok "AI provider configured"
 # ═══════════════════════════════════════════════════
 DB_NAME=$(echo "$AGENT_NAME" | tr '[:upper:]' '[:lower:]' | tr ' ' '_' | tr -cd 'a-z0-9_')
 
-if [ "$DOCKER_MODE" = "true" ]; then
+if [ -n "$_MONGO_URI" ]; then
+    MONGODB_URI="$_MONGO_URI"
+elif [ "$DOCKER_MODE" = "true" ]; then
     MONGODB_URI="mongodb://mongodb:27017/${DB_NAME}"
 else
     MONGODB_URI="mongodb://localhost:27017/${DB_NAME}"
@@ -487,11 +565,15 @@ WALLET_MNEMONIC=""
 
 print_step 7 $TOTAL_STEPS "Agent Wallet"
 
-echo -e "  ${DIM}Your agent needs a crypto wallet to participate in the network.${NC}"
-echo -e "  ${DIM}It's used for receiving payments, P2P service fees, and API credits.${NC}"
-echo ""
+if [ "$UNATTENDED" = "true" ]; then
+    IMPORT_WALLET=false
+else
+    echo -e "  ${DIM}Your agent needs a crypto wallet to participate in the network.${NC}"
+    echo -e "  ${DIM}It's used for receiving payments, P2P service fees, and API credits.${NC}"
+    echo ""
 
-ask_yn "Import an existing wallet?" "n" IMPORT_WALLET
+    ask_yn "Import an existing wallet?" "n" IMPORT_WALLET
+fi
 
 if [ "$IMPORT_WALLET" = "true" ]; then
     ask_secret "Private key (0x...)" CRYPTO_WALLET
@@ -543,17 +625,21 @@ UPSTREAM_CONTRIBUTIONS="true"
 
 print_step 8 $TOTAL_STEPS "Self-Modification & GitHub"
 
-echo -e "  ${DIM}LANAgent improves itself: it detects bugs, writes fixes, and${NC}"
-echo -e "  ${DIM}submits PRs — both to your fork and upstream so all agents${NC}"
-echo -e "  ${DIM}on the network benefit from each other's improvements.${NC}"
-echo ""
-echo -e "  ${DIM}To enable this, your agent needs a GitHub Personal Access Token.${NC}"
-echo -e "  ${DIM}Create one at:${NC}"
-echo -e "  ${BOLD}https://github.com/settings/tokens/new?scopes=repo${NC}"
-echo -e "  ${DIM}(select the 'repo' scope)${NC}"
-echo ""
+if [ "$UNATTENDED" = "true" ]; then
+    GIT_TOKEN="$_GITHUB_PAT"
+else
+    echo -e "  ${DIM}LANAgent improves itself: it detects bugs, writes fixes, and${NC}"
+    echo -e "  ${DIM}submits PRs — both to your fork and upstream so all agents${NC}"
+    echo -e "  ${DIM}on the network benefit from each other's improvements.${NC}"
+    echo ""
+    echo -e "  ${DIM}To enable this, your agent needs a GitHub Personal Access Token.${NC}"
+    echo -e "  ${DIM}Create one at:${NC}"
+    echo -e "  ${BOLD}https://github.com/settings/tokens/new?scopes=repo${NC}"
+    echo -e "  ${DIM}(select the 'repo' scope)${NC}"
+    echo ""
 
-ask_secret "GitHub Personal Access Token (or press Enter to skip)" GIT_TOKEN
+    ask_secret "GitHub Personal Access Token (or Enter to skip)" GIT_TOKEN
+fi
 
 if [ -n "$GIT_TOKEN" ]; then
     # Detect GitHub username from PAT
@@ -599,7 +685,11 @@ if [ -n "$GIT_TOKEN" ]; then
         echo -e "  ${DIM}main LANAgent project so all agents on the network benefit.${NC}"
         echo ""
 
-        ask_yn "Enable upstream contributions? (recommended)" "y" UPSTREAM_CONTRIBUTIONS_YN
+        if [ "$UNATTENDED" = "true" ]; then
+            UPSTREAM_CONTRIBUTIONS_YN=true
+        else
+            ask_yn "Enable upstream contributions? (recommended)" "y" UPSTREAM_CONTRIBUTIONS_YN
+        fi
 
         if [ "$UPSTREAM_CONTRIBUTIONS_YN" = "true" ]; then
             UPSTREAM_CONTRIBUTIONS="true"
@@ -628,42 +718,59 @@ AGENT_SERVICE_URL=""
 
 print_step 9 $TOTAL_STEPS "P2P Skynet Network"
 
-echo -e "  ${DIM}Connect to the Skynet peer-to-peer network to communicate${NC}"
-echo -e "  ${DIM}with other LANAgent instances. Agents can share plugins,${NC}"
-echo -e "  ${DIM}knowledge packs, and execute services for each other.${NC}"
-echo -e "  ${DIM}All communication is end-to-end encrypted (Ed25519 + X25519).${NC}"
-echo ""
+# Detect public IP (used in both modes)
+DETECTED_IP=$(curl -s --max-time 5 https://api.ipify.org 2>/dev/null || curl -s --max-time 5 https://ifconfig.me 2>/dev/null || echo "")
 
-ask_yn "Join the Skynet P2P network? (recommended)" "y" P2P_YN
-
-if [ "$P2P_YN" = "true" ]; then
-    P2P_ENABLED="true"
-    P2P_DISPLAY_NAME="${AGENT_NAME}"
-
-    # Detect public IP for service URL
-    DETECTED_IP=$(curl -s --max-time 5 https://api.ipify.org 2>/dev/null || curl -s --max-time 5 https://ifconfig.me 2>/dev/null || echo "")
-    if [ -n "$DETECTED_IP" ]; then
-        DEFAULT_SERVICE_URL="http://${DETECTED_IP}:${AGENT_PORT}"
+if [ "$UNATTENDED" = "true" ]; then
+    if [ "$_NO_P2P" = "true" ]; then
+        P2P_ENABLED="false"
+        info "P2P disabled"
     else
-        DEFAULT_SERVICE_URL=""
+        P2P_ENABLED="true"
+        P2P_DISPLAY_NAME="${AGENT_NAME}"
+        if [ -n "$_P2P_URL" ]; then
+            AGENT_SERVICE_URL="$_P2P_URL"
+        elif [ -n "$DETECTED_IP" ]; then
+            AGENT_SERVICE_URL="http://${DETECTED_IP}:${AGENT_PORT}"
+        fi
+        ok "P2P Skynet enabled (${AGENT_SERVICE_URL:-auto-detect})"
     fi
-
-    echo ""
-    echo -e "  ${DIM}Other agents need a public URL to reach your instance.${NC}"
-    echo -e "  ${DIM}This should be your server's public IP or domain name.${NC}"
-    ask "Public service URL" "$DEFAULT_SERVICE_URL" AGENT_SERVICE_URL
-
-    ok "P2P Skynet enabled — your agent will join the network on startup"
-    echo ""
-    echo -e "  ${DIM}Your agent will:${NC}"
-    echo -e "  ${DIM}  - Generate a unique cryptographic identity (Ed25519)${NC}"
-    echo -e "  ${DIM}  - Connect to the registry at wss://registry.lanagent.net${NC}"
-    echo -e "  ${DIM}  - Discover and communicate with other agents${NC}"
-    echo -e "  ${DIM}  - Share capabilities and execute services${NC}"
-    echo -e "  ${DIM}  - Trust levels configurable via the web UI${NC}"
 else
-    P2P_ENABLED="false"
-    info "P2P disabled — your agent will run standalone"
+    echo -e "  ${DIM}Connect to the Skynet peer-to-peer network to communicate${NC}"
+    echo -e "  ${DIM}with other LANAgent instances. Agents can share plugins,${NC}"
+    echo -e "  ${DIM}knowledge packs, and execute services for each other.${NC}"
+    echo -e "  ${DIM}All communication is end-to-end encrypted (Ed25519 + X25519).${NC}"
+    echo ""
+
+    ask_yn "Join the Skynet P2P network? (recommended)" "y" P2P_YN
+
+    if [ "$P2P_YN" = "true" ]; then
+        P2P_ENABLED="true"
+        P2P_DISPLAY_NAME="${AGENT_NAME}"
+
+        if [ -n "$DETECTED_IP" ]; then
+            DEFAULT_SERVICE_URL="http://${DETECTED_IP}:${AGENT_PORT}"
+        else
+            DEFAULT_SERVICE_URL=""
+        fi
+
+        echo ""
+        echo -e "  ${DIM}Other agents need a public URL to reach your instance.${NC}"
+        echo -e "  ${DIM}This should be your server's public IP or domain name.${NC}"
+        ask "Public service URL" "$DEFAULT_SERVICE_URL" AGENT_SERVICE_URL
+
+        ok "P2P Skynet enabled — your agent will join the network on startup"
+        echo ""
+        echo -e "  ${DIM}Your agent will:${NC}"
+        echo -e "  ${DIM}  - Generate a unique cryptographic identity (Ed25519)${NC}"
+        echo -e "  ${DIM}  - Connect to the registry at wss://registry.lanagent.net${NC}"
+        echo -e "  ${DIM}  - Discover and communicate with other agents${NC}"
+        echo -e "  ${DIM}  - Share capabilities and execute services${NC}"
+        echo -e "  ${DIM}  - Trust levels configurable via the web UI${NC}"
+    else
+        P2P_ENABLED="false"
+        info "P2P disabled — your agent will run standalone"
+    fi
 fi
 
 # ═══════════════════════════════════════════════════
@@ -964,7 +1071,11 @@ if [ "$DOCKER_MODE" = "true" ]; then
 
     # Auto-launch Docker
     if command -v docker &>/dev/null; then
-        ask_yn "Start your agent now with Docker?" "y" START_DOCKER
+        if [ "$UNATTENDED" = "true" ]; then
+            START_DOCKER=$( [ "$_NO_START" = "true" ] && echo "false" || echo "true" )
+        else
+            ask_yn "Start your agent now with Docker?" "y" START_DOCKER
+        fi
         if [ "$START_DOCKER" = "true" ]; then
             echo ""
             info "Building and starting containers..."
@@ -983,7 +1094,11 @@ if [ "$DOCKER_MODE" = "true" ]; then
 fi
 
 if [ "$DOCKER_MODE" != "true" ] && command -v pm2 &>/dev/null; then
-    ask_yn "Start your agent now with PM2?" "y" START_PM2
+    if [ "$UNATTENDED" = "true" ]; then
+        START_PM2=$( [ "$_NO_START" = "true" ] && echo "false" || echo "true" )
+    else
+        ask_yn "Start your agent now with PM2?" "y" START_PM2
+    fi
     if [ "$START_PM2" = "true" ]; then
         echo ""
         # Ensure nvm is loaded
