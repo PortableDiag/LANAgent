@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <!-- Background -->
+  <rect width="64" height="64" rx="8" fill="#1a1a1a"/>
+  
+  <!-- Robot Head -->
+  <rect x="18" y="16" width="28" height="24" rx="4" fill="#00a8ff" stroke="#40c4ff" stroke-width="2"/>
+  
+  <!-- Eyes -->
+  <circle cx="26" cy="26" r="4" fill="#1a1a1a"/>
+  <circle cx="38" cy="26" r="4" fill="#1a1a1a"/>
+  <circle cx="26" cy="26" r="2" fill="#40c4ff"/>
+  <circle cx="38" cy="26" r="2" fill="#40c4ff"/>
+  
+  <!-- Antenna -->
+  <rect x="30" y="8" width="4" height="10" fill="#40c4ff"/>
+  <circle cx="32" cy="8" r="3" fill="#40c4ff"/>
+  
+  <!-- Body/Network Indicator -->
+  <rect x="22" y="42" width="20" height="14" rx="2" fill="#00a8ff" stroke="#40c4ff" stroke-width="2"/>
+  
+  <!-- Network Lights -->
+  <circle cx="28" cy="49" r="2" fill="#4caf50"/>
+  <circle cx="36" cy="49" r="2" fill="#ff9800"/>
+</svg>

@@ -1,0 +1,27 @@
+# Instance-Specific Configuration (CLAUDE.local.md)
+# Copy this to CLAUDE.local.md and fill in your values.
+# This file is gitignored — it contains instance-specific credentials.
+
+## Production Server Access
+
+**Host:** YOUR_SERVER_IP
+**User:** YOUR_USER
+**Password:** YOUR_PASSWORD
+
+```bash
+sshpass -p 'YOUR_PASSWORD' ssh YOUR_USER@YOUR_SERVER_IP "command"
+```
+
+## Authentication
+
+| Service | Credentials |
+|---------|-------------|
+| Web UI | Password: `your-web-password` |
+| API Key | `your-api-key` (auto-generated on first run) |
+
+## My Instance
+
+- **Agent Name:** YOUR_AGENT_NAME
+- **Server IP:** YOUR_SERVER_IP
+- **Deploy Path:** /path/to/deployment
+- **Repo Path:** /path/to/repo

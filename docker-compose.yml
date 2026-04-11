@@ -1,0 +1,46 @@
+services:
+  lanagent:
+    build: .
+    container_name: ${AGENT_NAME:-lanagent}
+    env_file: .env
+    environment:
+      # Override MongoDB to point to the compose service (not localhost)
+      - MONGODB_URI=mongodb://mongodb:27017/${AGENT_NAME:-lanagent}
+      - AGENT_REPO_PATH=/app/repo
+    ports:
+      - "${AGENT_PORT:-3000}:${AGENT_PORT:-3000}"
+      - "${AGENT_SSH_PORT:-2222}:2222"
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./workspace:/app/workspace
+      - ./.env:/app/.env:ro
+      - .:/app/repo                 # Full git repo for self-modification and upstream PRs
+    depends_on:
+      mongodb:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - lanagent-net
+
+  mongodb:
+    image: mongo:7
+    container_name: ${AGENT_NAME:-lanagent}-mongodb
+    volumes:
+      - mongodb_data:/data/db
+    healthcheck:
+      test: mongosh --eval "db.runCommand({ping:1})" --quiet
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+    networks:
+      - lanagent-net
+
+volumes:
+  mongodb_data:
+
+networks:
+  lanagent-net:
+    driver: bridge

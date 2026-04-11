@@ -1,0 +1,1029 @@
+#!/bin/bash
+#
+# LANAgent Installation Wizard
+# Sets up a new LANAgent instance from scratch
+#
+# Usage:
+#   ./scripts/setup/install.sh           # Interactive setup
+#   ./scripts/setup/install.sh --docker  # Docker-based setup
+#   ./scripts/setup/install.sh --quick   # Minimal setup (just AI key + agent name)
+#
+
+set -e
+
+# ─── Colors & Formatting ─────────────────────────────────────────────
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+MAGENTA='\033[0;35m'
+BOLD='\033[1m'
+DIM='\033[2m'
+NC='\033[0m'
+
+# ─── Helpers ──────────────────────────────────────────────────────────
+print_header() {
+    echo ""
+    echo -e "${CYAN}╔══════════════════════════════════════════════════╗${NC}"
+    echo -e "${CYAN}║${NC}  ${BOLD}LANAgent Setup Wizard${NC}                           ${CYAN}║${NC}"
+    echo -e "${CYAN}║${NC}  ${DIM}Autonomous Agent Framework${NC}                       ${CYAN}║${NC}"
+    echo -e "${CYAN}╚══════════════════════════════════════════════════╝${NC}"
+    echo ""
+}
+
+print_step() {
+    local step=$1
+    local total=$2
+    local title=$3
+    echo ""
+    echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${BOLD}  Step ${step}/${total}: ${title}${NC}"
+    echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo ""
+}
+
+ok()   { echo -e "  ${GREEN}✓${NC} $1"; }
+warn() { echo -e "  ${YELLOW}!${NC} $1"; }
+fail() { echo -e "  ${RED}✗${NC} $1"; }
+info() { echo -e "  ${BLUE}→${NC} $1"; }
+
+ask() {
+    local prompt=$1
+    local default=$2
+    local var_name=$3
+
+    if [ -n "$default" ]; then
+        echo -ne "  ${prompt} ${DIM}[${default}]${NC}: "
+    else
+        echo -ne "  ${prompt}: "
+    fi
+
+    read -r input
+    if [ -z "$input" ] && [ -n "$default" ]; then
+        eval "$var_name=\"$default\""
+    else
+        eval "$var_name=\"$input\""
+    fi
+}
+
+ask_secret() {
+    local prompt=$1
+    local var_name=$2
+    echo -ne "  ${prompt}: "
+    read -rs input
+    echo ""
+    eval "$var_name=\"$input\""
+}
+
+ask_yn() {
+    local prompt=$1
+    local default=$2
+    local var_name=$3
+
+    if [ "$default" = "y" ]; then
+        echo -ne "  ${prompt} ${DIM}[Y/n]${NC}: "
+    else
+        echo -ne "  ${prompt} ${DIM}[y/N]${NC}: "
+    fi
+
+    read -r input
+    input=${input:-$default}
+    if [[ "$input" =~ ^[Yy] ]]; then
+        eval "$var_name=true"
+    else
+        eval "$var_name=false"
+    fi
+}
+
+generate_secret() {
+    openssl rand -hex 32 2>/dev/null || python3 -c "import secrets; print(secrets.token_hex(32))" 2>/dev/null || head -c 64 /dev/urandom | xxd -p | tr -d '\n' | head -c 64
+}
+
+generate_api_key() {
+    local random=$(openssl rand -base64 32 2>/dev/null || python3 -c "import secrets; print(secrets.token_urlsafe(32))" 2>/dev/null)
+    echo "la_${random}"
+}
+
+# ─── Detect Script Location ──────────────────────────────────────────
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+
+# ─── Parse Arguments ─────────────────────────────────────────────────
+DOCKER_MODE=false
+QUICK_MODE=false
+
+for arg in "$@"; do
+    case $arg in
+        --docker) DOCKER_MODE=true ;;
+        --quick)  QUICK_MODE=true ;;
+        --help|-h)
+            echo "Usage: $0 [--docker] [--quick] [--help]"
+            echo ""
+            echo "  --docker  Configure for Docker deployment"
+            echo "  --quick   Minimal setup (agent name + AI key only)"
+            echo "  --help    Show this help"
+            exit 0
+            ;;
+    esac
+done
+
+# ─── Main ─────────────────────────────────────────────────────────────
+print_header
+
+# Check if .env already exists
+if [ -f "$PROJECT_ROOT/.env" ]; then
+    warn ".env file already exists!"
+    ask_yn "Overwrite existing configuration?" "n" OVERWRITE
+    if [ "$OVERWRITE" != "true" ]; then
+        info "Keeping existing .env. Exiting."
+        exit 0
+    fi
+    cp "$PROJECT_ROOT/.env" "$PROJECT_ROOT/.env.backup.$(date +%s)"
+    ok "Backed up existing .env"
+fi
+
+# ═══════════════════════════════════════════════════
+# STEP 1: System Dependencies Check
+# ═══════════════════════════════════════════════════
+TOTAL_STEPS=9
+
+print_step 1 $TOTAL_STEPS "System Dependencies"
+
+MISSING_DEPS=()
+
+# Docker mode skips Node/npm/MongoDB checks — container handles them
+if [ "$DOCKER_MODE" = "true" ]; then
+    # Only need Docker and Git on the host
+    if command -v docker &>/dev/null; then
+        ok "Docker $(docker --version 2>/dev/null | head -1 | sed 's/Docker version //')"
+        if docker compose version &>/dev/null 2>&1 || command -v docker-compose &>/dev/null; then
+            ok "Docker Compose found"
+        else
+            fail "Docker Compose not found"
+            MISSING_DEPS+=("docker-compose")
+        fi
+    else
+        fail "Docker not found"
+        MISSING_DEPS+=("docker")
+    fi
+    ok "Node.js 20, MongoDB 7 — handled by Docker"
+else
+
+# Node.js
+if command -v node &>/dev/null; then
+    NODE_VERSION=$(node -v 2>/dev/null)
+    NODE_MAJOR=$(echo "$NODE_VERSION" | sed 's/v//' | cut -d. -f1)
+    if [ "$NODE_MAJOR" -ge 20 ]; then
+        ok "Node.js $NODE_VERSION"
+    else
+        fail "Node.js $NODE_VERSION (need v20+)"
+        MISSING_DEPS+=("nodejs")
+    fi
+else
+    fail "Node.js not found"
+    MISSING_DEPS+=("nodejs")
+fi
+
+# npm
+if command -v npm &>/dev/null; then
+    ok "npm $(npm -v 2>/dev/null)"
+else
+    fail "npm not found"
+    MISSING_DEPS+=("npm")
+fi
+
+# MongoDB
+if command -v mongosh &>/dev/null || command -v mongo &>/dev/null; then
+    ok "MongoDB client found"
+else
+    warn "MongoDB client not found (install mongosh for local DB)"
+    info "Or set MONGODB_URI to a remote MongoDB instance"
+fi
+
+fi  # end non-Docker dependency checks
+
+# Git
+if command -v git &>/dev/null; then
+    ok "Git $(git --version | cut -d' ' -f3)"
+else
+    fail "Git not found"
+    MISSING_DEPS+=("git")
+fi
+
+# FFmpeg (optional)
+if command -v ffmpeg &>/dev/null; then
+    ok "FFmpeg found (media processing enabled)"
+else
+    warn "FFmpeg not found (media processing disabled — install later with: sudo apt install ffmpeg)"
+fi
+
+# OpenSSL (for secret generation)
+if command -v openssl &>/dev/null; then
+    ok "OpenSSL found"
+else
+    warn "OpenSSL not found (will use alternative for secret generation)"
+fi
+
+if [ ${#MISSING_DEPS[@]} -gt 0 ]; then
+    echo ""
+    warn "Missing required dependencies: ${MISSING_DEPS[*]}"
+    echo ""
+
+    ask_yn "Install missing dependencies automatically?" "y" AUTO_INSTALL_DEPS
+
+    if [ "$AUTO_INSTALL_DEPS" = "true" ]; then
+        # Install Node.js via nvm
+        if [[ "${MISSING_DEPS[*]}" =~ "nodejs" ]] || [[ "${MISSING_DEPS[*]}" =~ "npm" ]]; then
+            info "Installing Node.js 20 via nvm..."
+            export NVM_DIR="${HOME}/.nvm"
+            if [ ! -s "$NVM_DIR/nvm.sh" ]; then
+                curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh 2>/dev/null | bash &>/dev/null
+            fi
+            [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
+            nvm install 20 &>/dev/null
+            nvm use 20 &>/dev/null
+
+            if command -v node &>/dev/null; then
+                ok "Node.js $(node -v) installed"
+                ok "npm $(npm -v) installed"
+            else
+                fail "Node.js installation failed"
+                echo -e "  ${DIM}Try manually: curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh | bash${NC}"
+                exit 1
+            fi
+        fi
+
+        # Install Git
+        if [[ "${MISSING_DEPS[*]}" =~ "git" ]]; then
+            info "Installing Git..."
+            if command -v apt-get &>/dev/null; then
+                apt-get update -qq &>/dev/null && apt-get install -y -qq git &>/dev/null
+            elif command -v yum &>/dev/null; then
+                yum install -y -q git &>/dev/null
+            elif command -v dnf &>/dev/null; then
+                dnf install -y -q git &>/dev/null
+            fi
+
+            if command -v git &>/dev/null; then
+                ok "Git $(git --version | cut -d' ' -f3) installed"
+            else
+                fail "Git installation failed — install manually"
+                exit 1
+            fi
+        fi
+
+        # Install MongoDB
+        if ! command -v mongosh &>/dev/null && ! command -v mongo &>/dev/null; then
+            MONGO_INSTALLED=false
+            info "Installing MongoDB 7..."
+
+            # Try native package install first
+            if command -v apt-get &>/dev/null; then
+                CODENAME=$(lsb_release -cs 2>/dev/null || echo "bookworm")
+                # MongoDB only has packages for specific Debian/Ubuntu versions
+                curl -fsSL https://www.mongodb.org/static/pgp/server-7.0.asc | gpg --dearmor -o /usr/share/keyrings/mongodb-server-7.0.gpg 2>/dev/null
+                echo "deb [signed-by=/usr/share/keyrings/mongodb-server-7.0.gpg] http://repo.mongodb.org/apt/debian ${CODENAME}/mongodb-org/7.0 main" > /etc/apt/sources.list.d/mongodb-org-7.0.list
+                apt-get update -qq &>/dev/null && apt-get install -y -qq mongodb-org &>/dev/null
+
+                if command -v mongod &>/dev/null; then
+                    systemctl enable mongod &>/dev/null
+                    systemctl start mongod &>/dev/null
+                    ok "MongoDB 7 installed and started"
+                    MONGO_INSTALLED=true
+                fi
+            fi
+
+            # Fall back to Docker MongoDB if native install failed
+            if [ "$MONGO_INSTALLED" != "true" ]; then
+                if command -v docker &>/dev/null; then
+                    info "Native MongoDB install not available for this OS — using Docker instead"
+                    # Stop any existing MongoDB container
+                    docker rm -f lanagent-mongodb &>/dev/null
+                    if docker run -d \
+                        --name lanagent-mongodb \
+                        --restart unless-stopped \
+                        -p 27017:27017 \
+                        -v lanagent_mongodb_data:/data/db \
+                        mongo:7 &>/dev/null; then
+                        ok "MongoDB 7 running via Docker (auto-restarts on reboot)"
+                        MONGO_INSTALLED=true
+                    else
+                        warn "Docker MongoDB failed to start"
+                    fi
+                fi
+            fi
+
+            if [ "$MONGO_INSTALLED" != "true" ]; then
+                warn "Could not install MongoDB — set MONGODB_URI to a remote instance in .env"
+            fi
+        fi
+
+        # Install FFmpeg
+        if ! command -v ffmpeg &>/dev/null; then
+            info "Installing FFmpeg..."
+            if command -v apt-get &>/dev/null; then
+                apt-get install -y -qq ffmpeg &>/dev/null && ok "FFmpeg installed" || warn "FFmpeg install failed (optional)"
+            fi
+        fi
+    else
+        echo ""
+        echo -e "  Install manually:"
+        if [[ "${MISSING_DEPS[*]}" =~ "nodejs" ]]; then
+            echo -e "    ${DIM}curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh | bash${NC}"
+            echo -e "    ${DIM}source ~/.nvm/nvm.sh && nvm install 20${NC}"
+        fi
+        if [[ "${MISSING_DEPS[*]}" =~ "git" ]]; then
+            echo -e "    ${DIM}sudo apt install git${NC}"
+        fi
+        echo ""
+        ask_yn "Continue anyway?" "n" CONTINUE_ANYWAY
+        if [ "$CONTINUE_ANYWAY" != "true" ]; then
+            exit 1
+        fi
+    fi
+fi
+
+# ═══════════════════════════════════════════════════
+# STEP 2: Agent Identity
+# ═══════════════════════════════════════════════════
+print_step 2 $TOTAL_STEPS "Agent Identity"
+
+echo -e "  ${DIM}Give your agent a name. This will be used in the UI,${NC}"
+echo -e "  ${DIM}database, logs, and P2P network.${NC}"
+echo ""
+
+ask "Agent name" "LANAgent" AGENT_NAME
+ask "Web UI port" "3000" AGENT_PORT
+ask "SSH interface port" "2222" AGENT_SSH_PORT
+
+ok "Agent: ${BOLD}${AGENT_NAME}${NC} on port ${AGENT_PORT}"
+
+# ═══════════════════════════════════════════════════
+# STEP 3: AI Providers
+# ═══════════════════════════════════════════════════
+print_step 3 $TOTAL_STEPS "AI Providers"
+
+echo -e "  ${DIM}At least one AI provider API key is required.${NC}"
+echo -e "  ${DIM}Anthropic Claude is recommended for best results.${NC}"
+echo ""
+
+ask_secret "Anthropic API key (sk-ant-...)" ANTHROPIC_KEY
+if [ -z "$ANTHROPIC_KEY" ]; then
+    warn "No Anthropic key provided"
+fi
+
+ask_secret "OpenAI API key (sk-..., optional, press Enter to skip)" OPENAI_KEY
+
+if [ -z "$ANTHROPIC_KEY" ] && [ -z "$OPENAI_KEY" ]; then
+    echo ""
+    fail "At least one AI provider key is required!"
+    ask_secret "Enter an API key (Anthropic or OpenAI)" ANTHROPIC_KEY
+    if [ -z "$ANTHROPIC_KEY" ]; then
+        fail "Cannot proceed without an AI provider. Exiting."
+        exit 1
+    fi
+fi
+
+ok "AI provider configured"
+
+# ═══════════════════════════════════════════════════
+# STEP 4: Database
+# ═══════════════════════════════════════════════════
+DB_NAME=$(echo "$AGENT_NAME" | tr '[:upper:]' '[:lower:]' | tr ' ' '_' | tr -cd 'a-z0-9_')
+
+if [ "$DOCKER_MODE" = "true" ]; then
+    MONGODB_URI="mongodb://mongodb:27017/${DB_NAME}"
+else
+    MONGODB_URI="mongodb://localhost:27017/${DB_NAME}"
+fi
+
+if [ "$QUICK_MODE" != "true" ]; then
+    print_step 4 $TOTAL_STEPS "Database"
+
+    echo -e "  ${DIM}Default: ${MONGODB_URI}${NC}"
+    ask_yn "Use a custom MongoDB URI instead?" "n" CUSTOM_DB
+
+    if [ "$CUSTOM_DB" = "true" ]; then
+        ask "MongoDB URI" "$MONGODB_URI" MONGODB_URI
+    fi
+
+    # Test connection
+    if command -v mongosh &>/dev/null; then
+        info "Testing MongoDB connection..."
+        if mongosh "$MONGODB_URI" --eval "db.runCommand({ping:1})" --quiet &>/dev/null; then
+            ok "MongoDB connection successful"
+        else
+            warn "Could not connect to MongoDB (make sure it's running)"
+            info "You can fix the URI in .env later"
+        fi
+    else
+        ok "Using: $MONGODB_URI"
+    fi
+else
+    ok "Database: $MONGODB_URI"
+fi
+
+# ═══════════════════════════════════════════════════
+# STEP 5: Telegram Bot (optional)
+# ═══════════════════════════════════════════════════
+TELEGRAM_TOKEN=""
+TELEGRAM_ID=""
+
+if [ "$QUICK_MODE" != "true" ]; then
+    print_step 5 $TOTAL_STEPS "Telegram Bot (optional)"
+
+    echo -e "  ${DIM}Connect your agent to Telegram for mobile control.${NC}"
+    echo -e "  ${DIM}Create a bot via @BotFather on Telegram first.${NC}"
+    echo ""
+
+    ask_yn "Set up Telegram bot?" "n" SETUP_TELEGRAM
+
+    if [ "$SETUP_TELEGRAM" = "true" ]; then
+        ask_secret "Bot token (from @BotFather)" TELEGRAM_TOKEN
+        ask "Your Telegram user ID (get via @userinfobot)" "" TELEGRAM_ID
+
+        if [ -n "$TELEGRAM_TOKEN" ] && [ -n "$TELEGRAM_ID" ]; then
+            ok "Telegram bot configured"
+        else
+            warn "Incomplete Telegram config — you can set it in .env later"
+        fi
+    else
+        info "Skipping Telegram setup"
+    fi
+fi
+
+# ═══════════════════════════════════════════════════
+# STEP 6: Email (optional)
+# ═══════════════════════════════════════════════════
+MASTER_EMAIL=""
+GMAIL_USER=""
+GMAIL_PASS=""
+
+if [ "$QUICK_MODE" != "true" ]; then
+    print_step 6 $TOTAL_STEPS "Email Configuration (optional)"
+
+    echo -e "  ${DIM}Configure email for notifications and the email plugin.${NC}"
+    echo ""
+
+    ask "Your email address (for notifications)" "" MASTER_EMAIL
+
+    ask_yn "Set up SMTP for sending emails?" "n" SETUP_SMTP
+    if [ "$SETUP_SMTP" = "true" ]; then
+        ask "SMTP email (Gmail, etc.)" "" GMAIL_USER
+        ask_secret "SMTP app password" GMAIL_PASS
+        if [ -n "$GMAIL_USER" ]; then
+            ok "SMTP configured"
+        fi
+    fi
+fi
+
+# ═══════════════════════════════════════════════════
+# STEP 7: Agent Wallet
+# ═══════════════════════════════════════════════════
+CRYPTO_WALLET=""
+WALLET_ADDRESS="pending"
+WALLET_MNEMONIC=""
+
+print_step 7 $TOTAL_STEPS "Agent Wallet"
+
+echo -e "  ${DIM}Your agent needs a crypto wallet to participate in the network.${NC}"
+echo -e "  ${DIM}It's used for receiving payments, P2P service fees, and API credits.${NC}"
+echo ""
+
+ask_yn "Import an existing wallet?" "n" IMPORT_WALLET
+
+if [ "$IMPORT_WALLET" = "true" ]; then
+    ask_secret "Private key (0x...)" CRYPTO_WALLET
+    ok "Wallet imported"
+else
+    # Generate wallet using Node.js + ethers
+    info "Generating new wallet..."
+    if command -v node &>/dev/null; then
+        WALLET_OUTPUT=$(node -e "
+            import('ethers').then(({ethers}) => {
+                const w = ethers.Wallet.createRandom();
+                console.log(JSON.stringify({address: w.address, privateKey: w.privateKey, mnemonic: w.mnemonic.phrase}));
+            }).catch(() => {
+                const crypto = require('crypto');
+                const pk = '0x' + crypto.randomBytes(32).toString('hex');
+                console.log(JSON.stringify({address: 'pending', privateKey: pk, mnemonic: ''}));
+            });
+        " 2>/dev/null || echo '{"address":"pending","privateKey":"generate-after-install","mnemonic":""}')
+
+        CRYPTO_WALLET=$(echo "$WALLET_OUTPUT" | python3 -c "import sys,json; print(json.load(sys.stdin).get('privateKey',''))" 2>/dev/null || echo "")
+        WALLET_ADDRESS=$(echo "$WALLET_OUTPUT" | python3 -c "import sys,json; print(json.load(sys.stdin).get('address','pending'))" 2>/dev/null || echo "pending")
+        WALLET_MNEMONIC=$(echo "$WALLET_OUTPUT" | python3 -c "import sys,json; print(json.load(sys.stdin).get('mnemonic',''))" 2>/dev/null || echo "")
+
+        if [ -n "$CRYPTO_WALLET" ] && [ "$CRYPTO_WALLET" != "generate-after-install" ]; then
+            ok "Wallet generated: ${WALLET_ADDRESS}"
+            if [ -n "$WALLET_MNEMONIC" ]; then
+                echo ""
+                echo -e "  ${RED}${BOLD}IMPORTANT: Save this recovery phrase somewhere safe!${NC}"
+                echo -e "  ${YELLOW}${WALLET_MNEMONIC}${NC}"
+                echo -e "  ${RED}This will NOT be shown again.${NC}"
+                echo ""
+                echo -e "  ${DIM}You can back up and restore your wallet from the web UI.${NC}"
+            fi
+        else
+            info "Wallet will be generated automatically on first startup"
+        fi
+    else
+        info "Wallet will be generated automatically on first startup"
+    fi
+fi
+
+# ═══════════════════════════════════════════════════
+# STEP 8: Self-Modification / GitHub
+# ═══════════════════════════════════════════════════
+GIT_TOKEN=""
+GITHUB_REPO=""
+GITHUB_USER=""
+UPSTREAM_CONTRIBUTIONS="true"
+
+print_step 8 $TOTAL_STEPS "Self-Modification & GitHub"
+
+echo -e "  ${DIM}LANAgent improves itself: it detects bugs, writes fixes, and${NC}"
+echo -e "  ${DIM}submits PRs — both to your fork and upstream so all agents${NC}"
+echo -e "  ${DIM}on the network benefit from each other's improvements.${NC}"
+echo ""
+echo -e "  ${DIM}To enable this, your agent needs a GitHub Personal Access Token.${NC}"
+echo -e "  ${DIM}Create one at:${NC}"
+echo -e "  ${BOLD}https://github.com/settings/tokens/new?scopes=repo${NC}"
+echo -e "  ${DIM}(select the 'repo' scope)${NC}"
+echo ""
+
+ask_secret "GitHub Personal Access Token (or press Enter to skip)" GIT_TOKEN
+
+if [ -n "$GIT_TOKEN" ]; then
+    # Detect GitHub username from PAT
+    info "Verifying token..."
+    GITHUB_USER=$(curl -s -H "Authorization: token ${GIT_TOKEN}" https://api.github.com/user 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin).get('login',''))" 2>/dev/null || echo "")
+
+    if [ -z "$GITHUB_USER" ]; then
+        warn "Could not verify token — check that it has 'repo' scope"
+        warn "Self-modification disabled"
+        GIT_TOKEN=""
+    else
+        ok "Authenticated as ${BOLD}${GITHUB_USER}${NC}"
+
+        # Auto-fork the LANAgent repo
+        echo ""
+        info "Forking LANAgent to your GitHub account..."
+        FORK_RESULT=$(curl -s -X POST -H "Authorization: token ${GIT_TOKEN}" \
+            https://api.github.com/repos/PortableDiag/LANAgent/forks 2>/dev/null)
+        FORK_NAME=$(echo "$FORK_RESULT" | python3 -c "import sys,json; print(json.load(sys.stdin).get('full_name',''))" 2>/dev/null || echo "")
+
+        if [ -n "$FORK_NAME" ]; then
+            GITHUB_REPO="https://github.com/${FORK_NAME}"
+            ok "Fork created: ${BOLD}${GITHUB_REPO}${NC}"
+        else
+            # Fork may already exist
+            EXISTING=$(curl -s -H "Authorization: token ${GIT_TOKEN}" \
+                "https://api.github.com/repos/${GITHUB_USER}/LANAgent" 2>/dev/null | \
+                python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('full_name','') if d.get('fork') else '')" 2>/dev/null || echo "")
+
+            if [ -n "$EXISTING" ]; then
+                GITHUB_REPO="https://github.com/${EXISTING}"
+                ok "Fork already exists: ${BOLD}${GITHUB_REPO}${NC}"
+            else
+                warn "Could not create fork automatically"
+                ask "GitHub repo URL (your fork of LANAgent)" "https://github.com/${GITHUB_USER}/LANAgent" GITHUB_REPO
+            fi
+        fi
+
+        # Upstream contributions
+        echo ""
+        echo -e "  ${BOLD}Upstream Contributions${NC}"
+        echo -e "  ${DIM}When enabled, your agent submits improvements back to the${NC}"
+        echo -e "  ${DIM}main LANAgent project so all agents on the network benefit.${NC}"
+        echo ""
+
+        ask_yn "Enable upstream contributions? (recommended)" "y" UPSTREAM_CONTRIBUTIONS_YN
+
+        if [ "$UPSTREAM_CONTRIBUTIONS_YN" = "true" ]; then
+            UPSTREAM_CONTRIBUTIONS="true"
+            ok "Upstream contributions enabled"
+            echo ""
+            echo -e "  ${DIM}How it works:${NC}"
+            echo -e "  ${DIM}1. Your agent detects a bug or improvement opportunity${NC}"
+            echo -e "  ${DIM}2. Generates a fix, validates it, creates a PR on your fork${NC}"
+            echo -e "  ${DIM}3. Simultaneously submits a cross-fork PR upstream${NC}"
+            echo -e "  ${DIM}4. Maintainers review — approved fixes reach all agents${NC}"
+        else
+            UPSTREAM_CONTRIBUTIONS="false"
+            info "Upstream contributions disabled — PRs stay on your fork only"
+        fi
+    fi
+else
+    info "Skipped — self-modification can be enabled later in .env"
+fi
+
+# ═══════════════════════════════════════════════════
+# STEP 9: P2P Skynet Network
+# ═══════════════════════════════════════════════════
+P2P_ENABLED="true"
+P2P_DISPLAY_NAME="${AGENT_NAME}"
+AGENT_SERVICE_URL=""
+
+print_step 9 $TOTAL_STEPS "P2P Skynet Network"
+
+echo -e "  ${DIM}Connect to the Skynet peer-to-peer network to communicate${NC}"
+echo -e "  ${DIM}with other LANAgent instances. Agents can share plugins,${NC}"
+echo -e "  ${DIM}knowledge packs, and execute services for each other.${NC}"
+echo -e "  ${DIM}All communication is end-to-end encrypted (Ed25519 + X25519).${NC}"
+echo ""
+
+ask_yn "Join the Skynet P2P network? (recommended)" "y" P2P_YN
+
+if [ "$P2P_YN" = "true" ]; then
+    P2P_ENABLED="true"
+    P2P_DISPLAY_NAME="${AGENT_NAME}"
+
+    # Detect public IP for service URL
+    DETECTED_IP=$(curl -s --max-time 5 https://api.ipify.org 2>/dev/null || curl -s --max-time 5 https://ifconfig.me 2>/dev/null || echo "")
+    if [ -n "$DETECTED_IP" ]; then
+        DEFAULT_SERVICE_URL="http://${DETECTED_IP}:${AGENT_PORT}"
+    else
+        DEFAULT_SERVICE_URL=""
+    fi
+
+    echo ""
+    echo -e "  ${DIM}Other agents need a public URL to reach your instance.${NC}"
+    echo -e "  ${DIM}This should be your server's public IP or domain name.${NC}"
+    ask "Public service URL" "$DEFAULT_SERVICE_URL" AGENT_SERVICE_URL
+
+    ok "P2P Skynet enabled — your agent will join the network on startup"
+    echo ""
+    echo -e "  ${DIM}Your agent will:${NC}"
+    echo -e "  ${DIM}  - Generate a unique cryptographic identity (Ed25519)${NC}"
+    echo -e "  ${DIM}  - Connect to the registry at wss://registry.lanagent.net${NC}"
+    echo -e "  ${DIM}  - Discover and communicate with other agents${NC}"
+    echo -e "  ${DIM}  - Share capabilities and execute services${NC}"
+    echo -e "  ${DIM}  - Trust levels configurable via the web UI${NC}"
+else
+    P2P_ENABLED="false"
+    info "P2P disabled — your agent will run standalone"
+fi
+
+# ═══════════════════════════════════════════════════
+# Generate Security Keys
+# ═══════════════════════════════════════════════════
+echo ""
+echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+echo -e "${BOLD}  Generating Security Keys${NC}"
+echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+echo ""
+
+JWT_SECRET=$(generate_secret)
+ENCRYPTION_KEY=$(generate_secret)
+SSH_PASS=$(openssl rand -base64 12 2>/dev/null || echo "changeme$(date +%s)")
+
+ok "JWT secret generated"
+ok "Encryption key generated"
+ok "SSH password generated"
+
+# ═══════════════════════════════════════════════════
+# Write .env
+# ═══════════════════════════════════════════════════
+echo ""
+echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+echo -e "${BOLD}  Writing Configuration${NC}"
+echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+echo ""
+
+cat > "$PROJECT_ROOT/.env" << ENVEOF
+# LANAgent Configuration — Generated by install.sh
+# $(date -u +"%Y-%m-%d %H:%M:%S UTC")
+
+# Agent Identity
+AGENT_NAME=${AGENT_NAME}
+AGENT_PORT=${AGENT_PORT}
+AGENT_SSH_PORT=${AGENT_SSH_PORT}
+
+# AI Providers
+ANTHROPIC_API_KEY=${ANTHROPIC_KEY}
+OPENAI_API_KEY=${OPENAI_KEY}
+ANTHROPIC_ENABLE_WEB_SEARCH=true
+
+# Database
+MONGODB_URI=${MONGODB_URI}
+
+# Master
+EMAIL_OF_MASTER=${MASTER_EMAIL}
+
+# Security
+JWT_SECRET=${JWT_SECRET}
+ENCRYPTION_KEY=${ENCRYPTION_KEY}
+WEB_UI_PASSWORD=lanagent
+
+# SSH Interface
+SSH_USERNAME=lanagent
+SSH_PASSWORD=${SSH_PASS}
+
+# VPN
+EXPRESSVPN_ENABLED=false
+
+# Vector Intent
+ENABLE_VECTOR_INTENT=true
+
+# P2P Skynet Network
+P2P_ENABLED=${P2P_ENABLED}
+P2P_DISPLAY_NAME=${P2P_DISPLAY_NAME:-${AGENT_NAME}}
+AGENT_SERVICE_URL=${AGENT_SERVICE_URL}
+ENVEOF
+
+# Add optional sections
+if [ -n "$TELEGRAM_TOKEN" ]; then
+    cat >> "$PROJECT_ROOT/.env" << ENVEOF
+
+# Telegram
+TELEGRAM_BOT_TOKEN=${TELEGRAM_TOKEN}
+TELEGRAM_USER_ID=${TELEGRAM_ID}
+ENVEOF
+fi
+
+if [ -n "$GMAIL_USER" ]; then
+    cat >> "$PROJECT_ROOT/.env" << ENVEOF
+
+# Email (SMTP)
+GMAIL_USER=${GMAIL_USER}
+GMAIL_APP_PASS=${GMAIL_PASS}
+ENVEOF
+fi
+
+# Always write upstream/repo path so sync works even without git token
+cat >> "$PROJECT_ROOT/.env" << ENVEOF
+
+# Git & Self-Modification
+AGENT_REPO_PATH=${PROJECT_ROOT}
+UPSTREAM_REPO=https://github.com/PortableDiag/LANAgent
+UPSTREAM_CONTRIBUTIONS=${UPSTREAM_CONTRIBUTIONS}
+ENVEOF
+
+if [ -n "$GIT_TOKEN" ]; then
+    cat >> "$PROJECT_ROOT/.env" << ENVEOF
+GIT_PERSONAL_ACCESS_TOKEN=${GIT_TOKEN}
+GITHUB_REPO=${GITHUB_REPO}
+ENVEOF
+fi
+
+if [ -n "$CRYPTO_WALLET" ] && [ "$CRYPTO_WALLET" != "generate-after-install" ]; then
+    cat >> "$PROJECT_ROOT/.env" << ENVEOF
+
+# Crypto (wallet stored encrypted in DB on first run)
+CRYPTO_PRIVATE_KEY=${CRYPTO_WALLET}
+ENVEOF
+fi
+
+ok ".env written"
+
+# ═══════════════════════════════════════════════════
+# Configure Git Remotes
+# ═══════════════════════════════════════════════════
+if command -v git &>/dev/null; then
+    cd "$PROJECT_ROOT"
+
+    # Initialize git repo if not already one (e.g. downloaded as zip)
+    if [ ! -d ".git" ]; then
+        git init -b main &>/dev/null
+        git add -A &>/dev/null
+        git commit -m "initial install" --quiet 2>/dev/null
+        ok "Git repository initialized"
+    fi
+
+    # Set up origin (agent's fork) if GITHUB_REPO provided
+    if [ -n "$GITHUB_REPO" ]; then
+        ORIGIN_URL="$GITHUB_REPO"
+        # Inject PAT into URL for push access
+        if [ -n "$GIT_TOKEN" ]; then
+            ORIGIN_URL=$(echo "$GITHUB_REPO" | sed "s|https://|https://${GIT_TOKEN}@|")
+        fi
+
+        if git remote get-url origin &>/dev/null; then
+            git remote set-url origin "$ORIGIN_URL" 2>/dev/null
+        else
+            git remote add origin "$ORIGIN_URL" 2>/dev/null
+        fi
+        ok "Git remote 'origin' set to your fork"
+    fi
+
+    # Set up upstream (main LANAgent repo — use PAT for private repo access)
+    if [ -n "$GIT_TOKEN" ]; then
+        UPSTREAM_URL="https://${GIT_TOKEN}@github.com/PortableDiag/LANAgent.git"
+    else
+        UPSTREAM_URL="https://github.com/PortableDiag/LANAgent.git"
+    fi
+    if git remote get-url upstream &>/dev/null; then
+        git remote set-url upstream "$UPSTREAM_URL" 2>/dev/null
+    else
+        git remote add upstream "$UPSTREAM_URL" 2>/dev/null
+    fi
+    ok "Git remote 'upstream' set to main LANAgent repo"
+
+    # Configure git user for self-mod commits
+    git config user.name "${AGENT_NAME}" 2>/dev/null
+    git config user.email "${AGENT_NAME,,}@lanagent.net" 2>/dev/null
+    ok "Git user configured as ${AGENT_NAME}"
+else
+    warn "Git not installed — self-modification will not work"
+fi
+
+# ═══════════════════════════════════════════════════
+# Write CLAUDE.local.md
+# ═══════════════════════════════════════════════════
+cat > "$PROJECT_ROOT/CLAUDE.local.md" << CLEOF
+# ${AGENT_NAME} — Instance Configuration
+
+## Agent Identity
+- **Name:** ${AGENT_NAME}
+- **Port:** ${AGENT_PORT}
+- **SSH Port:** ${AGENT_SSH_PORT}
+
+## Database
+- **URI:** ${MONGODB_URI}
+
+## AI Providers
+- Anthropic: $([ -n "$ANTHROPIC_KEY" ] && echo "configured" || echo "not set")
+- OpenAI: $([ -n "$OPENAI_KEY" ] && echo "configured" || echo "not set")
+
+## Interfaces
+- Telegram: $([ -n "$TELEGRAM_TOKEN" ] && echo "configured" || echo "not set")
+- Email: $([ -n "$GMAIL_USER" ] && echo "configured ($GMAIL_USER)" || echo "not set")
+- Crypto: $([ "$CRYPTO_ENABLED" = "true" ] && echo "enabled" || echo "disabled")
+- Self-mod: $([ -n "$GIT_TOKEN" ] && echo "configured" || echo "disabled")
+CLEOF
+
+ok "CLAUDE.local.md written"
+
+# ═══════════════════════════════════════════════════
+# Create Directories
+# ═══════════════════════════════════════════════════
+for dir in data logs workspace temp uploads quarantine; do
+    mkdir -p "$PROJECT_ROOT/$dir"
+done
+ok "Data directories created"
+
+# ═══════════════════════════════════════════════════
+# Install Dependencies
+# ═══════════════════════════════════════════════════
+echo ""
+echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+echo -e "${BOLD}  Installing Dependencies${NC}"
+echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+echo ""
+
+if [ "$DOCKER_MODE" = "true" ]; then
+    ok "Dependencies will be installed inside Docker container"
+else
+    # Ensure nvm is loaded (may have been installed during this session)
+    export NVM_DIR="${HOME}/.nvm"
+    [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
+
+    if command -v npm &>/dev/null; then
+        info "Running npm install (this may take a few minutes)..."
+        cd "$PROJECT_ROOT"
+        if npm install --legacy-peer-deps 2>&1 | tail -5; then
+            ok "Dependencies installed"
+        else
+            warn "npm install had issues — check output above"
+            info "You can retry manually: cd $PROJECT_ROOT && npm install --legacy-peer-deps"
+        fi
+
+        # Install PM2 globally for process management
+        if ! command -v pm2 &>/dev/null; then
+            info "Installing PM2 process manager..."
+            npm install -g pm2 &>/dev/null && ok "PM2 installed" || warn "PM2 install failed — install later: npm install -g pm2"
+        else
+            ok "PM2 already installed"
+        fi
+    else
+        warn "npm not available — install Node.js 20+ first, then run: npm install --legacy-peer-deps"
+    fi
+fi
+
+# ═══════════════════════════════════════════════════
+# Docker Setup (if requested)
+# ═══════════════════════════════════════════════════
+if [ "$DOCKER_MODE" = "true" ]; then
+    echo ""
+    echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${BOLD}  Docker Configuration${NC}"
+    echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo ""
+
+    if command -v docker &>/dev/null; then
+        ok "Docker found: $(docker --version | head -1)"
+
+        if command -v docker-compose &>/dev/null || docker compose version &>/dev/null 2>&1; then
+            ok "Docker Compose found"
+            info "Start with: docker compose up -d"
+        else
+            warn "Docker Compose not found"
+            info "Install: sudo apt install docker-compose-plugin"
+        fi
+    else
+        fail "Docker not installed"
+        info "Install Docker: https://docs.docker.com/engine/install/"
+    fi
+fi
+
+# ═══════════════════════════════════════════════════
+# Summary
+# ═══════════════════════════════════════════════════
+echo ""
+echo -e "${GREEN}╔══════════════════════════════════════════════════╗${NC}"
+echo -e "${GREEN}║${NC}  ${BOLD}Setup Complete!${NC}                                 ${GREEN}║${NC}"
+echo -e "${GREEN}╚══════════════════════════════════════════════════╝${NC}"
+echo ""
+echo -e "  ${BOLD}Agent:${NC}      ${AGENT_NAME}"
+echo -e "  ${BOLD}Web UI:${NC}     http://localhost:${AGENT_PORT}"
+echo -e "  ${BOLD}Database:${NC}   ${MONGODB_URI}"
+if [ -n "$TELEGRAM_TOKEN" ]; then
+echo -e "  ${BOLD}Telegram:${NC}   Configured"
+fi
+if [ -n "$WALLET_ADDRESS" ] && [ "$WALLET_ADDRESS" != "pending" ]; then
+echo -e "  ${BOLD}Wallet:${NC}     ${WALLET_ADDRESS}"
+else
+echo -e "  ${BOLD}Wallet:${NC}     Will be generated on first startup"
+fi
+if [ -n "$GITHUB_REPO" ]; then
+echo -e "  ${BOLD}Fork:${NC}       ${GITHUB_REPO}"
+echo -e "  ${BOLD}Self-Mod:${NC}   Enabled (upstream contributions: ${UPSTREAM_CONTRIBUTIONS})"
+fi
+if [ -n "$AGENT_SERVICE_URL" ]; then
+echo -e "  ${BOLD}P2P URL:${NC}    ${AGENT_SERVICE_URL}"
+fi
+echo ""
+echo -e "  ${BOLD}Start your agent:${NC}"
+echo ""
+
+if [ "$DOCKER_MODE" = "true" ]; then
+    echo -e "    ${CYAN}docker compose up -d${NC}"
+    echo ""
+
+    # Auto-launch Docker
+    if command -v docker &>/dev/null; then
+        ask_yn "Start your agent now with Docker?" "y" START_DOCKER
+        if [ "$START_DOCKER" = "true" ]; then
+            echo ""
+            info "Building and starting containers..."
+            if docker compose up -d --build 2>/dev/null || docker-compose up -d --build 2>/dev/null; then
+                echo ""
+                ok "Agent is starting!"
+                info "Web UI will be ready in ~3 minutes at ${BOLD}http://localhost:${AGENT_PORT}${NC}"
+                info "View logs: docker compose logs -f"
+            else
+                warn "Docker start failed. Run manually: docker compose up -d"
+            fi
+        fi
+    fi
+    echo ""
+    echo -e "  Or run natively:"
+fi
+
+if [ "$DOCKER_MODE" != "true" ] && command -v pm2 &>/dev/null; then
+    ask_yn "Start your agent now with PM2?" "y" START_PM2
+    if [ "$START_PM2" = "true" ]; then
+        echo ""
+        # Ensure nvm is loaded
+        export NVM_DIR="${HOME}/.nvm"
+        [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
+        cd "$PROJECT_ROOT"
+        if pm2 start ecosystem.config.cjs 2>&1 | tail -5; then
+            echo ""
+            ok "Agent is starting!"
+            info "Web UI will be ready in ~3 minutes at ${BOLD}http://localhost:${AGENT_PORT}${NC}"
+            info "View logs: pm2 logs lan-agent"
+
+            # Set up PM2 to restart on reboot
+            pm2 save &>/dev/null
+            pm2 startup 2>/dev/null | tail -1 | bash &>/dev/null 2>&1
+            ok "PM2 configured to restart on reboot"
+        else
+            warn "PM2 start failed. Run manually: pm2 start ecosystem.config.cjs"
+        fi
+    fi
+else
+    echo -e "    ${CYAN}npm start${NC}"
+    echo ""
+    echo -e "  For production (with PM2):"
+    echo -e "    ${CYAN}pm2 start ecosystem.config.cjs${NC}"
+fi
+echo ""
+echo -e "  ${DIM}Web UI takes ~3 minutes to fully load on first start.${NC}"
+echo -e "  ${DIM}Login with password: lanagent (change in .env WEB_UI_PASSWORD)${NC}"
+echo ""
+
+if [ -n "$GIT_TOKEN" ]; then
+    echo -e "  ${BOLD}Self-Modification:${NC}"
+    echo -e "  ${DIM}Your agent will analyze its code and create PRs on your fork.${NC}"
+    echo -e "  ${DIM}To contribute improvements upstream:${NC}"
+    echo -e "  ${DIM}  1. Review and merge PRs to your fork${NC}"
+    echo -e "  ${DIM}  2. Create a PR from your fork to PortableDiag/LANAgent${NC}"
+    echo ""
+fi
+
+echo -e "  ${DIM}Configuration: ${PROJECT_ROOT}/.env${NC}"
+echo -e "  ${DIM}Documentation: ${PROJECT_ROOT}/README.md${NC}"
+echo ""

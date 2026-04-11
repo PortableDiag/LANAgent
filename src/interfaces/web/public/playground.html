@@ -1,0 +1,2099 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LAN Agent — Playground</title>
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        :root {
+            --bg-primary: #0a0a1a;
+            --bg-secondary: #12122a;
+            --bg-tertiary: #1a1a3a;
+            --text-primary: #ffffff;
+            --text-secondary: #8888aa;
+            --accent: #00a8ff;
+            --accent-hover: #0090e0;
+            --border: #2a2a4a;
+            --success: #4caf50;
+            --warning: #ff9800;
+            --danger: #f44336;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        /* Top Bar */
+        .top-bar {
+            display: flex; align-items: center; justify-content: space-between;
+            padding: 10px 20px; background: var(--bg-secondary);
+            border-bottom: 1px solid var(--border); flex-shrink: 0;
+        }
+        .top-bar-left { display: flex; align-items: center; gap: 16px; }
+        .top-bar h1 { font-size: 18px; font-weight: 600; color: var(--accent); }
+        .top-bar h1 i { margin-right: 8px; }
+        .back-link {
+            color: var(--text-secondary); text-decoration: none; font-size: 14px;
+            display: flex; align-items: center; gap: 6px; padding: 6px 12px;
+            border-radius: 6px; border: 1px solid var(--border); transition: all 0.2s;
+        }
+        .back-link:hover { color: var(--text-primary); border-color: var(--accent); background: rgba(0,168,255,0.1); }
+
+        /* Main Layout */
+        .main-layout { flex: 1; display: flex; overflow: hidden; }
+
+        /* 3D Viewport */
+        .viewport {
+            flex: 1; position: relative; background: var(--bg-primary);
+        }
+        #viewport-canvas { width: 100%; height: 100%; }
+        .viewport-overlay {
+            position: absolute; bottom: 16px; left: 16px; right: 16px;
+            display: flex; gap: 8px; justify-content: center; flex-wrap: wrap;
+        }
+        .viewport-btn {
+            background: rgba(0,0,0,0.7); border: 1px solid var(--border); color: var(--text-primary);
+            padding: 8px 14px; border-radius: 8px; cursor: pointer; font-size: 13px;
+            display: flex; align-items: center; gap: 6px; transition: all 0.2s;
+        }
+        .viewport-btn:hover { border-color: var(--accent); background: rgba(0,168,255,0.15); }
+        .viewport-btn.active { border-color: var(--accent); color: var(--accent); }
+        .viewport-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+        /* Loading state */
+        .viewport-message {
+            position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+            text-align: center; color: var(--text-secondary); font-size: 15px;
+        }
+        .viewport-message i { font-size: 48px; display: block; margin-bottom: 16px; color: var(--accent); opacity: 0.5; }
+
+        /* Side Panel */
+        .side-panel {
+            width: 320px; min-width: 320px; max-width: 320px; flex-shrink: 0;
+            display: flex; flex-direction: column;
+            background: var(--bg-secondary); overflow: hidden;
+            border-left: 1px solid var(--border);
+        }
+        .panel-tabs {
+            display: flex; border-bottom: 1px solid var(--border); flex-shrink: 0;
+        }
+        .panel-tab {
+            flex: 1; padding: 8px 4px; text-align: center; cursor: pointer;
+            color: var(--text-secondary); font-size: 11px; border: none; background: none;
+            border-bottom: 2px solid transparent; transition: all 0.2s;
+            white-space: nowrap; overflow: hidden; min-width: 0;
+        }
+        .panel-tab:hover { color: var(--text-primary); }
+        .panel-tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+        .panel-tab i { display: block; font-size: 14px; margin-bottom: 2px; }
+
+        .panel-content { flex: 1; overflow-y: auto; padding: 16px; min-height: 0; }
+        .panel-section { display: none; }
+        .panel-section.active { display: block; }
+
+        /* Activity cards */
+        .activity-card {
+            background: var(--bg-tertiary); border: 1px solid var(--border);
+            border-radius: 10px; padding: 14px; margin-bottom: 10px;
+            cursor: pointer; transition: all 0.2s;
+        }
+        .activity-card:hover { border-color: var(--accent); transform: translateY(-1px); }
+        .activity-card.locked { opacity: 0.5; cursor: not-allowed; }
+        .activity-card.locked:hover { border-color: var(--border); transform: none; }
+        .activity-card .card-header {
+            display: flex; align-items: center; gap: 10px; margin-bottom: 6px;
+        }
+        .activity-card .card-icon {
+            width: 36px; height: 36px; border-radius: 8px;
+            display: flex; align-items: center; justify-content: center;
+            font-size: 16px; flex-shrink: 0;
+        }
+        .activity-card .card-title { font-size: 14px; font-weight: 600; }
+        .activity-card .card-desc { font-size: 12px; color: var(--text-secondary); line-height: 1.4; }
+        .activity-card .card-badge {
+            display: inline-block; font-size: 10px; padding: 2px 8px; border-radius: 10px;
+            margin-top: 6px; font-weight: 600;
+        }
+        .badge-available { background: rgba(76,175,80,0.2); color: var(--success); }
+        .badge-coming { background: rgba(255,152,0,0.2); color: var(--warning); }
+        .badge-concept { background: rgba(136,136,170,0.2); color: var(--text-secondary); }
+
+        /* Music Player */
+        .music-player {
+            background: var(--bg-tertiary); border-top: 1px solid var(--border);
+            padding: 10px 16px; flex-shrink: 0;
+        }
+        .music-player .track-info {
+            font-size: 12px; color: var(--text-primary); margin-bottom: 8px;
+            white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+        }
+        .music-player .track-info .track-artist { color: var(--text-secondary); }
+        .music-player .progress-bar {
+            width: 100%; height: 4px; background: var(--bg-primary); border-radius: 2px;
+            cursor: pointer; margin-bottom: 8px;
+        }
+        .music-player .progress-fill {
+            height: 100%; background: var(--accent); border-radius: 2px; width: 0%;
+            transition: width 0.3s linear;
+        }
+        .music-controls {
+            display: flex; align-items: center; gap: 8px;
+        }
+        .music-controls button {
+            background: none; border: none; color: var(--text-primary);
+            cursor: pointer; font-size: 16px; padding: 4px; transition: color 0.2s;
+        }
+        .music-controls button:hover { color: var(--accent); }
+        .music-controls .volume-slider {
+            width: 60px; margin-left: auto; accent-color: var(--accent);
+        }
+        .music-controls .time-display {
+            font-size: 11px; color: var(--text-secondary); margin-left: 4px;
+        }
+        .music-file-list {
+            overflow-y: auto;
+        }
+        .music-file-item {
+            padding: 6px 10px; font-size: 12px; cursor: pointer; border-radius: 6px;
+            display: flex; align-items: center; gap: 8px; transition: background 0.2s;
+        }
+        .music-file-item:hover { background: var(--bg-tertiary); }
+        .music-file-item.playing { color: var(--accent); }
+        .music-file-item i { font-size: 10px; color: var(--text-secondary); flex-shrink: 0; }
+        .music-folder-name {
+            font-size: 11px; font-weight: 600; color: var(--text-secondary);
+            padding: 8px 10px 4px; text-transform: uppercase; letter-spacing: 0.5px;
+        }
+        .music-source-config {
+            display: flex; gap: 6px; margin-bottom: 12px;
+        }
+        .music-source-config input {
+            flex: 1; padding: 7px 10px; border-radius: 6px;
+            border: 1px solid var(--border); background: var(--bg-primary);
+            color: var(--text-primary); font-size: 12px; outline: none;
+        }
+        .music-source-config input:focus { border-color: var(--accent); }
+        .music-source-config button {
+            padding: 7px 12px; border-radius: 6px; border: none;
+            background: var(--accent); color: white; cursor: pointer; font-size: 12px;
+        }
+
+        /* Chat bar */
+        .chat-bar {
+            display: flex; gap: 8px; padding: 12px 16px;
+            background: var(--bg-tertiary); border-top: 1px solid var(--border);
+            flex-shrink: 0;
+        }
+        .chat-bar input {
+            flex: 1; padding: 10px 14px; border-radius: 8px;
+            border: 1px solid var(--border); background: var(--bg-primary);
+            color: var(--text-primary); font-size: 13px; outline: none;
+        }
+        .chat-bar input:focus { border-color: var(--accent); }
+        .chat-bar button {
+            padding: 10px 16px; border-radius: 8px; border: none;
+            background: var(--accent); color: white; cursor: pointer;
+            font-size: 13px; transition: background 0.2s;
+        }
+        .chat-bar button:hover { background: var(--accent-hover); }
+
+        /* Agent status */
+        .agent-status {
+            padding: 12px 16px; background: var(--bg-tertiary);
+            border-bottom: 1px solid var(--border); font-size: 12px;
+            display: flex; align-items: center; gap: 10px;
+        }
+        .agent-status img {
+            width: 32px; height: 32px; border-radius: 50%;
+            border: 2px solid var(--accent); object-fit: cover;
+        }
+        .agent-status .agent-name { font-weight: 600; font-size: 13px; }
+        .agent-status .agent-mood { color: var(--text-secondary); }
+        .status-dot {
+            width: 8px; height: 8px; border-radius: 50%;
+            background: var(--success); display: inline-block; margin-right: 4px;
+        }
+
+        /* Panel toggle button (visible on mobile) */
+        .panel-toggle {
+            display: none; position: absolute; top: 12px; right: 12px; z-index: 100;
+            background: rgba(0,0,0,0.7); border: 1px solid var(--border); color: var(--text-primary);
+            width: 40px; height: 40px; border-radius: 10px; cursor: pointer;
+            font-size: 16px; align-items: center; justify-content: center; transition: all 0.2s;
+        }
+        .panel-toggle:hover { border-color: var(--accent); background: rgba(0,168,255,0.15); }
+
+        /* Mobile responsive */
+        @media (max-width: 768px) {
+            .top-bar { padding: 8px 12px; }
+            .top-bar h1 { font-size: 15px; }
+            .back-link span { display: none; }
+
+            .side-panel {
+                position: fixed; top: 0; right: 0; bottom: 0; width: 320px; max-width: 85vw;
+                z-index: 200; transform: translateX(100%); transition: transform 0.3s ease;
+                box-shadow: -4px 0 20px rgba(0,0,0,0.5);
+            }
+            .side-panel.open { transform: translateX(0); }
+
+            .panel-toggle { display: flex; }
+
+            .panel-backdrop {
+                display: none; position: fixed; inset: 0; z-index: 199;
+                background: rgba(0,0,0,0.5); backdrop-filter: blur(2px);
+            }
+            .panel-backdrop.open { display: block; }
+        }
+    </style>
+</head>
+<body>
+    <!-- Top Bar -->
+    <div class="top-bar">
+        <div class="top-bar-left">
+            <h1><i class="fas fa-gamepad"></i> Playground</h1>
+            <a href="/" class="back-link"><i class="fas fa-arrow-left"></i> Dashboard</a>
+            <a href="avatar.html" class="back-link"><i class="fas fa-user-astronaut"></i> Avatar Designer</a>
+        </div>
+    </div>
+
+    <div class="main-layout">
+        <!-- 3D Viewport -->
+        <div class="viewport">
+            <div id="viewport-canvas"></div>
+            <div id="viewport-message" class="viewport-message">
+                <i class="fas fa-gamepad"></i>
+                <span id="viewport-message-text">Loading avatar...</span>
+            </div>
+            <div class="viewport-overlay" id="viewport-controls" style="display: none;">
+                <button class="viewport-btn" onclick="playground.resetCamera()"><i class="fas fa-crosshairs"></i> Reset View</button>
+                <button class="viewport-btn" onclick="playground.scaleAgent(1.2)" title="Make agent bigger"><i class="fas fa-search-plus"></i></button>
+                <button class="viewport-btn" onclick="playground.scaleAgent(0.8)" title="Make agent smaller"><i class="fas fa-search-minus"></i></button>
+                <button class="viewport-btn" id="btn-vr" onclick="playground.enterVR()" style="display:none;"><i class="fas fa-vr-cardboard"></i> Enter VR</button>
+                <button class="viewport-btn" id="btn-mic" onclick="playground.toggleMic()"><i class="fas fa-microphone"></i> Voice</button>
+            </div>
+            <!-- Webcam preview for mirror mode -->
+            <video id="webcam-preview" autoplay playsinline muted style="display:none;position:absolute;bottom:80px;left:16px;width:200px;border-radius:10px;border:2px solid var(--border);opacity:0.85;transform:scaleX(-1);"></video>
+            <button id="btn-flip-cam" onclick="playground.flipCamera()" style="display:none;position:absolute;bottom:80px;left:220px;background:rgba(0,0,0,0.7);border:1px solid var(--border);color:var(--text-primary);width:36px;height:36px;border-radius:8px;cursor:pointer;font-size:14px;z-index:10;" title="Switch camera"><i class="fas fa-sync-alt"></i></button>
+            <div id="mirror-status" style="display:none;position:absolute;top:12px;left:12px;background:rgba(0,0,0,0.7);padding:6px 12px;border-radius:8px;font-size:12px;color:#69f0ae;">
+                <i class="fas fa-video"></i> Mirror Mode Active
+            </div>
+            <button class="panel-toggle" onclick="playground.togglePanel()"><i class="fas fa-bars"></i></button>
+        </div>
+
+        <!-- Mobile backdrop -->
+        <div class="panel-backdrop" id="panel-backdrop" onclick="playground.togglePanel()"></div>
+
+        <!-- Side Panel -->
+        <div class="side-panel" id="side-panel">
+            <!-- Agent Status -->
+            <div class="agent-status">
+                <img id="agent-avatar" src="/api/agent/avatar" alt="Agent" onerror="this.src='data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><rect fill=%22%2312122a%22 width=%22100%22 height=%22100%22/><text x=%2250%22 y=%2260%22 text-anchor=%22middle%22 fill=%22%2300a8ff%22 font-size=%2240%22>?</text></svg>'">
+                <div>
+                    <div class="agent-name"><span class="status-dot"></span> <span id="agent-name-text">Agent</span></div>
+                    <div class="agent-mood" id="agent-mood">Idle — waiting to play</div>
+                </div>
+            </div>
+
+            <!-- Tabs -->
+            <div class="panel-tabs">
+                <button class="panel-tab active" data-tab="activities" onclick="playground.switchTab('activities')" title="Activities">
+                    <i class="fas fa-dice"></i> Play
+                </button>
+                <button class="panel-tab" data-tab="chat" onclick="playground.switchTab('chat')" title="Chat">
+                    <i class="fas fa-comments"></i> Chat
+                </button>
+                <button class="panel-tab" data-tab="dance" onclick="playground.switchTab('dance')" title="Music">
+                    <i class="fas fa-music"></i> Music
+                </button>
+                <button class="panel-tab" data-tab="settings" onclick="playground.switchTab('settings')" title="Settings">
+                    <i class="fas fa-sliders-h"></i> Settings
+                </button>
+            </div>
+
+            <div class="panel-content">
+                <!-- Activities Tab -->
+                <div class="panel-section active" id="tab-activities">
+                    <div style="font-size:12px;color:var(--text-secondary);margin-bottom:12px;">
+                        <i class="fas fa-info-circle"></i> Choose an activity to do with your agent
+                    </div>
+
+                    <div class="activity-card" onclick="playground.startActivity('freeplay')">
+                        <div class="card-header">
+                            <div class="card-icon" style="background:rgba(0,168,255,0.15);color:var(--accent);"><i class="fas fa-comments"></i></div>
+                            <div class="card-title">Free Play</div>
+                        </div>
+                        <div class="card-desc">Chat with your agent in 3D. Talk, ask questions, or just hang out. Your agent responds with voice, expressions, and gestures.</div>
+                        <span class="card-badge badge-available">Available</span>
+                    </div>
+
+                    <div class="activity-card" onclick="playground.startActivity('emote')">
+                        <div class="card-header">
+                            <div class="card-icon" style="background:rgba(156,39,176,0.15);color:#ce93d8;"><i class="fas fa-theater-masks"></i></div>
+                            <div class="card-title">Emote Studio</div>
+                        </div>
+                        <div class="card-desc">Trigger expressions and animations on your agent. See how they react, laugh, get angry, or surprised.</div>
+                        <span class="card-badge badge-available">Available</span>
+                    </div>
+
+                    <div class="activity-card" onclick="playground.startActivity('mirror')">
+                        <div class="card-header">
+                            <div class="card-icon" style="background:rgba(0,230,118,0.15);color:#69f0ae;"><i class="fas fa-video"></i></div>
+                            <div class="card-title">Mirror Mode</div>
+                        </div>
+                        <div class="card-desc">Your agent mirrors your movements in real-time. In VR, tracks your headset and controllers. Falls back to webcam pose tracking without VR.</div>
+                        <span class="card-badge badge-available">Available</span>
+                    </div>
+
+                    <div class="activity-card" onclick="playground.startActivity('dance')">
+                        <div class="card-header">
+                            <div class="card-icon" style="background:rgba(255,152,0,0.15);color:var(--warning);"><i class="fas fa-music"></i></div>
+                            <div class="card-title">Dance</div>
+                        </div>
+                        <div class="card-desc">Dance together with your agent. Pick a song and watch them move, or join in via VR with motion tracking.</div>
+                        <span class="card-badge badge-available">Available</span>
+                    </div>
+
+                    <div class="activity-card locked">
+                        <div class="card-header">
+                            <div class="card-icon" style="background:rgba(76,175,80,0.15);color:var(--success);"><i class="fas fa-dumbbell"></i></div>
+                            <div class="card-title">Exercise</div>
+                        </div>
+                        <div class="card-desc">Follow along with your agent for guided workouts. Stretching, yoga, bodyweight exercises with VR tracking.</div>
+                        <span class="card-badge badge-coming">Coming Soon</span>
+                    </div>
+
+                    <div class="activity-card locked">
+                        <div class="card-header">
+                            <div class="card-icon" style="background:rgba(244,67,54,0.15);color:var(--danger);"><i class="fas fa-fist-raised"></i></div>
+                            <div class="card-title">Sparring</div>
+                        </div>
+                        <div class="card-desc">Light sparring and martial arts practice in VR. Your agent adapts to your skill level and provides coaching.</div>
+                        <span class="card-badge badge-concept">Concept</span>
+                    </div>
+
+                    <div class="activity-card locked">
+                        <div class="card-header">
+                            <div class="card-icon" style="background:rgba(33,150,243,0.15);color:#64b5f6;"><i class="fas fa-chess"></i></div>
+                            <div class="card-title">Games</div>
+                        </div>
+                        <div class="card-desc">Play games with your agent — charades, trivia, Simon says, or reaction tests in 3D space.</div>
+                        <span class="card-badge badge-concept">Concept</span>
+                    </div>
+
+                    <div class="activity-card locked">
+                        <div class="card-header">
+                            <div class="card-icon" style="background:rgba(0,188,212,0.15);color:#4dd0e1;"><i class="fas fa-om"></i></div>
+                            <div class="card-title">Meditation</div>
+                        </div>
+                        <div class="card-desc">Guided meditation and breathing exercises. Your agent leads the session with calming animations and ambient sounds.</div>
+                        <span class="card-badge badge-concept">Concept</span>
+                    </div>
+                </div>
+
+                <!-- Emote Tab -->
+                <div class="panel-section" id="tab-emote">
+                    <div id="emote-panel">
+                        <div style="text-align:center;padding:40px 20px;color:var(--text-secondary);font-size:13px;">
+                            <i class="fas fa-theater-masks" style="font-size:32px;display:block;margin-bottom:12px;opacity:0.3;"></i>
+                            Loading expressions and animations...
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Chat Tab -->
+                <div class="panel-section" id="tab-chat">
+                    <div id="chat-messages" style="min-height:200px;">
+                        <div style="text-align:center;padding:40px 20px;color:var(--text-secondary);font-size:13px;">
+                            <i class="fas fa-comments" style="font-size:32px;display:block;margin-bottom:12px;opacity:0.3;"></i>
+                            Say something to your agent
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Settings Tab -->
+                <div class="panel-section" id="tab-settings">
+                    <div style="font-size:12px;color:var(--text-secondary);margin-bottom:12px;">
+                        <i class="fas fa-info-circle"></i> Playground settings
+                    </div>
+
+                    <div style="margin-bottom:16px;">
+                        <label style="font-size:12px;color:var(--text-secondary);display:block;margin-bottom:4px;">Environment</label>
+                        <select id="setting-environment" style="width:100%;padding:8px;border-radius:6px;border:1px solid var(--border);background:var(--bg-tertiary);color:var(--text-primary);font-size:13px;">
+                            <option value="void">Void (dark)</option>
+                            <option value="room">Room</option>
+                            <option value="outdoors">Outdoors</option>
+                            <option value="dojo">Dojo</option>
+                            <option value="stage">Stage</option>
+                        </select>
+                    </div>
+
+                    <div style="margin-bottom:16px;">
+                        <label style="font-size:12px;color:var(--text-secondary);display:block;margin-bottom:4px;">Agent Distance</label>
+                        <input type="range" id="setting-distance" min="1" max="5" step="0.5" value="2.5"
+                            style="width:100%;" onchange="playground.setAgentDistance(this.value)">
+                    </div>
+
+                    <div style="margin-bottom:16px;">
+                        <label style="font-size:12px;color:var(--text-secondary);display:block;margin-bottom:4px;">Agent Scale</label>
+                        <input type="range" id="setting-scale" min="0.5" max="3" step="0.1" value="1"
+                            style="width:100%;" onchange="playground.setAgentScale(this.value)">
+                    </div>
+
+                    <div style="margin-bottom:16px;">
+                        <label style="font-size:12px;color:var(--text-secondary);display:block;margin-bottom:6px;">Agent Position</label>
+                        <div style="display:flex;gap:6px;">
+                            <button onclick="playground.moveAgent(-0.2,0,0)" style="flex:1;padding:6px;border-radius:6px;border:1px solid var(--border);background:var(--bg-tertiary);color:var(--text-primary);cursor:pointer;font-size:11px;"><i class="fas fa-arrow-left"></i></button>
+                            <button onclick="playground.moveAgent(0.2,0,0)" style="flex:1;padding:6px;border-radius:6px;border:1px solid var(--border);background:var(--bg-tertiary);color:var(--text-primary);cursor:pointer;font-size:11px;"><i class="fas fa-arrow-right"></i></button>
+                            <button onclick="playground.moveAgent(0,0.2,0)" style="flex:1;padding:6px;border-radius:6px;border:1px solid var(--border);background:var(--bg-tertiary);color:var(--text-primary);cursor:pointer;font-size:11px;"><i class="fas fa-arrow-up"></i></button>
+                            <button onclick="playground.moveAgent(0,-0.2,0)" style="flex:1;padding:6px;border-radius:6px;border:1px solid var(--border);background:var(--bg-tertiary);color:var(--text-primary);cursor:pointer;font-size:11px;"><i class="fas fa-arrow-down"></i></button>
+                            <button onclick="playground.moveAgent(0,0,-0.2)" style="flex:1;padding:6px;border-radius:6px;border:1px solid var(--border);background:var(--bg-tertiary);color:var(--text-primary);cursor:pointer;font-size:11px;">Closer</button>
+                            <button onclick="playground.moveAgent(0,0,0.2)" style="flex:1;padding:6px;border-radius:6px;border:1px solid var(--border);background:var(--bg-tertiary);color:var(--text-primary);cursor:pointer;font-size:11px;">Further</button>
+                        </div>
+                    </div>
+
+                    <label style="font-size:12px;color:var(--text-secondary);display:block;margin:8px 0;">
+                        <input type="checkbox" id="setting-voice" checked> Voice responses (TTS)
+                    </label>
+                    <label style="font-size:12px;color:var(--text-secondary);display:block;margin:8px 0;">
+                        <input type="checkbox" id="setting-lipsync" checked> Lip sync
+                    </label>
+                    <label style="font-size:12px;color:var(--text-secondary);display:block;margin:8px 0;">
+                        <input type="checkbox" id="setting-lookat" checked> Eyes follow you
+                    </label>
+                    <label style="font-size:12px;color:var(--text-secondary);display:block;margin:8px 0;">
+                        <input type="checkbox" id="setting-physics" checked> Hair & cloth physics
+                    </label>
+                </div>
+
+                <!-- Dance/Music Tab -->
+                <div class="panel-section" id="tab-dance">
+                    <div style="font-size:12px;color:var(--text-secondary);margin-bottom:12px;">
+                        <i class="fas fa-info-circle"></i> Configure your music source and dance with your agent
+                    </div>
+
+                    <div style="font-size:11px;color:var(--text-secondary);margin-bottom:4px;">Music Source (local path, NAS mount, or URL)</div>
+                    <div class="music-source-config">
+                        <input type="text" id="music-source-path" placeholder="/mnt/nas/music or https://...">
+                        <button onclick="playground.saveMusicConfig()"><i class="fas fa-save"></i></button>
+                    </div>
+
+                    <div id="music-status" style="font-size:11px;color:var(--text-secondary);margin-bottom:10px;display:none;"></div>
+
+                    <div id="music-file-list" class="music-file-list">
+                        <div style="text-align:center;padding:30px 20px;color:var(--text-secondary);font-size:12px;">
+                            <i class="fas fa-folder-open" style="font-size:24px;display:block;margin-bottom:8px;opacity:0.3;"></i>
+                            Set a music source to browse your library
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Music Player Bar -->
+            <div class="music-player" id="music-player" style="display:none;">
+                <div class="track-info">
+                    <span id="music-track-name">No track selected</span>
+                </div>
+                <div class="progress-bar" onclick="playground.seekMusic(event)">
+                    <div class="progress-fill" id="music-progress"></div>
+                </div>
+                <div class="music-controls">
+                    <button onclick="playground.prevTrack()" title="Previous"><i class="fas fa-step-backward"></i></button>
+                    <button onclick="playground.toggleMusic()" title="Play/Pause" id="music-play-btn"><i class="fas fa-play"></i></button>
+                    <button onclick="playground.nextTrack()" title="Next"><i class="fas fa-step-forward"></i></button>
+                    <button onclick="playground.shuffleDance()" title="Shuffle dance" id="music-dance-btn"><i class="fas fa-random"></i></button>
+                    <span class="time-display" id="music-time">0:00</span>
+                    <input type="range" class="volume-slider" min="0" max="1" step="0.05" value="0.7" onchange="playground.setMusicVolume(this.value)">
+                </div>
+            </div>
+
+            <!-- Chat Input -->
+            <div class="chat-bar">
+                <input type="text" id="chat-input" placeholder="Say something to your agent..."
+                    onkeydown="if(event.key==='Enter')playground.sendMessage()">
+                <button onclick="playground.sendMessage()"><i class="fas fa-paper-plane"></i></button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Three.js + VRM libs (same as avatar designer) -->
+    <script src="/lib/three.min.js"></script>
+    <script src="/lib/GLTFLoader.js"></script>
+    <script src="/lib/OrbitControls.js"></script>
+    <script src="/lib/three-vrm.js"></script>
+    <script src="/js/vr-controls.js"></script>
+    <!-- MediaPipe Pose for mirror mode -->
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/pose@0.5.1675469404/pose.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils@0.3.1675466862/camera_utils.js" crossorigin="anonymous"></script>
+    <script>
+    class Playground {
+        constructor() {
+            this.token = null;
+            this.currentVRM = null;
+            this.vrmModels = [];
+            this.scene = null;
+            this.camera = null;
+            this.renderer = null;
+            this.controls = null;
+            this.clock = new THREE.Clock();
+            this._mixer = null;
+            this._idleActions = [];
+            this._currentIdleAction = null;
+            this._idleTime = 0;
+            this.vrmLookAtTarget = null;
+            this._currentActivity = null;
+            this._activeExpression = null; // persist triggered expression across frames
+            this._vrControls = null;
+        }
+
+        async init() {
+            // Auth
+            this.token = localStorage.getItem('lanagent_token');
+            if (!this.token) {
+                try {
+                    const resp = await fetch('/api/auth/login', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ password: 'lanagent' })
+                    });
+                    const data = await resp.json();
+                    if (data.token) {
+                        this.token = data.token;
+                        localStorage.setItem('lanagent_token', data.token);
+                    }
+                } catch (e) { console.warn('Auth failed:', e); }
+            }
+
+            // Load agent name
+            try {
+                const resp = await fetch('/api/agent/identity', {
+                    headers: { 'Authorization': `Bearer ${this.token}` }
+                });
+                const data = await resp.json();
+                if (data.success) {
+                    document.getElementById('agent-name-text').textContent = data.data.name;
+                }
+            } catch (e) { /* fallback to default */ }
+
+            // Init 3D scene
+            this._initScene();
+
+            // Load the active VRM model
+            await this._loadActiveModel();
+        }
+
+        _initScene() {
+            const container = document.getElementById('viewport-canvas');
+            if (this.renderer) return;
+
+            this.scene = new THREE.Scene();
+
+            // Subtle floor grid
+            const grid = new THREE.GridHelper(10, 20, 0x1a1a3a, 0x111128);
+            this.scene.add(grid);
+
+            // Lighting
+            const ambient = new THREE.AmbientLight(0xffffff, 0.6);
+            this.scene.add(ambient);
+            const key = new THREE.DirectionalLight(0xffffff, 0.8);
+            key.position.set(2, 3, 4);
+            this.scene.add(key);
+            const fill = new THREE.DirectionalLight(0x8888ff, 0.3);
+            fill.position.set(-2, 1, -2);
+            this.scene.add(fill);
+
+            // Camera
+            this.camera = new THREE.PerspectiveCamera(35, container.clientWidth / container.clientHeight, 0.1, 100);
+            this.camera.position.set(0, 1.3, 2.5);
+
+            // Renderer
+            this.renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+            this.renderer.setSize(container.clientWidth, container.clientHeight);
+            this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+            this.renderer.outputEncoding = THREE.sRGBEncoding;
+            this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
+            this.renderer.toneMappingExposure = 1.2;
+            container.appendChild(this.renderer.domElement);
+
+            // Controls
+            this.controls = new THREE.OrbitControls(this.camera, this.renderer.domElement);
+            this.controls.target.set(0, 1.0, 0);
+            this.controls.enableDamping = true;
+            this.controls.dampingFactor = 0.1;
+            this.controls.maxDistance = 8;
+            this.controls.minDistance = 0.8;
+            this.controls.update();
+
+            // WebXR
+            if (navigator.xr) {
+                navigator.xr.isSessionSupported('immersive-vr').then(supported => {
+                    if (supported) document.getElementById('btn-vr').style.display = '';
+                }).catch(() => {});
+            }
+
+            // Mouse look-at tracking
+            this._setupMouseLookAt();
+
+            window.addEventListener('resize', () => this._handleResize());
+            this.renderer.setAnimationLoop(() => this._renderFrame());
+        }
+
+        _renderFrame() {
+            const delta = this.clock.getDelta();
+
+            if (this._vrControls) this._vrControls.update(delta);
+
+            // VR menu interaction + B/Y button toggle
+            if (this.renderer.xr.isPresenting) {
+                this._updateVRMenuInteraction();
+                this._checkVRMenuButton();
+            }
+
+            if (this.currentVRM) {
+                // Mirror mode: VR tracking takes priority over idle animations
+                if (this._mirrorActive && this._mirrorMode !== 'webcam') {
+                    // Auto-switch to VR mode when headset becomes active
+                    if (this.renderer.xr.isPresenting && this._mirrorMode !== 'vr') {
+                        this._mirrorMode = 'vr';
+                        const statusEl = document.getElementById('mirror-status');
+                        statusEl.innerHTML = '<i class="fas fa-vr-cardboard"></i> Mirror Mode — VR Tracking';
+                    }
+                    if (this._mirrorMode === 'vr') {
+                        this._updateVRMirror();
+                    }
+                }
+
+                if (this._mixer && !this._mirrorActive) this._mixer.update(delta);
+                this.currentVRM.update(delta);
+                if (!this._mirrorActive) this._updateIdleEffects(delta);
+
+                // Re-apply active expression (persists across frames)
+                if (this._activeExpression && this.currentVRM.expressionManager) {
+                    this.currentVRM.expressionManager.setValue(this._activeExpression, 1.0);
+                }
+            }
+
+            if (this.controls?.enabled) this.controls.update();
+            this.renderer.render(this.scene, this.camera);
+        }
+
+        _updateIdleEffects(delta) {
+            if (!this.currentVRM) return;
+            this._idleTime += delta;
+            const t = this._idleTime;
+
+            // Periodic blink
+            if (this.currentVRM.expressionManager) {
+                const blinkCycle = t % 4;
+                let blink = 0;
+                if (blinkCycle > 3.7 && blinkCycle < 3.9) {
+                    blink = Math.sin((blinkCycle - 3.7) / 0.2 * Math.PI);
+                }
+                const dbCycle = t % 7;
+                if (dbCycle > 6.5 && dbCycle < 6.7) {
+                    blink = Math.max(blink, Math.sin((dbCycle - 6.5) / 0.2 * Math.PI));
+                }
+                this.currentVRM.expressionManager.setValue('blink', blink);
+            }
+        }
+
+        _setupMouseLookAt() {
+            const container = document.getElementById('viewport-canvas');
+            container.addEventListener('mousemove', (e) => {
+                if (!this.currentVRM?.lookAt || !this.vrmLookAtTarget) return;
+                const rect = container.getBoundingClientRect();
+                const x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+                const y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+                this.vrmLookAtTarget.position.set(x * 2, 1.3 + y * 0.5, 3);
+            });
+        }
+
+        _handleResize() {
+            const container = document.getElementById('viewport-canvas');
+            if (!container || !this.camera) return;
+            const w = container.clientWidth, h = container.clientHeight;
+            this.camera.aspect = w / h;
+            this.camera.updateProjectionMatrix();
+            this.renderer.setSize(w, h);
+        }
+
+        async _loadActiveModel() {
+            // Fetch active VRM from server
+            let activeId = null;
+            try {
+                const vrmResp = await fetch('/api/agent/vrm');
+                const vrmData = await vrmResp.json();
+                if (vrmData.success) activeId = vrmData.activeVRMModel;
+            } catch (e) { /* fallback */ }
+
+            if (!activeId) {
+                document.getElementById('viewport-message-text').textContent =
+                    'No avatar selected. Visit the Avatar Designer to choose one.';
+                return;
+            }
+
+            try {
+                const resp = await fetch('/vrm-models/manifest.json');
+                if (!resp.ok) throw new Error('Manifest not found');
+                this.vrmModels = await resp.json();
+
+                const modelInfo = this.vrmModels.find(m => m.id === activeId);
+                if (!modelInfo) throw new Error('Model not in manifest');
+
+                document.getElementById('viewport-message-text').innerHTML =
+                    '<i class="fas fa-spinner fa-spin" style="font-size:14px;"></i> Loading ' + modelInfo.name + '...';
+
+                const loader = new THREE.GLTFLoader();
+                if (typeof THREE_VRM !== 'undefined' && THREE_VRM.VRMLoaderPlugin) {
+                    loader.register(parser => new THREE_VRM.VRMLoaderPlugin(parser));
+                }
+
+                const url = `/vrm-models/${modelInfo.file}`;
+                const gltf = await new Promise((resolve, reject) => {
+                    loader.load(url, resolve, undefined, reject);
+                });
+
+                const vrm = gltf.userData.vrm;
+                if (!vrm) throw new Error('No VRM data in file');
+
+                this.currentVRM = vrm;
+                if (THREE_VRM.VRMUtils) THREE_VRM.VRMUtils.removeUnnecessaryJoints(vrm.scene);
+
+                vrm.scene.traverse(child => {
+                    if (child.isMesh && child.material) {
+                        child.material.side = THREE.DoubleSide;
+                        child.material.needsUpdate = true;
+                    }
+                });
+
+                // Hide until animation loads
+                vrm.scene.visible = false;
+                this.scene.add(vrm.scene);
+
+                // Camera framing
+                const box = new THREE.Box3().setFromObject(vrm.scene);
+                const center = box.getCenter(new THREE.Vector3());
+                this.camera.position.set(0, center.y, 2.5);
+                this.controls.target.set(0, center.y, 0);
+                this.controls.update();
+
+                // LookAt
+                if (vrm.lookAt) {
+                    this.vrmLookAtTarget = new THREE.Object3D();
+                    this.scene.add(this.vrmLookAtTarget);
+                    vrm.lookAt.target = this.vrmLookAtTarget;
+                    this.vrmLookAtTarget.position.set(0, center.y, 3);
+                }
+
+                // Load animations
+                this._idleTime = 0;
+                this._mixer = null;
+                await this._loadIdleAnimations(vrm).catch(e => {
+                    console.warn('Animation load:', e.message);
+                    vrm.scene.visible = true;
+                });
+
+                // Show UI
+                document.getElementById('viewport-message').style.display = 'none';
+                document.getElementById('viewport-controls').style.display = 'flex';
+
+            } catch (err) {
+                console.error('Failed to load model:', err);
+                document.getElementById('viewport-message-text').textContent =
+                    'Failed to load avatar: ' + err.message;
+            }
+        }
+
+        // --- VRM Animation (shared with avatar designer) ---
+
+        _getBone(vrm, name) {
+            if (!vrm.humanoid) return null;
+            return vrm.humanoid.getNormalizedBoneNode(name)
+                || vrm.humanoid.getRawBoneNode(name)
+                || null;
+        }
+
+        async loadVRMA(url) {
+            if (!this.currentVRM?.humanoid) return null;
+            const vrm = this.currentVRM;
+            // VRMA animation files often reference textures from their source model.
+            // Override texture loading to return a 1x1 placeholder so missing textures
+            // don't crash the GLTFLoader (the "encoding" null error).
+            const manager = new THREE.LoadingManager();
+            manager.onError = () => {};
+            const loader = new THREE.GLTFLoader(manager);
+            const defaultTexLoader = THREE.DefaultLoadingManager.getHandler?.(/\.jpg$/) || null;
+            const placeholderCanvas = document.createElement('canvas');
+            placeholderCanvas.width = placeholderCanvas.height = 1;
+            const placeholderTex = new THREE.CanvasTexture(placeholderCanvas);
+            const origLoad = THREE.TextureLoader.prototype.load;
+            THREE.TextureLoader.prototype.load = function(texUrl, onLoad, onProgress, onError) {
+                // If this is a relative texture from a VRMA, return placeholder
+                if (texUrl.includes('.jpg') || texUrl.includes('.png')) {
+                    try { return origLoad.call(this, texUrl, onLoad, onProgress, (err) => { if (onLoad) onLoad(placeholderTex); }); }
+                    catch { if (onLoad) onLoad(placeholderTex); return placeholderTex; }
+                }
+                return origLoad.call(this, texUrl, onLoad, onProgress, onError);
+            };
+            let gltf;
+            try {
+                gltf = await new Promise((resolve, reject) => {
+                    loader.load(url, resolve, undefined, reject);
+                });
+            } finally {
+                THREE.TextureLoader.prototype.load = origLoad;
+            }
+            if (!gltf.animations?.length) return null;
+
+            const vrmaExt = gltf.parser?.json?.extensions?.VRMC_vrm_animation
+                         || gltf.userData?.gltfExtensions?.VRMC_vrm_animation;
+            const nodeNameToBone = {};
+            if (vrmaExt?.humanoid?.humanBones) {
+                const nodes = gltf.parser?.json?.nodes || [];
+                for (const [boneName, info] of Object.entries(vrmaExt.humanoid.humanBones)) {
+                    if (info.node < nodes.length) nodeNameToBone[nodes[info.node].name] = boneName;
+                }
+            }
+
+            const clip = gltf.animations[0];
+            const retargetedTracks = [];
+            for (const track of clip.tracks) {
+                const dotIdx = track.name.lastIndexOf('.');
+                const nodeName = track.name.substring(0, dotIdx);
+                const property = track.name.substring(dotIdx);
+                const vrmBoneName = nodeNameToBone[nodeName];
+                if (!vrmBoneName) continue;
+                const bone = this._getBone(vrm, vrmBoneName);
+                if (!bone) continue;
+                const newTrack = track.clone();
+                newTrack.name = bone.name + property;
+                retargetedTracks.push(newTrack);
+            }
+            if (!retargetedTracks.length) return null;
+            return new THREE.AnimationClip(clip.name, clip.duration, retargetedTracks);
+        }
+
+        async _loadIdleAnimations(vrm) {
+            if (!this._mixer) this._mixer = new THREE.AnimationMixer(vrm.scene);
+            const animFiles = [
+                // Idle loops
+                { url: '/vrm-models/animations/waiting-3ESXHYFP.vrma', name: 'idle', loop: true },
+                { url: '/vrm-models/animations/liked-I5PMMZDS.vrma', name: 'liked', loop: true },
+                // VRoid Hub official mocap
+                { url: '/vrm-models/animations/vroid_01.vrma', name: 'pose', loop: true },
+                { url: '/vrm-models/animations/vroid_02.vrma', name: 'greeting', loop: false },
+                { url: '/vrm-models/animations/vroid_03.vrma', name: 'peace sign', loop: false },
+                { url: '/vrm-models/animations/vroid_04.vrma', name: 'shoot', loop: false },
+                { url: '/vrm-models/animations/vroid_05.vrma', name: 'spin', loop: false },
+                { url: '/vrm-models/animations/vroid_06.vrma', name: 'model pose', loop: false },
+                { url: '/vrm-models/animations/vroid_07.vrma', name: 'squat', loop: false },
+                // Emotion/gesture set
+                { url: '/vrm-models/animations/appearing-7KKFBBJ2.vrma', name: 'appearing', loop: false },
+                { url: '/vrm-models/animations/Angry.vrma', name: 'angry', loop: false },
+                { url: '/vrm-models/animations/Blush.vrma', name: 'blush', loop: false },
+                { url: '/vrm-models/animations/Clapping.vrma', name: 'clapping', loop: false },
+                { url: '/vrm-models/animations/Goodbye.vrma', name: 'goodbye', loop: false },
+                { url: '/vrm-models/animations/Jump.vrma', name: 'jump', loop: false },
+                { url: '/vrm-models/animations/LookAround.vrma', name: 'look around', loop: false },
+                { url: '/vrm-models/animations/Relax.vrma', name: 'relax', loop: false },
+                { url: '/vrm-models/animations/Sad.vrma', name: 'sad', loop: false },
+                { url: '/vrm-models/animations/Sleepy.vrma', name: 'sleepy', loop: false },
+                { url: '/vrm-models/animations/Surprised.vrma', name: 'surprised', loop: false },
+                { url: '/vrm-models/animations/Thinking.vrma', name: 'thinking', loop: false },
+                // Dance animations
+                { url: '/vrm-models/animations/ballet.vrma', name: 'ballet', loop: true },
+                { url: '/vrm-models/animations/hipHopDance.vrma', name: 'hip hop', loop: true },
+                { url: '/vrm-models/animations/sambaDancing.vrma', name: 'samba', loop: true },
+            ];
+            this._idleActions = [];
+            const loadWithTimeout = (url, ms = 10000) => {
+                return Promise.race([
+                    this.loadVRMA(url),
+                    new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), ms))
+                ]);
+            };
+            for (const anim of animFiles) {
+                try {
+                    const clip = await loadWithTimeout(anim.url);
+                    if (clip) {
+                        clip.name = anim.name;
+                        const action = this._mixer.clipAction(clip);
+                        action.setLoop(anim.loop ? THREE.LoopRepeat : THREE.LoopOnce);
+                        if (!anim.loop) action.clampWhenFinished = true;
+                        this._idleActions.push({ name: anim.name, action });
+                    }
+                } catch (e) {
+                    console.warn(`Failed to load ${anim.name}:`, e.message);
+                }
+            }
+            const idle = this._idleActions.find(a => a.name === 'idle');
+            if (idle) {
+                idle.action.play();
+                this._currentIdleAction = idle;
+                this._mixer.update(0.01);
+                vrm.update(0.01);
+            }
+            vrm.scene.visible = true;
+        }
+
+        playAnimation(name) {
+            if (!this._mixer || !this._idleActions) return;
+            const target = this._idleActions.find(a => a.name === name);
+            if (!target) return;
+            if (this._currentIdleAction && this._currentIdleAction !== target) {
+                this._currentIdleAction.action.crossFadeTo(target.action.reset().play(), 0.5, false);
+            } else {
+                target.action.reset().play();
+            }
+            this._currentIdleAction = target;
+            if (target.action.loop === THREE.LoopOnce) {
+                const idle = this._idleActions.find(a => a.name === 'idle');
+                if (idle) {
+                    if (this._oneShotHandler) this._mixer.removeEventListener('finished', this._oneShotHandler);
+                    this._oneShotHandler = (e) => {
+                        if (e.action === target.action) {
+                            target.action.crossFadeTo(idle.action.reset().play(), 0.5, false);
+                            this._currentIdleAction = idle;
+                            this._mixer.removeEventListener('finished', this._oneShotHandler);
+                        }
+                    };
+                    this._mixer.addEventListener('finished', this._oneShotHandler);
+                }
+            }
+        }
+
+        // --- Activities ---
+
+        startActivity(name) {
+            // Stop mirror if switching away
+            if (this._currentActivity === 'mirror' && name !== 'mirror') {
+                this._stopMirror();
+            }
+            // Stop dance if switching away
+            if (this._currentActivity === 'dance' && name !== 'dance') {
+                this._stopDancing();
+            }
+
+            this._currentActivity = name;
+            document.getElementById('agent-mood').textContent =
+                name === 'freeplay' ? 'Chatting with you' :
+                name === 'emote' ? 'Showing expressions' :
+                name === 'mirror' ? 'Mirroring you' :
+                name === 'dance' ? 'Dancing' : 'Playing';
+
+            if (name === 'emote') {
+                this._showEmotePanel();
+            } else if (name === 'freeplay') {
+                this.switchTab('chat');
+            } else if (name === 'mirror') {
+                this._startMirror();
+            } else if (name === 'dance') {
+                this.switchTab('dance');
+                this._loadMusicConfig();
+                this._browseMusicLibrary();
+            }
+        }
+
+        // --- Dance Mode / Music Player ---
+
+        _danceAnimations = ['ballet', 'hip hop', 'samba'];
+
+        async _loadMusicConfig() {
+            try {
+                const token = localStorage.getItem('lanagent_token');
+                const res = await fetch('/api/music-library/config', { headers: { 'Authorization': `Bearer ${token}` } });
+                const data = await res.json();
+                if (data.sourcePath) {
+                    document.getElementById('music-source-path').value = data.sourcePath;
+                }
+            } catch (e) { console.warn('Failed to load music config:', e); }
+        }
+
+        async saveMusicConfig() {
+            const sourcePath = document.getElementById('music-source-path').value.trim();
+            if (!sourcePath) return;
+            const statusEl = document.getElementById('music-status');
+            statusEl.style.display = 'block';
+            statusEl.textContent = 'Saving...';
+            try {
+                const token = localStorage.getItem('lanagent_token');
+                const res = await fetch('/api/music-library/config', {
+                    method: 'PUT',
+                    headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ sourcePath })
+                });
+                const data = await res.json();
+                if (data.success) {
+                    statusEl.textContent = 'Music source saved!';
+                    statusEl.style.color = 'var(--success)';
+                    this._browseMusicLibrary();
+                } else {
+                    statusEl.textContent = data.error || 'Failed to save';
+                    statusEl.style.color = 'var(--danger)';
+                }
+            } catch (e) {
+                statusEl.textContent = 'Error: ' + e.message;
+                statusEl.style.color = 'var(--danger)';
+            }
+            setTimeout(() => { statusEl.style.display = 'none'; statusEl.style.color = ''; }, 3000);
+        }
+
+        _pgMusicSubdir = '';
+        _pgMusicScrollStack = [];
+
+        async _browseMusicLibrary(subdir = '', append = false) {
+            const listEl = document.getElementById('music-file-list');
+            if (!listEl) return;
+            // Track scroll position for back navigation
+            const isGoingBack = subdir.length < this._pgMusicSubdir.length;
+            const isGoingDeeper = subdir.length > this._pgMusicSubdir.length;
+            if (isGoingDeeper) {
+                this._pgMusicScrollStack.push(listEl.scrollTop);
+            }
+            this._pgMusicSubdir = subdir;
+            if (!append) {
+                this._playlist = [];
+                listEl.innerHTML = '<div style="text-align:center;padding:20px;color:var(--text-secondary);font-size:12px;"><i class="fas fa-spinner fa-spin"></i> Loading...</div>';
+            }
+            const offset = append ? this._playlist.length : 0;
+            try {
+                const token = localStorage.getItem('lanagent_token');
+                const res = await fetch(`/api/music-library/browse?subdir=${encodeURIComponent(subdir)}&limit=100&offset=${offset}`, { headers: { 'Authorization': `Bearer ${token}` } });
+                const data = await res.json();
+                if (!data.success) {
+                    if (!append) listEl.innerHTML = `<div style="text-align:center;padding:20px;color:var(--text-secondary);font-size:12px;">${data.error || 'No music source configured'}</div>`;
+                    return;
+                }
+                const esc = s => s ? s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/"/g,'&quot;') : '';
+                let html = '';
+                if (!append) {
+                    if (subdir) {
+                        const parent = subdir.includes('/') ? subdir.substring(0, subdir.lastIndexOf('/')) : '';
+                        html += `<div class="music-file-item" onclick="playground._browseMusicLibrary('${esc(parent)}')"><i class="fas fa-arrow-left"></i> Back</div>`;
+                    }
+                    if (data.folders?.length) {
+                        data.folders.forEach(f => {
+                            const fp = subdir ? subdir + '/' + f : f;
+                            html += `<div class="music-file-item" onclick="playground._browseMusicLibrary('${esc(fp)}')"><i class="fas fa-folder" style="color:#ffd54f;"></i> ${esc(f)}</div>`;
+                        });
+                    }
+                }
+                const startIdx = this._playlist.length;
+                data.files?.forEach((f, i) => {
+                    const idx = startIdx + i;
+                    this._playlist.push({ name: f.name, path: f.path });
+                    html += `<div class="music-file-item" data-idx="${idx}" onclick="playground.playTrackByIndex(${idx})" title="${esc(f.name)}"><i class="fas fa-music"></i> ${esc(f.name.replace(/\.[^.]+$/, ''))}</div>`;
+                });
+                if (data.hasMore) {
+                    html += `<div class="music-file-item" onclick="playground._browseMusicLibrary('${esc(subdir)}', true)" style="color:var(--accent);"><i class="fas fa-plus-circle"></i> Load more (${data.totalFiles - offset - data.files.length} remaining)</div>`;
+                }
+                if (!html && !append) html = '<div style="text-align:center;padding:20px;color:var(--text-secondary);font-size:12px;">No audio files found</div>';
+                if (append) {
+                    const old = listEl.querySelector('[onclick*="true)"]');
+                    if (old) old.remove();
+                    listEl.insertAdjacentHTML('beforeend', html);
+                } else {
+                    listEl.innerHTML = html;
+                    // Restore scroll position when going back
+                    if (isGoingBack && this._pgMusicScrollStack.length) {
+                        const savedPos = this._pgMusicScrollStack.pop();
+                        setTimeout(() => { listEl.scrollTop = savedPos; }, 50);
+                    }
+                }
+            } catch (e) {
+                if (!append) listEl.innerHTML = `<div style="text-align:center;padding:20px;color:var(--text-secondary);font-size:12px;">Error: ${e.message}</div>`;
+            }
+        }
+
+        playTrackByIndex(idx) {
+            if (!this._playlist?.[idx]) return;
+            const track = this._playlist[idx];
+            this.playTrack(track.path, track.name);
+        }
+
+        playTrack(filePath, trackName) {
+            if (!this._audio) {
+                this._audio = new Audio();
+                this._audio.addEventListener('timeupdate', () => this._updateMusicProgress());
+                this._audio.addEventListener('ended', () => this.nextTrack());
+                this._audio.volume = 0.7;
+            }
+            const token = localStorage.getItem('lanagent_token');
+            this._audio.src = `/api/music-library/stream/${encodeURIComponent(filePath)}?token=${token}`;
+            this._audio.play();
+            this._musicPlaying = true;
+            this._currentTrackIndex = this._playlist?.findIndex(t => t.path === filePath) ?? -1;
+
+            document.getElementById('music-track-name').textContent = trackName || filePath;
+            document.getElementById('music-player').style.display = 'block';
+            document.getElementById('music-play-btn').innerHTML = '<i class="fas fa-pause"></i>';
+
+            // Highlight current track
+            document.querySelectorAll('.music-file-item').forEach(el => {
+                el.classList.toggle('playing', el.dataset.path === filePath);
+            });
+
+            // Start dancing
+            this._startDancing();
+        }
+
+        toggleMusic() {
+            if (!this._audio) return;
+            if (this._audio.paused) {
+                this._audio.play();
+                this._musicPlaying = true;
+                document.getElementById('music-play-btn').innerHTML = '<i class="fas fa-pause"></i>';
+                this._startDancing();
+            } else {
+                this._audio.pause();
+                this._musicPlaying = false;
+                document.getElementById('music-play-btn').innerHTML = '<i class="fas fa-play"></i>';
+                this._stopDancing();
+            }
+        }
+
+        nextTrack() {
+            if (!this._playlist?.length) return;
+            let idx = (this._currentTrackIndex + 1) % this._playlist.length;
+            const track = this._playlist[idx];
+            this.playTrack(track.path, track.name);
+        }
+
+        prevTrack() {
+            if (!this._playlist?.length) return;
+            let idx = this._currentTrackIndex - 1;
+            if (idx < 0) idx = this._playlist.length - 1;
+            const track = this._playlist[idx];
+            this.playTrack(track.path, track.name);
+        }
+
+        setMusicVolume(val) {
+            if (this._audio) this._audio.volume = parseFloat(val);
+        }
+
+        seekMusic(event) {
+            if (!this._audio || !this._audio.duration) return;
+            const bar = event.currentTarget;
+            const fraction = event.offsetX / bar.offsetWidth;
+            this._audio.currentTime = fraction * this._audio.duration;
+        }
+
+        _updateMusicProgress() {
+            if (!this._audio || !this._audio.duration) return;
+            const pct = (this._audio.currentTime / this._audio.duration) * 100;
+            document.getElementById('music-progress').style.width = pct + '%';
+            const m = Math.floor(this._audio.currentTime / 60);
+            const s = Math.floor(this._audio.currentTime % 60).toString().padStart(2, '0');
+            document.getElementById('music-time').textContent = `${m}:${s}`;
+        }
+
+        _startDancing() {
+            if (this._danceActive) return;
+            this._danceActive = true;
+            document.getElementById('music-dance-btn')?.classList.add('active');
+            // Play a random dance animation immediately
+            this._cycleDanceAnimation();
+            // Cycle every 12-18 seconds
+            this._danceCycleTimer = setInterval(() => this._cycleDanceAnimation(), 12000 + Math.random() * 6000);
+        }
+
+        _stopDancing() {
+            if (!this._danceActive) return;
+            this._danceActive = false;
+            document.getElementById('music-dance-btn')?.classList.remove('active');
+            if (this._danceCycleTimer) { clearInterval(this._danceCycleTimer); this._danceCycleTimer = null; }
+            this.playAnimation('idle');
+        }
+
+        shuffleDance() {
+            if (this._danceActive) {
+                this._stopDancing();
+            } else if (this._musicPlaying) {
+                this._startDancing();
+            }
+        }
+
+        _cycleDanceAnimation() {
+            // Check which dance animations actually loaded
+            const loaded = this._danceAnimations.filter(n => this._idleActions?.some(a => a.name === n));
+            // Fallback to any energetic animations if dance ones failed to load
+            const fallbacks = ['clapping', 'jump', 'spin', 'greeting', 'appearing'];
+            const pool = loaded.length ? loaded : fallbacks.filter(n => this._idleActions?.some(a => a.name === n));
+            if (!pool.length) { console.warn('No dance animations available'); return; }
+            const available = pool.filter(n => n !== this._currentDanceAnim);
+            const pick = available[Math.floor(Math.random() * available.length)] || pool[0];
+            this._currentDanceAnim = pick;
+            this.playAnimation(pick);
+        }
+
+        // --- Mirror Mode ---
+        // Priority: VR controllers/headset → webcam fallback → idle waiting
+
+        _cameraFacing = 'user'; // 'user' (front) or 'environment' (rear)
+
+        async _startMirror() {
+            if (this._mirrorActive) return;
+            if (!this.currentVRM) {
+                alert('Load a VRM model first');
+                return;
+            }
+
+            const statusEl = document.getElementById('mirror-status');
+
+            // Stop idle animation — mirror takes over bones
+            if (this._currentIdleAction) {
+                this._currentIdleAction.action.stop();
+            }
+
+            this._mirrorActive = true;
+            this._mirrorMode = 'waiting'; // 'vr', 'webcam', or 'waiting'
+
+            // Check if already in VR
+            if (this.renderer.xr.isPresenting) {
+                this._mirrorMode = 'vr';
+                statusEl.innerHTML = '<i class="fas fa-vr-cardboard"></i> Mirror Mode — VR Tracking';
+                statusEl.style.display = 'block';
+                return;
+            }
+
+            // Try webcam — adaptive for mobile/desktop
+            await this._startWebcamMirror();
+        }
+
+        async _startWebcamMirror() {
+            const statusEl = document.getElementById('mirror-status');
+            const video = document.getElementById('webcam-preview');
+            const flipBtn = document.getElementById('btn-flip-cam');
+            const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+
+            // Adaptive resolution — lower on mobile for performance
+            const camWidth = isMobile ? 480 : 640;
+            const camHeight = isMobile ? 360 : 480;
+
+            try {
+                // Stop existing camera if switching
+                if (this._mirrorCamera) { this._mirrorCamera.stop(); this._mirrorCamera = null; }
+                if (video.srcObject) { video.srcObject.getTracks().forEach(t => t.stop()); video.srcObject = null; }
+
+                const stream = await navigator.mediaDevices.getUserMedia({
+                    video: { width: { ideal: camWidth }, height: { ideal: camHeight }, facingMode: this._cameraFacing }
+                });
+                video.srcObject = stream;
+                video.style.display = 'block';
+                // Mirror flip: front camera is mirrored, rear camera is not
+                video.style.transform = this._cameraFacing === 'user' ? 'scaleX(-1)' : 'scaleX(1)';
+
+                // Show flip button on mobile (phones have front + rear cameras)
+                if (flipBtn) flipBtn.style.display = isMobile ? 'block' : 'none';
+
+                // Initialize pose detection if not already done
+                if (!this._pose) {
+                    this._pose = new Pose({
+                        locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/pose@0.5.1675469404/${file}`
+                    });
+                    this._pose.setOptions({
+                        modelComplexity: isMobile ? 0 : 1, // Lite model on mobile for performance
+                        smoothLandmarks: true,
+                        minDetectionConfidence: 0.5, minTrackingConfidence: 0.5,
+                    });
+                    this._pose.onResults((results) => this._onPoseResults(results));
+                }
+
+                this._mirrorCamera = new Camera(video, {
+                    onFrame: async () => {
+                        if (this._mirrorActive && this._mirrorMode === 'webcam') {
+                            await this._pose.send({ image: video });
+                        }
+                    },
+                    width: camWidth, height: camHeight
+                });
+                await this._mirrorCamera.start();
+                this._mirrorMode = 'webcam';
+
+                const camLabel = this._cameraFacing === 'user' ? 'Front Camera' : 'Rear Camera';
+                const deviceLabel = isMobile ? 'Mobile' : 'Desktop';
+                statusEl.innerHTML = `<i class="fas fa-video"></i> Mirror Mode — ${deviceLabel} ${camLabel}`;
+                statusEl.style.display = 'block';
+            } catch (err) {
+                // No webcam — waiting for VR
+                this._mirrorMode = 'waiting';
+                statusEl.innerHTML = '<i class="fas fa-vr-cardboard"></i> Mirror Mode — Enter VR to start';
+                statusEl.style.display = 'block';
+                if (flipBtn) flipBtn.style.display = 'none';
+                console.log('No webcam, mirror mode waiting for VR:', err.message);
+            }
+        }
+
+        async flipCamera() {
+            this._cameraFacing = this._cameraFacing === 'user' ? 'environment' : 'user';
+            if (this._mirrorActive && this._mirrorMode === 'webcam') {
+                await this._startWebcamMirror();
+            }
+        }
+
+        _stopMirror() {
+            this._mirrorActive = false;
+            this._mirrorMode = null;
+            const video = document.getElementById('webcam-preview');
+            const statusEl = document.getElementById('mirror-status');
+
+            if (this._mirrorCamera) {
+                this._mirrorCamera.stop();
+                this._mirrorCamera = null;
+            }
+            if (video.srcObject) {
+                video.srcObject.getTracks().forEach(t => t.stop());
+                video.srcObject = null;
+            }
+            video.style.display = 'none';
+            statusEl.style.display = 'none';
+            const flipBtn = document.getElementById('btn-flip-cam');
+            if (flipBtn) flipBtn.style.display = 'none';
+            if (this._pose) {
+                this._pose.close();
+                this._pose = null;
+            }
+
+            // Restart idle animation
+            const idle = this._idleActions?.find(a => a.name === 'idle');
+            if (idle) {
+                idle.action.reset().play();
+                this._currentIdleAction = idle;
+            }
+        }
+
+        /**
+         * VR Mirror: called every frame from _renderFrame when in VR mirror mode.
+         * Maps headset + controller positions to VRM bones.
+         */
+        _updateVRMirror() {
+            if (!this._mirrorActive || !this.currentVRM) return;
+            if (!this.renderer.xr.isPresenting) return;
+
+            const vrm = this.currentVRM;
+            const xr = this.renderer.xr;
+
+            // Get headset position and orientation in XR space
+            const cam = xr.getCamera();
+            if (!cam) return;
+            const headsetPos = new THREE.Vector3();
+            const headsetQuat = new THREE.Quaternion();
+            cam.getWorldPosition(headsetPos);
+            cam.getWorldQuaternion(headsetQuat);
+
+            // --- Head rotation ---
+            // Extract headset euler angles, then apply as local bone rotation.
+            // XR camera faces -Z, VRM head faces +Z in rest, so we flip yaw.
+            const head = this._getBone(vrm, 'head');
+            if (head) {
+                const e = new THREE.Euler().setFromQuaternion(headsetQuat, 'YXZ');
+                // Only apply relative rotation (deviation from looking straight)
+                head.rotation.set(
+                    e.x * 0.8,          // nod (damped)
+                    e.y * 0.8,           // turn (no PI flip — model faces +Z, yaw is relative)
+                    -e.z * 0.3,          // tilt (heavily damped)
+                    'YXZ'
+                );
+            }
+
+            // --- Arms: use controller position RELATIVE to headset ---
+            // This gives us body-relative coordinates regardless of worldGroup transform.
+            const session = xr.getSession();
+            if (!session?.inputSources) return;
+
+            for (let i = 0; i < session.inputSources.length; i++) {
+                const source = session.inputSources[i];
+                const hand = source.handedness;
+                if (!hand || hand === 'none') continue;
+
+                const controller = xr.getController(i);
+                const grip = xr.getControllerGrip(i);
+                if (!controller) continue;
+
+                const side = hand;
+                const sign = side === 'left' ? 1 : -1;
+                const upperArm = this._getBone(vrm, `${side}UpperArm`);
+                const lowerArm = this._getBone(vrm, `${side}LowerArm`);
+                if (!upperArm) continue;
+
+                // Controller position relative to headset
+                const ctrlWorld = new THREE.Vector3();
+                controller.getWorldPosition(ctrlWorld);
+                const relPos = new THREE.Vector3().subVectors(ctrlWorld, headsetPos);
+
+                // In XR space: X = right, Y = up, Z = backward (camera faces -Z)
+                // Shoulder offset from head: ~0.2m to each side, ~0.3m down
+                const shoulderOffset = new THREE.Vector3(sign * 0.2, -0.3, 0);
+                // Direction from estimated shoulder to controller
+                const armDir = new THREE.Vector3().subVectors(relPos, shoulderOffset);
+                const armDist = armDir.length();
+                armDir.normalize();
+
+                // Map XR direction to VRM bone rotations.
+                // VRM T-pose: left arm points +X, right arm points -X.
+                // We need to rotate the arm from T-pose direction to match armDir.
+                //
+                // armDir in body-relative XR space:
+                //   x: positive = right, negative = left
+                //   y: positive = up, negative = down
+                //   z: positive = backward, negative = forward
+                //
+                // VRM bone local rotations from T-pose:
+                //   Z rotation: positive = arm moves toward body / down (for left arm)
+                //   X rotation: positive = arm moves forward
+                //   Y rotation: twist
+
+                // Z rotation: angle between arm direction and horizontal plane,
+                // measured from the T-pose outward direction
+                // Arms by side = -PI/2 from T-pose for left, +PI/2 for right
+                const outward = sign; // +1 for left (points +X), -1 for right (points -X)
+                upperArm.rotation.z = Math.atan2(-armDir.y, armDir.x * outward);
+
+                // X rotation: forward/backward swing
+                upperArm.rotation.x = Math.atan2(-armDir.z, Math.sqrt(armDir.x * armDir.x + armDir.y * armDir.y)) * 0.8;
+
+                // Elbow bend from distance
+                if (lowerArm) {
+                    const maxReach = 0.6; // meters
+                    const bendRatio = 1 - Math.min(armDist / maxReach, 1);
+                    lowerArm.rotation.set(0, sign * -bendRatio * 2.0, 0);
+                }
+
+                // Finger tracking from gamepad
+                const gamepad = source.gamepad;
+                if (gamepad) {
+                    this._applyFingerPose(vrm, side, gamepad);
+                }
+            }
+        }
+
+        /**
+         * Map gamepad grip/trigger values to finger curl.
+         * Trigger (index 1) → index finger curl
+         * Grip (index 2) → middle/ring/pinky curl
+         * Thumbstick press or touch → thumb curl
+         */
+        _applyFingerPose(vrm, side, gamepad) {
+            const trigger = gamepad.buttons[0]?.value || 0;  // trigger = index finger
+            const grip = gamepad.buttons[1]?.value || 0;     // grip = other fingers
+            const thumbTouch = gamepad.buttons[3]?.touched ? 0.6 : 0; // thumbstick touch
+
+            const curlAngle = 1.2; // max curl in radians (~70°)
+
+            // Index finger: controlled by trigger
+            const indexBones = ['IndexProximal', 'IndexIntermediate', 'IndexDistal'];
+            for (const b of indexBones) {
+                const bone = this._getBone(vrm, `${side}${b}`);
+                if (bone) bone.rotation.z = trigger * curlAngle * (b === 'Distal' ? 0.7 : 1);
+            }
+
+            // Middle, Ring, Little: controlled by grip
+            for (const finger of ['Middle', 'Ring', 'Little']) {
+                for (const seg of ['Proximal', 'Intermediate', 'Distal']) {
+                    const bone = this._getBone(vrm, `${side}${finger}${seg}`);
+                    if (bone) bone.rotation.z = grip * curlAngle * (seg === 'Distal' ? 0.7 : 1);
+                }
+            }
+
+            // Thumb: curl when touching thumbstick/buttons
+            for (const seg of ['Metacarpal', 'Proximal', 'Distal']) {
+                const bone = this._getBone(vrm, `${side}Thumb${seg}`);
+                if (bone) bone.rotation.z = thumbTouch * curlAngle * 0.6;
+            }
+        }
+
+        // --- Webcam Pose Mapping (fallback) ---
+
+        _onPoseResults(results) {
+            if (!results.poseLandmarks || !this.currentVRM) return;
+            const lm = results.poseLandmarks;
+            const vrm = this.currentVRM;
+
+            const clamp = (v, min, max) => Math.max(min, Math.min(max, v));
+
+            // --- Head ---
+            const head = this._getBone(vrm, 'head');
+            if (head) {
+                const nose = lm[0];
+                const midShoulder = {
+                    x: (lm[11].x + lm[12].x) / 2,
+                    y: (lm[11].y + lm[12].y) / 2,
+                    z: (lm[11].z + lm[12].z) / 2
+                };
+                const hx = -(nose.x - midShoulder.x);
+                const hy = -(nose.y - midShoulder.y);
+                head.rotation.z = clamp(-hx * 2, -0.5, 0.5);
+                head.rotation.x = clamp(hy * 1.5 - 0.2, -0.4, 0.4);
+            }
+
+            // --- Spine ---
+            const spine = this._getBone(vrm, 'spine');
+            if (spine) {
+                spine.rotation.z = clamp((lm[11].y - lm[12].y) * 1.5, -0.3, 0.3);
+            }
+
+            // --- Arms (mirrored: webcam left → model right) ---
+            this._applyWebcamArm(vrm, 'right', lm[11], lm[13], lm[15]);
+            this._applyWebcamArm(vrm, 'left', lm[12], lm[14], lm[16]);
+
+            // --- Legs ---
+            this._applyWebcamLeg(vrm, 'right', lm[23], lm[25], lm[27]);
+            this._applyWebcamLeg(vrm, 'left', lm[24], lm[26], lm[28]);
+        }
+
+        _applyWebcamArm(vrm, side, shoulder, elbow, wrist) {
+            const upperArm = this._getBone(vrm, `${side}UpperArm`);
+            const lowerArm = this._getBone(vrm, `${side}LowerArm`);
+            if (!upperArm || !lowerArm) return;
+
+            const sign = side === 'left' ? 1 : -1;
+            const dx = -(elbow.x - shoulder.x);
+            const dy = -(elbow.y - shoulder.y);
+            const dz = (elbow.z - shoulder.z);
+
+            upperArm.rotation.z = sign * (Math.atan2(dy, Math.abs(dx)) - Math.PI / 2);
+            upperArm.rotation.x = Math.atan2(dz, Math.sqrt(dx * dx + dy * dy));
+
+            const edx = -(wrist.x - elbow.x), edy = -(wrist.y - elbow.y);
+            const udx = -(elbow.x - shoulder.x), udy = -(elbow.y - shoulder.y);
+            const dot = edx * udx + edy * udy;
+            const magU = Math.sqrt(udx * udx + udy * udy) || 0.001;
+            const magE = Math.sqrt(edx * edx + edy * edy) || 0.001;
+            const bend = Math.acos(Math.max(-1, Math.min(1, dot / (magU * magE))));
+            lowerArm.rotation.y = sign * -bend * 0.8;
+        }
+
+        _applyWebcamLeg(vrm, side, hip, knee, ankle) {
+            const upperLeg = this._getBone(vrm, `${side}UpperLeg`);
+            const lowerLeg = this._getBone(vrm, `${side}LowerLeg`);
+            if (!upperLeg || !lowerLeg) return;
+
+            const dy = -(knee.y - hip.y);
+            upperLeg.rotation.x = -(Math.atan2(dy, 0.3) - Math.PI / 2) * 0.5;
+
+            const edx = -(ankle.x - knee.x), edy = -(ankle.y - knee.y);
+            const udx = -(knee.x - hip.x), udy = -(knee.y - hip.y);
+            const dot = edx * udx + edy * udy;
+            const magU = Math.sqrt(udx * udx + udy * udy) || 0.001;
+            const magE = Math.sqrt(edx * edx + edy * edy) || 0.001;
+            const bend = Math.acos(Math.max(-1, Math.min(1, dot / (magU * magE))));
+            lowerLeg.rotation.x = bend * 0.6;
+        }
+
+        _showEmotePanel() {
+            this.switchTab('emote');
+            const panel = document.getElementById('emote-panel');
+            if (!this.currentVRM?.expressionManager) {
+                panel.innerHTML = '<div style="padding:20px;color:var(--text-secondary);text-align:center;">No expressions available on this model</div>';
+                return;
+            }
+
+            let exprNames = [];
+            if (this.currentVRM.expressionManager.expressions) {
+                exprNames = this.currentVRM.expressionManager.expressions
+                    .map(e => e.expressionName || e.name).filter(Boolean);
+            }
+
+            const animations = this._idleActions.map(a => a.name);
+
+            panel.innerHTML = `
+                <div style="padding:12px;">
+                    <div style="font-size:13px;font-weight:600;margin-bottom:8px;"><i class="fas fa-theater-masks"></i> Expressions</div>
+                    <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:16px;">
+                        ${exprNames.map(name => `
+                            <button onclick="playground.triggerExpression('${name}')"
+                                style="padding:6px 12px;border-radius:6px;border:1px solid var(--border);
+                                background:var(--bg-tertiary);color:var(--text-primary);cursor:pointer;
+                                font-size:12px;transition:all 0.2s;"
+                                onmouseover="this.style.borderColor='var(--accent)'"
+                                onmouseout="this.style.borderColor='var(--border)'">${name}</button>
+                        `).join('')}
+                    </div>
+                    <div style="font-size:13px;font-weight:600;margin-bottom:8px;"><i class="fas fa-running"></i> Animations</div>
+                    <div style="display:flex;flex-wrap:wrap;gap:6px;">
+                        ${animations.map(name => `
+                            <button onclick="playground.playAnimation('${name}')"
+                                style="padding:6px 12px;border-radius:6px;border:1px solid var(--border);
+                                background:var(--bg-tertiary);color:var(--text-primary);cursor:pointer;
+                                font-size:12px;transition:all 0.2s;"
+                                onmouseover="this.style.borderColor='var(--accent)'"
+                                onmouseout="this.style.borderColor='var(--border)'">${name}</button>
+                        `).join('')}
+                    </div>
+                </div>
+            `;
+        }
+
+        triggerExpression(name) {
+            if (!this.currentVRM?.expressionManager) return;
+            // Reset all expressions first
+            const mgr = this.currentVRM.expressionManager;
+            if (mgr.expressions) {
+                mgr.expressions.forEach(e => {
+                    const n = e.expressionName || e.name;
+                    if (n && n !== 'blink') mgr.setValue(n, 0);
+                });
+            }
+            // Store so it persists across frames
+            this._activeExpression = (name !== 'neutral') ? name : null;
+            if (this._activeExpression) {
+                mgr.setValue(name, 1.0);
+            }
+        }
+
+        // --- Chat ---
+
+        // Analyze text and trigger appropriate animation + expression
+        _reactToMessage(text) {
+            if (!this.currentVRM) return;
+            const lower = text.toLowerCase();
+
+            // Sentiment rules — first match wins
+            const reactions = [
+                // Greetings
+                { test: /\b(hello|hi|hey|greetings|welcome|good morning|good afternoon|good evening)\b/,
+                  anim: 'greeting', expr: 'happy' },
+                // Farewell
+                { test: /\b(goodbye|bye|see you|farewell|take care|good night)\b/,
+                  anim: 'goodbye', expr: 'relaxed' },
+                // Excitement / agreement
+                { test: /\b(great|awesome|excellent|perfect|amazing|wonderful|fantastic|brilliant|nice|love it|well done)\b/,
+                  anim: 'clapping', expr: 'happy' },
+                // Apology / sadness
+                { test: /\b(sorry|apologize|unfortunately|sadly|regret|can't|cannot|unable|fail|error|wrong)\b/,
+                  anim: 'sad', expr: 'sad' },
+                // Surprise / wow
+                { test: /\b(wow|whoa|incredible|unbelievable|no way|really\?|seriously|oh my)\b|!{2,}/,
+                  anim: 'surprised', expr: 'surprised' },
+                // Anger / frustration
+                { test: /\b(angry|furious|annoyed|frustrated|damn|ugh|terrible|horrible|worst)\b/,
+                  anim: 'angry', expr: 'angry' },
+                // Thinking / uncertainty
+                { test: /\b(hmm|let me think|not sure|maybe|perhaps|consider|wondering|depends|tricky|complex)\b/,
+                  anim: 'thinking', expr: 'neutral' },
+                // Humor / playful
+                { test: /\b(haha|lol|funny|joke|laugh|hilarious|😂|😄)\b/,
+                  anim: 'jump', expr: 'happy' },
+                // Sleepy / bored
+                { test: /\b(tired|sleepy|bored|boring|yawn|exhausted|meh)\b/,
+                  anim: 'sleepy', expr: 'relaxed' },
+                // Shy / embarrassed
+                { test: /\b(blush|embarrass|shy|flatter|thank you|thanks|appreciate)\b/,
+                  anim: 'blush', expr: 'relaxed' },
+                // Curious / looking
+                { test: /\b(look|check|search|find|where|show me|scan|detect)\b/,
+                  anim: 'look around', expr: 'neutral' },
+                // Calm / relax
+                { test: /\b(relax|calm|easy|simple|no worries|no problem|all good|done|complete|finished|success)\b/,
+                  anim: 'relax', expr: 'relaxed' },
+                // Questions (agent asking something)
+                { test: /\?$/,
+                  anim: 'thinking', expr: 'neutral' },
+            ];
+
+            let matched = false;
+            for (const r of reactions) {
+                if (r.test.test(lower)) {
+                    this.playAnimation(r.anim);
+                    this.triggerExpression(r.expr);
+                    // Reset expression after animation ends (approx duration)
+                    setTimeout(() => this.triggerExpression('neutral'), 4000);
+                    matched = true;
+                    break;
+                }
+            }
+
+            // Default: slight smile + liked animation for positive-neutral responses
+            if (!matched) {
+                if (lower.length > 100) {
+                    // Long detailed response — just a gentle liked pose
+                    this.playAnimation('liked');
+                    this.triggerExpression('happy');
+                    setTimeout(() => this.triggerExpression('neutral'), 3000);
+                } else {
+                    // Short response — subtle nod/pose
+                    this.playAnimation('pose');
+                    this.triggerExpression('neutral');
+                }
+            }
+        }
+
+        async sendMessage() {
+            const input = document.getElementById('chat-input');
+            const text = input.value.trim();
+            if (!text) return;
+            input.value = '';
+
+            this._appendChatMessage('You', text, false);
+
+            // Show thinking animation while waiting for response
+            this.playAnimation('thinking');
+            this.triggerExpression('neutral');
+
+            try {
+                const resp = await fetch('/api/command/execute', {
+                    method: 'POST',
+                    headers: { 'Authorization': `Bearer ${this.token}`, 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ command: text })
+                });
+                const data = await resp.json();
+                const reply = data.data?.content || data.result || data.response || data.error || 'No response';
+                this._appendChatMessage('Agent', reply, true);
+
+                // React to response with contextual animation + expression
+                this._reactToMessage(reply);
+
+            } catch (err) {
+                this._appendChatMessage('System', 'Error: ' + err.message, true);
+            }
+        }
+
+        _appendChatMessage(sender, text, isAgent) {
+            const msgs = document.getElementById('chat-messages');
+            // Clear placeholder
+            if (msgs.querySelector('.fa-comments')) msgs.innerHTML = '';
+
+            const div = document.createElement('div');
+            div.style.cssText = `padding:8px 12px;margin-bottom:8px;border-radius:8px;font-size:13px;line-height:1.5;
+                ${isAgent ? 'background:var(--bg-tertiary);border-left:3px solid var(--accent);' : 'background:rgba(0,168,255,0.1);border-left:3px solid rgba(0,168,255,0.4);'}`;
+            div.innerHTML = `<div style="font-size:11px;font-weight:600;color:${isAgent ? 'var(--accent)' : 'var(--text-secondary)'};margin-bottom:2px;">${sender}</div>${text}`;
+            msgs.appendChild(div);
+            msgs.scrollTop = msgs.scrollHeight;
+        }
+
+        // --- UI ---
+
+        switchTab(tab) {
+            document.querySelectorAll('.panel-tab').forEach(t => t.classList.toggle('active', t.dataset.tab === tab));
+            document.querySelectorAll('.panel-section').forEach(s => s.classList.toggle('active', s.id === `tab-${tab}`));
+            if (tab === 'dance' && !this._musicTabLoaded) {
+                this._musicTabLoaded = true;
+                this._loadMusicConfig();
+                this._browseMusicLibrary();
+            }
+        }
+
+        resetCamera() {
+            if (!this.currentVRM) return;
+            const box = new THREE.Box3().setFromObject(this.currentVRM.scene);
+            const center = box.getCenter(new THREE.Vector3());
+            this.camera.position.set(0, center.y, 2.5);
+            this.controls.target.set(0, center.y, 0);
+            this.controls.update();
+        }
+
+        setAgentDistance(val) {
+            this.camera.position.z = parseFloat(val);
+        }
+
+        scaleAgent(factor) {
+            if (!this.currentVRM?.scene) return;
+            const s = this.currentVRM.scene.scale;
+            s.multiplyScalar(factor);
+            const clamped = Math.max(0.3, Math.min(5, s.x));
+            s.set(clamped, clamped, clamped);
+            document.getElementById('setting-scale').value = clamped;
+        }
+
+        setAgentScale(val) {
+            if (!this.currentVRM?.scene) return;
+            const v = parseFloat(val);
+            this.currentVRM.scene.scale.set(v, v, v);
+        }
+
+        moveAgent(dx, dy, dz) {
+            if (!this.currentVRM?.scene) return;
+            this.currentVRM.scene.position.x += dx;
+            this.currentVRM.scene.position.y += dy;
+            this.currentVRM.scene.position.z += dz;
+        }
+
+        togglePanel() {
+            document.getElementById('side-panel').classList.toggle('open');
+            document.getElementById('panel-backdrop').classList.toggle('open');
+        }
+
+        toggleMic() {
+            // Stub for voice input
+            const btn = document.getElementById('btn-mic');
+            btn.classList.toggle('active');
+        }
+
+        _setupVRControllers() {
+            // Controller ray lines
+            const lineGeo = new THREE.BufferGeometry().setFromPoints([
+                new THREE.Vector3(0, 0, 0), new THREE.Vector3(0, 0, -3)
+            ]);
+            const lineMat = new THREE.LineBasicMaterial({ color: 0x00a8ff, transparent: true, opacity: 0.6 });
+
+            for (let i = 0; i < 2; i++) {
+                const controller = this.renderer.xr.getController(i);
+                controller.add(new THREE.Line(lineGeo.clone(), lineMat.clone()));
+                this.scene.add(controller);
+
+                const grip = this.renderer.xr.getControllerGrip(i);
+                this.scene.add(grip);
+            }
+
+            // Menu toggle: listen for B/Y button (button index 5) or squeeze on both controllers
+            for (let i = 0; i < 2; i++) {
+                const controller = this.renderer.xr.getController(i);
+                controller.addEventListener('selectstart', () => {
+                    // Double-click trigger within 500ms toggles menu
+                    const now = Date.now();
+                    if (this._lastTriggerTime && now - this._lastTriggerTime < 500) {
+                        this._toggleVRMenu();
+                        this._lastTriggerTime = 0;
+                    } else {
+                        this._lastTriggerTime = now;
+                    }
+                });
+            }
+
+            // VRControls: grab, scale, locomotion, snap-turn
+            if (typeof VRControls !== 'undefined') {
+                this._vrControls = new VRControls({
+                    renderer: this.renderer,
+                    scene: this.scene,
+                    camera: this.camera,
+                    controls: this.controls,
+                    getSelectables: () => this.currentVRM?.scene ? [this.currentVRM.scene] : [],
+                    onSelect: () => {}
+                });
+                this._vrControls.attach();
+
+                // Place agent in worldGroup so grab/scale works
+                if (this._vrControls.worldGroup && this.currentVRM?.scene) {
+                    const parent = this.currentVRM.scene.parent;
+                    if (parent) parent.remove(this.currentVRM.scene);
+                    this._vrControls.worldGroup.add(this.currentVRM.scene);
+                }
+            }
+        }
+
+        // --- VR Floating Menu ---
+
+        _createVRMenu() {
+            if (this._vrMenu) return;
+
+            this._vrMenu = new THREE.Group();
+            this._vrMenuButtons = [];
+            this._vrMenuVisible = false;
+
+            // Build button list from loaded animations + expressions
+            const items = [];
+
+            // Animations
+            if (this._idleActions) {
+                this._idleActions.forEach(a => {
+                    items.push({ label: a.name, type: 'anim', action: a.name });
+                });
+            }
+
+            // Expressions
+            if (this.currentVRM?.expressionManager?.expressions) {
+                const exprs = this.currentVRM.expressionManager.expressions
+                    .map(e => e.expressionName || e.name).filter(Boolean)
+                    .filter(n => !['blink', 'blinkLeft', 'blinkRight', 'lookUp', 'lookDown', 'lookLeft', 'lookRight'].includes(n));
+                exprs.forEach(name => {
+                    items.push({ label: name, type: 'expr', action: name });
+                });
+            }
+
+            // Add neutral reset
+            items.unshift({ label: '[ Reset ]', type: 'reset', action: 'reset' });
+
+            // Music controls for VR
+            items.push({ label: '\u25B6 Play/Pause', type: 'music', action: 'togglePlayPause' });
+            items.push({ label: '\u23ED Next Track', type: 'music', action: 'nextTrack' });
+            items.push({ label: '\uD83D\uDC83 Dance Mode', type: 'music', action: 'toggleDance' });
+
+            // Layout: vertical grid, 2 columns
+            const cols = 2;
+            const btnW = 0.18, btnH = 0.06, gap = 0.01;
+            const rows = Math.ceil(items.length / cols);
+            const panelW = cols * (btnW + gap) + gap;
+            const panelH = rows * (btnH + gap) + gap + 0.06; // extra for header
+
+            // Background panel
+            const panelGeo = new THREE.PlaneGeometry(panelW, panelH);
+            const panelMat = new THREE.MeshBasicMaterial({ color: 0x0a0a1a, transparent: true, opacity: 0.85, side: THREE.DoubleSide });
+            const panel = new THREE.Mesh(panelGeo, panelMat);
+            this._vrMenu.add(panel);
+
+            // Header
+            const headerCanvas = document.createElement('canvas');
+            headerCanvas.width = 256; headerCanvas.height = 32;
+            const hCtx = headerCanvas.getContext('2d');
+            hCtx.fillStyle = '#00a8ff'; hCtx.font = 'bold 18px sans-serif';
+            hCtx.fillText('Agent Controls', 10, 22);
+            const headerTex = new THREE.CanvasTexture(headerCanvas);
+            const headerGeo = new THREE.PlaneGeometry(panelW - 0.02, 0.04);
+            const headerMat = new THREE.MeshBasicMaterial({ map: headerTex, transparent: true, side: THREE.DoubleSide });
+            const header = new THREE.Mesh(headerGeo, headerMat);
+            header.position.set(0, panelH / 2 - 0.035, 0.001);
+            this._vrMenu.add(header);
+
+            // Create buttons
+            items.forEach((item, i) => {
+                const col = i % cols;
+                const row = Math.floor(i / cols);
+                const x = -panelW / 2 + gap + col * (btnW + gap) + btnW / 2;
+                const y = panelH / 2 - 0.06 - gap - row * (btnH + gap) - btnH / 2;
+
+                // Button background
+                const btnGeo = new THREE.PlaneGeometry(btnW, btnH);
+                const isAnim = item.type === 'anim';
+                const isReset = item.type === 'reset';
+                const isMusic = item.type === 'music';
+                const btnColor = isReset ? 0x333355 : isMusic ? 0x3a2a1a : isAnim ? 0x1a2a4a : 0x2a1a3a;
+                const btnMat = new THREE.MeshBasicMaterial({ color: btnColor, side: THREE.DoubleSide });
+                const btn = new THREE.Mesh(btnGeo, btnMat);
+                btn.position.set(x, y, 0.002);
+
+                // Text label
+                const canvas = document.createElement('canvas');
+                canvas.width = 256; canvas.height = 48;
+                const ctx = canvas.getContext('2d');
+                ctx.fillStyle = isReset ? '#ff9800' : isAnim ? '#69f0ae' : '#ce93d8';
+                ctx.font = '16px sans-serif';
+                const label = item.label.length > 14 ? item.label.substring(0, 13) + '…' : item.label;
+                ctx.fillText(label, 8, 30);
+                const tex = new THREE.CanvasTexture(canvas);
+                const labelGeo = new THREE.PlaneGeometry(btnW - 0.01, btnH - 0.01);
+                const labelMat = new THREE.MeshBasicMaterial({ map: tex, transparent: true, side: THREE.DoubleSide });
+                const labelMesh = new THREE.Mesh(labelGeo, labelMat);
+                labelMesh.position.set(x, y, 0.003);
+
+                this._vrMenu.add(btn);
+                this._vrMenu.add(labelMesh);
+
+                // Store for raycasting
+                btn.userData = { vrMenuItem: true, ...item };
+                this._vrMenuButtons.push(btn);
+            });
+
+            this._vrMenu.visible = false;
+            this.scene.add(this._vrMenu);
+        }
+
+        _toggleVRMenu() {
+            if (!this._vrMenu) this._createVRMenu();
+            this._vrMenuVisible = !this._vrMenuVisible;
+            this._vrMenu.visible = this._vrMenuVisible;
+
+            if (this._vrMenuVisible) {
+                // Position in front of user, slightly to the left
+                const cam = this.renderer.xr.getCamera();
+                if (cam) {
+                    const dir = new THREE.Vector3(0, 0, -1).applyQuaternion(cam.quaternion);
+                    const left = new THREE.Vector3(-1, 0, 0).applyQuaternion(cam.quaternion);
+                    const pos = cam.position.clone()
+                        .add(dir.multiplyScalar(0.8))
+                        .add(left.multiplyScalar(0.3));
+                    pos.y -= 0.1;
+                    this._vrMenu.position.copy(pos);
+                    this._vrMenu.lookAt(cam.position);
+                }
+            }
+        }
+
+        _updateVRMenuInteraction() {
+            if (!this._vrMenu?.visible || !this._vrMenuButtons?.length) return;
+
+            const xr = this.renderer.xr;
+            const session = xr.getSession();
+            if (!session?.inputSources) return;
+
+            const raycaster = new THREE.Raycaster();
+
+            for (let i = 0; i < session.inputSources.length; i++) {
+                const source = session.inputSources[i];
+                const controller = xr.getController(i);
+                if (!controller) continue;
+
+                // Ray from controller
+                const tempMatrix = new THREE.Matrix4();
+                tempMatrix.identity().extractRotation(controller.matrixWorld);
+                raycaster.ray.origin.setFromMatrixPosition(controller.matrixWorld);
+                raycaster.ray.direction.set(0, 0, -1).applyMatrix4(tempMatrix);
+
+                const hits = raycaster.intersectObjects(this._vrMenuButtons);
+                // Highlight hovered button
+                this._vrMenuButtons.forEach(b => b.material.emissive?.set(0, 0, 0));
+                if (hits.length > 0) {
+                    const btn = hits[0].object;
+                    if (btn.material.emissive) btn.material.emissive.set(0.1, 0.2, 0.4);
+
+                    // Check trigger press
+                    const gamepad = source.gamepad;
+                    if (gamepad?.buttons[0]?.pressed && !this._vrMenuTriggerHeld) {
+                        this._vrMenuTriggerHeld = true;
+                        const data = btn.userData;
+                        if (data.type === 'anim') {
+                            this.playAnimation(data.action);
+                        } else if (data.type === 'expr') {
+                            this.triggerExpression(data.action);
+                        } else if (data.type === 'reset') {
+                            this.triggerExpression('neutral');
+                            this.playAnimation('idle');
+                        } else if (data.type === 'music') {
+                            if (data.action === 'togglePlayPause') this.toggleMusic();
+                            else if (data.action === 'nextTrack') this.nextTrack();
+                            else if (data.action === 'toggleDance') this.shuffleDance();
+                        }
+                    }
+                }
+
+                if (!source.gamepad?.buttons[0]?.pressed) {
+                    this._vrMenuTriggerHeld = false;
+                }
+            }
+        }
+
+        _checkVRMenuButton() {
+            // Toggle menu with B or Y button (index 5) on either controller
+            const session = this.renderer.xr.getSession();
+            if (!session?.inputSources) return;
+            for (const source of session.inputSources) {
+                const btn = source.gamepad?.buttons[5];
+                if (btn?.pressed && !this._vrMenuBtnHeld) {
+                    this._vrMenuBtnHeld = true;
+                    this._toggleVRMenu();
+                }
+                if (btn && !btn.pressed) this._vrMenuBtnHeld = false;
+            }
+        }
+
+        async enterVR() {
+            if (this.renderer.xr.isPresenting) return;
+
+            // Set up VR controllers on first entry
+            if (!this._vrControls) {
+                this._setupVRControllers();
+            }
+
+            this.renderer.xr.enabled = true;
+            try {
+                const session = await navigator.xr.requestSession('immersive-vr', {
+                    optionalFeatures: ['local-floor', 'bounded-floor']
+                });
+                this.renderer.xr.setSession(session);
+            } catch (err) {
+                console.error('VR session failed:', err);
+            }
+        }
+    }
+
+    const playground = new Playground();
+    document.addEventListener('DOMContentLoaded', () => playground.init());
+    </script>
+</body>
+</html>

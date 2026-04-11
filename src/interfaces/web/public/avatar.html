@@ -1,0 +1,3771 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LAN Agent — Avatar Designer</title>
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        :root {
+            --bg-primary: #0a0a1a;
+            --bg-secondary: #12122a;
+            --bg-tertiary: #1a1a3a;
+            --text-primary: #ffffff;
+            --text-secondary: #8888aa;
+            --accent: #00a8ff;
+            --accent-hover: #0090e0;
+            --border: #2a2a4a;
+            --success: #4caf50;
+            --warning: #ff9800;
+            --danger: #f44336;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+        .top-bar {
+            display: flex; align-items: center; justify-content: space-between;
+            padding: 10px 20px; background: var(--bg-secondary);
+            border-bottom: 1px solid var(--border); flex-shrink: 0;
+        }
+        .top-bar-left { display: flex; align-items: center; gap: 16px; }
+        .top-bar h1 { font-size: 18px; font-weight: 600; color: var(--accent); }
+        .top-bar h1 i { margin-right: 8px; }
+        .back-link {
+            color: var(--text-secondary); text-decoration: none; font-size: 14px;
+            display: flex; align-items: center; gap: 6px; padding: 6px 12px;
+            border-radius: 6px; border: 1px solid var(--border); transition: all 0.2s;
+        }
+        .back-link:hover { color: var(--text-primary); border-color: var(--accent); background: rgba(0,168,255,0.1); }
+
+        .main-layout {
+            flex: 1; display: flex; overflow: hidden;
+        }
+
+        /* 3D Viewer */
+        .viewer-panel {
+            flex: 1; position: relative; background: var(--bg-primary);
+            border-right: 1px solid var(--border);
+        }
+        #viewer-canvas { width: 100%; height: 100%; }
+        .viewer-overlay {
+            position: absolute; bottom: 16px; left: 16px; right: 16px;
+            display: flex; gap: 8px; justify-content: center; flex-wrap: wrap;
+        }
+        .viewer-btn {
+            background: rgba(0,0,0,0.7); border: 1px solid var(--border); color: var(--text-primary);
+            padding: 8px 14px; border-radius: 8px; cursor: pointer; font-size: 13px;
+            display: flex; align-items: center; gap: 6px; transition: all 0.2s;
+        }
+        .viewer-btn:hover { border-color: var(--accent); background: rgba(0,168,255,0.15); }
+        .viewer-btn.active { border-color: var(--accent); color: var(--accent); }
+        .viewer-message {
+            position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+            text-align: center; color: var(--text-secondary); font-size: 15px;
+        }
+        .viewer-message i { font-size: 48px; display: block; margin-bottom: 16px; color: var(--accent); opacity: 0.5; }
+
+        /* Side Panel */
+        .side-panel {
+            width: 340px; flex-shrink: 0; display: flex; flex-direction: column;
+            background: var(--bg-secondary); overflow: hidden;
+        }
+        .panel-tabs {
+            display: flex; border-bottom: 1px solid var(--border); flex-shrink: 0;
+        }
+        .panel-tab {
+            flex: 1; padding: 10px; text-align: center; cursor: pointer;
+            color: var(--text-secondary); font-size: 13px; border: none; background: none;
+            border-bottom: 2px solid transparent; transition: all 0.2s;
+        }
+        .panel-tab:hover { color: var(--text-primary); }
+        .panel-tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+        .panel-tab i { display: block; font-size: 16px; margin-bottom: 4px; }
+
+        .panel-content {
+            flex: 1; overflow-y: auto; padding: 16px;
+        }
+        .panel-section { display: none; }
+        .panel-section.active { display: block; }
+
+        /* Create Form */
+        .form-group { margin-bottom: 16px; }
+        .form-group label { display: block; font-size: 13px; color: var(--text-secondary); margin-bottom: 6px; font-weight: 500; }
+        .form-input {
+            width: 100%; padding: 10px 12px; background: var(--bg-tertiary); border: 1px solid var(--border);
+            border-radius: 8px; color: var(--text-primary); font-size: 14px; outline: none;
+        }
+        .form-input:focus { border-color: var(--accent); }
+        .form-input::placeholder { color: var(--text-secondary); }
+        textarea.form-input { resize: vertical; min-height: 80px; font-family: inherit; }
+
+        .btn {
+            padding: 10px 16px; border-radius: 8px; border: none; cursor: pointer;
+            font-size: 14px; font-weight: 500; display: inline-flex; align-items: center; gap: 8px;
+            transition: all 0.2s; width: 100%; justify-content: center;
+        }
+        .btn-primary { background: var(--accent); color: white; }
+        .btn-primary:hover { background: var(--accent-hover); }
+        .btn-secondary { background: var(--bg-tertiary); color: var(--text-primary); border: 1px solid var(--border); }
+        .btn-secondary:hover { border-color: var(--accent); }
+        .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+        .btn-sm { padding: 6px 12px; font-size: 12px; width: auto; }
+
+        .drop-zone {
+            border: 2px dashed var(--border); border-radius: 12px; padding: 30px;
+            text-align: center; cursor: pointer; transition: all 0.2s; margin-bottom: 12px;
+        }
+        .drop-zone:hover, .drop-zone.dragover { border-color: var(--accent); background: rgba(0,168,255,0.05); }
+        .drop-zone i { font-size: 32px; color: var(--accent); opacity: 0.5; display: block; margin-bottom: 8px; }
+        .drop-zone input { display: none; }
+
+        /* Gallery */
+        .gallery-grid {
+            display: grid; grid-template-columns: 1fr 1fr; gap: 10px;
+        }
+        .gallery-item {
+            background: var(--bg-tertiary); border-radius: 10px; border: 1px solid var(--border);
+            overflow: hidden; cursor: pointer; transition: all 0.2s;
+        }
+        .gallery-item:hover { border-color: var(--accent); transform: translateY(-2px); }
+        .gallery-item.selected { border-color: var(--accent); box-shadow: 0 0 12px rgba(0,168,255,0.3); }
+        .gallery-item img { width: 100%; height: 100px; object-fit: cover; background: var(--bg-primary); }
+        .gallery-item .gallery-info { padding: 8px; font-size: 12px; }
+        .gallery-item .gallery-info .name { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .gallery-item .gallery-info .date { color: var(--text-secondary); font-size: 11px; }
+        .gallery-empty { text-align: center; padding: 30px; color: var(--text-secondary); }
+
+        /* Detected avatars / get started */
+        .detected-section { margin-bottom: 16px; }
+        .detected-section h3 { font-size: 14px; color: var(--accent); margin-bottom: 10px; display: flex; align-items: center; gap: 8px; }
+        .detected-card {
+            background: var(--bg-tertiary); border: 1px solid var(--border); border-radius: 10px;
+            padding: 12px; margin-bottom: 10px; cursor: pointer; transition: all 0.2s;
+            display: flex; gap: 12px; align-items: center;
+        }
+        .detected-card:hover { border-color: var(--accent); background: rgba(0,168,255,0.05); }
+        .detected-card img {
+            width: 64px; height: 64px; border-radius: 8px; object-fit: cover;
+            background: var(--bg-primary); flex-shrink: 0;
+        }
+        .detected-card .detected-info { flex: 1; min-width: 0; }
+        .detected-card .detected-info .label { font-weight: 600; font-size: 13px; margin-bottom: 2px; }
+        .detected-card .detected-info .sublabel { font-size: 11px; color: var(--text-secondary); }
+        .detected-card .detected-action {
+            font-size: 11px; color: var(--accent); white-space: nowrap;
+            display: flex; align-items: center; gap: 4px;
+        }
+
+        .snapshot-controls { margin-top: 8px; }
+
+        /* Customize panel */
+        .customize-group { margin-bottom: 14px; }
+        .customize-group h4 { font-size: 13px; color: var(--accent); margin-bottom: 8px; display: flex; align-items: center; gap: 6px; }
+        .customize-options { display: flex; flex-wrap: wrap; gap: 6px; }
+        .customize-option {
+            padding: 6px 10px; border-radius: 6px; border: 1px solid var(--border);
+            background: var(--bg-tertiary); cursor: pointer; font-size: 12px; color: var(--text-secondary);
+            transition: all 0.2s;
+        }
+        .customize-option:hover { border-color: var(--accent); color: var(--text-primary); }
+        .customize-option.selected { border-color: var(--accent); color: var(--accent); background: rgba(0,168,255,0.1); }
+
+        .status-msg {
+            padding: 10px 14px; border-radius: 8px; font-size: 13px; margin-bottom: 12px;
+        }
+        .status-msg.info { background: rgba(0,168,255,0.1); border: 1px solid rgba(0,168,255,0.3); color: var(--accent); }
+        .status-msg.success { background: rgba(76,175,80,0.1); border: 1px solid rgba(76,175,80,0.3); color: var(--success); }
+        .status-msg.error { background: rgba(244,67,54,0.1); border: 1px solid rgba(244,67,54,0.3); color: var(--danger); }
+
+        /* Mobile */
+        @media (max-width: 768px) {
+            .main-layout { flex-direction: column; }
+            .viewer-panel { height: 50vh; border-right: none; border-bottom: 1px solid var(--border); }
+            .side-panel { width: 100%; height: 50vh; }
+        }
+    </style>
+</head>
+<body>
+    <div class="top-bar">
+        <div class="top-bar-left">
+            <h1><i class="fas fa-user-astronaut"></i> Avatar Designer</h1>
+        </div>
+        <a href="/" class="back-link"><i class="fas fa-arrow-left"></i> Dashboard</a>
+    </div>
+
+    <div class="main-layout">
+        <!-- 3D Viewer -->
+        <div class="viewer-panel">
+            <div id="viewer-canvas"></div>
+            <div id="viewer-message" class="viewer-message">
+                <i class="fas fa-cube"></i>
+                <span id="viewer-message-text">Detecting existing avatars...</span>
+            </div>
+            <img id="viewer-2d-preview" style="display:none; position:absolute; top:50%; left:50%; transform:translate(-50%,-50%); max-width:80%; max-height:80%; border-radius:12px; border:2px solid var(--border); object-fit:contain;" />
+            <div class="viewer-overlay" id="viewer-controls" style="display: none;">
+                <button class="viewer-btn" onclick="avatarDesigner.resetCamera()"><i class="fas fa-crosshairs"></i> Reset View</button>
+                <button class="viewer-btn" id="btn-wireframe" onclick="avatarDesigner.toggleWireframe()"><i class="fas fa-border-all"></i> Wireframe</button>
+                <button class="viewer-btn" id="btn-rotate" onclick="avatarDesigner.toggleAutoRotate()"><i class="fas fa-sync-alt"></i> Auto Rotate</button>
+                <button class="viewer-btn" onclick="avatarDesigner.exportModel()"><i class="fas fa-download"></i> Export GLB</button>
+                <button class="viewer-btn" onclick="avatarDesigner.exportSnapshot()"><i class="fas fa-camera"></i> Export PNG</button>
+                <button class="viewer-btn" id="btn-vr" onclick="avatarDesigner.enterVR()" style="display:none;"><i class="fas fa-vr-cardboard"></i> Enter VR</button>
+                <div style="position:relative;display:inline-block;">
+                    <button class="viewer-btn" onclick="this.nextElementSibling.style.display=this.nextElementSibling.style.display==='block'?'none':'block'" title="VR Info"><i class="fas fa-vr-cardboard" style="opacity:0.5;"></i></button>
+                    <div style="display:none;position:absolute;right:0;bottom:36px;width:300px;background:var(--bg-tertiary,#1a1a3a);border:1px solid var(--border,#2a2a4a);border-radius:8px;padding:12px;font-size:12px;color:var(--text-secondary,#8888aa);z-index:999;line-height:1.5;box-shadow:0 4px 16px rgba(0,0,0,0.4);">
+                        <strong style="color:#fff"><i class="fas fa-vr-cardboard"></i> VR Mode</strong><br>
+                        View your avatar in VR with any WebXR headset.<br><br>
+                        <strong style="color:#fff">Setup:</strong> WebXR requires HTTPS. For local network, add your server URL to:<br>
+                        <code style="background:#0a0a1a;padding:2px 6px;border-radius:4px;font-size:11px;word-break:break-all;">chrome://flags/#unsafely-treat-insecure-origin-as-secure</code><br><br>
+                        Restart Chrome with SteamVR running. The "Enter VR" button will appear above.<br><br>
+                        <strong style="color:#fff">SteamVR Home:</strong> Export the GLB and copy to<br>
+                        <code style="background:#0a0a1a;padding:2px 6px;border-radius:4px;font-size:10px;word-break:break-all;">Steam\steamapps\common\SteamVR\tools\steamvr_environments\content\steamtourism_addons\models\</code>
+                        <div style="text-align:right;margin-top:8px;"><span onclick="this.parentElement.parentElement.style.display='none'" style="cursor:pointer;color:var(--accent,#00a8ff);font-size:11px;">Got it</span></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Side Panel -->
+        <div class="side-panel">
+            <div class="panel-tabs">
+                <button class="panel-tab" data-tab="vrm" onclick="avatarDesigner.switchTab('vrm')">
+                    <i class="fas fa-user-astronaut"></i> VRM
+                </button>
+                <button class="panel-tab" data-tab="glb" onclick="avatarDesigner.switchTab('glb')">
+                    <i class="fas fa-user"></i> GLB
+                </button>
+                <button class="panel-tab active" data-tab="gallery" onclick="avatarDesigner.switchTab('gallery')">
+                    <i class="fas fa-images"></i> Gallery
+                </button>
+                <button class="panel-tab" data-tab="create" onclick="avatarDesigner.switchTab('create')">
+                    <i class="fas fa-plus-circle"></i> Create
+                </button>
+                <button class="panel-tab" data-tab="customize" onclick="avatarDesigner.switchTab('customize')">
+                    <i class="fas fa-palette"></i> Customize
+                </button>
+                <button class="panel-tab" data-tab="actions" onclick="avatarDesigner.switchTab('actions')">
+                    <i class="fas fa-cog"></i> Actions
+                </button>
+            </div>
+            <div class="panel-content">
+                <!-- VRM Tab -->
+                <div class="panel-section" id="tab-vrm">
+                    <div style="font-size:12px;color:var(--text-secondary);margin-bottom:10px;">
+                        <i class="fas fa-info-circle"></i> Animated VRM avatars with expressions, physics, and eye tracking
+                    </div>
+                    <div id="vrm-model-picker" class="gallery-grid"></div>
+                    <div style="margin-top:8px;display:flex;gap:6px;">
+                        <input type="file" id="vrm-file-input" accept=".vrm" style="display:none"
+                            onchange="avatarDesigner.loadUploadedVRM(this.files[0])">
+                        <button class="btn btn-secondary" style="flex:1;font-size:12px;"
+                            onclick="document.getElementById('vrm-file-input').click()">
+                            <i class="fas fa-upload"></i> Upload VRM
+                        </button>
+                    </div>
+                    <div id="vrm-active-controls" style="display:none;margin-top:8px;">
+                        <button class="btn btn-primary" onclick="avatarDesigner.setActiveVRM()" style="width:100%;font-size:12px;">
+                            <i class="fas fa-check-circle"></i> Set as Active Avatar
+                        </button>
+                        <button class="btn btn-primary" id="btn-update-agent-avatar" onclick="avatarDesigner.updateAgentAvatar()" style="width:100%;font-size:12px;margin-top:6px;background:linear-gradient(135deg,#6366f1,#8b5cf6);">
+                            <i class="fas fa-globe"></i> Update Agent Avatar Everywhere
+                        </button>
+                        <div style="font-size:10px;color:var(--text-secondary);margin-top:3px;padding:0 2px;">
+                            Renders a bust portrait and updates profile image, email signature, and Gravatar
+                        </div>
+                        <div id="vrm-active-status" style="font-size:11px;color:var(--success);margin-top:4px;display:none;">
+                            <i class="fas fa-check"></i> This is your active avatar
+                        </div>
+                        <div id="vrm-update-status" style="font-size:11px;margin-top:4px;display:none;"></div>
+                    </div>
+                    <div id="vrm-controls" style="display:none;margin-top:12px;">
+                        <div class="customize-group">
+                            <h4><i class="fas fa-theater-masks"></i> Expression</h4>
+                            <div id="vrm-expression-options" class="customize-options"></div>
+                        </div>
+                        <div class="customize-group">
+                            <h4><i class="fas fa-sliders-h"></i> Controls</h4>
+                            <label style="font-size:12px;color:var(--text-secondary);display:block;margin:4px 0;">
+                                <input type="checkbox" id="vrm-lookat" checked> Eyes follow cursor / VR headset
+                            </label>
+                            <label style="font-size:12px;color:var(--text-secondary);display:block;margin:4px 0;">
+                                <input type="checkbox" id="vrm-spring" checked> Hair &amp; cloth physics
+                            </label>
+                            <label style="font-size:12px;color:var(--text-secondary);display:block;margin:4px 0;">
+                                <input type="checkbox" id="vrm-idle" checked> Idle animation (breathe, blink, sway)
+                            </label>
+                        </div>
+                        <div class="customize-group">
+                            <h4><i class="fas fa-microphone"></i> Voice &amp; Lip Sync</h4>
+                            <button class="btn btn-secondary" style="font-size:12px;width:100%;" onclick="avatarDesigner._testLipSync()">
+                                <i class="fas fa-volume-up"></i> Test Lip Sync
+                            </button>
+                            <div style="font-size:10px;color:var(--text-secondary);margin-top:4px;">
+                                Lip sync activates automatically when TTS voice plays
+                            </div>
+                        </div>
+                        <div id="vrm-credit" style="display:none;font-size:11px;color:var(--text-secondary);margin-top:8px;padding:6px 10px;background:var(--bg-tertiary);border-radius:6px;">
+                        </div>
+                    </div>
+                </div>
+
+                <!-- GLB Tab -->
+                <div class="panel-section" id="tab-glb">
+                    <div style="font-size:12px;color:var(--text-secondary);margin-bottom:10px;">
+                        <i class="fas fa-info-circle"></i> Realistic 3D avatars with ARKit blend shapes, outfits, and physics
+                    </div>
+                    <div id="glb-model-picker" class="gallery-grid"></div>
+                    <div style="margin-top:8px;display:flex;gap:6px;">
+                        <input type="file" id="glb-file-input" accept=".glb,.gltf" style="display:none"
+                            onchange="avatarDesigner.loadUploadedGLB(this.files[0])">
+                        <button class="btn btn-secondary" style="flex:1;font-size:12px;"
+                            onclick="document.getElementById('glb-file-input').click()">
+                            <i class="fas fa-upload"></i> Upload GLB
+                        </button>
+                    </div>
+                    <div id="glb-active-controls" style="display:none;margin-top:8px;">
+                        <button class="btn btn-primary" onclick="avatarDesigner.setActiveGLB()" style="width:100%;font-size:12px;">
+                            <i class="fas fa-check-circle"></i> Set as Active Avatar
+                        </button>
+                        <button class="btn btn-primary" id="btn-update-agent-avatar-glb" onclick="avatarDesigner.updateAgentAvatar()" style="width:100%;font-size:12px;margin-top:6px;background:linear-gradient(135deg,#6366f1,#8b5cf6);">
+                            <i class="fas fa-globe"></i> Update Agent Avatar Everywhere
+                        </button>
+                        <div style="font-size:10px;color:var(--text-secondary);margin-top:3px;padding:0 2px;">
+                            Renders a bust portrait and updates profile image, email signature, and Gravatar
+                        </div>
+                        <div id="glb-active-status" style="font-size:11px;color:var(--success);margin-top:4px;display:none;">
+                            <i class="fas fa-check"></i> This is your active avatar
+                        </div>
+                        <div id="glb-update-status" style="font-size:11px;margin-top:4px;display:none;"></div>
+                    </div>
+                    <div id="glb-controls" style="display:none;margin-top:12px;">
+                        <div class="customize-group">
+                            <h4><i class="fas fa-tshirt"></i> Outfit</h4>
+                            <div id="glb-outfit-options" class="customize-options"></div>
+                        </div>
+                        <div class="customize-group">
+                            <h4><i class="fas fa-theater-masks"></i> Expression</h4>
+                            <div id="glb-expression-options" class="customize-options">
+                                <span class="customize-option selected" data-glb-expr="neutral" onclick="avatarDesigner.setGLBExpression('neutral')">Neutral</span>
+                                <span class="customize-option" data-glb-expr="happy" onclick="avatarDesigner.setGLBExpression('happy')">Happy</span>
+                                <span class="customize-option" data-glb-expr="angry" onclick="avatarDesigner.setGLBExpression('angry')">Angry</span>
+                                <span class="customize-option" data-glb-expr="surprised" onclick="avatarDesigner.setGLBExpression('surprised')">Surprised</span>
+                                <span class="customize-option" data-glb-expr="sad" onclick="avatarDesigner.setGLBExpression('sad')">Sad</span>
+                                <span class="customize-option" data-glb-expr="wink" onclick="avatarDesigner.setGLBExpression('wink')">Wink</span>
+                            </div>
+                        </div>
+                        <div class="customize-group">
+                            <h4><i class="fas fa-sliders-h"></i> Controls</h4>
+                            <label style="font-size:12px;color:var(--text-secondary);display:block;margin:4px 0;">
+                                <input type="checkbox" id="glb-spring" checked onchange="avatarDesigner._toggleGLBSpringBones(this.checked)"> Hair &amp; body physics
+                            </label>
+                            <label style="font-size:12px;color:var(--text-secondary);display:block;margin:4px 0;">
+                                <input type="checkbox" id="glb-idle" checked> Idle animation (breathe, blink, sway)
+                            </label>
+                            <label style="font-size:12px;color:var(--text-secondary);display:block;margin:4px 0;">
+                                <input type="checkbox" id="glb-eye-track" checked> Eyes follow cursor
+                            </label>
+                        </div>
+                        <div class="customize-group">
+                            <h4><i class="fas fa-microphone"></i> Voice &amp; Lip Sync</h4>
+                            <button class="btn btn-secondary" style="font-size:12px;width:100%;" onclick="avatarDesigner._testGLBLipSync()">
+                                <i class="fas fa-volume-up"></i> Test Lip Sync
+                            </button>
+                            <div style="font-size:10px;color:var(--text-secondary);margin-top:4px;">
+                                Uses ARKit blend shapes for realistic mouth animation
+                            </div>
+                        </div>
+                        <div id="glb-credit" style="display:none;font-size:11px;color:var(--text-secondary);margin-top:8px;padding:6px 10px;background:var(--bg-tertiary);border-radius:6px;">
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Gallery Tab -->
+                <div class="panel-section active" id="tab-gallery">
+                    <div id="detected-avatars" style="display:none;"></div>
+                    <div id="gallery-grid" class="gallery-grid"></div>
+                    <div id="gallery-empty" class="gallery-empty" style="display:none;">
+                        <i class="fas fa-ghost" style="font-size:32px; margin-bottom:12px; opacity:0.3;"></i>
+                        <p>No 3D avatars yet</p>
+                        <p style="font-size:12px; margin-top:6px;">Use a detected image above or create from scratch</p>
+                    </div>
+                </div>
+
+                <!-- Create Tab -->
+                <div class="panel-section" id="tab-create">
+                    <div id="create-status"></div>
+                    <div class="form-group">
+                        <label><i class="fas fa-camera"></i> From Photo</label>
+                        <div class="drop-zone" id="drop-zone" onclick="document.getElementById('photo-input').click()">
+                            <i class="fas fa-cloud-upload-alt"></i>
+                            <div style="font-size: 13px; color: var(--text-secondary);">Drop a photo or click to upload</div>
+                            <input type="file" id="photo-input" accept="image/*">
+                        </div>
+                        <div id="photo-preview" style="display:none; text-align:center; margin-bottom:12px;">
+                            <img id="photo-preview-img" style="max-width:100%; max-height:150px; border-radius:8px;">
+                        </div>
+                        <button class="btn btn-primary" id="btn-create-photo" onclick="avatarDesigner.createFromPhoto()" disabled>
+                            <i class="fas fa-magic"></i> Generate from Photo
+                        </button>
+                    </div>
+                    <div style="text-align:center; color:var(--text-secondary); font-size:13px; margin: 12px 0;">— or —</div>
+                    <div class="form-group">
+                        <label><i class="fas fa-pen-fancy"></i> From Text Prompt</label>
+                        <textarea class="form-input" id="prompt-input" placeholder="e.g., A futuristic robot with glowing blue circuits and a visor, standing heroically"></textarea>
+                    </div>
+                    <button class="btn btn-primary" onclick="avatarDesigner.createFromPrompt()">
+                        <i class="fas fa-magic"></i> Generate from Prompt
+                    </button>
+                    <div style="margin-top: 12px; font-size: 12px; color: var(--text-secondary);">
+                        <i class="fas fa-info-circle"></i> Uses TRELLIS (free, no API key needed). Generation takes 30-90 seconds.
+                    </div>
+                </div>
+
+                <!-- Customize Tab -->
+                <div class="panel-section" id="tab-customize">
+                    <div id="customize-empty" style="text-align:center; padding:30px; color:var(--text-secondary);">
+                        Select an avatar to customize
+                    </div>
+                    <div id="customize-form" style="display:none;">
+                        <div class="customize-group">
+                            <h4><i class="fas fa-theater-masks"></i> Expression</h4>
+                            <div class="customize-options" id="expression-options">
+                                <span class="customize-option" data-value="neutral">Neutral</span>
+                                <span class="customize-option" data-value="happy">Happy</span>
+                                <span class="customize-option" data-value="angry">Angry</span>
+                                <span class="customize-option" data-value="surprised">Surprised</span>
+                                <span class="customize-option" data-value="determined">Determined</span>
+                                <span class="customize-option" data-value="calm">Calm</span>
+                            </div>
+                        </div>
+                        <div class="customize-group">
+                            <h4><i class="fas fa-tshirt"></i> Outfit</h4>
+                            <div class="customize-options" id="outfit-options">
+                                <span class="customize-option" data-value="default">Default</span>
+                                <span class="customize-option" data-value="tech">Tech Suit</span>
+                                <span class="customize-option" data-value="cyber">Cyberpunk</span>
+                                <span class="customize-option" data-value="formal">Formal</span>
+                                <span class="customize-option" data-value="warrior">Warrior</span>
+                            </div>
+                        </div>
+                        <div class="customize-group">
+                            <h4><i class="fas fa-hat-wizard"></i> Accessories</h4>
+                            <div class="customize-options" id="accessory-options">
+                                <span class="customize-option" data-value="none">None</span>
+                                <span class="customize-option" data-value="visor">Visor</span>
+                                <span class="customize-option" data-value="headset">Headset</span>
+                                <span class="customize-option" data-value="wings">Wings</span>
+                                <span class="customize-option" data-value="aura">Aura</span>
+                            </div>
+                        </div>
+                        <div class="customize-group">
+                            <h4><i class="fas fa-sparkles"></i> Effects</h4>
+                            <div class="customize-options" id="effect-options">
+                                <span class="customize-option" data-value="none">None</span>
+                                <span class="customize-option" data-value="glow">Glow</span>
+                                <span class="customize-option" data-value="particles">Particles</span>
+                                <span class="customize-option" data-value="hologram">Hologram</span>
+                                <span class="customize-option" data-value="flame">Flame</span>
+                            </div>
+                        </div>
+                        <button class="btn btn-primary" onclick="avatarDesigner.saveCustomizations()" style="margin-top: 8px;">
+                            <i class="fas fa-save"></i> Save Customizations
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Actions Tab -->
+                <div class="panel-section" id="tab-actions">
+                    <div id="actions-empty" style="text-align:center; padding:30px; color:var(--text-secondary);">
+                        Select an avatar first
+                    </div>
+                    <div id="actions-form" style="display:none;">
+                        <div id="avatar-info" style="margin-bottom:16px; padding:12px; background:var(--bg-tertiary); border-radius:8px; font-size:13px;"></div>
+                        <div style="display:flex; flex-direction:column; gap:8px;">
+                            <button class="btn btn-secondary" id="btn-autorig" onclick="avatarDesigner.autoRig()">
+                                <i class="fas fa-bone"></i> Auto-Rig (add skeleton)
+                            </button>
+                            <button class="btn btn-secondary" onclick="avatarDesigner.exportModel()">
+                                <i class="fas fa-download"></i> Export GLB
+                            </button>
+                            <button class="btn btn-secondary" onclick="avatarDesigner.mintNFT()">
+                                <i class="fas fa-stamp"></i> Mint as NFT
+                            </button>
+                            <button class="btn btn-secondary" onclick="avatarDesigner.viewItems()">
+                                <i class="fas fa-gem"></i> View Unlockable Items
+                            </button>
+                        </div>
+                        <div id="items-list" style="margin-top:12px;"></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Three.js r140 (self-hosted) + VRM support -->
+    <script src="/lib/three.min.js"></script>
+    <script src="/lib/OrbitControls.js"></script>
+    <script src="/lib/GLTFLoader.js"></script>
+    <script src="/lib/three-vrm.js"></script>
+    <script src="/js/vr-controls.js?v=2"></script>
+
+    <script>
+    class AvatarDesigner {
+        constructor() {
+            this.scene = null;
+            this.camera = null;
+            this.renderer = null;
+            this.controls = null;
+            this.currentModel = null;
+            this.currentAvatarId = null;
+            this.currentAvatar = null;
+            this.animationId = null;
+            this.clock = new THREE.Clock();
+            this.autoRotate = true;
+            this.wireframe = false;
+            this.token = localStorage.getItem('lanagent_token');
+            this.photoFile = null;
+            this.detectedImages = [];
+            // VRM
+            this.currentVRM = null;
+            this.vrmModels = [];
+            this.vrmLookAtTarget = null;
+            this._idleTime = 0;
+            this._currentExpression = 'neutral';
+            this._savedActiveVRM = null;
+            // GLB
+            this.glbModels = [];
+            this._glbMorphMeshes = [];
+            this._glbSpringBones = [];
+            this._glbMeshMap = {};
+            this._currentGLBId = null;
+            this._currentGLBInfo = null;
+            this._savedActiveGLB = null;
+            this._glbIdleTime = 0;
+        }
+
+        async init() {
+            this._setupDropZone();
+            this._setupCustomizeOptions();
+
+            // Fetch the active VRM model from server
+            try {
+                const resp = await fetch('/api/agent/vrm');
+                const data = await resp.json();
+                if (data.success && data.activeVRMModel) {
+                    this._savedActiveVRM = data.activeVRMModel;
+                }
+            } catch (e) { /* no active VRM */ }
+
+            // If user has an active VRM, skip 2D detection — VRM takes over the viewer
+            if (this._savedActiveVRM) {
+                document.getElementById('viewer-message').style.display = 'none';
+            }
+
+            await Promise.all([
+                this._savedActiveVRM ? Promise.resolve() : this._detectExistingAvatars(),
+                this.loadGallery(),
+                this.loadVRMManifest(),
+                this.loadGLBManifest()
+            ]);
+        }
+
+        // --- Detect existing 2D avatars from agent profile & ERC-8004 ---
+        async _detectExistingAvatars() {
+            const detected = [];
+
+            // 1. Agent profile avatar (/api/agent/avatar)
+            try {
+                const resp = await fetch('/api/agent/avatar', { method: 'HEAD' });
+                if (resp.ok && resp.headers.get('content-type')?.startsWith('image/')) {
+                    detected.push({
+                        url: '/api/agent/avatar',
+                        label: 'Agent Profile Avatar',
+                        sublabel: 'Current profile image',
+                        source: 'profile'
+                    });
+                }
+            } catch (e) { /* no profile avatar */ }
+
+            // 2. ERC-8004 IPFS avatar
+            try {
+                const resp = await fetch('/api/agent/erc8004/status', {
+                    headers: { 'Authorization': `Bearer ${this.token}` }
+                });
+                if (resp.ok) {
+                    const data = await resp.json();
+                    const cid = data?.data?.ipfs?.avatarCID || data?.ipfs?.avatarCID;
+                    if (cid) {
+                        // Try multiple IPFS gateways
+                        const ipfsUrl = `https://gateway.pinata.cloud/ipfs/${cid}`;
+                        detected.push({
+                            url: ipfsUrl,
+                            label: 'ERC-8004 On-Chain Avatar',
+                            sublabel: `IPFS: ${cid.slice(0, 12)}...`,
+                            source: 'erc8004'
+                        });
+                    }
+                }
+            } catch (e) { /* no ERC-8004 */ }
+
+            this.detectedImages = detected;
+            this._renderDetectedAvatars();
+
+            // Show first detected image in viewer as 2D preview
+            if (detected.length > 0) {
+                this._show2DPreview(detected[0].url);
+                document.getElementById('viewer-message-text').textContent =
+                    'Existing avatar detected — click "Use for 3D" to generate a full-body 3D model';
+            } else {
+                document.getElementById('viewer-message-text').textContent =
+                    'No existing avatars found. Create one from a photo or text prompt.';
+            }
+        }
+
+        _renderDetectedAvatars() {
+            const container = document.getElementById('detected-avatars');
+            if (this.detectedImages.length === 0) {
+                container.style.display = 'none';
+                return;
+            }
+
+            container.style.display = 'block';
+            container.innerHTML = `
+                <div class="detected-section">
+                    <h3><i class="fas fa-magic"></i> Existing Images Detected</h3>
+                    ${this.detectedImages.map((img, i) => `
+                        <div class="detected-card" onclick="avatarDesigner.useDetectedImage(${i})" title="Click to use as source for 3D generation">
+                            <img src="${img.url}" onerror="this.style.display='none'" alt="${img.label}">
+                            <div class="detected-info">
+                                <div class="label">${img.label}</div>
+                                <div class="sublabel">${img.sublabel}</div>
+                            </div>
+                            <div class="detected-action"><i class="fas fa-cube"></i> Use for 3D</div>
+                        </div>
+                    `).join('')}
+                </div>
+            `;
+        }
+
+        _show2DPreview(url) {
+            const preview = document.getElementById('viewer-2d-preview');
+            preview.src = url;
+            preview.style.display = 'block';
+            preview.onerror = () => { preview.style.display = 'none'; };
+        }
+
+        _hide2DPreview() {
+            document.getElementById('viewer-2d-preview').style.display = 'none';
+        }
+
+        async useDetectedImage(index) {
+            const img = this.detectedImages[index];
+            if (!img) return;
+
+            // Fetch the image as a blob and set it as the photo file
+            this._showStatus('create-status', `Loading ${img.label}...`, 'info');
+            try {
+                const resp = await fetch(img.url);
+                if (!resp.ok) throw new Error('Failed to fetch image');
+                const blob = await resp.blob();
+                const file = new File([blob], `avatar-${img.source}.png`, { type: blob.type || 'image/png' });
+                this._setPhotoFile(file);
+
+                // Switch to Create tab with photo ready
+                this.switchTab('create');
+                this._showStatus('create-status',
+                    `${img.label} loaded! Click "Generate from Photo" to create a full-body 3D model.`, 'info');
+            } catch (err) {
+                this._showStatus('create-status', `Could not load image: ${err.message}`, 'error');
+            }
+        }
+
+        _initViewer() {
+            if (this.scene) return; // already initialized
+
+            const container = document.getElementById('viewer-canvas');
+            this.scene = new THREE.Scene();
+            this.scene.background = new THREE.Color(0x0a0a1a);
+
+            this.camera = new THREE.PerspectiveCamera(45, container.clientWidth / container.clientHeight, 0.01, 100);
+            this.camera.position.set(0, 1.2, 3);
+
+            this.renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+            this.renderer.setSize(container.clientWidth, container.clientHeight);
+            this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+            this.renderer.outputEncoding = THREE.sRGBEncoding;
+            this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
+            this.renderer.toneMappingExposure = 1.2;
+            this.renderer.xr.enabled = true;
+            container.appendChild(this.renderer.domElement);
+
+            this.controls = new THREE.OrbitControls(this.camera, this.renderer.domElement);
+            this.controls.enableDamping = true;
+            this.controls.dampingFactor = 0.05;
+            this.controls.target.set(0, 0.8, 0);
+            this.controls.autoRotate = this.autoRotate;
+            this.controls.autoRotateSpeed = 2;
+            this.controls.update();
+
+            // Lighting — bright enough to illuminate non-metallic and metallic surfaces
+            this.scene.add(new THREE.AmbientLight(0xffffff, 0.8));
+            const keyLight = new THREE.DirectionalLight(0xffffff, 1.2);
+            keyLight.position.set(3, 5, 3);
+            this.scene.add(keyLight);
+            const fillLight = new THREE.DirectionalLight(0x4488ff, 0.6);
+            fillLight.position.set(-3, 2, -3);
+            this.scene.add(fillLight);
+            const rimLight = new THREE.DirectionalLight(0xff8844, 0.5);
+            rimLight.position.set(0, 3, -5);
+            this.scene.add(rimLight);
+            // Bottom fill to prevent dark underside
+            const bottomLight = new THREE.DirectionalLight(0xffffff, 0.3);
+            bottomLight.position.set(0, -3, 0);
+            this.scene.add(bottomLight);
+
+            // Ground grid
+            const gridHelper = new THREE.GridHelper(4, 20, 0x1a2a4a, 0x0d1525);
+            this.scene.add(gridHelper);
+
+            // Ground circle (subtle)
+            const groundGeo = new THREE.CircleGeometry(1.5, 64);
+            const groundMat = new THREE.MeshBasicMaterial({ color: 0x0f1a2d, transparent: true, opacity: 0.5 });
+            const ground = new THREE.Mesh(groundGeo, groundMat);
+            ground.rotation.x = -Math.PI / 2;
+            ground.position.y = 0.001;
+            this.scene.add(ground);
+
+            // WebXR VR support — check if VR is available and show button
+            this._vrSupported = false;
+            if (navigator.xr) {
+                navigator.xr.isSessionSupported('immersive-vr').then((supported) => {
+                    this._vrSupported = supported;
+                    if (supported) {
+                        document.getElementById('btn-vr').style.display = '';
+                        // Add VR controllers
+                        this._setupVRControllers();
+                    }
+                }).catch(() => {});
+            }
+
+            window.addEventListener('resize', () => this._handleResize());
+            this._animate();
+        }
+
+        _setupVRControllers() {
+            // Controller ray lines for pointing/selecting
+            const lineGeo = new THREE.BufferGeometry().setFromPoints([
+                new THREE.Vector3(0, 0, 0), new THREE.Vector3(0, 0, -3)
+            ]);
+            const lineMat = new THREE.LineBasicMaterial({ color: 0x00a8ff, transparent: true, opacity: 0.6 });
+
+            for (let i = 0; i < 2; i++) {
+                const controller = this.renderer.xr.getController(i);
+                controller.add(new THREE.Line(lineGeo.clone(), lineMat.clone()));
+                this.scene.add(controller);
+
+                // Controller grip (visual model)
+                const grip = this.renderer.xr.getControllerGrip(i);
+                if (typeof THREE.XRControllerModelFactory !== 'undefined') {
+                    const factory = new THREE.XRControllerModelFactory();
+                    grip.add(factory.createControllerModel(grip));
+                }
+                this.scene.add(grip);
+            }
+
+            // Initialize VR controller interactions (grab, scale, locomotion, snap-turn)
+            if (typeof VRControls !== 'undefined') {
+                this._vrControls = new VRControls({
+                    renderer: this.renderer,
+                    scene: this.scene,
+                    camera: this.camera,
+                    controls: this.controls,
+                    getSelectables: () => this.currentModel ? [this.currentModel] : [],
+                    onSelect: (mesh) => {
+                        // Toggle auto-rotate on select in avatar designer
+                        if (this.controls) {
+                            this.controls.autoRotate = !this.controls.autoRotate;
+                        }
+                    }
+                });
+                this._vrControls.attach();
+                this._vrClock = new THREE.Clock();
+            }
+        }
+
+        async enterVR() {
+            if (!this._vrSupported) {
+                alert('WebXR VR not available. Make sure SteamVR is running and you are using a compatible browser.');
+                return;
+            }
+            try {
+                const session = await navigator.xr.requestSession('immersive-vr', {
+                    optionalFeatures: ['local-floor', 'bounded-floor', 'hand-tracking']
+                });
+                this.renderer.xr.setSession(session);
+
+                // Position model at standing height in VR space
+                if (this.currentModel) {
+                    // Place model 1.5m in front of the user at floor level
+                    this.currentModel.position.z = -1.5;
+                }
+
+                session.addEventListener('end', () => {
+                    // Restore normal view when VR ends
+                    if (this.currentModel) {
+                        this.currentModel.position.z = 0;
+                    }
+                });
+            } catch (err) {
+                console.error('Failed to enter VR:', err);
+                alert('Failed to enter VR: ' + err.message);
+            }
+        }
+
+        _animate() {
+            // Use setAnimationLoop for WebXR compatibility (rAF doesn't fire during XR sessions)
+            this.renderer.setAnimationLoop(() => this._renderFrame());
+        }
+
+        _renderFrame() {
+            const delta = this.clock.getDelta();
+
+            if (this._vrControls) {
+                this._vrControls.update(delta);
+            }
+
+            // VRM update: mixer, spring bones, look-at, expressions
+            if (this.currentVRM) {
+                if (this._mixer) this._mixer.update(delta);
+                this.currentVRM.update(delta);
+                this._updateVRMIdleAnimation(delta);
+
+                // In VR, make eyes track headset instead of mouse
+                if (this.renderer.xr.isPresenting && this.vrmLookAtTarget) {
+                    const cam = this.renderer.xr.getCamera();
+                    if (cam) this.vrmLookAtTarget.position.copy(cam.position);
+                }
+            }
+
+            // GLB update: mixer + procedural idle, spring bones, eye tracking, lip sync
+            if (this.currentModel && !this.currentVRM && this._currentGLBInfo) {
+                if (this._glbMixer) this._glbMixer.update(delta);
+                if (!this._glbFrameLogged) {
+                    this._glbFrameLogged = true;
+                    console.log('GLB render loop active, calling _updateGLBIdleAnimation');
+                }
+                try {
+                    this._updateGLBIdleAnimation(delta);
+                } catch (e) {
+                    if (!this._glbAnimError) {
+                        this._glbAnimError = true;
+                        console.error('GLB idle animation error:', e);
+                    }
+                }
+            }
+
+            if (this.controls && this.controls.enabled) this.controls.update();
+
+            // Animate effect particles
+            if (this._effectParticles) {
+                const positions = this._effectParticles.geometry.attributes.position.array;
+                for (let i = 0; i < positions.length; i += 3) {
+                    positions[i + 1] += 0.003; // drift upward
+                    // Wrap around when too high
+                    if (this.currentModel) {
+                        const box = new THREE.Box3().setFromObject(this.currentModel);
+                        if (positions[i + 1] > box.max.y + 0.5) {
+                            positions[i + 1] = box.min.y;
+                        }
+                    }
+                }
+                this._effectParticles.geometry.attributes.position.needsUpdate = true;
+            }
+
+            this.renderer.render(this.scene, this.camera);
+        }
+
+        _handleResize() {
+            const container = document.getElementById('viewer-canvas');
+            if (!container || !this.camera) return;
+            const w = container.clientWidth, h = container.clientHeight;
+            this.camera.aspect = w / h;
+            this.camera.updateProjectionMatrix();
+            this.renderer.setSize(w, h);
+        }
+
+        async loadModel(avatarId) {
+            this._initViewer();
+            document.getElementById('viewer-message').style.display = 'none';
+            this._hide2DPreview();
+            document.getElementById('viewer-controls').style.display = 'flex';
+
+            // Remove old model (from worldGroup if VR controls active, otherwise scene)
+            if (this.currentModel) {
+                const parent = this.currentModel.parent || this.scene;
+                parent.remove(this.currentModel);
+                this.currentModel = null;
+            }
+
+            const loader = new THREE.GLTFLoader();
+            const url = `/api/avatar/${avatarId}/model?token=${encodeURIComponent(this.token)}`;
+
+            try {
+                const gltf = await new Promise((resolve, reject) => {
+                    loader.load(url, resolve, undefined, reject);
+                });
+
+                this.currentModel = gltf.scene;
+
+                // Debug: log what we got
+                let meshCount = 0, vertCount = 0;
+                this.currentModel.traverse((child) => {
+                    if (child.isMesh) {
+                        meshCount++;
+                        vertCount += child.geometry?.attributes?.position?.count || 0;
+                        const mat = child.material;
+                        // Force visibility — doubleSided, reduce metalness, ensure not transparent
+                        mat.side = THREE.DoubleSide;
+                        mat.transparent = false;
+                        mat.opacity = 1.0;
+                        if (mat.metalness !== undefined) mat.metalness = Math.min(mat.metalness, 0.2);
+                        if (mat.roughness !== undefined) mat.roughness = Math.max(Math.min(mat.roughness, 0.8), 0.3);
+                        // If no map/texture loaded, use a visible fallback color
+                        if (!mat.map) {
+                            mat.color = new THREE.Color(0x8888aa);
+                        }
+                        mat.needsUpdate = true;
+                    }
+                });
+                console.log(`Avatar model loaded: ${meshCount} meshes, ${vertCount} vertices`);
+
+                // Auto-center and scale
+                const box = new THREE.Box3().setFromObject(this.currentModel);
+                const size = box.getSize(new THREE.Vector3());
+                const center = box.getCenter(new THREE.Vector3());
+                console.log('Model bounds:', { min: box.min, max: box.max, size, center });
+
+                const maxDim = Math.max(size.x, size.y, size.z);
+                if (maxDim === 0) {
+                    console.error('Model has zero size — geometry may be empty');
+                    this._showStatus('create-status', 'Model loaded but has no visible geometry', 'error');
+                    return;
+                }
+
+                const scale = 2 / maxDim;
+                this.currentModel.scale.setScalar(scale);
+
+                // Center horizontally, place feet on ground
+                this.currentModel.position.set(
+                    -center.x * scale,
+                    -box.min.y * scale,
+                    -center.z * scale
+                );
+
+                // Add to worldGroup if VR controls active, otherwise scene
+                const target = (this._vrControls && this._vrControls.worldGroup) || this.scene;
+                target.add(this.currentModel);
+                this.currentAvatarId = avatarId;
+
+                // Update camera to frame the model
+                const newBox = new THREE.Box3().setFromObject(this.currentModel);
+                const newCenter = newBox.getCenter(new THREE.Vector3());
+                const newSize = newBox.getSize(new THREE.Vector3());
+                this.camera.position.set(0, newCenter.y, Math.max(newSize.z * 2, 3));
+                this.controls.target.copy(newCenter);
+                this.controls.update();
+                console.log('Camera set to:', this.camera.position, 'target:', newCenter);
+            } catch (err) {
+                console.error('Failed to load model:', err);
+                this._showStatus('create-status', `Failed to load 3D model: ${err.message}`, 'error');
+            }
+        }
+
+        // --- Gallery ---
+        async loadGallery() {
+            try {
+                const resp = await fetch('/api/avatar/gallery?limit=50', {
+                    headers: { 'Authorization': `Bearer ${this.token}` }
+                });
+                const data = await resp.json();
+                const grid = document.getElementById('gallery-grid');
+                const empty = document.getElementById('gallery-empty');
+
+                if (!data.success || !data.data?.length) {
+                    grid.innerHTML = '';
+                    empty.style.display = 'block';
+                    return;
+                }
+
+                empty.style.display = 'none';
+                grid.innerHTML = data.data.map(av => {
+                    const displayName = av.name || (av.sourceType === 'photo' ? 'Photo Avatar' : 'Prompt Avatar');
+                    return `
+                    <div class="gallery-item ${av.avatarId === this.currentAvatarId ? 'selected' : ''}"
+                         data-id="${av.avatarId}">
+                        <img src="${av.thumbnailPath ? `/api/avatar/${av.avatarId}/export?format=png&token=${encodeURIComponent(this.token)}` : '/api/agent/avatar'}"
+                             onerror="this.src='/api/agent/avatar'" alt="${displayName}"
+                             onclick="avatarDesigner.selectAvatar('${av.avatarId}')">
+                        <div class="gallery-info" onclick="avatarDesigner.selectAvatar('${av.avatarId}')">
+                            <div class="name">${displayName}</div>
+                            <div class="date">${new Date(av.createdAt).toLocaleDateString()}</div>
+                        </div>
+                        <div class="gallery-actions" style="display:flex;gap:4px;padding:2px 6px;">
+                            <button onclick="event.stopPropagation();avatarDesigner.renameAvatar('${av.avatarId}','${displayName.replace(/'/g, "\\'")}')" title="Rename"
+                                style="background:none;border:none;color:var(--text-secondary);cursor:pointer;font-size:12px;padding:2px 4px;"><i class="fas fa-pen"></i></button>
+                            <button onclick="event.stopPropagation();avatarDesigner.deleteAvatar('${av.avatarId}')" title="Delete"
+                                style="background:none;border:none;color:#e74c3c;cursor:pointer;font-size:12px;padding:2px 4px;"><i class="fas fa-trash"></i></button>
+                        </div>
+                    </div>`;
+                }).join('');
+            } catch (err) {
+                console.error('Gallery load failed:', err);
+            }
+        }
+
+        async renameAvatar(avatarId, currentName) {
+            const newName = prompt('Rename avatar:', currentName);
+            if (newName === null || newName.trim() === currentName) return;
+            try {
+                const resp = await fetch(`/api/avatar/${avatarId}/rename`, {
+                    method: 'PUT',
+                    headers: { 'Authorization': `Bearer ${this.token}`, 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ name: newName.trim() })
+                });
+                const data = await resp.json();
+                if (data.success) {
+                    await this.loadGallery();
+                } else {
+                    alert(data.error || 'Rename failed');
+                }
+            } catch (err) {
+                alert('Rename failed: ' + err.message);
+            }
+        }
+
+        async deleteAvatar(avatarId) {
+            if (!confirm('Delete this avatar? This cannot be undone.')) return;
+            try {
+                const resp = await fetch(`/api/avatar/${avatarId}`, {
+                    method: 'DELETE',
+                    headers: { 'Authorization': `Bearer ${this.token}` }
+                });
+                const data = await resp.json();
+                if (data.success) {
+                    if (this.currentAvatarId === avatarId) {
+                        if (this.currentModel) {
+                            const parent = this.currentModel.parent || this.scene;
+                            parent.remove(this.currentModel);
+                            this.currentModel = null;
+                        }
+                        this.currentAvatarId = null;
+                    }
+                    await this.loadGallery();
+                } else {
+                    alert(data.error || 'Delete failed');
+                }
+            } catch (err) {
+                alert('Delete failed: ' + err.message);
+            }
+        }
+
+        async selectAvatar(avatarId) {
+            this.currentAvatarId = avatarId;
+
+            // Highlight in gallery
+            document.querySelectorAll('.gallery-item').forEach(el => {
+                el.classList.toggle('selected', el.dataset.id === avatarId);
+            });
+
+            // Load model
+            await this.loadModel(avatarId);
+
+            // Fetch avatar details
+            try {
+                const resp = await fetch(`/api/avatar/${avatarId}`, {
+                    headers: { 'Authorization': `Bearer ${this.token}` }
+                });
+                const data = await resp.json();
+                if (data.success) {
+                    this.currentAvatar = data.data;
+                    this._updateCustomizePanel(data.data);
+                    this._updateActionsPanel(data.data);
+                }
+            } catch (err) {
+                console.error('Failed to fetch avatar details:', err);
+            }
+        }
+
+        _updateCustomizePanel(avatar) {
+            document.getElementById('customize-empty').style.display = 'none';
+            document.getElementById('customize-form').style.display = 'block';
+
+            const c = avatar.customizations || {};
+
+            // Restore all 4 customization selections
+            const expr = c.expression || 'neutral';
+            document.querySelectorAll('#expression-options .customize-option').forEach(el => {
+                el.classList.toggle('selected', el.dataset.value === expr);
+            });
+
+            const outfit = c.outfit?.style || 'default';
+            document.querySelectorAll('#outfit-options .customize-option').forEach(el => {
+                el.classList.toggle('selected', el.dataset.value === outfit);
+            });
+
+            const accessory = c.accessories?.[0]?.type || 'none';
+            document.querySelectorAll('#accessory-options .customize-option').forEach(el => {
+                el.classList.toggle('selected', el.dataset.value === accessory);
+            });
+
+            const effect = c.effects?.[0]?.type || 'none';
+            document.querySelectorAll('#effect-options .customize-option').forEach(el => {
+                el.classList.toggle('selected', el.dataset.value === effect);
+            });
+
+            // Apply the loaded customizations to the 3D model
+            this._applyCurrentCustomizations();
+        }
+
+        _updateActionsPanel(avatar) {
+            document.getElementById('actions-empty').style.display = 'none';
+            document.getElementById('actions-form').style.display = 'block';
+
+            const info = document.getElementById('avatar-info');
+            info.innerHTML = `
+                <div><strong>ID:</strong> ${avatar.avatarId}</div>
+                <div><strong>Source:</strong> ${avatar.sourceType || 'unknown'}</div>
+                <div><strong>Format:</strong> ${avatar.format || 'glb'}</div>
+                <div><strong>Created:</strong> ${new Date(avatar.createdAt).toLocaleString()}</div>
+                ${avatar.nftTokenId ? `<div><strong>NFT Token:</strong> #${avatar.nftTokenId}</div>` : ''}
+                ${avatar.polyCount ? `<div><strong>Polygons:</strong> ${avatar.polyCount.toLocaleString()}</div>` : ''}
+            `;
+        }
+
+        // --- Create ---
+        _setupDropZone() {
+            const zone = document.getElementById('drop-zone');
+            const input = document.getElementById('photo-input');
+
+            ['dragenter', 'dragover'].forEach(evt => {
+                zone.addEventListener(evt, e => { e.preventDefault(); zone.classList.add('dragover'); });
+            });
+            ['dragleave', 'drop'].forEach(evt => {
+                zone.addEventListener(evt, e => { e.preventDefault(); zone.classList.remove('dragover'); });
+            });
+
+            zone.addEventListener('drop', e => {
+                const file = e.dataTransfer?.files[0];
+                if (file?.type.startsWith('image/')) this._setPhotoFile(file);
+            });
+
+            input.addEventListener('change', e => {
+                if (e.target.files[0]) this._setPhotoFile(e.target.files[0]);
+            });
+        }
+
+        _setPhotoFile(file) {
+            this.photoFile = file;
+            const preview = document.getElementById('photo-preview');
+            const img = document.getElementById('photo-preview-img');
+            const btn = document.getElementById('btn-create-photo');
+            const reader = new FileReader();
+            reader.onload = e => { img.src = e.target.result; preview.style.display = 'block'; btn.disabled = false; };
+            reader.readAsDataURL(file);
+        }
+
+        async createFromPhoto() {
+            if (!this.photoFile) return;
+            const btn = document.getElementById('btn-create-photo');
+            btn.disabled = true;
+            btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Generating 3D model...';
+            this._showStatus('create-status', 'Uploading photo and generating 3D model... This may take 30-120 seconds. Will try multiple providers if needed (TRELLIS, Hunyuan3D, TripoSR).', 'info');
+
+            try {
+                const formData = new FormData();
+                formData.append('photo', this.photoFile);
+                const resp = await fetch('/api/avatar/create', {
+                    method: 'POST',
+                    headers: { 'Authorization': `Bearer ${this.token}` },
+                    body: formData
+                });
+
+                let data;
+                const text = await resp.text();
+                try { data = JSON.parse(text); } catch (e) {
+                    throw new Error(`Server returned non-JSON (${resp.status}): ${text.slice(0, 200)}`);
+                }
+
+                if (data.success) {
+                    this._showStatus('create-status', 'Avatar created successfully! Loading 3D model...', 'success');
+                    await this.loadGallery();
+                    await this.selectAvatar(data.data.avatarId);
+                    this.switchTab('gallery');
+                } else {
+                    this._showStatus('create-status', data.error || 'Creation failed', 'error');
+                }
+            } catch (err) {
+                console.error('createFromPhoto error:', err);
+                this._showStatus('create-status', `Generation failed: ${err.message}`, 'error');
+            } finally {
+                btn.disabled = false;
+                btn.innerHTML = '<i class="fas fa-magic"></i> Generate from Photo';
+            }
+        }
+
+        async createFromPrompt() {
+            const prompt = document.getElementById('prompt-input').value.trim();
+            if (!prompt) return;
+
+            const btn = document.querySelector('#tab-create .btn-primary:last-of-type');
+            if (btn) { btn.disabled = true; btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Generating...'; }
+            this._showStatus('create-status', 'Generating 3D model from prompt... This may take 30-90 seconds. Please wait.', 'info');
+
+            try {
+                const resp = await fetch('/api/avatar/create', {
+                    method: 'POST',
+                    headers: { 'Authorization': `Bearer ${this.token}`, 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ prompt })
+                });
+
+                let data;
+                const text = await resp.text();
+                try { data = JSON.parse(text); } catch (e) {
+                    throw new Error(`Server returned non-JSON (${resp.status}): ${text.slice(0, 200)}`);
+                }
+
+                if (data.success) {
+                    this._showStatus('create-status', 'Avatar created successfully! Loading 3D model...', 'success');
+                    await this.loadGallery();
+                    await this.selectAvatar(data.data.avatarId);
+                    this.switchTab('gallery');
+                } else {
+                    this._showStatus('create-status', data.error || 'Creation failed', 'error');
+                }
+            } catch (err) {
+                console.error('createFromPrompt error:', err);
+                this._showStatus('create-status', `Generation failed: ${err.message}`, 'error');
+            } finally {
+                if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fas fa-magic"></i> Generate from Prompt'; }
+            }
+        }
+
+        // --- Customize ---
+        _setupCustomizeOptions() {
+            document.querySelectorAll('.customize-options').forEach(group => {
+                group.addEventListener('click', e => {
+                    const opt = e.target.closest('.customize-option');
+                    if (!opt) return;
+                    group.querySelectorAll('.customize-option').forEach(o => o.classList.remove('selected'));
+                    opt.classList.add('selected');
+                    // Apply effect in real-time
+                    this._applyCurrentCustomizations();
+                });
+            });
+        }
+
+        _applyCurrentCustomizations() {
+            if (!this.currentModel) return;
+
+            const expression = document.querySelector('#expression-options .customize-option.selected')?.dataset.value || 'neutral';
+            const outfit = document.querySelector('#outfit-options .customize-option.selected')?.dataset.value || 'default';
+            const accessory = document.querySelector('#accessory-options .customize-option.selected')?.dataset.value || 'none';
+            const effect = document.querySelector('#effect-options .customize-option.selected')?.dataset.value || 'none';
+
+            // Remove previous effects
+            this._clearCustomizationEffects();
+
+            // Apply expression as emissive color tint on the model
+            const expressionColors = {
+                neutral: 0x000000, happy: 0x224400, angry: 0x440000,
+                surprised: 0x004444, determined: 0x442200, calm: 0x000044
+            };
+            const exprColor = new THREE.Color(expressionColors[expression] || 0x000000);
+
+            // Apply outfit as material color shift
+            const outfitColors = {
+                default: null, tech: 0x001133, cyber: 0x330033,
+                formal: 0x111111, warrior: 0x331100
+            };
+            const outfitColor = outfitColors[outfit];
+
+            this.currentModel.traverse(child => {
+                if (child.isMesh && child.material) {
+                    // Expression: emissive tint
+                    if (child.material.emissive) {
+                        child.material.emissive.copy(exprColor);
+                        child.material.emissiveIntensity = expression === 'neutral' ? 0 : 0.3;
+                    }
+                    // Outfit: color overlay
+                    if (outfitColor !== null && child.material.color) {
+                        if (!child.userData._origColor) child.userData._origColor = child.material.color.getHex();
+                        child.material.color.lerp(new THREE.Color(outfitColor), 0.3);
+                    } else if (child.userData._origColor) {
+                        child.material.color.setHex(child.userData._origColor);
+                    }
+                    child.material.needsUpdate = true;
+                }
+            });
+
+            // Apply effect
+            this._applyEffect(effect);
+
+            // Apply accessory
+            this._applyAccessory(accessory);
+        }
+
+        _clearCustomizationEffects() {
+            // Remove particle system
+            if (this._effectParticles) {
+                this.scene.remove(this._effectParticles);
+                this._effectParticles.geometry.dispose();
+                this._effectParticles.material.dispose();
+                this._effectParticles = null;
+            }
+            // Remove accessory objects
+            if (this._accessoryObj) {
+                this.scene.remove(this._accessoryObj);
+                this._accessoryObj = null;
+            }
+            // Reset hologram/glow
+            if (this.currentModel) {
+                this.currentModel.traverse(child => {
+                    if (child.isMesh && child.material) {
+                        child.material.transparent = false;
+                        child.material.opacity = 1.0;
+                        child.material.wireframe = false;
+                        if (child.userData._origColor) {
+                            child.material.color.setHex(child.userData._origColor);
+                        }
+                    }
+                });
+            }
+        }
+
+        _applyEffect(effect) {
+            if (!this.currentModel) return;
+            const box = new THREE.Box3().setFromObject(this.currentModel);
+            const center = box.getCenter(new THREE.Vector3());
+            const size = box.getSize(new THREE.Vector3());
+            const maxDim = Math.max(size.x, size.y, size.z);
+
+            switch (effect) {
+                case 'glow':
+                    this.currentModel.traverse(child => {
+                        if (child.isMesh && child.material) {
+                            child.material.emissiveIntensity = 0.6;
+                            if (child.material.emissive) child.material.emissive.setHex(0x0044ff);
+                            child.material.needsUpdate = true;
+                        }
+                    });
+                    break;
+
+                case 'particles': {
+                    const count = 200;
+                    const positions = new Float32Array(count * 3);
+                    for (let i = 0; i < count; i++) {
+                        positions[i * 3] = center.x + (Math.random() - 0.5) * maxDim * 1.5;
+                        positions[i * 3 + 1] = center.y + Math.random() * size.y;
+                        positions[i * 3 + 2] = center.z + (Math.random() - 0.5) * maxDim * 1.5;
+                    }
+                    const geo = new THREE.BufferGeometry();
+                    geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+                    const mat = new THREE.PointsMaterial({ color: 0x00aaff, size: 0.03, transparent: true, opacity: 0.6 });
+                    this._effectParticles = new THREE.Points(geo, mat);
+                    const target = (this._vrControls && this._vrControls.worldGroup) || this.scene;
+                    target.add(this._effectParticles);
+                    break;
+                }
+
+                case 'hologram':
+                    this.currentModel.traverse(child => {
+                        if (child.isMesh && child.material) {
+                            child.material.transparent = true;
+                            child.material.opacity = 0.4;
+                            child.material.wireframe = true;
+                            if (child.material.emissive) child.material.emissive.setHex(0x00ffff);
+                            child.material.emissiveIntensity = 0.8;
+                            child.material.needsUpdate = true;
+                        }
+                    });
+                    break;
+
+                case 'flame': {
+                    const count = 150;
+                    const positions = new Float32Array(count * 3);
+                    for (let i = 0; i < count; i++) {
+                        const angle = Math.random() * Math.PI * 2;
+                        const r = maxDim * 0.4 * Math.random();
+                        positions[i * 3] = center.x + Math.cos(angle) * r;
+                        positions[i * 3 + 1] = box.min.y + Math.random() * size.y * 0.6;
+                        positions[i * 3 + 2] = center.z + Math.sin(angle) * r;
+                    }
+                    const geo = new THREE.BufferGeometry();
+                    geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+                    const mat = new THREE.PointsMaterial({ color: 0xff4400, size: 0.04, transparent: true, opacity: 0.7 });
+                    this._effectParticles = new THREE.Points(geo, mat);
+                    const target = (this._vrControls && this._vrControls.worldGroup) || this.scene;
+                    target.add(this._effectParticles);
+                    break;
+                }
+            }
+        }
+
+        _applyAccessory(accessory) {
+            if (!this.currentModel) return;
+            const box = new THREE.Box3().setFromObject(this.currentModel);
+            const center = box.getCenter(new THREE.Vector3());
+            const size = box.getSize(new THREE.Vector3());
+
+            const group = new THREE.Group();
+            const target = (this._vrControls && this._vrControls.worldGroup) || this.scene;
+
+            switch (accessory) {
+                case 'visor': {
+                    const geo = new THREE.BoxGeometry(size.x * 0.6, size.y * 0.08, size.z * 0.15);
+                    const mat = new THREE.MeshStandardMaterial({ color: 0x00ccff, transparent: true, opacity: 0.6, emissive: 0x0066ff, emissiveIntensity: 0.5 });
+                    const visor = new THREE.Mesh(geo, mat);
+                    visor.position.set(center.x, box.max.y - size.y * 0.15, center.z + size.z * 0.2);
+                    group.add(visor);
+                    break;
+                }
+                case 'headset': {
+                    const geo = new THREE.TorusGeometry(size.x * 0.25, size.x * 0.04, 8, 16);
+                    const mat = new THREE.MeshStandardMaterial({ color: 0x333333, metalness: 0.8, roughness: 0.2 });
+                    const headset = new THREE.Mesh(geo, mat);
+                    headset.position.set(center.x, box.max.y - size.y * 0.05, center.z);
+                    headset.rotation.x = Math.PI / 2;
+                    group.add(headset);
+                    break;
+                }
+                case 'wings': {
+                    for (let side of [-1, 1]) {
+                        const shape = new THREE.Shape();
+                        shape.moveTo(0, 0);
+                        shape.quadraticCurveTo(side * 0.5, 0.6, side * 0.8, 0.3);
+                        shape.quadraticCurveTo(side * 0.6, -0.1, 0, -0.1);
+                        const geo = new THREE.ShapeGeometry(shape);
+                        const mat = new THREE.MeshStandardMaterial({ color: 0xffffff, transparent: true, opacity: 0.5, emissive: 0x4488ff, emissiveIntensity: 0.3, side: THREE.DoubleSide });
+                        const wing = new THREE.Mesh(geo, mat);
+                        wing.position.set(center.x, center.y + size.y * 0.2, center.z - size.z * 0.3);
+                        wing.scale.setScalar(size.y * 0.8);
+                        group.add(wing);
+                    }
+                    break;
+                }
+                case 'aura': {
+                    const geo = new THREE.SphereGeometry(Math.max(size.x, size.z) * 0.7, 16, 16);
+                    const mat = new THREE.MeshStandardMaterial({ color: 0x8800ff, transparent: true, opacity: 0.12, emissive: 0x8800ff, emissiveIntensity: 0.5, side: THREE.BackSide });
+                    const aura = new THREE.Mesh(geo, mat);
+                    aura.position.copy(center);
+                    group.add(aura);
+                    break;
+                }
+            }
+
+            if (group.children.length > 0) {
+                target.add(group);
+                this._accessoryObj = group;
+            }
+        }
+
+        async saveCustomizations() {
+            if (!this.currentAvatarId) return;
+
+            const expression = document.querySelector('#expression-options .customize-option.selected')?.dataset.value || 'neutral';
+            const outfit = document.querySelector('#outfit-options .customize-option.selected')?.dataset.value || 'default';
+            const accessory = document.querySelector('#accessory-options .customize-option.selected')?.dataset.value || 'none';
+            const effect = document.querySelector('#effect-options .customize-option.selected')?.dataset.value || 'none';
+
+            try {
+                const resp = await fetch(`/api/avatar/${this.currentAvatarId}/customize`, {
+                    method: 'PUT',
+                    headers: { 'Authorization': `Bearer ${this.token}`, 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        customizations: {
+                            expression,
+                            outfit: { style: outfit },
+                            accessories: accessory !== 'none' ? [accessory] : [],
+                            effects: effect !== 'none' ? { type: effect } : {}
+                        }
+                    })
+                });
+                const data = await resp.json();
+                if (data.success) {
+                    this._showStatus('create-status', 'Customizations saved!', 'success');
+                } else {
+                    this._showStatus('create-status', data.error || 'Save failed', 'error');
+                }
+            } catch (err) {
+                this._showStatus('create-status', err.message, 'error');
+            }
+        }
+
+        // --- Viewer controls ---
+        resetCamera() {
+            if (!this.controls) return;
+            this.camera.position.set(0, 1.2, 3);
+            this.controls.target.set(0, 0.8, 0);
+            this.controls.update();
+        }
+
+        toggleWireframe() {
+            this.wireframe = !this.wireframe;
+            document.getElementById('btn-wireframe').classList.toggle('active', this.wireframe);
+            if (this.currentModel) {
+                this.currentModel.traverse(child => {
+                    if (child.isMesh && child.material) {
+                        const mats = Array.isArray(child.material) ? child.material : [child.material];
+                        mats.forEach(m => { m.wireframe = this.wireframe; });
+                    }
+                });
+            }
+        }
+
+        toggleAutoRotate() {
+            this.autoRotate = !this.autoRotate;
+            document.getElementById('btn-rotate').classList.toggle('active', this.autoRotate);
+            if (this.controls) this.controls.autoRotate = this.autoRotate;
+        }
+
+        async autoRig() {
+            if (!this.currentAvatarId) return;
+            const btn = document.getElementById('btn-autorig');
+            btn.disabled = true;
+            btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Rigging...';
+            this._showStatus('create-status', 'Adding skeleton with automatic weights... This takes 10-30 seconds.', 'info');
+            try {
+                const resp = await fetch(`/api/avatar/${this.currentAvatarId}/rig`, {
+                    method: 'POST',
+                    headers: { 'Authorization': `Bearer ${this.token}` }
+                });
+                const data = await resp.json();
+                if (data.success) {
+                    this._showStatus('create-status', `Rigged! ${data.data.bones} bones, ${data.data.vertices} vertices. Reload to see the rigged model.`, 'success');
+                    // Reload the model to show rigged version
+                    await this.loadModel(this.currentAvatarId);
+                } else {
+                    this._showStatus('create-status', data.error || 'Rigging failed', 'error');
+                }
+            } catch (err) {
+                this._showStatus('create-status', 'Rigging failed: ' + err.message, 'error');
+            } finally {
+                btn.disabled = false;
+                btn.innerHTML = '<i class="fas fa-bone"></i> Auto-Rig (add skeleton)';
+            }
+        }
+
+        async exportModel() {
+            if (!this.currentAvatarId) return;
+            // Fetch with auth token and trigger download
+            try {
+                const resp = await fetch(`/api/avatar/${this.currentAvatarId}/export?format=glb&token=${encodeURIComponent(this.token)}`);
+                if (!resp.ok) throw new Error(`Export failed: ${resp.status}`);
+                const blob = await resp.blob();
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `avatar-${this.currentAvatarId}.glb`;
+                a.click();
+                URL.revokeObjectURL(url);
+            } catch (err) {
+                alert('Export failed: ' + err.message);
+            }
+        }
+
+        exportSnapshot() {
+            if (!this.renderer) return;
+            // Render one frame at higher res for snapshot
+            this.renderer.render(this.scene, this.camera);
+            const dataUrl = this.renderer.domElement.toDataURL('image/png');
+            const a = document.createElement('a');
+            a.href = dataUrl;
+            a.download = `avatar-${this.currentAvatarId || 'snapshot'}.png`;
+            a.click();
+        }
+
+        async mintNFT() {
+            if (!this.currentAvatarId) return;
+            if (!confirm('Mint this avatar as an ERC-721 NFT on BSC? This requires gas.')) return;
+
+            try {
+                const resp = await fetch(`/api/avatar/${this.currentAvatarId}/mint`, {
+                    method: 'POST',
+                    headers: { 'Authorization': `Bearer ${this.token}` }
+                });
+                const data = await resp.json();
+                if (data.success) {
+                    this._showStatus('create-status', `NFT minted! Token #${data.data.tokenId}`, 'success');
+                } else {
+                    this._showStatus('create-status', data.error || 'Mint failed', 'error');
+                }
+            } catch (err) {
+                this._showStatus('create-status', err.message, 'error');
+            }
+        }
+
+        async viewItems() {
+            if (!this.currentAvatarId) return;
+            const list = document.getElementById('items-list');
+            try {
+                const resp = await fetch(`/api/avatar/${this.currentAvatarId}/items`, {
+                    headers: { 'Authorization': `Bearer ${this.token}` }
+                });
+                const data = await resp.json();
+                if (data.success && data.data?.length) {
+                    list.innerHTML = '<h4 style="font-size:13px; color:var(--accent); margin-bottom:8px;">Unlockable Items</h4>' +
+                        data.data.map(item => `
+                            <div style="padding:8px; background:var(--bg-tertiary); border-radius:6px; margin-bottom:6px; font-size:12px; border:1px solid var(--border);">
+                                <strong>${item.name || item.itemId}</strong>
+                                ${item.achievement ? `<br><span style="color:var(--text-secondary);">${item.achievement}</span>` : ''}
+                                ${item.unlocked ? '<span style="color:var(--success);"> Unlocked</span>' : ''}
+                            </div>
+                        `).join('');
+                } else {
+                    list.innerHTML = '<div style="font-size:12px; color:var(--text-secondary);">No items available yet</div>';
+                }
+            } catch (err) {
+                list.innerHTML = `<div style="font-size:12px; color:var(--danger);">${err.message}</div>`;
+            }
+        }
+
+        // --- VRM Avatar System ---
+
+        async loadVRMManifest() {
+            try {
+                const resp = await fetch('/vrm-models/manifest.json');
+                if (!resp.ok) return;
+                this.vrmModels = await resp.json();
+                this._renderVRMPicker();
+
+                // Auto-load previously saved active VRM and switch to VRM tab
+                const activeId = this._savedActiveVRM;
+                if (activeId && this.vrmModels.find(m => m.id === activeId)) {
+                    // Hide 2D preview/message immediately — VRM takes over the viewer
+                    document.getElementById('viewer-message').style.display = 'none';
+                    this._hide2DPreview();
+                    // switchTab('vrm') will trigger loadVRMModel via the restore logic
+                    this.switchTab('vrm');
+                }
+            } catch (e) {
+                console.warn('VRM manifest not available:', e.message);
+            }
+        }
+
+        _renderVRMPicker() {
+            const grid = document.getElementById('vrm-model-picker');
+            if (!grid || !this.vrmModels.length) return;
+            const activeId = this._savedActiveVRM;
+            grid.innerHTML = this.vrmModels.map((m, i) => `
+                <div class="gallery-item${m.id === activeId ? ' selected' : ''}" data-vrm-id="${m.id}" onclick="avatarDesigner.loadVRMModel('${m.id}')"
+                     style="cursor:pointer;padding:10px;text-align:center;">
+                    <div style="font-size:28px;margin-bottom:6px;"><i class="fas fa-user-astronaut" style="color:var(--accent);"></i></div>
+                    <div class="name" style="font-size:13px;">${m.name}${m.id === activeId ? ' <i class="fas fa-star" style="color:var(--warning);font-size:10px;"></i>' : ''}</div>
+                    <div style="font-size:10px;color:var(--text-secondary);">${m.sizeMB}MB · ${m.expressions.length} expr · ${m.springBoneCount} springs</div>
+                    <div style="font-size:10px;color:var(--text-secondary);margin-top:2px;">${m.description}</div>
+                </div>
+            `).join('');
+        }
+
+        async setActiveVRM() {
+            if (!this._currentVRMId) return;
+            if (!confirm('Set this model as your active avatar?')) return;
+            // Persist to server
+            try {
+                await fetch('/api/agent/vrm', {
+                    method: 'PUT',
+                    headers: { 'Authorization': `Bearer ${this.token}`, 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ modelId: this._currentVRMId })
+                });
+            } catch (e) { console.warn('Failed to save active VRM:', e); }
+            this._savedActiveVRM = this._currentVRMId;
+            // Update UI
+            this._renderVRMPicker();
+            const status = document.getElementById('vrm-active-status');
+            if (status) { status.style.display = 'block'; }
+            // Re-highlight current
+            document.querySelectorAll('#vrm-model-picker .gallery-item').forEach(el => {
+                el.classList.toggle('selected', el.dataset.vrmId === this._currentVRMId);
+            });
+        }
+
+        /**
+         * Render a bust portrait of the current VRM model:
+         * - Temporarily move camera to frame head+shoulders
+         * - Render to an offscreen canvas at 512x512
+         * - Return base64 PNG
+         */
+        _renderBustPortrait() {
+            if (!this.currentVRM || !this.renderer) return null;
+            const vrm = this.currentVRM;
+
+            // Find head bone to center the bust shot
+            const head = this._getBone(vrm, 'head');
+            const chest = this._getBone(vrm, 'chest') || this._getBone(vrm, 'spine');
+            if (!head) return null;
+
+            // getWorldPosition already includes all parent transforms (scene rotation etc.)
+            const headPos = new THREE.Vector3();
+            head.getWorldPosition(headPos);
+
+            const chestPos = new THREE.Vector3();
+            if (chest) {
+                chest.getWorldPosition(chestPos);
+            } else {
+                chestPos.copy(headPos).y -= 0.3;
+            }
+
+            // Bust center: between chest and head, slightly head-biased
+            const bustCenter = new THREE.Vector3().lerpVectors(chestPos, headPos, 0.6);
+            const bustHeight = headPos.distanceTo(chestPos) * 1.6 || 0.5;
+
+            // Save current state
+            const savedCamPos = this.camera.position.clone();
+            const savedTarget = this.controls.target.clone();
+            const savedAspect = this.camera.aspect;
+            const savedLookAt = this.vrmLookAtTarget ? this.vrmLookAtTarget.position.clone() : null;
+
+            // Position bust camera in front of the face
+            // Camera looks along -Z in world, model faces camera (rotated PI)
+            // Place camera at same X/Y as bust center, offset forward in Z
+            const camZ = bustCenter.z + bustHeight * 2.2;
+            const camPos = new THREE.Vector3(bustCenter.x, bustCenter.y, camZ);
+            this.camera.aspect = 1;
+            this.camera.updateProjectionMatrix();
+            this.camera.position.copy(camPos);
+            this.camera.lookAt(bustCenter);
+
+            // Force eyes to look at the camera — position lookAt target at camera
+            if (this.vrmLookAtTarget) {
+                this.vrmLookAtTarget.position.copy(camPos);
+            }
+            // Update VRM so lookAt/expressions apply before render
+            vrm.update(1/30);
+
+            // Render to offscreen 512x512
+            const size = 512;
+            const prevSize = new THREE.Vector2();
+            this.renderer.getSize(prevSize);
+            this.renderer.setSize(size, size);
+            this.renderer.render(this.scene, this.camera);
+            const dataUrl = this.renderer.domElement.toDataURL('image/png');
+
+            // Restore everything
+            if (savedLookAt && this.vrmLookAtTarget) {
+                this.vrmLookAtTarget.position.copy(savedLookAt);
+            }
+            this.renderer.setSize(prevSize.x, prevSize.y);
+            this.camera.aspect = savedAspect;
+            this.camera.updateProjectionMatrix();
+            this.camera.position.copy(savedCamPos);
+            this.controls.target.copy(savedTarget);
+            this.controls.update();
+            this.renderer.render(this.scene, this.camera);
+
+            return dataUrl;
+        }
+
+        /**
+         * Render bust portrait → upload as agent avatar → sync to Gravatar & email signature
+         */
+        async updateAgentAvatar() {
+            if (!confirm('Update agent avatar everywhere?\nThis will render a bust portrait and push it to your profile, Gravatar, Telegram, and ERC-8004 NFT.')) return;
+            const btn = document.getElementById('btn-update-agent-avatar');
+            const status = document.getElementById('vrm-update-status');
+            if (!this.currentVRM && !this._glbMorphMeshes?.length) {
+                status.innerHTML = '<span style="color:var(--danger);"><i class="fas fa-exclamation-circle"></i> No VRM or GLB model loaded</span>';
+                status.style.display = 'block';
+                return;
+            }
+
+            btn.disabled = true;
+            btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Rendering bust portrait...';
+            status.innerHTML = '';
+            status.style.display = 'block';
+
+            try {
+                // Step 1: Render bust (VRM or GLB)
+                status.innerHTML = '<span style="color:var(--accent);"><i class="fas fa-camera"></i> Rendering bust portrait...</span>';
+                const dataUrl = this.currentVRM ? this._renderBustPortrait() : this._renderGLBBustPortrait();
+                if (!dataUrl) throw new Error('Failed to render bust portrait — head bone not found');
+
+                // Extract base64 data (remove data:image/png;base64, prefix)
+                const base64 = dataUrl.split(',')[1];
+
+                // Step 2: Upload as agent avatar
+                status.innerHTML = '<span style="color:var(--accent);"><i class="fas fa-upload"></i> Uploading agent avatar...</span>';
+                const uploadResp = await fetch('/api/agent/avatar', {
+                    method: 'POST',
+                    headers: { 'Authorization': `Bearer ${this.token}`, 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        image: base64,
+                        filename: 'avatar.png',
+                        description: this.currentVRM ? `VRM avatar: ${this._currentVRMId || 'custom'}` : `GLB avatar: ${this._currentGLBId || 'custom'}`
+                    })
+                });
+                const uploadData = await uploadResp.json();
+                if (!uploadData.success) throw new Error(uploadData.error || 'Upload failed');
+
+                // Step 3: Sync to Gravatar, Telegram, & external services
+                status.innerHTML = '<span style="color:var(--accent);"><i class="fas fa-globe"></i> Syncing to Gravatar, Telegram &amp; email...</span>';
+                let gravatarMsg = '', telegramMsg = '';
+                try {
+                    const syncResp = await fetch('/api/agent/avatar/sync', {
+                        method: 'POST',
+                        headers: { 'Authorization': `Bearer ${this.token}` }
+                    });
+                    const syncData = await syncResp.json();
+                    const gravatarOk = syncData.results?.gravatar?.success;
+                    gravatarMsg = gravatarOk ? 'Gravatar updated' : (syncData.results?.gravatar?.error || 'Gravatar not configured');
+                    const telegramOk = syncData.results?.telegram?.success;
+                    const telegramNote = syncData.results?.telegram?.note;
+                    telegramMsg = telegramOk ? (telegramNote || 'Telegram bot photo updated') : (syncData.results?.telegram?.error || 'Telegram not available');
+                } catch (syncErr) {
+                    gravatarMsg = `Gravatar: ${syncErr.message}`;
+                    telegramMsg = `Telegram: ${syncErr.message}`;
+                }
+
+                // Step 4: Update ERC-8004 on-chain NFT avatar
+                let erc8004Msg = '';
+                status.innerHTML = '<span style="color:var(--accent);"><i class="fas fa-link"></i> Updating on-chain identity (ERC-8004)...</span>';
+                try {
+                    const ercResp = await fetch('/api/agent/erc8004/update', {
+                        method: 'PUT',
+                        headers: { 'Authorization': `Bearer ${this.token}`, 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ forceAvatarReupload: true })
+                    });
+                    const ercData = await ercResp.json();
+                    if (ercData.success) {
+                        erc8004Msg = `ERC-8004 updated (tx: ${ercData.data?.txHash?.slice(0, 10)}...)`;
+                    } else {
+                        erc8004Msg = ercData.error || 'ERC-8004 update failed';
+                    }
+                } catch (ercErr) {
+                    erc8004Msg = `ERC-8004: ${ercErr.message}`;
+                }
+
+                status.innerHTML = `<span style="color:var(--success);"><i class="fas fa-check-circle"></i> Avatar updated everywhere!</span>` +
+                    `<br><span style="font-size:10px;color:var(--text-secondary);">${gravatarMsg}</span>` +
+                    `<br><span style="font-size:10px;color:var(--text-secondary);">${telegramMsg}</span>` +
+                    `<br><span style="font-size:10px;color:var(--text-secondary);">${erc8004Msg}</span>`;
+
+                // Also set as active VRM if not already
+                if (!this._savedActiveVRM) {
+                    this.setActiveVRM();
+                }
+
+            } catch (err) {
+                console.error('Update agent avatar failed:', err);
+                status.innerHTML = `<span style="color:var(--danger);"><i class="fas fa-exclamation-circle"></i> ${err.message}</span>`;
+            } finally {
+                btn.disabled = false;
+                btn.innerHTML = '<i class="fas fa-globe"></i> Update Agent Avatar Everywhere';
+            }
+        }
+
+        async loadVRMModel(modelId) {
+            const modelInfo = this.vrmModels.find(m => m.id === modelId);
+            if (!modelInfo) return;
+            this._currentVRMId = modelId;
+            const url = `/vrm-models/${modelInfo.file}`;
+
+            // Highlight selection
+            document.querySelectorAll('#vrm-model-picker .gallery-item').forEach(el => {
+                el.classList.toggle('selected', el.dataset.vrmId === modelId);
+            });
+
+            // Show active controls
+            const activeControls = document.getElementById('vrm-active-controls');
+            if (activeControls) activeControls.style.display = 'block';
+            const status = document.getElementById('vrm-active-status');
+            if (status) status.style.display = this._savedActiveVRM === modelId ? 'block' : 'none';
+
+            await this._loadVRMFromUrl(url, modelInfo);
+        }
+
+        async loadUploadedVRM(file) {
+            if (!file || !file.name.endsWith('.vrm')) return;
+            const url = URL.createObjectURL(file);
+            await this._loadVRMFromUrl(url, { id: 'upload', name: file.name, expressions: [], springBoneCount: 0 });
+        }
+
+        async _loadVRMFromUrl(url, modelInfo) {
+            this._vrmLoadPending = true;
+            this._initViewer();
+            document.getElementById('viewer-message').style.display = 'none';
+            this._hide2DPreview();
+            document.getElementById('viewer-controls').style.display = 'flex';
+
+            // Remove previous VRM
+            if (this.currentVRM) {
+                if (typeof THREE_VRM !== 'undefined' && THREE_VRM.VRMUtils) {
+                    THREE_VRM.VRMUtils.deepDispose(this.currentVRM.scene);
+                }
+                const parent = this.currentVRM.scene.parent;
+                if (parent) parent.remove(this.currentVRM.scene);
+                this.currentVRM = null;
+            }
+            // Remove previous GLB model
+            if (this.currentModel) {
+                const parent = this.currentModel.parent || this.scene;
+                parent.remove(this.currentModel);
+                this.currentModel = null;
+            }
+
+            try {
+                const loader = new THREE.GLTFLoader();
+
+                // Register VRM plugin if available
+                if (typeof THREE_VRM !== 'undefined' && THREE_VRM.VRMLoaderPlugin) {
+                    loader.register(parser => new THREE_VRM.VRMLoaderPlugin(parser));
+                }
+
+                const gltf = await new Promise((resolve, reject) => {
+                    loader.load(url, resolve, undefined, reject);
+                });
+
+                const vrm = gltf.userData.vrm;
+                if (!vrm) {
+                    console.error('No VRM data found in file');
+                    return;
+                }
+
+                this.currentVRM = vrm;
+
+                // Optimize
+                if (THREE_VRM.VRMUtils) {
+                    THREE_VRM.VRMUtils.removeUnnecessaryJoints(vrm.scene);
+                }
+
+                // Fix materials for rendering
+                vrm.scene.traverse(child => {
+                    if (child.isMesh && child.material) {
+                        child.material.side = THREE.DoubleSide;
+                        child.material.needsUpdate = true;
+                    }
+                });
+
+                // VRM models face +Z by default — camera is at +Z looking at origin,
+                // so model already faces the camera. No rotation needed.
+
+                // Add to scene (hidden until idle animation loads to avoid T-pose flash)
+                vrm.scene.visible = false;
+                const target = (this._vrControls && this._vrControls.worldGroup) || this.scene;
+                target.add(vrm.scene);
+                this.currentModel = vrm.scene;
+
+                // Frame camera on model
+                const box = new THREE.Box3().setFromObject(vrm.scene);
+                const center = box.getCenter(new THREE.Vector3());
+                const size = box.getSize(new THREE.Vector3());
+                this.camera.position.set(0, center.y, Math.max(size.z * 2.5, 2.5));
+                this.controls.target.copy(center);
+                this.controls.update();
+
+                // Set up look-at
+                if (vrm.lookAt) {
+                    if (!this.vrmLookAtTarget) {
+                        this.vrmLookAtTarget = new THREE.Object3D();
+                        this.scene.add(this.vrmLookAtTarget);
+                    }
+                    vrm.lookAt.target = this.vrmLookAtTarget;
+                    // Position default look target in front of face
+                    this.vrmLookAtTarget.position.set(0, center.y, 3);
+                }
+
+                // Set up mouse tracking
+                this._setupMouseLookAt(center);
+
+                // Build expression UI
+                this._renderVRMExpressions(vrm);
+
+                // Show controls
+                document.getElementById('vrm-controls').style.display = 'block';
+
+                // Update Customize/Actions tabs to point to VRM tab instead of "select an avatar"
+                document.getElementById('customize-empty').innerHTML =
+                    '<i class="fas fa-user-astronaut" style="font-size:32px;color:var(--accent);opacity:0.5;display:block;margin-bottom:12px;"></i>' +
+                    `VRM model <strong>${modelInfo.name}</strong> is active.<br><br>` +
+                    'Use the <strong>VRM</strong> tab for expressions, eye tracking, and animation controls.' +
+                    '<br><br><button class="btn btn-secondary" onclick="avatarDesigner.switchTab(\'vrm\')" style="font-size:12px;"><i class="fas fa-arrow-left"></i> Go to VRM Tab</button>';
+                document.getElementById('actions-empty').innerHTML =
+                    '<i class="fas fa-user-astronaut" style="font-size:32px;color:var(--accent);opacity:0.5;display:block;margin-bottom:12px;"></i>' +
+                    `VRM model <strong>${modelInfo.name}</strong> is active.<br><br>` +
+                    '<button class="btn btn-secondary" onclick="avatarDesigner.exportSnapshot()" style="font-size:12px;margin:4px;"><i class="fas fa-camera"></i> Export PNG</button>' +
+                    '<button class="btn btn-secondary" onclick="avatarDesigner.exportModel()" style="font-size:12px;margin:4px;"><i class="fas fa-download"></i> Export GLB</button>';
+
+                // Show credit if required
+                const creditEl = document.getElementById('vrm-credit');
+                if (modelInfo.credit) {
+                    creditEl.innerHTML = `<i class="fas fa-info-circle"></i> Model: ${modelInfo.credit}`;
+                    creditEl.style.display = 'block';
+                } else {
+                    creditEl.style.display = 'none';
+                }
+
+                // Set up animations
+                this._idleTime = 0;
+                this._mixer = null;
+
+                // Load VRMA animations (async, non-blocking)
+                // On failure, still reveal the model (T-pose is better than invisible)
+                this._loadIdleAnimations(vrm).catch(e => {
+                    console.warn('Animation load:', e.message);
+                    vrm.scene.visible = true;
+                });
+                console.log('VRM loaded:', modelInfo.name, '| expressions:', vrm.expressionManager ? 'yes' : 'no', '| lookAt:', vrm.lookAt ? 'yes' : 'no');
+
+            } catch (err) {
+                console.error('VRM load failed:', err);
+                alert('Failed to load VRM: ' + err.message);
+            } finally {
+                this._vrmLoadPending = false;
+            }
+        }
+
+        // Get a bone node, trying normalized first (VRM 1.0) then raw (VRM 0.x)
+        _getBone(vrm, name) {
+            if (!vrm.humanoid) return null;
+            return vrm.humanoid.getNormalizedBoneNode(name)
+                || vrm.humanoid.getRawBoneNode(name)
+                || null;
+        }
+
+        /**
+         * Load a VRMA animation file and retarget it to the current VRM model.
+         * VRMA is glTF2 with VRMC_vrm_animation extension that maps nodes to VRM bone names.
+         */
+        async loadVRMA(url) {
+            if (!this.currentVRM?.humanoid) return null;
+            const vrm = this.currentVRM;
+
+            const loader = new THREE.GLTFLoader();
+            const gltf = await new Promise((resolve, reject) => {
+                loader.load(url, resolve, undefined, reject);
+            });
+
+            if (!gltf.animations || gltf.animations.length === 0) {
+                console.warn('VRMA has no animations');
+                return null;
+            }
+
+            // Parse the VRMC_vrm_animation extension to get bone name mapping
+            const vrmaExt = gltf.parser?.json?.extensions?.VRMC_vrm_animation
+                         || gltf.userData?.gltfExtensions?.VRMC_vrm_animation;
+
+            // Build mapping: VRMA node name → VRM bone name
+            const nodeNameToBone = {};
+            if (vrmaExt?.humanoid?.humanBones) {
+                const nodes = gltf.parser?.json?.nodes || [];
+                for (const [boneName, info] of Object.entries(vrmaExt.humanoid.humanBones)) {
+                    const nodeIdx = info.node;
+                    if (nodeIdx < nodes.length) {
+                        nodeNameToBone[nodes[nodeIdx].name] = boneName;
+                    }
+                }
+            }
+
+            // Retarget: rename animation track targets from VRMA node names to VRM model bone names
+            const clip = gltf.animations[0];
+            const retargetedTracks = [];
+
+            for (const track of clip.tracks) {
+                // Track name format: "NodeName.property"
+                const dotIdx = track.name.lastIndexOf('.');
+                const nodeName = track.name.substring(0, dotIdx);
+                const property = track.name.substring(dotIdx);
+
+                const vrmBoneName = nodeNameToBone[nodeName];
+                if (!vrmBoneName) continue; // skip non-humanoid tracks (expressions, lookAt, etc.)
+
+                // Get the corresponding bone in our VRM model
+                const bone = this._getBone(vrm, vrmBoneName);
+                if (!bone) continue;
+
+                // Create retargeted track with the VRM model's bone node name
+                const newTrackName = bone.name + property;
+                const newTrack = track.clone();
+                newTrack.name = newTrackName;
+                retargetedTracks.push(newTrack);
+            }
+
+            if (retargetedTracks.length === 0) {
+                console.warn('No tracks could be retargeted');
+                return null;
+            }
+
+            const retargetedClip = new THREE.AnimationClip(clip.name, clip.duration, retargetedTracks);
+            console.log(`VRMA retargeted: ${retargetedTracks.length} tracks, duration: ${clip.duration.toFixed(1)}s`);
+            return retargetedClip;
+        }
+
+        async _loadIdleAnimations(vrm) {
+            if (!this._mixer) this._mixer = new THREE.AnimationMixer(vrm.scene);
+
+            // Load available VRMA animations
+            const animFiles = [
+                // Idle loops
+                { url: '/vrm-models/animations/waiting-3ESXHYFP.vrma', name: 'idle', loop: true },
+                { url: '/vrm-models/animations/liked-I5PMMZDS.vrma', name: 'liked', loop: true },
+                // VRoid Hub official mocap
+                { url: '/vrm-models/animations/vroid_01.vrma', name: 'pose', loop: true },
+                { url: '/vrm-models/animations/vroid_02.vrma', name: 'greeting', loop: false },
+                { url: '/vrm-models/animations/vroid_05.vrma', name: 'spin', loop: false },
+                // Emotion/gesture set
+                { url: '/vrm-models/animations/appearing-7KKFBBJ2.vrma', name: 'appearing', loop: false },
+                { url: '/vrm-models/animations/Clapping.vrma', name: 'clapping', loop: false },
+                { url: '/vrm-models/animations/Thinking.vrma', name: 'thinking', loop: false },
+                { url: '/vrm-models/animations/Surprised.vrma', name: 'surprised', loop: false },
+                { url: '/vrm-models/animations/Goodbye.vrma', name: 'goodbye', loop: false },
+            ];
+
+            this._idleActions = [];
+            // Load animations with per-file timeout to prevent hangs
+            const loadWithTimeout = (url, ms = 10000) => {
+                return Promise.race([
+                    this.loadVRMA(url),
+                    new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), ms))
+                ]);
+            };
+            for (const anim of animFiles) {
+                try {
+                    const clip = await loadWithTimeout(anim.url);
+                    if (clip) {
+                        clip.name = anim.name;
+                        const action = this._mixer.clipAction(clip);
+                        action.setLoop(anim.loop ? THREE.LoopRepeat : THREE.LoopOnce);
+                        if (!anim.loop) action.clampWhenFinished = true;
+                        this._idleActions.push({ name: anim.name, action });
+                    }
+                } catch (e) {
+                    console.warn(`Failed to load animation ${anim.name}:`, e.message);
+                }
+            }
+
+            // Play idle animation by default, then reveal the model
+            const idle = this._idleActions.find(a => a.name === 'idle');
+            if (idle) {
+                idle.action.play();
+                this._currentIdleAction = idle;
+                this._mixer.update(0.01);
+                vrm.update(0.01);
+                console.log('Playing idle animation');
+            }
+            // Always reveal model
+            vrm.scene.visible = true;
+        }
+
+        playAnimation(name) {
+            if (!this._mixer || !this._idleActions) return;
+            const target = this._idleActions.find(a => a.name === name);
+            if (!target) return;
+
+            if (this._currentIdleAction && this._currentIdleAction !== target) {
+                this._currentIdleAction.action.crossFadeTo(target.action.reset().play(), 0.5, false);
+            } else {
+                target.action.reset().play();
+            }
+            this._currentIdleAction = target;
+
+            // If it's a one-shot animation, crossfade back to idle when done
+            if (target.action.loop === THREE.LoopOnce) {
+                const idle = this._idleActions.find(a => a.name === 'idle');
+                if (idle) {
+                    // Remove previous listener to prevent leaks
+                    if (this._oneShotFinishedHandler) {
+                        this._mixer.removeEventListener('finished', this._oneShotFinishedHandler);
+                    }
+                    this._oneShotFinishedHandler = (e) => {
+                        if (e.action === target.action) {
+                            target.action.crossFadeTo(idle.action.reset().play(), 0.5, false);
+                            this._currentIdleAction = idle;
+                            this._mixer.removeEventListener('finished', this._oneShotFinishedHandler);
+                            this._oneShotFinishedHandler = null;
+                        }
+                    };
+                    this._mixer.addEventListener('finished', this._oneShotFinishedHandler);
+                }
+            }
+        }
+
+        /**
+         * After AnimationMixer applies VRMA keyframes, nudge shoulder/upperArm bones
+         * slightly outward to prevent crossed-arm poses from clipping through the torso.
+         * This works regardless of which animation clip is playing.
+         */
+        _applyArmSpreadCorrection() {
+            if (!this.currentVRM?.humanoid) return;
+            const vrm = this.currentVRM;
+            const spreadAngle = 0.12; // radians (~7°) outward offset
+
+            // Apply outward rotation to shoulders and upper arms
+            // Left side: positive Z rotation pushes arm away from body
+            // Right side: negative Z rotation pushes arm away from body
+            const corrections = [
+                { bone: 'leftShoulder',  axis: 'z', angle:  spreadAngle * 0.5 },
+                { bone: 'leftUpperArm',  axis: 'z', angle:  spreadAngle },
+                { bone: 'rightShoulder', axis: 'z', angle: -spreadAngle * 0.5 },
+                { bone: 'rightUpperArm', axis: 'z', angle: -spreadAngle },
+            ];
+
+            for (const c of corrections) {
+                const bone = this._getBone(vrm, c.bone);
+                if (!bone) continue;
+                // Apply additive rotation on the local axis
+                bone.rotation[c.axis] += c.angle;
+            }
+        }
+
+        _setupMouseLookAt(modelCenter) {
+            const container = document.getElementById('viewer-canvas');
+            if (this._mouseLookHandler) container.removeEventListener('mousemove', this._mouseLookHandler);
+
+            this._mouseLookHandler = (e) => {
+                if (!this.currentVRM?.lookAt || !this.vrmLookAtTarget) return;
+                if (!document.getElementById('vrm-lookat')?.checked) return;
+
+                const rect = container.getBoundingClientRect();
+                const x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+                const y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+
+                this.vrmLookAtTarget.position.set(
+                    x * 2,
+                    (modelCenter?.y || 1.4) + y * 0.5,
+                    3
+                );
+            };
+            container.addEventListener('mousemove', this._mouseLookHandler);
+        }
+
+        _renderVRMExpressions(vrm) {
+            const container = document.getElementById('vrm-expression-options');
+            if (!container) return;
+
+            if (!vrm.expressionManager) {
+                container.innerHTML = '<span style="color:var(--text-secondary);font-size:12px;">No expressions available</span>';
+                return;
+            }
+
+            // Get available expressions — try both v1.0 and v0.x APIs
+            let exprNames = [];
+            if (vrm.expressionManager.expressions) {
+                exprNames = vrm.expressionManager.expressions.map(e => e.expressionName || e.name).filter(Boolean);
+            }
+            if (exprNames.length === 0 && vrm.expressionManager._expressionMap) {
+                exprNames = Object.keys(vrm.expressionManager._expressionMap);
+            }
+
+            // Filter out auto-managed ones
+            const hideNames = ['blink', 'blinkLeft', 'blinkRight', 'lookUp', 'lookDown', 'lookLeft', 'lookRight'];
+            const displayNames = exprNames.filter(n => !hideNames.includes(n));
+
+            // Add neutral option
+            const allOptions = ['neutral', ...displayNames.filter(n => n !== 'neutral')];
+
+            container.innerHTML = allOptions.map(name => {
+                const label = name.charAt(0).toUpperCase() + name.slice(1);
+                const selected = name === 'neutral' ? ' selected' : '';
+                return `<span class="customize-option${selected}" data-vrm-expr="${name}"
+                         onclick="avatarDesigner.setVRMExpression('${name}')">${label}</span>`;
+            }).join('');
+        }
+
+        setVRMExpression(name) {
+            if (!this.currentVRM?.expressionManager) return;
+
+            // Reset all
+            const mgr = this.currentVRM.expressionManager;
+            if (mgr.expressions) {
+                mgr.expressions.forEach(e => {
+                    const eName = e.expressionName || e.name;
+                    if (eName && !['blink', 'blinkLeft', 'blinkRight'].includes(eName)) {
+                        mgr.setValue(eName, 0);
+                    }
+                });
+            }
+
+            // Set selected
+            if (name !== 'neutral') {
+                mgr.setValue(name, 1.0);
+            }
+            this._currentExpression = name;
+
+            // Update UI
+            document.querySelectorAll('#vrm-expression-options .customize-option')
+                .forEach(el => el.classList.toggle('selected', el.dataset.vrmExpr === name));
+        }
+
+        _updateVRMIdleAnimation(delta) {
+            if (!this.currentVRM) return;
+            if (!document.getElementById('vrm-idle')?.checked) return;
+
+            this._idleTime += delta;
+            const t = this._idleTime;
+
+            // Periodic blink
+            if (this.currentVRM.expressionManager) {
+                const blinkCycle = t % 4;
+                let blink = 0;
+                if (blinkCycle > 3.7 && blinkCycle < 3.9) {
+                    blink = Math.sin((blinkCycle - 3.7) / 0.2 * Math.PI);
+                }
+                const dbCycle = t % 7;
+                if (dbCycle > 6.5 && dbCycle < 6.7) {
+                    blink = Math.max(blink, Math.sin((dbCycle - 6.5) / 0.2 * Math.PI));
+                }
+                this.currentVRM.expressionManager.setValue('blink', blink);
+            }
+
+            this._updateLipSync();
+        }
+
+        // --- Lip Sync System ---
+
+        _initLipSync() {
+            if (this._lipSyncReady) return;
+            try {
+                this._audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                this._lipSyncAnalyser = this._audioContext.createAnalyser();
+                this._lipSyncAnalyser.fftSize = 256;
+                this._lipSyncData = new Uint8Array(this._lipSyncAnalyser.frequencyBinCount);
+                this._lipSyncReady = true;
+                this._lipSyncActive = false;
+            } catch (e) {
+                console.warn('Web Audio not available for lip sync:', e.message);
+            }
+        }
+
+        /**
+         * Play audio and sync avatar mouth to it.
+         * Can be called with a URL, Blob, or AudioBuffer.
+         */
+        async playWithLipSync(audioSource) {
+            if (!this.currentVRM?.expressionManager) return;
+            this._initLipSync();
+            if (!this._lipSyncReady) return;
+
+            // Resume audio context if suspended (browser autoplay policy)
+            if (this._audioContext.state === 'suspended') {
+                await this._audioContext.resume();
+            }
+
+            let source;
+
+            if (audioSource instanceof AudioBuffer) {
+                source = this._audioContext.createBufferSource();
+                source.buffer = audioSource;
+            } else {
+                // URL or Blob — fetch and decode
+                let arrayBuffer;
+                if (audioSource instanceof Blob) {
+                    arrayBuffer = await audioSource.arrayBuffer();
+                } else if (typeof audioSource === 'string') {
+                    const resp = await fetch(audioSource);
+                    arrayBuffer = await resp.arrayBuffer();
+                } else {
+                    return;
+                }
+                const audioBuffer = await this._audioContext.decodeAudioData(arrayBuffer);
+                source = this._audioContext.createBufferSource();
+                source.buffer = audioBuffer;
+            }
+
+            // Connect: source → analyser → destination
+            source.connect(this._lipSyncAnalyser);
+            this._lipSyncAnalyser.connect(this._audioContext.destination);
+
+            // Set expression to slight smile while talking
+            if (this._currentExpression === 'neutral') {
+                this.currentVRM.expressionManager.setValue('happy', 0.2);
+            }
+
+            this._lipSyncActive = true;
+            source.onended = () => {
+                this._lipSyncActive = false;
+                // Reset mouth
+                const mgr = this.currentVRM?.expressionManager;
+                if (mgr) {
+                    mgr.setValue('aa', 0);
+                    mgr.setValue('ih', 0);
+                    mgr.setValue('ou', 0);
+                    mgr.setValue('ee', 0);
+                    mgr.setValue('oh', 0);
+                    if (this._currentExpression === 'neutral') mgr.setValue('happy', 0);
+                }
+            };
+            source.start(0);
+        }
+
+        _updateLipSync() {
+            if (!this._lipSyncActive || !this._lipSyncAnalyser || !this.currentVRM?.expressionManager) return;
+
+            this._lipSyncAnalyser.getByteFrequencyData(this._lipSyncData);
+            const data = this._lipSyncData;
+            const mgr = this.currentVRM.expressionManager;
+
+            // Map frequency bands to visemes
+            // Low frequencies (100-400Hz) → aa (open mouth)
+            // Mid-low (400-800Hz) → oh (round mouth)
+            // Mid (800-1500Hz) → ih/ee (wide mouth)
+            // High (1500-3000Hz) → ou (pursed)
+            const binCount = data.length;
+            const lowBand = this._avgBand(data, 2, Math.floor(binCount * 0.08));
+            const midLowBand = this._avgBand(data, Math.floor(binCount * 0.08), Math.floor(binCount * 0.15));
+            const midBand = this._avgBand(data, Math.floor(binCount * 0.15), Math.floor(binCount * 0.3));
+            const highBand = this._avgBand(data, Math.floor(binCount * 0.3), Math.floor(binCount * 0.5));
+
+            // Normalize to 0-1 range with sensitivity
+            const sensitivity = 1.8;
+            const aa = Math.min(1, (lowBand / 255) * sensitivity);
+            const oh = Math.min(1, (midLowBand / 255) * sensitivity * 0.8);
+            const ee = Math.min(1, (midBand / 255) * sensitivity * 0.6);
+            const ou = Math.min(1, (highBand / 255) * sensitivity * 0.5);
+
+            // Apply with smoothing (lerp toward target)
+            const lerp = 0.4;
+            const prev = this._prevVisemes || { aa: 0, oh: 0, ee: 0, ou: 0 };
+            const smoothAa = prev.aa + (aa - prev.aa) * lerp;
+            const smoothOh = prev.oh + (oh - prev.oh) * lerp;
+            const smoothEe = prev.ee + (ee - prev.ee) * lerp;
+            const smoothOu = prev.ou + (ou - prev.ou) * lerp;
+
+            mgr.setValue('aa', smoothAa);
+            mgr.setValue('oh', smoothOh);
+            mgr.setValue('ee', smoothEe);
+            mgr.setValue('ou', smoothOu);
+
+            this._prevVisemes = { aa: smoothAa, oh: smoothOh, ee: smoothEe, ou: smoothOu };
+        }
+
+        _avgBand(data, start, end) {
+            let sum = 0;
+            const count = end - start;
+            if (count <= 0) return 0;
+            for (let i = start; i < end && i < data.length; i++) sum += data[i];
+            return sum / count;
+        }
+
+        /**
+         * Hook into the existing TTS playback to lip sync.
+         * Call this when TTS audio is received from the agent.
+         */
+        async lipSyncFromTTS(audioUrl) {
+            try {
+                if (this.currentVRM) {
+                    await this.playWithLipSync(audioUrl);
+                } else if (this._glbMorphMeshes?.length) {
+                    await this.playGLBWithLipSync(audioUrl);
+                }
+            } catch (e) {
+                console.warn('Lip sync failed:', e.message);
+            }
+        }
+
+        async _testLipSync() {
+            if (!this.currentVRM?.expressionManager) {
+                alert('Load a VRM model first');
+                return;
+            }
+            this._initLipSync();
+            if (!this._lipSyncReady) {
+                alert('Web Audio not available');
+                return;
+            }
+            if (this._audioContext.state === 'suspended') {
+                await this._audioContext.resume();
+            }
+
+            // Use the agent's configured TTS service (same voice as Telegram)
+            const testText = 'Hello! I am your AI assistant. How can I help you today?';
+            try {
+                const resp = await fetch('/api/voice/speak', {
+                    method: 'POST',
+                    headers: { 'Authorization': `Bearer ${this.token}`, 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ text: testText })
+                });
+                const data = await resp.json();
+                if (data.success && data.audioUrl) {
+                    console.log('TTS generated, playing with lip sync...');
+                    await this.playWithLipSync(data.audioUrl);
+                    return;
+                } else {
+                    console.warn('TTS response:', data.error || 'no audioUrl');
+                }
+            } catch (e) {
+                console.warn('TTS API error:', e.message);
+            }
+
+            // Fallback: browser speech synthesis with simulated visemes
+            console.log('Using browser speech synthesis fallback');
+            const mgr = this.currentVRM.expressionManager;
+            const utterance = new SpeechSynthesisUtterance(testText);
+            utterance.rate = 0.9;
+            utterance.pitch = 1.1;
+
+            this._lipSyncActive = true;
+            mgr.setValue('happy', 0.2);
+
+            const visemeSequence = ['aa', 'ee', 'oh', 'aa', 'ih', 'ou', 'aa', 'ee', 'oh', 'aa'];
+            let visemeIdx = 0;
+            const visemeInterval = setInterval(() => {
+                if (!this._lipSyncActive) { clearInterval(visemeInterval); return; }
+                ['aa', 'ih', 'ou', 'ee', 'oh'].forEach(v => mgr.setValue(v, 0));
+                const v = visemeSequence[visemeIdx % visemeSequence.length];
+                mgr.setValue(v, 0.7 + Math.random() * 0.3);
+                visemeIdx++;
+            }, 120);
+
+            utterance.onend = () => {
+                this._lipSyncActive = false;
+                clearInterval(visemeInterval);
+                ['aa', 'ih', 'ou', 'ee', 'oh'].forEach(v => mgr.setValue(v, 0));
+                if (this._currentExpression === 'neutral') mgr.setValue('happy', 0);
+            };
+            speechSynthesis.speak(utterance);
+        }
+
+        // =============================================
+        // === GLB Realistic Avatar System ===
+        // =============================================
+
+        async loadGLBManifest() {
+            try {
+                const resp = await fetch('/glb-manifest.json');
+                if (!resp.ok) return;
+                this.glbModels = await resp.json();
+                this._renderGLBPicker();
+
+                // Auto-load previously saved active GLB
+                try {
+                    const glbResp = await fetch('/api/agent/glb');
+                    const glbData = await glbResp.json();
+                    if (glbData.success && glbData.activeGLBModel) {
+                        this._savedActiveGLB = glbData.activeGLBModel;
+                    }
+                } catch (e) { /* no active GLB */ }
+
+                // If user has active GLB and no active VRM, auto-load it
+                if (this._savedActiveGLB && !this._savedActiveVRM) {
+                    document.getElementById('viewer-message').style.display = 'none';
+                    this._hide2DPreview();
+                    this.switchTab('glb');
+                }
+            } catch (e) {
+                console.warn('GLB manifest not available:', e.message);
+            }
+        }
+
+        _renderGLBPicker() {
+            const grid = document.getElementById('glb-model-picker');
+            if (!grid || !this.glbModels?.length) return;
+            const activeId = this._savedActiveGLB;
+            grid.innerHTML = this.glbModels.map(m => `
+                <div class="gallery-item${m.id === activeId ? ' selected' : ''}" data-glb-id="${m.id}" onclick="avatarDesigner.loadGLBModel('${m.id}')"
+                     style="cursor:pointer;padding:10px;text-align:center;">
+                    <div style="font-size:28px;margin-bottom:6px;"><i class="fas fa-user" style="color:#e91e63;"></i></div>
+                    <div class="name" style="font-size:13px;">${m.name}${m.id === activeId ? ' <i class="fas fa-star" style="color:var(--warning);font-size:10px;"></i>' : ''}</div>
+                    <div style="font-size:10px;color:var(--text-secondary);">${m.sizeMB}MB · ${m.blendShapeCount} shapes · ${m.outfits.length} outfits</div>
+                    <div style="font-size:10px;color:var(--text-secondary);margin-top:2px;">${m.description}</div>
+                </div>
+            `).join('');
+        }
+
+        async loadGLBModel(modelId) {
+            const modelInfo = this.glbModels?.find(m => m.id === modelId);
+            if (!modelInfo) return;
+            this._currentGLBId = modelId;
+            this._currentGLBInfo = modelInfo;
+            const url = `/glb-models/${modelInfo.file}`;
+
+            // Highlight selection
+            document.querySelectorAll('#glb-model-picker .gallery-item').forEach(el => {
+                el.classList.toggle('selected', el.dataset.glbId === modelId);
+            });
+
+            // Show active controls
+            const activeControls = document.getElementById('glb-active-controls');
+            if (activeControls) activeControls.style.display = 'block';
+            const status = document.getElementById('glb-active-status');
+            if (status) status.style.display = this._savedActiveGLB === modelId ? 'block' : 'none';
+
+            await this._loadGLBFromUrl(url, modelInfo);
+        }
+
+        async loadUploadedGLB(file) {
+            if (!file) return;
+            const url = URL.createObjectURL(file);
+            await this._loadGLBFromUrl(url, {
+                id: 'upload', name: file.name, outfits: [], allMeshes: [],
+                springBones: {}, blendShapes: [], headBone: null, eyeBones: []
+            });
+        }
+
+        async _loadGLBFromUrl(url, modelInfo) {
+            this._initViewer();
+            document.getElementById('viewer-message').style.display = 'none';
+            this._hide2DPreview();
+            document.getElementById('viewer-controls').style.display = 'flex';
+
+            // Remove previous VRM
+            if (this.currentVRM) {
+                if (typeof THREE_VRM !== 'undefined' && THREE_VRM.VRMUtils) {
+                    THREE_VRM.VRMUtils.deepDispose(this.currentVRM.scene);
+                }
+                const parent = this.currentVRM.scene.parent;
+                if (parent) parent.remove(this.currentVRM.scene);
+                this.currentVRM = null;
+                this._mixer = null;
+            }
+            // Remove previous model
+            if (this.currentModel) {
+                const parent = this.currentModel.parent || this.scene;
+                parent.remove(this.currentModel);
+                this.currentModel = null;
+            }
+
+            // Clean up previous GLB state
+            this._glbMorphMeshes = [];
+            this._glbSpringBones = [];
+            this._glbMixer = null;
+            this._glbIdleTime = 0;
+            this._glbIdleBonesInit = false;
+            this._glbChestBone = null;
+            this._glbSpine2Bone = null;
+            this._glbSpine1Bone = null;
+            this._glbNeckBone = null;
+            this._glbHipBone = null;
+            this._glbShoulderL = null;
+            this._glbShoulderR = null;
+            this._glbHeadBone = null;
+            this._glbEyeBones = [];
+            this._glbFrameLogged = false;
+            this._glbAnimError = false;
+            this._glbArmsRelaxed = false;
+            this._glbUpperArmL = null;
+            this._glbUpperArmR = null;
+            this._glbMixer = null;
+            this._glbAnimActions = [];
+            this._currentGLBAnimation = null;
+            this._glbHumanoidMap = null;
+
+            try {
+                const loader = new THREE.GLTFLoader();
+                const gltf = await new Promise((resolve, reject) => {
+                    loader.load(url, resolve, (e) => {
+                        // Progress — large files may take a moment
+                        if (e.total) {
+                            const pct = Math.round((e.loaded / e.total) * 100);
+                            document.getElementById('viewer-message').style.display = 'block';
+                            document.getElementById('viewer-message-text').textContent = `Loading model... ${pct}%`;
+                        }
+                    }, reject);
+                });
+                document.getElementById('viewer-message').style.display = 'none';
+
+                const model = gltf.scene;
+                this.currentModel = model;
+                this._currentGLB = gltf;
+                this._currentGLBInfo = modelInfo;
+
+                // Collect all meshes and their morph targets
+                const meshMap = {};
+                model.traverse(child => {
+                    if (child.isMesh) {
+                        // Map by own name and parent node name
+                        meshMap[child.name] = child;
+                        if (child.parent?.name && child.parent.name !== child.name) {
+                            if (!meshMap[child.parent.name]) meshMap[child.parent.name] = child.parent;
+                        }
+
+                        // Hide rig control shapes and stray planes
+                        if (child.name.startsWith('cs_') || child.name === 'Plane' ||
+                            (child.name.startsWith('Plane') && !child.name.startsWith('SK_'))) {
+                            child.visible = false;
+                        }
+
+                        // Fix materials for rendering
+                        const mats = Array.isArray(child.material) ? child.material : [child.material];
+                        mats.forEach(mat => {
+                            mat.side = THREE.DoubleSide;
+                            // Mark eye glass and eye shadow meshes to always stay hidden
+                            if (mat.name && (mat.name.includes('EyesGlass') || mat.name.includes('EyeGlass') || mat.name.includes('EyesShadow'))) {
+                                child.visible = false;
+                                child.userData._alwaysHidden = true;
+                                console.log('Hiding eye overlay mesh:', child.name, mat.name);
+                            }
+                            // Fix eye material + force render on top of head mesh
+                            if (mat.name && mat.name === 'M_SG_Eyes') {
+                                const eyeMat = mat.clone();
+                                eyeMat.metalness = 0.0;
+                                eyeMat.roughness = 0.3;
+                                eyeMat.metalnessMap = null;
+                                eyeMat.roughnessMap = null;
+                                eyeMat.envMap = null;
+                                eyeMat.depthTest = true;
+                                eyeMat.depthWrite = true;
+                                eyeMat.name = 'M_SG_Eyes';
+                                child.material = eyeMat;
+                                // Render eyes AFTER head so they appear on top in eye sockets
+                                child.renderOrder = 5;
+                            }
+                            // Head mesh renders first (default order 0)
+                            if (mat.name && mat.name === 'M_SG_Head') {
+                                child.renderOrder = 0;
+                            }
+                            // Fix teeth
+                            if (mat.name && mat.name === 'M_SG_Teeth') {
+                                const teethMat = mat.clone();
+                                teethMat.metalness = 0.0;
+                                teethMat.roughness = 0.5;
+                                teethMat.metalnessMap = null;
+                                teethMat.name = 'M_SG_Teeth';
+                                child.material = teethMat;
+                            }
+                            // Fix skin — no metalness
+                            if (mat.name && (mat.name === 'M_SG_Head' || mat.name === 'M_SG_Body' || mat.name === 'M_SG_BodySafe')) {
+                                mat.metalness = 0.0;
+                                mat.needsUpdate = true;
+                            }
+                            // Fix eye shadow — make it subtle, not black
+                            if (mat.name && mat.name.includes('EyesShadow')) {
+                                mat.transparent = true;
+                                mat.opacity = 0.3;
+                            }
+                            // Fix lash material — ensure alpha works
+                            if (mat.name && mat.name.includes('Lash')) {
+                                mat.transparent = true;
+                                mat.alphaTest = 0.5;
+                            }
+                            // Fix hair material — alpha cutout + brown tint
+                            if (mat.name && mat.name.includes('Hair')) {
+                                mat.transparent = false;
+                                mat.alphaTest = 0.5;
+                                mat.depthWrite = true;
+                                mat.side = THREE.FrontSide; // Don't render back faces (prevents bleed through head)
+                                mat.color = new THREE.Color(0.25, 0.12, 0.08); // warm dark brown tint
+                            }
+                            mat.needsUpdate = true;
+                        });
+                        // Track meshes with morph targets
+                        if (child.morphTargetDictionary && Object.keys(child.morphTargetDictionary).length > 0) {
+                            this._glbMorphMeshes.push(child);
+                        }
+                    }
+                });
+                // Also map top-level node names (Groups containing multi-primitive meshes)
+                model.traverse(child => {
+                    if ((child.isGroup || child.isObject3D) && child.name.startsWith('SK_')) {
+                        meshMap[child.name] = child;
+                    }
+                });
+                this._glbMeshMap = meshMap;
+
+                // Debug: log the full scene hierarchy for SK_ nodes
+                console.log('GLB loaded:', modelInfo.name,
+                    '| meshes:', Object.keys(meshMap).length,
+                    '| morph meshes:', this._glbMorphMeshes.length,
+                    '| morph targets:', this._glbMorphMeshes[0]?.morphTargetDictionary ? Object.keys(this._glbMorphMeshes[0].morphTargetDictionary).length : 0
+                );
+                console.log('GLB mesh map keys:', Object.keys(meshMap).filter(k => k.startsWith('SK_') || k.startsWith('Plane')));
+                // Log hierarchy for debugging outfit issues
+                model.traverse(child => {
+                    if (child.name && child.name.startsWith('SK_') && (child.isMesh || child.isGroup || child.children?.length > 0)) {
+                        console.log(`  Node: ${child.name} | type: ${child.type} | isMesh: ${child.isMesh} | children: ${child.children.length} | visible: ${child.visible}`);
+                    }
+                });
+                // Log bone/node names for idle animation debugging
+                const boneNames = [];
+                model.traverse(child => {
+                    if (!child.isMesh && !child.isGroup && (child.name.includes('spine') || child.name.includes('neck') || child.name.includes('head') || child.name.includes('shoulder') || child.name.includes('root') || child.name.includes('traj'))) {
+                        boneNames.push(`${child.name}(${child.type})`);
+                    }
+                });
+                console.log('GLB key bones:', boneNames);
+
+                // Auto-center and scale
+                const box = new THREE.Box3().setFromObject(model);
+                const size = box.getSize(new THREE.Vector3());
+                const center = box.getCenter(new THREE.Vector3());
+                const maxDim = Math.max(size.x, size.y, size.z);
+                if (maxDim > 0) {
+                    const scale = 2 / maxDim;
+                    model.scale.setScalar(scale);
+                    model.position.set(-center.x * scale, -box.min.y * scale, -center.z * scale);
+                }
+
+                // Set outfit BEFORE adding to scene (prevents both body groups
+                // rendering simultaneously and causing depth buffer issues with eyes)
+                if (modelInfo.outfits?.length > 0) {
+                    this._setGLBOutfit(modelInfo.outfits[0].id);
+                    this._renderGLBOutfitPicker(modelInfo);
+                }
+
+                // Add to scene
+                const target = (this._vrControls && this._vrControls.worldGroup) || this.scene;
+                target.add(model);
+
+                // Frame camera
+                const newBox = new THREE.Box3().setFromObject(model);
+                const newCenter = newBox.getCenter(new THREE.Vector3());
+                const newSize = newBox.getSize(new THREE.Vector3());
+                this.camera.position.set(0, newCenter.y, Math.max(newSize.z * 2.5, 2.5));
+                this.controls.target.copy(newCenter);
+                this.controls.update();
+
+                // Fix materials
+                this._fixGLBMaterials();
+
+                // TODO: Mixamo animations need proper integration
+                // this._loadGLBAnimations().catch(e => console.warn('GLB animations:', e.message));
+
+                // Set up spring bone physics
+                this._initGLBSpringBones(model, modelInfo);
+
+                // Set up eye tracking for GLB
+                this._setupGLBMouseLookAt(model, modelInfo, newCenter);
+
+                // Show controls
+                document.getElementById('glb-controls').style.display = 'block';
+
+                // Credit
+                const creditEl = document.getElementById('glb-credit');
+                if (modelInfo.credit) {
+                    creditEl.innerHTML = `<i class="fas fa-info-circle"></i> Model: ${modelInfo.credit}`;
+                    creditEl.style.display = 'block';
+                } else {
+                    creditEl.style.display = 'none';
+                }
+
+            } catch (err) {
+                console.error('GLB load failed:', err);
+                alert('Failed to load GLB: ' + err.message);
+            }
+        }
+
+        // --- GLB Mixamo Animation System ---
+
+        async _loadGLBAnimations() {
+            if (!this.currentModel) return;
+
+            this._glbMixer = new THREE.AnimationMixer(this.currentModel);
+            this._glbAnimActions = [];
+
+            // Mixamo animations converted to GLB — same skeleton, no retargeting needed
+            const animFiles = [
+                { url: '/glb-models/animations/idle.glb', name: 'idle', loop: true },
+                { url: '/glb-models/animations/idle2.glb', name: 'idle2', loop: true },
+                { url: '/glb-models/animations/happy_idle.glb', name: 'happy', loop: true },
+                { url: '/glb-models/animations/standing_idle_to_fight_idle.glb', name: 'fight_idle', loop: true },
+            ];
+
+            const loader = new THREE.GLTFLoader();
+
+            for (const anim of animFiles) {
+                try {
+                    const gltf = await new Promise((resolve, reject) => {
+                        const timeout = setTimeout(() => reject(new Error('timeout')), 15000);
+                        loader.load(anim.url, (g) => { clearTimeout(timeout); resolve(g); }, undefined, reject);
+                    });
+
+                    if (!gltf.animations?.length) {
+                        console.warn(`No animations in ${anim.name}`);
+                        continue;
+                    }
+
+                    const clip = gltf.animations[0];
+                    clip.name = anim.name;
+
+                    // Fix bone name dots + filter problematic root tracks
+                    const fixedTracks = [];
+                    for (const track of clip.tracks) {
+                        const lastDotIdx = track.name.lastIndexOf('.');
+                        if (lastDotIdx <= 0) continue;
+
+                        const bonePart = track.name.substring(0, lastDotIdx);
+                        const propPart = track.name.substring(lastDotIdx);
+                        const fixedBone = bonePart.replace(/\./g, '');
+
+                        // Skip root bone position/scale (causes underground/inversion)
+                        // Only keep rotation for root, and all transforms for other bones
+                        if (fixedBone === 'rootx' && (propPart === '.position' || propPart === '.scale')) continue;
+
+                        track.name = fixedBone + propPart;
+                        fixedTracks.push(track);
+                    }
+                    clip.tracks = fixedTracks;
+
+                    const action = this._glbMixer.clipAction(clip);
+                    action.setLoop(anim.loop ? THREE.LoopRepeat : THREE.LoopOnce);
+                    if (!anim.loop) action.clampWhenFinished = true;
+                    this._glbAnimActions.push({ name: anim.name, action });
+                    console.log(`GLB Mixamo animation loaded: ${anim.name} (${clip.tracks.length} tracks, ${clip.duration.toFixed(1)}s)`);
+                } catch (e) {
+                    console.warn(`GLB animation ${anim.name} failed:`, e.message);
+                }
+            }
+
+            // Play idle animation
+            const idle = this._glbAnimActions.find(a => a.name === 'idle');
+            if (idle) {
+                idle.action.play();
+                this._currentGLBAnimation = idle;
+                console.log('GLB playing idle animation');
+            }
+        }
+
+        playGLBAnimation(name) {
+            if (!this._glbMixer || !this._glbAnimActions) return;
+            const target = this._glbAnimActions.find(a => a.name === name);
+            if (!target) return;
+
+            if (this._currentGLBAnimation && this._currentGLBAnimation !== target) {
+                this._currentGLBAnimation.action.crossFadeTo(target.action.reset().play(), 0.5, false);
+            } else {
+                target.action.reset().play();
+            }
+            this._currentGLBAnimation = target;
+
+            // One-shot animations crossfade back to idle
+            if (target.action.loop === THREE.LoopOnce) {
+                const idle = this._glbAnimActions.find(a => a.name === 'idle');
+                if (idle) {
+                    if (this._glbOneShotHandler) {
+                        this._glbMixer.removeEventListener('finished', this._glbOneShotHandler);
+                    }
+                    this._glbOneShotHandler = (e) => {
+                        if (e.action === target.action) {
+                            target.action.crossFadeTo(idle.action.reset().play(), 0.5, false);
+                            this._currentGLBAnimation = idle;
+                            this._glbMixer.removeEventListener('finished', this._glbOneShotHandler);
+                        }
+                    };
+                    this._glbMixer.addEventListener('finished', this._glbOneShotHandler);
+                }
+            }
+        }
+
+        // --- GLB Material Post-Fix (runs after model + outfit fully loaded) ---
+        _fixGLBMaterials() {
+            if (!this.currentModel) return;
+            this.currentModel.traverse(child => {
+                if (!child.isMesh) return;
+                const mats = Array.isArray(child.material) ? child.material : [child.material];
+                mats.forEach(mat => {
+                    if (!mat.name) return;
+                    // Eyes: remove metalness entirely
+                    if (mat.name === 'M_SG_Eyes') {
+                        mat.metalness = 0.0;
+                        mat.roughness = 0.3;
+                        mat.metalnessMap = null;
+                        mat.roughnessMap = null;
+                        mat.envMap = null;
+                        mat.needsUpdate = true;
+                        console.log('Post-fix: Eyes metalness=0, roughnessMap=null');
+                    }
+                    // Teeth
+                    if (mat.name === 'M_SG_Teeth') {
+                        mat.metalness = 0.0;
+                        mat.roughness = 0.5;
+                        mat.metalnessMap = null;
+                        mat.needsUpdate = true;
+                    }
+                    // Skin: no metalness
+                    if (mat.name === 'M_SG_Head' || mat.name === 'M_SG_Body' || mat.name === 'M_SG_BodySafe') {
+                        mat.metalness = 0.0;
+                        mat.needsUpdate = true;
+                    }
+                    // Hair: matte, not shiny plastic
+                    if (mat.name.includes('Hair')) {
+                        mat.metalness = 0.0;
+                        mat.roughness = 0.8;
+                        mat.metalnessMap = null;
+                        mat.roughnessMap = null;
+                        mat.needsUpdate = true;
+                    }
+                });
+            });
+        }
+
+        // --- GLB Outfit System ---
+
+        _renderGLBOutfitPicker(modelInfo) {
+            const container = document.getElementById('glb-outfit-options');
+            if (!container || !modelInfo.outfits?.length) return;
+            container.innerHTML = modelInfo.outfits.map((o, i) =>
+                `<span class="customize-option${i === 0 ? ' selected' : ''}" data-glb-outfit="${o.id}"
+                    onclick="avatarDesigner._setGLBOutfit('${o.id}')">${o.label}</span>`
+            ).join('');
+        }
+
+        _setGLBOutfit(outfitId) {
+            const modelInfo = this._currentGLBInfo;
+            if (!modelInfo?.outfits || !this.currentModel) return;
+
+            const outfit = modelInfo.outfits.find(o => o.id === outfitId);
+            if (!outfit) return;
+
+            const showSet = new Set(outfit.meshes);
+            const allSet = new Set(modelInfo.allMeshes || []);
+
+            // Meshes that layer over the body (need render order + polygon offset)
+            const clothingMeshes = ['SK_TankTop', 'SK_Pants', 'SK_Sneakers', 'SK_Underwear',
+                                    'SK_Backpack', 'SK_Respirator', 'SK_Hair'];
+
+            // Use getObjectByName for reliable lookup
+            allSet.forEach(name => {
+                const obj = this.currentModel.getObjectByName(name);
+                if (obj) {
+                    const shouldShow = showSet.has(name);
+                    obj.visible = shouldShow;
+                    // For groups with children, set all children too
+                    // BUT respect _alwaysHidden flag (eye overlays)
+                    if (obj.children) {
+                        obj.traverse(c => {
+                            if (c.userData._alwaysHidden) { c.visible = false; return; }
+                            c.visible = shouldShow;
+                        });
+                    }
+                    // Set clothing to render on top of body to prevent bleed-through
+                    if (shouldShow && clothingMeshes.includes(name)) {
+                        obj.traverse(c => {
+                            if (c.isMesh) {
+                                c.renderOrder = 2;
+                                const mats = Array.isArray(c.material) ? c.material : [c.material];
+                                mats.forEach(m => {
+                                    m.polygonOffset = true;
+                                    m.polygonOffsetFactor = -8;
+                                    m.polygonOffsetUnits = -8;
+                                    m.needsUpdate = true;
+                                });
+                            }
+                        });
+                    }
+                } else {
+                    console.warn(`Outfit: mesh "${name}" not found in model`);
+                }
+            });
+
+            // Update UI
+            document.querySelectorAll('#glb-outfit-options .customize-option').forEach(el => {
+                el.classList.toggle('selected', el.dataset.glbOutfit === outfitId);
+            });
+
+            this._currentGLBOutfit = outfitId;
+            console.log(`Outfit set to: ${outfitId}`,
+                'show:', [...showSet],
+                'hidden:', [...allSet].filter(n => !showSet.has(n)));
+        }
+
+        // --- GLB Expression System (ARKit Blend Shapes) ---
+
+        setGLBExpression(preset) {
+            if (!this._glbMorphMeshes?.length) return;
+
+            // Expression presets using ARKit blend shape combinations
+            const presets = {
+                neutral: {},
+                happy: { mouthSmileLeft: 0.7, mouthSmileRight: 0.7, cheekSquintLeft: 0.4, cheekSquintRight: 0.4, eyeSquintLeft: 0.2, eyeSquintRight: 0.2 },
+                angry: { browDownLeft: 0.8, browDownRight: 0.8, noseSneerLeft: 0.5, noseSneerRight: 0.5, mouthFrownLeft: 0.4, mouthFrownRight: 0.4, jawOpen: 0.1 },
+                surprised: { browInnerUp: 0.8, browOuterUpLeft: 0.7, browOuterUpRight: 0.7, eyeWideLeft: 0.8, eyeWideRight: 0.8, jawOpen: 0.5, mouthFunnel: 0.3 },
+                sad: { browInnerUp: 0.6, browDownLeft: 0.3, browDownRight: 0.3, mouthFrownLeft: 0.6, mouthFrownRight: 0.6, eyeSquintLeft: 0.2, eyeSquintRight: 0.2 },
+                wink: { eyeBlinkRight: 1.0, mouthSmileLeft: 0.5, mouthSmileRight: 0.3, cheekSquintRight: 0.3 }
+            };
+
+            const values = presets[preset] || {};
+
+            // Reset all blend shapes to 0 first (except auto-managed ones like blink during idle)
+            this._glbMorphMeshes.forEach(mesh => {
+                const dict = mesh.morphTargetDictionary;
+                if (!dict) return;
+                for (const [name, idx] of Object.entries(dict)) {
+                    if (!name.startsWith('eyeBlink') || preset !== 'neutral') {
+                        mesh.morphTargetInfluences[idx] = 0;
+                    }
+                }
+            });
+
+            // Apply preset values
+            for (const [shapeName, value] of Object.entries(values)) {
+                this._setGLBMorphTarget(shapeName, value);
+            }
+
+            this._currentGLBExpression = preset;
+
+            // Update UI
+            document.querySelectorAll('#glb-expression-options .customize-option').forEach(el => {
+                el.classList.toggle('selected', el.dataset.glbExpr === preset);
+            });
+        }
+
+        _setGLBMorphTarget(name, value) {
+            this._glbMorphMeshes.forEach(mesh => {
+                const idx = mesh.morphTargetDictionary?.[name];
+                if (idx !== undefined) {
+                    mesh.morphTargetInfluences[idx] = value;
+                }
+            });
+        }
+
+        _getGLBMorphTarget(name) {
+            for (const mesh of this._glbMorphMeshes) {
+                const idx = mesh.morphTargetDictionary?.[name];
+                if (idx !== undefined) return mesh.morphTargetInfluences[idx];
+            }
+            return 0;
+        }
+
+        // --- GLB Spring Bone Physics ---
+
+        _initGLBSpringBones(model, modelInfo) {
+            this._glbSpringBones = [];
+            if (!modelInfo.springBones) return;
+
+            const findBone = (name) => {
+                let found = null;
+                model.traverse(child => {
+                    if (child.name === name && !child.isMesh) found = child;
+                });
+                return found;
+            };
+
+            // Set up breast spring bones
+            const breastBones = modelInfo.springBones.breast || [];
+            breastBones.forEach(name => {
+                const bone = findBone(name);
+                if (bone) {
+                    this._glbSpringBones.push({
+                        bone, type: 'breast',
+                        restRotation: bone.rotation.clone(),
+                        velocity: new THREE.Vector3(),
+                        stiffness: 0.5,
+                        damping: 0.7,
+                        gravity: -0.003
+                    });
+                }
+            });
+
+            // Set up hair spring bones
+            const hairBones = modelInfo.springBones.hair || [];
+            hairBones.forEach(name => {
+                const bone = findBone(name);
+                if (bone) {
+                    this._glbSpringBones.push({
+                        bone, type: 'hair',
+                        restRotation: bone.rotation.clone(),
+                        velocity: new THREE.Vector3(),
+                        stiffness: 0.4,
+                        damping: 0.6,
+                        gravity: -0.005
+                    });
+                }
+            });
+
+            console.log(`GLB spring bones initialized: ${this._glbSpringBones.length} (${breastBones.length} breast, ${hairBones.length} hair)`);
+        }
+
+        _updateGLBSpringBones(delta) {
+            if (!this._glbSpringBones?.length) return;
+            if (!document.getElementById('glb-spring')?.checked) return;
+
+            for (const sb of this._glbSpringBones) {
+                const bone = sb.bone;
+                if (!bone.parent) continue;
+
+                // Get parent world movement as the driving force
+                const parentPos = new THREE.Vector3();
+                bone.parent.getWorldPosition(parentPos);
+
+                if (!sb._prevParentPos) {
+                    sb._prevParentPos = parentPos.clone();
+                    continue;
+                }
+
+                // Calculate force from parent movement
+                const movement = new THREE.Vector3().subVectors(parentPos, sb._prevParentPos);
+                sb._prevParentPos.copy(parentPos);
+
+                // Spring physics: apply inertia opposite to movement
+                const dt = Math.min(delta, 0.05) * 60; // cap delta, normalize to 60fps
+                sb.velocity.x += (-movement.x * 1.5 - sb.velocity.x * sb.damping) * dt;
+                sb.velocity.z += (-movement.z * 1.5 - sb.velocity.z * sb.damping) * dt;
+
+                // Spring back to rest rotation (using Euler, not quaternion)
+                const restX = sb.restRotation.x;
+                const restZ = sb.restRotation.z;
+                sb.velocity.x -= (bone.rotation.x - restX) * sb.stiffness * dt;
+                sb.velocity.z -= (bone.rotation.z - restZ) * sb.stiffness * dt;
+
+                // Clamp velocity
+                const maxVel = 0.02;
+                sb.velocity.x = THREE.MathUtils.clamp(sb.velocity.x, -maxVel, maxVel);
+                sb.velocity.z = THREE.MathUtils.clamp(sb.velocity.z, -maxVel, maxVel);
+
+                // Apply rotation offset from rest
+                bone.rotation.x = restX + (bone.rotation.x - restX + sb.velocity.x) * 0.95;
+                bone.rotation.z = restZ + (bone.rotation.z - restZ + sb.velocity.z) * 0.95;
+
+                // Clamp total deviation from rest
+                const maxDev = sb.type === 'hair' ? 0.15 : 0.08;
+                bone.rotation.x = THREE.MathUtils.clamp(bone.rotation.x, restX - maxDev, restX + maxDev);
+                bone.rotation.z = THREE.MathUtils.clamp(bone.rotation.z, restZ - maxDev, restZ + maxDev);
+            }
+        }
+
+        _toggleGLBSpringBones(enabled) {
+            if (!enabled) {
+                this._glbSpringBones?.forEach(sb => {
+                    sb.bone.rotation.copy(sb.restRotation);
+                    sb.velocity.set(0, 0, 0);
+                });
+            }
+        }
+
+        // --- GLB Eye Tracking ---
+
+        _setupGLBMouseLookAt(model, modelInfo, modelCenter) {
+            this._glbEyeBones = [];
+            if (!modelInfo.eyeBones) return;
+
+            const findNode = (name) => {
+                let found = null;
+                model.traverse(child => {
+                    if (child.name === name && !child.isMesh) found = child;
+                });
+                return found;
+            };
+
+            modelInfo.eyeBones.forEach(name => {
+                const bone = findNode(name);
+                if (bone) {
+                    this._glbEyeBones.push({
+                        bone,
+                        restQuat: bone.quaternion.clone()
+                    });
+                }
+            });
+
+            // Also find head bone for head tracking
+            if (modelInfo.headBone) {
+                const headBone = findNode(modelInfo.headBone);
+                if (headBone) {
+                    this._glbHeadBone = { bone: headBone, restQuat: headBone.quaternion.clone() };
+                }
+            }
+
+            this._glbModelCenter = modelCenter;
+
+            const container = document.getElementById('viewer-canvas');
+            if (this._glbMouseLookHandler) container.removeEventListener('mousemove', this._glbMouseLookHandler);
+
+            this._glbMouseLookHandler = (e) => {
+                if (!document.getElementById('glb-eye-track')?.checked) return;
+                if (!this._glbEyeBones?.length) return;
+
+                const rect = container.getBoundingClientRect();
+                const x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+                const y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+
+                this._glbLookTarget = { x, y };
+            };
+            container.addEventListener('mousemove', this._glbMouseLookHandler);
+        }
+
+        _updateGLBEyeTracking(delta) {
+            if (!this._glbLookTarget || !this._glbEyeBones?.length) return;
+            if (!document.getElementById('glb-eye-track')?.checked) return;
+
+            const { x, y } = this._glbLookTarget;
+            const maxAngle = 0.2; // radians
+
+            // Rotate eye bones toward cursor
+            this._glbEyeBones.forEach(eb => {
+                const targetX = -y * maxAngle; // vertical look
+                const targetY = x * maxAngle;  // horizontal look
+
+                // Smooth lerp
+                eb.bone.rotation.x += (targetX - eb.bone.rotation.x) * 0.1;
+                eb.bone.rotation.y += (targetY - eb.bone.rotation.y) * 0.1;
+            });
+
+            // Subtle head tracking
+            if (this._glbHeadBone) {
+                const headMaxAngle = 0.08;
+                const hb = this._glbHeadBone;
+                const targetX = -y * headMaxAngle;
+                const targetY = x * headMaxAngle;
+                hb.bone.rotation.x += (targetX - (hb.bone.rotation.x - hb.restQuat.x)) * 0.03;
+                hb.bone.rotation.y += (targetY - (hb.bone.rotation.y - hb.restQuat.y)) * 0.03;
+            }
+        }
+
+        // --- GLB Procedural Idle Animation ---
+
+        _updateGLBIdleAnimation(delta) {
+            if (!this.currentModel || this.currentVRM) return; // Only for GLB, not VRM
+
+            // Always update physics and tracking, even if idle checkbox is off
+            this._updateGLBSpringBones(delta);
+            this._updateGLBEyeTracking(delta);
+            this._updateGLBLipSync();
+
+            if (!document.getElementById('glb-idle')?.checked) return;
+
+            this._glbIdleTime = (this._glbIdleTime || 0) + delta;
+            const t = this._glbIdleTime;
+
+            // --- Find bones on first frame ---
+            if (!this._glbIdleBonesInit) {
+                this._glbIdleBonesInit = true;
+                // Get skeleton bones directly from the SkinnedMesh
+                // These are GUARANTEED to be the deformation bones with skin weights
+                let skeletonBones = [];
+                this.currentModel.traverse(child => {
+                    if (child.isSkinnedMesh && child.skeleton && child.skeleton.bones.length > skeletonBones.length) {
+                        skeletonBones = child.skeleton.bones;
+                    }
+                });
+                console.log('Skeleton bones count:', skeletonBones.length);
+
+                // Search by name priority (first name tried across ALL bones first)
+                const findBoneInSkeleton = (...names) => {
+                    for (const name of names) {
+                        for (const bone of skeletonBones) {
+                            if (bone.name === name) return bone;
+                        }
+                    }
+                    return null;
+                };
+                const findBoneContaining = (...keywords) => {
+                    for (const bone of skeletonBones) {
+                        const lower = bone.name.toLowerCase();
+                        for (const kw of keywords) {
+                            if (lower === kw.toLowerCase() || lower.includes(kw.toLowerCase())) return bone;
+                        }
+                    }
+                    return null;
+                };
+
+                // Find bones from the actual skeleton (guaranteed to have skin weights)
+                this._glbChestBone = findBoneInSkeleton('spine_03x', 'c_spine_03x') || findBoneContaining('spine_03');
+                this._glbSpine2Bone = findBoneInSkeleton('spine_02x', 'c_spine_02x') || findBoneContaining('spine_02');
+                this._glbSpine1Bone = findBoneInSkeleton('spine_01x', 'c_spine_01x') || findBoneContaining('spine_01');
+                this._glbNeckBone = findBoneInSkeleton('neckx', 'c_neckx') || findBoneContaining('neck');
+                this._glbHipBone = findBoneInSkeleton('rootx', 'c_traj', 'c_root_masterx') || findBoneContaining('root');
+                this._glbShoulderL = findBoneInSkeleton('shoulderl', 'c_shoulderl');
+                this._glbShoulderR = findBoneInSkeleton('shoulderr', 'c_shoulderr');
+                this._glbHeadIdleBone = findBoneInSkeleton('headx', 'c_headx');
+                // Arm bones for relaxing A-pose (arm.l -> arml, arm.r -> armr after dot strip)
+                this._glbUpperArmL = findBoneInSkeleton('arml', 'arm_fkl', 'c_arm_fkl');
+                this._glbUpperArmR = findBoneInSkeleton('armr', 'arm_fkr', 'c_arm_fkr');
+
+
+                // Store rest rotations
+                const idleBones = [this._glbChestBone, this._glbSpine2Bone, this._glbSpine1Bone,
+                 this._glbNeckBone, this._glbHipBone, this._glbShoulderL, this._glbShoulderR, this._glbHeadIdleBone]
+                    .filter(Boolean);
+                idleBones.forEach(b => { if (!b._restRot) b._restRot = b.rotation.clone(); });
+
+                console.log('GLB idle bones found:', {
+                    chest: this._glbChestBone?.name || 'NOT FOUND',
+                    spine2: this._glbSpine2Bone?.name || 'NOT FOUND',
+                    spine1: this._glbSpine1Bone?.name || 'NOT FOUND',
+                    neck: this._glbNeckBone?.name || 'NOT FOUND',
+                    head: this._glbHeadIdleBone?.name || 'NOT FOUND',
+                    hip: this._glbHipBone?.name || 'NOT FOUND',
+                    shoulderL: this._glbShoulderL?.name || 'NOT FOUND',
+                    shoulderR: this._glbShoulderR?.name || 'NOT FOUND',
+                    armL: this._glbUpperArmL?.name || 'NOT FOUND',
+                    armR: this._glbUpperArmR?.name || 'NOT FOUND'
+                });
+            }
+
+            // If Mixamo animations are playing, skip procedural bone rotations
+            // (Mixamo handles all bone poses; we only add blinking + expressions on top)
+            if (this._glbMixer && this._glbAnimActions?.length > 0) {
+                const t = this._glbIdleTime;
+                const blinkCycle = t % 3.5;
+                let blink = 0;
+                if (blinkCycle > 3.1 && blinkCycle < 3.3) blink = Math.sin((blinkCycle - 3.1) / 0.2 * Math.PI);
+                const dbCycle = t % 8;
+                if (dbCycle > 7.4 && dbCycle < 7.6) blink = Math.max(blink, Math.sin((dbCycle - 7.4) / 0.2 * Math.PI));
+                if (this._glbMorphMeshes?.length) {
+                    this._setGLBMorphTarget('eyeBlinkLeft', blink);
+                    this._setGLBMorphTarget('eyeBlinkRight', blink);
+                    const microSmile = Math.sin(t * 0.3) * 0.06 + 0.06;
+                    if (!this._currentGLBExpression || this._currentGLBExpression === 'neutral') {
+                        this._setGLBMorphTarget('mouthSmileLeft', microSmile);
+                        this._setGLBMorphTarget('mouthSmileRight', microSmile);
+                    }
+                }
+                this._updateGLBSpringBones(delta);
+                this._updateGLBEyeTracking(delta);
+                this._updateGLBLipSync();
+                return;
+            }
+
+            // --- Fallback: procedural bone animation (only if no Mixamo animations) ---
+
+            // --- Relax A-pose arms on first frame ---
+            if (!this._glbArmsRelaxed) {
+                this._glbArmsRelaxed = true;
+                // Rotate upper arms down from A-pose to relaxed position
+                if (this._glbUpperArmL) {
+                    this._glbUpperArmL.rotation.z += 0.5; // ~30 degrees down
+                    this._glbUpperArmL._restRot = this._glbUpperArmL.rotation.clone();
+                }
+                if (this._glbUpperArmR) {
+                    this._glbUpperArmR.rotation.z -= 0.5;
+                    this._glbUpperArmR._restRot = this._glbUpperArmR.rotation.clone();
+                }
+            }
+
+            // --- Breathing (upper spine only — no hip/leg movement) ---
+            if (this._glbChestBone) {
+                const breathe = Math.sin(t * 1.2);
+                this._glbChestBone.rotation.x = (this._glbChestBone._restRot?.x || 0) + breathe * 0.03;
+            }
+            if (this._glbSpine2Bone) {
+                const breathe2 = Math.sin(t * 1.2 + 0.3);
+                this._glbSpine2Bone.rotation.x = (this._glbSpine2Bone._restRot?.x || 0) + breathe2 * 0.02;
+                // Subtle upper body sway (only spine2+, not spine1 which connects to legs)
+                this._glbSpine2Bone.rotation.z = (this._glbSpine2Bone._restRot?.z || 0) + Math.sin(t * 0.4) * 0.03;
+            }
+
+            // --- Shoulder movement ---
+            if (this._glbShoulderL) {
+                this._glbShoulderL.rotation.z = (this._glbShoulderL._restRot?.z || 0) + Math.sin(t * 0.7) * 0.025;
+            }
+            if (this._glbShoulderR) {
+                this._glbShoulderR.rotation.z = (this._glbShoulderR._restRot?.z || 0) + Math.sin(t * 0.7 + 1.0) * 0.025;
+            }
+
+            // --- Neck + head (move together naturally) ---
+            const neckSwayY = Math.sin(t * 0.3) * 0.025;
+            const neckSwayX = Math.sin(t * 0.5) * 0.02;
+            if (this._glbNeckBone) {
+                this._glbNeckBone.rotation.x = (this._glbNeckBone._restRot?.x || 0) + neckSwayX;
+                this._glbNeckBone.rotation.y = (this._glbNeckBone._restRot?.y || 0) + neckSwayY;
+            }
+            if (this._glbHeadIdleBone) {
+                this._glbHeadIdleBone.rotation.x = (this._glbHeadIdleBone._restRot?.x || 0) + neckSwayX * 0.6 + Math.sin(t * 0.6) * 0.01;
+                this._glbHeadIdleBone.rotation.y = (this._glbHeadIdleBone._restRot?.y || 0) + neckSwayY * 0.6 + Math.sin(t * 0.35) * 0.015;
+                this._glbHeadIdleBone.rotation.z = (this._glbHeadIdleBone._restRot?.z || 0) + Math.sin(t * 0.45) * 0.008;
+            }
+
+            // --- Blinking ---
+            const blinkCycle = t % 3.5;
+            let blink = 0;
+            if (blinkCycle > 3.1 && blinkCycle < 3.3) {
+                blink = Math.sin((blinkCycle - 3.1) / 0.2 * Math.PI);
+            }
+            // Double blink occasionally
+            const dbCycle = t % 8;
+            if (dbCycle > 7.4 && dbCycle < 7.6) {
+                blink = Math.max(blink, Math.sin((dbCycle - 7.4) / 0.2 * Math.PI));
+            }
+            if (this._currentGLBExpression === 'neutral' || this._currentGLBExpression === undefined) {
+                this._setGLBMorphTarget('eyeBlinkLeft', blink);
+                this._setGLBMorphTarget('eyeBlinkRight', blink);
+            }
+
+            // --- Subtle micro-expressions ---
+            const microSmile = Math.sin(t * 0.3) * 0.06 + 0.06;
+            if (this._currentGLBExpression === 'neutral' || !this._currentGLBExpression) {
+                this._setGLBMorphTarget('mouthSmileLeft', microSmile);
+                this._setGLBMorphTarget('mouthSmileRight', microSmile);
+                // Occasional brow raise
+                const browRaise = Math.max(0, Math.sin(t * 0.15) * 0.15);
+                this._setGLBMorphTarget('browInnerUp', browRaise);
+            }
+
+            // --- Update spring bones ---
+            this._updateGLBSpringBones(delta);
+
+            // --- Update eye tracking ---
+            this._updateGLBEyeTracking(delta);
+
+            // --- Update lip sync ---
+            this._updateGLBLipSync();
+        }
+
+        // --- GLB Lip Sync ---
+
+        _updateGLBLipSync() {
+            if (!this._lipSyncActive || !this._lipSyncAnalyser || !this._glbMorphMeshes?.length) return;
+
+            this._lipSyncAnalyser.getByteFrequencyData(this._lipSyncData);
+            const data = this._lipSyncData;
+
+            const binCount = data.length;
+            const lowBand = this._avgBand(data, 2, Math.floor(binCount * 0.08));
+            const midLowBand = this._avgBand(data, Math.floor(binCount * 0.08), Math.floor(binCount * 0.15));
+            const midBand = this._avgBand(data, Math.floor(binCount * 0.15), Math.floor(binCount * 0.3));
+            const highBand = this._avgBand(data, Math.floor(binCount * 0.3), Math.floor(binCount * 0.5));
+
+            const sensitivity = 2.0;
+            // Map to ARKit blend shapes — wider variety of mouth shapes
+            const jawOpen = Math.min(0.7, (lowBand / 255) * sensitivity * 0.6);
+            const mouthFunnel = Math.min(0.6, (midLowBand / 255) * sensitivity * 0.4);
+            const mouthPucker = Math.min(0.5, (highBand / 255) * sensitivity * 0.3);
+            const mouthStretch = Math.min(0.4, (midBand / 255) * sensitivity * 0.3);
+            const lowerDown = Math.min(0.5, jawOpen * 0.6);
+
+            // Smooth with faster response
+            const lerp = 0.5;
+            const prev = this._prevGLBVisemes || { jawOpen: 0, mouthFunnel: 0, mouthPucker: 0, mouthStretch: 0, lowerDown: 0 };
+
+            const sJaw = prev.jawOpen + (jawOpen - prev.jawOpen) * lerp;
+            const sFunnel = prev.mouthFunnel + (mouthFunnel - prev.mouthFunnel) * lerp;
+            const sPucker = prev.mouthPucker + (mouthPucker - prev.mouthPucker) * lerp;
+            const sStretch = prev.mouthStretch + (mouthStretch - prev.mouthStretch) * lerp;
+            const sLower = prev.lowerDown + (lowerDown - prev.lowerDown) * lerp;
+
+            this._setGLBMorphTarget('jawOpen', sJaw);
+            this._setGLBMorphTarget('mouthFunnel', sFunnel);
+            this._setGLBMorphTarget('mouthPucker', sPucker);
+            this._setGLBMorphTarget('mouthStretchLeft', sStretch);
+            this._setGLBMorphTarget('mouthStretchRight', sStretch);
+            this._setGLBMorphTarget('mouthLowerDownLeft', sLower);
+            this._setGLBMorphTarget('mouthLowerDownRight', sLower);
+            this._setGLBMorphTarget('mouthUpperUpLeft', sJaw * 0.2);
+            this._setGLBMorphTarget('mouthUpperUpRight', sJaw * 0.2);
+
+            this._prevGLBVisemes = { jawOpen: sJaw, mouthFunnel: sFunnel, mouthPucker: sPucker, mouthStretch: sStretch, lowerDown: sLower };
+        }
+
+        async playGLBWithLipSync(audioSource) {
+            if (!this._glbMorphMeshes?.length) return;
+            this._initLipSync();
+            if (!this._lipSyncReady) return;
+
+            if (this._audioContext.state === 'suspended') {
+                await this._audioContext.resume();
+            }
+
+            let source;
+            if (audioSource instanceof AudioBuffer) {
+                source = this._audioContext.createBufferSource();
+                source.buffer = audioSource;
+            } else {
+                let arrayBuffer;
+                if (audioSource instanceof Blob) {
+                    arrayBuffer = await audioSource.arrayBuffer();
+                } else if (typeof audioSource === 'string') {
+                    const resp = await fetch(audioSource);
+                    arrayBuffer = await resp.arrayBuffer();
+                } else {
+                    return;
+                }
+                const audioBuffer = await this._audioContext.decodeAudioData(arrayBuffer);
+                source = this._audioContext.createBufferSource();
+                source.buffer = audioBuffer;
+            }
+
+            source.connect(this._lipSyncAnalyser);
+            this._lipSyncAnalyser.connect(this._audioContext.destination);
+
+            // Slight smile while talking
+            if (!this._currentGLBExpression || this._currentGLBExpression === 'neutral') {
+                this._setGLBMorphTarget('mouthSmileLeft', 0.15);
+                this._setGLBMorphTarget('mouthSmileRight', 0.15);
+            }
+
+            this._lipSyncActive = true;
+            source.onended = () => {
+                this._lipSyncActive = false;
+                // Reset mouth
+                ['jawOpen', 'mouthFunnel', 'mouthPucker', 'mouthSmileLeft', 'mouthSmileRight',
+                 'mouthStretchLeft', 'mouthStretchRight'].forEach(name => {
+                    this._setGLBMorphTarget(name, 0);
+                });
+                this._prevGLBVisemes = null;
+            };
+            source.start(0);
+        }
+
+        async _testGLBLipSync() {
+            if (!this._glbMorphMeshes?.length) {
+                alert('Load a GLB model first');
+                return;
+            }
+            this._initLipSync();
+            if (!this._lipSyncReady) {
+                alert('Web Audio not available');
+                return;
+            }
+            if (this._audioContext.state === 'suspended') {
+                await this._audioContext.resume();
+            }
+
+            // Try TTS first
+            const testText = 'Hello! I am your AI assistant. How can I help you today?';
+            try {
+                const resp = await fetch('/api/voice/speak', {
+                    method: 'POST',
+                    headers: { 'Authorization': `Bearer ${this.token}`, 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ text: testText })
+                });
+                const data = await resp.json();
+                if (data.success && data.audioUrl) {
+                    await this.playGLBWithLipSync(data.audioUrl);
+                    return;
+                }
+            } catch (e) {
+                console.warn('TTS API error:', e.message);
+            }
+
+            // Fallback: browser speech synthesis with simulated visemes
+            const utterance = new SpeechSynthesisUtterance(testText);
+            utterance.rate = 0.9;
+            utterance.pitch = 1.1;
+
+            this._lipSyncActive = true;
+            const visemeShapes = ['jawOpen', 'mouthFunnel', 'mouthPucker', 'mouthSmileLeft'];
+            let visemeIdx = 0;
+            const visemeInterval = setInterval(() => {
+                if (!this._lipSyncActive) { clearInterval(visemeInterval); return; }
+                ['jawOpen', 'mouthFunnel', 'mouthPucker', 'mouthSmileLeft', 'mouthSmileRight',
+                 'mouthStretchLeft', 'mouthStretchRight'].forEach(name => this._setGLBMorphTarget(name, 0));
+                const v = visemeShapes[visemeIdx % visemeShapes.length];
+                this._setGLBMorphTarget(v, 0.5 + Math.random() * 0.5);
+                if (v.includes('Smile')) this._setGLBMorphTarget('mouthSmileRight', 0.5 + Math.random() * 0.5);
+                this._setGLBMorphTarget('jawOpen', 0.3 + Math.random() * 0.4);
+                visemeIdx++;
+            }, 120);
+
+            utterance.onend = () => {
+                this._lipSyncActive = false;
+                clearInterval(visemeInterval);
+                ['jawOpen', 'mouthFunnel', 'mouthPucker', 'mouthSmileLeft', 'mouthSmileRight',
+                 'mouthStretchLeft', 'mouthStretchRight'].forEach(name => this._setGLBMorphTarget(name, 0));
+            };
+            speechSynthesis.speak(utterance);
+        }
+
+        // --- GLB Active Avatar ---
+
+        async setActiveGLB() {
+            if (!this._currentGLBId) return;
+            if (!confirm('Set this GLB model as your active avatar?')) return;
+            try {
+                await fetch('/api/agent/glb', {
+                    method: 'PUT',
+                    headers: { 'Authorization': `Bearer ${this.token}`, 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ modelId: this._currentGLBId })
+                });
+            } catch (e) { console.warn('Failed to save active GLB:', e); }
+            this._savedActiveGLB = this._currentGLBId;
+            this._renderGLBPicker();
+            const status = document.getElementById('glb-active-status');
+            if (status) status.style.display = 'block';
+            document.querySelectorAll('#glb-model-picker .gallery-item').forEach(el => {
+                el.classList.toggle('selected', el.dataset.glbId === this._currentGLBId);
+            });
+        }
+
+        // --- GLB Bust Portrait ---
+
+        _renderGLBBustPortrait() {
+            if (!this.currentModel || this.currentVRM || !this.renderer) return null;
+
+            // Find head and chest bones
+            let headBone = null, chestBone = null;
+            const modelInfo = this._currentGLBInfo;
+
+            this.currentModel.traverse(child => {
+                if (child.isBone) {
+                    if (modelInfo?.headBone && child.name === modelInfo.headBone) headBone = child;
+                    if (modelInfo?.chestBone && child.name === modelInfo.chestBone) chestBone = child;
+                }
+            });
+
+            if (!headBone) return null;
+
+            const headPos = new THREE.Vector3();
+            headBone.getWorldPosition(headPos);
+
+            const chestPos = new THREE.Vector3();
+            if (chestBone) {
+                chestBone.getWorldPosition(chestPos);
+            } else {
+                chestPos.copy(headPos);
+                chestPos.y -= 0.3;
+            }
+
+            const bustCenter = new THREE.Vector3().lerpVectors(chestPos, headPos, 0.6);
+            const bustHeight = headPos.distanceTo(chestPos) * 1.6 || 0.5;
+
+            // Save current state
+            const savedCamPos = this.camera.position.clone();
+            const savedTarget = this.controls.target.clone();
+            const savedAspect = this.camera.aspect;
+
+            // Position bust camera
+            const camZ = bustCenter.z + bustHeight * 2.2;
+            const camPos = new THREE.Vector3(bustCenter.x, bustCenter.y, camZ);
+            this.camera.aspect = 1;
+            this.camera.updateProjectionMatrix();
+            this.camera.position.copy(camPos);
+            this.camera.lookAt(bustCenter);
+
+            // Render to offscreen 512x512
+            const size = 512;
+            const prevSize = new THREE.Vector2();
+            this.renderer.getSize(prevSize);
+            this.renderer.setSize(size, size);
+            this.renderer.render(this.scene, this.camera);
+            const dataUrl = this.renderer.domElement.toDataURL('image/png');
+
+            // Restore
+            this.renderer.setSize(prevSize.x, prevSize.y);
+            this.camera.aspect = savedAspect;
+            this.camera.updateProjectionMatrix();
+            this.camera.position.copy(savedCamPos);
+            this.controls.target.copy(savedTarget);
+            this.controls.update();
+            this.renderer.render(this.scene, this.camera);
+
+            return dataUrl;
+        }
+
+        // --- UI Helpers ---
+        switchTab(tab) {
+            document.querySelectorAll('.panel-tab').forEach(t => t.classList.toggle('active', t.dataset.tab === tab));
+            document.querySelectorAll('.panel-section').forEach(s => s.classList.toggle('active', s.id === `tab-${tab}`));
+
+            // When manually switching to VRM tab, restore the active model if viewer is empty
+            if (tab === 'vrm' && !this.currentVRM && !this._vrmLoadPending) {
+                const activeId = this._currentVRMId || this._savedActiveVRM;
+                if (activeId && this.vrmModels?.find(m => m.id === activeId)) {
+                    this.loadVRMModel(activeId);
+                }
+            }
+            // When switching to GLB tab, restore the active GLB model if viewer is empty
+            if (tab === 'glb' && !this._currentGLBId && !this.currentVRM) {
+                const activeId = this._savedActiveGLB;
+                if (activeId && this.glbModels?.find(m => m.id === activeId)) {
+                    this.loadGLBModel(activeId);
+                }
+            }
+        }
+
+        _showStatus(id, message, type) {
+            const el = document.getElementById(id);
+            if (el) {
+                el.innerHTML = `<div class="status-msg ${type}"><i class="fas fa-${type === 'success' ? 'check-circle' : type === 'error' ? 'exclamation-circle' : 'info-circle'}"></i> ${message}</div>`;
+                if (type === 'success') setTimeout(() => { el.innerHTML = ''; }, 5000);
+            }
+        }
+    }
+
+    const avatarDesigner = new AvatarDesigner();
+    document.addEventListener('DOMContentLoaded', () => avatarDesigner.init());
+    </script>
+</body>
+</html>

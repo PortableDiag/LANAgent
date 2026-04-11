@@ -1,0 +1,50 @@
+name: PR Security Check
+
+on:
+  pull_request:
+    branches: [main]
+
+jobs:
+  credential-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Scan for credential leaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          config-path: .gitleaks.toml
+
+      - name: Check for hardcoded paths
+        run: |
+          echo "Checking for hardcoded instance-specific paths..."
+          ISSUES=0
+
+          # Check for hardcoded /root/lanagent paths in source files
+          if grep -rn '/root/lanagent' src/ --include='*.js' | grep -v node_modules; then
+            echo "::error::Found hardcoded /root/lanagent paths in source files"
+            ISSUES=$((ISSUES + 1))
+          fi
+
+          # Check for hardcoded personal emails in source files
+          if grep -rn 'portablediag@' src/ --include='*.js'; then
+            echo "::error::Found hardcoded personal email in source files"
+            ISSUES=$((ISSUES + 1))
+          fi
+
+          # Check for sshpass with inline passwords
+          if grep -rn "sshpass -p '" src/ scripts/ --include='*.sh' --include='*.js' | grep -v deploy.config | grep -v '.example'; then
+            echo "::error::Found hardcoded SSH passwords"
+            ISSUES=$((ISSUES + 1))
+          fi
+
+          if [ $ISSUES -gt 0 ]; then
+            echo "::error::Found $ISSUES security issues. See above for details."
+            exit 1
+          fi
+
+          echo "No hardcoded credentials found in source files."

@@ -1,0 +1,629 @@
+/**
+ * Plugin Template for LANAgent
+ * 
+ * This is a complete template for creating a new plugin with vector intent detection support.
+ * Copy this file and rename it to your plugin name (e.g., myplugin.js)
+ * 
+ * Key features demonstrated:
+ * - Vector intent detection integration
+ * - Dynamic capability registration
+ * - Natural language parameter extraction
+ * - Device alias support
+ * - Proper error handling
+ * - State management
+ * - Cached settings using PluginSettings
+ */
+
+import { BasePlugin } from '../core/basePlugin.js';
+
+export default class TemplatePlugin extends BasePlugin {
+  constructor(agent) {
+    super(agent);
+    
+    // Required: Unique plugin identifier (lowercase, no spaces)
+    this.name = 'template';
+    
+    // Required: Semantic version
+    this.version = '1.0.0';
+    
+    // Required: Clear description of what your plugin does
+    this.description = 'Template plugin demonstrating vector intent detection';
+    
+    // Required: Define commands that will be indexed for vector search
+    // These become your plugin's "intents" that users can trigger with natural language
+    this.commands = [
+      {
+        command: 'create',
+        description: 'Create a new item with specified properties',
+        usage: 'create({ name: "Item Name", type: "basic", properties: {} })'
+      },
+      {
+        command: 'list',
+        description: 'List all items with optional filtering',
+        usage: 'list({ filter: "active", sort: "name", limit: 10 })'
+      },
+      {
+        command: 'update',
+        description: 'Update an existing item',
+        usage: 'update({ item: "name or id", changes: { status: "active" } })'
+      },
+      {
+        command: 'delete',
+        description: 'Delete an item by name or ID',
+        usage: 'delete({ item: "name or id" })'
+      },
+      {
+        command: 'control',
+        description: 'Control item state or perform actions',
+        usage: 'control({ item: "name", action: "start", parameters: {} })'
+      }
+    ];
+    
+    // Plugin-specific properties
+    this.items = new Map();
+    this.config = {
+      apiEndpoint: process.env.TEMPLATE_API_ENDPOINT || null,
+      apiKey: process.env.TEMPLATE_API_KEY || null,
+      enableAI: true,
+      maxItems: 100
+    };
+    
+    // Initialize logger with plugin-specific context
+    this.logger = this.createPluginLogger();
+  }
+  
+  /**
+   * Initialize plugin - called when plugin is loaded
+   */
+  async initialize() {
+    this.logger.info(`Initializing ${this.name} plugin...`);
+    
+    try {
+      // Load configuration from database if exists
+      await this.loadConfig();
+      
+      // Connect to external services if needed
+      if (this.config.apiEndpoint) {
+        await this.connectToAPI();
+      }
+      
+      // Load existing items from database
+      await this.loadItems();
+      
+      // Set initialization state
+      this.initialized = true;
+      this.logger.info(`${this.name} plugin initialized successfully`);
+      
+    } catch (error) {
+      this.logger.error('Failed to initialize plugin:', error);
+      throw error;
+    }
+  }
+  
+  /**
+   * Provide dynamic AI capabilities based on current plugin state
+   * This is called by the intent detector to get current examples
+   */
+  async getAICapabilities() {
+    // Return null if plugin is disabled
+    if (!this.config.enableAI) {
+      return {
+        enabled: false,
+        message: `AI control is disabled for ${this.name}`
+      };
+    }
+    
+    try {
+      const items = Array.from(this.items.values());
+      
+      return {
+        enabled: true,
+        
+        // Dynamic examples based on actual items
+        dynamicExamples: items.flatMap(item => [
+          {
+            plugin: this.name,
+            action: 'update',
+            example: `update ${item.name} to active status`,
+            description: `Update ${item.name} properties`
+          },
+          {
+            plugin: this.name,
+            action: 'control',
+            example: `start ${item.name}`,
+            description: `Control ${item.name}`
+          },
+          {
+            plugin: this.name,
+            action: 'delete',
+            example: `delete ${item.name}`,
+            description: `Remove ${item.name}`
+          }
+        ]),
+        
+        // Static examples for general commands
+        examples: [
+          `create a new widget called Office Manager`,
+          `list all active items`,
+          `show me the latest items`,
+          `delete all inactive items`,
+          `control the main processor`
+        ],
+        
+        // Additional context for AI
+        context: {
+          itemCount: items.length,
+          itemTypes: [...new Set(items.map(i => i.type))],
+          capabilities: this.commands.map(c => c.command)
+        }
+      };
+      
+    } catch (error) {
+      this.logger.error('Failed to get AI capabilities:', error);
+      return {
+        enabled: true,
+        examples: this.getDefaultExamples()
+      };
+    }
+  }
+  
+  /**
+   * Main execution handler - called when plugin action is triggered
+   */
+  async execute(params) {
+    const { action, ...data } = params;
+    
+    // Validate action exists
+    this.validateParams(params, {
+      action: {
+        required: true,
+        type: 'string',
+        enum: this.commands.map(c => c.command)
+      }
+    });
+    
+    // Handle natural language parameter extraction if needed
+    if (params.needsParameterExtraction && this.agent.providerManager) {
+      try {
+        const extracted = await this.extractParameters(
+          params.originalInput || params.input,
+          action,
+          data
+        );
+        Object.assign(data, extracted);
+      } catch (error) {
+        this.logger.warn('Parameter extraction failed, using raw data:', error);
+      }
+    }
+    
+    // Route to appropriate handler
+    try {
+      switch (action) {
+        case 'create':
+          return await this.handleCreate(data);
+        case 'list':
+          return await this.handleList(data);
+        case 'update':
+          return await this.handleUpdate(data);
+        case 'delete':
+          return await this.handleDelete(data);
+        case 'control':
+          return await this.handleControl(data);
+        default:
+          throw new Error(`Unknown action: ${action}`);
+      }
+    } catch (error) {
+      this.logger.error(`Action ${action} failed:`, error);
+      return {
+        success: false,
+        error: error.message,
+        suggestion: this.getSuggestion(action, error)
+      };
+    }
+  }
+  
+  /**
+   * Extract structured parameters from natural language using AI
+   */
+  async extractParameters(input, action, existingParams) {
+    const itemNames = Array.from(this.items.keys());
+    const itemTypes = [...new Set(this.items.values().map(i => i.type))];
+    
+    const prompt = `Extract parameters from this natural language command:
+Input: "${input}"
+Action: ${action}
+Existing parameters: ${JSON.stringify(existingParams)}
+
+Available items: ${itemNames.join(', ') || 'none'}
+Available types: ${itemTypes.join(', ') || 'basic, advanced'}
+
+Based on the action "${action}", extract the appropriate parameters.
+Return ONLY valid JSON that matches the expected format for this action.
+
+Expected formats by action:
+- create: { "name": "string", "type": "string", "properties": {} }
+- list: { "filter": "string", "sort": "string", "limit": number }
+- update: { "item": "name or id", "changes": {} }
+- delete: { "item": "name or id" }
+- control: { "item": "name", "action": "string", "value": any }`;
+
+    const response = await this.agent.providerManager.generateResponse(prompt, {
+      temperature: 0.3,
+      maxTokens: 300
+    });
+    
+    try {
+      return JSON.parse(response.content);
+    } catch (error) {
+      this.logger.error('Failed to parse AI response:', response.content);
+      return {};
+    }
+  }
+  
+  // Handler methods for each action
+  
+  async handleCreate(data) {
+    this.validateParams(data, {
+      name: { required: true, type: 'string' },
+      type: { type: 'string', default: 'basic' }
+    });
+    
+    const { name, type = 'basic', properties = {} } = data;
+    
+    // Check if item already exists
+    if (this.items.has(name.toLowerCase())) {
+      throw new Error(`Item "${name}" already exists`);
+    }
+    
+    // Create new item
+    const item = {
+      id: `${this.name}_${Date.now()}`,
+      name,
+      type,
+      properties,
+      status: 'active',
+      createdAt: new Date(),
+      updatedAt: new Date()
+    };
+    
+    // Store in memory and database
+    this.items.set(name.toLowerCase(), item);
+    await this.saveItem(item);
+    
+    return {
+      success: true,
+      message: `Created ${type} item "${name}"`,
+      item
+    };
+  }
+  
+  async handleList(data) {
+    const { filter, sort = 'name', limit = 50 } = data;
+    
+    let items = Array.from(this.items.values());
+    
+    // Apply filter
+    if (filter) {
+      items = items.filter(item => {
+        return item.status === filter ||
+               item.type === filter ||
+               item.name.toLowerCase().includes(filter.toLowerCase());
+      });
+    }
+    
+    // Apply sorting
+    items.sort((a, b) => {
+      switch (sort) {
+        case 'name':
+          return a.name.localeCompare(b.name);
+        case 'created':
+          return b.createdAt - a.createdAt;
+        case 'updated':
+          return b.updatedAt - a.updatedAt;
+        default:
+          return 0;
+      }
+    });
+    
+    // Apply limit
+    items = items.slice(0, limit);
+    
+    return {
+      success: true,
+      count: items.length,
+      total: this.items.size,
+      items
+    };
+  }
+  
+  async handleUpdate(data) {
+    this.validateParams(data, {
+      item: { required: true, type: 'string' },
+      changes: { required: true, type: 'object' }
+    });
+    
+    const { item: itemName, changes } = data;
+    
+    // Resolve item (supports aliases)
+    const item = await this.resolveItem(itemName);
+    if (!item) {
+      throw new Error(`Item "${itemName}" not found`);
+    }
+    
+    // Apply changes
+    Object.assign(item, changes, {
+      updatedAt: new Date()
+    });
+    
+    // Save to database
+    await this.saveItem(item);
+    
+    return {
+      success: true,
+      message: `Updated "${item.name}"`,
+      item
+    };
+  }
+  
+  async handleDelete(data) {
+    this.validateParams(data, {
+      item: { required: true, type: 'string' }
+    });
+    
+    const { item: itemName } = data;
+    
+    // Handle "all" keyword
+    if (itemName.toLowerCase() === 'all') {
+      const count = this.items.size;
+      this.items.clear();
+      await this.deleteAllItems();
+      
+      return {
+        success: true,
+        message: `Deleted all ${count} items`
+      };
+    }
+    
+    // Resolve specific item
+    const item = await this.resolveItem(itemName);
+    if (!item) {
+      throw new Error(`Item "${itemName}" not found`);
+    }
+    
+    // Delete from memory and database
+    this.items.delete(item.name.toLowerCase());
+    await this.deleteItem(item.id);
+    
+    return {
+      success: true,
+      message: `Deleted "${item.name}"`
+    };
+  }
+  
+  async handleControl(data) {
+    this.validateParams(data, {
+      item: { required: true, type: 'string' },
+      action: { required: true, type: 'string' }
+    });
+    
+    const { item: itemName, action: controlAction, value } = data;
+    
+    // Resolve item
+    const item = await this.resolveItem(itemName);
+    if (!item) {
+      throw new Error(`Item "${itemName}" not found`);
+    }
+    
+    // Perform control action
+    switch (controlAction) {
+      case 'start':
+        item.status = 'running';
+        break;
+      case 'stop':
+        item.status = 'stopped';
+        break;
+      case 'restart':
+        item.status = 'restarting';
+        setTimeout(() => { item.status = 'running'; }, 1000);
+        break;
+      case 'set':
+        if (value !== undefined) {
+          item.properties.value = value;
+        }
+        break;
+      default:
+        throw new Error(`Unknown control action: ${controlAction}`);
+    }
+    
+    item.updatedAt = new Date();
+    await this.saveItem(item);
+    
+    return {
+      success: true,
+      message: `Executed ${controlAction} on "${item.name}"`,
+      item
+    };
+  }
+  
+  // Helper methods
+  
+  /**
+   * Resolve item by name or ID, supporting aliases
+   */
+  async resolveItem(nameOrId) {
+    // Direct name match (case insensitive)
+    const nameLower = nameOrId.toLowerCase();
+    if (this.items.has(nameLower)) {
+      return this.items.get(nameLower);
+    }
+    
+    // Check by ID
+    for (const item of this.items.values()) {
+      if (item.id === nameOrId) {
+        return item;
+      }
+    }
+    
+    // Check aliases (if using device alias system)
+    try {
+      const { DeviceAlias } = await import('../../models/DeviceAlias.js');
+      const resolvedName = await DeviceAlias.resolveAlias(nameOrId, this.name);
+      if (resolvedName && this.items.has(resolvedName.toLowerCase())) {
+        return this.items.get(resolvedName.toLowerCase());
+      }
+    } catch (error) {
+      // Alias system not available
+    }
+    
+    // Fuzzy match
+    for (const [key, item] of this.items) {
+      if (key.includes(nameLower) || item.name.toLowerCase().includes(nameLower)) {
+        return item;
+      }
+    }
+    
+    return null;
+  }
+  
+  /**
+   * Provide helpful suggestions for common errors
+   */
+  getSuggestion(action, error) {
+    const errorLower = error.message.toLowerCase();
+    
+    if (errorLower.includes('not found')) {
+      const items = Array.from(this.items.keys()).slice(0, 5);
+      return `Available items: ${items.join(', ') || 'none'}. Use "list" to see all.`;
+    }
+    
+    if (errorLower.includes('already exists')) {
+      return 'Use "update" to modify existing items or choose a different name.';
+    }
+    
+    return `Valid actions: ${this.commands.map(c => c.command).join(', ')}`;
+  }
+  
+  /**
+   * Get default examples when dynamic generation fails
+   */
+  getDefaultExamples() {
+    return [
+      `create a new item`,
+      `list all items`,
+      `update item status`,
+      `delete old items`,
+      `control the system`
+    ];
+  }
+  
+  // Database methods (implement based on your storage needs)
+  
+  async loadConfig() {
+    try {
+      // Load settings using the cached method for better performance
+      const { PluginSettings } = await import('../../models/PluginSettings.js');
+      const settings = await PluginSettings.getCached(this.name, 'config');
+      
+      if (settings) {
+        Object.assign(this.config, settings);
+        this.logger.info('Loaded cached configuration');
+      }
+    } catch (error) {
+      this.logger.warn('Failed to load config from cache:', error);
+    }
+  }
+  
+  async saveConfig() {
+    try {
+      // Save settings using the cached method - cache is automatically updated
+      const { PluginSettings } = await import('../../models/PluginSettings.js');
+      await PluginSettings.setCached(this.name, 'config', this.config);
+      
+      this.logger.info('Configuration saved and cached');
+    } catch (error) {
+      this.logger.error('Failed to save config:', error);
+    }
+  }
+  
+  async loadItems() {
+    // Load from your database
+    // Example: const items = await ItemModel.find({ plugin: this.name });
+    // For now, just log
+    this.logger.info('Loading items from database...');
+  }
+  
+  async saveItem(item) {
+    // Save to your database
+    this.logger.info(`Saving item ${item.id} to database`);
+  }
+  
+  async deleteItem(itemId) {
+    // Delete from your database
+    this.logger.info(`Deleting item ${itemId} from database`);
+  }
+  
+  async deleteAllItems() {
+    // Delete all items from database
+    this.logger.info('Deleting all items from database');
+  }
+  
+  /**
+   * Examples of using PluginSettings for different scenarios
+   */
+  async settingsExamples() {
+    const { PluginSettings } = await import('../../models/PluginSettings.js');
+    
+    // Example 1: Store user preferences with custom TTL (10 minutes)
+    await PluginSettings.setCached(this.name, 'userPreferences', {
+      theme: 'dark',
+      notifications: true,
+      language: 'en'
+    });
+    const prefs = await PluginSettings.getCached(this.name, 'userPreferences', 600);
+    
+    // Example 2: Store API credentials (sensitive data)
+    await PluginSettings.setCached(this.name, 'apiCredentials', {
+      endpoint: 'https://api.example.com',
+      key: process.env.API_KEY,
+      lastRefresh: new Date()
+    });
+    
+    // Example 3: Store feature flags
+    await PluginSettings.setCached(this.name, 'features', {
+      betaFeatures: false,
+      advancedMode: true,
+      debugMode: process.env.NODE_ENV === 'development'
+    });
+    
+    // Example 4: Clear all settings for this plugin
+    await PluginSettings.clearCache(this.name);
+    
+    // Example 5: Get cache statistics
+    const stats = PluginSettings.getCacheStats();
+    this.logger.info('Cache stats:', stats);
+  }
+  
+  /**
+   * Cleanup when plugin is disabled
+   */
+  async cleanup() {
+    this.logger.info(`Cleaning up ${this.name} plugin...`);
+    
+    // Close connections
+    // Save state
+    // Clear caches
+    
+    this.items.clear();
+    this.initialized = false;
+  }
+  
+  /**
+   * Get commands for help/documentation
+   */
+  getCommands() {
+    return this.commands.reduce((acc, cmd) => {
+      acc[cmd.command] = cmd.description;
+      return acc;
+    }, {});
+  }
+}
