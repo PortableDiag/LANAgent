@@ -17,9 +17,9 @@ export default class TwitterPlugin extends BasePlugin {
     this.description = 'Twitter/X integration — read via FxTwitter, post/interact via X API v2, auto-post, profile management';
 
     this.requiredCredentials = [
-      { key: 'apiKey', label: 'Consumer Key (from OAuth 1.0 Keys)', envVar: 'TWITTER_API_KEY', required: false },
-      { key: 'apiSecret', label: 'Consumer Key Secret', envVar: 'TWITTER_API_SECRET', required: false },
-      { key: 'accessToken', label: 'Access Token (from OAuth 1.0 Keys)', envVar: 'TWITTER_ACCESS_TOKEN', required: false },
+      { key: 'apiKey', label: 'Consumer Key', envVar: 'TWITTER_CONSUMER_KEY', required: false },
+      { key: 'apiSecret', label: 'Consumer Key Secret', envVar: 'TWITTER_CONSUMER_SECRET', required: false },
+      { key: 'accessToken', label: 'Access Token', envVar: 'TWITTER_ACCESS_TOKEN', required: false },
       { key: 'accessTokenSecret', label: 'Access Token Secret', envVar: 'TWITTER_ACCESS_TOKEN_SECRET', required: false }
     ];
 
@@ -316,19 +316,28 @@ export default class TwitterPlugin extends BasePlugin {
    */
   async xApiRequest(method, endpoint, body = null) {
     if (!this.hasWriteCredentials()) {
-      throw new Error('X API credentials not configured. Set TWITTER_API_KEY, TWITTER_API_SECRET, TWITTER_ACCESS_TOKEN, and TWITTER_ACCESS_TOKEN_SECRET.');
+      throw new Error('X API credentials not configured. Set Consumer Key, Consumer Key Secret, Access Token, and Access Token Secret.');
     }
 
-    const url = `${this.X_API_BASE}${endpoint}`;
-    const authHeader = this.generateOAuthHeader(method, url);
+    const fullUrl = endpoint.startsWith('http') ? endpoint : `${this.X_API_BASE}${endpoint}`;
+    const [url, queryString] = fullUrl.split('?');
+    // Query params must be included in the OAuth signature
+    const queryParams = {};
+    if (queryString) {
+      for (const pair of queryString.split('&')) {
+        const [k, v] = pair.split('=');
+        queryParams[decodeURIComponent(k)] = decodeURIComponent(v || '');
+      }
+    }
+    const authHeader = this.generateOAuthHeader(method, url, queryParams);
 
     const config = {
       method,
-      url,
+      url: fullUrl,
       headers: {
         'Authorization': authHeader,
         'Content-Type': 'application/json',
-        'User-Agent': 'LANAgent/2.0'
+        'User-Agent': 'LANAgent/3.0'
       }
     };
 
@@ -336,8 +345,20 @@ export default class TwitterPlugin extends BasePlugin {
       config.data = body;
     }
 
-    const response = await axios(config);
-    return response.data;
+    try {
+      const response = await axios(config);
+      return response.data;
+    } catch (err) {
+      const status = err.response?.status;
+      const detail = err.response?.data?.detail || err.response?.data?.errors?.[0]?.message || err.response?.data?.title || err.message;
+
+      // Alert on payment/rate limit issues
+      if (status === 402 || status === 429 || (detail && detail.toLowerCase().includes('credit'))) {
+        this._alertLowCredits(status, detail);
+      }
+
+      throw new Error(`X API ${method} ${endpoint} failed (${status}): ${detail}`);
+    }
   }
 
   /**
@@ -367,8 +388,14 @@ export default class TwitterPlugin extends BasePlugin {
       config.data = new URLSearchParams(params).toString();
     }
 
-    const response = await axios(config);
-    return response.data;
+    try {
+      const response = await axios(config);
+      return response.data;
+    } catch (err) {
+      const status = err.response?.status;
+      const detail = err.response?.data?.errors?.[0]?.message || err.response?.data?.error || err.message;
+      throw new Error(`X API v1.1 ${endpoint} failed (${status}): ${detail}`);
+    }
   }
 
   // Bearer token removed — all API calls use OAuth 1.0a
@@ -495,7 +522,7 @@ export default class TwitterPlugin extends BasePlugin {
   }
 
   async getAuthenticatedUser() {
-    const result = await this.xApiRequest('GET', '/users/me?user.fields=description,profile_image_url,profile_banner_url,public_metrics');
+    const result = await this.xApiRequest('GET', '/users/me');
 
     this.authenticatedUserId = result.data?.id;
     this.authenticatedUsername = result.data?.username;
@@ -896,6 +923,36 @@ Return ONLY the tweet text, nothing else.`;
         : 'No specific activity to report',
       recentTweets
     };
+  }
+
+  // ─── Credit / Rate Limit Alerts ────────────────────────────────────────
+
+  /**
+   * Alert when X API returns payment or rate limit errors.
+   * Sends Telegram notification and disables auto-posting to avoid wasting calls.
+   */
+  async _alertLowCredits(status, detail) {
+    // Cooldown — don't spam alerts
+    const now = Date.now();
+    if (this._lastCreditAlert && (now - this._lastCreditAlert) < 4 * 60 * 60 * 1000) return;
+    this._lastCreditAlert = now;
+
+    const msg = status === 429
+      ? `Twitter/X API rate limit hit. Auto-posting paused.\n\nDetail: ${detail}`
+      : `Twitter/X API payment issue (${status}). Auto-posting paused. Add credits at developer.x.com.\n\nDetail: ${detail}`;
+
+    this.logger.warn(`Twitter credit/rate alert: ${status} — ${detail}`);
+
+    // Pause auto-posting
+    this._autoPostConfig.enabled = false;
+
+    // Notify via Telegram
+    try {
+      const telegram = this.agent?.interfaces?.get('telegram');
+      if (telegram?.sendNotification) {
+        await telegram.sendNotification(msg);
+      }
+    } catch { /* non-critical */ }
   }
 
   // ─── Read Commands (FxTwitter, free) ──────────────────────────────────
