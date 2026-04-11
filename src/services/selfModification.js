@@ -45,6 +45,8 @@ export class SelfModificationService extends EventEmitter {
     
     // Configuration (focused on capability upgrades, not bugs or new plugins)
     this.config = {
+      enabled: true, // Self-modification enabled by default
+      analysisOnly: false, // Can make actual changes by default
       maxChangesPerSession: 10000, // Max lines changed per upgrade (effectively unlimited)
       maxDailyImprovements: 2, // Max capability upgrades per day
       idleMinutes: 10, // Minutes before considered idle for upgrades
