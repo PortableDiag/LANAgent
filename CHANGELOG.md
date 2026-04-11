@@ -4,13 +4,29 @@ All notable changes to LANAgent will be documented in this file.
 
 ## [2.24.9] - 2026-04-11
 
+### Added
+- **Twitter/X plugin v3.0** — Profile management (update name, bio, avatar, banner via v1.1 API), media upload (v2 chunked), auto-posting 2x/day with AI-generated content from real agent activity, credit/rate limit alerts via Telegram. Credential labels match X developer portal exactly.
+- **Twitter auto-posting scheduler** — `twitter-engagement` job runs every 10 minutes, posts during waking hours (8am-10pm) with 4-hour gap, topic deduplication against recent tweets, same content safety rules as MindSwarm.
+- **Local AI (Ollama) as first-class installer option** — Step 3 now asks cloud vs local AI. Auto-detects Ollama on localhost, supports remote Ollama URL. New flags: `--ollama-url`, `--local-ai`. Ollama-only installs work with no cloud API costs.
+- **GitHub CLI in installer and Dockerfile** — `gh` CLI auto-installed during setup (required for self-modification PR creation). Added to Docker image for container-based installs.
+- **Post-install security checklist** — Reminds users to change default password, secure `.env`, keep MongoDB off the internet, and protect wallet keys. Includes wiki link.
+- **GitHub Wiki** — 25-page wiki covering installation, configuration, troubleshooting, self-modification, P2P, API gateway, plugins, AI providers (local + cloud), crypto, FAQ, and architecture.
+- **Gateway `/stats` endpoint** — Single source of truth for all websites. Returns live service counts, agent counts, per-plugin credit costs, version. Websites fetch dynamically instead of hardcoding numbers.
+- **Gateway dynamic service pricing** — Per-plugin credit costs fetched from agent catalogs every 5 minutes instead of hardcoded. Uses lowest agent price across the network.
+- **Gateway promotion system** — Time-limited discount promotions with admin API. Bonus credits applied to both Stripe and crypto purchases. Auto-expires. Portal shows promotion banner with countdown.
+- **Gateway replenishment lock** — Prevents concurrent BNB→SKYNET swaps for the same agent (was causing 2-3x cost due to race condition).
+
 ### Fixed
 - **Docker installer SSL/Caddy port conflict** — The SSL/HTTPS step (Step 10) was skipped for `--docker` installs, so `AGENT_PORT` was never changed from 80 to 3000 when Caddy was configured. Docker containers failed silently because Caddy already occupied port 80. The SSL step now runs for both native and Docker install modes.
-- **Gateway low balance Telegram alert silently failing** — The alert used `parse_mode: "Markdown"` which caused Telegram API parse failures because the wallet address contains underscores (interpreted as italic markers). Removed Markdown parse mode so alerts send as plain text. Added success logging to confirm delivery.
-- **Production self-modification pushing to wrong repo** — Alice was pushing auto-improvement branches to the public `PortableDiag/LANAgent` repo instead of the private `LANAgent-genesis` repo, causing 403 permission errors. Fixed git remote and `GITHUB_REPO` env var on production.
+- **Self-modification disabled on all fresh installs** — The Agent mongoose schema had `selfModification.enabled` defaulting to `false` and `analysisOnly` to `true`. Every fresh install had self-modification silently disabled. Changed schema defaults.
+- **Self-modification scan never running (lock collision)** — `self-mod-scan` and `git-monitor` fired at the same second, git-monitor always grabbed the lock first. Staggered self-mod by 5 minutes to break the collision.
+- **PR creation failing on forks (missing labels)** — `gh pr create --label` fails when labels don't exist on the target repo. Now retries without labels as fallback.
+- **Gateway low balance Telegram alert silently failing** — The alert used `parse_mode: "Markdown"` which caused Telegram API parse failures because the wallet address contains underscores. Removed Markdown parse mode.
+- **Twitter OAuth 401 on query params** — OAuth 1.0a signature wasn't including URL query parameters. Fixed signature generation to include query params in the base string.
 
 ### Changed
 - **Gateway balance alert** — Cooldown reduced from 6 hours to 4 hours for faster notification when BNB runs low.
+- **api.lanagent.net portal** — 25 service cards with live availability indicators (dimmed when offline), sorted alphabetically. 30 curl demos, 6 language examples (Python, JS, Go, Rust, PHP, Java) with 13 examples each. Dynamic credit costs from agent catalogs.
 
 ## [2.24.8] - 2026-04-10
 

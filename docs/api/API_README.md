@@ -157,6 +157,29 @@ X-API-Key: gsk_your_key
 → { "credits": 488, "totalPurchased": 500, "totalSpent": 12 }
 ```
 
+### Promotions
+
+```
+GET /promotion
+→ { "promotion": { "name": "Launch Special", "discountPercent": 50, "endsAt": "2026-05-11T..." } }
+→ { "promotion": null }  ← no active promotion
+
+GET /stats
+→ { "version": "2.24.9", "agents": { "total": 2, "online": 2 },
+    "services": { "total": 25, "plugins": 17 },
+    "serviceCosts": { "anime": 1, "chainlink": 1, ... },
+    "promotion": {...} }
+```
+
+Admin (requires `X-Admin-Key`):
+```
+POST /admin/promotions
+{ "name": "Launch Special", "discountPercent": 50, "startsAt": "2026-04-11", "endsAt": "2026-05-11" }
+
+GET /admin/promotions         ← list all (with status: active/expired/scheduled/disabled)
+DELETE /admin/promotions/:id  ← disable a promotion
+```
+
 ### Catalog
 
 ```
