@@ -117,7 +117,7 @@ UNATTENDED=false
 # Unattended mode pre-set values
 _NAME="" _PORT="" _SSH_PORT=""
 _ANTHROPIC_KEY="" _OPENAI_KEY="" _GITHUB_PAT=""
-_P2P_URL="" _MONGO_URI="" _NO_P2P=false _NO_START=false
+_P2P_URL="" _MONGO_URI="" _NO_P2P=false _NO_START=false _DOMAIN=""
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -140,6 +140,8 @@ while [[ $# -gt 0 ]]; do
         --p2p-url=*)    _P2P_URL="${1#*=}" ;;
         --mongo-uri)    _MONGO_URI="$2"; shift ;;
         --mongo-uri=*)  _MONGO_URI="${1#*=}" ;;
+        --domain)       _DOMAIN="$2"; shift ;;
+        --domain=*)     _DOMAIN="${1#*=}" ;;
         --no-p2p)       _NO_P2P=true ;;
         --no-start)     _NO_START=true ;;
         --help|-h)
@@ -159,6 +161,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --github-pat TOKEN      GitHub PAT for self-modification + auto-fork"
             echo "  --p2p-url URL           Public URL for P2P (auto-detected if omitted)"
             echo "  --mongo-uri URI         MongoDB URI (default: mongodb://localhost:27017/agentname)"
+            echo "  --domain DOMAIN         Domain name for auto-SSL (e.g. myagent.example.com)"
             echo "  --no-p2p                Disable P2P networking"
             echo "  --no-start              Don't start the agent after install"
             echo ""
@@ -212,7 +215,7 @@ fi
 # ═══════════════════════════════════════════════════
 # STEP 1: System Dependencies Check
 # ═══════════════════════════════════════════════════
-TOTAL_STEPS=9
+TOTAL_STEPS=10
 
 print_step 1 $TOTAL_STEPS "System Dependencies"
 
@@ -809,6 +812,97 @@ else
     else
         P2P_ENABLED="false"
         info "P2P disabled — your agent will run standalone"
+    fi
+fi
+
+# ═══════════════════════════════════════════════════
+# STEP 10: SSL / HTTPS (optional)
+# ═══════════════════════════════════════════════════
+SETUP_SSL=false
+SSL_DOMAIN=""
+
+if [ "$DOCKER_MODE" != "true" ]; then
+    print_step 10 $TOTAL_STEPS "SSL / HTTPS (optional)"
+
+    if [ "$UNATTENDED" = "true" ]; then
+        if [ -n "$_DOMAIN" ]; then
+            SETUP_SSL=true
+            SSL_DOMAIN="$_DOMAIN"
+        fi
+    else
+        echo -e "  ${DIM}Secure your web UI with HTTPS using Caddy (auto-SSL).${NC}"
+        echo -e "  ${DIM}Recommended for VPS/cloud servers exposed to the internet.${NC}"
+        echo -e "  ${DIM}LAN-only servers can skip this.${NC}"
+        echo ""
+
+        ask_yn "Set up HTTPS?" "n" SETUP_SSL_YN
+        if [ "$SETUP_SSL_YN" = "true" ]; then
+            SETUP_SSL=true
+            echo ""
+            echo -e "  ${DIM}If you have a domain pointing to this server (e.g. myagent.example.com),${NC}"
+            echo -e "  ${DIM}enter it below for automatic Let's Encrypt SSL.${NC}"
+            echo -e "  ${DIM}Leave blank for a self-signed certificate (works without a domain).${NC}"
+            ask "Domain name (or Enter for self-signed)" "" SSL_DOMAIN
+        fi
+    fi
+
+    if [ "$SETUP_SSL" = "true" ]; then
+        # Install Caddy
+        if ! command -v caddy &>/dev/null; then
+            info "Installing Caddy web server..."
+            if command -v apt-get &>/dev/null; then
+                apt-get install -y -qq debian-keyring debian-archive-keyring apt-transport-https &>/dev/null
+                curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' 2>/dev/null | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg 2>/dev/null
+                curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' 2>/dev/null > /etc/apt/sources.list.d/caddy-stable.list
+                apt-get update -qq &>/dev/null && apt-get install -y -qq caddy &>/dev/null
+            fi
+
+            if command -v caddy &>/dev/null; then
+                ok "Caddy installed"
+            else
+                warn "Caddy install failed — HTTPS not configured"
+                SETUP_SSL=false
+            fi
+        else
+            ok "Caddy already installed"
+        fi
+    fi
+
+    if [ "$SETUP_SSL" = "true" ] && command -v caddy &>/dev/null; then
+        # Write Caddyfile
+        if [ -n "$SSL_DOMAIN" ]; then
+            # Domain mode — Let's Encrypt auto-SSL
+            cat > /etc/caddy/Caddyfile << CADDYEOF
+${SSL_DOMAIN} {
+    reverse_proxy localhost:${AGENT_PORT}
+}
+CADDYEOF
+            ok "Caddy configured for ${BOLD}https://${SSL_DOMAIN}${NC} → localhost:${AGENT_PORT}"
+            info "Make sure your DNS A record points ${SSL_DOMAIN} to this server's IP"
+        else
+            # No domain — self-signed cert on the server's IP
+            SELF_SIGNED_ADDR="${DETECTED_IP:-0.0.0.0}"
+            cat > /etc/caddy/Caddyfile << CADDYEOF
+:443 {
+    tls internal
+    reverse_proxy localhost:${AGENT_PORT}
+}
+CADDYEOF
+            ok "Caddy configured with self-signed cert on port 443 → localhost:${AGENT_PORT}"
+            warn "Browser will show a security warning (self-signed). Traffic is still encrypted."
+        fi
+
+        # Restart Caddy
+        systemctl enable caddy &>/dev/null
+        systemctl restart caddy &>/dev/null
+        ok "Caddy started"
+
+        # Update P2P service URL to use HTTPS
+        if [ -n "$SSL_DOMAIN" ]; then
+            AGENT_SERVICE_URL="https://${SSL_DOMAIN}"
+        elif [ -n "$DETECTED_IP" ]; then
+            AGENT_SERVICE_URL="https://${DETECTED_IP}"
+        fi
     fi
 fi
 
