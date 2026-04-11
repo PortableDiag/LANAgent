@@ -821,7 +821,8 @@ fi
 SETUP_SSL=false
 SSL_DOMAIN=""
 
-if [ "$DOCKER_MODE" != "true" ]; then
+# SSL applies to both native and Docker modes (Caddy runs on the host either way)
+if true; then
     print_step 10 $TOTAL_STEPS "SSL / HTTPS (optional)"
 
     if [ "$UNATTENDED" = "true" ]; then
