@@ -13,8 +13,8 @@ All notable changes to LANAgent will be documented in this file.
 - **GitHub Wiki** — 25-page wiki covering installation, configuration, troubleshooting, self-modification, P2P, API gateway, plugins, AI providers (local + cloud), crypto, FAQ, and architecture.
 - **Gateway `/stats` endpoint** — Single source of truth for all websites. Returns live service counts, agent counts, per-plugin credit costs, version. Websites fetch dynamically instead of hardcoding numbers.
 - **Gateway dynamic service pricing** — Per-plugin credit costs fetched from agent catalogs every 5 minutes instead of hardcoded. Uses lowest agent price across the network.
-- **Gateway promotion system** — Time-limited discount promotions with admin API. Bonus credits applied to both Stripe and crypto purchases. Auto-expires. Portal shows promotion banner with countdown.
-- **Gateway replenishment lock** — Prevents concurrent BNB→SKYNET swaps for the same agent (was causing 2-3x cost due to race condition).
+- **Gateway promotion system** — Time-limited discount promotions. Bonus credits applied to both Stripe and crypto purchases. Auto-expires. Portal shows promotion banner with countdown.
+- **Gateway replenishment fix** — Fixed race condition where multiple concurrent requests could trigger duplicate agent credit replenishments.
 
 ### Fixed
 - **Docker installer SSL/Caddy port conflict** — The SSL/HTTPS step (Step 10) was skipped for `--docker` installs, so `AGENT_PORT` was never changed from 80 to 3000 when Caddy was configured. Docker containers failed silently because Caddy already occupied port 80. The SSL step now runs for both native and Docker install modes.
