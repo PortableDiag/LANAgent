@@ -359,6 +359,11 @@ if [ ${#MISSING_DEPS[@]} -gt 0 ]; then
                     systemctl start mongod &>/dev/null
                     ok "MongoDB 7 installed and started"
                     MONGO_INSTALLED=true
+                else
+                    # Native install failed — clean up the apt source so it doesn't break other installs
+                    rm -f /etc/apt/sources.list.d/mongodb-org-7.0.list
+                    rm -f /usr/share/keyrings/mongodb-server-7.0.gpg
+                    apt-get update -qq &>/dev/null
                 fi
             fi
 
