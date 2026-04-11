@@ -118,6 +118,7 @@ UNATTENDED=false
 _NAME="" _PORT="" _SSH_PORT=""
 _ANTHROPIC_KEY="" _OPENAI_KEY="" _GITHUB_PAT=""
 _P2P_URL="" _MONGO_URI="" _NO_P2P=false _NO_START=false _DOMAIN=""
+_OLLAMA_URL="" _LOCAL_AI=false
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -142,6 +143,9 @@ while [[ $# -gt 0 ]]; do
         --mongo-uri=*)  _MONGO_URI="${1#*=}" ;;
         --domain)       _DOMAIN="$2"; shift ;;
         --domain=*)     _DOMAIN="${1#*=}" ;;
+        --ollama-url)   _OLLAMA_URL="$2"; _LOCAL_AI=true; shift ;;
+        --ollama-url=*) _OLLAMA_URL="${1#*=}"; _LOCAL_AI=true ;;
+        --local-ai)     _LOCAL_AI=true ;;
         --no-p2p)       _NO_P2P=true ;;
         --no-start)     _NO_START=true ;;
         --help|-h)
@@ -162,6 +166,8 @@ while [[ $# -gt 0 ]]; do
             echo "  --p2p-url URL           Public URL for P2P (auto-detected if omitted)"
             echo "  --mongo-uri URI         MongoDB URI (default: mongodb://localhost:27017/agentname)"
             echo "  --domain DOMAIN         Domain name for auto-SSL (e.g. myagent.example.com)"
+            echo "  --ollama-url URL        Ollama server URL (default: http://localhost:11434)"
+            echo "  --local-ai              Use local AI (Ollama) instead of cloud providers"
             echo "  --no-p2p                Disable P2P networking"
             echo "  --no-start              Don't start the agent after install"
             echo ""
@@ -496,21 +502,56 @@ ok "Agent: ${BOLD}${AGENT_NAME}${NC} on port ${AGENT_PORT}"
 # ═══════════════════════════════════════════════════
 print_step 3 $TOTAL_STEPS "AI Providers"
 
+OLLAMA_URL=""
+ENABLE_OLLAMA=""
+
 if [ "$UNATTENDED" = "true" ]; then
     ANTHROPIC_KEY="$_ANTHROPIC_KEY"
     OPENAI_KEY="$_OPENAI_KEY"
+    if [ "$_LOCAL_AI" = "true" ]; then
+        OLLAMA_URL="${_OLLAMA_URL:-http://localhost:11434}"
+        ENABLE_OLLAMA="true"
+    fi
 else
-    echo -e "  ${DIM}At least one AI provider API key is required.${NC}"
-    echo -e "  ${DIM}Anthropic Claude or OpenAI — either works.${NC}"
+    echo -e "  ${DIM}LANAgent supports cloud AI (Anthropic/OpenAI) and local AI${NC}"
+    echo -e "  ${DIM}(Ollama — runs on your hardware, free, private, works offline).${NC}"
+    echo -e "  ${DIM}You can use one or both. You can always add more later.${NC}"
+    echo ""
+
+    ask_yn "Use local AI via Ollama? (free, private, runs on your hardware)" "n" USE_OLLAMA
+    if [ "$USE_OLLAMA" = "true" ]; then
+        # Check if Ollama is running locally
+        if curl -s http://localhost:11434/api/tags &>/dev/null; then
+            ok "Ollama detected at localhost:11434"
+            OLLAMA_URL="http://localhost:11434"
+        else
+            echo -e "  ${DIM}Ollama not detected locally. You can point to a remote Ollama instance${NC}"
+            echo -e "  ${DIM}(e.g., another machine on your LAN with a GPU).${NC}"
+            echo ""
+            ask "Ollama server URL" "http://localhost:11434" OLLAMA_URL
+
+            if curl -s "${OLLAMA_URL}/api/tags" &>/dev/null; then
+                ok "Ollama connected at ${OLLAMA_URL}"
+            else
+                warn "Ollama not reachable at ${OLLAMA_URL} — install later: https://ollama.ai"
+                echo -e "  ${DIM}After installing Ollama, pull a model: ollama pull llama3.1${NC}"
+            fi
+        fi
+        ENABLE_OLLAMA="true"
+    fi
+
+    echo ""
+    echo -e "  ${DIM}Cloud AI gives stronger reasoning (good for self-modification).${NC}"
+    echo -e "  ${DIM}You can use cloud + local together, or cloud/local alone.${NC}"
     echo ""
 
     ask_secret "Anthropic API key (sk-ant-..., or Enter to skip)" ANTHROPIC_KEY
 
     ask_secret "OpenAI API key (sk-..., or Enter to skip)" OPENAI_KEY
 
-    if [ -z "$ANTHROPIC_KEY" ] && [ -z "$OPENAI_KEY" ]; then
+    if [ -z "$ANTHROPIC_KEY" ] && [ -z "$OPENAI_KEY" ] && [ -z "$ENABLE_OLLAMA" ]; then
         echo ""
-        fail "At least one AI provider key is required!"
+        fail "At least one AI provider is required (cloud key or Ollama)!"
         ask_secret "Enter an API key (Anthropic or OpenAI)" ANTHROPIC_KEY
         if [ -z "$ANTHROPIC_KEY" ]; then
             fail "Cannot proceed without an AI provider. Exiting."
@@ -519,7 +560,15 @@ else
     fi
 fi
 
-ok "AI provider configured"
+if [ -n "$ENABLE_OLLAMA" ]; then
+    ok "Local AI (Ollama) configured at ${OLLAMA_URL}"
+fi
+if [ -n "$ANTHROPIC_KEY" ] || [ -n "$OPENAI_KEY" ]; then
+    ok "Cloud AI provider configured"
+fi
+if [ -z "$ANTHROPIC_KEY" ] && [ -z "$OPENAI_KEY" ] && [ -n "$ENABLE_OLLAMA" ]; then
+    ok "Running with local AI only (no cloud API costs)"
+fi
 
 # ═══════════════════════════════════════════════════
 # STEP 4: Database
@@ -969,6 +1018,12 @@ AGENT_SSH_PORT=${AGENT_SSH_PORT}
 ANTHROPIC_API_KEY=${ANTHROPIC_KEY}
 OPENAI_API_KEY=${OPENAI_KEY}
 ANTHROPIC_ENABLE_WEB_SEARCH=true
+
+# Local AI (Ollama) — free, private, runs on your hardware
+ENABLE_OLLAMA=${ENABLE_OLLAMA:-false}
+OLLAMA_BASE_URL=${OLLAMA_URL:-http://localhost:11434}
+OLLAMA_CHAT_MODEL=llama3.1
+OLLAMA_EMBEDDING_MODEL=nomic-embed-text
 
 # Database
 MONGODB_URI=${MONGODB_URI}
