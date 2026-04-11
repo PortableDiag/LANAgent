@@ -24,7 +24,9 @@ module.exports = {
     watch: false,
     max_memory_restart: '4G',
     max_restarts: 10,
-    min_uptime: '10s',
+    min_uptime: '5m',
+    kill_timeout: 10000,
+    listen_timeout: 300000,
     env_production: {
       ...process.env,
       NODE_ENV: 'production',
