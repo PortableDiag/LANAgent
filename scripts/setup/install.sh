@@ -1355,6 +1355,14 @@ if [ -n "$GIT_TOKEN" ]; then
     echo ""
 fi
 
+echo -e "  ${BOLD}Security Checklist:${NC}"
+echo -e "  ${DIM}1. Change the default web password in .env (WEB_UI_PASSWORD)${NC}"
+echo -e "  ${DIM}2. Restrict .env file permissions: chmod 600 .env${NC}"
+echo -e "  ${DIM}3. Ensure MongoDB is not exposed to the internet (bind to localhost or use Docker)${NC}"
+echo -e "  ${DIM}4. If using a domain, the installer already set up HTTPS via Caddy${NC}"
+echo -e "  ${DIM}5. Your wallet private key is in .env — keep this file safe${NC}"
+echo ""
 echo -e "  ${DIM}Configuration: ${PROJECT_ROOT}/.env${NC}"
 echo -e "  ${DIM}Documentation: ${PROJECT_ROOT}/README.md${NC}"
+echo -e "  ${DIM}Wiki: https://github.com/PortableDiag/LANAgent/wiki${NC}"
 echo ""
