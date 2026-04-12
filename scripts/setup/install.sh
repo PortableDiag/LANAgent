@@ -188,8 +188,8 @@ done
 
 # Validate unattended mode
 if [ "$UNATTENDED" = "true" ]; then
-    if [ -z "$_ANTHROPIC_KEY" ] && [ -z "$_OPENAI_KEY" ]; then
-        fail "Unattended mode requires --anthropic-key or --openai-key"
+    if [ -z "$_ANTHROPIC_KEY" ] && [ -z "$_OPENAI_KEY" ] && [ "$_LOCAL_AI" != "true" ]; then
+        fail "Unattended mode requires --anthropic-key, --openai-key, or --local-ai"
         exit 1
     fi
     _NAME="${_NAME:-LANAgent}"
