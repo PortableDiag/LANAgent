@@ -338,6 +338,7 @@ if [ ${#MISSING_DEPS[@]} -gt 0 ]; then
             [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
             nvm install 20 &>/dev/null
             nvm use 20 &>/dev/null
+            nvm alias default 20 &>/dev/null
 
             if command -v node &>/dev/null; then
                 ok "Node.js $(node -v) installed"
@@ -1213,7 +1214,14 @@ else
             info "You can retry manually: cd $PROJECT_ROOT && npm install --legacy-peer-deps"
         fi
 
-        # Install PM2 globally for process management
+        # Ensure nvm node is active for PM2 install
+        if [ -s "${HOME}/.nvm/nvm.sh" ]; then
+            export NVM_DIR="${HOME}/.nvm"
+            . "$NVM_DIR/nvm.sh"
+            nvm use 20 &>/dev/null 2>&1
+        fi
+
+        # Install PM2 globally for process management (uses nvm node if available)
         if ! command -v pm2 &>/dev/null; then
             info "Installing PM2 process manager..."
             npm install -g pm2 &>/dev/null && ok "PM2 installed" || warn "PM2 install failed — install later: npm install -g pm2"
@@ -1317,9 +1325,13 @@ if [ "$DOCKER_MODE" != "true" ] && command -v pm2 &>/dev/null; then
     fi
     if [ "$START_PM2" = "true" ]; then
         echo ""
-        # Ensure nvm is loaded
+        # Ensure nvm node 20 is active and set as default for PM2
         export NVM_DIR="${HOME}/.nvm"
-        [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
+        if [ -s "$NVM_DIR/nvm.sh" ]; then
+            . "$NVM_DIR/nvm.sh"
+            nvm use 20 &>/dev/null 2>&1
+            nvm alias default 20 &>/dev/null 2>&1
+        fi
         cd "$PROJECT_ROOT"
         if pm2 start ecosystem.config.cjs 2>&1 | tail -5; then
             echo ""
