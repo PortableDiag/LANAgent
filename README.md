@@ -150,7 +150,7 @@ All repo references are resolved dynamically from git remotes — no hardcoded U
   - Natural language: "scan for bluetooth devices", "connect to my headphones"
   - Web UI for device management
 - 🖼️ **Agent Avatar**: Per-instance visual identity with API serving, Web UI management, and system prompt self-awareness
-  - **VRM Animated Avatar**: 10 VRM 1.0 models with 49 VRMA animations, facial expressions, eye tracking, spring bone physics, and lip sync
+  - **VRM Animated Avatar**: VRM 1.0 support with VRMA animations, facial expressions, eye tracking, spring bone physics, and lip sync. Upload your own VRM models.
   - **3D Avatar Designer**: Upload photo → generate 3D GLB model via HuggingFace Spaces (Hunyuan3D-2.1, TRELLIS), or pick a VRM model, or upload your own VRM
   - **Playground**: Interactive 3D page — chat with agent, emote studio, mirror mode (VR + webcam), VR floating menu
   - **Update Avatar Everywhere**: Renders bust portrait and syncs to agent profile, Gravatar, Telegram, and ERC-8004 NFT
@@ -483,7 +483,7 @@ LANAgent includes a comprehensive Web3 and cryptocurrency system with:
 
 ### 🎭 **VR Avatar System**
 - **Avatar Designer** at `/avatar.html` — full 3D viewer/designer with Three.js r140
-  - **VRM Tab**: 10 VRM 1.0 models with 49 VRMA animations — pick one and it animates with motion-captured idle
+  - **VRM Tab**: Upload VRM 1.0 models, apply VRMA animations — real-time motion-captured idle animations
   - Upload custom VRM files from VRoid Studio or VRoid Hub
   - **Set as Active Avatar** — persists in MongoDB, loads automatically across pages/devices
   - **Update Agent Avatar Everywhere** — renders bust portrait, syncs to profile, Gravatar, Telegram, ERC-8004 NFT

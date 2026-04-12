@@ -2,7 +2,7 @@
 
 All notable changes to LANAgent will be documented in this file.
 
-## [2.24.9] - 2026-04-11
+## [2.24.9] - 2026-04-12
 
 ### Added
 - **Twitter/X plugin v3.0** — Profile management (update name, bio, avatar, banner via v1.1 API), media upload (v2 chunked), auto-posting 2x/day with AI-generated content from real agent activity, credit/rate limit alerts via Telegram. Credential labels match X developer portal exactly.
@@ -33,6 +33,9 @@ All notable changes to LANAgent will be documented in this file.
 - **Ollama env var precedence** — `.env` variables now override saved database config for Ollama provider, fixing Docker installs where `host.docker.internal` was overwritten by localhost defaults.
 - **Ollama timeout** — Increased from 2 minutes to 10 minutes for CPU-only inference on modest hardware.
 - **Dashboard branch overflow fix** — Self-modification "Current Branch" field truncates long branch names with ellipsis.
+- **MindSwarm media upload fix** — Upload field name changed from `file` to `media` to match MindSwarm API.
+- **Docker localhost binding** — `docker-compose.yml` uses `DOCKER_BIND_HOST` env var. Installer sets `127.0.0.1` when Caddy/SSL is configured, preventing Docker ports from being publicly accessible.
+- **Server firewall hardening** — UFW installed and configured on all production VPS servers. Services bound to `127.0.0.1` behind nginx/Caddy reverse proxies.
 
 ## [2.24.8] - 2026-04-10
 
