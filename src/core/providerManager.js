@@ -91,12 +91,14 @@ export class ProviderManager extends EventEmitter {
     if (process.env.OLLAMA_BASE_URL || process.env.ENABLE_OLLAMA === 'true') {
       try {
         const config = {
-          baseUrl: process.env.OLLAMA_BASE_URL || 'http://localhost:11434',
-          chatModel: process.env.OLLAMA_CHAT_MODEL,
-          embeddingModel: process.env.OLLAMA_EMBEDDING_MODEL,
-          visionModel: process.env.OLLAMA_VISION_MODEL,
-          ...savedConfigs.ollama
+          ...savedConfigs.ollama,
+          // Env vars take precedence over saved DB config
+          ...(process.env.OLLAMA_BASE_URL && { baseUrl: process.env.OLLAMA_BASE_URL }),
+          ...(process.env.OLLAMA_CHAT_MODEL && { chatModel: process.env.OLLAMA_CHAT_MODEL }),
+          ...(process.env.OLLAMA_EMBEDDING_MODEL && { embeddingModel: process.env.OLLAMA_EMBEDDING_MODEL }),
+          ...(process.env.OLLAMA_VISION_MODEL && { visionModel: process.env.OLLAMA_VISION_MODEL }),
         };
+        if (!config.baseUrl) config.baseUrl = 'http://localhost:11434';
         const ollama = new OllamaProvider(config);
         await this.registerProvider("ollama", ollama);
       } catch (error) {
