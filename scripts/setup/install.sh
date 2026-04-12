@@ -245,8 +245,23 @@ if [ "$DOCKER_MODE" = "true" ]; then
             fi
         fi
     else
-        fail "Docker not found"
-        MISSING_DEPS+=("docker")
+        info "Installing Docker..."
+        if curl -fsSL https://get.docker.com | sh &>/dev/null 2>&1 && command -v docker &>/dev/null; then
+            ok "Docker installed"
+            # Also install Docker Compose if not bundled
+            if ! docker compose version &>/dev/null 2>&1; then
+                apt-get install -y -qq docker-compose-v2 &>/dev/null 2>&1 || true
+            fi
+            if docker compose version &>/dev/null 2>&1; then
+                ok "Docker Compose found"
+            else
+                fail "Docker Compose not found"
+                MISSING_DEPS+=("docker-compose")
+            fi
+        else
+            fail "Docker installation failed"
+            MISSING_DEPS+=("docker")
+        fi
     fi
     ok "Node.js 20, MongoDB 7 — handled by Docker"
 else
@@ -512,12 +527,38 @@ print_step 3 $TOTAL_STEPS "AI Providers"
 OLLAMA_URL=""
 ENABLE_OLLAMA=""
 
+# Install Ollama if needed and pull a default model
+install_ollama() {
+    if command -v ollama &>/dev/null || curl -s http://localhost:11434/api/tags &>/dev/null; then
+        return 0
+    fi
+    info "Installing Ollama..."
+    curl -fsSL https://ollama.ai/install.sh -o /tmp/ollama-install.sh 2>/dev/null
+    bash /tmp/ollama-install.sh &>/dev/null 2>&1
+    rm -f /tmp/ollama-install.sh
+    sleep 3
+    if curl -s http://localhost:11434/api/tags &>/dev/null; then
+        ok "Ollama installed and running"
+        # Pull a small default model
+        info "Pulling default model (tinyllama — small, fast)..."
+        ollama pull tinyllama &>/dev/null 2>&1 && ok "Model tinyllama ready" || warn "Model pull failed — run later: ollama pull tinyllama"
+        return 0
+    else
+        warn "Ollama install failed — install later: https://ollama.ai"
+        return 1
+    fi
+}
+
 if [ "$UNATTENDED" = "true" ]; then
     ANTHROPIC_KEY="$_ANTHROPIC_KEY"
     OPENAI_KEY="$_OPENAI_KEY"
     if [ "$_LOCAL_AI" = "true" ]; then
         OLLAMA_URL="${_OLLAMA_URL:-http://localhost:11434}"
         ENABLE_OLLAMA="true"
+        # Auto-install Ollama if not reachable and URL is localhost
+        if [[ "$OLLAMA_URL" == *"localhost"* ]] && ! curl -s "$OLLAMA_URL/api/tags" &>/dev/null; then
+            install_ollama
+        fi
     fi
 else
     echo -e "  ${DIM}LANAgent supports cloud AI (Anthropic/OpenAI) and local AI${NC}"
@@ -532,16 +573,22 @@ else
             ok "Ollama detected at localhost:11434"
             OLLAMA_URL="http://localhost:11434"
         else
-            echo -e "  ${DIM}Ollama not detected locally. You can point to a remote Ollama instance${NC}"
-            echo -e "  ${DIM}(e.g., another machine on your LAN with a GPU).${NC}"
-            echo ""
-            ask "Ollama server URL" "http://localhost:11434" OLLAMA_URL
-
-            if curl -s "${OLLAMA_URL}/api/tags" &>/dev/null; then
-                ok "Ollama connected at ${OLLAMA_URL}"
-            else
-                warn "Ollama not reachable at ${OLLAMA_URL} — install later: https://ollama.ai"
-                echo -e "  ${DIM}After installing Ollama, pull a model: ollama pull llama3.1${NC}"
+            echo -e "  ${DIM}Ollama not detected locally.${NC}"
+            ask_yn "Install Ollama now? (recommended)" "y" INSTALL_OLLAMA
+            if [ "$INSTALL_OLLAMA" = "true" ]; then
+                install_ollama
+                if curl -s http://localhost:11434/api/tags &>/dev/null; then
+                    OLLAMA_URL="http://localhost:11434"
+                fi
+            fi
+            if [ -z "$OLLAMA_URL" ]; then
+                echo -e "  ${DIM}You can point to a remote Ollama instance on your LAN instead.${NC}"
+                ask "Ollama server URL (or Enter to skip)" "http://localhost:11434" OLLAMA_URL
+                if [ -n "$OLLAMA_URL" ] && curl -s "${OLLAMA_URL}/api/tags" &>/dev/null; then
+                    ok "Ollama connected at ${OLLAMA_URL}"
+                elif [ -n "$OLLAMA_URL" ]; then
+                    warn "Ollama not reachable at ${OLLAMA_URL} — start it later"
+                fi
             fi
         fi
         ENABLE_OLLAMA="true"
