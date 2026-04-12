@@ -36,7 +36,7 @@ Run `bash scripts/setup/install.sh --help` for all options.
 ### Get your identity (automatic)
 
 After ~1 hour of being connected to the P2P network, your agent automatically receives:
-- **200 SKYNET tokens** — free welcome package from the genesis agent
+- **200 SKYNET tokens** — free welcome package from the network
 - **yourname@lanagent.net email** — automatically provisioned, no setup needed
 
 For an **ENS subname** (yourname.lanagent.eth), go to **Skynet > Identity** in the web UI:
@@ -48,7 +48,7 @@ For an **ENS subname** (yourname.lanagent.eth), go to **Skynet > Identity** in t
 
 LANAgent is designed for many instances to run simultaneously, each contributing to the project:
 
-- **Upstream sync**: Your instance automatically pulls updates from the genesis repo every 30 minutes
+- **Upstream sync**: Your instance automatically pulls updates from the main repo every 30 minutes
 - **Self-improvement**: Discovers bugs and improvements in its own code, creates PRs on your fork
 - **Upstream contributions**: Improvements are automatically contributed back to the main project via cross-fork PRs (enabled by default, set `UPSTREAM_CONTRIBUTIONS=false` to disable)
 - **P2P networking**: Instances discover and communicate with each other via the Skynet P2P network
@@ -100,7 +100,7 @@ All repo references are resolved dynamically from git remotes — no hardcoded U
   - Feature Discovery: Centralized feature discovery from git repositories (runs twice daily)
   - PR Review: AI-powered autonomous review, merge, and deployment of pull/merge requests (disabled by default)
   - **Cross-Fork Upstream PRs**: Improvements are automatically contributed back to the upstream repo
-  - **Upstream Sync**: Forked instances auto-receive updates from the genesis repo every 30 minutes
+  - **Upstream Sync**: Forked instances auto-receive updates from the main repo every 30 minutes
 - 🚨 **Proactive Alerts**: Immediate notifications for resource issues
 - 📦 **ARR Service Update Monitoring**: Daily check for Prowlarr, Radarr, Sonarr, Lidarr, Readarr updates with Telegram notifications — flags major version bumps
 - 🗂️ **Development Plan Auto-Archive**: Daily Agenda job (`archive-old-dev-items`, 02:30) archives `completed` items older than 30 days
@@ -233,7 +233,7 @@ All repo references are resolved dynamically from git remotes — no hardcoded U
     - Governance: token-weighted proposal voting (for/against/abstain)
     - V2 liquidity management: add/remove liquidity, position tracking, pool share monitoring
     - V3 autonomous market maker: concentrated liquidity with auto-rebalance, fee collection, circuit breakers, and Telegram alerts
-  - **Email Lease Service**: P2P email account provisioning — genesis provisions `username@lanagent.net` accounts for fork agents
+  - **Email Lease Service**: P2P email account provisioning — `username@lanagent.net` accounts automatically provisioned for new agents
     - SKYNET token payment with on-chain verification, configurable pricing
     - HMAC-SHA256 authenticated Mail Management API on docker-mailserver
     - Auto-pay, renewal, revocation, expired lease cleanup
@@ -342,12 +342,12 @@ LANAgent includes a comprehensive Web3 and cryptocurrency system with:
 - SIWE (Sign-In With Ethereum) authentication
 - EIP-712 typed data signatures
 - **ENS Name Management**: Register `.eth` names, create subnames for multi-agent setups, auto-renew before expiry, **Web UI Identity tab** for one-click subname + email requests via P2P
-    - P2P subname provisioning: forked instances auto-request subnames from genesis peer (e.g., `fork.lanagent.eth`)
+    - P2P subname provisioning: instances auto-request subnames via P2P (e.g., `myagent.lanagent.eth`)
     - Optional SKYNET token pricing for subname creation (configurable per-instance, default free)
     - NLP control: "what is my ENS name", "get me an ENS subname", "request subname coolbot"
-    - **Identity tab** (Skynet > Identity): Wallet funding (send BNB → convert to SKYNET), ENS subname request (`name.lanagent.eth`), email lease request (`name@lanagent.net`) — all via P2P to genesis agent, 100 SKYNET each
+    - **Identity tab** (Skynet > Identity): Wallet funding (send BNB → convert to SKYNET), ENS subname request (`name.lanagent.eth`), email lease request (`name@lanagent.net`) — all via P2P, 100 SKYNET each
     - Name collision auto-fallback with fingerprint suffix, pending payment retry on daily schedule
-  - Registered: `lanagent.eth` (base) + `alice.lanagent.eth` (subname)
+  - Registered: `lanagent.eth` (base)
   - Cross-chain resolution: names resolve on BSC, Ethereum, and all EVM chains
   - NameWrapper integration for gasless subname creation
 - Multi-signature wallet support
@@ -358,7 +358,7 @@ LANAgent includes a comprehensive Web3 and cryptocurrency system with:
 - Heartbeat (30-min) ensures time-based strategies like DCA run in flat markets
 - 3 included strategies (DCA, Mean Reversion, Momentum) with a pluggable architecture for building your own
 - Market regime detection: composite scoring from 72h price slope, trend strength, and RSI dynamically adjusts buy thresholds
-- Token Trader secondary strategy for speculative tokens with **multi-token simultaneous trading**, grid trading, trailing stops, progressive scale-out levels, pump stall detection, grid buy trend gates, emergency sell cooldown, escalating grid cooldowns, consecutive buy caps, avg entry sanity checks, and autonomous watchlist rotation with composite scoring (60% volatility, 25% liquidity, 15% momentum), fail-count tolerance (3-strike removal with system token immunity), and minimum score threshold
+- Token Trader secondary strategy for speculative tokens with multi-token simultaneous trading, trailing stops, and autonomous watchlist rotation
 - Multi-network support: Ethereum, BSC, Polygon with network-specific thresholds
 - Chainlink as primary price source with CoinGecko fallback
 - DEX swaps via Uniswap V2/V3/V4, PancakeSwap V2/V3/V4 (Infinity) with V4 > V3 > V2 preference, dual-protocol V4 quoting on BSC (PCS Infinity + Uniswap V4), CLAMM hooked pool support with native BNB address(0) intermediary routing, 1inch Aggregator fallback for tokens with no direct DEX path, and Telegram notifications
@@ -389,20 +389,14 @@ LANAgent includes a comprehensive Web3 and cryptocurrency system with:
   - SENTINEL soulbound token minted to reporter as reputation badge
   - SENTINEL tokens boost P2P trust score (+5 per token, up to +15)
   - 7 scam categories: Address Poisoning, Phishing, Honeypot, Rug Pull, Fake Contract, Dust Attack, Other
-  - SKYNET token fee for reporting (adjustable by genesis agent)
+  - SKYNET token fee for reporting (auto-priced to ~$0.50 USD)
   - 2-of-3 immunity system: ERC-8004 identity, SKYNET balance, active stake
   - Batch reporting (up to 50 addresses per transaction)
-  - Genesis agent (ERC-8004 #2930) can remove false positives
   - **Automatic Scam Token Reporting**: Agent autonomously detects and reports scam tokens to the registry
     - Confidence scoring: honeypot (50pts), scam name (40pts), no code (20pts), dust (15pts)
     - Requires 2+ signals (threshold 50) — "no swap path" alone never triggers
     - Batch-reports at end of each sweep cycle, WebUI toggle (enabled by default)
-  - **USD-Anchored Fee Auto-Pricing**: The genesis instance continuously anchors `reportFee` and `immunityThreshold` to a USD target via the shared SKYNET/USD oracle (PancakeSwap LP reserves × Chainlink BNB/USD)
-    - Hourly Agenda jobs `skynet-auto-price-fee` and `skynet-auto-price-immunity`
-    - 25% drift gate + 24h hard rate limit prevent gas burn on small price wiggles
-    - Min/max SKYNET clamps protect against oracle anomalies
-    - Pre-flight `_isGenesisInstance()` check (signer vs `OwnershipFacet.owner()`) so forks silently no-op — only the canonical genesis instance drives the fee
-    - Defaults: $0.50 flag fee, $50 immunity threshold. Kill switch per-param via `skynet.scammerFee.autoPrice` / `skynet.immunityThreshold.autoPrice` SystemSettings keys
+  - **USD-Anchored Fee Auto-Pricing**: Report fee and immunity threshold automatically anchored to USD via on-chain oracle (PancakeSwap LP reserves + Chainlink BNB/USD). Defaults: ~$0.50 flag fee, ~$50 immunity threshold.
   - **Fee-to-Staking Flywheel**: Registry reporting fees automatically fund staking reward epochs
     - On-chain detection of `ScammerRegistered` events (self + external reporters)
     - Isolated `registryFees` ledger prevents mixing with LP/treasury/reserve funds
@@ -420,7 +414,7 @@ LANAgent includes a comprehensive Web3 and cryptocurrency system with:
 - Mint, update, and view identity NFT from Web UI or API
 - NFT card display in Web UI — avatar, chain badge, metadata grid, BscScan/IPFS links
 - Wallet linking via EIP-712 signed `setAgentWallet()` on-chain call
-- Telegram integration — ask ALICE to show her NFT identity
+- Telegram integration — ask your agent to show its NFT identity
 - Staleness detection — notifies when on-chain registration is outdated
 - Pinata API key management with encrypted database storage
 
@@ -668,7 +662,7 @@ LANAgent/
 "Send email to john@example.com about meeting"
 "Check my emails"
 "Add task: backup server database [high priority]"
-"Send email to alice@example.com with attachment /home/report.pdf"
+"Send email to user@example.com with attachment /home/report.pdf"
 "Email the monthly report at /tmp/report.xlsx to the team"
 "Schedule email to bob@example.com tomorrow at 9am with subject 'Daily Report'"
 "Send recurring email to team@example.com every Monday at 9am"
@@ -795,7 +789,7 @@ nvm use 20
 Required environment variables in `.env`:
 ```
 # Agent Configuration
-AGENT_NAME=ALICE
+AGENT_NAME=MyAgent
 AGENT_PORT=80
 AGENT_SSH_PORT=2222
 SSH_PASSWORD=your_secure_password
