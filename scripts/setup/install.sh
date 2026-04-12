@@ -1075,7 +1075,12 @@ ANTHROPIC_ENABLE_WEB_SEARCH=true
 
 # Local AI (Ollama) — free, private, runs on your hardware
 ENABLE_OLLAMA=${ENABLE_OLLAMA:-false}
-OLLAMA_BASE_URL=${OLLAMA_URL:-http://localhost:11434}
+# Docker containers can't reach host localhost — use host.docker.internal
+if [ "$DOCKER_MODE" = "true" ] && [[ "${OLLAMA_URL:-localhost}" == *"localhost"* ]]; then
+  OLLAMA_BASE_URL=${OLLAMA_URL/localhost/host.docker.internal}
+else
+  OLLAMA_BASE_URL=${OLLAMA_URL:-http://localhost:11434}
+fi
 OLLAMA_CHAT_MODEL=llama3.1
 OLLAMA_EMBEDDING_MODEL=nomic-embed-text
 
