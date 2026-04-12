@@ -2946,7 +2946,8 @@ Return ONLY the post text, nothing else.`;
     }
 
     const form = new FormData();
-    form.append('file', fs.createReadStream(filePath), path.basename(filePath));
+    const fieldName = endpoint.includes('/avatar') || endpoint.includes('/banner') ? 'file' : 'media';
+    form.append(fieldName, fs.createReadStream(filePath), path.basename(filePath));
 
     const url = `${this.baseUrl}${endpoint}`;
     return await retryOperation(async () => {
