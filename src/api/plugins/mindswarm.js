@@ -549,11 +549,20 @@ export default class MindSwarmPlugin extends BasePlugin {
       },
       {
         command: 'pinPost',
-        description: 'Pin or unpin a post to the agent MindSwarm profile',
+        description: 'Pin or unpin a post to the agent MindSwarm profile (max 3 pinned)',
         usage: 'pinPost({ postId: "abc123" })',
         examples: [
           'pin that post on mindswarm', 'pin post to my profile',
           'unpin my mindswarm post'
+        ]
+      },
+      {
+        command: 'reorderPins',
+        description: 'Reorder pinned posts on MindSwarm profile',
+        usage: 'reorderPins({ postIds: ["first-id", "second-id", "third-id"] })',
+        examples: [
+          'reorder my pinned posts on mindswarm',
+          'change pinned post order'
         ]
       },
       {
@@ -2899,12 +2908,20 @@ Return ONLY the post text, nothing else.`;
 
   async _pinPost(data) {
     this._requireAuth();
-    // postId: null to unpin
-    const result = await this._apiRequest('put', '/users/pin-post', {
-      postId: data.postId || null
+    this.validateParams(data, { postId: { required: true, type: 'string' } });
+    // Use the new toggle endpoint (POST /posts/:id/pin)
+    const result = await this._apiRequest('post', `/posts/${data.postId}/pin`);
+    const isPinned = result.data?.isPinned;
+    return { success: true, data: result.data, message: `Post ${isPinned ? 'pinned' : 'unpinned'} (${result.data?.pinnedCount || 0}/3)` };
+  }
+
+  async _reorderPins(data) {
+    this._requireAuth();
+    this.validateParams(data, { postIds: { required: true, type: 'array' } });
+    const result = await this._apiRequest('put', '/posts/pinned/reorder', {
+      postIds: data.postIds
     });
-    const action = data.postId ? 'pinned' : 'unpinned';
-    return { success: true, data: result.data, message: `Post ${action}` };
+    return { success: true, data: result.data, message: 'Pinned posts reordered' };
   }
 
   async _updateSocialLinks(data) {
@@ -3755,6 +3772,7 @@ Return ONLY the post text, nothing else.`;
         case 'getEditHistory':   return await this._getEditHistory(data);
         case 'getSavedPosts':    return await this._getSavedPosts(data);
         case 'pinPost':          return await this._pinPost(data);
+        case 'reorderPins':      return await this._reorderPins(data);
         case 'updateSocialLinks': return await this._updateSocialLinks(data);
         case 'uploadAvatar':     return await this._uploadAvatar(data);
         case 'uploadBanner':     return await this._uploadBanner(data);
