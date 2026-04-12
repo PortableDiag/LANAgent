@@ -16626,7 +16626,9 @@ class LANAgentDashboard {
                 // Store events by date for easy access
                 this.calendarEvents = {};
                 response.events.forEach(event => {
-                    const date = new Date(event.start).toDateString();
+                    // Parse date without UTC→local conversion to avoid off-by-one day
+                    const d = new Date(event.start);
+                    const date = new Date(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()).toDateString();
                     if (!this.calendarEvents[date]) {
                         this.calendarEvents[date] = [];
                     }
@@ -16775,11 +16777,11 @@ class LANAgentDashboard {
             ` : ''}
             <div class="event-detail-item">
                 <label>Start</label>
-                <div class="value">${new Date(event.start).toLocaleString()}</div>
+                <div class="value">${event.allDay ? new Date(event.start).toLocaleDateString('en-US', {timeZone:'UTC'}) : new Date(event.start).toLocaleString()}</div>
             </div>
             <div class="event-detail-item">
                 <label>End</label>
-                <div class="value">${new Date(event.end).toLocaleString()}</div>
+                <div class="value">${event.allDay ? new Date(event.end).toLocaleDateString('en-US', {timeZone:'UTC'}) : new Date(event.end).toLocaleString()}</div>
             </div>
             ${event.allDay ? `
             <div class="event-detail-item">
