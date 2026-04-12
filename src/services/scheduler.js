@@ -982,8 +982,8 @@ Respond with ONLY the rephrased message, no explanation:`;
         if (!apiManager) return;
         const twitter = apiManager.apis?.get('twitter')?.instance;
         if (!twitter?.hasWriteCredentials()) return;
-        if (!twitter._autoPostConfig?.enabled) return;
-        await twitter._dailyAutoPost();
+        if (twitter._autoPostConfig?.enabled) await twitter._dailyAutoPost();
+        if (twitter._engagementConfig?.enabled) await twitter._engagementCycle();
       } catch (error) {
         logger.error('Twitter engagement error:', error.message);
       }
