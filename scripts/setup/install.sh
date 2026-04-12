@@ -235,8 +235,14 @@ if [ "$DOCKER_MODE" = "true" ]; then
         if docker compose version &>/dev/null 2>&1 || command -v docker-compose &>/dev/null; then
             ok "Docker Compose found"
         else
-            fail "Docker Compose not found"
-            MISSING_DEPS+=("docker-compose")
+            info "Installing Docker Compose..."
+            apt-get install -y -qq docker-compose-v2 &>/dev/null 2>&1 || apt-get install -y -qq docker-compose-plugin &>/dev/null 2>&1 || pip3 install docker-compose &>/dev/null 2>&1
+            if docker compose version &>/dev/null 2>&1 || command -v docker-compose &>/dev/null; then
+                ok "Docker Compose installed"
+            else
+                fail "Docker Compose not found"
+                MISSING_DEPS+=("docker-compose")
+            fi
         fi
     else
         fail "Docker not found"

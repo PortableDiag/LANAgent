@@ -16,6 +16,8 @@ services:
       - ./workspace:/app/workspace
       - ./.env:/app/.env:ro
       - .:/app/repo                 # Full git repo for self-modification and upstream PRs
+    extra_hosts:
+      - "host.docker.internal:host-gateway"  # Access host services (Ollama, etc.) from container
     depends_on:
       mongodb:
         condition: service_healthy
