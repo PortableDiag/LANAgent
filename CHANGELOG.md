@@ -27,6 +27,12 @@ All notable changes to LANAgent will be documented in this file.
 ### Changed
 - **Gateway balance alert** — Cooldown reduced from 6 hours to 4 hours for faster notification when BNB runs low.
 - **api.lanagent.net portal** — 25 service cards with live availability indicators (dimmed when offline), sorted alphabetically. 30 curl demos, 6 language examples (Python, JS, Go, Rust, PHP, Java) with 13 examples each. Dynamic credit costs from agent catalogs.
+- **Twitter media upload** — v2 API single-request image upload with auto-attach to tweets and replies. Posts with images via `filePath` parameter.
+- **Installer auto-installs Docker** — Docker mode now auto-installs Docker via `get.docker.com` and Docker Compose when not found.
+- **Installer auto-installs Ollama** — Local AI mode auto-installs Ollama and pulls `tinyllama` default model when not found locally.
+- **Ollama env var precedence** — `.env` variables now override saved database config for Ollama provider, fixing Docker installs where `host.docker.internal` was overwritten by localhost defaults.
+- **Ollama timeout** — Increased from 2 minutes to 10 minutes for CPU-only inference on modest hardware.
+- **Dashboard branch overflow fix** — Self-modification "Current Branch" field truncates long branch names with ellipsis.
 
 ## [2.24.8] - 2026-04-10
 

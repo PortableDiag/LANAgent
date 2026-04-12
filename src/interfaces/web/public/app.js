@@ -2870,8 +2870,10 @@ class LANAgentDashboard {
             runningEl.style.color = status.isRunning ? '#4caf50' : '#888';
         }
         
-        document.getElementById('selfmod-branch').textContent = 
-            status.currentBranch || 'main';
+        const branchEl = document.getElementById('selfmod-branch');
+        const branchName = status.currentBranch || 'main';
+        branchEl.textContent = branchName;
+        branchEl.title = branchName;
         
         // Calculate next session time (runs at 4 AM and 4 PM)
         const nextEl = document.getElementById('selfmod-next');

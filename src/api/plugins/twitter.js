@@ -242,6 +242,8 @@ export default class TwitterPlugin extends BasePlugin {
           return await this.likeTweet(data);
         case 'getMe':
           return await this.getAuthenticatedUser();
+        case 'uploadMedia':
+          return await this.uploadMedia(data);
 
         // Profile management (v1.1)
         case 'updateProfile':
@@ -402,12 +404,22 @@ export default class TwitterPlugin extends BasePlugin {
 
   // ─── Write Commands (X API v2) ────────────────────────────────────────
 
-  async postTweet({ text, pollOptions, pollDuration, quoteTweetId, replySettings, mediaIds }) {
+  async postTweet({ text, pollOptions, pollDuration, quoteTweetId, replySettings, mediaIds, filePath }) {
     if (!text || text.trim().length === 0) {
       return { success: false, error: 'Tweet text is required' };
     }
     if (text.length > 280) {
       return { success: false, error: `Tweet too long (${text.length}/280 characters)` };
+    }
+
+    // Auto-upload image if filePath provided
+    if (filePath && !mediaIds) {
+      try {
+        const uploaded = await this.uploadMedia({ filePath });
+        mediaIds = [uploaded.mediaId];
+      } catch (err) {
+        this.logger.warn('Media upload failed, posting without image:', err.message);
+      }
     }
 
     const body = { text: text.trim() };
@@ -445,7 +457,7 @@ export default class TwitterPlugin extends BasePlugin {
     };
   }
 
-  async replyToTweet({ text, replyToId, url }) {
+  async replyToTweet({ text, replyToId, url, filePath, mediaIds }) {
     // Extract tweet ID from URL if provided instead of raw ID
     if (!replyToId && url) {
       replyToId = this.extractPostId(url);
@@ -460,10 +472,24 @@ export default class TwitterPlugin extends BasePlugin {
       return { success: false, error: `Reply too long (${text.length}/280 characters)` };
     }
 
+    // Auto-upload image if filePath provided
+    if (filePath && !mediaIds) {
+      try {
+        const uploaded = await this.uploadMedia({ filePath });
+        mediaIds = [uploaded.mediaId];
+      } catch (err) {
+        this.logger.warn('Media upload failed for reply, posting without image:', err.message);
+      }
+    }
+
     const body = {
       text: text.trim(),
       reply: { in_reply_to_tweet_id: String(replyToId) }
     };
+
+    if (mediaIds && Array.isArray(mediaIds) && mediaIds.length > 0) {
+      body.media = { media_ids: mediaIds.map(String) };
+    }
 
     const result = await this.xApiRequest('POST', '/tweets', body);
 
@@ -628,49 +654,48 @@ export default class TwitterPlugin extends BasePlugin {
       mediaType = { '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png', '.gif': 'image/gif', '.webp': 'image/webp', '.mp4': 'video/mp4' }[ext] || 'image/jpeg';
     }
 
-    // INIT
-    const initUrl = `${this.X_API_BASE}/media/upload/initialize`;
-    const initAuth = this.generateOAuthHeader('POST', initUrl);
-    const initRes = await axios.post(initUrl, {
-      media_type: mediaType,
-      total_bytes: totalBytes,
-      media_category: mediaCategory
-    }, {
-      headers: { 'Authorization': initAuth, 'Content-Type': 'application/json', 'User-Agent': 'LANAgent/3.0' }
-    });
+    // X API v2 simple media upload — POST /2/media/upload with multipart
+    const uploadUrl = `${this.X_API_BASE}/media/upload`;
+    const authHeader = this.generateOAuthHeader('POST', uploadUrl);
 
-    const mediaId = initRes.data.data?.id;
-    if (!mediaId) throw new Error('Media upload init failed — no media ID returned');
+    // Build multipart body manually (no form-data dependency needed)
+    const boundary = '----LANAgent' + crypto.randomBytes(8).toString('hex');
+    const filename = path.basename(filePath);
+    const parts = [];
+    // media file
+    parts.push(`--${boundary}\r\nContent-Disposition: form-data; name="media"; filename="${filename}"\r\nContent-Type: ${mediaType}\r\n\r\n`);
+    const mediaBuffer = Buffer.concat([Buffer.from(parts[0]), fileData, Buffer.from('\r\n')]);
+    // media_category
+    const catPart = `--${boundary}\r\nContent-Disposition: form-data; name="media_category"\r\n\r\n${mediaCategory}\r\n`;
+    // media_type
+    const typePart = `--${boundary}\r\nContent-Disposition: form-data; name="media_type"\r\n\r\n${mediaType}\r\n`;
+    // closing
+    const closePart = `--${boundary}--\r\n`;
 
-    // APPEND — single segment for images, using JSON with base64 media_data
-    const appendUrl = `${this.X_API_BASE}/media/upload/${mediaId}/append`;
-    const appendAuth = this.generateOAuthHeader('POST', appendUrl);
+    const body = Buffer.concat([mediaBuffer, Buffer.from(catPart), Buffer.from(typePart), Buffer.from(closePart)]);
 
-    await axios.post(appendUrl, {
-      media_data: fileData.toString('base64'),
-      segment_index: 0
-    }, {
-      headers: {
-        'Authorization': appendAuth,
-        'Content-Type': 'application/json',
-        'User-Agent': 'LANAgent/3.0'
-      },
-      maxContentLength: 100 * 1024 * 1024
-    });
+    try {
+      const response = await axios.post(uploadUrl, body, {
+        headers: {
+          'Authorization': authHeader,
+          'Content-Type': `multipart/form-data; boundary=${boundary}`,
+          'User-Agent': 'LANAgent/3.0'
+        },
+        maxContentLength: 100 * 1024 * 1024,
+        maxBodyLength: 100 * 1024 * 1024,
+        timeout: 60000
+      });
 
-    // FINALIZE
-    const finalizeUrl = `${this.X_API_BASE}/media/upload/${mediaId}/finalize`;
-    const finalizeAuth = this.generateOAuthHeader('POST', finalizeUrl);
-    const finalizeRes = await axios.post(finalizeUrl, null, {
-      headers: { 'Authorization': finalizeAuth, 'User-Agent': 'LANAgent/3.0' }
-    });
+      const mediaId = response.data?.data?.media_id || response.data?.data?.id || response.data?.media_id_string;
+      if (!mediaId) throw new Error('No media_id in response: ' + JSON.stringify(response.data));
 
-    this.logger.info('Media uploaded', { mediaId, mediaType, bytes: totalBytes });
-    return {
-      mediaId,
-      mediaKey: finalizeRes.data.data?.media_key,
-      size: totalBytes
-    };
+      this.logger.info('Media uploaded', { mediaId, mediaType, bytes: totalBytes });
+      return { mediaId, size: totalBytes };
+    } catch (err) {
+      const status = err.response?.status;
+      const detail = err.response?.data?.detail || err.response?.data?.errors?.[0]?.message || err.response?.data?.error || err.message;
+      throw new Error(`Media upload failed (${status}): ${detail}`);
+    }
   }
 
   // ─── Auto-Posting ────────────────────────────────────────────────────
