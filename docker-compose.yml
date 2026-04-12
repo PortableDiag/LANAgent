@@ -8,8 +8,8 @@ services:
       - MONGODB_URI=mongodb://mongodb:27017/${AGENT_NAME:-lanagent}
       - AGENT_REPO_PATH=/app/repo
     ports:
-      - "${AGENT_PORT:-3000}:${AGENT_PORT:-3000}"
-      - "${AGENT_SSH_PORT:-2222}:2222"
+      - "${DOCKER_BIND_HOST:-0.0.0.0}:${AGENT_PORT:-3000}:${AGENT_PORT:-3000}"
+      - "${DOCKER_BIND_HOST:-0.0.0.0}:${AGENT_SSH_PORT:-2222}:2222"
     volumes:
       - ./data:/app/data
       - ./logs:/app/logs

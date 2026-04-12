@@ -996,6 +996,8 @@ if true; then
             AGENT_PORT=$INTERNAL_PORT
             ok "Agent port changed to ${AGENT_PORT} (Caddy handles 80/443)"
         fi
+        # When behind a reverse proxy, bind Docker to localhost only
+        DOCKER_BIND_HOST="127.0.0.1"
 
         # Write Caddyfile
         if [ -n "$SSL_DOMAIN" ]; then
@@ -1099,6 +1101,9 @@ WEB_UI_PASSWORD=lanagent
 # SSH Interface
 SSH_USERNAME=lanagent
 SSH_PASSWORD=${SSH_PASS}
+
+# Docker network binding (127.0.0.1 when behind reverse proxy, 0.0.0.0 for direct access)
+DOCKER_BIND_HOST=${DOCKER_BIND_HOST:-0.0.0.0}
 
 # VPN
 EXPRESSVPN_ENABLED=false
