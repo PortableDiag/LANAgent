@@ -17,7 +17,7 @@ export class OllamaProvider extends BaseProvider {
       vision: config.visionModel || process.env.OLLAMA_VISION_MODEL || 'llava'
     };
     this.contextLength = config.contextLength || 4096;
-    this.timeout = config.timeout || 120000; // 2 minutes default for local inference
+    this.timeout = config.timeout || 600000; // 10 minutes — local CPU inference can be slow on modest hardware
     this.availableModels = [];
     this.metrics.usage = {}; // Per-model usage analytics (do not overwrite BaseProvider.metrics)
     this.commands = [
