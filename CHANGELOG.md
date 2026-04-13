@@ -36,6 +36,9 @@ All notable changes to LANAgent will be documented in this file.
 - **MindSwarm media upload fix** — Upload field name changed from `file` to `media` to match MindSwarm API.
 - **Docker localhost binding** — `docker-compose.yml` uses `DOCKER_BIND_HOST` env var. Installer sets `127.0.0.1` when Caddy/SSL is configured, preventing Docker ports from being publicly accessible.
 - **Server firewall hardening** — UFW installed and configured on all production VPS servers. Services bound to `127.0.0.1` behind nginx/Caddy reverse proxies.
+- **Twitter engagement system** — Mention monitoring, AI auto-reply with safety guards (max 5/cycle, 10/day, 2-deep thread limit), auto-like mentions, auto-follow back with blocklist. All features OFF by default (opt-in).
+- **MindSwarm pin post** — Updated to v2 toggle API (`POST /posts/:id/pin`), added `reorderPins` action.
+- **Calendar date fix** — Events no longer show one day early due to UTC-to-local timezone conversion.
 
 ## [2.24.8] - 2026-04-10
 
