@@ -42,6 +42,11 @@ export default class FirebaseCloudMessagingFCMPlugin extends BasePlugin {
         command: 'scheduleMessage',
         description: 'Schedule a notification message to be sent at a future time',
         usage: 'scheduleMessage <timestamp> <registrationToken> <title> <body> [data]'
+      },
+      {
+        command: 'createMessageTemplate',
+        description: 'Create a reusable message template with placeholders for dynamic content',
+        usage: 'createMessageTemplate <templateId> <templateString>'
       }
     ];
 
@@ -49,6 +54,8 @@ export default class FirebaseCloudMessagingFCMPlugin extends BasePlugin {
     this.baseUrl = 'https://fcm.googleapis.com/fcm/send';
     this.httpsAgent = new https.Agent({ keepAlive: true });
     this.scheduler = this.agent?.services?.get('taskScheduler');
+    this.messageTemplates = new Map();
+
     if (this.scheduler?.agenda) {
       this.scheduler.agenda.define('fcm-scheduled-message', async (job) => {
         const { registrationToken, title, body, data } = job.attrs.data;
@@ -58,7 +65,7 @@ export default class FirebaseCloudMessagingFCMPlugin extends BasePlugin {
   }
 
   async execute(params) {
-    const { action, registrationToken, registrationTokens, title, body, topic, data, timestamp, priority } = params;
+    const { action, registrationToken, registrationTokens, title, body, topic, data, timestamp, priority, templateId, templateString } = params;
 
     try {
       switch(action) {
@@ -72,6 +79,8 @@ export default class FirebaseCloudMessagingFCMPlugin extends BasePlugin {
           return await this.unsubscribeFromTopic(registrationToken, topic);
         case 'scheduleMessage':
           return await this.scheduleMessage(timestamp, registrationToken, title, body, data);
+        case 'createMessageTemplate':
+          return await this.createMessageTemplate(templateId, templateString);
         default:
           return { 
             success: false, 
@@ -82,6 +91,22 @@ export default class FirebaseCloudMessagingFCMPlugin extends BasePlugin {
       logger.error('Firebase Cloud Messaging FCM plugin error:', error);
       return { success: false, error: error.message };
     }
+  }
+
+  /**
+   * Create a reusable message template with placeholders for dynamic content.
+   * @param {string} templateId - The unique identifier for the template.
+   * @param {string} templateString - The template string with placeholders.
+   * @returns {Promise<Object>}
+   */
+  async createMessageTemplate(templateId, templateString) {
+    if (!templateId || !templateString) {
+      return { success: false, error: 'Template ID and template string are required' };
+    }
+
+    this.messageTemplates.set(templateId, templateString);
+    logger.info(`Created message template with ID: ${templateId}`);
+    return { success: true, message: `Template ${templateId} created successfully` };
   }
 
   /**

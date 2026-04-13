@@ -1,18 +1,19 @@
 import { logger } from './logger.js';
 
 /**
- * Safely parse JSON with error handling
+ * Safely parse JSON with error handling and custom deserializer
  * @param {string} text - JSON string to parse
  * @param {*} defaultValue - Default value if parsing fails
+ * @param {Function} [customDeserializer] - Optional custom deserializer function
  * @returns {*} Parsed object or default value
  */
-export function safeJsonParse(text, defaultValue = null) {
+export function safeJsonParse(text, defaultValue = null, customDeserializer = null) {
   if (!text || typeof text !== 'string') {
     return defaultValue;
   }
   
   try {
-    return JSON.parse(text);
+    return customDeserializer ? JSON.parse(text, customDeserializer) : JSON.parse(text);
   } catch (error) {
     logger.debug(`JSON parse error: ${error.message}`, { 
       text: text.substring(0, 100),
@@ -23,14 +24,15 @@ export function safeJsonParse(text, defaultValue = null) {
 }
 
 /**
- * Safely stringify JSON with error handling
+ * Safely stringify JSON with error handling and custom serializer
  * @param {*} obj - Object to stringify
  * @param {number} spaces - Number of spaces for indentation
+ * @param {Function} [customSerializer] - Optional custom serializer function
  * @returns {string} JSON string or empty string on error
  */
-export function safeJsonStringify(obj, spaces = 0) {
+export function safeJsonStringify(obj, spaces = 0, customSerializer = null) {
   try {
-    return JSON.stringify(obj, null, spaces);
+    return JSON.stringify(obj, customSerializer, spaces);
   } catch (error) {
     logger.error(`JSON stringify error: ${error.message}`, { error });
     
@@ -61,9 +63,10 @@ export function safeJsonStringify(obj, spaces = 0) {
  * Parse JSON from various sources (string, buffer, or already parsed)
  * @param {string|Buffer|Object} input - Input to parse
  * @param {*} defaultValue - Default value if parsing fails
+ * @param {Function} [customDeserializer] - Optional custom deserializer function
  * @returns {*} Parsed object or default value
  */
-export function parseJsonInput(input, defaultValue = null) {
+export function parseJsonInput(input, defaultValue = null, customDeserializer = null) {
   // Already an object
   if (typeof input === 'object' && input !== null && !Buffer.isBuffer(input)) {
     return input;
@@ -76,7 +79,7 @@ export function parseJsonInput(input, defaultValue = null) {
   
   // Parse string
   if (typeof input === 'string') {
-    return safeJsonParse(input, defaultValue);
+    return safeJsonParse(input, defaultValue, customDeserializer);
   }
   
   return defaultValue;

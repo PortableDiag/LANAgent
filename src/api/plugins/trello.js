@@ -68,6 +68,11 @@ export default class TrelloPlugin extends BasePlugin {
         command: 'movecard',
         description: 'Move a card from one list to another',
         usage: 'movecard({ cardId: "CARD_ID", targetListId: "TARGET_LIST_ID" })'
+      },
+      {
+        command: 'assignmember',
+        description: 'Assign a member to a card',
+        usage: 'assignmember({ cardId: "CARD_ID", memberId: "MEMBER_ID" })'
       }
     ];
     
@@ -116,6 +121,9 @@ export default class TrelloPlugin extends BasePlugin {
 
         case 'movecard':
           return await this.moveCard(params);
+
+        case 'assignmember':
+          return await this.assignMember(params);
           
         default:
           return { 
@@ -443,6 +451,41 @@ export default class TrelloPlugin extends BasePlugin {
     } catch (error) {
       logger.error('Error moving card:', error.message);
       return { success: false, error: 'Failed to move card: ' + error.message };
+    }
+  }
+
+  /**
+   * Assign a member to a card
+   * @param {Object} params - Parameters for assigning the member
+   * @param {string} params.cardId - The ID of the card
+   * @param {string} params.memberId - The ID of the member to assign
+   * @returns {Promise<Object>} - Result of the assign operation
+   */
+  async assignMember(params) {
+    const { cardId, memberId } = params;
+    
+    this.validateParams(params, { 
+      cardId: { required: true, type: 'string' },
+      memberId: { required: true, type: 'string' }
+    });
+
+    if (!this.apiKey || !this.oauthToken) {
+      return { success: false, error: 'API key or OAuth token not configured' };
+    }
+
+    try {
+      logger.info(`Assigning member: ${memberId} to card: ${cardId}`);
+      const response = await axios.post(`${this.baseUrl}/cards/${cardId}/idMembers`, null, {
+        params: {
+          key: this.apiKey,
+          token: this.oauthToken,
+          value: memberId
+        }
+      });
+      return { success: true, data: response.data };
+    } catch (error) {
+      logger.error('Error assigning member to card:', error.message);
+      return { success: false, error: 'Failed to assign member: ' + error.message };
     }
   }
 }

@@ -1,5 +1,6 @@
 import { PluginSettings } from '../../../models/PluginSettings.js';
 import { logger } from '../../../utils/logger.js';
+import { safeJsonStringify } from '../../../utils/jsonUtils.js';
 
 let killSwitchActive = false;
 let lastCheck = 0;
@@ -17,7 +18,7 @@ async function refreshKillSwitch() {
 
 export function setKillSwitch(active) {
   killSwitchActive = !!active;
-  logger.warn(`External gateway kill switch ${killSwitchActive ? 'ACTIVATED' : 'deactivated'}`);
+  logKillSwitchEvent(killSwitchActive ? 'ACTIVATED' : 'deactivated');
 }
 
 export function isKillSwitchActive() {
@@ -35,6 +36,7 @@ export async function killSwitchMiddleware(req, res, next) {
   }
 
   if (killSwitchActive) {
+    logKillSwitchEvent('BLOCKED', req.path);
     return res.status(503).json({
       success: false,
       error: 'Service temporarily unavailable',
@@ -43,4 +45,18 @@ export async function killSwitchMiddleware(req, res, next) {
   }
 
   next();
+}
+
+/**
+ * Logs detailed metrics about kill switch activations and deactivations.
+ * @param {string} action - The action performed (e.g., 'ACTIVATED', 'deactivated', 'BLOCKED').
+ * @param {string} [path] - The request path if applicable.
+ */
+function logKillSwitchEvent(action, path = '') {
+  const eventDetails = {
+    timestamp: new Date().toISOString(),
+    action,
+    path
+  };
+  logger.info(`Kill switch event: ${safeJsonStringify(eventDetails)}`);
 }

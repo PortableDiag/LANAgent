@@ -209,6 +209,16 @@ export class WebScraperService {
           throw new Error('403 Forbidden');
         }
 
+        if (response.status() === 429) {
+          logger.warn('Received 429 Too Many Requests, applying exponential backoff...');
+          throw new Error('429 Too Many Requests');
+        }
+
+        if (response.status() >= 500) {
+          logger.warn(`Received ${response.status()} error, retrying immediately...`);
+          throw new Error(`HTTP ${response.status()}: ${response.statusText()}`);
+        }
+
         if (response.status() >= 400) {
           throw new Error(`HTTP ${response.status()}: ${response.statusText()}`);
         }
@@ -283,6 +293,16 @@ export class WebScraperService {
           waitUntil: options.waitUntil || 'networkidle',
           timeout: options.timeout || 30000
         });
+
+        if (response.status() === 429) {
+          logger.warn('Received 429 Too Many Requests, applying exponential backoff...');
+          throw new Error('429 Too Many Requests');
+        }
+
+        if (response.status() >= 500) {
+          logger.warn(`Received ${response.status()} error, retrying immediately...`);
+          throw new Error(`HTTP ${response.status()}: ${response.statusText()}`);
+        }
 
         if (response.status() >= 400) {
           throw new Error(`HTTP ${response.status()}: ${response.statusText()}`);

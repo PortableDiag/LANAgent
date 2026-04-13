@@ -29,19 +29,38 @@ router.get('/api/status', authenticateToken, async (req, res) => {
   }
 });
 
-// Connect to VPN
+// Connect to VPN with optional multi-protocol fallback
 router.post('/api/connect', authenticateToken, async (req, res) => {
   try {
     const agent = req.app.locals.agent;
-    const { location, protocol, retry } = req.body;
-    
-    const result = await retryOperation(() => agent.apiManager.executeAPI('vpn', 'connect', {
-      location,
-      protocol,
-      retry
-    }), { retries: 3, shouldRetry: isRetryableError });
-    
-    res.json(result);
+    const { location, protocol, protocols, retry } = req.body;
+
+    // Support both single protocol (string) and multiple protocols (array)
+    const protocolList = protocols || (protocol ? [protocol] : ['openvpn']);
+
+    let connectionResult;
+    for (const proto of protocolList) {
+      try {
+        connectionResult = await retryOperation(() => agent.apiManager.executeAPI('vpn', 'connect', {
+          location,
+          protocol: proto,
+          retry
+        }), { retries: 3, shouldRetry: isRetryableError });
+
+        if (connectionResult.success) break;
+      } catch (error) {
+        logger.warn(`VPN connect failed with protocol ${proto}: ${error.message}`);
+      }
+    }
+
+    if (!connectionResult || !connectionResult.success) {
+      return res.status(502).json({
+        success: false,
+        error: `Failed to connect using protocols: ${protocolList.join(', ')}`
+      });
+    }
+
+    res.json(connectionResult);
   } catch (error) {
     logger.error('VPN connect API error:', error);
     res.status(500).json({

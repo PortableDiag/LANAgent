@@ -56,6 +56,16 @@ export default class NumverifyPlugin extends BasePlugin {
           'convert +447911123456 to national format',
           'convert +33123456789 to international format'
         ]
+      },
+      {
+        command: 'detectPhoneNumberRegion',
+        description: 'Detect the region of a given phone number',
+        usage: 'detectPhoneNumberRegion({ number: "+14158586273" })',
+        examples: [
+          'detect the region for +14158586273',
+          'find out the region of +447911123456',
+          'get the region for +33123456789'
+        ]
       }
     ];
 
@@ -141,6 +151,9 @@ export default class NumverifyPlugin extends BasePlugin {
 
         case 'convertPhoneNumberFormat':
           return await this.convertPhoneNumberFormat(data);
+
+        case 'detectPhoneNumberRegion':
+          return await this.detectPhoneNumberRegion(data);
 
         default:
           throw new Error(`Unknown action: ${action}`);
@@ -281,6 +294,21 @@ export default class NumverifyPlugin extends BasePlugin {
         results
       }
     };
+  }
+
+  async detectPhoneNumberRegion({ number }) {
+    try {
+      const phoneNumber = parsePhoneNumberFromString(number);
+      if (!phoneNumber) {
+        throw new Error('Invalid phone number');
+      }
+
+      const region = phoneNumber.country || 'Unknown';
+      return { success: true, data: { region } };
+    } catch (error) {
+      this.logger.error('detectPhoneNumberRegion failed:', error);
+      return { success: false, error: error.message };
+    }
   }
 
   async getAICapabilities() {

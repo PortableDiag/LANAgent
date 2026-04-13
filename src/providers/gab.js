@@ -1,11 +1,14 @@
 import OpenAI from "openai";
 import { BaseProvider } from "./BaseProvider.js";
 import { logger } from "../utils/logger.js";
+import { retryOperation } from '../utils/retryUtils.js';
+import NodeCache from 'node-cache';
 
 export class GabProvider extends BaseProvider {
   constructor(config = {}) {
     super("Gab", config);
     this.client = null;
+    this.cache = new NodeCache({ stdTTL: 600, checkperiod: 120 });
     this.models = {
       chat: config.chatModel || config.model || "arya", // Default to Gab's native model
       alternativeChat: "gpt-4o" // Alternative model if available
@@ -60,24 +63,17 @@ export class GabProvider extends BaseProvider {
   }
 
   /**
-   * Retry logic with exponential backoff for API requests
-   * @param {Function} fn - The function to execute with retry
-   * @param {number} retries - Number of retry attempts
-   * @param {number} delay - Initial delay in milliseconds
-   * @returns {Promise<any>}
+   * Categorize errors into network, authentication, and API-specific errors
+   * @param {Error} error - The error object to categorize
+   * @returns {string} - The category of the error
    */
-  async retryWithExponentialBackoff(fn, retries = 3, delay = 1000) {
-    try {
-      return await fn();
-    } catch (error) {
-      if (retries > 0) {
-        logger.warn(`Retrying after error: ${error.message}. Attempts left: ${retries}`);
-        await new Promise(res => setTimeout(res, delay));
-        return this.retryWithExponentialBackoff(fn, retries - 1, delay * 2);
-      } else {
-        logger.error("Max retries reached. Throwing error.");
-        throw error;
-      }
+  categorizeError(error) {
+    if (error.message.includes('Network Error')) {
+      return 'network';
+    } else if (error.response && error.response.status === 401) {
+      return 'authentication';
+    } else {
+      return 'api';
     }
   }
 
@@ -90,7 +86,7 @@ export class GabProvider extends BaseProvider {
         { role: "user", content: prompt }
       ];
 
-      const completion = await this.retryWithExponentialBackoff(() => 
+      const completion = await retryOperation(() => 
         this.client.chat.completions.create({
           model: options.model || this.models.chat,
           messages,
@@ -98,7 +94,7 @@ export class GabProvider extends BaseProvider {
           max_tokens: options.maxTokens || 1000,
           stream: options.stream || false,
           ...options.additionalParams
-        })
+        }), { retries: 3 }
       );
 
       const responseTime = Date.now() - startTime;
@@ -117,8 +113,9 @@ export class GabProvider extends BaseProvider {
         provider: this.name
       };
     } catch (error) {
+      const errorCategory = this.categorizeError(error);
       this.metrics.errors++;
-      logger.error("Gab generateResponse error:", error);
+      logger.error(`Gab generateResponse error [${errorCategory}]:`, error);
       throw error;
     }
   }
@@ -128,11 +125,11 @@ export class GabProvider extends BaseProvider {
     const startTime = Date.now();
     
     try {
-      const response = await this.retryWithExponentialBackoff(() => 
+      const response = await retryOperation(() => 
         this.client.embeddings.create({
           model: "text-embedding-ada-002",
           input: text
-        })
+        }), { retries: 3 }
       );
 
       const responseTime = Date.now() - startTime;
@@ -145,8 +142,9 @@ export class GabProvider extends BaseProvider {
 
       return response.data[0].embedding;
     } catch (error) {
+      const errorCategory = this.categorizeError(error);
       this.metrics.errors++;
-      logger.warn("Gab does not support embeddings:", error.message);
+      logger.warn(`Gab does not support embeddings [${errorCategory}]:`, error.message);
       return null;
     }
   }
@@ -167,7 +165,7 @@ export class GabProvider extends BaseProvider {
     try {
       const base64Image = imageBuffer.toString("base64");
       
-      const response = await this.retryWithExponentialBackoff(() => 
+      const response = await retryOperation(() => 
         this.client.chat.completions.create({
           model: this.models.chat,
           messages: [
@@ -180,7 +178,7 @@ export class GabProvider extends BaseProvider {
             }
           ],
           max_tokens: 1000
-        })
+        }), { retries: 3 }
       );
 
       const responseTime = Date.now() - startTime;
@@ -196,8 +194,9 @@ export class GabProvider extends BaseProvider {
         usage: response.usage
       };
     } catch (error) {
+      const errorCategory = this.categorizeError(error);
       this.metrics.errors++;
-      logger.warn("Gab image analysis failed, may not be supported:", error.message);
+      logger.warn(`Gab image analysis failed, may not be supported [${errorCategory}]:`, error.message);
       throw error;
     }
   }

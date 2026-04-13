@@ -49,6 +49,13 @@ class ImageGenerationService {
         };
     }
 
+    /**
+     * Generate an image with a given prompt and options, supporting priority levels.
+     * @param {string} prompt - The prompt for image generation.
+     * @param {Object} options - Options for image generation.
+     * @param {number} [options.priority=0] - Priority level for the request.
+     * @returns {Promise<Object>} - The result of the image generation.
+     */
     async generate(prompt, options = {}) {
         if (!this.initialized) {
             throw new Error('ImageGenerationService not initialized. Call initialize() first.');
@@ -58,7 +65,8 @@ class ImageGenerationService {
             throw new Error('Image generation is disabled in settings');
         }
 
-        return this.queue.add(() => this.generateImageTask(prompt, options));
+        const priority = options.priority || 0;
+        return this.queue.add(() => this.generateImageTask(prompt, options), { priority });
     }
 
     async generateImageTask(prompt, options) {
@@ -66,7 +74,6 @@ class ImageGenerationService {
         const providerInstance = this.providerManager.providers.get(provider);
 
         if (!providerInstance) {
-            // Try to get any available provider that supports image generation
             const availableProvider = this.getAvailableImageProvider();
             if (!availableProvider) {
                 throw new Error(`Provider ${provider} not available and no fallback found`);
@@ -81,7 +88,6 @@ class ImageGenerationService {
     async generateWithProvider(providerInstance, prompt, options = {}) {
         const provider = providerInstance.name.toLowerCase();
 
-        // Get provider-specific options
         let providerOptions;
         if (provider === 'openai') {
             providerOptions = {
@@ -125,7 +131,6 @@ class ImageGenerationService {
             return null;
         }
 
-        // Check OpenAI first, then HuggingFace
         for (const providerName of ['openai', 'huggingface']) {
             const provider = this.providerManager.providers.get(providerName);
             if (provider && typeof provider.generateImage === 'function') {

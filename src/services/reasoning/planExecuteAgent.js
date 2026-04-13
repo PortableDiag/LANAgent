@@ -70,21 +70,22 @@ export class PlanExecuteAgent extends EventEmitter {
       }
 
       // Step 2: Execute each step
-      for (let i = 0; i < plan.steps.length; i++) {
-        const step = plan.steps[i];
+      const sortedSteps = this.planner.sortStepsByPriority(plan.steps);
+      for (let i = 0; i < sortedSteps.length; i++) {
+        const step = sortedSteps[i];
         const stepNumber = i + 1;
 
-        this.emit('stepStart', { stepNumber, step, totalSteps: plan.steps.length });
+        this.emit('stepStart', { stepNumber, step, totalSteps: sortedSteps.length });
 
         if (this.showProgress && context.showThinking) {
-          await context.showThinking(`⏳ Step ${stepNumber}/${plan.steps.length}: ${step.description}`);
+          await context.showThinking(`⏳ Step ${stepNumber}/${sortedSteps.length}: ${step.description}`);
         }
 
         // Execute the step
         const result = await this.executor.execute(step, context);
         results.push({ step, result, stepNumber });
 
-        this.emit('stepComplete', { stepNumber, step, result, totalSteps: plan.steps.length });
+        this.emit('stepComplete', { stepNumber, step, result, totalSteps: sortedSteps.length });
 
         // Check for failure
         if (!result.success) {
@@ -126,7 +127,7 @@ export class PlanExecuteAgent extends EventEmitter {
               plan,
               results,
               completedSteps: i,
-              totalSteps: plan.steps.length,
+              totalSteps: sortedSteps.length,
               replanCount,
               duration: Date.now() - startTime
             };
@@ -146,8 +147,8 @@ export class PlanExecuteAgent extends EventEmitter {
         success: true,
         plan,
         results,
-        completedSteps: plan.steps.length,
-        totalSteps: plan.steps.length,
+        completedSteps: sortedSteps.length,
+        totalSteps: sortedSteps.length,
         replanCount,
         duration: Date.now() - startTime,
         summary: this.generateSummary(task, plan, results)
@@ -291,7 +292,9 @@ Respond in this JSON format:
       "tool": "tool_name",
       "command": "action_name",
       "params": { "param1": "value1" },
-      "expectedOutput": "What we expect to get from this step"
+      "expectedOutput": "What we expect to get from this step",
+      "complexity": "low|medium|high",
+      "urgency": "low|medium|high"
     }
   ],
   "dependencies": "Any dependencies between steps",
@@ -353,7 +356,9 @@ Respond in this JSON format:
       "tool": "tool_name",
       "command": "action_name",
       "params": { "param1": "value1" },
-      "expectedOutput": "What we expect"
+      "expectedOutput": "What we expect",
+      "complexity": "low|medium|high",
+      "urgency": "low|medium|high"
     }
   ],
   "adaptations": "How this plan addresses the previous error"
@@ -392,7 +397,9 @@ Respond with valid JSON only.`;
             command: step.command,
             params: step.params || {},
             expectedOutput: step.expectedOutput,
-            priority: step.priority || 'medium' // Add priority field
+            complexity: step.complexity || 'medium',
+            urgency: step.urgency || 'medium',
+            priority: this.calculatePriority(step.complexity, step.urgency)
           })),
           dependencies: parsed.dependencies,
           estimatedComplexity: parsed.estimatedComplexity || 'medium',
@@ -406,6 +413,22 @@ Respond with valid JSON only.`;
       logger.error('Plan parse error:', error);
       return { steps: [], objective: 'Parse failed' };
     }
+  }
+
+  /**
+   * Calculate priority based on complexity and urgency
+   */
+  calculatePriority(complexity, urgency) {
+    const complexityWeight = { low: 1, medium: 2, high: 3 };
+    const urgencyWeight = { low: 1, medium: 2, high: 3 };
+    return complexityWeight[complexity] + urgencyWeight[urgency];
+  }
+
+  /**
+   * Sort steps by priority
+   */
+  sortStepsByPriority(steps) {
+    return steps.sort((a, b) => b.priority - a.priority);
   }
 }
 

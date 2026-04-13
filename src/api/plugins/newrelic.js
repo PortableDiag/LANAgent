@@ -60,11 +60,22 @@ export default class NewRelicPlugin extends BasePlugin {
         command: 'createDashboard',
         description: 'Create a new dashboard in New Relic',
         usage: 'createDashboard({ dashboardData: {...} })'
+      },
+      {
+        command: 'getSyntheticsMonitors',
+        description: 'Fetch a list of Synthetics monitors from New Relic',
+        usage: 'getSyntheticsMonitors()'
+      },
+      {
+        command: 'createSyntheticsMonitor',
+        description: 'Create a new Synthetics monitor in New Relic',
+        usage: 'createSyntheticsMonitor({ monitorData: {...} })'
       }
     ];
     
     this.apiKey = process.env.NEW_RELIC_API_KEY;
     this.baseUrl = 'https://api.newrelic.com/v2/';
+    this.syntheticsBaseUrl = 'https://synthetics.newrelic.com/synthetics/api/v3/';
   }
 
   async execute(params) {
@@ -98,6 +109,12 @@ export default class NewRelicPlugin extends BasePlugin {
 
         case 'createDashboard':
           return await this.createDashboard(params);
+
+        case 'getSyntheticsMonitors':
+          return await this.getSyntheticsMonitors();
+
+        case 'createSyntheticsMonitor':
+          return await this.createSyntheticsMonitor(params);
 
         default:
           return { 
@@ -367,6 +384,61 @@ export default class NewRelicPlugin extends BasePlugin {
     } catch (error) {
       logger.error('Error creating dashboard:', error.message);
       return { success: false, error: 'Failed to create dashboard: ' + error.message };
+    }
+  }
+
+  /**
+   * Fetch a list of Synthetics monitors from New Relic.
+   * @returns {Object} Result object with Synthetics monitors data or error message.
+   */
+  async getSyntheticsMonitors() {
+    if (!this.apiKey) {
+      return { success: false, error: 'API key not configured' };
+    }
+
+    try {
+      logger.info('Fetching Synthetics monitors list from New Relic');
+      
+      const response = await axios.get(`${this.syntheticsBaseUrl}monitors`, {
+        headers: { 'Api-Key': this.apiKey }
+      });
+
+      return { success: true, data: response.data };
+      
+    } catch (error) {
+      logger.error('Error fetching Synthetics monitors:', error.message);
+      return { success: false, error: 'Failed to fetch Synthetics monitors: ' + error.message };
+    }
+  }
+
+  /**
+   * Create a new Synthetics monitor in New Relic.
+   * @param {Object} params - Parameters containing monitorData.
+   * @returns {Object} Result object with creation status or error message.
+   */
+  async createSyntheticsMonitor(params) {
+    const { monitorData } = params;
+
+    this.validateParams(params, {
+      monitorData: { required: true, type: 'object' }
+    });
+
+    if (!this.apiKey) {
+      return { success: false, error: 'API key not configured' };
+    }
+
+    try {
+      logger.info('Creating a new Synthetics monitor in New Relic');
+      
+      const response = await axios.post(`${this.syntheticsBaseUrl}monitors`, monitorData, {
+        headers: { 'Api-Key': this.apiKey, 'Content-Type': 'application/json' }
+      });
+
+      return { success: true, data: response.data };
+      
+    } catch (error) {
+      logger.error('Error creating Synthetics monitor:', error.message);
+      return { success: false, error: 'Failed to create Synthetics monitor: ' + error.message };
     }
   }
 }

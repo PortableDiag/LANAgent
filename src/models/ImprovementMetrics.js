@@ -64,6 +64,18 @@ const improvementMetricsSchema = new mongoose.Schema({
   capabilities: {
     newCapabilitiesAdded: [String],
     totalCapabilities: { type: Number, default: 0 }
+  },
+  trends: {
+    byType: [{
+      date: Date,
+      type: String,
+      count: Number
+    }],
+    byPriority: [{
+      date: Date,
+      priority: String,
+      count: Number
+    }]
   }
 }, {
   timestamps: true
@@ -183,6 +195,19 @@ improvementMetricsSchema.statics.updateMetrics = async function(date = new Date(
       improvementsPerHour: dailyMetrics.total / hoursInDay
     };
 
+    const trends = {
+      byType: Object.entries(dailyMetrics.byType).map(([type, count]) => ({
+        date: startOfDay,
+        type,
+        count
+      })),
+      byPriority: Object.entries(dailyMetrics.byPriority).map(([priority, count]) => ({
+        date: startOfDay,
+        priority,
+        count
+      }))
+    };
+
     const metrics = await this.findOneAndUpdate(
       { date: startOfDay },
       {
@@ -193,7 +218,8 @@ improvementMetricsSchema.statics.updateMetrics = async function(date = new Date(
         capabilities: {
           newCapabilitiesAdded: [...new Set(newCapabilities)],
           totalCapabilities: newCapabilities.length
-        }
+        },
+        trends
       },
       { upsert: true, new: true }
     );
@@ -252,6 +278,38 @@ improvementMetricsSchema.statics.getLatestMetrics = async function() {
     return latestMetrics;
   } catch (error) {
     logger.error('Error fetching latest metrics:', error);
+    throw error;
+  }
+};
+
+/**
+ * Get trend data for improvement types and priorities over time.
+ * @returns {Promise<Object>} - An object containing trend data.
+ */
+improvementMetricsSchema.statics.getTrends = async function() {
+  try {
+    const trends = await this.aggregate([
+      { $unwind: '$trends.byType' },
+      { $unwind: '$trends.byPriority' },
+      {
+        $group: {
+          _id: null,
+          byType: { $push: '$trends.byType' },
+          byPriority: { $push: '$trends.byPriority' }
+        }
+      },
+      {
+        $project: {
+          _id: 0,
+          byType: 1,
+          byPriority: 1
+        }
+      }
+    ]);
+
+    return trends[0] || { byType: [], byPriority: [] };
+  } catch (error) {
+    logger.error('Error fetching trends:', error);
     throw error;
   }
 };

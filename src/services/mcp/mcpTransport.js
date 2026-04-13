@@ -150,7 +150,7 @@ export class StdioTransport extends MCPTransport {
     this.args = args;
     this.options = options;
     this.process = null;
-    this.buffer = '';
+    this.buffer = [];
   }
 
   /**
@@ -168,7 +168,7 @@ export class StdioTransport extends MCPTransport {
         });
 
         this.process.stdout.on('data', (data) => {
-          this.buffer += data.toString();
+          this.buffer.push(data.toString());
           this.processBuffer();
         });
 
@@ -207,8 +207,9 @@ export class StdioTransport extends MCPTransport {
    */
   processBuffer() {
     // Messages are newline-delimited JSON
-    const lines = this.buffer.split('\n');
-    this.buffer = lines.pop() || ''; // Keep incomplete line in buffer
+    const bufferString = this.buffer.join('');
+    const lines = bufferString.split('\n');
+    this.buffer = [lines.pop() || '']; // Keep incomplete line in buffer
 
     for (const line of lines) {
       if (line.trim()) {
