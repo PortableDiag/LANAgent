@@ -227,7 +227,7 @@ All repo references are resolved dynamically from git remotes — no hardcoded U
     - Paid services: peers expose plugin commands with per-operation SKYNET pricing
     - Payment verification: BEP-20 Transfer event parsing, double-spend prevention, 3-block confirmations
     - Reputation staking: composite trust scores (0-100) based on SKYNET balance, ERC-8004, SENTINEL tokens, longevity, activity
-    - On-chain staking: Synthetix-style staking contract with proportional yield, 7-day epochs auto-funded from registry fee income
+    - On-chain staking: proportional yield with lock tiers, 7-day epochs auto-funded from registry fee income
     - NLP staking control: "stake 5000 SKYNET", "claim my rewards", "check staking status" via intents 119-122
     - Bounty system: post tasks with SKYNET rewards, claim and complete workflow
     - Governance: token-weighted proposal voting (for/against/abstain)
