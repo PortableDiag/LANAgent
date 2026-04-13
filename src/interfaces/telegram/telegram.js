@@ -706,6 +706,16 @@ export class TelegramInterface extends EventEmitter {
         return;
       }
 
+      // Check if caption requests media conversion
+      const caption = (ctx.message.caption || '').toLowerCase();
+      const mime = doc.mime_type || '';
+      if ((mime.startsWith('video/') || mime.startsWith('audio/')) &&
+          (caption.includes('convert') || caption.includes('mp3') || caption.includes('mp4') ||
+           caption.includes('extract audio') || caption.includes('to audio') || caption.includes('wav') ||
+           caption.includes('aac') || caption.includes('flac') || caption.includes('ogg'))) {
+        return this.handleMediaConversion(ctx, doc.file_id, doc.file_name || 'media', caption);
+      }
+
       await ctx.reply(`📄 Received document: ${doc.file_name}\nProcessing...`);
 
       try {
@@ -716,6 +726,103 @@ export class TelegramInterface extends EventEmitter {
         await ctx.reply('❌ Failed to process document.');
       }
     });
+
+    // Handle video messages (compressed videos sent via Telegram's video button)
+    this.bot.on(message('video'), async (ctx) => {
+      const caption = (ctx.message.caption || '').toLowerCase();
+      if (caption.includes('convert') || caption.includes('mp3') || caption.includes('extract audio') ||
+          caption.includes('to audio') || caption.includes('wav') || caption.includes('aac')) {
+        return this.handleMediaConversion(ctx, ctx.message.video.file_id, 'video.mp4', caption);
+      }
+      // If AI detect mode, handle there
+      if (ctx.session?.currentOperation === 'ai_detect') {
+        return this.handleAIDetectDocument(ctx, { file_id: ctx.message.video.file_id, mime_type: 'video/mp4' }, 'video');
+      }
+    });
+
+    // Handle audio messages with conversion captions
+    this.bot.on(message('audio'), async (ctx) => {
+      const caption = (ctx.message.caption || '').toLowerCase();
+      if (caption.includes('convert') || caption.includes('mp4') || caption.includes('wav') ||
+          caption.includes('to video') || caption.includes('flac') || caption.includes('ogg')) {
+        const ext = ctx.message.audio.mime_type?.split('/')[1] || 'mp3';
+        return this.handleMediaConversion(ctx, ctx.message.audio.file_id, `audio.${ext}`, caption);
+      }
+    });
+  }
+
+  /**
+   * Handle media file conversion via FFmpeg
+   */
+  async handleMediaConversion(ctx, fileId, fileName, caption) {
+    const fs = (await import('fs')).default;
+    const path = (await import('path')).default;
+    const os = (await import('os')).default;
+
+    // Determine target format from caption
+    let targetFormat = 'mp3'; // default
+    if (caption.includes('mp4')) targetFormat = 'mp4';
+    else if (caption.includes('wav')) targetFormat = 'wav';
+    else if (caption.includes('aac')) targetFormat = 'aac';
+    else if (caption.includes('flac')) targetFormat = 'flac';
+    else if (caption.includes('ogg')) targetFormat = 'ogg';
+    else if (caption.includes('mp3')) targetFormat = 'mp3';
+
+    await ctx.reply(`🔄 Converting to ${targetFormat.toUpperCase()}...`);
+
+    const tempDir = path.join(os.tmpdir(), 'lanagent-convert');
+    await fs.promises.mkdir(tempDir, { recursive: true });
+    const inputPath = path.join(tempDir, fileName);
+    const baseName = path.basename(fileName, path.extname(fileName));
+    const outputPath = path.join(tempDir, `${baseName}.${targetFormat}`);
+
+    try {
+      // Download file from Telegram
+      const fileLink = await ctx.telegram.getFileLink(fileId);
+      const response = await fetch(fileLink.href);
+      const buffer = Buffer.from(await response.arrayBuffer());
+      await fs.promises.writeFile(inputPath, buffer);
+
+      // Convert via FFmpeg plugin
+      const ffmpeg = this.agent.apiManager?.apis?.get('ffmpeg')?.instance;
+      if (!ffmpeg) {
+        await ctx.reply('❌ FFmpeg plugin not available.');
+        return;
+      }
+
+      const result = await ffmpeg.execute({
+        action: 'convert',
+        input: inputPath,
+        output: outputPath
+      });
+
+      if (!result.success) {
+        await ctx.reply(`❌ Conversion failed: ${result.error}`);
+        return;
+      }
+
+      // Send converted file back
+      const stat = await fs.promises.stat(outputPath);
+      const sizeMB = (stat.size / (1024 * 1024)).toFixed(1);
+
+      if (targetFormat === 'mp3' || targetFormat === 'wav' || targetFormat === 'aac' || targetFormat === 'flac' || targetFormat === 'ogg') {
+        await ctx.replyWithAudio({ source: outputPath, filename: `${baseName}.${targetFormat}` },
+          { caption: `✅ Converted to ${targetFormat.toUpperCase()} (${sizeMB}MB)` });
+      } else {
+        await ctx.replyWithDocument({ source: outputPath, filename: `${baseName}.${targetFormat}` },
+          { caption: `✅ Converted to ${targetFormat.toUpperCase()} (${sizeMB}MB)` });
+      }
+
+      // Cleanup
+      await fs.promises.unlink(inputPath).catch(() => {});
+      await fs.promises.unlink(outputPath).catch(() => {});
+    } catch (error) {
+      logger.error('Media conversion error:', error);
+      await ctx.reply(`❌ Conversion failed: ${error.message}`);
+      // Cleanup on error
+      await fs.promises.unlink(inputPath).catch(() => {});
+      await fs.promises.unlink(outputPath).catch(() => {});
+    }
   }
 
   /**
