@@ -200,11 +200,13 @@ class VizDashboard {
         }
 
         // Clock for delta time
-        if (!viz._vrClock) viz._vrClock = new THREE.Clock();
+        if (!viz._vrClock) viz._vrClock = new THREE.Timer();
 
         // Set up XR-compatible render loop that calls the viz's existing animate logic
         viz.renderer.setAnimationLoop(() => {
-            const t = viz.clock ? viz.clock.getElapsedTime() : 0;
+            if (viz.clock) viz.clock.update();
+            if (viz._vrClock) viz._vrClock.update();
+            const t = viz.clock ? viz.clock.getElapsed() : 0;
             const delta = viz._vrClock ? viz._vrClock.getDelta() : 0.016;
 
             // Update VR controller interactions
@@ -281,6 +283,10 @@ class VizDashboard {
 }
 
 // Auto-initialize when DOM is ready
-document.addEventListener('DOMContentLoaded', () => {
+if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', () => {
+        window.vizDashboard = new VizDashboard();
+    });
+} else {
     window.vizDashboard = new VizDashboard();
-});
+}

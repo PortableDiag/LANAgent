@@ -13,7 +13,7 @@ class MemoryPalaceViz {
         this.nodeMeshes = [];
         this.memories = [];
         this.animationId = null;
-        this.clock = new THREE.Clock();
+        this.clock = new THREE.Timer();
         this.raycaster = new THREE.Raycaster();
         this.mouse = new THREE.Vector2();
         this.tooltip = null;
@@ -412,7 +412,8 @@ class MemoryPalaceViz {
     }
 
     _renderFrame() {
-        const t = this.clock.getElapsedTime();
+        this.clock.update();
+        const t = this.clock.getElapsed();
 
         this.nodeMeshes.forEach((mesh, i) => {
             if (mesh.userData.isCenter) {

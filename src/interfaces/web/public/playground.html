@@ -524,15 +524,28 @@
     </div>
 
     <!-- Three.js + VRM libs (same as avatar designer) -->
-    <script src="/lib/three.min.js"></script>
-    <script src="/lib/GLTFLoader.js"></script>
-    <script src="/lib/OrbitControls.js"></script>
-    <script src="/lib/three-vrm.js"></script>
+    <!-- Three.js r183 (single bundle, fast load) -->
+    <script src="/lib/three.r183.min.js"></script>
+    <script type="importmap">
+    { "imports": { "three": "/lib/three.r183.module.js", "three/addons/": "/lib/addons/" } }
+    </script>
+    <script type="module">
+      import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+      import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+      import * as THREE_VRM from '/lib/three-vrm.module.js';
+
+      THREE.OrbitControls = OrbitControls;
+      THREE.GLTFLoader = GLTFLoader;
+      window.THREE_VRM = THREE_VRM;
+
+      window.dispatchEvent(new Event('three-ready'));
+    </script>
     <script src="/js/vr-controls.js"></script>
     <!-- MediaPipe Pose for mirror mode -->
     <script src="https://cdn.jsdelivr.net/npm/@mediapipe/pose@0.5.1675469404/pose.js" crossorigin="anonymous"></script>
     <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils@0.3.1675466862/camera_utils.js" crossorigin="anonymous"></script>
     <script>
+    window.addEventListener('three-ready', function() {
     class Playground {
         constructor() {
             this.token = null;
@@ -542,7 +555,7 @@
             this.camera = null;
             this.renderer = null;
             this.controls = null;
-            this.clock = new THREE.Clock();
+            this.clock = new THREE.Timer();
             this._mixer = null;
             this._idleActions = [];
             this._currentIdleAction = null;
@@ -617,7 +630,7 @@
             this.renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
             this.renderer.setSize(container.clientWidth, container.clientHeight);
             this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-            this.renderer.outputEncoding = THREE.sRGBEncoding;
+            this.renderer.outputColorSpace = THREE.SRGBColorSpace;
             this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
             this.renderer.toneMappingExposure = 1.2;
             container.appendChild(this.renderer.domElement);
@@ -646,6 +659,7 @@
         }
 
         _renderFrame() {
+            this.clock.update();
             const delta = this.clock.getDelta();
 
             if (this._vrControls) this._vrControls.update(delta);
@@ -773,14 +787,19 @@
                     }
                 });
 
-                // Hide until animation loads
-                vrm.scene.visible = false;
+                // Add to scene and compute bounds while visible
                 this.scene.add(vrm.scene);
-
-                // Camera framing
+                vrm.scene.updateMatrixWorld(true);
                 const box = new THREE.Box3().setFromObject(vrm.scene);
                 const center = box.getCenter(new THREE.Vector3());
-                this.camera.position.set(0, center.y, 2.5);
+                const size = box.getSize(new THREE.Vector3());
+
+                // Hide until animation loads (after bounds calc)
+                vrm.scene.visible = false;
+
+                // Camera framing — center on model
+                const dist = Math.max(size.y * 1.5, 2.5);
+                this.camera.position.set(0, center.y, dist);
                 this.controls.target.set(0, center.y, 0);
                 this.controls.update();
 
@@ -2092,8 +2111,13 @@
         }
     }
 
-    const playground = new Playground();
-    document.addEventListener('DOMContentLoaded', () => playground.init());
+    window.playground = new Playground();
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', () => playground.init());
+    } else {
+        playground.init();
+    }
+    }); // end three-ready
     </script>
 </body>
 </html>

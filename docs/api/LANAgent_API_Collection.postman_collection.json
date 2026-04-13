@@ -2,9 +2,9 @@
   "info": {
     "_postman_id": "9b5edc66-ea34-4329-a9d5-baca5366e76d",
     "name": "LANAgent API Collection",
-    "description": "LANAgent API v2.24.9 \u2014 Twitter v3.0 (profile management, auto-posting, media upload), local AI (Ollama) installer, self-mod E2E verified, dynamic gateway pricing from agent catalogs, promotion system, 25-page GitHub wiki, 6-language API examples. Updated April 11, 2026.",
+    "description": "LANAgent API v2.25.0 \u2014 Three.js r183 upgrade (visualizations, avatar, playground), three-vrm v3, color space + Timer API migration, VRM bounding box fix, website feature accuracy. Updated April 13, 2026.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
-    "version": "2.24.9"
+    "version": "2.25.0"
   },
   "auth": {
     "type": "bearer",

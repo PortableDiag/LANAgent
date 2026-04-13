@@ -150,7 +150,7 @@ All repo references are resolved dynamically from git remotes — no hardcoded U
   - Natural language: "scan for bluetooth devices", "connect to my headphones"
   - Web UI for device management
 - 🖼️ **Agent Avatar**: Per-instance visual identity with API serving, Web UI management, and system prompt self-awareness
-  - **VRM Animated Avatar**: VRM 1.0 support with VRMA animations, facial expressions, eye tracking, spring bone physics, and lip sync. Upload your own VRM models.
+  - **VRM Animated Avatar**: VRM 1.0 support with VRMA animations, facial expressions, spring bone physics, and procedural idle animations. Three.js r183 + @pixiv/three-vrm v3. Upload your own VRM models.
   - **3D Avatar Designer**: Upload photo → generate 3D GLB model via HuggingFace Spaces (Hunyuan3D-2.1, TRELLIS), or pick a VRM model, or upload your own VRM
   - **Playground**: Interactive 3D page — chat with agent, emote studio, mirror mode (VR + webcam), VR floating menu
   - **Update Avatar Everywhere**: Renders bust portrait and syncs to agent profile, Gravatar, Telegram, and ERC-8004 NFT

@@ -168,14 +168,16 @@
     <!-- Visualization Container -->
     <div id="viz-container"></div>
 
-    <!-- Three.js r140 (self-hosted, supports three-vrm v1.0) -->
-    <script src="/lib/three.min.js"></script>
-    <script src="/lib/OrbitControls.js"></script>
-
-    <!-- VR Controller Interactions -->
+    <!-- Three.js r183 (single bundle, fast load) -->
+    <script src="/lib/three.r183.min.js"></script>
+    <script type="importmap">
+    { "imports": { "three": "/lib/three.r183.module.js", "three/addons/": "/lib/addons/" } }
+    </script>
+    <script type="module">
+        import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+        THREE.OrbitControls = OrbitControls;
+    </script>
     <script src="/js/vr-controls.js?v=1"></script>
-
-    <!-- Viz Dashboard Manager -->
     <script src="/js/viz-dashboard.js?v=3"></script>
 </body>
 </html>

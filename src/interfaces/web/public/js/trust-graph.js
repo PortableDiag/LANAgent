@@ -13,7 +13,7 @@ class TrustGraphViz {
         this.nodeMeshes = [];
         this.edgeLines = [];
         this.animationId = null;
-        this.clock = new THREE.Clock();
+        this.clock = new THREE.Timer();
         this.raycaster = new THREE.Raycaster();
         this.mouse = new THREE.Vector2();
         this.tooltip = null;
@@ -346,7 +346,8 @@ class TrustGraphViz {
 
     animate() {
         this.animationId = requestAnimationFrame(() => this.animate());
-        const t = this.clock.getElapsedTime();
+        this.clock.update();
+        const t = this.clock.getElapsed();
 
         this.nodeMeshes.forEach((mesh, i) => {
             mesh.rotation.y = t * 0.2 + i;

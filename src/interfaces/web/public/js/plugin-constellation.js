@@ -13,7 +13,7 @@ class PluginConstellationViz {
         this.nodeMeshes = [];
         this.edgeLines = [];
         this.animationId = null;
-        this.clock = new THREE.Clock();
+        this.clock = new THREE.Timer();
         this.raycaster = new THREE.Raycaster();
         this.mouse = new THREE.Vector2();
         this.tooltip = null;
@@ -488,7 +488,8 @@ class PluginConstellationViz {
 
     animate() {
         this.animationId = requestAnimationFrame(() => this.animate());
-        const t = this.clock.getElapsedTime();
+        this.clock.update();
+        const t = this.clock.getElapsed();
 
         if (this.centerMesh) {
             this.centerMesh.rotation.y = t * 0.2;

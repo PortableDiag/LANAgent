@@ -16,7 +16,7 @@ class WalletGraphViz {
         this.edgeLines = [];
         this.labelSprites = [];
         this.animationId = null;
-        this.clock = new THREE.Clock();
+        this.clock = new THREE.Timer();
         this.raycaster = new THREE.Raycaster();
         this.mouse = new THREE.Vector2();
         this.tooltip = null;
@@ -427,7 +427,8 @@ class WalletGraphViz {
 
     animate() {
         this.animationId = requestAnimationFrame(() => this.animate());
-        const t = this.clock.getElapsedTime();
+        this.clock.update();
+        const t = this.clock.getElapsed();
 
         // Rotate center node
         if (this.centerMesh) {

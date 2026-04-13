@@ -2,6 +2,17 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.0] - 2026-04-13
+
+### Changed
+- **Three.js r140 → r183** — Upgraded Three.js from r140 (2022) to r183 (2026) across all 3D pages (visualizations, avatar designer, playground). Single-file UMD bundle with ES module bridge for addon compatibility. Import maps resolve addon imports (`OrbitControls`, `GLTFLoader`, `XRControllerModelFactory`).
+- **three-vrm v1.0.0 → v3.5.1** — Upgraded @pixiv/three-vrm to v3.x for r183 compatibility. Fixes removed `sRGBEncoding`/`LinearEncoding` constants. `VRMUtils.removeUnnecessaryJoints` deprecated in favor of `combineSkeletons`.
+- **Color space API** — Replaced `renderer.outputEncoding = THREE.sRGBEncoding` with `renderer.outputColorSpace = THREE.SRGBColorSpace` in avatar.html and playground.html.
+- **Clock → Timer** — Replaced deprecated `THREE.Clock` with `THREE.Timer` across all 11 visualization scripts, avatar designer, and playground. Added required `timer.update()` calls in render loops.
+- **VRM bounding box fix** — Model is now temporarily set visible during `Box3.setFromObject()` calculation, fixing empty bounds when model starts hidden (prevents camera framing on origin instead of model center).
+- **lanagent.net Three.js upgrade** — Website updated from Three.js r128 (CDN) to r183 via import map.
+- **lanagent.net feature accuracy** — Removed private-only trading strategies from website (DollarMaximizer, Arbitrage, NativeMaximizer, VolatilityAdjusted). Replaced lip sync/eye tracking claims with tested features (expressions, spring bone physics, TTS).
+
 ## [2.24.9] - 2026-04-12
 
 ### Added

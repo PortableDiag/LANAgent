@@ -13,7 +13,7 @@ class CryptoTokenSpaceViz {
         this.tokenMeshes = [];
         this.sprites = [];
         this.animationId = null;
-        this.clock = new THREE.Clock();
+        this.clock = new THREE.Timer();
         this.raycaster = new THREE.Raycaster();
         this.mouse = new THREE.Vector2();
         this.tooltip = null;
@@ -324,7 +324,8 @@ class CryptoTokenSpaceViz {
 
     animate() {
         this.animationId = requestAnimationFrame(() => this.animate());
-        const t = this.clock.getElapsedTime();
+        this.clock.update();
+        const t = this.clock.getElapsed();
 
         this.tokenMeshes.forEach((mesh, i) => {
             const d = mesh.userData;

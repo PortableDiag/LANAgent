@@ -14,7 +14,7 @@ class AgentBrainViz {
         this.edges = [];
         this.labels = [];
         this.animationId = null;
-        this.clock = new THREE.Clock();
+        this.clock = new THREE.Timer();
         this.raycaster = new THREE.Raycaster();
         this.mouse = new THREE.Vector2();
         this.tooltip = null;
@@ -371,7 +371,8 @@ class AgentBrainViz {
 
     animate() {
         this.animationId = requestAnimationFrame(() => this.animate());
-        const t = this.clock.getElapsedTime();
+        this.clock.update();
+        const t = this.clock.getElapsed();
 
         this.nodes.forEach((node, i) => {
             if (node.userData.active) {
