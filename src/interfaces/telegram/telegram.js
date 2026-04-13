@@ -609,6 +609,14 @@ export class TelegramInterface extends EventEmitter {
 
     // Handle audio files (MP3, M4A, etc. sent as audio messages)
     this.bot.on(message('audio'), async (ctx) => {
+      // Media conversion: check caption first
+      const audioCaption = (ctx.message.caption || '').toLowerCase();
+      if (audioCaption.includes('convert') || audioCaption.includes('mp4') || audioCaption.includes('wav') ||
+          audioCaption.includes('flac') || audioCaption.includes('ogg') || audioCaption.includes('mp3')) {
+        const ext = ctx.message.audio.mime_type?.split('/')[1] || 'mp3';
+        return this.handleMediaConversion(ctx, ctx.message.audio.file_id, `audio.${ext}`, audioCaption);
+      }
+
       // AI detect mode: check if audio is AI-generated speech
       if (ctx.session?.currentOperation === 'ai_detect') {
         const ext = ctx.message.audio.mime_type?.split('/')?.[1] || 'mp3';
@@ -740,15 +748,6 @@ export class TelegramInterface extends EventEmitter {
       }
     });
 
-    // Handle audio messages with conversion captions
-    this.bot.on(message('audio'), async (ctx) => {
-      const caption = (ctx.message.caption || '').toLowerCase();
-      if (caption.includes('convert') || caption.includes('mp4') || caption.includes('wav') ||
-          caption.includes('to video') || caption.includes('flac') || caption.includes('ogg')) {
-        const ext = ctx.message.audio.mime_type?.split('/')[1] || 'mp3';
-        return this.handleMediaConversion(ctx, ctx.message.audio.file_id, `audio.${ext}`, caption);
-      }
-    });
   }
 
   /**
