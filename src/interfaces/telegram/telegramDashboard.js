@@ -1148,9 +1148,84 @@ export class TelegramDashboard extends TelegramInterface {
       }
     });
 
+    // Handle video messages (compressed videos)
+    this.bot.on(message('video'), async (ctx) => {
+      if (ctx.isGuest) return;
+      try {
+        const video = ctx.message.video;
+        const caption = ctx.message.caption || '';
+        logger.info(`Telegram video received: ${video.duration}s, ${video.width}x${video.height}, ${(video.file_size/1024/1024).toFixed(1)}MB, caption="${caption}"`);
+
+        // Telegram Bot API limit: 20MB for file downloads
+        if (video.file_size > 20 * 1024 * 1024) {
+          await ctx.reply(`⚠️ Video is too large (${(video.file_size/1024/1024).toFixed(0)}MB). Telegram limits bot file downloads to 20MB.\n\nTry sending a shorter or lower-resolution video, or send it as a document via the Web UI instead.`);
+          return;
+        }
+
+        if (caption) {
+          // Download video
+          const fileLink = await ctx.telegram.getFileLink(video.file_id);
+          const resp = await fetch(fileLink.href);
+          const buffer = Buffer.from(await resp.arrayBuffer());
+
+          const os = await import('os');
+          const path = await import('path');
+          const fs = await import('fs/promises');
+          const tempDir = path.join(os.tmpdir(), 'lanagent-convert');
+          await fs.mkdir(tempDir, { recursive: true });
+          const inputPath = path.join(tempDir, `video_${Date.now()}.mp4`);
+          await fs.writeFile(inputPath, buffer);
+
+          // Determine target format from caption
+          const cap = caption.toLowerCase();
+          let targetFormat = 'mp3';
+          if (cap.includes('mp4')) targetFormat = 'mp4';
+          else if (cap.includes('wav')) targetFormat = 'wav';
+          else if (cap.includes('aac')) targetFormat = 'aac';
+          else if (cap.includes('flac')) targetFormat = 'flac';
+          else if (cap.includes('ogg')) targetFormat = 'ogg';
+
+          const outputPath = path.join(tempDir, `converted_${Date.now()}.${targetFormat}`);
+          const thinkingMsg = await ctx.reply(`🔄 Converting to ${targetFormat.toUpperCase()}...`);
+
+          const ffmpeg = this.agent.apiManager?.apis?.get('ffmpeg')?.instance;
+          if (!ffmpeg) {
+            await ctx.reply('❌ FFmpeg plugin not available.');
+            return;
+          }
+
+          const result = await ffmpeg.execute({ action: 'convert', input: inputPath, output: outputPath });
+
+          try { await ctx.telegram.deleteMessage(ctx.chat.id, thinkingMsg.message_id); } catch {}
+
+          if (!result.success) {
+            await ctx.reply(`❌ Conversion failed: ${result.error}`);
+          } else {
+            const stat = await fs.stat(outputPath);
+            const sizeMB = (stat.size / (1024 * 1024)).toFixed(1);
+            if (['mp3','wav','aac','flac','ogg'].includes(targetFormat)) {
+              await ctx.replyWithAudio({ source: outputPath, filename: `converted.${targetFormat}` },
+                { caption: `✅ Converted to ${targetFormat.toUpperCase()} (${sizeMB}MB)` });
+            } else {
+              await ctx.replyWithDocument({ source: outputPath, filename: `converted.${targetFormat}` },
+                { caption: `✅ Converted to ${targetFormat.toUpperCase()} (${sizeMB}MB)` });
+            }
+          }
+
+          await fs.unlink(inputPath).catch(() => {});
+          await fs.unlink(outputPath).catch(() => {});
+        } else {
+          await ctx.reply('🎬 Got the video. What would you like me to do with it? (e.g., "convert to mp3")');
+        }
+      } catch (err) {
+        logger.error('Error handling video:', err);
+        await ctx.reply('Failed to process video: ' + err.message);
+      }
+    });
+
     this.bot.on(message('text'), async (ctx) => {
       const text = ctx.message.text;
-      
+
       // Skip if it's a command
       if (text.startsWith('/')) return;
 

@@ -39,6 +39,9 @@ All notable changes to LANAgent will be documented in this file.
 - **Twitter engagement system** — Mention monitoring, AI auto-reply with safety guards (max 5/cycle, 10/day, 2-deep thread limit), auto-like mentions, auto-follow back with blocklist. All features OFF by default (opt-in).
 - **MindSwarm pin post** — Updated to v2 toggle API (`POST /posts/:id/pin`), added `reorderPins` action.
 - **Calendar date fix** — Events no longer show one day early due to UTC-to-local timezone conversion.
+- **Telegram media conversion** — Send a video or audio file with a caption like "convert to mp3" and the bot converts via FFmpeg and sends back the result. Supports mp3, mp4, wav, aac, flac, ogg. 20MB Telegram API limit with clear error message for oversized files.
+- **MindSwarm media upload fix** — Upload field name corrected from `file` to `media` to match MindSwarm API.
+- **Skynet Telegram bot** — Fixed channel link markdown escaping in @skynet_tracker messages.
 
 ## [2.24.8] - 2026-04-10
 
