@@ -419,7 +419,7 @@ LANAgent includes a comprehensive Web3 and cryptocurrency system with:
 - Pinata API key management with encrypted database storage
 
 ### 🌐 **Unified API Gateway (api.lanagent.net)**
-- 97+ paid services (17 plugins, 90+ commands, 8 dedicated routes) via unified gateway at `https://api.lanagent.net`
+- 25 paid services (17 plugins, 8 dedicated routes) via unified gateway at `https://api.lanagent.net`
 - **Three payment methods**: Stripe (credit card), BNB, or SKYNET — no crypto knowledge required
 - **Agent directory**: `GET /agents` lists all network agents; `POST /agents/:id/:service` routes to specific agent
 - **ERC-8004 endpoints**: each agent at `api.lanagent.net/agents/{agentId}`

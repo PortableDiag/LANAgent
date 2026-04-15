@@ -2,6 +2,14 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.1] - 2026-04-14
+
+### Fixed
+- **skynettoken.com og:image broken** — Link preview images were broken because `og:image` used a relative path (`assets/skynet-256.png`). Changed to absolute URL (`https://skynettoken.com/assets/skynet-full.png`). Added `og:url`, `og:image:width/height`, and Twitter card meta tags (`twitter:card`, `twitter:title`, `twitter:description`, `twitter:image`).
+- **skynettoken.com hardcoded service count** — "69 services" was hardcoded in hero text and API gateway card. Now dynamically fetches from `api.lanagent.net/stats` on page load, matching lanagent.net's existing sync pattern. Static fallback updated to 25 (actual count).
+- **Stale service counts in docs** — API README and project README had outdated service counts (87+, 97+). Updated to match live `/stats` endpoint (25 services: 17 plugins, 8 dedicated routes).
+- **Orphaned MongoDB collection** — Dropped `agendaJobs` collection (5 records from Jan/March) that was left behind when Agenda was reconfigured to use `scheduled_jobs`.
+
 ## [2.25.0] - 2026-04-13
 
 ### Changed
