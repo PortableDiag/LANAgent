@@ -10,6 +10,7 @@ import { Email } from '../../models/Email.js';
 import { PluginSettings } from '../../models/PluginSettings.js';
 import { EmailContactManager } from '../../utils/emailContactManager.js';
 import { addGravatarHeaders, getGravatarUrl, enrichContactWithGravatar, fetchGravatarProfile } from '../../utils/gravatarHelper.js';
+import { getServerHost } from '../../utils/paths.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -429,7 +430,7 @@ export default class EmailPlugin extends BasePlugin {
       : `\n\n---\n${this.agent.config.name} - ${signatureName}'s AI Assistant\nEmail: ${this.getState('emailAddress')}\nThis message was sent by an AI assistant on behalf of ${signatureName}.`;
     
     // Generate avatar URL for signature - prefer local avatar, fallback to Gravatar
-    const serverHost = process.env.AGENT_HOST || process.env.SERVER_IP || 'localhost';
+    const serverHost = getServerHost();
     const webPort = process.env.AGENT_PORT || 80;
     const localAvatarUrl = this.agent.agentModel?.avatarPath
       ? `http://${serverHost}:${webPort}/api/agent/avatar`

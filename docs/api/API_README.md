@@ -2524,9 +2524,9 @@ Previously this would normalize `mp4` to `m4a` audio. Now it correctly downloads
 
 **LAN Download Links** — When files exceed Telegram's 50MB bot limit, a LAN download URL is provided:
 ```
-http://localhost:3000/downloads/filename.mp4
+http://192.168.0.50/downloads/filename.mp4
 ```
-Static file serving via `/downloads` route.
+The server's LAN IP is auto-detected from `os.networkInterfaces()` via `getServerHost()` in `src/utils/paths.js`. Override with `AGENT_HOST` or `SERVER_IP` env vars. Static file serving via `/downloads` route.
 
 **Agent Stats Compare Command** — Compare improvement stats between current and previous time periods:
 ```

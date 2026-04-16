@@ -2,6 +2,11 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.2] - 2026-04-16
+
+### Fixed
+- **Download URLs showing localhost instead of LAN IP** — Telegram download links, avatar URLs, email signatures, and web dashboard links all fell back to `localhost` when `AGENT_HOST` was not set. Added `getServerHost()` utility in `src/utils/paths.js` that auto-detects the server's LAN IP from `os.networkInterfaces()` as a fallback (priority: `AGENT_HOST` > `SERVER_IP` > auto-detect > `localhost`). Applied across `telegramDashboard.js`, `agent.js`, and `email.js`.
+
 ## [2.25.1] - 2026-04-14
 
 ### Fixed

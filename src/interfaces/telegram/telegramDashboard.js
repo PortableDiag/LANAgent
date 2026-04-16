@@ -2,6 +2,7 @@ import { TelegramInterface } from "./telegram.js";
 import { Telegraf, Markup, Scenes, session } from "telegraf";
 import { message } from 'telegraf/filters';
 import { logger } from "../../utils/logger.js";
+import { getServerHost } from "../../utils/paths.js";
 import { MultiUserSupport } from './multiUserSupport.js';
 import { TelegramMediaGenerator } from '../../services/telegramMediaGenerator.js';
 import fs from 'fs/promises';
@@ -1048,7 +1049,7 @@ export class TelegramDashboard extends TelegramInterface {
         Markup.button.callback("🌐 Network", "goto_network")
       ],
       [
-        Markup.button.url("🌐 Web Dashboard", `http://${process.env.AGENT_HOST || 'localhost'}:${process.env.AGENT_PORT || 3000}`),
+        Markup.button.url("🌐 Web Dashboard", `http://${getServerHost()}:${process.env.AGENT_PORT || 3000}`),
         Markup.button.callback("❌ Close", "close_dashboard")
       ]
     ]);
@@ -1398,7 +1399,7 @@ export class TelegramDashboard extends TelegramInterface {
               let lanUrl = '';
               if (response.path.startsWith(downloadsDir)) {
                 const relativePath = response.path.slice(downloadsDir.length);
-                lanUrl = `http://${process.env.AGENT_HOST || 'localhost'}:${process.env.AGENT_PORT || 3000}/downloads/${encodeURI(relativePath.replace(/^\//, ''))}`;
+                lanUrl = `http://${getServerHost()}:${process.env.AGENT_PORT || 3000}/downloads/${encodeURI(relativePath.replace(/^\//, ''))}`;
               }
 
               if (sizeMB > 50) {
@@ -1441,7 +1442,7 @@ export class TelegramDashboard extends TelegramInterface {
               let lanUrl = '';
               if (response.path.startsWith(downloadsDir)) {
                 const relativePath = response.path.slice(downloadsDir.length);
-                lanUrl = `http://${process.env.AGENT_HOST || 'localhost'}:${process.env.AGENT_PORT || 3000}/downloads/${encodeURI(relativePath.replace(/^\//, ''))}`;
+                lanUrl = `http://${getServerHost()}:${process.env.AGENT_PORT || 3000}/downloads/${encodeURI(relativePath.replace(/^\//, ''))}`;
               }
               try {
                 await ctx.replyWithDocument(
@@ -2936,7 +2937,7 @@ export class TelegramDashboard extends TelegramInterface {
     
     message += `🎯 **Core Interfaces:**\n`;
     message += `✅ Telegram Bot (this interface)\n`;
-    message += `✅ Web Dashboard (http://${process.env.AGENT_HOST || 'localhost'}:${process.env.AGENT_PORT || 3000})\n`;
+    message += `✅ Web Dashboard (http://${getServerHost()}:${process.env.AGENT_PORT || 3000})\n`;
     message += `✅ SSH Server (port 2222)\n\n`;
     
     message += `🤖 **AI Integration:**\n`;

@@ -35,6 +35,7 @@ import mqttService from '../services/mqtt/mqttService.js';
 import eventEngine from '../services/mqtt/eventEngine.js';
 import { ReActAgent, PlanExecuteAgent, ThoughtStore } from '../services/reasoning/index.js';
 import { setGlobalAgent } from './agentAccessor.js';
+import { getServerHost } from '../utils/paths.js';
 import { exec } from 'child_process';
 import { promisify } from 'util';
 import { readFileSync, existsSync, mkdirSync, copyFileSync } from 'fs';
@@ -1498,7 +1499,7 @@ Respond conversationally — elaborate, clarify, or answer based on what was jus
                   await this.memoryManager.storeConversation(context.userId, input, caption, context);
                   return { type: 'photo', path: fullPath, caption };
                 } else {
-                  const serverHost = process.env.AGENT_HOST || 'localhost';
+                  const serverHost = getServerHost();
                   const port = process.env.AGENT_PORT || 443;
                   const protocol = String(port) === '443' ? 'https' : 'http';
                   const avatarUrl = `${protocol}://${serverHost}/api/agent/avatar`;
@@ -1507,7 +1508,7 @@ Respond conversationally — elaborate, clarify, or answer based on what was jus
                   return { type: 'text', content: urlMsg };
                 }
               } catch (error) {
-                const serverHost = process.env.AGENT_HOST || 'localhost';
+                const serverHost = getServerHost();
                 const port = process.env.AGENT_PORT || 443;
                 const protocol = String(port) === '443' ? 'https' : 'http';
                 const avatarUrl = `${protocol}://${serverHost}/api/agent/avatar`;
@@ -4426,7 +4427,7 @@ Return ONLY a valid JSON object with the extracted parameters, nothing else.`;
   getSystemPrompt() {
     // Dynamic configuration values (no hardcoding)
     const agentEmail = process.env.AGENT_EMAIL || process.env.EMAIL_USER || process.env.IMAP_USER || 'alice@lanagent.net';
-    const serverHost = process.env.AGENT_HOST || process.env.SERVER_IP || 'localhost';
+    const serverHost = getServerHost();
     const webPassword = process.env.WEB_PASSWORD || 'lanagent';
     const webPort = this.config.port || process.env.AGENT_PORT || 80;
     const sshPort = this.config.sshPort || process.env.AGENT_SSH_PORT || 2222;

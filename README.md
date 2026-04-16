@@ -793,6 +793,7 @@ AGENT_NAME=MyAgent
 AGENT_PORT=80
 AGENT_SSH_PORT=2222
 SSH_PASSWORD=your_secure_password
+# AGENT_HOST=192.168.0.50  # Optional — auto-detected from network interfaces if not set
 
 # MongoDB
 MONGODB_URI=mongodb://localhost:27017/lanagent
