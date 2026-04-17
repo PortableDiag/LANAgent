@@ -30,9 +30,10 @@ class MCPTransport extends EventEmitter {
    * Send a JSON-RPC request
    * @param {string} method - Method name
    * @param {object} params - Method parameters
+   * @param {number} [customTimeout] - Optional custom timeout in milliseconds
    * @returns {Promise} Response promise
    */
-  async request(method, params = {}) {
+  async request(method, params = {}, customTimeout) {
     const id = this.nextId();
     const message = {
       jsonrpc: '2.0',
@@ -42,10 +43,11 @@ class MCPTransport extends EventEmitter {
     };
 
     return new Promise((resolve, reject) => {
+      const timeoutDuration = customTimeout || 30000;
       const timeout = setTimeout(() => {
         this.pendingRequests.delete(id);
         reject(new Error(`Request timeout: ${method}`));
-      }, 30000);
+      }, timeoutDuration);
 
       this.pendingRequests.set(id, { resolve, reject, timeout });
       this.send(message);

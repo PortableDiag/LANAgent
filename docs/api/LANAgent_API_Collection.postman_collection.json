@@ -2,7 +2,7 @@
   "info": {
     "_postman_id": "9b5edc66-ea34-4329-a9d5-baca5366e76d",
     "name": "LANAgent API Collection",
-    "description": "LANAgent API v2.25.2 \u2014 LAN IP auto-detection for download URLs, avatar links, email signatures. Updated April 16, 2026.",
+    "description": "LANAgent API v2.25.2 \u2014 LAN IP auto-detection, AI detector fix, PR review (token revocation, MCP timeouts, MQTT lifecycle, Sentry context, oracle logging, email retry). Updated April 17, 2026.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
     "version": "2.25.2"
   },

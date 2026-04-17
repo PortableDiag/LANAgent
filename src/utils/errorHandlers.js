@@ -150,6 +150,13 @@ export function withErrorHandler(fn, context = 'Unknown') {
             name: fn.name || 'anonymous',
             context
           });
+          // Add additional context if available
+          if (args[0]?.userId) {
+            scope.setTag('user_id', args[0].userId);
+          }
+          if (args[0]?.sessionId) {
+            scope.setTag('session_id', args[0].sessionId);
+          }
           Sentry.captureException(error);
         });
       }

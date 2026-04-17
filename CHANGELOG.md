@@ -8,6 +8,16 @@ All notable changes to LANAgent will be documented in this file.
 - **Download URLs showing localhost instead of LAN IP** — Telegram download links, avatar URLs, email signatures, and web dashboard links all fell back to `localhost` when `AGENT_HOST` was not set. Added `getServerHost()` utility in `src/utils/paths.js` that auto-detects the server's LAN IP from `os.networkInterfaces()` as a fallback (priority: `AGENT_HOST` > `SERVER_IP` > auto-detect > `localhost`). Applied across `telegramDashboard.js`, `agent.js`, and `email.js`.
 - **AI image detector false positives** — Switched from `Ateeqq/ai-vs-human-image-detector` to `umm-maybe/AI-image-detector`. The Ateeqq model classified virtually all images as AI-generated (99.9%+ AI score on real photos, screenshots, and all non-noise images). The umm-maybe model correctly identifies real photos as human (~98%). Label handling updated to support both model formats (`artificial`/`human` and `ai`/`hum`).
 
+### Added
+- **Download token revocation** — `revokeDownloadToken(token)` in `downloadTokenService.js` for invalidating active download tokens.
+- **MCP custom request timeouts** — Optional `customTimeout` parameter on `mcpTransport.request()` for long-running MCP tool calls (default unchanged at 30s).
+- **MQTT device lifecycle state** — `lifecycleState` field (`active`/`inactive`/`decommissioned`) on MqttDevice model with indexed queries and `transitionLifecycleState()` method.
+
+### Improved
+- **Sentry error context** — `withErrorHandler` now tags Sentry errors with `user_id` and `session_id` when available.
+- **Oracle route error logging** — All catch blocks in oracle routes now log via `logger.error` instead of silently returning 500s.
+- **Email lease retry** — Expiration notification emails now retry up to 3 times on transient SMTP failures.
+
 ## [2.25.1] - 2026-04-14
 
 ### Fixed

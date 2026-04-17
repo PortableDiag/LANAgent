@@ -34,6 +34,7 @@ router.get('/stats', async (req, res) => {
         const { config, ...publicStats } = stats;
         res.json({ success: true, ...publicStats });
     } catch (err) {
+        logger.error(`Oracle route error: ${err.message}`);
         res.status(500).json({ success: false, error: err.message });
     }
 });
@@ -49,6 +50,7 @@ router.get('/admin/active', async (req, res) => {
         const active = await oracleAgentService.getActiveParticipations();
         res.json({ success: true, participations: active });
     } catch (err) {
+        logger.error(`Oracle route error: ${err.message}`);
         res.status(500).json({ success: false, error: err.message });
     }
 });
@@ -63,6 +65,7 @@ router.get('/admin/history', async (req, res) => {
         const history = await oracleAgentService.getHistory(limit);
         res.json({ success: true, history });
     } catch (err) {
+        logger.error(`Oracle route error: ${err.message}`);
         res.status(500).json({ success: false, error: err.message });
     }
 });
@@ -76,6 +79,7 @@ router.get('/admin/stats', async (req, res) => {
         const stats = await oracleAgentService.getStats();
         res.json({ success: true, ...stats });
     } catch (err) {
+        logger.error(`Oracle route error: ${err.message}`);
         res.status(500).json({ success: false, error: err.message });
     }
 });
@@ -89,6 +93,7 @@ router.put('/admin/config', async (req, res) => {
         const config = await oracleAgentService.updateConfig(req.body);
         res.json({ success: true, config });
     } catch (err) {
+        logger.error(`Oracle route error: ${err.message}`);
         res.status(500).json({ success: false, error: err.message });
     }
 });
@@ -102,6 +107,7 @@ router.post('/admin/pause', async (req, res) => {
         await oracleAgentService.pause();
         res.json({ success: true, message: 'Oracle participation paused' });
     } catch (err) {
+        logger.error(`Oracle route error: ${err.message}`);
         res.status(500).json({ success: false, error: err.message });
     }
 });
@@ -115,6 +121,7 @@ router.post('/admin/resume', async (req, res) => {
         await oracleAgentService.resume();
         res.json({ success: true, message: 'Oracle participation resumed' });
     } catch (err) {
+        logger.error(`Oracle route error: ${err.message}`);
         res.status(500).json({ success: false, error: err.message });
     }
 });

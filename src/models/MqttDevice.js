@@ -101,6 +101,14 @@ const mqttDeviceSchema = new mongoose.Schema({
     zone: String
   },
 
+  // Lifecycle state for device fleet management
+  lifecycleState: {
+    type: String,
+    enum: ['active', 'inactive', 'decommissioned'],
+    default: 'active',
+    index: true
+  },
+
   // Metadata
   description: String,
 
@@ -160,6 +168,19 @@ mqttDeviceSchema.methods.addStatusHistory = async function(status, details = {})
  */
 mqttDeviceSchema.methods.getStatusHistory = function(limit = 10) {
   return this.statusHistory.slice(-limit).reverse();
+};
+
+/**
+ * Transition the device to a new lifecycle state
+ * @param {String} newState - 'active', 'inactive', or 'decommissioned'
+ */
+mqttDeviceSchema.methods.transitionLifecycleState = async function(newState) {
+  if (!['active', 'inactive', 'decommissioned'].includes(newState)) {
+    throw new Error(`Invalid lifecycle state: ${newState}`);
+  }
+  this.lifecycleState = newState;
+  this.statusHistory.push({ status: `Lifecycle: ${newState}`, details: {} });
+  await this.save();
 };
 
 export default mongoose.model('MqttDevice', mqttDeviceSchema);

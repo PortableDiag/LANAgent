@@ -2,6 +2,7 @@ import mongoose from 'mongoose';
 import { v4 as uuidv4 } from 'uuid';
 import { logger } from '../utils/logger.js';
 import { getGlobalAgent } from '../core/agentAccessor.js';
+import { retryOperation } from '../utils/retryUtils.js';
 
 const renewalPaymentSchema = new mongoose.Schema({
   txHash: { type: String, required: true },
@@ -150,12 +151,12 @@ emailLeaseSchema.statics.sendExpirationNotifications = async function(daysAhead 
   let skipped = 0;
   for (const lease of expiringLeases) {
     try {
-      await emailPlugin.instance.execute({
+      await retryOperation(() => emailPlugin.instance.execute({
         action: 'send',
         to: lease.email,
         subject: 'LANAgent — Email lease expiration warning',
         message: `Hi ${lease.peerDisplayName || 'there'},\n\nYour LANAgent email lease for ${lease.email} expires on ${lease.expiresAt.toISOString().slice(0, 10)}. Renew it before then to avoid service interruption.\n\n— LANAgent`
-      });
+      }), { retries: 3 });
       sent++;
     } catch (err) {
       skipped++;

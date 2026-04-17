@@ -51,3 +51,15 @@ export function consumeDownload(token) {
   downloadCounters.set(token, remaining - 1, downloadCounters.getTtl(token));
   return true;
 }
+
+/**
+ * Revoke a download token, preventing further use.
+ * @param {string} token - The token to revoke.
+ */
+export function revokeDownloadToken(token) {
+  if (downloadCounters.del(token)) {
+    logger.info(`Download token revoked: ${token}`);
+  } else {
+    logger.warn(`Attempted to revoke non-existent or already revoked token: ${token}`);
+  }
+}
