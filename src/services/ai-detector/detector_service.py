@@ -68,10 +68,10 @@ class ModelManager:
         """Load ViT for AI image detection."""
         from transformers import AutoModelForImageClassification, AutoImageProcessor
 
-        logger.info("Loading image detection model (ai-vs-human-image-detector)...")
+        logger.info("Loading image detection model (AI-image-detector)...")
         start = time.time()
 
-        model_name = "Ateeqq/ai-vs-human-image-detector"
+        model_name = "umm-maybe/AI-image-detector"
         processor = AutoImageProcessor.from_pretrained(model_name, cache_dir=CACHE_DIR)
         model = AutoModelForImageClassification.from_pretrained(
             model_name, cache_dir=CACHE_DIR
@@ -108,7 +108,7 @@ class ModelManager:
     def loaded_models(self):
         models = []
         if self._image_model is not None:
-            models.append("ai-vs-human-image-detector")
+            models.append("AI-image-detector")
         if self._audio_model is not None:
             models.append("whisper-tiny" if self.device == "cpu" else "whisper-base")
         return models
@@ -140,9 +140,10 @@ class ImageDetector:
             ImageDetector._classify, image, model_data["model"], model_data["processor"]
         )
 
-        # Ateeqq model labels: {0: "ai", 1: "hum"}
-        ai_score = results.get("ai", 0.0)
-        human_score = results.get("hum", 0.0)
+        # Normalize label names — different models use different labels
+        # umm-maybe: {0: "artificial", 1: "human"}, Ateeqq: {0: "ai", 1: "hum"}
+        ai_score = results.get("artificial", results.get("ai", 0.0))
+        human_score = results.get("human", results.get("hum", 0.0))
 
         if ai_score > 0.65:
             verdict = "ai_generated"

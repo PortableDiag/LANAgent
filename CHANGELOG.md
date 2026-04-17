@@ -6,6 +6,7 @@ All notable changes to LANAgent will be documented in this file.
 
 ### Fixed
 - **Download URLs showing localhost instead of LAN IP** — Telegram download links, avatar URLs, email signatures, and web dashboard links all fell back to `localhost` when `AGENT_HOST` was not set. Added `getServerHost()` utility in `src/utils/paths.js` that auto-detects the server's LAN IP from `os.networkInterfaces()` as a fallback (priority: `AGENT_HOST` > `SERVER_IP` > auto-detect > `localhost`). Applied across `telegramDashboard.js`, `agent.js`, and `email.js`.
+- **AI image detector false positives** — Switched from `Ateeqq/ai-vs-human-image-detector` to `umm-maybe/AI-image-detector`. The Ateeqq model classified virtually all images as AI-generated (99.9%+ AI score on real photos, screenshots, and all non-noise images). The umm-maybe model correctly identifies real photos as human (~98%). Label handling updated to support both model formats (`artificial`/`human` and `ai`/`hum`).
 
 ## [2.25.1] - 2026-04-14
 
