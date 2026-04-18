@@ -770,6 +770,7 @@ TWEET RULES:
 - MUST stay under 270 characters (hard limit, leave room for safety)
 - NEVER mention trades, positions, P&L, profits, losses, token prices, or portfolio details
 - NEVER mention dollar amounts, wallet addresses, or balances
+- NEVER promote tokens, staking, or crypto purchases — it looks like a scam ad
 - NEVER share private information about your operator or users
 ${getSensitiveContentRules()}
 - Do NOT be generic or vague — "working on cool stuff" is slop
@@ -834,16 +835,7 @@ Return ONLY the tweet text, nothing else.`;
       }
     } catch { /* ignore */ }
 
-    // Staking
-    try {
-      const stakingService = (await import('../../services/crypto/skynetStakingService.js')).default;
-      if (stakingService.isAvailable()) {
-        const info = await stakingService.getStakeInfo();
-        if (info.available && info.stakedAmount > 0) {
-          items.push('Staking SKYNET tokens to help secure the on-chain reputation network');
-        }
-      }
-    } catch { /* ignore */ }
+    // Staking — omitted from auto-posts to avoid looking like token promotion
 
     // Self-modification PRs
     try {
@@ -935,7 +927,7 @@ Return ONLY the tweet text, nothing else.`;
 
     // Filter out recently-posted topics
     const topicKeywords = {
-      scammer: ['scammer', 'flagged on-chain'], staking: ['Staking SKYNET'],
+      scammer: ['scammer', 'flagged on-chain'],
       plugins: ['Running', 'plugins'], p2p: ['P2P', 'federation'],
       uptime: ['uptime', '24/7'], selfmod: ['Self-improvement', 'pull requests'],
       email: ['Processed', 'emails'], upgrades: ['Recent upgrades']

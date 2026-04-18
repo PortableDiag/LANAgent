@@ -1248,6 +1248,7 @@ POST RULES:
 - Stay under 280 characters
 - NEVER mention trades, positions, P&L, profits, losses, token prices, or portfolio details
 - NEVER mention dollar amounts, wallet addresses, or balances
+- NEVER promote tokens, staking, or crypto purchases — it looks like a scam ad
 - NEVER share private information about your operator or users
 ${getSensitiveContentRules()}
 - Do NOT be generic or vague — "working on cool stuff" is slop, "caught an address poisoning attack on-chain today" is real
@@ -1321,16 +1322,7 @@ Return ONLY the post text, nothing else.`;
       }
     } catch { /* ignore */ }
 
-    // Staking for network security (non-financial framing)
-    try {
-      const stakingService = (await import('../../services/crypto/skynetStakingService.js')).default;
-      if (stakingService.isAvailable()) {
-        const info = await stakingService.getStakeInfo();
-        if (info.available && info.stakedAmount > 0) {
-          items.push(`Staking SKYNET tokens to help secure the on-chain reputation network`);
-        }
-      }
-    } catch { /* ignore */ }
+    // Staking — omitted from auto-posts to avoid looking like token promotion
 
     // Self-modification / PRs
     try {
@@ -1426,7 +1418,6 @@ Return ONLY the post text, nothing else.`;
     // Filter out context items that match topics we've recently posted about
     const topicToKeywords = {
       'scammer': ['scammer', 'flagged on-chain', 'soulbound'],
-      'staking': ['Staking SKYNET'],
       'plugins': ['Running', 'plugins'],
       'p2p': ['P2P', 'federation'],
       'uptime': ['uptime', '24/7'],
@@ -1605,15 +1596,9 @@ Return ONLY valid JSON.`;
 - Never reveal personal details about your operator, infrastructure, server, or API keys.
 ${getSensitiveContentRules()}
 - If asked about crypto trading, profits, positions, or contracts, deflect: "I don't discuss my personal finances."
-- EXCEPTION: You CAN talk about the Skynet project — it's a public project you're part of:
-  * Main site: https://lanagent.net — LANAgent project home
-  * Token site: https://skynettoken.com — SKYNET token info, staking, and ecosystem
-  * SKYNET token: 0x8Ef0ecE5687417a8037F787b39417eB16972b04F (BSC/BNB Chain)
-  * SkynetDiamond contract: 0xFfA95Ec77d7Ed205d48fea72A888aE1C93e30fF7 (BSC) — ERC-2535 Diamond Proxy: staking, LP staking, scammer registry, commerce, oracle, coordination, trust, credentials
-  * Staking: Synthetix-style rewards, lock tiers (no lock 1x, 30d 1.5x, 90d 2x, 180d 3x), 24h reward epochs
-  * Scammer Registry: report scammers (50K SKYNET fee), fees go to staking rewards, soulbound badges for reporters
-  * Utility: staking rewards, scammer reporting, P2P services, bounties, governance, compute rental, knowledge marketplace
-  * You can share these URLs, contract addresses, and explain Skynet features enthusiastically
+- You CAN mention LANAgent (https://lanagent.net) as your open source project if relevant.
+- Do NOT proactively promote tokens, contract addresses, staking, or token purchases — it looks like spam.
+- If someone directly asks about the Skynet ecosystem, you can briefly explain it's a utility token for the LANAgent network, but keep it factual and brief — never shill.
 - EXCEPTION: You CAN share your MindSwarm referral link when relevant:
   * MindSwarm is the social network you're on — invite people naturally when they seem interested
   * Your referral link: ${referralLink || 'https://mindswarm.net'}
