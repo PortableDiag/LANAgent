@@ -1948,12 +1948,16 @@ class SwapService {
         // Pack commands into bytes
         const commandBytes = ethers.hexlify(Uint8Array.from(commands));
 
-        const txOverrides = isNativeIn
-            ? { value: amountInWei, gasLimit: 500000n }
-            : { gasLimit: 500000n };
+        const baseOverrides = isNativeIn ? { value: amountInWei } : {};
+        let gasLimit = 500000n;
+        try {
+            const estimated = await router.execute.estimateGas(commandBytes, inputs, deadline, baseOverrides);
+            gasLimit = estimated * 125n / 100n;
+        } catch { /* fallback to 500k */ }
+        const txOverrides = { ...baseOverrides, gasLimit };
 
         const hookLabel = poolKey.hooks !== ethers.ZeroAddress ? ` hook:${poolKey.hooks.slice(0,10)}` : '';
-        logger.info(`V4 PCS Infinity swap: ${commandBytes} (fee:${v4Data.fee}${hookLabel}, zeroForOne:${zeroForOne})`);
+        logger.info(`V4 PCS Infinity swap: ${commandBytes} (fee:${v4Data.fee}${hookLabel}, zeroForOne:${zeroForOne}, gas:${gasLimit})`);
         return await router.execute(commandBytes, inputs, deadline, txOverrides);
     }
 
@@ -2025,11 +2029,15 @@ class SwapService {
         }
 
         const commandBytes = ethers.hexlify(Uint8Array.from(commands));
-        const txOverrides = isNativeIn
-            ? { value: amountInWei, gasLimit: 500000n }
-            : { gasLimit: 500000n };
+        const baseOverrides = isNativeIn ? { value: amountInWei } : {};
+        let gasLimit = 500000n;
+        try {
+            const estimated = await router.execute.estimateGas(commandBytes, inputs, deadline, baseOverrides);
+            gasLimit = estimated * 125n / 100n;
+        } catch { /* fallback to 500k */ }
+        const txOverrides = { ...baseOverrides, gasLimit };
 
-        logger.info(`V4 Uniswap swap: ${commandBytes} (fee:${v4Data.fee}, zeroForOne:${zeroForOne}, network:${network})`);
+        logger.info(`V4 Uniswap swap: ${commandBytes} (fee:${v4Data.fee}, zeroForOne:${zeroForOne}, network:${network}, gas:${gasLimit})`);
         return await router.execute(commandBytes, inputs, deadline, txOverrides);
     }
 
@@ -2083,9 +2091,15 @@ class SwapService {
         const isSmartRouter = SMART_ROUTER_NETWORKS.has(network);
         const routerABI = isSmartRouter ? PANCAKESWAP_SMART_ROUTER_ABI : UNISWAP_V3_ROUTER_ABI;
         const v3Router = new ethers.Contract(checksumAddr(v3Data.routerAddress), routerABI, signer);
-        const txOverrides = isNativeIn
-            ? { value: amountInWei, gasLimit: 500000n }
-            : { gasLimit: 500000n };
+        const baseOverrides = isNativeIn ? { value: amountInWei } : {};
+
+        // Estimate gas dynamically with 25% buffer, fall back to 500k
+        const estimateGas = async (method, args, overrides) => {
+            try {
+                const estimated = await method.estimateGas(...args, overrides);
+                return estimated * 125n / 100n;
+            } catch { return 500000n; }
+        };
 
         if (isNativeOut) {
             // For native output: swap to WETH in router, then unwrapWETH9
@@ -2104,9 +2118,11 @@ class SwapService {
             const unwrapCalldata = v3Router.interface.encodeFunctionData('unwrapWETH9', [amountOutMin, signer.address]);
             // SmartRouter uses multicall(deadline, data[]), old router uses multicall(data[])
             if (isSmartRouter) {
-                return await v3Router.multicall(deadline, [swapCalldata, unwrapCalldata], txOverrides);
+                const gasLimit = await estimateGas(v3Router.multicall, [deadline, [swapCalldata, unwrapCalldata]], baseOverrides);
+                return await v3Router.multicall(deadline, [swapCalldata, unwrapCalldata], { ...baseOverrides, gasLimit });
             }
-            return await v3Router.multicall([swapCalldata, unwrapCalldata], txOverrides);
+            const gasLimit = await estimateGas(v3Router.multicall, [[swapCalldata, unwrapCalldata]], baseOverrides);
+            return await v3Router.multicall([swapCalldata, unwrapCalldata], { ...baseOverrides, gasLimit });
         }
 
         // Token-to-token or native-to-token: wrap in multicall with deadline for SmartRouter
@@ -2125,23 +2141,28 @@ class SwapService {
                     sqrtPriceLimitX96: 0n
                 }]);
             }
-            return await v3Router.multicall(deadline, [swapCalldata], txOverrides);
+            const gasLimit = await estimateGas(v3Router.multicall, [deadline, [swapCalldata]], baseOverrides);
+            return await v3Router.multicall(deadline, [swapCalldata], { ...baseOverrides, gasLimit });
         }
 
         // Old-style Uniswap V3 router (deadline in struct)
         if (v3Data.isMultiHop) {
-            return await v3Router.exactInput({
+            const params = {
                 path: v3Data.encodedPath, recipient: signer.address,
                 deadline, amountIn: amountInWei, amountOutMinimum: amountOutMin
-            }, txOverrides);
+            };
+            const gasLimit = await estimateGas(v3Router.exactInput, [params], baseOverrides);
+            return await v3Router.exactInput(params, { ...baseOverrides, gasLimit });
         }
 
-        return await v3Router.exactInputSingle({
+        const params = {
             tokenIn: v3Data.path[0], tokenOut: v3Data.path[v3Data.path.length - 1],
             fee: v3Data.feeTier, recipient: signer.address,
             deadline, amountIn: amountInWei, amountOutMinimum: amountOutMin,
             sqrtPriceLimitX96: 0n
-        }, txOverrides);
+        };
+        const gasLimit = await estimateGas(v3Router.exactInputSingle, [params], baseOverrides);
+        return await v3Router.exactInputSingle(params, { ...baseOverrides, gasLimit });
     }
 
     /**
@@ -2607,7 +2628,7 @@ class SwapService {
         // Calculate hard slippage ceiling based on token tax
         // Ensure ceiling is at least 2% above starting slippage so retries can actually fire
         const hardCeiling = tokenTaxPercent > 0
-            ? Math.min(tokenTaxPercent + 5, 25)  // Tax token: tax + 5%, max 25%
+            ? Math.min(tokenTaxPercent + 5, 15)  // Tax token: tax + 5%, max 15%
             : Math.max(userMaxSlippage || 5, slippageTolerance + 2);
 
         try {

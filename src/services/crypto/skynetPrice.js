@@ -63,10 +63,14 @@ export async function getSkynetUsdPrice({ fresh = false } = {}) {
       ['function latestRoundData() view returns (uint80,int256,uint256,uint256,uint80)'],
       provider
     );
-    const [, answer] = await chainlink.latestRoundData();
+    const [, answer, , updatedAt] = await chainlink.latestRoundData();
     const bnbUsd = Number(answer) / 1e8;
+    const ageSeconds = Math.floor(Date.now() / 1000) - Number(updatedAt);
 
-    if (skyReserve <= 0 || bnbUsd <= 0) return null;
+    if (skyReserve <= 0 || bnbUsd <= 0 || ageSeconds > 600) {
+      if (ageSeconds > 600) logger.debug(`Chainlink BNB/USD stale (${ageSeconds}s old), skipping`);
+      return null;
+    }
     const skynetUsd = (bnbReserve / skyReserve) * bnbUsd;
     if (!isFinite(skynetUsd) || skynetUsd <= 0) return null;
 

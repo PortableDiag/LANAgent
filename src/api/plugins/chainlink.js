@@ -431,9 +431,13 @@ export default class ChainlinkPlugin extends BasePlugin {
             // Calculate price
             const price = Number(answer) / Math.pow(10, Number(decimals));
 
-            // Calculate age
+            // Calculate age and check staleness
             const ageSeconds = Math.floor(Date.now() / 1000) - Number(updatedAt);
             const ageMinutes = Math.floor(ageSeconds / 60);
+            const stale = price <= 0 || ageSeconds > 600; // 10 minutes
+            if (stale) {
+                logger.warn(`Chainlink ${pairUpper}: stale or invalid (price=${price}, age=${ageSeconds}s)`);
+            }
 
             const data = {
                 pair: pairUpper,
@@ -441,6 +445,8 @@ export default class ChainlinkPlugin extends BasePlugin {
                 roundId: roundId.toString(),
                 timestamp: new Date(Number(updatedAt) * 1000).toISOString(),
                 age: ageMinutes < 1 ? `${ageSeconds} seconds` : `${ageMinutes} minutes`,
+                ageSeconds,
+                stale,
                 network: resolvedNetwork,
                 feedAddress,
                 decimals: Number(decimals)
