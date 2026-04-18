@@ -449,28 +449,28 @@ export class SelfModificationService extends EventEmitter {
         return;
       }
       
-      // 4. Select best upgrade opportunity
-      const selected = prioritized[0];
+      // 4. Select best non-duplicate upgrade opportunity
+      let selected = null;
+      for (const candidate of prioritized) {
+        const fp = this.generateCapabilityFingerprint(candidate);
+        if (this.isDuplicateCapability(fp)) {
+          logger.info(`⏭️ Skipping duplicate capability upgrade (fingerprint: ${fp}): ${candidate.description}`);
+          continue;
+        }
+        const isDuplicatePR = await this.checkGitHubForDuplicatePR(candidate);
+        if (isDuplicatePR) {
+          logger.info(`⏭️ Skipping capability upgrade - similar PR exists: ${candidate.description}`);
+          continue;
+        }
+        selected = candidate;
+        break;
+      }
       if (!selected) {
-        logger.error('No upgrade selected after prioritization');
+        logger.info('All capability upgrade candidates are duplicates or have existing PRs');
         return;
       }
       logger.info(`🔧 Selected capability upgrade: ${selected.type} for ${selected.target || selected.file}`);
-      
-      // 4.1. Check for duplicates before proceeding
-      const fingerprint = this.generateCapabilityFingerprint(selected);
-      if (this.isDuplicateCapability(fingerprint)) {
-        logger.info(`⏭️ Skipping duplicate capability upgrade (fingerprint: ${fingerprint}): ${selected.description}`);
-        return;
-      }
-      
-      // 4.2. Check GitHub for existing PRs
-      const isDuplicatePR = await this.checkGitHubForDuplicatePR(selected);
-      if (isDuplicatePR) {
-        logger.info(`⏭️ Skipping capability upgrade - similar PR exists: ${selected.description}`);
-        return;
-      }
-      
+
       // 5. Create branch for upgrade
       const branchName = await this.createImprovementBranch(selected);
       
