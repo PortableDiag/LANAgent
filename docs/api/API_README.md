@@ -8331,6 +8331,8 @@ POST /price/compare  {"pair":"ETH"}    # Compare sources
 | `data.roundId` | string | Chainlink round ID (for historical lookups) |
 | `data.timestamp` | string | Last update time (ISO 8601) |
 | `data.age` | string | Human-readable age (e.g., "7 seconds") |
+| `data.ageSeconds` | number | Price age in seconds (for programmatic staleness checks) |
+| `data.stale` | boolean | `true` if price is >10 minutes old or ≤ 0 — consumers should treat stale prices with caution |
 | `data.decimals` | number | Oracle precision (null for CoinGecko) |
 | `data.marketCap` | number | Market cap (CoinGecko fallback only) |
 | `data.volume24h` | number | 24h volume (CoinGecko fallback only) |

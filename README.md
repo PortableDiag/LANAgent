@@ -206,6 +206,9 @@ All repo references are resolved dynamically from git remotes — no hardcoded U
   - **Strategy Import/Export**: Universal Strategy Format (.strategy.json) with versioning, checksum validation, sensitive data sanitization, and bundle support for backup/sharing
   - **Gas Cost Tracking**: Captures actual gas costs from swap receipts, deducts from PnL, and tracks cumulative gas spend. Pre-trade gate requires $1+ net value after gas for buys and $1+ net profit after gas for sells (emergency sells bypass)
   - **P&L History Chart**: D3 cumulative line chart in P&L Dashboard with area gradient, hover tooltips, configurable range (7d–1yr). Backfilled from trade logs, auto-updated every 15 minutes from live token trader positions
+  - **Dynamic Gas Estimation**: V3/V4 swaps use `estimateGas()` with 25% buffer instead of fixed gas limits, preventing reverts on complex paths and overpayment on simple ones (1inch path already used this)
+  - **Slippage Safety**: Tax token slippage ceiling capped at 15% (tax + 5%) to limit MEV/sandwich attack exposure during retries
+  - **Oracle Staleness Protection**: Chainlink price feeds include `stale` flag and `ageSeconds` for consumers; SKYNET price oracle (P2P/registry pricing) rejects data >10 minutes old
   - **Dynamic Risk Assessment**: Liquidity-based slippage tolerance and volatility-based position sizing on BaseStrategy
   - **Batch Transaction Confirmations**: `Promise.allSettled`-based parallel transaction waiting with per-tx error handling
   - **Gas Profitability**: Estimates swap gas cost in USD before executing; skips trades where profit < 2x gas cost (stop-loss bypasses this)

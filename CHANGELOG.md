@@ -2,6 +2,15 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.3] - 2026-04-18
+
+### Fixed
+- **25% slippage hard ceiling on tax token swaps** — Tax token retry logic allowed slippage to escalate up to 25%, creating MEV/sandwich attack risk. Lowered hard ceiling from 25% to 15% (`tokenTaxPercent + 5%`, capped at 15%). Tax tokens rarely exceed 10% tax, so this still covers legitimate cases.
+- **Hardcoded 500k gas limit on V3/V4 swaps** — All V3 (Uniswap/PancakeSwap SmartRouter) and V4 (PancakeSwap Infinity, Uniswap V4) swap executions used a fixed `gasLimit: 500000n` regardless of path complexity. Multi-hop paths can exceed 500k gas (reverts), and simple swaps overpay. Replaced with dynamic `estimateGas()` + 25% buffer, falling back to 500k if estimation fails. Matches the existing 1inch path which already used dynamic gas estimation.
+- **Chainlink stale price data accepted silently** — Chainlink plugin calculated price age but never flagged stale data. Added `stale` boolean and `ageSeconds` fields to response; logs a warning when price is >10 minutes old or ≤ 0. Consumers can now check `data.stale` before acting on the price.
+- **SKYNET price oracle accepts stale Chainlink data** — `skynetPrice.js` (used for P2P auto-pricing and scammer registry fees) read Chainlink BNB/USD without checking freshness. Now returns `null` (skip cycle) when price data is >10 minutes stale, preventing pricing decisions on outdated oracle data.
+- **Social media SKYNET spam** — Twitter and MindSwarm post generators were promoting SKYNET tokens in ~25-33% of all posts due to a hardcoded staking context item injected into the context pool and explicit "shill enthusiastically" instructions in MindSwarm engagement rules. Removed staking context items, stripped promotional language from engagement rules, added explicit "NEVER promote tokens" rule to post generation prompts.
+
 ## [2.25.2] - 2026-04-16
 
 ### Fixed
