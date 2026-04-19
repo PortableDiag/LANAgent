@@ -73,18 +73,22 @@ deviceAliasSchema.statics.resolveAlias = async function(aliasName, plugin = 'gov
     return cached.deviceName;
   }
   
-  const alias = await this.findOne({ 
-    alias: aliasName.toLowerCase().trim(),
-    plugin: plugin 
-  });
-  
-  if (alias) {
-    aliasCache.set(cacheKey, {
-      _id: alias._id,
-      deviceName: alias.deviceName
-    });
-    alias.recordUsage().catch(err => logger.error('Error recording alias usage:', err));
-    return alias.deviceName;
+  try {
+    const alias = await retryOperation(() => this.findOne({ 
+      alias: aliasName.toLowerCase().trim(),
+      plugin: plugin 
+    }), { retries: 3 });
+    
+    if (alias) {
+      aliasCache.set(cacheKey, {
+        _id: alias._id,
+        deviceName: alias.deviceName
+      });
+      alias.recordUsage().catch(err => logger.error('Error recording alias usage:', err));
+      return alias.deviceName;
+    }
+  } catch (error) {
+    logger.error('Error resolving alias:', error);
   }
   
   return null;
@@ -136,7 +140,7 @@ deviceAliasSchema.statics.setAlias = async function(aliasName, deviceName, plugi
     expirationDate: expirationDate
   };
 
-  const result = await this.findOneAndUpdate(
+  const result = await retryOperation(() => this.findOneAndUpdate(
     {
       alias: aliasName.toLowerCase().trim(),
       plugin: plugin
@@ -146,7 +150,7 @@ deviceAliasSchema.statics.setAlias = async function(aliasName, deviceName, plugi
       new: true,
       upsert: true
     }
-  );
+  ), { retries: 3 });
   
   aliasCache.del(cacheKey);
   
@@ -164,9 +168,9 @@ deviceAliasSchema.statics.clearCache = function() {
 deviceAliasSchema.statics.cleanupExpiredAliases = async function() {
   try {
     const now = new Date();
-    const expiredAliases = await this.find({
+    const expiredAliases = await retryOperation(() => this.find({
       expirationDate: { $ne: null, $lte: now }
-    });
+    }), { retries: 3 });
 
     if (expiredAliases.length > 0) {
       const idsToRemove = expiredAliases.map(alias => alias._id);

@@ -1,5 +1,6 @@
 import mongoose from 'mongoose';
 import { logger } from '../utils/logger.js';
+import { retryOperation } from '../utils/retryUtils.js';
 
 // Schema for archived monthly provider statistics
 const providerStatsArchiveSchema = new mongoose.Schema({
@@ -251,7 +252,11 @@ providerStatsArchiveSchema.statics.createArchive = async function(archiveType = 
     notes
   });
 
-  await archive.save();
+  await retryOperation(() => archive.save(), { retries: 3 }).catch(error => {
+    logger.error(`Failed to save archive for ${periodYear}-${String(periodMonth).padStart(2, '0')}: ${error.message}`);
+    throw error;
+  });
+
   return archive;
 };
 

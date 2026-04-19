@@ -1,5 +1,11 @@
 import { logger } from './logger.js';
 import { retryOperation } from './retryUtils.js';
+import NodeCache from 'node-cache';
+
+/**
+ * In-memory cache for active project data
+ */
+const projectCache = new NodeCache({ stdTTL: 300, checkperiod: 60 });
 
 /**
  * Determines which project an issue/bug report should be created for
@@ -43,9 +49,11 @@ export async function determineProjectForIssue(message, agent) {
   try {
     const projectsPlugin = agent.apiManager?.getPlugin('projects');
     if (projectsPlugin) {
-      const activeProjects = await retryOperation(
-        () => projectsPlugin.execute({ action: 'list', status: 'active' }),
-        { retries: 3 }
+      const activeProjects = await getCachedProjects(() => 
+        retryOperation(
+          () => projectsPlugin.execute({ action: 'list', status: 'active' }),
+          { retries: 3 }
+        )
       );
       
       if (activeProjects.success && activeProjects.projects) {
@@ -135,6 +143,22 @@ export async function determineProjectForIssue(message, agent) {
   }
   
   return null;
+}
+
+/**
+ * Get cached projects or fetch them if not cached
+ * @param {Function} fetchFunc - Function to fetch projects if not cached
+ * @returns {Promise<Object>} - The active projects data
+ */
+async function getCachedProjects(fetchFunc) {
+  const cacheKey = 'activeProjects';
+  const cachedProjects = projectCache.get(cacheKey);
+  if (cachedProjects !== undefined) {
+    return cachedProjects;
+  }
+  const projects = await fetchFunc();
+  projectCache.set(cacheKey, projects);
+  return projects;
 }
 
 /**

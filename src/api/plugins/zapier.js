@@ -57,6 +57,26 @@ export default class ZapierPlugin extends BasePlugin {
           'set zap 67890 to execute at midnight',
           'plan zap 112233 for next Monday at 9 AM'
         ]
+      },
+      {
+        command: 'pause_zap',
+        description: 'Pause a specific Zap by ID',
+        usage: 'pause_zap({ zapId: "12345" })',
+        examples: [
+          'pause zap 12345',
+          'halt automation 67890',
+          'stop workflow 112233 temporarily'
+        ]
+      },
+      {
+        command: 'resume_zap',
+        description: 'Resume a specific paused Zap by ID',
+        usage: 'resume_zap({ zapId: "12345" })',
+        examples: [
+          'resume zap 12345',
+          'continue automation 67890',
+          'restart workflow 112233'
+        ]
       }
     ];
 
@@ -125,6 +145,10 @@ export default class ZapierPlugin extends BasePlugin {
           return await this.runZap(data);
         case 'schedule_zap':
           return await this.scheduleZap(data);
+        case 'pause_zap':
+          return await this.pauseZap(data);
+        case 'resume_zap':
+          return await this.resumeZap(data);
         default:
           throw new Error(`Unknown action: ${action}`);
       }
@@ -250,6 +274,42 @@ export default class ZapierPlugin extends BasePlugin {
       };
     } catch (error) {
       this.logger.error('scheduleZap failed:', error);
+      return { success: false, error: error.message };
+    }
+  }
+
+  async pauseZap({ zapId }) {
+    this.validateParams({ zapId }, {
+      zapId: { required: true, type: 'string' }
+    });
+
+    try {
+      const response = await retryOperation(() => axios.post(`${this.config.baseUrl}/zaps/${zapId}/pause`, {}, {
+        headers: { 'Authorization': `Bearer ${this.config.apiKey}` }
+      }), { retries: 3, context: 'pauseZap API call' });
+
+      this.cache.del('listZaps');
+      return { success: true, data: response.data };
+    } catch (error) {
+      this.logger.error('pauseZap failed:', error);
+      return { success: false, error: error.message };
+    }
+  }
+
+  async resumeZap({ zapId }) {
+    this.validateParams({ zapId }, {
+      zapId: { required: true, type: 'string' }
+    });
+
+    try {
+      const response = await retryOperation(() => axios.post(`${this.config.baseUrl}/zaps/${zapId}/resume`, {}, {
+        headers: { 'Authorization': `Bearer ${this.config.apiKey}` }
+      }), { retries: 3, context: 'resumeZap API call' });
+
+      this.cache.del('listZaps');
+      return { success: true, data: response.data };
+    } catch (error) {
+      this.logger.error('resumeZap failed:', error);
       return { success: false, error: error.message };
     }
   }
