@@ -2,6 +2,18 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.4] - 2026-04-19
+
+### Fixed
+- **Port scan on undefined host** — `extractPortScanParams()` returned empty object when no target was specified, causing `portScan()` to scan "undefined". Now defaults to `localhost` when no host is found. Added input validation in `portScan()` to return a helpful error message instead of scanning an invalid target.
+- **Self-modification pipeline stuck on first candidate** — Pipeline always selected `prioritized[0]`, checked its fingerprint, and returned immediately on duplicate without trying remaining candidates. Now iterates through the entire prioritized array, skipping duplicates until a valid candidate is found.
+
+### Improved
+- **Zapier plugin** — Added `pause_zap` and `resume_zap` commands for pausing/resuming Zaps by ID.
+- **DeviceAlias retry resilience** — Wrapped Mongoose queries in `retryOperation()` for `resolveAlias`, `setAlias`, and `cleanupExpiredAliases`, consistent with existing patterns.
+- **ProviderStatsArchive retry** — Wrapped archive save in `retryOperation()` with error logging.
+- **Project context caching** — Added `NodeCache` (5-minute TTL) for active projects list in `projectContext.js`, reducing redundant API calls.
+
 ## [2.25.3] - 2026-04-18
 
 ### Fixed

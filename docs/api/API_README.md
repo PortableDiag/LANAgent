@@ -377,6 +377,22 @@ curl -X POST http://localhost/api/plugin \
 
 Past times and invalid ISO strings are rejected. The job is persisted in Agenda's `scheduled_jobs` collection and survives restarts. Internally, the plugin calls `agent.scheduler.agenda.schedule(date, 'zapier-run-zap', { zapId })`; the `zapier-run-zap` job then resolves the live zapier plugin instance and calls `runZap({ zapId })` at the scheduled time.
 
+**Zapier `pause_zap` / `resume_zap` (v2.25.4):**
+
+```bash
+# Pause a Zap
+curl -X POST http://localhost/api/plugin \
+  -H "X-API-Key: $LANAGENT_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{ "plugin": "zapier", "action": "pause_zap", "data": { "zapId": "12345" } }'
+
+# Resume a paused Zap
+curl -X POST http://localhost/api/plugin \
+  -H "X-API-Key: $LANAGENT_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{ "plugin": "zapier", "action": "resume_zap", "data": { "zapId": "12345" } }'
+```
+
 **Other features merged in this pass:**
 
 - **`RuntimeError.correlationId`** — indexed field plus `RuntimeError.getErrorsByCorrelationId(id)` static for grouping related errors from a single request/operation.
