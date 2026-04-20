@@ -4049,13 +4049,13 @@ Respond with JSON: {"suggestion": "extracted_suggestion"}`;
       // Extract host/IP from queries like "port scan 192.168.1.1"
       const ipMatch = query.match(/(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})/);
       const hostMatch = query.match(/(?:scan|on)\s+(\S+\.\S+)/i);
-      
+
       if (ipMatch) {
         return { host: ipMatch[1] };
       } else if (hostMatch) {
         return { host: hostMatch[1] };
       }
-      return {};
+      return { host: 'localhost' };
     } catch (error) {
       return {};
     }

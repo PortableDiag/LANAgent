@@ -481,6 +481,13 @@ export default class NetworkPlugin extends BasePlugin {
   }
 
   async portScan(host, ports = 'common') {
+    if (!host) {
+      return {
+        success: false,
+        openPorts: [],
+        message: 'No target host specified. Please provide an IP address or hostname to scan (e.g., "scan ports on 192.168.0.1").'
+      };
+    }
     try {
       // Resolve hostname to IP if needed
       let targetIP = host;
