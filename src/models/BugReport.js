@@ -176,7 +176,7 @@ BugReportSchema.pre('init', function(data) {
 
 /**
  * Advanced search using aggregation pipeline.
- * Supports filtering by severity, status, date range, and environment.
+ * Supports filtering by severity, status, date range, environment, and metadata fields.
  */
 BugReportSchema.statics.advancedSearch = async function(criteria) {
   const matchStage = {};
@@ -187,6 +187,11 @@ BugReportSchema.statics.advancedSearch = async function(criteria) {
     matchStage.foundDate = {};
     if (criteria.startDate) matchStage.foundDate.$gte = new Date(criteria.startDate);
     if (criteria.endDate) matchStage.foundDate.$lte = new Date(criteria.endDate);
+  }
+  if (criteria.metadata) {
+    for (const [key, value] of Object.entries(criteria.metadata)) {
+      matchStage[`metadata.${key}`] = value;
+    }
   }
 
   try {

@@ -34,11 +34,17 @@ export class MarketIndicators {
     }
 
     try {
-      const value = await retryOperation(fetcher);
+      const value = await retryOperation(fetcher, { retries: 3 });
       this.cache.set(key, value);
       return value;
     } catch (error) {
       logger.warn(`Failed to fetch ${key}: ${error.message}`);
+      // Attempt to use historical data as a fallback
+      const historical = this.getHistoricalFallback(key);
+      if (historical !== null) {
+        logger.info(`Using historical data for ${key} as fallback`);
+        return historical;
+      }
       // Return cached value even if stale, or default
       return cached ?? null;
     }
@@ -67,6 +73,16 @@ export class MarketIndicators {
     if (data.length > this.maxHistoryPoints) {
       data.splice(0, data.length - this.maxHistoryPoints);
     }
+  }
+
+  /**
+   * Get historical fallback data for a market indicator
+   */
+  getHistoricalFallback(indicator) {
+    const data = this.historicalData.get(indicator);
+    if (!data || data.length === 0) return null;
+    // Use the most recent historical value as a fallback
+    return data[data.length - 1].value;
   }
 
   /**

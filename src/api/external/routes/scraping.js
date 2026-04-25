@@ -12,6 +12,7 @@ const scrapeCache = new NodeCache({ stdTTL: 600, checkperiod: 120 });
 // Credit costs per tier
 const TIER_COSTS = {
   basic: 1,
+  stealth: 2,
   full: 3,
   render: 5
 };
@@ -89,6 +90,39 @@ async function executeScrape(req, { url, selectors, extractType = 'text', userAg
       }
     }
 
+    // Quality-based escalation: if result looks suspicious, retry with Puppeteer
+    if (rawResult.success && !options.usePuppeteer && rawResult.content) {
+      const title = rawResult.content.title || '';
+      const ogImage = rawResult.content.ogImage || '';
+      const images = rawResult.content.images || [];
+
+      // Detect polluted title (contains repeated logo/brand text patterns)
+      const titleLooksCorrupted = /(.{3,})\1{2,}/.test(title) || // same text repeated 3+ times
+        (title.length > 200); // unreasonably long title
+
+      // Detect tracking pixel as primary image
+      const adPatterns = [/ads\.rmbl\.ws/i, /doubleclick\.net/i, /googlesyndication/i, /\/t\?a=/i, /\/pixel\?/i, /\/beacon\?/i];
+      const ogImageIsTracker = ogImage && adPatterns.some(p => p.test(ogImage));
+      const onlyAdImages = images.length > 0 && images.length <= 3 &&
+        images.every(img => adPatterns.some(p => p.test(img.src)));
+
+      const qualityIsSuspicious = titleLooksCorrupted || ogImageIsTracker || onlyAdImages;
+
+      if (qualityIsSuspicious) {
+        logger.info(`[ExternalScrape] Suspicious quality for ${url} (title_corrupted=${titleLooksCorrupted}, og_tracker=${ogImageIsTracker}, only_ads=${onlyAdImages}), retrying with Puppeteer...`);
+        try {
+          const retryResult = await scraper.execute({ action, url, options: { ...options, usePuppeteer: true } });
+          if (retryResult.success) {
+            logger.info(`[ExternalScrape] Quality escalation to Puppeteer succeeded for ${url}`);
+            rawResult = retryResult;
+          }
+        } catch (err) {
+          logger.warn(`[ExternalScrape] Quality escalation Puppeteer failed for ${url}: ${err.message}`);
+          // Keep the original result — it's better than nothing
+        }
+      }
+    }
+
     // Force-sanitize: rebuild result from scratch using only primitive/plain values
     result = {
       success: !!rawResult.success,
@@ -96,6 +130,7 @@ async function executeScrape(req, { url, selectors, extractType = 'text', userAg
       content: rawResult.content ? {
         title: String(rawResult.content.title || ''),
         description: String(rawResult.content.description || ''),
+        ogImage: String(rawResult.content.ogImage || ''),
         text: String(rawResult.content.text || ''),
         links: (rawResult.content.links || []).map(l => ({ href: String(l.href || ''), text: String(l.text || '') })),
         images: (rawResult.content.images || []).map(i => ({ src: String(i.src || ''), alt: String(i.alt || '') })),
@@ -116,6 +151,22 @@ async function executeScrape(req, { url, selectors, extractType = 'text', userAg
     return { success: false, error: result?.error || 'Scraping failed', targetError: true };
   }
 
+  // Filter images: remove ad/tracker pixels
+  let filteredImages = result.content?.images || [];
+  let ogImage = result.content?.ogImage || '';
+  if (scraper.filterImages) {
+    filteredImages = scraper.filterImages(filteredImages);
+  }
+  // Validate og:image and find best image
+  let bestImage = '';
+  if (scraper.getBestImage) {
+    try {
+      bestImage = await scraper.getBestImage(ogImage, result.content?.images || []);
+    } catch { bestImage = ogImage; }
+  } else {
+    bestImage = ogImage;
+  }
+
   // Return only serializable fields (avoid leaking axios internals)
   const response = {
     success: true,
@@ -123,9 +174,10 @@ async function executeScrape(req, { url, selectors, extractType = 'text', userAg
     data: {
       title: result.content?.title || '',
       description: result.content?.description || '',
+      ogImage: bestImage,
       text: result.content?.text || '',
       links: result.content?.links || [],
-      images: result.content?.images || [],
+      images: filteredImages,
       structuredData: result.content?.jsonld || [],
       microdata: result.content?.microdata || []
     },
@@ -175,7 +227,7 @@ async function executeScrape(req, { url, selectors, extractType = 'text', userAg
 /**
  * POST /api/external/scrape
  * Single URL scrape — supports both credit and legacy payment
- * Tier: basic (1 credit), full (3 credits, +HTML), render (5 credits, +HTML+screenshot)
+ * Tier: basic (1 credit), stealth (2 credits, forces Puppeteer), full (3 credits, +HTML), render (5 credits, +HTML+screenshot)
  */
 router.post('/',
   creditAuth(false), // Try credit auth but don't block legacy
@@ -199,7 +251,7 @@ router.post('/',
       await ExternalCreditBalance.debitCredits(req.wallet, creditCost);
 
       try {
-        const usePuppeteer = tier === 'render';
+        const usePuppeteer = tier === 'render' || tier === 'stealth';
         const result = await executeScrape(req, { url, selectors, extractType, userAgent, usePuppeteer });
 
         if (!result.success) {

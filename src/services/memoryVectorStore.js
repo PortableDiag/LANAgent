@@ -74,6 +74,8 @@ export class MemoryVectorStore {
         category: memory.metadata?.category || '',
         importance: memory.metadata?.importance || 5,
         tags: JSON.stringify(memory.metadata?.tags || []),
+        source: memory.metadata?.source || '',
+        context: memory.metadata?.context || '',
         createdAt: memory.createdAt?.toISOString() || new Date().toISOString()
       };
 
@@ -176,7 +178,9 @@ export class MemoryVectorStore {
       minSimilarity = 0.5,
       type = null,
       userId = null,
-      category = null
+      category = null,
+      source = null,
+      context = null
     } = options;
 
     try {
@@ -187,6 +191,8 @@ export class MemoryVectorStore {
       if (type) filters.push(`type = '${type}'`);
       if (userId) filters.push(`"userId" = '${userId}'`);
       if (category) filters.push(`category = '${category}'`);
+      if (source) filters.push(`source = '${source}'`);
+      if (context) filters.push(`context = '${context}'`);
 
       if (filters.length > 0) {
         searchQuery = searchQuery.where(filters.join(' AND '));
@@ -206,6 +212,8 @@ export class MemoryVectorStore {
             category: data.category,
             importance: data.importance,
             tags: tags ? JSON.parse(tags) : [],
+            source: data.source,
+            context: data.context,
             createdAt: data.createdAt,
             distance: _distance,
             similarity: 1 - _distance
@@ -299,6 +307,8 @@ export class MemoryVectorStore {
           category: m.metadata?.category || '',
           importance: m.metadata?.importance || 5,
           tags: JSON.stringify(m.metadata?.tags || []),
+          source: m.metadata?.source || '',
+          context: m.metadata?.context || '',
           createdAt: m.createdAt?.toISOString() || new Date().toISOString()
         }));
 

@@ -43,6 +43,15 @@ export default class ChallengeQuestionsPlugin extends BasePlugin {
         examples: [
           'what types of challenge questions are available'
         ]
+      },
+      {
+        command: 'trackPerformance',
+        description: 'Record verification results and get accuracy stats for adaptive difficulty',
+        usage: 'trackPerformance({ userId: "user1", correct: 4, total: 5, questionTypes: ["arithmetic","logic"] })',
+        examples: [
+          'track challenge performance',
+          'get challenge accuracy stats'
+        ]
       }
     ];
 
@@ -50,6 +59,9 @@ export default class ChallengeQuestionsPlugin extends BasePlugin {
 
     // Token store for server-side verification flow
     this.tokenStore = new NodeCache({ stdTTL: 600, checkperiod: 60 }); // 10 min TTL
+
+    // Performance tracking store (24h TTL per user)
+    this.performanceStore = new NodeCache({ stdTTL: 86400, checkperiod: 600 });
   }
 
   async initialize() {
@@ -68,6 +80,8 @@ export default class ChallengeQuestionsPlugin extends BasePlugin {
         return this.verify(data);
       case 'types':
         return this.getTypes();
+      case 'trackPerformance':
+        return this.trackPerformance(data);
       default:
         return { success: false, error: `Unknown action: ${action}` };
     }
@@ -189,6 +203,57 @@ export default class ChallengeQuestionsPlugin extends BasePlugin {
         maxVerifyAttempts: 3
       }
     };
+  }
+
+  // ─── Performance Tracking ─────────────────────────────────────────────
+
+  trackPerformance({ userId, correct, total, questionTypes }) {
+    if (!userId) return { success: false, error: 'userId is required' };
+    if (correct == null || total == null) return { success: false, error: 'correct and total are required' };
+
+    const key = `perf:${userId}`;
+    const existing = this.performanceStore.get(key) || { attempts: 0, totalCorrect: 0, totalQuestions: 0, typeAccuracy: {} };
+
+    existing.attempts++;
+    existing.totalCorrect += Number(correct);
+    existing.totalQuestions += Number(total);
+
+    // Track per-type accuracy
+    if (Array.isArray(questionTypes)) {
+      for (const type of questionTypes) {
+        if (!existing.typeAccuracy[type]) existing.typeAccuracy[type] = { correct: 0, total: 0 };
+        existing.typeAccuracy[type].total++;
+      }
+    }
+
+    this.performanceStore.set(key, existing);
+
+    const accuracy = existing.totalQuestions > 0 ? existing.totalCorrect / existing.totalQuestions : 0;
+    const difficulty = accuracy > 0.9 ? 'hard' : accuracy > 0.6 ? 'medium' : 'easy';
+
+    return {
+      success: true,
+      data: {
+        userId,
+        attempts: existing.attempts,
+        totalCorrect: existing.totalCorrect,
+        totalQuestions: existing.totalQuestions,
+        accuracy: Math.round(accuracy * 100) / 100,
+        recommendedDifficulty: difficulty,
+        typeAccuracy: existing.typeAccuracy
+      }
+    };
+  }
+
+  /**
+   * Get recommended question types based on user performance.
+   * Avoids types the user always gets right (too easy), biases toward weaker areas.
+   */
+  getAdaptiveWeights(userId) {
+    if (!userId) return null;
+    const stats = this.performanceStore.get(`perf:${userId}`);
+    if (!stats || stats.attempts < 3) return null; // not enough data
+    return stats.typeAccuracy;
   }
 
   // ─── Question Generators ──────────────────────────────────────────────

@@ -2,11 +2,26 @@ import { logger } from '../utils/logger.js';
 import { Task } from '../models/Task.js';
 import { retryOperation } from '../utils/retryUtils.js';
 
+// Default reminder thresholds (ordered by hours descending)
+const DEFAULT_REMINDERS = [
+  { hours: 24, key: '24h', message: '1 day' },
+  { hours: 12, key: '12h', message: '12 hours' },
+  { hours: 6, key: '6h', message: '6 hours' },
+  { hours: 2, key: '2h', message: '2 hours' },
+  { hours: 1, key: '1h', message: '1 hour' },
+  { hours: 0.5, key: '30m', message: '30 minutes' }
+];
+
 export class TaskReminderService {
-  constructor(agent) {
+  constructor(agent, config = {}) {
     this.agent = agent;
     this.sentReminders = new Map(); // Track sent reminders
     this.enabled = true;
+    this.checkInterval = config.checkInterval || '5 minutes';
+    // Accept custom reminder thresholds (must be array of {hours, key, message})
+    this.reminderThresholds = Array.isArray(config.reminders) && config.reminders.length > 0
+      ? config.reminders.sort((a, b) => b.hours - a.hours)
+      : DEFAULT_REMINDERS;
   }
 
   /**
@@ -23,8 +38,8 @@ export class TaskReminderService {
       await this.checkReminders();
     });
 
-    // Schedule reminder checks every 5 minutes
-    await this.agent.scheduler.agenda.every('5 minutes', 'task-reminder-check');
+    // Schedule reminder checks at configured interval
+    await this.agent.scheduler.agenda.every(this.checkInterval, 'task-reminder-check');
     
     logger.info('Task reminder service initialized with Agenda');
   }
@@ -100,15 +115,8 @@ export class TaskReminderService {
       return;
     }
     
-    // Reminder thresholds
-    const reminders = [
-      { hours: 24, key: '24h', message: '1 day' },
-      { hours: 12, key: '12h', message: '12 hours' },
-      { hours: 6, key: '6h', message: '6 hours' },
-      { hours: 2, key: '2h', message: '2 hours' },
-      { hours: 1, key: '1h', message: '1 hour' },
-      { hours: 0.5, key: '30m', message: '30 minutes' }
-    ];
+    // Use configurable reminder thresholds
+    const reminders = this.reminderThresholds;
     
     // Find appropriate reminder
     for (const reminder of reminders) {

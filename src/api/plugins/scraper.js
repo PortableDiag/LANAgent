@@ -120,6 +120,92 @@ export default class ScraperPlugin extends BasePlugin {
     }
   }
   
+  /**
+   * Known ad/tracker domains and URL patterns to filter from image results
+   */
+  static AD_TRACKER_PATTERNS = [
+    // Domain-based patterns
+    /ads\.rmbl\.ws/i,
+    /doubleclick\.net/i,
+    /googlesyndication\.com/i,
+    /googleadservices\.com/i,
+    /adservice\.google\./i,
+    /facebook\.com\/tr/i,
+    /pixel\.facebook\.com/i,
+    /analytics\.twitter\.com/i,
+    /bat\.bing\.com/i,
+    /amazon-adsystem\.com/i,
+    /adnxs\.com/i,
+    /criteo\.com/i,
+    /taboola\.com/i,
+    /outbrain\.com/i,
+    /pubmatic\.com/i,
+    /rubiconproject\.com/i,
+    /scorecardresearch\.com/i,
+    /quantserve\.com/i,
+    // URL path patterns (tracking pixels/beacons)
+    /\/t\?a=/i,
+    /\/pixel\?/i,
+    /\/beacon\?/i,
+    /\/track\?/i,
+    /1x1\./i,
+    /transparent\./i,
+    /spacer\./i
+  ];
+
+  /**
+   * Check if a URL matches known ad/tracker patterns
+   */
+  isAdOrTracker(url) {
+    if (!url) return true;
+    return ScraperPlugin.AD_TRACKER_PATTERNS.some(pattern => pattern.test(url));
+  }
+
+  /**
+   * Filter images array: remove ad/tracker URLs and tiny tracking pixels
+   */
+  filterImages(images) {
+    return images.filter(img => !this.isAdOrTracker(img.src));
+  }
+
+  /**
+   * Validate an image URL with a HEAD request — returns true if it responds 2xx with content-type image/*
+   */
+  async validateImageUrl(url) {
+    if (!url) return false;
+    try {
+      const response = await axios.head(url, {
+        timeout: 5000,
+        maxRedirects: 3,
+        headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' }
+      });
+      const contentType = response.headers['content-type'] || '';
+      return response.status >= 200 && response.status < 300 && contentType.startsWith('image/');
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Get the best image from scrape results: prefer validated og:image, then first valid non-ad image
+   */
+  async getBestImage(ogImage, images) {
+    // Try og:image first (if it passes ad filter and validation)
+    if (ogImage && !this.isAdOrTracker(ogImage)) {
+      const valid = await this.validateImageUrl(ogImage);
+      if (valid) return ogImage;
+    }
+
+    // Fall back to first non-ad image from the page that validates
+    const filtered = this.filterImages(images);
+    for (const img of filtered.slice(0, 5)) { // check up to 5 candidates
+      const valid = await this.validateImageUrl(img.src);
+      if (valid) return img.src;
+    }
+
+    return ogImage || ''; // last resort: return unvalidated og:image or empty
+  }
+
   async cleanup() {
     // Clear the cleanup interval when plugin is unloaded
     if (this.cacheCleanupInterval) {
@@ -276,9 +362,10 @@ export default class ScraperPlugin extends BasePlugin {
       const $ = cheerio.load(response.data);
       
       let content = {
-        title: $('title').text() || $('h1').first().text(),
-        description: $('meta[name="description"]').attr('content') || 
-                     $('meta[property="og:description"]').attr('content') || '',
+        title: $('meta[property="og:title"]').first().attr('content') || $('title').text() || $('h1').first().text(),
+        description: $('meta[property="og:description"]').first().attr('content') ||
+                     $('meta[name="description"]').attr('content') || '',
+        ogImage: $('meta[property="og:image"]').first().attr('content') || '',
         text: '',
         links: [],
         images: [],
@@ -470,8 +557,10 @@ export default class ScraperPlugin extends BasePlugin {
         };
         
         const result = {
-          title: document.title,
-          description: document.querySelector('meta[name="description"]')?.content || '',
+          title: document.querySelector('meta[property="og:title"]')?.content || document.title,
+          description: document.querySelector('meta[property="og:description"]')?.content ||
+                       document.querySelector('meta[name="description"]')?.content || '',
+          ogImage: document.querySelector('meta[property="og:image"]')?.content || '',
           text: '',
           links: [],
           images: [],

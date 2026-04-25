@@ -28,6 +28,11 @@ export default class WhoisPlugin extends BasePlugin {
         command: 'availability',
         description: 'Check if a domain is available for registration',
         usage: 'availability [domain]'
+      },
+      {
+        command: 'bulkLookup',
+        description: 'Perform WHOIS lookups for multiple domains at once (max 20)',
+        usage: 'bulkLookup({ domains: ["example.com", "test.org"] })'
       }
     ];
     
@@ -84,6 +89,8 @@ export default class WhoisPlugin extends BasePlugin {
           return await this.getSslInfo(domain);
         case 'availability':
           return await this.checkAvailability(domain);
+        case 'bulkLookup':
+          return await this.bulkLookup(params);
         default:
           return { success: false, error: 'Unknown action. Use: lookup, dns, ssl, or availability' };
       }
@@ -186,6 +193,43 @@ export default class WhoisPlugin extends BasePlugin {
         return { success: false, error: `Failed to get SSL certificate info: ${error.message}` };
       }
     });
+  }
+
+  async bulkLookup({ domains }) {
+    if (!domains || !Array.isArray(domains) || domains.length === 0) {
+      return { success: false, error: 'domains array is required' };
+    }
+    if (domains.length > 20) {
+      return { success: false, error: 'Maximum 20 domains per bulk lookup' };
+    }
+
+    const results = [];
+    // Process in chunks of 5 to avoid API rate limits
+    const CHUNK_SIZE = 5;
+    for (let i = 0; i < domains.length; i += CHUNK_SIZE) {
+      const chunk = domains.slice(i, i + CHUNK_SIZE);
+      const chunkResults = await Promise.allSettled(
+        chunk.map(d => this.lookupDomain(d))
+      );
+      for (let j = 0; j < chunk.length; j++) {
+        const r = chunkResults[j];
+        results.push({
+          domain: chunk[j],
+          ...(r.status === 'fulfilled' ? r.value : { success: false, error: r.reason?.message || 'Lookup failed' })
+        });
+      }
+    }
+
+    return {
+      success: true,
+      data: {
+        total: domains.length,
+        successful: results.filter(r => r.success).length,
+        failed: results.filter(r => !r.success).length,
+        results
+      },
+      message: `Bulk WHOIS lookup completed for ${domains.length} domains`
+    };
   }
 
   async checkAvailability(domain) {

@@ -407,4 +407,83 @@ router.post('/api/apply-preset', authenticateToken, async (req, res) => {
     }
 });
 
+// Schedule a firewall rule change for a future time
+router.post('/api/schedule-rule', authenticateToken, async (req, res) => {
+    try {
+        const { action, rule, scheduleTime } = req.body;
+
+        if (!action || !rule || !scheduleTime) {
+            return res.status(400).json({
+                success: false,
+                error: 'action, rule, and scheduleTime are required'
+            });
+        }
+
+        // Validate action
+        const allowedActions = ['allow', 'deny', 'delete'];
+        if (!allowedActions.includes(action)) {
+            return res.status(400).json({
+                success: false,
+                error: `Invalid action. Must be one of: ${allowedActions.join(', ')}`
+            });
+        }
+
+        // Sanitize rule: only allow port specs, IPs, CIDR, and proto keywords
+        if (!/^[\w\d\s\/:.\-]+$/.test(rule) || rule.length > 100) {
+            return res.status(400).json({
+                success: false,
+                error: 'Invalid rule format. Use port/protocol or IP-based rules (e.g., "80/tcp", "from 192.168.1.0/24")'
+            });
+        }
+
+        const executeAt = new Date(scheduleTime);
+        if (isNaN(executeAt.getTime()) || executeAt <= new Date()) {
+            return res.status(400).json({
+                success: false,
+                error: 'scheduleTime must be a valid future date/time'
+            });
+        }
+
+        // Use Agenda scheduler if available
+        const agent = req.app?.locals?.agent;
+        if (!agent?.scheduler?.agenda) {
+            return res.status(503).json({
+                success: false,
+                error: 'Scheduler not available'
+            });
+        }
+
+        // Define the job if not already defined
+        const jobName = 'scheduled-firewall-rule';
+        const agenda = agent.scheduler.agenda;
+
+        // Define idempotently — Agenda ignores duplicate defines
+        agenda.define(jobName, async (job) => {
+            const { action: a, rule: r } = job.attrs.data;
+            logger.info(`Executing scheduled firewall rule: ${a} ${r}`);
+            const result = await executeUFW(a, { rule: r });
+            if (result.success) {
+                logger.info(`Scheduled firewall rule applied: ${a} ${r}`);
+            } else {
+                logger.error(`Scheduled firewall rule failed: ${a} ${r} — ${result.error}`);
+            }
+        });
+
+        await agenda.schedule(executeAt, jobName, { action, rule });
+
+        logger.info(`Firewall rule scheduled: ${action} ${rule} at ${executeAt.toISOString()}`);
+        res.json({
+            success: true,
+            message: `Rule scheduled: ${action} ${rule}`,
+            scheduledFor: executeAt.toISOString()
+        });
+    } catch (error) {
+        logger.error('Firewall schedule-rule API error:', error);
+        res.status(500).json({
+            success: false,
+            error: 'Failed to schedule firewall rule'
+        });
+    }
+});
+
 export default router;

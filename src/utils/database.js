@@ -58,7 +58,9 @@ export async function connectDatabase() {
     await retryOperation(() => mongoose.connect(uri, {
       serverSelectionTimeoutMS: 5000, // 5 second timeout
       heartbeatFrequencyMS: 10000, // Check connection every 10 seconds
-      maxPoolSize: 10, // Connection pool for concurrent operations
+      maxPoolSize: process.env.DB_MAX_POOL_SIZE ? parseInt(process.env.DB_MAX_POOL_SIZE, 10) : 10, // Connection pool for concurrent operations
+      minPoolSize: process.env.DB_MIN_POOL_SIZE ? parseInt(process.env.DB_MIN_POOL_SIZE, 10) : 0, // Minimum number of connections in the pool
+      maxIdleTimeMS: process.env.DB_MAX_IDLE_TIME_MS ? parseInt(process.env.DB_MAX_IDLE_TIME_MS, 10) : 30000, // Maximum idle time for connections
     }), { retries: 3 });
 
     logger.info('MongoDB connected successfully');
