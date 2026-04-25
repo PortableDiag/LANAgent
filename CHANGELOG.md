@@ -2,6 +2,29 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.5] - 2026-04-24
+
+### Fixed
+- **Scraper: bad image extraction** — Scrape responses returned ad tracking pixels (e.g., `ads.rmbl.ws/t?a=...`) as the og:image. Now filters known ad/tracker domains (doubleclick, googlesyndication, Rumble ads, etc.) and validates images with HEAD requests (must return 2xx with `content-type: image/*`).
+- **Scraper: polluted titles** — Title extraction fell back to `document.title` which included concatenated logo alt text and nav items. Now prefers `og:title` meta tag in both Cheerio and Puppeteer paths.
+- **Scraper: no quality-based tier escalation** — Basic tier accepted garbage results from Cloudflare-blocked or ad-heavy pages without retrying. Now auto-escalates to Puppeteer when results contain tracking pixel images, corrupted titles, or only ad images.
+
+### Added
+- **Scraper: stealth tier** — New `stealth` tier (2 credits) forces Puppeteer rendering from the start for known difficult sites. Available alongside basic (1), full (3), render (5).
+- **Firewall: scheduled rule changes** — `POST /firewall/api/schedule-rule` endpoint for scheduling UFW rule changes at a future time via Agenda. Supports allow/deny/delete actions with input sanitization.
+- **Whois: bulk domain lookup** — `bulkLookup` command for up to 20 domains at once, processed in chunks of 5 with `Promise.allSettled` to avoid API rate limits.
+- **Challenge questions: performance tracking** — `trackPerformance` command records per-user accuracy stats and recommends difficulty levels (easy/medium/hard) for adaptive challenge generation.
+- **Task reminders: configurable intervals** — `TaskReminderService` constructor now accepts `config.checkInterval` and `config.reminders` array for custom reminder thresholds. Defaults preserved for backwards compatibility.
+
+### Improved
+- **MarketIndicators** — Historical data fallback when cached indicator values expire and fetch fails, instead of returning null.
+- **memoryVectorStore** — Added `source` and `context` metadata fields for memory tagging and filtering.
+- **Database** — MongoDB connection pool settings (`maxPoolSize`, `minPoolSize`, `maxIdleTimeMS`) now configurable via environment variables.
+- **BugReport** — `advancedSearch` now supports filtering by arbitrary metadata fields.
+
+### PR Review
+- Reviewed 27 AI-generated PRs: merged 4, implemented 4 manually (good ideas with broken code), closed 19 with detailed comments.
+
 ## [2.25.4] - 2026-04-19
 
 ### Fixed

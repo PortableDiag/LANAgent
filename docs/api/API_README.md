@@ -45,6 +45,7 @@ Both methods give you the same `gsk_*` API key and access the same services.
 | Service | Endpoint | Credits | Description |
 |---------|----------|---------|-------------|
 | Web Scrape (basic) | `POST /scrape` | 1 | Metadata, text, links |
+| Web Scrape (stealth) | `POST /scrape` | 2 | Forces Puppeteer for difficult sites |
 | Web Scrape (full) | `POST /scrape` | 3 | + raw HTML |
 | Web Scrape (render) | `POST /scrape` | 5 | + HTML + screenshot (Puppeteer) |
 | Batch Scrape | `POST /scrape/batch` | 1-5 each | Up to 100 URLs |
@@ -464,7 +465,7 @@ Content-Type: application/json
 | ffmpeg | convert, extract, compress, info, concat, trim | 5 | Media processing |
 | huggingface | textClassification, sentimentAnalysis, textSummarization, questionAnswering, translation, fillMask, zeroShotClassification, featureExtraction, imageCaption, namedEntityRecognition, languageDetection, textSimilarity, spamDetection | 10 | HuggingFace AI inference — 13 NLP/vision tasks |
 | aiDetector | detectText, detectImage, detectAudio, detectVideo, autoDetect | 5 | AI content detection (text/image/audio/video) |
-| challengeQuestions | generate, generateWithAnswers, verify, types | 2 | Bot-filtering challenge questions (8 types, 70% pass threshold) |
+| challengeQuestions | generate, generateWithAnswers, verify, types, trackPerformance | 2 | Bot-filtering challenge questions (8 types, 70% pass threshold, adaptive difficulty) |
 | tokenProfiler | audit, honeypotCheck, holderAnalysis, score | 3 | ERC20 token scam/safety analysis via GoPlus |
 | walletProfiler | profile, tokens, riskScore | 3 | Crypto wallet profiling and risk scoring |
 | contractAudit | audit, quickCheck, explain | 5 | Solidity smart contract security audit |
@@ -751,6 +752,7 @@ Minimum purchase: 10 credits. Double-spend protected.
 | Service | Credits | Tier |
 |---------|---------|------|
 | Web Scrape (metadata + text) | 1 | basic |
+| Web Scrape (Puppeteer forced) | 2 | stealth |
 | Web Scrape (+ raw HTML) | 3 | full |
 | Web Scrape (+ HTML + screenshot) | 5 | render |
 | YouTube Download (MP4) | 10 | — |
@@ -784,6 +786,7 @@ Response:
   "data": {
     "title": "Example Domain",
     "description": "...",
+    "ogImage": "https://example.com/image.png",
     "text": "This domain is for use in illustrative examples...",
     "links": [{ "href": "https://...", "text": "More info" }],
     "images": [],
@@ -6128,6 +6131,7 @@ curl -X POST http://localhost:3000/api/plugin \
 - **WhoisPlugin** - Domain WHOIS lookups and availability checking
   - `POST /api/plugin` with `plugin: "whois", action: "lookup", domain: "example.com"`
   - `POST /api/plugin` with `plugin: "whois", action: "availability", domain: "newdomain.com"`
+  - `POST /api/plugin` with `plugin: "whois", action: "bulkLookup", domains: ["example.com", "test.org"]` (max 20)
 - **ImageUpscalerPlugin** - AI-powered image enhancement (requires RAPIDAPI_KEY)
   - `POST /api/plugin` with `plugin: "imageUpscaler", action: "upscale", imagePath: "/path/to/image.jpg", scale: 4`
   - `POST /api/plugin` with `plugin: "imageUpscaler", action: "enhance", imagePath: "/path/to/image.jpg"`
@@ -7401,6 +7405,7 @@ Dual-provider VPN plugin (v2.0): WireGuard for inbound tunnel (api.lanagent.net 
 - Firewall status and rule management
 - Security preset configuration
 - Traffic monitoring
+- Scheduled rule changes (`POST /firewall/api/schedule-rule`) — schedule allow/deny/delete rules for a future time via Agenda
 - Retry logic on all UFW commands (3 retries) with structured logging
 
 ### SSH Management

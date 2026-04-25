@@ -2,9 +2,9 @@
   "info": {
     "_postman_id": "9b5edc66-ea34-4329-a9d5-baca5366e76d",
     "name": "LANAgent API Collection",
-    "description": "LANAgent API v2.25.4 \u2014 Port scan fix, self-mod pipeline fix, Zapier pause/resume, retry resilience improvements. Updated April 19, 2026.",
+    "description": "LANAgent API v2.25.5 \u2014 Scraper og:title/og:image/ad filtering, stealth tier, firewall scheduling, whois bulk lookup, challenge performance tracking, configurable task reminders. Updated April 24, 2026.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
-    "version": "2.25.4"
+    "version": "2.25.5"
   },
   "auth": {
     "type": "bearer",
@@ -15615,7 +15615,36 @@
                 "scraping"
               ]
             },
-            "description": "Scrape a URL and extract content. extractType: text (default) or structured. Optional: selectors (CSS selectors), userAgent. Results cached for 10 minutes. Retries up to 3 times on failure. Requires ERC-8004 agent identity + payment."
+            "description": "Scrape a URL and extract content. Tiers: basic (1 credit), stealth (2, forces Puppeteer), full (3, +HTML), render (5, +HTML+screenshot). Response includes ogImage (validated, ad-filtered). extractType: text (default) or structured. Optional: selectors, userAgent."
+          }
+        },
+        {
+          "name": "Scrape URL (Stealth Tier)",
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "X-API-Key",
+                "value": "lsk_your_api_key"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"url\": \"https://rumble.com/some-video.html\",\n  \"tier\": \"stealth\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/external/scrape",
+              "host": ["{{base_url}}"],
+              "path": ["api", "external", "scrape"]
+            },
+            "description": "Scrape with stealth tier (2 credits) — forces Puppeteer rendering for Cloudflare-protected or ad-heavy sites. Returns clean og:title, validated og:image, and ad-filtered image list."
           }
         },
         {

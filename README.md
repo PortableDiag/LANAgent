@@ -470,8 +470,8 @@ LANAgent includes a comprehensive Web3 and cryptocurrency system with:
 
 ### Paid API Gateway (api.lanagent.net)
 - **75+ plugin commands** via generic proxy: `POST /service/:plugin/:action`
-- 15 plugins: anime (6), chainlink (5), challengeQuestions (4), contractAudit (3), lyrics (3), nasa (8), news (4), tokenProfiler (4), walletProfiler (3), websearch (5), huggingface (13), scraper (5), ytdlp (6), ffmpeg (6), aiDetector (5)
-- 13 dedicated service endpoints: scrape, YouTube, image gen, code sandbox, OCR, PDF x4, transcode, price x5
+- 15 plugins: anime (6), chainlink (5), challengeQuestions (5), contractAudit (3), lyrics (3), nasa (8), news (4), tokenProfiler (4), walletProfiler (3), websearch (5), huggingface (13), scraper (5), ytdlp (6), ffmpeg (6), aiDetector (5)
+- 13 dedicated service endpoints: scrape (4 tiers: basic/stealth/full/render), YouTube, image gen, code sandbox, OCR, PDF x4, transcode, price x5
 - Dynamic service catalog: `GET /service/catalog`
 - Auto-pricing every 15 minutes from PancakeSwap LP reserves + Chainlink BNB/USD oracle (toggle in UI, `skynet.autoPriceEnabled` SystemSetting)
 - Stripe live payments ($5/400, $15/1300, $50/4700 credits) + BNB/SKYNET crypto payments
