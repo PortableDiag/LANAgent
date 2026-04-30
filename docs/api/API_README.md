@@ -347,6 +347,76 @@ The gateway calls `GET /api/external/catalog` on your agent and reads the `servi
 
 ---
 
+## Recent Updates (April 30, 2026)
+
+### v2.25.6 — PR Review Pass: 26 PRs (5 merged, 11 implemented, 10 closed)
+
+Reviewed AI-generated PRs #2031–#2056. Merged five directly. Eleven had good ideas but broken implementations — closed with rationale and reimplemented manually with corrections. Ten were closed as fundamentally broken or duplicative.
+
+**New plugin actions:**
+
+```bash
+# Whois — schedule a domain expiration alert via Agenda (persisted)
+curl -X POST http://localhost/api/plugin \
+  -H "X-API-Key: $LANAGENT_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "plugin": "whois",
+    "action": "setExpirationAlert",
+    "domain": "example.com",
+    "daysBefore": 30
+  }'
+# → { "success": true, "message": "Expiration alert scheduled for example.com at 2027-..." }
+
+# Cancel any pending alerts for a domain
+curl -X POST http://localhost/api/plugin \
+  -H "X-API-Key: $LANAGENT_API_KEY" \
+  -d '{ "plugin": "whois", "action": "cancelExpirationAlert", "domain": "example.com" }'
+# → { "success": true, "cancelled": 1, "message": "Cancelled 1 alert(s) for example.com" }
+```
+
+**Calendar reminders — new `sms` and `push` types + recurring `customInterval`:**
+
+```js
+// Reminder schema (src/models/CalendarEvent.js)
+reminders: [{
+  type: 'notification' | 'email' | 'telegram' | 'sms' | 'push',
+  minutesBefore: Number,        // default 15
+  customInterval: Number,       // optional: minutes between recurring fires until event start
+  target: String,               // optional override (phone for sms, FCM token for push)
+  sent: Boolean,
+  sentAt: Date,
+  lastSentAt: Date              // tracks recurring fires
+}]
+```
+
+When `customInterval > 0` is set, the reminder fires every N minutes from `firstFireTime` (= `event.startDate - minutesBefore*60s`) until `event.startDate`, then auto-finalizes. SMS routes through vonage/sinch/messagebird (in that fallback order); push routes through firebasecloudmessagingfcm. Defaults: `target` falls back to `PHONE_OF_MASTER` (sms) / `FCM_TOKEN_OF_MASTER` (push) env vars.
+
+**Vector intent caching:**
+
+`POST /api/vector-intent/search` now caches results for 5 minutes by SHA-1 of `(query, k, filters)`. Cached responses include `cached: true`. All `/api/vector-intent/*` routes are rate-limited to 100 req per 15 min.
+
+**Auth rate limiting:**
+
+`/api/external/auth/nonce` and `/api/external/auth/verify` are rate-limited to 10 req per minute per IP.
+
+**Device alias advanced search:**
+
+`GET /api/device-aliases?deviceName=...&userId=...&sortBy=usageCount&sortOrder=desc` — filter and sort listings. Cache key includes all params so different queries don't bleed.
+
+**Internal-only additions (no public API surface):**
+
+- `SubAgent.updateConfig({ config, enabled, status })` — runtime config changes with deep-merge into nested subdoc
+- `UpsConfig.escalationPolicies[]` + `applyEscalationPolicy(durationMinutes, severity)` — auto-applied in `UpsService.sendNotifications`
+- `cryptoManager.rotateDhKeys()` — rotates X25519 only, preserves fingerprint
+- `peerManager.getActivityReport()` — persisted connection time + transfer counts
+- `KnowledgePack.trackUsage(packId, peer, importTimeMs)` / `getAnalytics(filter)` — wired into `importPack`
+- `DevelopmentPlan.archiveOldCompletedItemsBatch(days, batchSize)` — paginated archival
+- `AgentCoordination.bulkAcceptParticipants(intentHash, accepts)` / `batchUpdateExecutionResults(intentHash, updates)` — `arrayFilters`-scoped
+- `generateProfessionalSignature({ ..., includeQRCode: true })` — embeds vCard QR
+
+---
+
 ## Recent Updates (April 9, 2026)
 
 ### v2.24.2 — PR Review Pass: Scheduled Jobs + Misc Hardening

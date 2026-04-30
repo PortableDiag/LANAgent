@@ -2,6 +2,32 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.6] - 2026-04-30
+
+### Added
+- **Calendar: SMS, push, and recurring reminders** — `CalendarEvent.reminders` enum gained `sms` and `push`. New `customInterval` field fires recurring reminders every N minutes from `firstFireTime` until event start (auto-finalized when the event begins). New `target` field overrides the destination per-reminder (phone/FCM token), falling back to `PHONE_OF_MASTER` / `FCM_TOKEN_OF_MASTER`. SMS routes through vonage/sinch/messagebird; push through firebasecloudmessagingfcm.
+- **SubAgent: runtime updateConfig** — New `updateConfig({ config, enabled, status })` method deep-merges into the nested `config` subdoc using `set()` per leaf path, so partial updates (e.g. `{ budget: { dailyApiCalls: 200 } }`) preserve sibling fields. Records before/after via `addHistory`.
+- **UPS: escalation policies** — New `escalationPolicies` array on `UpsConfig` (`minDurationMinutes`, `severity`, `channels`, `messagePrefix`). `UpsService` now tracks `alertStartTimes` per `upsName:eventType`, computes alert duration, and applies the highest-threshold matched policy in `sendNotifications` — prepends `messagePrefix` to the alert. Resolution events (`power_restored`, `communication_restored`) clear the tracking.
+- **P2P: safe DH key rotation** — New `cryptoManager.rotateDhKeys()` regenerates only the X25519 ECDH keypair while preserving the Ed25519 signing keypair (and therefore the peer fingerprint / trust relationships). Persists to `PluginSettings`, clears session-key cache so peers renegotiate.
+- **P2P: persistent peer activity report** — `P2PPeer` gains `totalConnectionSeconds`. `peerManager` records session start on `markOnline`, persists session duration on `markOffline`. New `getActivityReport()` returns persisted stats plus current-session seconds for online peers.
+- **Whois: domain expiration alerts** — New `setExpirationAlert({ domain, daysBefore })` and `cancelExpirationAlert({ domain })` actions. Defines an Agenda job `whois-expiration-alert` that calls `agent.notify` N days before WHOIS expiry. Cancels existing alerts for the same domain before scheduling so repeat calls don't duplicate. Persisted by Agenda's MongoDB store.
+- **Email signatures: vCard QR codes** — `generateProfessionalSignature` now accepts `includeQRCode: true` and emits an embedded data-URL vCard QR (errorCorrection H, 200px) into all three templates (modern/classic/minimal). Empty vCard fields are omitted.
+- **DevPlan: batch archive** — New `archiveOldCompletedItemsBatch(days, batchSize)` paginates by `_id` and runs `updateMany` per batch with retry, returning `{ matched, modified, batches }`. Bounded memory on large collections. Wired into the existing `commands`/`execute` dispatch surface.
+- **Coordination: bulk participant ops** — `AgentCoordination.bulkAcceptParticipants(intentHash, accepts)` and `batchUpdateExecutionResults(intentHash, updates)` use `intentHash`-scoped filters with `arrayFilters` so only matching participant subdocs are touched within one coordination — no cross-coordination scope leak.
+- **DeviceAliases: advanced search** — `GET /api/device-aliases` accepts `deviceName`, `userId`, `sortBy`, `sortOrder` query params. Cache key reflects all filter/sort params so cached responses don't bleed between queries.
+- **Skynet referrals: source tracking** — New `referralSource` field on `SkynetReferral` (enum: `p2p`/`web`/`email`/`social_media`/`cli`/`other`). `handleReferralReward` now reads optional `referralSource` from the P2P message (defaults to `p2p`). New `getReferralSourceStats(fingerprint)` aggregation.
+- **KnowledgePack: usage analytics** — New `trackUsage(packId, peerFingerprint, importTime)` and `getAnalytics(filter)` methods on the model. Wired into `knowledgePackSharing.importPack` to record real data on every import.
+- **HealingEvent: lifecycle logging** — `start`/`complete`/`fail`/`skip` now emit structured `logger.info`/`logger.error` entries.
+
+### Improved
+- **Auth: rate limiting** — `/nonce` and `/verify` endpoints rate-limited to 10 req/min per IP via `express-rate-limit`. Mongoose calls wrapped with `retryOperation` for transient errors.
+- **MqttHistory: retry on reads** — `getTimeSeries` and `getStatistics` wrap their queries with `retryOperation`.
+- **CreditDebit middleware: error resilience** — Wrapped credit operations in try/catch (previously could throw unhandled rejections, killing the request without a response). `findByWallet` and `debitCredits` use `retryOperation`.
+- **Vector intent: /search caching + rate limit** — POST `/search` results cached 5 minutes by SHA-1 of `(query, k, filters)`. All routes rate-limited to 100 req per 15 minutes (embedding/search are expensive).
+
+### PR Review
+- Reviewed 26 AI-generated PRs (#2031–#2056): merged 5 directly, manually implemented 11 (good idea, broken implementation — closed with detailed rationale), closed 10 as fundamentally broken or duplicative.
+
 ## [2.25.5] - 2026-04-24
 
 ### Fixed

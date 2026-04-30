@@ -1,9 +1,40 @@
 {
-  "lastUpdated": "2026-04-24T20:00:00.000Z",
+  "lastUpdated": "2026-04-30T17:20:00.000Z",
   "overallProgress": "100%",
-  "status": "PRODUCTION READY - v2.25.5 - Scraper fixes (og:title, ad filtering, stealth tier), 27 PRs reviewed (4 merged, 4 implemented, 19 closed), 4 new features.",
-  "milestone": "Fixed paid scraper quality issues (bad images, polluted titles, no tier escalation). Added stealth tier, firewall scheduling, whois bulk lookup, challenge performance tracking, configurable task reminders. Reviewed 27 AI-generated PRs.",
+  "status": "PRODUCTION READY - v2.25.6 - 26 PRs reviewed (5 merged, 11 implemented, 10 closed), 16 new features.",
+  "milestone": "Reviewed 26 AI-generated PRs (#2031-#2056). Added SMS/push/recurring calendar reminders, runtime SubAgent config updates, UPS escalation policies wired into notifications, safe P2P DH key rotation (preserving fingerprint), persistent peer activity tracking, whois domain expiration alerts via Agenda, vCard QR codes in email signatures, batched DevPlan archive, scoped bulk coordination ops, vector-intent /search caching, advanced device-alias search, and rate limiting on auth/vector-intent endpoints.",
   "features": {
+    "prReviewAndFeatures2026_04_30": {
+      "status": "deployed",
+      "progress": "100%",
+      "addedDate": "2026-04-30",
+      "description": "Reviewed 26 AI-generated PRs (#2031-#2056): merged 5 directly, manually implemented 11 with corrections (good ideas with broken implementations - closed with detailed rationale), closed 10 as fundamentally broken or duplicative.",
+      "changes": [
+        "src/api/external/routes/auth.js: rate limiting on /nonce and /verify, retry on mongoose calls (PR #2031 merged)",
+        "src/models/CalendarEvent.js + src/api/plugins/calendar.js: sms/push reminder types, customInterval recurring, target override, lastSentAt tracking; SMS via vonage/sinch/messagebird, push via firebasecloudmessagingfcm",
+        "src/models/SubAgent.js: updateConfig(updates) with deep-merge into nested config subdoc using mongoose set() per leaf",
+        "src/models/UpsConfig.js + src/services/ups/upsService.js: escalationPolicies array (minDurationMinutes, severity, channels, messagePrefix); UpsService tracks alertStartTimes per upsName:eventType and applies highest-threshold policy in sendNotifications",
+        "src/models/MqttHistory.js: retry on getTimeSeries and getStatistics (PR #2037 merged)",
+        "src/models/HealingEvent.js: lifecycle logging at start/complete/fail/skip (PR #2039 merged)",
+        "src/models/KnowledgePack.js: trackUsage and getAnalytics methods (PR #2040 merged); wired into knowledgePackSharing.importPack",
+        "src/services/p2p/cryptoManager.js: rotateDhKeys() rotates X25519 only, preserves Ed25519 + fingerprint",
+        "src/services/p2p/peerManager.js + src/models/P2PPeer.js: totalConnectionSeconds field, connectionStartTimes Map, getActivityReport()",
+        "src/api/plugins/whois.js: setExpirationAlert/cancelExpirationAlert via Agenda job whois-expiration-alert",
+        "src/utils/emailSignatureHelper.js: includeQRCode option emits embedded vCard QR data URL into all 3 templates",
+        "src/models/SkynetReferral.js + src/services/p2p/skynetEconomy.js: referralSource field with p2p/web/cli enum, getReferralSourceStats aggregation, plumbed through P2P creation (PR #2044 merged + extended)",
+        "src/models/DevelopmentPlan.js: archiveOldCompletedItemsBatch (paginated by _id, updateMany per batch) wired into commands/execute",
+        "src/interfaces/web/vectorIntentRoutes.js: SHA-1 cache key on /search (5min TTL), rate limit (100 req/15min)",
+        "src/models/AgentCoordination.js: bulkAcceptParticipants and batchUpdateExecutionResults using arrayFilters scoped by intentHash",
+        "src/api/external/middleware/creditDebit.js: try/catch + retry around credit operations (PR #2053 merged)",
+        "src/interfaces/web/deviceAliasRoutes.js: deviceName/userId/sortBy/sortOrder query params with cache key reflecting all params (PR #2056 merged)",
+        ".env.example: PHONE_OF_MASTER, FCM_TOKEN_OF_MASTER for SMS/push reminder fallbacks"
+      ],
+      "prDecisions": {
+        "merged": ["#2031 auth.js", "#2037 MqttHistory.js", "#2039 HealingEvent.js", "#2040 KnowledgePack.js", "#2044 SkynetReferral.js", "#2053 creditDebit.js", "#2056 deviceAliasRoutes.js"],
+        "implementedManually": ["#2032 calendar reminders", "#2034 SubAgent updateConfig", "#2035 UPS escalation", "#2038 P2P DH rotation", "#2041 whois alerts", "#2042 signature QR codes", "#2043 peer activity", "#2047 DevPlan batch", "#2049 vector-intent cache", "#2050 coordination bulk ops"],
+        "closed": ["#2033 SkeletonUtils (vendored lib + redundant)", "#2036 SSH cmd cache poisoning", "#2045 DOM events on node-canvas", "#2046 false async claim breaks sync API", "#2048 ABI versioning migration risk", "#2051 unsafe scan-progress cache", "#2052 truncated mid-file breaks export", "#2054 fake ML claim", "#2055 calls nonexistent method"]
+      }
+    },
     "scraperQualityFixes2026_04_24": {
       "status": "deployed",
       "progress": "100%",
