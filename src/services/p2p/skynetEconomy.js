@@ -260,7 +260,7 @@ class SkynetEconomy {
   // ==================== REFERRAL REWARDS ====================
 
   async handleReferralReward(fromFingerprint, message) {
-    const { referredFingerprint, serviceId, originalAmount, rewardAmount, txHash } = message;
+    const { referredFingerprint, serviceId, originalAmount, rewardAmount, txHash, referralSource } = message;
     logger.info(`Referral reward from ${fromFingerprint.slice(0, 8)}...: ${rewardAmount} SKYNET for service ${serviceId}`);
 
     try {
@@ -271,7 +271,8 @@ class SkynetEconomy {
         originalAmount: originalAmount || 0,
         rewardAmount: rewardAmount || 0,
         txHash,
-        status: txHash ? 'paid' : 'pending'
+        status: txHash ? 'paid' : 'pending',
+        referralSource: referralSource || 'p2p'
       });
 
       if (this.agent?.emit) {

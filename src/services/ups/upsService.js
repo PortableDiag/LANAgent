@@ -18,6 +18,7 @@ class UpsService extends EventEmitter {
     this.enabled = false;
     this.pollIntervals = new Map();    // upsName -> interval timer
     this.previousStatuses = new Map(); // upsName -> last status
+    this.alertStartTimes = new Map();  // `${upsName}:${eventType}` -> Date when alert first fired
     this.shutdownInitiated = false;
     this.nutAvailable = null;          // Cache NUT availability check
   }
@@ -438,7 +439,30 @@ class UpsService extends EventEmitter {
   async sendNotifications(upsName, eventType, severity, status, config) {
     if (!config?.notifications?.enabled) return;
 
-    const message = this.formatNotificationMessage(upsName, eventType, status, config);
+    let message = this.formatNotificationMessage(upsName, eventType, status, config);
+
+    // Track alert start time and apply escalation policy if any
+    const alertKey = `${upsName}:${eventType}`;
+    const isResolution = ['power_restored', 'communication_restored'].includes(eventType);
+    if (isResolution) {
+      this.alertStartTimes.delete(alertKey);
+    } else {
+      if (!this.alertStartTimes.has(alertKey)) {
+        this.alertStartTimes.set(alertKey, new Date());
+      }
+      const alertStart = this.alertStartTimes.get(alertKey);
+      const alertDurationMinutes = (Date.now() - alertStart.getTime()) / 60000;
+
+      if (typeof config.applyEscalationPolicy === 'function') {
+        const escalation = config.applyEscalationPolicy(alertDurationMinutes, severity);
+        if (escalation?.messagePrefix) {
+          message = `${escalation.messagePrefix}\n\n${message}`;
+        }
+        if (escalation?.channels?.length) {
+          logger.info(`UPS escalation triggered for ${upsName}/${eventType} (${alertDurationMinutes.toFixed(1)}m): ${escalation.channels.join(', ')}`);
+        }
+      }
+    }
 
     // Send via agent notification system (Telegram, etc.)
     if (this.agent) {

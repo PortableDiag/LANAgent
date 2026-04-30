@@ -496,6 +496,58 @@ subAgentSchema.methods.getSummary = function() {
   };
 };
 
+/**
+ * Apply runtime configuration changes without restarting the agent.
+ * Deep-merges into the nested `config` subdoc and optionally updates top-level
+ * `enabled` / `status`. Records a config_updated history entry.
+ *
+ * @param {Object} updates - { config?, enabled?, status? }
+ *   - config: partial config to deep-merge (e.g. { budget: { dailyApiCalls: 200 } })
+ *   - enabled: top-level boolean
+ *   - status: top-level status string
+ */
+subAgentSchema.methods.updateConfig = async function(updates = {}) {
+  if (!updates || typeof updates !== 'object') {
+    throw new Error('updateConfig requires an object');
+  }
+
+  const before = {
+    enabled: this.enabled,
+    status: this.status,
+    config: this.config ? this.config.toObject() : {}
+  };
+
+  if (updates.config && typeof updates.config === 'object') {
+    // Apply per-leaf using mongoose set() so nested subdocs aren't clobbered
+    const applyDeep = (prefix, value) => {
+      if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+        this.set(prefix, value);
+        return;
+      }
+      for (const [k, v] of Object.entries(value)) {
+        applyDeep(`${prefix}.${k}`, v);
+      }
+    };
+    applyDeep('config', updates.config);
+  }
+
+  if (updates.enabled !== undefined) {
+    this.enabled = !!updates.enabled;
+  }
+
+  if (updates.status && this.status !== updates.status) {
+    this.status = updates.status;
+  }
+
+  this.addHistory('config_updated', {
+    before,
+    after: { enabled: this.enabled, status: this.status, config: updates.config }
+  });
+
+  await this.save();
+  return this;
+};
+
 const SubAgent = mongoose.model('SubAgent', subAgentSchema);
 
 export default SubAgent;

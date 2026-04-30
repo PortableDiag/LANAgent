@@ -1,4 +1,5 @@
 import mongoose from 'mongoose';
+import { logger } from '../utils/logger.js';
 
 const knowledgePackSchema = new mongoose.Schema({
   // Identity
@@ -256,6 +257,43 @@ knowledgePackSchema.statics.findByMetadata = function(criteria) {
   }
   
   return this.find(query).sort({ createdAt: -1 });
+};
+
+/**
+ * Track and analyze the usage of knowledge packs
+ * @param {string} packId - The ID of the knowledge pack
+ * @param {string} userId - The ID of the user accessing the pack
+ * @param {number} importTime - The time taken to import the pack
+ */
+knowledgePackSchema.statics.trackUsage = async function(packId, userId, importTime) {
+  try {
+    const analyticsCollection = mongoose.connection.collection('knowledgePackAnalytics');
+    await analyticsCollection.insertOne({
+      packId,
+      userId,
+      importTime,
+      accessedAt: new Date()
+    });
+    logger.info(`Tracked usage for packId: ${packId}, userId: ${userId}`);
+  } catch (error) {
+    logger.error(`Failed to track usage for packId: ${packId}, userId: ${userId}`, error);
+  }
+};
+
+/**
+ * Retrieve analytics data for knowledge packs
+ * @param {Object} filter - Filter criteria for analytics data
+ * @returns {Promise<Array>} - Array of analytics data matching the filter
+ */
+knowledgePackSchema.statics.getAnalytics = async function(filter = {}) {
+  try {
+    const analyticsCollection = mongoose.connection.collection('knowledgePackAnalytics');
+    const analyticsData = await analyticsCollection.find(filter).toArray();
+    return analyticsData;
+  } catch (error) {
+    logger.error('Failed to retrieve analytics data', error);
+    throw error;
+  }
 };
 
 export const KnowledgePack = mongoose.model('KnowledgePack', knowledgePackSchema);

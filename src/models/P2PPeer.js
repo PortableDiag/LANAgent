@@ -67,6 +67,12 @@ const p2pPeerSchema = new mongoose.Schema({
     default: 0
   },
 
+  // Cumulative connection time across all sessions, in seconds
+  totalConnectionSeconds: {
+    type: Number,
+    default: 0
+  },
+
   // Optional ERC-8004 NFT verification
   erc8004: {
     verified: { type: Boolean, default: false },

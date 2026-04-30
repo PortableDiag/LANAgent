@@ -1,9 +1,23 @@
 import express from 'express';
+import crypto from 'crypto';
+import NodeCache from 'node-cache';
+import rateLimit from 'express-rate-limit';
 import { logger } from '../../utils/logger.js';
 import { intentIndexer } from '../../utils/intentIndexer.js';
 import { retryOperation } from '../../utils/retryUtils.js';
 
 const router = express.Router();
+
+// 5-minute cache for /search results keyed by (query, k, filters) hash
+const searchCache = new NodeCache({ stdTTL: 300, checkperiod: 60 });
+
+// Rate-limit vector intent endpoints (embedding/search are expensive)
+const limiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 100,
+  message: { error: 'Too many requests, please try again later.' }
+});
+router.use(limiter);
 
 // Lazy load auth middleware to avoid early environment access
 let authenticateTokenMiddleware = null;
@@ -101,33 +115,46 @@ router.get('/stats', async (req, res) => {
 router.post('/search', async (req, res) => {
   try {
     const { query, k = 10, filters = null } = req.body;
-    
+
     if (!query) {
       return res.status(400).json({ error: 'Query is required' });
     }
-    
+
     const agent = req.app.locals.agent;
     if (!agent) {
       return res.status(500).json({
         error: 'Agent not available'
       });
     }
-    
+
     const vectorStore = agent.services.get('vectorStore');
     const embeddingService = agent.services.get('embeddingService');
-    
+
     if (!vectorStore || !embeddingService) {
       return res.status(503).json({
         error: 'Vector services not initialized'
       });
     }
-    
+
+    // Cache by deterministic hash of (query, k, filters) — same request returns
+    // cached results for 5 minutes, avoiding repeated embedding+vector lookups
+    const cacheKey = crypto
+      .createHash('sha1')
+      .update(JSON.stringify({ query, k, filters }))
+      .digest('hex');
+    const cached = searchCache.get(cacheKey);
+    if (cached) {
+      return res.json({ query, results: cached, cached: true });
+    }
+
     // Generate query embedding
     const queryEmbedding = await retryOperation(() => embeddingService.generateEmbedding(query), { retries: 3, context: 'embeddingGeneration' });
 
     // Search vector store with optional filters
     const results = await retryOperation(() => vectorStore.search(queryEmbedding, k, filters), { retries: 3, context: 'vectorSearch' });
-    
+
+    searchCache.set(cacheKey, results);
+
     res.json({
       query,
       results

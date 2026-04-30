@@ -47,6 +47,22 @@ const upsConfigSchema = new mongoose.Schema({
     cooldownMinutes: { type: Number, default: 5 }  // Min time between same notifications
   },
 
+  // Escalation policies — applied in order; the highest minDurationMinutes the alert has
+  // exceeded wins. Lets ops route prolonged alerts to extra channels with a custom message.
+  escalationPolicies: [{
+    minDurationMinutes: { type: Number, required: true }, // Threshold (alert age in minutes)
+    severity: {
+      type: String,
+      enum: ['low', 'medium', 'high', 'any'],
+      default: 'any'
+    },
+    channels: [{
+      type: String,
+      enum: ['telegram', 'email', 'mqtt', 'webhook']
+    }],
+    messagePrefix: String // Prepended to the standard alert message
+  }],
+
   // Auto-shutdown settings
   autoShutdown: {
     enabled: { type: Boolean, default: false },
@@ -203,6 +219,36 @@ upsConfigSchema.methods.recordNotification = async function(notificationType) {
 upsConfigSchema.methods.getNotificationChannels = function(severity) {
   const mapping = this.notifications.severityChannelMapping;
   return mapping[severity] || [];
+};
+
+/**
+ * Apply escalation policy based on alert duration and severity.
+ * Returns the highest-threshold policy whose minDurationMinutes the alert has
+ * exceeded and whose severity matches (or is 'any').
+ *
+ * @param {number} alertDurationMinutes
+ * @param {string} severity - 'low' | 'medium' | 'high'
+ * @returns {{ channels: string[], messagePrefix?: string } | null}
+ */
+upsConfigSchema.methods.applyEscalationPolicy = function(alertDurationMinutes, severity) {
+  if (!Array.isArray(this.escalationPolicies) || this.escalationPolicies.length === 0) {
+    return null;
+  }
+
+  const matched = this.escalationPolicies
+    .filter(p =>
+      (p.severity === 'any' || p.severity === severity) &&
+      p.minDurationMinutes <= alertDurationMinutes
+    )
+    .sort((a, b) => b.minDurationMinutes - a.minDurationMinutes); // Highest threshold first
+
+  if (matched.length === 0) return null;
+
+  const policy = matched[0];
+  return {
+    channels: Array.isArray(policy.channels) ? [...policy.channels] : [],
+    messagePrefix: policy.messagePrefix
+  };
 };
 
 export const UpsConfig = mongoose.model('UpsConfig', upsConfigSchema);

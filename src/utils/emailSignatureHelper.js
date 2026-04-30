@@ -1,15 +1,17 @@
 import { getGravatarUrl } from './gravatarHelper.js';
+import QRCode from 'qrcode';
 
 /**
  * Email signature templates and helpers for professional email signatures
  */
 
 /**
- * Generate a professional HTML email signature
+ * Generate a professional HTML email signature.
+ * Async because optional QR code generation is async.
  * @param {Object} options - Signature configuration options
- * @returns {string} HTML signature
+ * @returns {Promise<string>} HTML signature
  */
-export function generateProfessionalSignature(options) {
+export async function generateProfessionalSignature(options) {
   const {
     name,
     title,
@@ -22,7 +24,8 @@ export function generateProfessionalSignature(options) {
     disclaimer,
     style = 'modern', // modern, classic, minimal
     role,
-    department
+    department,
+    includeQRCode = false
   } = options;
 
   // Determine the template based on role or department
@@ -31,16 +34,45 @@ export function generateProfessionalSignature(options) {
   // Use Gravatar if no custom avatar URL provided
   const imageUrl = avatarUrl || getGravatarUrl(email, 100, 'robohash');
 
+  // Generate vCard QR code (data URL) if requested
+  const qrCodeUrl = includeQRCode
+    ? await generateContactQRCode({ name, title, email, phone, organization })
+    : '';
+
   switch (template) {
     case 'minimal':
-      return generateMinimalSignature({ name, title, email, imageUrl });
-    
+      return generateMinimalSignature({ name, title, email, imageUrl, qrCodeUrl });
+
     case 'classic':
-      return generateClassicSignature({ name, title, email, imageUrl, organization, phone, website, disclaimer });
-    
+      return generateClassicSignature({ name, title, email, imageUrl, organization, phone, website, disclaimer, qrCodeUrl });
+
     case 'modern':
     default:
-      return generateModernSignature({ name, title, email, imageUrl, organization, phone, website, socialLinks, disclaimer });
+      return generateModernSignature({ name, title, email, imageUrl, organization, phone, website, socialLinks, disclaimer, qrCodeUrl });
+  }
+}
+
+/**
+ * Generate a vCard 3.0 QR code (returned as a data URL) for the given contact.
+ * Empty fields are omitted to keep the vCard clean.
+ * @param {{name?: string, title?: string, email?: string, phone?: string, organization?: string}} contact
+ * @returns {Promise<string>} data URL or empty string on error
+ */
+async function generateContactQRCode(contact) {
+  const lines = ['BEGIN:VCARD', 'VERSION:3.0'];
+  if (contact.name) lines.push(`FN:${contact.name}`);
+  if (contact.title) lines.push(`TITLE:${contact.title}`);
+  if (contact.email) lines.push(`EMAIL:${contact.email}`);
+  if (contact.phone) lines.push(`TEL:${contact.phone}`);
+  if (contact.organization) lines.push(`ORG:${contact.organization}`);
+  lines.push('END:VCARD');
+  const vCard = lines.join('\n');
+
+  try {
+    return await QRCode.toDataURL(vCard, { errorCorrectionLevel: 'H', margin: 1, width: 200 });
+  } catch (error) {
+    console.error('Error generating contact QR code:', error);
+    return '';
   }
 }
 
@@ -79,7 +111,7 @@ function selectTemplateByRoleOrDepartment(role, department, defaultStyle) {
  * Modern signature with avatar and social links
  */
 function generateModernSignature(opts) {
-  const { name, title, email, imageUrl, organization, phone, website, socialLinks, disclaimer } = opts;
+  const { name, title, email, imageUrl, organization, phone, website, socialLinks, disclaimer, qrCodeUrl } = opts;
   
   return `
     <table cellpadding="0" cellspacing="0" border="0" style="font-family: Arial, sans-serif; color: #333; max-width: 600px;">
@@ -125,6 +157,7 @@ function generateModernSignature(opts) {
                 </table>
                 
                 ${Object.keys(socialLinks).length > 0 ? generateSocialLinks(socialLinks) : ''}
+                ${qrCodeUrl ? `<img src="${qrCodeUrl}" alt="vCard QR code" style="margin-top: 10px; width: 100px; height: 100px;">` : ''}
               </td>
             </tr>
           </table>
@@ -146,7 +179,7 @@ function generateModernSignature(opts) {
  * Classic professional signature
  */
 function generateClassicSignature(opts) {
-  const { name, title, email, imageUrl, organization, phone, website, disclaimer } = opts;
+  const { name, title, email, imageUrl, organization, phone, website, disclaimer, qrCodeUrl } = opts;
   
   return `
     <table cellpadding="0" cellspacing="0" border="0" style="font-family: Georgia, serif;">
@@ -169,6 +202,7 @@ function generateClassicSignature(opts) {
                   ${phone ? ` | ${phone}` : ''}
                   ${website ? ` | <a href="${website}" style="color: #333;">${website.replace(/^https?:\/\//, '')}</a>` : ''}
                 </p>
+                ${qrCodeUrl ? `<img src="${qrCodeUrl}" alt="vCard QR code" style="margin-top: 10px; width: 100px; height: 100px;">` : ''}
               </td>
             </tr>
           </table>
@@ -190,7 +224,7 @@ function generateClassicSignature(opts) {
  * Minimal signature
  */
 function generateMinimalSignature(opts) {
-  const { name, title, email, imageUrl } = opts;
+  const { name, title, email, imageUrl, qrCodeUrl } = opts;
   
   return `
     <table cellpadding="0" cellspacing="0" border="0" style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif;">
@@ -206,6 +240,7 @@ function generateMinimalSignature(opts) {
                 <p style="margin: 2px 0 0 0; font-size: 13px; color: #666;">
                   ${title} • <a href="mailto:${email}" style="color: #0066cc; text-decoration: none;">${email}</a>
                 </p>
+                ${qrCodeUrl ? `<img src="${qrCodeUrl}" alt="vCard QR code" style="margin-top: 8px; width: 80px; height: 80px;">` : ''}
               </td>
             </tr>
           </table>

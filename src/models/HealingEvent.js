@@ -108,6 +108,7 @@ healingEventSchema.methods.start = async function() {
   this.status = 'in_progress';
   this.startedAt = new Date();
   await this.save();
+  logger.info(`HealingEvent started: ${this._id}`, { event: this });
 };
 
 healingEventSchema.methods.complete = async function(success, message, output = null) {
@@ -120,6 +121,7 @@ healingEventSchema.methods.complete = async function(success, message, output = 
     output: output ? String(output).substring(0, 5000) : null
   };
   await this.save();
+  logger.info(`HealingEvent completed: ${this._id}`, { event: this });
 };
 
 healingEventSchema.methods.fail = async function(error) {
@@ -141,6 +143,7 @@ healingEventSchema.methods.fail = async function(error) {
         error: error.message || String(error)
       };
       await this.save();
+      logger.error(`HealingEvent failed: ${this._id}`, { event: this });
     }, retryStrategy);
   } catch (retryError) {
     logger.error(`Failed to save HealingEvent after retries: ${retryError.message}`);
@@ -154,6 +157,7 @@ healingEventSchema.methods.skip = async function(reason) {
     message: reason
   };
   await this.save();
+  logger.info(`HealingEvent skipped: ${this._id}`, { event: this });
 };
 
 // Static methods

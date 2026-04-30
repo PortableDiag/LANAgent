@@ -9,6 +9,7 @@ class PeerManager {
     this.onlinePeers = new Set(); // fingerprints currently online
     this.peerGroups = new Map(); // peer groups by trustLevel:capabilitiesHash
     this.peerGroupIndex = new Map(); // fingerprint -> current group key (for cleanup)
+    this.connectionStartTimes = new Map(); // fingerprint -> Date when current session started
   }
 
   /**
@@ -20,6 +21,7 @@ class PeerManager {
       this.onlinePeers.clear();
       this.peerGroups.clear();
       this.peerGroupIndex.clear();
+      this.connectionStartTimes.clear();
       logger.info('P2P PeerManager initialized, all peers marked offline');
     } catch (error) {
       logger.error('Failed to initialize PeerManager:', error);
@@ -118,6 +120,9 @@ class PeerManager {
    */
   async markOnline(fingerprint, capabilitiesHash) {
     this.onlinePeers.add(fingerprint);
+    if (!this.connectionStartTimes.has(fingerprint)) {
+      this.connectionStartTimes.set(fingerprint, new Date());
+    }
 
     const peer = await P2PPeer.findByFingerprint(fingerprint);
     if (peer) {
@@ -136,9 +141,16 @@ class PeerManager {
   async markOffline(fingerprint) {
     this.onlinePeers.delete(fingerprint);
 
+    const sessionStart = this.connectionStartTimes.get(fingerprint);
+    this.connectionStartTimes.delete(fingerprint);
+    const sessionSeconds = sessionStart ? Math.max(0, (Date.now() - sessionStart.getTime()) / 1000) : 0;
+
     const peer = await P2PPeer.findByFingerprint(fingerprint);
     if (peer) {
       peer.isOnline = false;
+      if (sessionSeconds > 0) {
+        peer.totalConnectionSeconds = (peer.totalConnectionSeconds || 0) + sessionSeconds;
+      }
       await peer.save();
     }
   }
@@ -282,12 +294,44 @@ class PeerManager {
   }
 
   /**
+   * Get peer activity report — persisted connection time + transfer counts,
+   * plus current-session seconds for online peers.
+   * @returns {Promise<Array<{fingerprint: string, totalConnectionSeconds: number, currentSessionSeconds: number, transferCount: number, isOnline: boolean, lastSeen: Date|null, trustLevel: string}>>}
+   */
+  async getActivityReport() {
+    const peers = await P2PPeer.find({}, {
+      fingerprint: 1,
+      totalConnectionSeconds: 1,
+      transferCount: 1,
+      isOnline: 1,
+      lastSeen: 1,
+      trustLevel: 1
+    }).lean();
+
+    const now = Date.now();
+    return peers.map(p => {
+      const sessionStart = this.connectionStartTimes.get(p.fingerprint);
+      const currentSessionSeconds = sessionStart ? Math.max(0, (now - sessionStart.getTime()) / 1000) : 0;
+      return {
+        fingerprint: p.fingerprint,
+        totalConnectionSeconds: p.totalConnectionSeconds || 0,
+        currentSessionSeconds,
+        transferCount: p.transferCount || 0,
+        isOnline: !!p.isOnline,
+        lastSeen: p.lastSeen || null,
+        trustLevel: p.trustLevel
+      };
+    });
+  }
+
+  /**
    * Shutdown - cleanup
    */
   shutdown() {
     this.onlinePeers.clear();
     this.peerGroups.clear();
     this.peerGroupIndex.clear();
+    this.connectionStartTimes.clear();
   }
 }
 

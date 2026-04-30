@@ -1,5 +1,6 @@
 import mongoose from 'mongoose';
 import { logger } from '../utils/logger.js';
+import { retryOperation } from '../utils/retryUtils.js';
 
 const developmentItemSchema = new mongoose.Schema({
   content: {
@@ -96,11 +97,61 @@ developmentItemSchema.statics.archiveOldCompletedItems = async function(days = 3
   }
 };
 
+/**
+ * Archive completed development items in batches to bound memory use on
+ * large collections. Paginates by _id, runs updateMany per batch with
+ * retry on transient errors.
+ *
+ * @param {Number} days - Items completed more than this many days ago will be archived.
+ * @param {Number} batchSize - Number of items processed per batch.
+ * @returns {Promise<{matched: number, modified: number, batches: number}>}
+ */
+developmentItemSchema.statics.archiveOldCompletedItemsBatch = async function(days = 30, batchSize = 100) {
+  try {
+    const cutoffDate = new Date();
+    cutoffDate.setDate(cutoffDate.getDate() - days);
+
+    let matched = 0;
+    let modified = 0;
+    let batches = 0;
+    let lastId = null;
+
+    while (true) {
+      const query = { status: 'completed', completedAt: { $lt: cutoffDate } };
+      if (lastId) query._id = { $gt: lastId };
+
+      const batch = await this.find(query).sort({ _id: 1 }).limit(batchSize).select('_id').lean().exec();
+      if (batch.length === 0) break;
+
+      const ids = batch.map(item => item._id);
+      lastId = ids[ids.length - 1];
+
+      const result = await retryOperation(
+        () => this.updateMany({ _id: { $in: ids } }, { $set: { status: 'archived' } }),
+        { retries: 3 }
+      );
+
+      matched += result.matchedCount ?? result.n ?? 0;
+      modified += result.modifiedCount ?? result.nModified ?? 0;
+      batches += 1;
+    }
+
+    if (modified > 0) {
+      logger.info(`Archived ${modified} completed development items older than ${days} days in ${batches} batch(es).`);
+    }
+    return { matched, modified, batches };
+  } catch (error) {
+    logger.error('Error archiving old completed development items in batches:', error);
+    throw error;
+  }
+};
+
 const DevelopmentPlan = mongoose.model('DevelopmentPlan', developmentItemSchema);
 
 DevelopmentPlan.commands = [
   { command: 'filterItems', description: 'Filter development items based on criteria', usage: 'filterItems({ tags, priority, status, type })' },
-  { command: 'archiveOldCompletedItems', description: 'Archive completed items older than N days', usage: 'archiveOldCompletedItems(days)' }
+  { command: 'archiveOldCompletedItems', description: 'Archive completed items older than N days', usage: 'archiveOldCompletedItems(days)' },
+  { command: 'archiveOldCompletedItemsBatch', description: 'Archive completed items older than N days in batches', usage: 'archiveOldCompletedItemsBatch({ days, batchSize })' }
 ];
 
 DevelopmentPlan.execute = async function(command, params) {
@@ -109,6 +160,8 @@ DevelopmentPlan.execute = async function(command, params) {
       return await this.filterItems(params);
     case 'archiveOldCompletedItems':
       return await this.archiveOldCompletedItems(params?.days ?? 30);
+    case 'archiveOldCompletedItemsBatch':
+      return await this.archiveOldCompletedItemsBatch(params?.days ?? 30, params?.batchSize ?? 100);
     default:
       throw new Error(`Unknown command: ${command}`);
   }

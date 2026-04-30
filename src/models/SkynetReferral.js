@@ -8,13 +8,17 @@ const skynetReferralSchema = new mongoose.Schema({
   rewardAmount: { type: Number, default: 0 },
   rewardPercent: { type: Number, default: 5 },
   txHash: { type: String, default: null },
-  status: { type: String, enum: ['pending', 'paid', 'failed'], default: 'pending' }
+  status: { type: String, enum: ['pending', 'paid', 'failed'], default: 'pending' },
+  referralSource: {
+    type: String,
+    enum: ['p2p', 'web', 'email', 'social_media', 'cli', 'other'],
+    default: 'other'
+  }
 }, { timestamps: true });
 
 skynetReferralSchema.index({ referrerFingerprint: 1, createdAt: -1 });
 skynetReferralSchema.index({ referredFingerprint: 1 });
 
-// Default referral tier definitions
 const REFERRAL_TIERS = [
   { level: 1, minReferrals: 0, rewardMultiplier: 1.0, name: 'Bronze' },
   { level: 2, minReferrals: 10, rewardMultiplier: 1.5, name: 'Silver' },
@@ -187,7 +191,6 @@ skynetReferralSchema.statics.getTierProgressionReport = async function (fingerpr
   const referralCount = await this.countDocuments({ referrerFingerprint: fingerprint, status: 'paid' });
   const currentTier = this.calculateUserTier(referralCount, REFERRAL_TIERS);
   
-  // Find next tier
   const sortedTiers = [...REFERRAL_TIERS].sort((a, b) => a.minReferrals - b.minReferrals);
   let nextTier = null;
   for (const tier of sortedTiers) {
@@ -209,6 +212,23 @@ skynetReferralSchema.statics.getTierProgressionReport = async function (fingerpr
     currentTier,
     progressToNextTier
   };
+};
+
+/**
+ * Get referral source statistics.
+ */
+skynetReferralSchema.statics.getReferralSourceStats = async function (fingerprint) {
+  const stats = await this.aggregate([
+    { $match: { referrerFingerprint: fingerprint, status: 'paid' } },
+    { $group: { _id: '$referralSource', count: { $sum: 1 } } }
+  ]);
+
+  const sourceStats = {};
+  for (const stat of stats) {
+    sourceStats[stat._id] = stat.count;
+  }
+
+  return sourceStats;
 };
 
 const SkynetReferral = mongoose.model('SkynetReferral', skynetReferralSchema);

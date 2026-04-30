@@ -58,18 +58,27 @@ const calendarEventSchema = new mongoose.Schema({
   reminders: [{
     type: {
       type: String,
-      enum: ['notification', 'email', 'telegram'],
+      enum: ['notification', 'email', 'telegram', 'sms', 'push'],
       default: 'telegram'
     },
     minutesBefore: {
       type: Number,
       default: 15
     },
+    // Repeating reminder interval in minutes leading up to the event.
+    // When set (>0), the reminder fires every N minutes from minutesBefore until startDate is reached.
+    customInterval: {
+      type: Number,
+      default: null
+    },
+    // Destination override for sms/push (phone number, FCM token). Falls back to env defaults.
+    target: String,
     sent: {
       type: Boolean,
       default: false
     },
     sentAt: Date,
+    lastSentAt: Date, // Last time a recurring (customInterval) reminder fired
     jobId: String // Agenda job ID for this reminder
   }],
 

@@ -1,5 +1,6 @@
 import ExternalCreditBalance from '../../../models/ExternalCreditBalance.js';
 import { logger } from '../../../utils/logger.js';
+import { retryOperation } from '../../../utils/retryUtils.js';
 
 /**
  * Middleware that debits credits for a service call.
@@ -17,57 +18,66 @@ export function creditDebit(creditCost) {
       return next();
     }
 
-    // Check balance
-    const account = await ExternalCreditBalance.findByWallet(req.wallet);
-    if (!account || account.credits < creditCost) {
-      return res.status(402).json({
-        success: false,
-        error: 'Insufficient credits',
-        required: creditCost,
-        balance: account?.credits || 0
-      });
-    }
-
-    // Reserve credits (debit upfront)
-    const debited = await ExternalCreditBalance.debitCredits(req.wallet, creditCost);
-    if (!debited) {
-      return res.status(402).json({
-        success: false,
-        error: 'Insufficient credits (race condition)',
-        required: creditCost
-      });
-    }
-
-    // Mark that credits were used (skip legacy payment middleware)
-    req.creditsPaid = creditCost;
-
-    // Intercept res.json to handle refunds and add credit info
-    const originalJson = res.json.bind(res);
-    res.json = function (data) {
-      // If service failed due to target error, refund
-      if (data && data.success === false && data.targetError) {
-        ExternalCreditBalance.refundCredits(req.wallet, creditCost)
-          .then(() => {
-            logger.info(`Refunded ${creditCost} credits to ${req.wallet} (target error)`);
-          })
-          .catch((err) => {
-            logger.error(`Credit refund failed for ${req.wallet}:`, err);
-          });
-        data.credited = true;
-        data.creditsRefunded = creditCost;
+    try {
+      // Check balance with retry logic
+      const account = await retryOperation(() => ExternalCreditBalance.findByWallet(req.wallet), { retries: 3 });
+      if (!account || account.credits < creditCost) {
+        return res.status(402).json({
+          success: false,
+          error: 'Insufficient credits',
+          required: creditCost,
+          balance: account?.credits || 0
+        });
       }
 
-      // Add remaining credits to response
-      ExternalCreditBalance.findByWallet(req.wallet)
-        .then((acc) => {
-          data.creditsRemaining = acc?.credits || 0;
-          originalJson(data);
-        })
-        .catch(() => {
-          originalJson(data);
+      // Reserve credits (debit upfront) with retry logic
+      const debited = await retryOperation(() => ExternalCreditBalance.debitCredits(req.wallet, creditCost), { retries: 3 });
+      if (!debited) {
+        return res.status(402).json({
+          success: false,
+          error: 'Insufficient credits (race condition)',
+          required: creditCost
         });
-    };
+      }
 
-    next();
+      // Mark that credits were used (skip legacy payment middleware)
+      req.creditsPaid = creditCost;
+
+      // Intercept res.json to handle refunds and add credit info
+      const originalJson = res.json.bind(res);
+      res.json = function (data) {
+        // If service failed due to target error, refund
+        if (data && data.success === false && data.targetError) {
+          ExternalCreditBalance.refundCredits(req.wallet, creditCost)
+            .then(() => {
+              logger.info(`Refunded ${creditCost} credits to ${req.wallet} (target error)`);
+            })
+            .catch((err) => {
+              logger.error(`Credit refund failed for ${req.wallet}:`, err);
+            });
+          data.credited = true;
+          data.creditsRefunded = creditCost;
+        }
+
+        // Add remaining credits to response
+        ExternalCreditBalance.findByWallet(req.wallet)
+          .then((acc) => {
+            data.creditsRemaining = acc?.credits || 0;
+            originalJson(data);
+          })
+          .catch((err) => {
+            logger.error(`Failed to fetch remaining credits for ${req.wallet}:`, err);
+            originalJson(data);
+          });
+      };
+
+      next();
+    } catch (err) {
+      logger.error(`Error processing credit debit for ${req.wallet}:`, err);
+      return res.status(500).json({
+        success: false,
+        error: 'Internal server error'
+      });
+    }
   };
 }

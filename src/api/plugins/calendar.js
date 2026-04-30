@@ -384,9 +384,22 @@ export default class CalendarPlugin extends BasePlugin {
           const reminder = event.reminders[i];
           if (reminder.sent) continue;
 
-          const reminderTime = new Date(event.startDate.getTime() - reminder.minutesBefore * 60 * 1000);
+          const firstFireTime = new Date(event.startDate.getTime() - reminder.minutesBefore * 60 * 1000);
+          if (firstFireTime > now) continue;
 
-          if (reminderTime <= now) {
+          // Recurring reminder: fire every customInterval minutes between firstFireTime and event start
+          if (reminder.customInterval && reminder.customInterval > 0) {
+            const intervalMs = reminder.customInterval * 60 * 1000;
+            const lastSent = reminder.lastSentAt ? new Date(reminder.lastSentAt) : null;
+            const dueForRecurrence = !lastSent || (now.getTime() - lastSent.getTime()) >= intervalMs;
+
+            if (dueForRecurrence && now < event.startDate) {
+              await this.sendLocalReminder(event, reminder, i, { recurring: true });
+            } else if (now >= event.startDate) {
+              // Event has started — finalize this reminder so it stops firing
+              await event.markReminderSent(i);
+            }
+          } else {
             await this.sendLocalReminder(event, reminder, i);
           }
         }
@@ -396,7 +409,7 @@ export default class CalendarPlugin extends BasePlugin {
     }
   }
 
-  async sendLocalReminder(event, reminder, reminderIndex) {
+  async sendLocalReminder(event, reminder, reminderIndex, options = {}) {
     try {
       const timeUntil = this.formatTimeUntil(event.startDate);
       const message = `📅 Reminder: ${event.title}\n` +
@@ -417,11 +430,51 @@ export default class CalendarPlugin extends BasePlugin {
             body: message
           });
         }
+      } else if (reminder.type === 'sms') {
+        const to = reminder.target || process.env.PHONE_OF_MASTER;
+        if (!to) {
+          this.logger.warn('SMS reminder skipped: no target phone number (set reminder.target or PHONE_OF_MASTER)');
+        } else {
+          const smsPlugin = this.agent?.pluginManager?.getPlugin('vonage')
+            || this.agent?.pluginManager?.getPlugin('sinch')
+            || this.agent?.pluginManager?.getPlugin('messagebird');
+          if (smsPlugin) {
+            await smsPlugin.execute({ action: 'sendsms', to, text: message });
+          } else {
+            this.logger.warn('SMS reminder skipped: no SMS plugin available (vonage/sinch/messagebird)');
+          }
+        }
+      } else if (reminder.type === 'push') {
+        const token = reminder.target || process.env.FCM_TOKEN_OF_MASTER;
+        if (!token) {
+          this.logger.warn('Push reminder skipped: no FCM token (set reminder.target or FCM_TOKEN_OF_MASTER)');
+        } else {
+          const fcmPlugin = this.agent?.pluginManager?.getPlugin('firebasecloudmessagingfcm');
+          if (fcmPlugin) {
+            await fcmPlugin.execute({
+              action: 'sendMessage',
+              registrationToken: token,
+              title: `Reminder: ${event.title}`,
+              body: message
+            });
+          } else {
+            this.logger.warn('Push reminder skipped: firebasecloudmessagingfcm plugin not available');
+          }
+        }
+      } else if (reminder.type === 'notification' && this.agent) {
+        // In-app notification — falls back to telegram if available
+        await this.agent.sendNotification?.(message);
       }
 
-      // Mark reminder as sent
-      await event.markReminderSent(reminderIndex);
-      this.logger.info(`Sent local reminder for event: ${event.title}`);
+      if (options.recurring) {
+        // Track the recurring fire without ending the reminder lifecycle
+        event.reminders[reminderIndex].lastSentAt = new Date();
+        await event.save();
+        this.logger.info(`Sent recurring reminder for event: ${event.title}`);
+      } else {
+        await event.markReminderSent(reminderIndex);
+        this.logger.info(`Sent local reminder for event: ${event.title}`);
+      }
     } catch (error) {
       this.logger.error('Error sending local reminder:', error);
     }

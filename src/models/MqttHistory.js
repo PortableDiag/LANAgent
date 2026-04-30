@@ -257,45 +257,52 @@ mqttHistorySchema.statics.getTimeSeries = async function(topic, options = {}) {
   }
 
   let result;
-  if (aggregation) {
-    // Aggregate data
-    const groupId = {
-      minute: { $dateToString: { format: '%Y-%m-%d %H:%M', date: '$timestamp' } },
-      hour: { $dateToString: { format: '%Y-%m-%d %H:00', date: '$timestamp' } },
-      day: { $dateToString: { format: '%Y-%m-%d', date: '$timestamp' } }
-    }[aggregation];
+  try {
+    result = await retryOperation(async () => {
+      if (aggregation) {
+        // Aggregate data
+        const groupId = {
+          minute: { $dateToString: { format: '%Y-%m-%d %H:%M', date: '$timestamp' } },
+          hour: { $dateToString: { format: '%Y-%m-%d %H:00', date: '$timestamp' } },
+          day: { $dateToString: { format: '%Y-%m-%d', date: '$timestamp' } }
+        }[aggregation];
 
-    result = await this.aggregate([
-      {
-        $match: {
+        return this.aggregate([
+          {
+            $match: {
+              topic,
+              timestamp: { $gte: startTime, $lte: endTime },
+              numericValue: { $ne: null }
+            }
+          },
+          {
+            $group: {
+              _id: groupId,
+              avg: { $avg: '$numericValue' },
+              min: { $min: '$numericValue' },
+              max: { $max: '$numericValue' },
+              count: { $sum: 1 },
+              first: { $first: '$numericValue' },
+              last: { $last: '$numericValue' }
+            }
+          },
+          { $sort: { _id: 1 } },
+          { $limit: limit }
+        ]);
+      } else {
+        // Return raw data
+        return this.find({
           topic,
-          timestamp: { $gte: startTime, $lte: endTime },
-          numericValue: { $ne: null }
-        }
-      },
-      {
-        $group: {
-          _id: groupId,
-          avg: { $avg: '$numericValue' },
-          min: { $min: '$numericValue' },
-          max: { $max: '$numericValue' },
-          count: { $sum: 1 },
-          first: { $first: '$numericValue' },
-          last: { $last: '$numericValue' }
-        }
-      },
-      { $sort: { _id: 1 } },
-      { $limit: limit }
-    ]);
-  } else {
-    // Return raw data
-    result = await this.find({
-      topic,
-      timestamp: { $gte: startTime, $lte: endTime }
-    })
-      .sort({ timestamp: -1 })
-      .limit(limit)
-      .lean();
+          timestamp: { $gte: startTime, $lte: endTime }
+        })
+          .sort({ timestamp: -1 })
+          .limit(limit)
+          .lean();
+      }
+    });
+  } catch (error) {
+    logger.error('Error retrieving time-series data:', error);
+    throw error;
   }
 
   this.cache.set(cacheKey, result);
@@ -310,25 +317,33 @@ mqttHistorySchema.statics.getStatistics = async function(topic, startTime, endTi
     return cachedData;
   }
 
-  const result = await this.aggregate([
-    {
-      $match: {
-        topic,
-        timestamp: { $gte: startTime, $lte: endTime },
-        numericValue: { $ne: null }
-      }
-    },
-    {
-      $group: {
-        _id: null,
-        count: { $sum: 1 },
-        avg: { $avg: '$numericValue' },
-        min: { $min: '$numericValue' },
-        max: { $max: '$numericValue' },
-        stdDev: { $stdDevPop: '$numericValue' }
-      }
-    }
-  ]);
+  let result;
+  try {
+    result = await retryOperation(async () => {
+      return this.aggregate([
+        {
+          $match: {
+            topic,
+            timestamp: { $gte: startTime, $lte: endTime },
+            numericValue: { $ne: null }
+          }
+        },
+        {
+          $group: {
+            _id: null,
+            count: { $sum: 1 },
+            avg: { $avg: '$numericValue' },
+            min: { $min: '$numericValue' },
+            max: { $max: '$numericValue' },
+            stdDev: { $stdDevPop: '$numericValue' }
+          }
+        }
+      ]);
+    });
+  } catch (error) {
+    logger.error('Error retrieving statistics:', error);
+    throw error;
+  }
 
   const statistics = result[0] || { count: 0, avg: null, min: null, max: null, stdDev: null };
   this.cache.set(cacheKey, statistics);

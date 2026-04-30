@@ -63,16 +63,25 @@ async function getCachedData(key, fetchFunc) {
   return data;
 }
 
-// List all aliases
+// List all aliases with advanced search capabilities
 router.get('/', async (req, res) => {
   try {
-    const { plugin } = req.query;
-    const query = plugin ? { plugin } : {};
-    
-    const aliases = await getCachedData(`aliases_${plugin || 'all'}`, async () => {
-      return await retryOperation(() => DeviceAlias.find(query).sort({ usageCount: -1 }).lean());
+    const { plugin, deviceName, userId, sortBy = 'usageCount', sortOrder = 'desc' } = req.query;
+    const query = {};
+    if (plugin) query.plugin = plugin;
+    if (deviceName) query.deviceName = deviceName;
+    if (userId) query.userId = userId;
+
+    const sortOptions = {};
+    if (sortBy) {
+      sortOptions[sortBy] = sortOrder === 'asc' ? 1 : -1;
+    }
+
+    const cacheKey = `aliases_${JSON.stringify(query)}_${sortBy}_${sortOrder}`;
+    const aliases = await getCachedData(cacheKey, async () => {
+      return await retryOperation(() => DeviceAlias.find(query).sort(sortOptions).lean());
     });
-    
+
     res.json({
       success: true,
       aliases: aliases
@@ -92,21 +101,21 @@ router.get('/:alias', async (req, res) => {
   try {
     const { alias } = req.params;
     const { plugin = 'govee' } = req.query;
-    
+
     const deviceAlias = await getCachedData(`alias_${alias.toLowerCase()}_${plugin}`, async () => {
-      return await retryOperation(() => DeviceAlias.findOne({ 
+      return await retryOperation(() => DeviceAlias.findOne({
         alias: alias.toLowerCase(),
-        plugin 
+        plugin
       }).lean());
     });
-    
+
     if (!deviceAlias) {
       return res.status(404).json({
         success: false,
         error: 'Alias not found'
       });
     }
-    
+
     res.json({
       success: true,
       alias: deviceAlias
@@ -125,32 +134,32 @@ router.get('/:alias', async (req, res) => {
 router.post('/', async (req, res) => {
   try {
     const { alias, deviceName, plugin = 'govee', deviceId } = req.body;
-    
+
     if (!alias || !deviceName) {
       return res.status(400).json({
         success: false,
         error: 'Both alias and deviceName are required'
       });
     }
-    
+
     const userId = req.user?.userId || req.apiKey?.name || 'system';
-    
+
     const deviceAlias = await retryOperation(() => DeviceAlias.setAlias(
       alias,
       deviceName,
       plugin,
       userId
     ));
-    
+
     // Update deviceId if provided
     if (deviceId) {
       deviceAlias.deviceId = deviceId;
       await deviceAlias.save();
     }
-    
+
     // Invalidate cache for updated alias
     cache.del(`alias_${alias.toLowerCase()}_${plugin}`);
-    
+
     res.json({
       success: true,
       alias: deviceAlias,
@@ -171,22 +180,22 @@ router.delete('/:alias', async (req, res) => {
   try {
     const { alias } = req.params;
     const { plugin = 'govee' } = req.query;
-    
-    const result = await retryOperation(() => DeviceAlias.deleteOne({ 
+
+    const result = await retryOperation(() => DeviceAlias.deleteOne({
       alias: alias.toLowerCase(),
-      plugin 
+      plugin
     }));
-    
+
     if (result.deletedCount === 0) {
       return res.status(404).json({
         success: false,
         error: 'Alias not found'
       });
     }
-    
+
     // Invalidate cache for deleted alias
     cache.del(`alias_${alias.toLowerCase()}_${plugin}`);
-    
+
     res.json({
       success: true,
       message: 'Alias deleted successfully'
@@ -205,14 +214,14 @@ router.delete('/:alias', async (req, res) => {
 router.post('/bulk', async (req, res) => {
   try {
     const { aliases, plugin = 'govee' } = req.body;
-    
+
     if (!Array.isArray(aliases)) {
       return res.status(400).json({
         success: false,
         error: 'Aliases must be an array'
       });
     }
-    
+
     const userId = req.user?.userId || req.apiKey?.name || 'system';
 
     // Process aliases in parallel for better performance

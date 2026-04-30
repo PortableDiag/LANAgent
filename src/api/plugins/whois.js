@@ -33,13 +33,40 @@ export default class WhoisPlugin extends BasePlugin {
         command: 'bulkLookup',
         description: 'Perform WHOIS lookups for multiple domains at once (max 20)',
         usage: 'bulkLookup({ domains: ["example.com", "test.org"] })'
+      },
+      {
+        command: 'setExpirationAlert',
+        description: 'Schedule a notification N days before a domain expires',
+        usage: 'setExpirationAlert({ domain: "example.com", daysBefore: 30 })'
+      },
+      {
+        command: 'cancelExpirationAlert',
+        description: 'Cancel any pending expiration alerts for a domain',
+        usage: 'cancelExpirationAlert({ domain: "example.com" })'
       }
     ];
-    
+
     // Initialize whoisjson - will be imported dynamically
     this.whoisjson = null;
     this.apiKey = process.env.WHOISJSON_API_KEY;
     this.cache = new NodeCache({ stdTTL: 300, checkperiod: 60 }); // 5 min TTL for WHOIS data
+    this.scheduler = this.agent?.services?.get('taskScheduler');
+
+    if (this.scheduler?.agenda) {
+      this.scheduler.agenda.define('whois-expiration-alert', async (job) => {
+        const { domain, expiresAt, daysBefore } = job.attrs.data || {};
+        const message = `🔔 Domain expiration warning: ${domain} expires on ${expiresAt} (~${daysBefore} days from this alert).`;
+        try {
+          if (this.agent?.notify) {
+            await this.agent.notify(message);
+          } else {
+            logger.warn(`whois-expiration-alert fired but agent.notify is not available — ${message}`);
+          }
+        } catch (error) {
+          logger.error('Failed to dispatch whois-expiration-alert:', error.message);
+        }
+      });
+    }
   }
 
   /**
@@ -73,12 +100,12 @@ export default class WhoisPlugin extends BasePlugin {
   }
 
   async execute(params) {
-    const { action, domain } = params;
-    
+    const { action, domain, daysBefore } = params;
+
     if (!this.whoisjson) {
       await this.initialize();
     }
-    
+
     try {
       switch (action) {
         case 'lookup':
@@ -91,8 +118,12 @@ export default class WhoisPlugin extends BasePlugin {
           return await this.checkAvailability(domain);
         case 'bulkLookup':
           return await this.bulkLookup(params);
+        case 'setExpirationAlert':
+          return await this.setExpirationAlert(domain, daysBefore);
+        case 'cancelExpirationAlert':
+          return await this.cancelExpirationAlert(domain);
         default:
-          return { success: false, error: 'Unknown action. Use: lookup, dns, ssl, or availability' };
+          return { success: false, error: 'Unknown action. Use: lookup, dns, ssl, availability, bulkLookup, setExpirationAlert, or cancelExpirationAlert' };
       }
     } catch (error) {
       logger.error('Whois plugin error:', error);
@@ -256,5 +287,59 @@ export default class WhoisPlugin extends BasePlugin {
         return { success: false, error: `Failed to check availability: ${error.message}` };
       }
     });
+  }
+
+  /**
+   * Schedule a one-shot Agenda job that fires N days before the domain's
+   * registered expiration date (read from WHOIS). Persisted via Agenda's
+   * MongoDB store, so alerts survive restarts.
+   */
+  async setExpirationAlert(domain, daysBefore) {
+    this.validateParams({ domain, daysBefore }, {
+      domain: { required: true, type: 'string' },
+      daysBefore: { required: true, type: 'number' }
+    });
+
+    if (!this.scheduler?.agenda) {
+      return { success: false, error: 'Scheduler not available — cannot persist alert' };
+    }
+
+    const whoisResult = await this.lookupDomain(domain);
+    if (!whoisResult.success || !whoisResult.data?.expires) {
+      return { success: false, error: `Failed to read expiration date for ${domain}: ${whoisResult.error || 'no expires field in WHOIS data'}` };
+    }
+
+    const expirationDate = new Date(whoisResult.data.expires);
+    if (isNaN(expirationDate.getTime())) {
+      return { success: false, error: `WHOIS expires field is not a valid date: ${whoisResult.data.expires}` };
+    }
+
+    const alertDate = new Date(expirationDate.getTime() - daysBefore * 24 * 60 * 60 * 1000);
+    if (alertDate <= new Date()) {
+      return { success: false, error: 'Alert date is in the past. Choose a smaller daysBefore or this domain is already too close to expiry.' };
+    }
+
+    // Cancel any existing alert for this domain to avoid duplicates
+    await this.scheduler.agenda.cancel({ name: 'whois-expiration-alert', 'data.domain': domain });
+
+    await this.scheduler.agenda.schedule(alertDate, 'whois-expiration-alert', {
+      domain,
+      expiresAt: expirationDate.toISOString(),
+      daysBefore
+    });
+
+    return {
+      success: true,
+      message: `Expiration alert scheduled for ${domain} at ${alertDate.toISOString()} (${daysBefore} days before ${expirationDate.toISOString()}).`
+    };
+  }
+
+  async cancelExpirationAlert(domain) {
+    this.validateParams({ domain }, { domain: { required: true, type: 'string' } });
+    if (!this.scheduler?.agenda) {
+      return { success: false, error: 'Scheduler not available' };
+    }
+    const cancelled = await this.scheduler.agenda.cancel({ name: 'whois-expiration-alert', 'data.domain': domain });
+    return { success: true, cancelled, message: `Cancelled ${cancelled || 0} alert(s) for ${domain}` };
   }
 }

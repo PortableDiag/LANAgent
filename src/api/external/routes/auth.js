@@ -4,6 +4,8 @@ import NodeCache from 'node-cache';
 import jwt from 'jsonwebtoken';
 import { logger } from '../../../utils/logger.js';
 import ExternalCreditBalance from '../../../models/ExternalCreditBalance.js';
+import rateLimit from 'express-rate-limit';
+import { retryOperation } from '../../../utils/retryUtils.js';
 
 const router = Router();
 
@@ -16,11 +18,18 @@ const JWT_SECRET = process.env.JWT_SECRET || crypto.randomBytes(32).toString('he
 // Export for use by creditAuth middleware
 export { JWT_SECRET };
 
+// Rate limiting middleware
+const authRateLimiter = rateLimit({
+  windowMs: 60 * 1000, // 1 minute
+  max: 10, // limit each IP to 10 requests per windowMs
+  message: { success: false, error: 'Too many requests, please try again later.' }
+});
+
 /**
  * GET /api/external/auth/nonce?wallet=0x...
  * Generate a signing nonce for wallet authentication
  */
-router.get('/nonce', (req, res) => {
+router.get('/nonce', authRateLimiter, (req, res) => {
   const { wallet } = req.query;
 
   if (!wallet || !/^0x[a-fA-F0-9]{40}$/.test(wallet)) {
@@ -43,7 +52,7 @@ router.get('/nonce', (req, res) => {
  * POST /api/external/auth/verify
  * Verify wallet signature and issue JWT
  */
-router.post('/verify', async (req, res) => {
+router.post('/verify', authRateLimiter, async (req, res) => {
   try {
     const { wallet, signature, nonce } = req.body;
 
@@ -80,9 +89,9 @@ router.post('/verify', async (req, res) => {
     }
 
     // Ensure account exists
-    let account = await ExternalCreditBalance.findByWallet(normalizedWallet);
+    let account = await retryOperation(() => ExternalCreditBalance.findByWallet(normalizedWallet), { retries: 3 });
     if (!account) {
-      account = await ExternalCreditBalance.create({ wallet: normalizedWallet });
+      account = await retryOperation(() => ExternalCreditBalance.create({ wallet: normalizedWallet }), { retries: 3 });
     }
 
     // Issue JWT (1 hour expiry — used for key management and credit purchases)
@@ -133,7 +142,7 @@ router.post('/api-key', requireJWT, async (req, res) => {
     const { name } = req.body;
     const key = `lsk_${crypto.randomBytes(16).toString('hex')}`;
 
-    const account = await ExternalCreditBalance.findOneAndUpdate(
+    const account = await retryOperation(() => ExternalCreditBalance.findOneAndUpdate(
       { wallet: req.wallet },
       {
         $push: {
@@ -145,7 +154,7 @@ router.post('/api-key', requireJWT, async (req, res) => {
         }
       },
       { new: true, upsert: true }
-    );
+    ), { retries: 3 });
 
     if (!account) {
       return res.status(500).json({ success: false, error: 'Failed to create API key' });
@@ -171,11 +180,11 @@ router.delete('/api-key/:key', requireJWT, async (req, res) => {
   try {
     const { key } = req.params;
 
-    const result = await ExternalCreditBalance.findOneAndUpdate(
+    const result = await retryOperation(() => ExternalCreditBalance.findOneAndUpdate(
       { wallet: req.wallet, 'apiKeys.key': key },
       { $set: { 'apiKeys.$.revoked': true } },
       { new: true }
-    );
+    ), { retries: 3 });
 
     if (!result) {
       return res.status(404).json({ success: false, error: 'API key not found' });
@@ -194,7 +203,7 @@ router.delete('/api-key/:key', requireJWT, async (req, res) => {
  */
 router.get('/api-keys', requireJWT, async (req, res) => {
   try {
-    const account = await ExternalCreditBalance.findByWallet(req.wallet);
+    const account = await retryOperation(() => ExternalCreditBalance.findByWallet(req.wallet), { retries: 3 });
     if (!account) {
       return res.json({ success: true, apiKeys: [] });
     }

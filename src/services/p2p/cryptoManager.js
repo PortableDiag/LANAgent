@@ -364,6 +364,48 @@ class CryptoManager {
   }
 
   /**
+   * Rotate the X25519 ECDH (DH) keypair while preserving the Ed25519 signing
+   * keypair (and therefore the peer fingerprint / trust relationships).
+   *
+   * Persists the new DH keys to PluginSettings, clears the session-key cache so
+   * peers will renegotiate, and returns the new public DH key. The peerManager
+   * already handles incoming DH key rotation from peers; this is the symmetric
+   * outbound rotation.
+   */
+  async rotateDhKeys() {
+    if (!this.identity) {
+      throw new Error('Identity not initialized — cannot rotate DH keys');
+    }
+
+    const { publicKey: dhPub, privateKey: dhPriv } = crypto.generateKeyPairSync('x25519', {
+      publicKeyEncoding: { type: 'spki', format: 'der' },
+      privateKeyEncoding: { type: 'pkcs8', format: 'der' }
+    });
+
+    this.identity.dhPublicKey = dhPub;
+    this.identity.dhPrivateKey = dhPriv;
+
+    try {
+      await PluginSettings.setCached(PLUGIN_NAME, IDENTITY_KEY, {
+        signPublicKey: this.identity.signPublicKey.toString('base64'),
+        signPrivateKey: this.identity.signPrivateKey.toString('base64'),
+        dhPublicKey: this.identity.dhPublicKey.toString('base64'),
+        dhPrivateKey: this.identity.dhPrivateKey.toString('base64'),
+        fingerprint: this.identity.fingerprint,
+        dhRotatedAt: new Date().toISOString()
+      });
+    } catch (error) {
+      logger.error('Failed to persist rotated DH keys:', error);
+      throw error;
+    }
+
+    this.clearSessionKeys();
+    logger.info(`P2P DH keys rotated; fingerprint preserved: ${this.identity.fingerprint}`);
+
+    return this.identity.dhPublicKey.toString('base64');
+  }
+
+  /**
    * Shutdown - clear all sensitive material
    */
   shutdown() {

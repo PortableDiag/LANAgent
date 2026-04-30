@@ -623,6 +623,7 @@ Respond in exactly this JSON format:
     pack.status = 'importing';
     await pack.save();
 
+    const importStart = Date.now();
     const results = { total: pack.memories.length, imported: 0, duplicates: 0, failed: 0, memoryIds: [] };
 
     try {
@@ -665,6 +666,7 @@ Respond in exactly this JSON format:
       await pack.save();
 
       await peerManager.incrementTransferCount(pack.peerFingerprint);
+      await KnowledgePack.trackUsage(pack.packId, pack.peerFingerprint, Date.now() - importStart);
       logger.info(`P2P imported knowledge pack "${pack.title}": ${results.imported} new, ${results.duplicates} duplicates, ${results.failed} failed`);
       return true;
     } catch (error) {
