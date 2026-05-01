@@ -1596,9 +1596,10 @@ class SwapService {
                 if (!amountOut) throw callErr; // re-throw if we couldn't decode
             }
             // Sanity check: reject obviously wrong quotes (> 1000x input or zero)
+            // Reverting V4 hooks return bytes that decode to a sentinel ~8.22e58 — known artifact, not actionable. Demoted to debug.
             if (!amountOut || amountOut <= 0n) return null;
             if (amountOut > amountInWei * 1000n) {
-                logger.warn(`V4 quote sanity check failed: output ${ethers.formatUnits(amountOut, 18)} is >1000x input, discarding`);
+                logger.debug(`V4 quote rejected (sanity): ${ethers.formatUnits(amountOut, 18)} >1000x input — likely reverting hook`);
                 return null;
             }
 
