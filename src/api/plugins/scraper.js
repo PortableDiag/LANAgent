@@ -1,5 +1,6 @@
 import { BasePlugin } from '../core/basePlugin.js';
 import { launchBrowser } from '../../utils/stealthBrowser.js';
+import { fsRequestGet, isFlareSolverrAvailable } from '../../utils/flareSolverr.js';
 import { logger } from '../../utils/logger.js';
 import { safeJsonStringify } from '../../utils/jsonUtils.js';
 import axios from 'axios';
@@ -280,13 +281,13 @@ export default class ScraperPlugin extends BasePlugin {
   }
 
   async scrapePage(url, options) {
-    const { usePuppeteer = false, selector, waitForSelector, bypassCache = false } = options;
-    
+    const { usePuppeteer = false, useFlareSolverr = false, selector, waitForSelector, bypassCache = false } = options;
+
     // Check cache first unless explicitly bypassed
     if (!bypassCache) {
-      const cacheKey = this.generateCacheKey(url, { usePuppeteer, selector, waitForSelector, userAgent: options.userAgent });
+      const cacheKey = this.generateCacheKey(url, { usePuppeteer, useFlareSolverr, selector, waitForSelector, userAgent: options.userAgent });
       const cachedData = this.getCachedData(cacheKey);
-      
+
       if (cachedData) {
         logger.info(`Returning cached data for ${url} (cache hit)`);
         return {
@@ -296,27 +297,122 @@ export default class ScraperPlugin extends BasePlugin {
         };
       }
     }
-    
+
     try {
       let result;
-      if (usePuppeteer) {
+      if (useFlareSolverr) {
+        result = await this.scrapeWithFlareSolverr(url, options);
+      } else if (usePuppeteer) {
         result = await this.scrapeWithPuppeteer(url, options);
       } else {
         result = await this.scrapeWithCheerio(url, options);
       }
-      
+
       // Cache the successful result
       if (!bypassCache && result) {
-        const cacheKey = this.generateCacheKey(url, { usePuppeteer, selector, waitForSelector, userAgent: options.userAgent });
+        const cacheKey = this.generateCacheKey(url, { usePuppeteer, useFlareSolverr, selector, waitForSelector, userAgent: options.userAgent });
         this.setCachedData(cacheKey, result);
         logger.info(`Cached scraping result for ${url}`);
       }
-      
+
       return result;
     } catch (error) {
       logger.error(`Scraping error for ${url}:`, error.message);
       throw new Error(`Failed to scrape ${url}: ${error.message}`);
     }
+  }
+
+  /**
+   * Parse HTML with cheerio and extract the same content shape as scrapeWithCheerio.
+   * Shared between scrapeWithCheerio (after axios fetch) and scrapeWithFlareSolverr.
+   */
+  parseHtmlContent(html, url, selector) {
+    const $ = cheerio.load(html);
+
+    const content = {
+      title: $('meta[property="og:title"]').first().attr('content') || $('title').text() || $('h1').first().text(),
+      description: $('meta[property="og:description"]').first().attr('content') ||
+                   $('meta[name="description"]').attr('content') || '',
+      ogImage: $('meta[property="og:image"]').first().attr('content') || '',
+      text: '',
+      links: [],
+      images: [],
+      jsonld: [],
+      microdata: []
+    };
+
+    if (selector) {
+      content.text = $(selector).text().trim();
+    } else {
+      // Clone before stripping scripts/styles so we don't mutate the source
+      $('script, style').remove();
+      const mainSelectors = ['main', 'article', '[role="main"]', '#content', '.content'];
+      let mainContent = '';
+      for (const sel of mainSelectors) {
+        if ($(sel).length) {
+          mainContent = $(sel).text().trim();
+          break;
+        }
+      }
+      content.text = mainContent || $('body').text().trim();
+    }
+
+    $('a[href]').each((i, elem) => {
+      const href = $(elem).attr('href');
+      const text = $(elem).text().trim();
+      if (href && text) content.links.push({ href, text });
+    });
+
+    $('img[src]').each((i, elem) => {
+      const src = $(elem).attr('src');
+      const alt = $(elem).attr('alt') || '';
+      if (src) content.images.push({ src, alt });
+    });
+
+    content.text = content.text.replace(/\s+/g, ' ').trim();
+    if (content.text.length > 5000) {
+      content.text = content.text.substring(0, 5000) + '...';
+    }
+
+    return { content, $ };
+  }
+
+  /**
+   * Scrape via FlareSolverr — bypasses Cloudflare Turnstile / managed challenges.
+   * Returns the same shape as scrapeWithCheerio/scrapeWithPuppeteer plus a
+   * `_rawHtml` field so callers (render tier) can attach the raw HTML cheaply.
+   */
+  async scrapeWithFlareSolverr(url, options = {}) {
+    const { selector, userAgent } = options;
+
+    const fsOptions = { maxTimeout: 60000 };
+    if (userAgent && this.defaultUserAgents[userAgent]) {
+      fsOptions.userAgent = this.defaultUserAgents[userAgent];
+    } else if (typeof userAgent === 'string' && userAgent.length > 0) {
+      fsOptions.userAgent = userAgent;
+    }
+
+    const solution = await fsRequestGet(url, fsOptions);
+    const html = solution.response || '';
+    const httpStatus = solution.status;
+
+    if (httpStatus >= 400) {
+      throw new Error(`FlareSolverr fetched ${url} but target returned HTTP ${httpStatus}`);
+    }
+
+    const { content, $ } = this.parseHtmlContent(html, url, selector);
+    content.jsonld = await this.extractJsonLd($);
+    content.microdata = this.extractMicrodata($);
+
+    return {
+      success: true,
+      url: solution.url || url,
+      content,
+      method: 'flaresolverr',
+      _rawHtml: html,
+      _cookies: solution.cookies || [],
+      _userAgent: solution.userAgent || ''
+    };
   }
 
   async scrapeWithCheerio(url, options) {
@@ -615,7 +711,7 @@ export default class ScraperPlugin extends BasePlugin {
   }
 
   async takeScreenshot(url, options) {
-    const { fullPage = false, viewport, userAgent } = options;
+    const { fullPage = false, viewport, userAgent, cookies } = options;
 
     if (!this.browser) {
       this.browser = await launchBrowser();
@@ -642,6 +738,24 @@ export default class ScraperPlugin extends BasePlugin {
         await page.setUserAgent(agent);
       } else {
         await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36');
+      }
+
+      // Inject cookies (used by render tier to carry CF clearance from FlareSolverr)
+      if (Array.isArray(cookies) && cookies.length > 0) {
+        try {
+          await page.setCookie(...cookies.map(c => ({
+            name: c.name,
+            value: String(c.value),
+            domain: c.domain,
+            path: c.path || '/',
+            expires: typeof c.expires === 'number' ? c.expires : undefined,
+            httpOnly: !!c.httpOnly,
+            secure: !!c.secure,
+            sameSite: c.sameSite
+          })).filter(c => c.name && c.domain));
+        } catch (err) {
+          logger.warn(`Failed to inject cookies for screenshot: ${err.message}`);
+        }
       }
 
       await page.setViewport(viewport || { width: 1920, height: 1080, deviceScaleFactor: 1 });

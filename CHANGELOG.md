@@ -2,6 +2,23 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.10] - 2026-05-01
+
+Sync from genesis. Bundles render-tier scraping fix (originally v2.25.7) and the v2.25.10 PR review pass into a single public release. Genesis-only crypto strategy work (v2.25.8 TokenTrader cleanup, v2.25.9 watchlist V2 liquidity fix) is intentionally not synced.
+
+### Fixed
+- **Render-tier scraping (paid API): 500 on Cloudflare-protected sites** — `POST /api/external/scrape` with `tier: render` was returning HTTP 500 for sites guarded by Cloudflare Turnstile / managed challenges (Rumble, Bitchute, etc.) — Puppeteer + puppeteer-extra-stealth couldn't bypass the managed-challenge variant, so the route refunded credits and returned 500. The render tier now routes through a local FlareSolverr Docker container as its primary fetch path, which solves the challenge headlessly and returns the real HTML + CF clearance cookies. Cookies are then injected into Puppeteer's screenshot pass so the render tier still produces a real screenshot of CF-protected pages.
+
+### Added
+- **`src/utils/flareSolverr.js`** — small client for the FlareSolverr v1 API (`request.get`, `sessions.list`) with a 30-second availability cache so the render-tier path doesn't probe on every request.
+- **`scraper.scrapeWithFlareSolverr(url, options)`** — new fetch path on the scraper plugin. Returns the same `{ success, content: { title, description, ogImage, text, links, images, jsonld, microdata } }` shape as the existing cheerio/puppeteer paths, plus `_rawHtml` / `_cookies` / `_userAgent` for the render tier to attach.
+- **`scraper.takeScreenshot` cookies option** — the screenshot path now accepts a `cookies` array (Puppeteer cookie objects) which it injects via `page.setCookie` before navigation. Lets the render tier produce real screenshots of CF-protected pages by carrying clearance cookies from the FlareSolverr solve.
+- **Shazam: lyrics command** — new `getLyrics({ songId })` (or `{ artist, title }`) action on the Shazam plugin. Resolves songId via `Shazam.track_info` to get artist + title, then queries `https://api.lyrics.ovh/v1/{artist}/{title}` (the actual lyrics.ovh endpoint shape, with both args URL-encoded). Caches by songId or artist+title using the existing plugin `NodeCache` so repeats don't re-hit Shazam or lyrics.ovh. Distinguishes 404 (not in lyrics.ovh) from other HTTP errors and from empty-lyrics responses.
+- **LP Market Maker: scheduled operations** — `POST /api/crypto/lp/mm/schedule`, `GET /schedule`, `DELETE /schedule/:jobId`. `when` accepts ISO date, natural-language strings ("in 5 minutes"), or a 5/6-field cron expression (auto-detected via regex; recurring goes through `agenda.every`, one-shots through `agenda.schedule`). Operations: `rebalance`, `collect`, `open`, `close` — all wrapped in `retryOperation` (3 retries) calling the existing `lpMarketMaker.*` methods. Persistent across restarts via Agenda's MongoDB store. Uses the project's existing TaskScheduler/Agenda integration via `req.app.locals.agent.scheduler.agenda`.
+- **P2P peers: persisted session/reconnection counters** — new `sessionCount` and `reconnectionCount` fields on `P2PPeer` model. `PeerManager.markOnline` increments `sessionCount` always, and `reconnectionCount` only when there were prior sessions (so first-ever connect is not counted as a reconnect). `getActivityReport()` now exposes `sessionCount`, `reconnectionCount`, and `averageSessionSeconds` (computed from completed sessions only — currently-open session doesn't drag long-lived peers' average to zero).
+- **External-auth: adaptive rate limiter tied to circuit breaker** — `POST /api/external/*` now goes through an `express-rate-limit` instance whose `max` is read from the identity-verification circuit breaker each request. Defaults: 60/min CLOSED, 10/min HALF_OPEN, 5/min OPEN. Tunable via `EXTERNAL_AUTH_RATE_CLOSED`/`EXTERNAL_AUTH_RATE_HALFOPEN`/`EXTERNAL_AUTH_RATE_OPEN` env. Keys by `X-Agent-Id` first (so misbehaving callers don't poison neighbours behind the same NAT), forwarded-IP fallback. Sets `standardHeaders: true, legacyHeaders: false` for RFC-compliant `RateLimit-*` headers. 429 response body includes `circuitBreakerState` so callers can correlate the throttle with our health.
+- **Production setup**: FlareSolverr 3.4.6 running as `docker run --restart unless-stopped` on the genesis instance at `127.0.0.1:8191`. Documented `FLARESOLVERR_URL` under a new `SCRAPING — RENDER TIER (FlareSolverr)` section in `.env.example`. Public-fork operators who run the render tier should stand up their own FlareSolverr container; it's optional otherwise (scraper falls back to Puppeteer when `FLARESOLVERR_URL` is unset).
+
 ## [2.25.6] - 2026-04-30
 
 ### Added

@@ -1,9 +1,47 @@
 {
-  "lastUpdated": "2026-04-30T17:20:00.000Z",
+  "lastUpdated": "2026-05-01T12:30:00.000Z",
   "overallProgress": "100%",
-  "status": "PRODUCTION READY - v2.25.6 - 26 PRs reviewed (5 merged, 11 implemented, 10 closed), 16 new features.",
-  "milestone": "Reviewed 26 AI-generated PRs (#2031-#2056). Added SMS/push/recurring calendar reminders, runtime SubAgent config updates, UPS escalation policies wired into notifications, safe P2P DH key rotation (preserving fingerprint), persistent peer activity tracking, whois domain expiration alerts via Agenda, vCard QR codes in email signatures, batched DevPlan archive, scoped bulk coordination ops, vector-intent /search caching, advanced device-alias search, and rate limiting on auth/vector-intent endpoints.",
+  "status": "PRODUCTION READY - v2.25.10 - render-tier scraping bypasses Cloudflare via FlareSolverr; PR review pass added Shazam lyrics, LP MM scheduled operations, persisted peer session counters, adaptive external-auth rate limit.",
+  "milestone": "Bundled sync from genesis: render-tier FlareSolverr fix (originally v2.25.7) + PR review pass on PRs #2057-#2064 (4 implemented manually, 4 closed). Genesis-only crypto strategy work (v2.25.8 TokenTrader cleanup, v2.25.9 watchlist V2-only liquidity fix) is intentionally not synced.",
   "features": {
+    "renderTierFlareSolverr2026_05_01": {
+      "status": "deployed",
+      "progress": "100%",
+      "addedDate": "2026-05-01",
+      "description": "Render-tier scraping (5 credits, the highest paid tier) was returning HTTP 500 for Cloudflare-protected sites (Rumble, Bitchute, etc.) because puppeteer-extra-stealth could not solve managed Turnstile challenges. Render tier now routes through a local FlareSolverr Docker container which solves the challenge headlessly and returns the real HTML plus CF clearance cookies. Cookies are injected into puppeteer's screenshot pass so render tier still produces a real screenshot of CF-protected pages. Falls back to cheerio/puppeteer if FlareSolverr is unreachable; escalates back to FS if puppeteer hits a managed challenge.",
+      "changes": [
+        "src/utils/flareSolverr.js: NEW — FlareSolverr v1 client with 30s availability cache",
+        "src/api/plugins/scraper.js: scrapeWithFlareSolverr() returns same content shape plus _rawHtml/_cookies/_userAgent; takeScreenshot() accepts cookies array and injects via page.setCookie before navigation; parseHtmlContent() extraction helper",
+        "src/api/external/routes/scraping.js: executeScrape gains renderTier flag — tries FS first, falls back to cheerio/puppeteer, escalates back to FS if puppeteer hits managed challenge; result builder preserves _rawHtml/_cookies/_userAgent",
+        ".env.example: FLARESOLVERR_URL section documenting the docker run command"
+      ],
+      "files": [
+        "src/utils/flareSolverr.js",
+        "src/api/plugins/scraper.js",
+        "src/api/external/routes/scraping.js",
+        ".env.example"
+      ]
+    },
+    "prReviewBatch2026_05_01": {
+      "status": "deployed",
+      "progress": "100%",
+      "addedDate": "2026-05-01",
+      "description": "Reviewed 8 AI-generated PRs (#2057-#2064). 4 features manually implemented with corrections; 4 closed as broken/dead/speculative. All PRs left with detailed close comments. Implementations from this batch: Shazam getLyrics, LP MM scheduled operations CRUD, persisted P2P session/reconnection counters, adaptive external-auth rate limit.",
+      "changes": [
+        "src/api/plugins/shazam.js: getLyrics action with correct lyrics.ovh routing (/v1/{artist}/{title}, both URL-encoded), Shazam.track_info to resolve songId to artist+title, NodeCache by songId or artist+title, distinguishes 404 from other errors",
+        "src/api/lpMarketMaker.js: POST/GET/DELETE /schedule endpoints with Agenda jobs (lp-mm-rebalance/collect/open/close), ISO+cron auto-detection (looksLikeCron heuristic), lazy ensureJobsDefined, ObjectId cancel; uses req.app.locals.agent.scheduler.agenda per the whois.js pattern",
+        "src/services/p2p/peerManager.js: markOnline increments peer.sessionCount and peer.reconnectionCount; getActivityReport returns sessionCount/reconnectionCount/averageSessionSeconds (computed from completed sessions only)",
+        "src/models/P2PPeer.js: sessionCount and reconnectionCount fields (default 0)",
+        "src/api/external/middleware/externalAuth.js: adaptiveAuthRateLimiter via express-rate-limit; max() reads circuit breaker state per request; X-Agent-Id keyGenerator with forwarded-IP fallback; standardHeaders/legacyHeaders=false; env tunables (EXTERNAL_AUTH_RATE_CLOSED/HALFOPEN/OPEN); 429 response includes circuitBreakerState"
+      ],
+      "files": [
+        "src/api/plugins/shazam.js",
+        "src/api/lpMarketMaker.js",
+        "src/services/p2p/peerManager.js",
+        "src/models/P2PPeer.js",
+        "src/api/external/middleware/externalAuth.js"
+      ]
+    },
     "prReviewAndFeatures2026_04_30": {
       "status": "deployed",
       "progress": "100%",

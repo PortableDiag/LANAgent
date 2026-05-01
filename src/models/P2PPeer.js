@@ -73,6 +73,22 @@ const p2pPeerSchema = new mongoose.Schema({
     default: 0
   },
 
+  // Total number of times this peer has come online (session count).
+  // Increments once per markOnline call.
+  sessionCount: {
+    type: Number,
+    default: 0
+  },
+
+  // Number of times this peer reconnected after a prior session (so first-ever
+  // connection is not counted; only sessions 2..N). reconnectionCount = sessionCount - 1
+  // for any peer that has connected at least once, but stored explicitly so
+  // markOnline doesn't have to derive it under race conditions.
+  reconnectionCount: {
+    type: Number,
+    default: 0
+  },
+
   // Optional ERC-8004 NFT verification
   erc8004: {
     verified: { type: Boolean, default: false },

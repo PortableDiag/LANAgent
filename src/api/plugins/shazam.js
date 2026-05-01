@@ -52,6 +52,16 @@ export default class ShazamPlugin extends BasePlugin {
           'song info for shazam id 123456',
           'details about this track'
         ]
+      },
+      {
+        command: 'getLyrics',
+        description: 'Fetch lyrics for an identified song (resolves songId via Shazam, then queries lyrics.ovh)',
+        usage: 'getLyrics({ songId: "track-id" })',
+        examples: [
+          'get lyrics for track 123456',
+          'lyrics for shazam id 123456',
+          'show lyrics for this song'
+        ]
       }
     ];
   }
@@ -68,6 +78,8 @@ export default class ShazamPlugin extends BasePlugin {
         return await this.getRecommendations(data);
       case 'getSongDetails':
         return await this.getSongDetails(data);
+      case 'getLyrics':
+        return await this.getLyrics(data);
       default:
         return { success: false, error: `Unknown action: ${action}` };
     }
@@ -340,6 +352,90 @@ export default class ShazamPlugin extends BasePlugin {
         success: false,
         error: `Failed to get song details: ${error.message}`
       };
+    }
+  }
+
+  /**
+   * Fetch lyrics for an identified song.
+   *
+   * Resolves the Shazam track via track_info to get { title, subtitle (artist) },
+   * then queries lyrics.ovh — a free public lyrics API whose endpoint is
+   * `/v1/{artist}/{title}`, not `/v1/{songId}`. Caches by songId so repeat
+   * lookups don't re-hit either Shazam or lyrics.ovh.
+   */
+  async getLyrics(data) {
+    const { songId, artist: artistArg, title: titleArg } = data;
+
+    if (!songId && !(artistArg && titleArg)) {
+      return { success: false, error: 'Provide a Shazam songId, or both artist and title.' };
+    }
+
+    const cacheKey = songId ? `lyrics_id_${songId}` : `lyrics_kv_${artistArg}_${titleArg}`;
+    const cached = this.cache.get(cacheKey);
+    if (cached) {
+      return { success: true, type: 'text', result: cached.text, metadata: { ...cached.metadata, fromCache: true } };
+    }
+
+    let artist = artistArg;
+    let title = titleArg;
+
+    // If only songId provided, resolve artist+title via Shazam track_info
+    if (!artist || !title) {
+      try {
+        const { Shazam } = await import('node-shazam');
+        const shazam = new Shazam();
+        const raw = await shazam.track_info('en-US', 'US', songId);
+        const track = raw?.track || raw;
+        if (!track || (!track.title && !track.subtitle)) {
+          return { success: false, error: `No track found for songId ${songId}` };
+        }
+        title = track.title || title;
+        artist = track.subtitle || artist;
+      } catch (err) {
+        this.logger.error(`Failed to resolve track ${songId} for lyrics:`, err);
+        return { success: false, error: `Could not resolve track ${songId}: ${err.message}` };
+      }
+    }
+
+    if (!artist || !title) {
+      return { success: false, error: 'Could not determine artist and title for this song.' };
+    }
+
+    try {
+      this.logger.info(`Fetching lyrics: ${artist} — ${title}`);
+      const url = `https://api.lyrics.ovh/v1/${encodeURIComponent(artist)}/${encodeURIComponent(title)}`;
+      const response = await fetch(url);
+
+      if (response.status === 404) {
+        return {
+          success: true,
+          type: 'text',
+          result: `No lyrics found on lyrics.ovh for ${artist} — ${title}.`,
+          metadata: { artist, title, songId, found: false }
+        };
+      }
+      if (!response.ok) {
+        return { success: false, error: `lyrics.ovh returned HTTP ${response.status}` };
+      }
+
+      const body = await response.json();
+      const lyrics = (body?.lyrics || '').trim();
+      if (!lyrics) {
+        return {
+          success: true,
+          type: 'text',
+          result: `No lyrics found on lyrics.ovh for ${artist} — ${title}.`,
+          metadata: { artist, title, songId, found: false }
+        };
+      }
+
+      const text = `🎶 *Lyrics — ${title} by ${artist}*\n\n${lyrics}`;
+      const metadata = { artist, title, songId, found: true, source: 'lyrics.ovh' };
+      this.cache.set(cacheKey, { text, metadata });
+      return { success: true, type: 'text', result: text, metadata };
+    } catch (error) {
+      this.logger.error('Failed to fetch lyrics:', error);
+      return { success: false, error: `Failed to get lyrics: ${error.message}` };
     }
   }
 }

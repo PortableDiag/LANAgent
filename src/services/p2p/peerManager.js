@@ -126,6 +126,12 @@ class PeerManager {
 
     const peer = await P2PPeer.findByFingerprint(fingerprint);
     if (peer) {
+      // Count this as a session; if peer has any prior session, it's a reconnection.
+      const priorSessions = peer.sessionCount || 0;
+      peer.sessionCount = priorSessions + 1;
+      if (priorSessions > 0) {
+        peer.reconnectionCount = (peer.reconnectionCount || 0) + 1;
+      }
       peer.isOnline = true;
       peer.lastSeen = new Date();
       if (capabilitiesHash) peer.capabilitiesHash = capabilitiesHash;
@@ -294,14 +300,18 @@ class PeerManager {
   }
 
   /**
-   * Get peer activity report — persisted connection time + transfer counts,
-   * plus current-session seconds for online peers.
-   * @returns {Promise<Array<{fingerprint: string, totalConnectionSeconds: number, currentSessionSeconds: number, transferCount: number, isOnline: boolean, lastSeen: Date|null, trustLevel: string}>>}
+   * Get peer activity report — persisted connection time + transfer counts +
+   * session/reconnection analytics, plus current-session seconds for online peers.
+   * averageSessionSeconds is computed from completed sessions only (so the
+   * currently-open session doesn't skew the average toward zero on long-lived peers).
+   * @returns {Promise<Array<{fingerprint: string, totalConnectionSeconds: number, currentSessionSeconds: number, sessionCount: number, reconnectionCount: number, averageSessionSeconds: number, transferCount: number, isOnline: boolean, lastSeen: Date|null, trustLevel: string}>>}
    */
   async getActivityReport() {
     const peers = await P2PPeer.find({}, {
       fingerprint: 1,
       totalConnectionSeconds: 1,
+      sessionCount: 1,
+      reconnectionCount: 1,
       transferCount: 1,
       isOnline: 1,
       lastSeen: 1,
@@ -312,10 +322,19 @@ class PeerManager {
     return peers.map(p => {
       const sessionStart = this.connectionStartTimes.get(p.fingerprint);
       const currentSessionSeconds = sessionStart ? Math.max(0, (now - sessionStart.getTime()) / 1000) : 0;
+      const sessionCount = p.sessionCount || 0;
+      // Completed sessions = sessionCount minus the currently-open one (if online)
+      const completedSessions = p.isOnline ? Math.max(0, sessionCount - 1) : sessionCount;
+      const averageSessionSeconds = completedSessions > 0
+        ? (p.totalConnectionSeconds || 0) / completedSessions
+        : 0;
       return {
         fingerprint: p.fingerprint,
         totalConnectionSeconds: p.totalConnectionSeconds || 0,
         currentSessionSeconds,
+        sessionCount,
+        reconnectionCount: p.reconnectionCount || 0,
+        averageSessionSeconds,
         transferCount: p.transferCount || 0,
         isOnline: !!p.isOnline,
         lastSeen: p.lastSeen || null,

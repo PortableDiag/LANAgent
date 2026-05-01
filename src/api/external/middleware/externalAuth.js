@@ -1,4 +1,5 @@
 import NodeCache from 'node-cache';
+import rateLimit from 'express-rate-limit';
 import { logger } from '../../../utils/logger.js';
 import { retryOperation } from '../../../utils/retryUtils.js';
 
@@ -57,7 +58,54 @@ function recordFailure() {
   }
 }
 
+// Adaptive rate limiter: tightens when the identity-verification circuit
+// breaker is OPEN/HALF_OPEN so we shed load while the registry RPC recovers.
+// Keys by X-Agent-Id (the auth header) so a single misbehaving caller doesn't
+// poison neighbours behind the same NAT/proxy; falls back to forwarded IP.
+//
+// Tunable via env:
+//   EXTERNAL_AUTH_RATE_CLOSED   (default 60/min when healthy)
+//   EXTERNAL_AUTH_RATE_HALFOPEN (default 10/min while testing recovery)
+//   EXTERNAL_AUTH_RATE_OPEN     (default 5/min while circuit is open)
+const rateClosed   = parseInt(process.env.EXTERNAL_AUTH_RATE_CLOSED   || '60', 10);
+const rateHalfOpen = parseInt(process.env.EXTERNAL_AUTH_RATE_HALFOPEN || '10', 10);
+const rateOpen     = parseInt(process.env.EXTERNAL_AUTH_RATE_OPEN     || '5',  10);
+
+const adaptiveAuthRateLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: () => {
+    if (circuitBreaker.state === 'OPEN') return rateOpen;
+    if (circuitBreaker.state === 'HALF_OPEN') return rateHalfOpen;
+    return rateClosed;
+  },
+  standardHeaders: true,   // Return RFC-compliant `RateLimit-*` headers
+  legacyHeaders: false,    // Disable deprecated `X-RateLimit-*`
+  keyGenerator: (req) => {
+    // Prefer X-Agent-Id (already required by this middleware) so per-agent
+    // misbehaviour is isolated. Fall back to forwarded IP for the rare
+    // pre-header rejection path.
+    const agentId = req.headers['x-agent-id'];
+    if (agentId) return `agent:${agentId}`;
+    const forwarded = req.headers['x-forwarded-for'];
+    if (forwarded) return `ip:${forwarded.split(',')[0].trim()}`;
+    return `ip:${req.ip || req.connection?.remoteAddress || 'unknown'}`;
+  },
+  handler: (req, res) => {
+    res.status(429).json({
+      success: false,
+      error: 'Too many identity-verification requests, please slow down.',
+      circuitBreakerState: circuitBreaker.state
+    });
+  }
+});
+
 export async function externalAuthMiddleware(req, res, next) {
+  // Apply adaptive rate limit first; if it rejects, the handler above
+  // responds 429 and we never reach the inner logic.
+  return adaptiveAuthRateLimiter(req, res, () => _verifyIdentity(req, res, next));
+}
+
+async function _verifyIdentity(req, res, next) {
   const agentId = req.headers['x-agent-id'];
   const chain = req.headers['x-agent-chain'] || 'bsc';
 

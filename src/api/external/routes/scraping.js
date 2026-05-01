@@ -3,6 +3,7 @@ import { hybridAuth } from '../middleware/hybridAuth.js';
 import { creditAuth } from '../middleware/creditAuth.js';
 import { logger } from '../../../utils/logger.js';
 import { retryOperation, isRetryableError } from '../../../utils/retryUtils.js';
+import { isFlareSolverrAvailable } from '../../../utils/flareSolverr.js';
 import ExternalCreditBalance from '../../../models/ExternalCreditBalance.js';
 import NodeCache from 'node-cache';
 
@@ -25,9 +26,17 @@ router.get('/health', (req, res) => {
 });
 
 /**
- * Execute a single scrape operation
+ * Execute a single scrape operation.
+ *
+ * tier semantics for fallback chain:
+ *   - basic / full / extract: cheerio → puppeteer (on block) → flaresolverr (on managed-challenge block, render tier only)
+ *   - stealth: puppeteer
+ *   - render: flaresolverr → puppeteer (if FS unreachable)
+ *
+ * Render-tier callers pass renderTier=true so a CF managed-challenge block
+ * escalates to FlareSolverr instead of returning 500.
  */
-async function executeScrape(req, { url, selectors, extractType = 'text', userAgent, usePuppeteer = false }) {
+async function executeScrape(req, { url, selectors, extractType = 'text', userAgent, usePuppeteer = false, renderTier = false }) {
   const scraperEntry = req.app.locals.agent?.apiManager?.apis?.get('scraper');
   const scraper = scraperEntry?.instance || scraperEntry;
   if (!scraper?.execute) {
@@ -41,7 +50,7 @@ async function executeScrape(req, { url, selectors, extractType = 'text', userAg
   if (usePuppeteer) options.usePuppeteer = true;
 
   // Check cache
-  const cacheKey = `${action}:${url}:${JSON.stringify(selectors || '')}`;
+  const cacheKey = `${action}:${url}:${JSON.stringify(selectors || '')}:render=${renderTier}`;
   const cached = scrapeCache.get(cacheKey);
   if (cached) return cached;
 
@@ -50,12 +59,32 @@ async function executeScrape(req, { url, selectors, extractType = 'text', userAg
     let rawResult;
     let cheerioError = null;
 
-    // Try cheerio first (fast)
-    try {
-      rawResult = await scraper.execute({ action, url, options });
-    } catch (err) {
-      cheerioError = err.message || String(err);
-      rawResult = { success: false, error: cheerioError };
+    // Render tier: try FlareSolverr first (most likely to bypass Cloudflare).
+    if (renderTier && await isFlareSolverrAvailable()) {
+      try {
+        logger.info(`[ExternalScrape] Render tier: trying FlareSolverr for ${url}`);
+        rawResult = await scraper.execute({ action, url, options: { ...options, useFlareSolverr: true } });
+        if (rawResult?.success) {
+          logger.info(`[ExternalScrape] FlareSolverr succeeded for ${url}`);
+        }
+      } catch (fsErr) {
+        logger.warn(`[ExternalScrape] FlareSolverr failed for ${url}: ${fsErr.message}, falling back`);
+        rawResult = null;
+      }
+    }
+
+    // Try cheerio first (fast) — only if FS path didn't already produce a result
+    if (!rawResult || !rawResult.success) {
+      try {
+        const cheerioResult = await scraper.execute({ action, url, options });
+        // Don't overwrite a successful FS result with a cheerio failure
+        if (cheerioResult?.success || !rawResult) {
+          rawResult = cheerioResult;
+        }
+      } catch (err) {
+        cheerioError = err.message || String(err);
+        if (!rawResult) rawResult = { success: false, error: cheerioError };
+      }
     }
 
     // Detect Cloudflare/bot challenge pages that return 200 but aren't real content
@@ -64,7 +93,7 @@ async function executeScrape(req, { url, selectors, extractType = 'text', userAg
       challengeTitles.some(t => rawResult.content.title.includes(t));
 
     // If cheerio failed, got blocked, or got a challenge page, auto-retry with Puppeteer
-    const shouldRetryWithPuppeteer = !options.usePuppeteer && (
+    const shouldRetryWithPuppeteer = !options.usePuppeteer && rawResult.method !== 'flaresolverr' && (
       !rawResult.success ||
       !rawResult.content?.title ||
       gotChallengePage
@@ -86,6 +115,24 @@ async function executeScrape(req, { url, selectors, extractType = 'text', userAg
           logger.warn(`[ExternalScrape] Puppeteer also failed for ${url}: ${puppeteerErr.message}`);
           // Keep the original cheerio error
           rawResult = { success: false, error: cheerioError || puppeteerErr.message };
+        }
+      }
+    }
+
+    // Render tier final escalation: if Puppeteer was Cloudflare-blocked, try FlareSolverr.
+    // This covers the case where renderTier=true but FS was unavailable initially, or
+    // where the upstream tried puppeteer first and hit a managed challenge.
+    if (renderTier && (!rawResult.success || rawResult.cloudflareBlocked) && rawResult.method !== 'flaresolverr') {
+      if (await isFlareSolverrAvailable()) {
+        logger.info(`[ExternalScrape] Render tier: escalating to FlareSolverr after Puppeteer block on ${url}`);
+        try {
+          const fsResult = await scraper.execute({ action, url, options: { ...options, useFlareSolverr: true } });
+          if (fsResult?.success) {
+            logger.info(`[ExternalScrape] FlareSolverr succeeded after Puppeteer fallback for ${url}`);
+            rawResult = fsResult;
+          }
+        } catch (fsErr) {
+          logger.warn(`[ExternalScrape] FlareSolverr escalation failed for ${url}: ${fsErr.message}`);
         }
       }
     }
@@ -138,7 +185,13 @@ async function executeScrape(req, { url, selectors, extractType = 'text', userAg
         microdata: rawResult.content.microdata || []
       } : null,
       method: String(rawResult.method || 'unknown'),
-      error: rawResult.error ? String(rawResult.error) : undefined
+      error: rawResult.error ? String(rawResult.error) : undefined,
+      // Preserve raw HTML and cookies from FlareSolverr so we can attach
+      // HTML to render-tier responses without a redundant fetch and so the
+      // screenshot pass can navigate past Cloudflare with the same cookies.
+      _rawHtml: typeof rawResult._rawHtml === 'string' ? rawResult._rawHtml : undefined,
+      _cookies: Array.isArray(rawResult._cookies) ? rawResult._cookies : undefined,
+      _userAgent: typeof rawResult._userAgent === 'string' ? rawResult._userAgent : undefined
     };
   } catch (err) {
     const msg = typeof err?.message === 'string' ? err.message : 'Scraping failed';
@@ -184,19 +237,31 @@ async function executeScrape(req, { url, selectors, extractType = 'text', userAg
     method: result.method
   };
 
-  // Capture raw HTML for full/render tiers
-  try {
-    const axios = (await import('axios')).default;
-    const htmlRes = await axios.get(url, { timeout: 15000, maxContentLength: 5 * 1024 * 1024, headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' } });
-    if (typeof htmlRes.data === 'string') {
-      response._rawHtml = htmlRes.data;
-    }
-  } catch { /* HTML fetch optional, don't fail */ }
-
-  // Capture screenshot for render tier via separate screenshot action
-  if (usePuppeteer && scraper.execute) {
+  // Use raw HTML from FlareSolverr if available; otherwise do a direct fetch.
+  if (typeof result._rawHtml === 'string' && result._rawHtml.length > 0) {
+    response._rawHtml = result._rawHtml;
+  } else {
     try {
-      const ssResult = await scraper.execute({ action: 'screenshot', url, options: { fullPage: false } });
+      const axios = (await import('axios')).default;
+      const htmlRes = await axios.get(url, { timeout: 15000, maxContentLength: 5 * 1024 * 1024, headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' } });
+      if (typeof htmlRes.data === 'string') {
+        response._rawHtml = htmlRes.data;
+      }
+    } catch { /* HTML fetch optional, don't fail */ }
+  }
+
+  // Capture screenshot for render tier via separate screenshot action.
+  // For FlareSolverr-solved pages, pass the CF-clearance cookies so puppeteer
+  // can navigate past the challenge.
+  const wantScreenshot = usePuppeteer || renderTier;
+  if (wantScreenshot && scraper.execute) {
+    try {
+      const ssOptions = { fullPage: false };
+      if (Array.isArray(result._cookies) && result._cookies.length > 0) {
+        ssOptions.cookies = result._cookies;
+      }
+      if (result._userAgent) ssOptions.userAgent = result._userAgent;
+      const ssResult = await scraper.execute({ action: 'screenshot', url, options: ssOptions });
       if (ssResult.success && ssResult.screenshot) {
         response._screenshot = ssResult.screenshot;
       }
@@ -251,8 +316,9 @@ router.post('/',
       await ExternalCreditBalance.debitCredits(req.wallet, creditCost);
 
       try {
-        const usePuppeteer = tier === 'render' || tier === 'stealth';
-        const result = await executeScrape(req, { url, selectors, extractType, userAgent, usePuppeteer });
+        const usePuppeteer = tier === 'stealth';
+        const renderTier = tier === 'render';
+        const result = await executeScrape(req, { url, selectors, extractType, userAgent, usePuppeteer, renderTier });
 
         if (!result.success) {
           // Refund on target failure
