@@ -47,7 +47,7 @@ Both methods give you the same `gsk_*` API key and access the same services.
 | Web Scrape (basic) | `POST /scrape` | 1 | Metadata, text, links |
 | Web Scrape (stealth) | `POST /scrape` | 2 | Forces Puppeteer for difficult sites |
 | Web Scrape (full) | `POST /scrape` | 3 | + raw HTML |
-| Web Scrape (render) | `POST /scrape` | 5 | + HTML + screenshot (Puppeteer) |
+| Web Scrape (render) | `POST /scrape` | 5 | + HTML + screenshot, FlareSolverr-backed for Cloudflare-protected sites (Rumble, Bitchute, etc.) |
 | Batch Scrape | `POST /scrape/batch` | 1-5 each | Up to 100 URLs |
 | YouTube Download | `POST /youtube/download` | 10 | MP4 video |
 | YouTube Audio | `POST /youtube/audio` | 8 | MP3 audio |
@@ -347,7 +347,20 @@ The gateway calls `GET /api/external/catalog` on your agent and reads the `servi
 
 ---
 
-## Recent Updates (April 30, 2026)
+## Recent Updates (May 1, 2026)
+
+### v2.25.10 — PR Review Pass + FlareSolverr Render Tier
+
+**Render-tier scraping** (v2.25.7) — Cloudflare-protected sites (Rumble, Bitchute, etc.) no longer return 500 on the render tier. New `src/utils/flareSolverr.js` adds a 30-second-cached availability check + GET helper against a local FlareSolverr instance (`FLARESOLVERR_URL`, default `http://127.0.0.1:8191/v1`). The render tier now tries FlareSolverr first, falls back to cheerio→puppeteer, and escalates back to FS if puppeteer hits a managed challenge. Cookies + UA are passed through to puppeteer for screenshot capture so the rendered DOM matches the bypassed session.
+
+**8 AI-generated PRs reviewed** (v2.25.10, #2057–#2064) — 4 implemented manually with corrections, 4 closed.
+
+| Feature | Endpoint / Plugin |
+|---------|-------------------|
+| Shazam lyrics | `Shazam.getLyrics({ songId })` or `{ artist, title }` — resolves songId via `track_info`, queries lyrics.ovh, NodeCache-cached |
+| LP MM scheduling | `POST /api/crypto/lp/mm/schedule` — Agenda-backed, ISO/natural-language/cron auto-detection (see LP MM section above) |
+| P2P session counters | `sessionCount`, `reconnectionCount`, `averageSessionSeconds` now persisted on `P2PPeer` and exposed via `getActivityReport()` |
+| Adaptive auth rate limit | `POST /api/external/*` — `express-rate-limit` driven by circuit breaker state (60/10/5 per min CLOSED/HALF_OPEN/OPEN, tunable via `EXTERNAL_AUTH_RATE_*`); keys by `X-Agent-Id` first |
 
 ### v2.25.6 — PR Review Pass: 26 PRs (5 merged, 11 implemented, 10 closed)
 
@@ -824,7 +837,7 @@ Minimum purchase: 10 credits. Double-spend protected.
 | Web Scrape (metadata + text) | 1 | basic |
 | Web Scrape (Puppeteer forced) | 2 | stealth |
 | Web Scrape (+ raw HTML) | 3 | full |
-| Web Scrape (+ HTML + screenshot) | 5 | render |
+| Web Scrape (+ HTML + screenshot, Cloudflare bypass) | 5 | render |
 | YouTube Download (MP4) | 10 | — |
 | YouTube Audio (MP3) | 8 | — |
 | Media Transcoding | 20 | — |
@@ -2381,6 +2394,9 @@ Autonomous concentrated liquidity market maker for SKYNET/BNB on PancakeSwap V3.
 | POST | `/api/crypto/lp/mm/close` | Remove all liquidity and deactivate |
 | POST | `/api/crypto/lp/mm/rebalance` | Manual rebalance — remove + re-add at current price center |
 | POST | `/api/crypto/lp/mm/collect` | Collect accumulated V3 trading fees |
+| POST | `/api/crypto/lp/mm/schedule` | Schedule operation (`rebalance`/`collect`/`open`/`close`). Body: `{ operation, when }` — `when` accepts ISO date, natural language ("in 5 minutes"), or 5/6-field cron (recurring). v2.25.10 |
+| GET | `/api/crypto/lp/mm/schedule` | List active scheduled jobs with next-run times |
+| DELETE | `/api/crypto/lp/mm/schedule/:jobId` | Cancel scheduled operation |
 
 ```bash
 # Check market maker status
