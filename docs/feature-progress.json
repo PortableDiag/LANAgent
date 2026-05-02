@@ -1,8 +1,8 @@
 {
-  "lastUpdated": "2026-05-01T12:30:00.000Z",
+  "lastUpdated": "2026-05-01T19:50:00.000Z",
   "overallProgress": "100%",
-  "status": "PRODUCTION READY - v2.25.10 - render-tier scraping bypasses Cloudflare via FlareSolverr; PR review pass added Shazam lyrics, LP MM scheduled operations, persisted peer session counters, adaptive external-auth rate limit.",
-  "milestone": "Bundled sync from genesis: render-tier FlareSolverr fix (originally v2.25.7) + PR review pass on PRs #2057-#2064 (4 implemented manually, 4 closed). Genesis-only crypto strategy work (v2.25.8 TokenTrader cleanup, v2.25.9 watchlist V2-only liquidity fix) is intentionally not synced.",
+  "status": "PRODUCTION READY - v2.25.11 - V4 quote sanity log demoted to debug (cleans ~200 unactionable warn entries/day from reverting Uniswap V4 hook decode artifacts). Plus prior 2.25.10 features (render-tier scraping via FlareSolverr; PR review pass: Shazam lyrics, LP MM scheduled ops, peer session counters, adaptive external-auth rate limit).",
+  "milestone": "v2.25.11 cleans up swap log noise discovered while diagnosing the production crypto agent. Public release covers infrastructure changes only — additional crypto strategy refinements live on the genesis fork per project policy.",
   "features": {
     "renderTierFlareSolverr2026_05_01": {
       "status": "deployed",

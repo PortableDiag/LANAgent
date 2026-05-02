@@ -2,9 +2,9 @@
   "info": {
     "_postman_id": "9b5edc66-ea34-4329-a9d5-baca5366e76d",
     "name": "LANAgent API Collection",
-    "description": "LANAgent API v2.25.10 \u2014 Render-tier scraping bypasses Cloudflare via FlareSolverr (Rumble/Bitchute now return 200 with HTML + screenshot). PR review pass: Shazam getLyrics, LP MM scheduled operations CRUD, persisted peer session/reconnection counters, adaptive external-auth rate limit. Updated May 1, 2026.",
+    "description": "LANAgent API v2.25.11 \u2014 V4 quote sanity warning demoted to debug (cleans ~200 unactionable log entries/day from reverting Uniswap V4 hook decode artifacts; discard behaviour unchanged). v2.25.10 features remain: render-tier scraping via FlareSolverr (Rumble/Bitchute), Shazam getLyrics, LP MM scheduled operations CRUD, persisted peer session/reconnection counters, adaptive external-auth rate limit. Updated May 1, 2026.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
-    "version": "2.25.10"
+    "version": "2.25.11"
   },
   "auth": {
     "type": "bearer",

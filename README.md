@@ -250,7 +250,7 @@ All repo references are resolved dynamically from git remotes — no hardcoded U
 - 👁️ **Image Analysis**: Describe images, detect objects, extract text using AI
 - 💰 **Cryptocurrency Wallet**: Full multi-chain wallet with BTC/ETH/BSC/Polygon/Base support, smart contract interaction, DeFi operations, testnet faucets, HD wallet generation, and secure key management
 
-**Latest (v2.24.8):** Installer auto-fork and auto-dependency install, Docker self-modification support, PancakeSwap slippage protection, MIT license. See [CHANGELOG.md](CHANGELOG.md) for full history.
+**Latest (v2.25.11):** V4 quote sanity warning demoted to debug — cleans ~200/day of unactionable log noise from reverting Uniswap V4 hook decode artifacts (discard behaviour unchanged). v2.25.10 PR review pass added Shazam lyrics lookup, LP Market Maker scheduled operations (CRUD via Agenda), persisted P2P peer session/reconnection counters, and adaptive rate limiting on external-auth middleware tied to the identity-verification circuit breaker. v2.25.7 added FlareSolverr-backed render-tier scraping (Cloudflare-protected sites like Rumble/Bitchute now return 200 with HTML + screenshot). See [CHANGELOG.md](CHANGELOG.md) for full history.
 
 ## API Authentication
 

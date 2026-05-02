@@ -2,6 +2,11 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.11] - 2026-05-01
+
+### Fixed
+- **swapService V4 quote sanity log demoted to debug** — reverting Uniswap V4 hooks return bytes that decode to a sentinel ~8.22e58 uint256, tripping the existing `amountOut > 1000× input` guard. The guard correctly discards the bad quote, but the WARN-level log was generating ~200 entries/day of unactionable noise. Now `debug` only — discard behaviour is unchanged.
+
 ## [2.25.10] - 2026-05-01
 
 Sync from genesis. Bundles render-tier scraping fix (originally v2.25.7) and the v2.25.10 PR review pass into a single public release. Genesis-only crypto strategy work (v2.25.8 TokenTrader cleanup, v2.25.9 watchlist V2 liquidity fix) is intentionally not synced.
