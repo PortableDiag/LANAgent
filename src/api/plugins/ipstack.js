@@ -57,6 +57,16 @@ export default class IPstackPlugin extends BasePlugin {
           'what is my timezone',
           'find my IP timezone'
         ]
+      },
+      {
+        command: 'getTimezones',
+        description: 'Get timezone information for multiple IP addresses',
+        usage: 'getTimezones({ ipAddresses: ["134.201.250.155", "192.168.1.1"] })',
+        examples: [
+          'get timezones for IPs 134.201.250.155 and 192.168.1.1',
+          'find timezones of multiple IP addresses',
+          'retrieve timezone data for IPs 8.8.8.8 and 8.8.4.4'
+        ]
       }
     ];
 
@@ -136,6 +146,8 @@ export default class IPstackPlugin extends BasePlugin {
           return await this.getTimezone(data);
         case 'getOwnTimezone':
           return await this.getOwnTimezone();
+        case 'getTimezones':
+          return await this.getTimezones(data);
         default:
           throw new Error(`Unknown action: ${action}`);
       }
@@ -246,6 +258,26 @@ export default class IPstackPlugin extends BasePlugin {
       this.logger.error('Error fetching own timezone data:', error);
       return { success: false, error: 'Failed to fetch own timezone data.' };
     }
+  }
+
+  /**
+   * New feature: Batch timezone retrieval for multiple IP addresses
+   */
+  async getTimezones(data) {
+    this.validateParams(data, {
+      ipAddresses: { required: true, type: 'array' }
+    });
+
+    return await this.fetchTimezoneBatch(data.ipAddresses);
+  }
+
+  async fetchTimezoneBatch(ipAddresses) {
+    const results = [];
+    for (const ip of ipAddresses) {
+      const result = await this.getCachedData(ip, () => this.fetchTimezone(ip));
+      results.push(result);
+    }
+    return { success: true, data: results };
   }
 
   async getCachedData(key, fetchFunc) {

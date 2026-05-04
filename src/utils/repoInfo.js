@@ -41,7 +41,9 @@ export function getOriginRepo(repoPath) {
       _cachedOrigin = parsed;
       return _cachedOrigin;
     }
-  } catch {}
+  } catch (error) {
+    logger.debug(`repoInfo: git remote lookup failed, falling back: ${error.message}`);
+  }
 
   // Try env var
   const envRepo = process.env.GITHUB_REPO;
