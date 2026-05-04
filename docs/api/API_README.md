@@ -45,9 +45,9 @@ Both methods give you the same `gsk_*` API key and access the same services.
 | Service | Endpoint | Credits | Description |
 |---------|----------|---------|-------------|
 | Web Scrape (basic) | `POST /scrape` | 1 | Metadata, text, links |
-| Web Scrape (stealth) | `POST /scrape` | 2 | Forces Puppeteer for difficult sites |
-| Web Scrape (full) | `POST /scrape` | 3 | + raw HTML |
-| Web Scrape (render) | `POST /scrape` | 5 | + HTML + screenshot, FlareSolverr-backed for Cloudflare-protected sites (Rumble, Bitchute, etc.) |
+| Web Scrape (stealth) | `POST /scrape` | 2 | Forces Puppeteer for difficult sites; auto-rotates VPN on block |
+| Web Scrape (full) | `POST /scrape` | 3 | + raw HTML; auto-rotates VPN on block |
+| Web Scrape (render) | `POST /scrape` | 5 | + HTML + screenshot, FlareSolverr-backed for Cloudflare-protected sites (Rumble, Bitchute, etc.); auto-rotates VPN on block |
 | Batch Scrape | `POST /scrape/batch` | 1-5 each | Up to 100 URLs |
 | YouTube Download | `POST /youtube/download` | 10 | MP4 video |
 | YouTube Audio | `POST /youtube/audio` | 8 | MP3 audio |
@@ -117,6 +117,41 @@ GET /portal/packages
     { "id": "pro", "price": 5000, "credits": 4700, "priceDisplay": "$50.00" }
   ]}
 ```
+
+---
+
+### Scraper Subscriptions (v2.25.12+)
+
+Monthly Stripe subscriptions for `/scrape` and `/scrape/batch` calls — flat-rate alternative to the per-call credit pool. Two independent quota buckets per plan: `basic` (covers `basic`/`stealth`/`full` tiers) and `render` (covers the `render` tier). Quotas reset on every renewal. Calls past the cap automatically fall back to the credit pool — never hard-fail as long as the user has either subscription quota or credits available.
+
+| Plan | Price | Basic / month | Render / month |
+|------|-------|---------------|----------------|
+| Scraper Starter | $10/mo | 100,000 | 2,500 |
+| Scraper Pro | $25/mo | 500,000 | 15,000 |
+| Scraper Business | $50/mo | 2,000,000 | 50,000 |
+
+```
+GET /portal/scrape-plans                     ← public; lists all plans + quotas
+
+POST /portal/subscribe                       ← auth required (gsk_* or JWT)
+{ "plan": "scraper_pro" }
+→ { "checkoutUrl": "https://checkout.stripe.com/...", "sessionId": "cs_live_..." }
+
+GET /portal/subscription                     ← auth required
+→ { "active": true, "plan": "scraper_pro", "planName": "Scraper Pro",
+    "basicUsed": 1234, "basicLimit": 500000,
+    "renderUsed": 17, "renderLimit": 15000,
+    "periodEnd": "2026-06-03T...", "cancelAtPeriodEnd": false }
+
+POST /portal/cancel-subscription             ← auth required; cancels at period end
+→ { "success": true, "message": "Subscription will end at period end. You retain quota until then." }
+```
+
+Subscriptions cover **only** the scrape routes; all 25 other services (YouTube, transcoding, AI image gen, code sandbox, plugins, etc.) continue to bill from the credit pool. Subscriptions are additive — users can hold credits and a subscription simultaneously, and during an active sub the gateway uses subscription quota first, falling back to credits only when the bucket is exhausted.
+
+`/scrape` response includes `billing: 'subscription' | 'credits'` so the client can tell which bucket paid for the call. When billed via subscription, `subBucket`, `subUsed`, and `subLimit` are surfaced; when billed via credits, `creditsCharged` and `creditsRemaining` are surfaced.
+
+**Promo: first-month discount.** When a `Promotion` is active, subscription checkout attaches a Stripe coupon (`duration: 'once'`) for the matching discount percentage. Renewals revert to base price. Existing one-time credit packages already give bonus credits during promotions — same discount percent applies to the first month of any new sub.
 
 ---
 
@@ -348,6 +383,16 @@ The gateway calls `GET /api/external/catalog` on your agent and reads the `servi
 ---
 
 ## Recent Updates (May 1, 2026)
+
+### v2.25.12 — Scraper Subscriptions + VPN Rotation on Block
+
+**Scraper Subscriptions** — three monthly Stripe tiers ($10/$25/$50) on the gateway portal, additive to the existing one-time credit packages. Two independent quota buckets per plan (basic + render). Tier mapping: `basic`/`stealth`/`full` → basic counter, `render` → render counter. Quotas reset on `invoice.paid` webhook (`subscription_cycle`). Falls back to credit pool when bucket exhausted. New routes: `GET /portal/scrape-plans`, `GET /portal/subscription`, `POST /portal/subscribe`, `POST /portal/cancel-subscription`. See **Scraper Subscriptions** section above.
+
+**Promo coupon** — when an active `Promotion` document exists, `/portal/subscribe` attaches a Stripe coupon (`lanagent_promo_${pct}pct_once`, `duration: 'once'`) to the Checkout session. First-month discount only; renewals at full price. Idempotent via `getOrCreateStripeCoupon()`.
+
+**Defensive Stripe customer recovery** — `getOrCreateStripeCustomer(user)` validates a stored `stripeCustomerId` against Stripe before use; recreates if missing (handles stale test-mode IDs after live-key switch, or dashboard deletions). Used by both `/portal/checkout` and `/portal/subscribe`.
+
+**Paid-scrape: VPN auto-rotation on block** — `executeScrapeWithVpnRotation` wrapper in `src/api/external/routes/scraping.js` detects block-shaped failures (403/406/429/503/CF challenge/access-denied/rate-limit) on `stealth`/`full`/`render` tiers and rotates the agent's ExpressVPN exit through a curated 10-location pool, retrying up to `MAX_VPN_ROTATIONS = 2` times per scrape. Skipped on `tier='basic'`. Recovery surfaces `vpnRotation: { location, rotations }` in the response. Test hook `_testBlock: 'once' | 'always'` in request body simulates blocks for E2E verification.
 
 ### v2.25.10 — PR Review Pass + FlareSolverr Render Tier
 
@@ -3242,6 +3287,17 @@ POST /api/plugin
 POST /api/plugin
 { "plugin": "ipstack", "action": "getOwnTimezone" }
 ```
+
+**IPstack - Batch timezone lookup (v2.25.14):**
+```
+POST /api/plugin
+{
+  "plugin": "ipstack",
+  "action": "getTimezones",
+  "ipAddresses": ["134.201.250.155", "8.8.8.8", "1.1.1.1"]
+}
+```
+Returns timezone info for each IP. Mirrors `fetchGeolocationBatch`; reuses the plugin's per-IP `fetchTimezone` + cache helpers, so repeated lookups for the same IPs hit the cache.
 
 **Currencylayer - Get currency fluctuations:**
 ```
@@ -7565,7 +7621,7 @@ LANAgent uses a comprehensive plugin system with 77+ available plugins:
 - **chainlink** - Decentralized oracle price feeds and blockchain data
 - **news** - News articles and headlines from various sources
 - **alphavantage** - Stock market data, forex rates, and financial information
-- **ipstack** - IP geolocation and address lookup (getLocation with single IP or ipRange, getOwnLocation, getTimezone, getOwnTimezone)
+- **ipstack** - IP geolocation and address lookup (getLocation with single IP or ipRange, getOwnLocation, getTimezone, getOwnTimezone, getTimezones batch)
 - **weatherstack** - Real-time weather data (getCurrentWeather, getWeatherDescription, getTemperature)
 - **numverify** - Phone number validation and carrier lookup (validatePhoneNumber, getCarrierInfo, batchValidatePhoneNumbers, convertPhoneNumberFormat)
 

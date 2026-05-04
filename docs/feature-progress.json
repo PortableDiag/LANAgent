@@ -1,22 +1,21 @@
 {
-  "lastUpdated": "2026-05-03T23:55:00.000Z",
+  "lastUpdated": "2026-05-03T23:59:00.000Z",
   "overallProgress": "100%",
-  "status": "PRODUCTION READY - v2.25.13 - Gateway-side release adding the email + support layer (usage-threshold notifications, account-management email suite, support inbox poller). Plus prior v2.25.12 paid-scrape VPN auto-rotation on block (10-location pool, 2 retries, cache invalidation; surfaces vpnRotation metadata on recovery; basic tier skipped).",
-  "milestone": "Two infrastructure releases: v2.25.12 added VPN auto-rotation to the paid-scrape path in src/api/external/routes/scraping.js (operator concern: 'my IP will get flagged scraping the same target on the raw IP'; built executeScrapeWithVpnRotation around the existing scraper); v2.25.13 was triggered by the operator question 'when a customer has consumed 90 or 100% of their credits/allowance, do we email them like ScraperAPI does?' — answer was no, so the gateway got a full email + support layer including password reset (which had no /portal/forgot-password route at all, locking out anyone who forgot their password). Public release covers infrastructure changes only — additional crypto strategy refinements live on the genesis fork per project policy.",
+  "status": "PRODUCTION READY - v2.25.14 - ALICE PR review pass: 18 auto-generated PRs (#2065-#2082) reviewed one by one. 1 merged (ipstack getTimezones batch command, mirrors fetchGeolocationBatch). 1 salvaged (repoInfo.js silent catch replaced with logger.debug for git-remote fallback observability). 16 closed with explanatory comments — failure patterns: breaking changes that would crash callers, would-crash-on-import code (__dirname in ESM, TaskScheduler.schedule called as static), stubs that return success:true without doing anything, on-chain double-spend hazards from blanket retry-wrapping of writes, misuses of validateJsonSchema, redundant duplicates of existing code, and description-vs-diff mismatches.",
+  "milestone": "Continued the ALICE PR triage cadence. Every closure includes a comment explaining the specific issues so the LLM has feedback to learn from. The salvage rule — 'If the PR had a good idea but bad implementation, and you can correctly fully implement it without rewriting or changing or breaking any functionality, then do that' — surfaced one safe one-line improvement (#2067 → debug logging on the git-remote catch). Headline output of v2.25.14: a single new public-API capability (ipstack getTimezones batch) and 17 closed PRs that won't ship code that would break production.",
   "features": {
-    "scrapeVpnRotation2026_05_03": {
+    "alicePrReviewPass2026_05_03": {
       "status": "deployed",
       "progress": "100%",
       "addedDate": "2026-05-03",
-      "description": "Auto-rotate the agent's ExpressVPN exit through a curated 10-location pool when a paid-scrape returns a block-shaped failure (403/406/429/503/Cloudflare challenge/access-denied/rate-limit signature). Up to MAX_VPN_ROTATIONS=2 retries per scrape; cache invalidated on each retry. Surfaces vpnRotation: { location, rotations } in the response on recovery. Skipped on tier='basic' because cheerio fetches are too cheap/fast to justify the 3-5s VPN reconnect cost. Test hook _testBlock: 'once' | 'always' in request body forces simulated blocks for E2E verification without needing a real blocked target.",
-      "pool": ["usnj", "usla", "usch", "cato", "uklo", "nlam", "defr", "frpa", "jpto", "sgma"],
-      "files": ["src/api/external/routes/scraping.js"]
+      "description": "Reviewed 18 ALICE-generated PRs (#2065-#2082) one by one. Outcome: 1 merged, 1 salvaged, 16 closed each with an explanatory comment. Merged: #2065 (ipstack getTimezones batch — mirrors fetchGeolocationBatch, reuses fetchTimezone + getCachedData helpers, no new deps). Salvaged: #2067 (repoInfo.js — silent } catch {} → logger.debug for git-remote fallback observability; rest of PR closed because making getOriginRepo async would break in-file sync callers, retryOperation around execSync is pointless, and unused NodeCache import bloats the file). 16 closures categorized by root cause (breaking changes, would-crash-on-import code, stubs returning success:true, financial/safety hazards from blanket retry on writes, misused utilities, redundant duplicates of existing code, description-vs-diff mismatches, operational-doc loss). All comments cite specific file:line locations and explain the underlying issue.",
+      "files": ["src/api/plugins/ipstack.js", "src/utils/repoInfo.js"]
     },
     "gatewayUsageThresholdEmails2026_05_03": {
       "status": "deployed",
       "progress": "100%",
       "addedDate": "2026-05-03",
-      "description": "Transactional emails fire automatically as a portal user crosses 80%/90%/100% of their subscription bucket (basic + render, separately) or their credit-pool balance. Credit thresholds are computed against creditAlertBaseline (snapshot of balance after most recent top-up) so each top-up resets the alert window. Sub thresholds reset on invoice.paid (billing_reason: subscription_cycle). Fire-once-per-cycle enforced via atomic findOneAndUpdate so concurrent debits can't double-send. Send is fire-and-forget — /scrape never blocks on SMTP. Lives in the api-lanagent-net gateway repo, not in the agent itself.",
+      "description": "Transactional emails fire automatically as a portal user crosses 80%/90%/100% of their subscription bucket (basic + render, separately) or their credit-pool balance. Credit thresholds are computed against creditAlertBaseline (snapshot of balance after most recent top-up) so each top-up resets the alert window — avoids the 'lifetime % spent' problem where a heavy user is at 99% forever. Sub thresholds reset on invoice.paid (billing_reason: subscription_cycle). Fire-once-per-cycle enforced via atomic findOneAndUpdate on per-threshold notifications.{credits,subBasic,subRender}{80,90,100} timestamps so concurrent debits can't double-send. Send is fire-and-forget — /scrape never blocks on SMTP. End-to-end verified: 6 emails fired correctly, idempotency verified (no resend when flag already set).",
       "thresholds": [80, 90, 100],
       "files": ["api-lanagent-net/email.mjs", "api-lanagent-net/portal.mjs", "api-lanagent-net/index.mjs"]
     },
@@ -24,7 +23,7 @@
       "status": "deployed",
       "progress": "100%",
       "addedDate": "2026-05-03",
-      "description": "Account-management email suite. New routes: POST /portal/forgot-password, POST /portal/reset-password, GET /portal/reset (HTML form), GET /portal/verify (one-shot verification page), POST /portal/resend-verification. Hooks into existing routes: /portal/signup fires welcome + email-verification; /portal/api-keys POST/DELETE/regenerate fires create/revoke notifications with name/prefix/source-IP/timestamp; /portal/cancel-subscription fires confirmation with period-end date. PortalToken collection with TTL index, SHA-256 hashed tokens, prior-unused tokens invalidated on mint so links can't be replayed.",
+      "description": "Full account-management email suite. New routes: POST /portal/forgot-password (always returns 200 to avoid leaking which addresses are registered), POST /portal/reset-password (consumes single-use token + sets new password), GET /portal/reset?token=… (HTML form linked from reset email), GET /portal/verify?token=… (one-shot verification page that flips emailVerified=true), POST /portal/resend-verification. Hooks into existing routes: /portal/signup fires welcome + email-verification on completion; /portal/api-keys POST/DELETE/regenerate fires create/revoke notifications with name/prefix/source-IP/timestamp; /portal/cancel-subscription fires cancellation confirmation with period-end date. New PortalToken collection with TTL index — Mongo auto-removes expired tokens. Tokens are SHA-256 hashed in DB; raw value only ever leaves in the email URL. Minting a fresh token invalidates prior unused tokens of the same purpose so stale links can't be replayed.",
       "endpoints": ["POST /portal/forgot-password", "POST /portal/reset-password", "GET /portal/reset", "GET /portal/verify", "POST /portal/resend-verification"],
       "files": ["api-lanagent-net/email.mjs", "api-lanagent-net/portal.mjs"]
     },
@@ -32,20 +31,109 @@
       "status": "deployed",
       "progress": "100%",
       "addedDate": "2026-05-03",
-      "description": "support@lanagent.net mailbox monitored by a new support-poller PM2 service on the gateway VPS. Polls IMAPS every 60s for UNSEEN messages. v1: notification-only — Telegram alert with from/subject/body, skips bouncebacks/auto-replies/noreply senders. v2: same flow plus user-context enrichment — looks up the From: address in PortalUser, builds 7-day usage context (sub state with bucket %, credits, recent request totals, top failing routes, most recent failure with error message + age, last payment), and includes that in the Telegram message. Marks messages \\Seen after notify so each ticket pings exactly once. Roadmap to v3 (LLM-drafted replies + Telegram approve flow), v4 (auto-send for trusted categories), v5 (proactive outreach on internal events) documented in docs/proposals/ai-support-system.md.",
+      "description": "support@lanagent.net mailbox provisioned (500MB quota) and monitored by a new support-poller PM2 service on the gateway VPS. Polls IMAPS every 60s for UNSEEN messages. v1: notification-only — Telegram alert with from/subject/body, skips bouncebacks/auto-replies/noreply senders. v2: same flow plus user-context enrichment — looks up the From: address in PortalUser, builds 7-day usage context (sub state with bucket %, credits, recent request totals, top failing routes, most recent failure with error message + age, last payment), and includes that in the Telegram message. Both matched-sender and unmatched-sender paths verified end-to-end. Marks messages \\Seen after notify so each ticket pings exactly once. Roadmap to v3 (LLM-drafted replies + Telegram approve flow), v4 (auto-send for trusted categories), v5 (proactive outreach on internal events) documented in docs/proposals/ai-support-system.md.",
       "service": "support-poller",
-      "files": ["api-lanagent-net/support-poller.mjs", "docs/proposals/ai-support-system.md"]
+      "files": ["api-lanagent-net/support-poller.mjs", "api-lanagent-net/ecosystem.config.cjs", "docs/proposals/ai-support-system.md"]
+    },
+    "scrapeVpnRotation2026_05_03": {
+      "status": "deployed",
+      "progress": "100%",
+      "addedDate": "2026-05-03",
+      "description": "Auto-rotate the agent's ExpressVPN exit through a curated 10-location pool when a paid-scrape returns a block-shaped failure (403/406/429/503/Cloudflare challenge/access-denied/rate-limit signature). Up to MAX_VPN_ROTATIONS=2 retries per scrape; cache invalidated on each retry. Surfaces vpnRotation: { location, rotations } in the response on recovery. Skipped on tier='basic' because cheerio fetches are too cheap/fast to justify the 3-5s VPN reconnect cost. Test hook _testBlock: 'once' | 'always' in request body forces simulated blocks for E2E verification without needing a real blocked target. Verified end-to-end: simulated block on tier=stealth rotated smart->usnj and recovered on attempt 1; _testBlock=always exhausted both rotations (smart->usnj->usla) and refunded credits.",
+      "pool": ["usnj", "usla", "usch", "cato", "uklo", "nlam", "defr", "frpa", "jpto", "sgma"],
+      "files": ["src/api/external/routes/scraping.js"]
+    },
+    "gatewayScraperSubscriptions2026_05_03": {
+      "status": "deployed",
+      "progress": "100%",
+      "addedDate": "2026-05-03",
+      "description": "Three monthly Stripe subscription tiers on api.lanagent.net for /scrape and /scrape/batch routes. Two independent quota buckets per plan (basic + render); tier mapping basic/stealth/full->basic counter, render->render counter. Subscriptions are additive to existing one-time credit packages and BNB/SKYNET crypto purchases. When sub bucket exhausted, /scrape falls back to credit pool. Quotas reset on invoice.paid webhook (subscription_cycle). Atomic mongo $expr ops prevent race conditions at the DB level.",
+      "tiers": {
+        "scraper_starter":  { "price": "$10/mo", "basic": 100000, "render": 2500 },
+        "scraper_pro":      { "price": "$25/mo", "basic": 500000, "render": 15000 },
+        "scraper_business": { "price": "$50/mo", "basic": 2000000, "render": 50000 }
+      },
+      "endpoints": ["GET /portal/scrape-plans", "GET /portal/subscription", "POST /portal/subscribe", "POST /portal/cancel-subscription"],
+      "webhookEvents": ["customer.subscription.created", "customer.subscription.updated", "customer.subscription.deleted", "invoice.paid"]
+    },
+    "subscriptionPromoCoupon2026_05_03": {
+      "status": "deployed",
+      "progress": "100%",
+      "addedDate": "2026-05-03",
+      "description": "When an active Promotion document exists, /portal/subscribe attaches a Stripe coupon (idempotently created via getOrCreateStripeCoupon(percentOff) with deterministic ID lanagent_promo_${pct}pct_once and duration: 'once') to the Checkout session. Discount applies to first invoice only; renewals revert to base price. Existing Launch Special (50%) promo now reduces first month of any sub from $10/$25/$50 to $5/$12.50/$25."
+    },
+    "stripeCustomerRecovery2026_05_03": {
+      "status": "deployed",
+      "progress": "100%",
+      "addedDate": "2026-05-03",
+      "description": "getOrCreateStripeCustomer(user) helper validates a stored stripeCustomerId against Stripe before use. If missing (typically left over from test mode after switching to live keys, or deleted in the dashboard), a fresh customer is created and the user record is updated. Used by both /portal/checkout and /portal/subscribe. Reproduced the bug by planting a fake customer ID on a test user, confirmed the helper detects the stale ID and self-heals."
+    },
+    "portalPriceLabelFix2026_05_03": {
+      "status": "deployed",
+      "progress": "100%",
+      "addedDate": "2026-05-03",
+      "description": "Three subscription-eligible service cards on api.lanagent.net were showing prices that didn't match what the gateway charged. Corrected the landing-page HTML to show real tier breakdowns, added three discrete demo cards for scraping (Basic/Stealth/Render), removed redundant Advanced Scraper card (kept underlying plugin endpoint), split YouTube into Video and Audio cards pointing at dedicated routes."
+    },
+    "prReviewBatch2026_05_01": {
+      "status": "deployed",
+      "progress": "100%",
+      "addedDate": "2026-05-01",
+      "description": "Reviewed 8 AI-generated PRs (#2057-#2064). 4 features manually implemented with corrections; 4 closed as broken/dead/speculative. All PRs left with detailed close comments explaining what was wrong and what was implemented (or why nothing was).",
+      "decisions": {
+        "implementedManually": [
+          "#2058 shazam getLyrics — PR used wrong lyrics.ovh URL shape (/v1/{songId} instead of /v1/{artist}/{title}). Reimplemented with proper Shazam.track_info -> artist+title resolution, NodeCache by songId or artist+title, 404/empty-lyrics distinction.",
+          "#2060 lpMarketMaker /schedule — PR called non-existent TaskScheduler.scheduleJob and didn't handle list/cancel. Reimplemented as full CRUD (POST/GET/DELETE) using req.app.locals.agent.scheduler.agenda with per-operation Agenda jobs, ISO/cron auto-detection, retryOperation wrapping. Persistent across restarts.",
+          "#2062 peerManager analytics — PR used in-memory Map cleared every restart and conflated session/reconnection counts. Reimplemented as persisted P2PPeer.sessionCount + reconnectionCount fields; getActivityReport now exposes averageSessionSeconds (computed from completed sessions only).",
+          "#2064 externalAuth adaptive rate limit — PR was structurally OK but keyed by IP (NAT collisions) and missing standardHeaders. Reimplemented with X-Agent-Id keyGenerator + forwarded-IP fallback, RFC-9239 RateLimit-* headers, env-tunable thresholds (EXTERNAL_AUTH_RATE_CLOSED/HALFOPEN/OPEN), 429 body includes circuitBreakerState."
+        ],
+        "closedNoImpl": [
+          "#2057 BaseProvider logRequestDetails — added unused method with no callers, no integration with existing updateMetrics. Dead code, no value.",
+          "#2059 repoInfo NodeCache layer — wrapped synchronous execSync in async retryOperation, breaking the function (parseGitHubUrl(<Promise>) returns null → silent fallthrough to env/genesis fallback on every call). Underlying premise wrong: module-level closure cache is already optimal, no need for TTL.",
+          "#2061 MqttBroker batch subscriptions — assigned NodeCache instance to schemaMethods (programming error), didn't implement promised bulkWrite, optimized methods that have no callers (real subscription mgmt goes through MqttBroker.updateOne).",
+          "#2063 SkynetServiceConfig dynamic rate limits — multiple structural failures: TaskScheduler.schedule doesn't exist, model file scheduling jobs at module load (initialization race), const referenced before declaration (TDZ), forEach+async race, lifetime totalRequests used as windowed metric, sawtooth ratchet logic. Real implementation needs proper sliding-window load measurement and an Agenda job in the scheduler service."
+        ]
+      },
+      "changes": [
+        "src/api/plugins/shazam.js: getLyrics action with correct lyrics.ovh routing, NodeCache by songId or artist+title, no spurious logger import, doesn't strip unrelated comments",
+        "src/api/lpMarketMaker.js: POST/GET/DELETE /schedule endpoints with Agenda jobs (lp-mm-rebalance/collect/open/close), ISO+cron auto-detection, looksLikeCron heuristic, lazy ensureJobsDefined, ObjectId cancel",
+        "src/services/p2p/peerManager.js: markOnline increments sessionCount and reconnectionCount on the peer doc; getActivityReport returns sessionCount/reconnectionCount/averageSessionSeconds",
+        "src/models/P2PPeer.js: sessionCount and reconnectionCount fields (default 0)",
+        "src/api/external/middleware/externalAuth.js: adaptiveAuthRateLimiter via express-rate-limit; max() reads circuit breaker state per request; X-Agent-Id keyGenerator with forwarded-IP fallback; standardHeaders/legacyHeaders=false; env tunables; 429 includes circuitBreakerState"
+      ],
+      "files": [
+        "src/api/plugins/shazam.js",
+        "src/api/lpMarketMaker.js",
+        "src/services/p2p/peerManager.js",
+        "src/models/P2PPeer.js",
+        "src/api/external/middleware/externalAuth.js"
+      ]
+    },
+    "watchlistV2LiquidityFix2026_05_01": {
+      "status": "deployed",
+      "progress": "100%",
+      "addedDate": "2026-05-01",
+      "description": "CryptoStrategyAgent.watchlistPriceFetcher set hasLiquidity=true only when V3 or V4 quote >= V2 quote. For V2-only tokens (every small-cap on PancakeSwap, including the SKYNET system token), V3/V4 returned null and hasLiquidity stayed false — the evaluator then counted that as a failure and incremented _failCount on every cycle. SKYNET (our own token) was at _failCount: 16 with system:true preventing removal. Verified on-chain: SKYNET V2 pool 0xf3def...8694a has 37.5M SKYNET / 1.10 BNB reserves (~$1,369 TVL, $0.0000182/token); no V3 pool exists at any fee tier (100/500/3000/10000). Fix: hasLiquidity = any of V2/V3/V4 has amountOut > 0; liquidityDepth = max(out * price) across protocols. Applied to both watchlistPriceFetcher definitions in CryptoStrategyAgent (auto-config branch and active-strategy branch). Reset SKYNET's persisted _failCount to 0 in subagents.state.domainState.strategyRegistry (both base trader and instance copy).",
+      "changes": [
+        "src/services/subagents/CryptoStrategyAgent.js:2789-2811 (auto-configure watchlist fetcher): replaced V3/V4-must-beat-V2 gate with any-protocol-counts accumulator helper",
+        "src/services/subagents/CryptoStrategyAgent.js:2961-2992 (active-strategy watchlist fetcher): same fix, same helper pattern",
+        "MongoDB live-state reset: subagents collection, _failCount=0 for SKYNET in strategies.token_trader.config.tokenWatchlist[symbol=SKYNET] and tokenTraders.<addr>.config.tokenWatchlist[symbol=SKYNET]"
+      ],
+      "files": [
+        "src/services/subagents/CryptoStrategyAgent.js"
+      ]
     },
     "renderTierFlareSolverr2026_05_01": {
       "status": "deployed",
       "progress": "100%",
       "addedDate": "2026-05-01",
       "description": "Render-tier scraping (5 credits, the highest paid tier) was returning HTTP 500 for Cloudflare-protected sites (Rumble, Bitchute, etc.) because puppeteer-extra-stealth could not solve managed Turnstile challenges. Render tier now routes through a local FlareSolverr Docker container which solves the challenge headlessly and returns the real HTML plus CF clearance cookies. Cookies are injected into puppeteer's screenshot pass so render tier still produces a real screenshot of CF-protected pages. Falls back to cheerio/puppeteer if FlareSolverr is unreachable; escalates back to FS if puppeteer hits a managed challenge.",
+      "verified": "Rumble (677KB HTML, 863KB screenshot, 17s, 5 credits charged), Bitchute (586KB HTML, 5s), example.com (no regression on basic tier 270ms).",
       "changes": [
         "src/utils/flareSolverr.js: NEW — FlareSolverr v1 client with 30s availability cache",
         "src/api/plugins/scraper.js: scrapeWithFlareSolverr() returns same content shape plus _rawHtml/_cookies/_userAgent; takeScreenshot() accepts cookies array and injects via page.setCookie before navigation; parseHtmlContent() extraction helper",
         "src/api/external/routes/scraping.js: executeScrape gains renderTier flag — tries FS first, falls back to cheerio/puppeteer, escalates back to FS if puppeteer hits managed challenge; result builder preserves _rawHtml/_cookies/_userAgent",
-        ".env.example: FLARESOLVERR_URL section documenting the docker run command"
+        ".env.example: FLARESOLVERR_URL section documenting the docker run command",
+        "Production: ghcr.io/flaresolverr/flaresolverr:3.4.6 on 127.0.0.1:8191 with --restart unless-stopped"
       ],
       "files": [
         "src/utils/flareSolverr.js",
@@ -54,24 +142,28 @@
         ".env.example"
       ]
     },
-    "prReviewBatch2026_05_01": {
+    "tokenTraderHeartbeatCleanup2026_05_01": {
       "status": "deployed",
       "progress": "100%",
       "addedDate": "2026-05-01",
-      "description": "Reviewed 8 AI-generated PRs (#2057-#2064). 4 features manually implemented with corrections; 4 closed as broken/dead/speculative. All PRs left with detailed close comments. Implementations from this batch: Shazam getLyrics, LP MM scheduled operations CRUD, persisted P2P session/reconnection counters, adaptive external-auth rate limit.",
+      "description": "TokenTraderHeartbeatManager._executeTick() now checks for the trader instance up-front via strategyRegistry.getTokenTrader() and calls stopToken() if it's gone, instead of letting the tick fail deep in the swap logic. Prevents orphaned timers from wasting CPU and producing confusing 'trader not found' errors after a token is exited or hot-reloaded.",
       "changes": [
-        "src/api/plugins/shazam.js: getLyrics action with correct lyrics.ovh routing (/v1/{artist}/{title}, both URL-encoded), Shazam.track_info to resolve songId to artist+title, NodeCache by songId or artist+title, distinguishes 404 from other errors",
-        "src/api/lpMarketMaker.js: POST/GET/DELETE /schedule endpoints with Agenda jobs (lp-mm-rebalance/collect/open/close), ISO+cron auto-detection (looksLikeCron heuristic), lazy ensureJobsDefined, ObjectId cancel; uses req.app.locals.agent.scheduler.agenda per the whois.js pattern",
-        "src/services/p2p/peerManager.js: markOnline increments peer.sessionCount and peer.reconnectionCount; getActivityReport returns sessionCount/reconnectionCount/averageSessionSeconds (computed from completed sessions only)",
-        "src/models/P2PPeer.js: sessionCount and reconnectionCount fields (default 0)",
-        "src/api/external/middleware/externalAuth.js: adaptiveAuthRateLimiter via express-rate-limit; max() reads circuit breaker state per request; X-Agent-Id keyGenerator with forwarded-IP fallback; standardHeaders/legacyHeaders=false; env tunables (EXTERNAL_AUTH_RATE_CLOSED/HALFOPEN/OPEN); 429 response includes circuitBreakerState"
+        "src/services/crypto/TokenTraderHeartbeatManager.js: orphan detection at start of _executeTick(), single info log, calls stopToken() to cancel timer cleanly"
       ],
       "files": [
-        "src/api/plugins/shazam.js",
-        "src/api/lpMarketMaker.js",
-        "src/services/p2p/peerManager.js",
-        "src/models/P2PPeer.js",
-        "src/api/external/middleware/externalAuth.js"
+        "src/services/crypto/TokenTraderHeartbeatManager.js"
+      ]
+    },
+    "tokenTraderGridCooldownTighten2026_05_01": {
+      "status": "deployed",
+      "progress": "100%",
+      "addedDate": "2026-05-01",
+      "description": "Lowered TokenTrader grid trade cooldown from 30 minutes to 10 minutes. The 30-minute window was too conservative for grid trading in sideways regime; on volatile small-caps it caused the strategy to miss multiple legitimate dip-buy opportunities per hour. 10 minutes still prevents whipsaw entries while letting the grid actually work the range. DIP-buy cooldown (1hr) and emergency-sell cooldowns are unchanged — those need the longer windows to avoid catastrophic re-entries.",
+      "changes": [
+        "src/services/crypto/strategies/TokenTraderStrategy.js: gridCooldownMs default 30min → 10min"
+      ],
+      "files": [
+        "src/services/crypto/strategies/TokenTraderStrategy.js"
       ]
     },
     "prReviewAndFeatures2026_04_30": {

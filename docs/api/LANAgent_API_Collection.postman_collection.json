@@ -2,9 +2,9 @@
   "info": {
     "_postman_id": "9b5edc66-ea34-4329-a9d5-baca5366e76d",
     "name": "LANAgent API Collection",
-    "description": "LANAgent API v2.25.13 \u2014 Two infrastructure releases since v2.25.11. v2.25.12: paid-scrape VPN auto-rotation on block (stealth/full/render tiers, 10-location pool, 2 retries, surfaces vpnRotation metadata on recovery; basic tier skipped). Plus gateway-side Scraper Subscriptions ($10/$25/$50 monthly) on api.lanagent.net. v2.25.13: gateway email + support layer \u2014 usage-threshold notification emails (80/90/100% on sub buckets and credit-pool balance, fire-once-per-cycle); account-management email suite (password reset, email verification, welcome, API-key created/revoked, sub cancellation); support@lanagent.net inbox monitored by a support-poller PM2 service that pings Telegram with enriched account context. v2.25.10 features remain: render-tier scraping via FlareSolverr (Rumble/Bitchute), Shazam getLyrics, LP MM scheduled operations CRUD, persisted peer session/reconnection counters, adaptive external-auth rate limit. Updated May 3, 2026.",
+    "description": "LANAgent API v2.25.14 \u2014 ALICE PR review pass: 18 auto-generated PRs (#2065-#2082) reviewed; 1 merged (ipstack getTimezones batch command), 1 salvaged (repoInfo.js git-remote fallback observability), 16 closed with explanatory comments. The new ipstack action `getTimezones` accepts an array of IP addresses and returns timezone info for each, mirroring the existing `fetchGeolocationBatch` pattern. v2.25.13 added the email + support layer to the gateway (usage-threshold notifications, password-reset + email-verification + API-key create/revoke + cancellation transactional emails, support@ inbox monitored by a Telegram-notifying poller). v2.25.12 features (VPN auto-rotation, Scraper Subscriptions) still in place. Updated May 3, 2026.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
-    "version": "2.25.13"
+    "version": "2.25.14"
   },
   "auth": {
     "type": "bearer",
