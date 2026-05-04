@@ -1,9 +1,41 @@
 {
-  "lastUpdated": "2026-05-01T19:50:00.000Z",
+  "lastUpdated": "2026-05-03T23:55:00.000Z",
   "overallProgress": "100%",
-  "status": "PRODUCTION READY - v2.25.11 - V4 quote sanity log demoted to debug (cleans ~200 unactionable warn entries/day from reverting Uniswap V4 hook decode artifacts). Plus prior 2.25.10 features (render-tier scraping via FlareSolverr; PR review pass: Shazam lyrics, LP MM scheduled ops, peer session counters, adaptive external-auth rate limit).",
-  "milestone": "v2.25.11 cleans up swap log noise discovered while diagnosing the production crypto agent. Public release covers infrastructure changes only — additional crypto strategy refinements live on the genesis fork per project policy.",
+  "status": "PRODUCTION READY - v2.25.13 - Gateway-side release adding the email + support layer (usage-threshold notifications, account-management email suite, support inbox poller). Plus prior v2.25.12 paid-scrape VPN auto-rotation on block (10-location pool, 2 retries, cache invalidation; surfaces vpnRotation metadata on recovery; basic tier skipped).",
+  "milestone": "Two infrastructure releases: v2.25.12 added VPN auto-rotation to the paid-scrape path in src/api/external/routes/scraping.js (operator concern: 'my IP will get flagged scraping the same target on the raw IP'; built executeScrapeWithVpnRotation around the existing scraper); v2.25.13 was triggered by the operator question 'when a customer has consumed 90 or 100% of their credits/allowance, do we email them like ScraperAPI does?' — answer was no, so the gateway got a full email + support layer including password reset (which had no /portal/forgot-password route at all, locking out anyone who forgot their password). Public release covers infrastructure changes only — additional crypto strategy refinements live on the genesis fork per project policy.",
   "features": {
+    "scrapeVpnRotation2026_05_03": {
+      "status": "deployed",
+      "progress": "100%",
+      "addedDate": "2026-05-03",
+      "description": "Auto-rotate the agent's ExpressVPN exit through a curated 10-location pool when a paid-scrape returns a block-shaped failure (403/406/429/503/Cloudflare challenge/access-denied/rate-limit signature). Up to MAX_VPN_ROTATIONS=2 retries per scrape; cache invalidated on each retry. Surfaces vpnRotation: { location, rotations } in the response on recovery. Skipped on tier='basic' because cheerio fetches are too cheap/fast to justify the 3-5s VPN reconnect cost. Test hook _testBlock: 'once' | 'always' in request body forces simulated blocks for E2E verification without needing a real blocked target.",
+      "pool": ["usnj", "usla", "usch", "cato", "uklo", "nlam", "defr", "frpa", "jpto", "sgma"],
+      "files": ["src/api/external/routes/scraping.js"]
+    },
+    "gatewayUsageThresholdEmails2026_05_03": {
+      "status": "deployed",
+      "progress": "100%",
+      "addedDate": "2026-05-03",
+      "description": "Transactional emails fire automatically as a portal user crosses 80%/90%/100% of their subscription bucket (basic + render, separately) or their credit-pool balance. Credit thresholds are computed against creditAlertBaseline (snapshot of balance after most recent top-up) so each top-up resets the alert window. Sub thresholds reset on invoice.paid (billing_reason: subscription_cycle). Fire-once-per-cycle enforced via atomic findOneAndUpdate so concurrent debits can't double-send. Send is fire-and-forget — /scrape never blocks on SMTP. Lives in the api-lanagent-net gateway repo, not in the agent itself.",
+      "thresholds": [80, 90, 100],
+      "files": ["api-lanagent-net/email.mjs", "api-lanagent-net/portal.mjs", "api-lanagent-net/index.mjs"]
+    },
+    "gatewayPasswordResetAndVerification2026_05_03": {
+      "status": "deployed",
+      "progress": "100%",
+      "addedDate": "2026-05-03",
+      "description": "Account-management email suite. New routes: POST /portal/forgot-password, POST /portal/reset-password, GET /portal/reset (HTML form), GET /portal/verify (one-shot verification page), POST /portal/resend-verification. Hooks into existing routes: /portal/signup fires welcome + email-verification; /portal/api-keys POST/DELETE/regenerate fires create/revoke notifications with name/prefix/source-IP/timestamp; /portal/cancel-subscription fires confirmation with period-end date. PortalToken collection with TTL index, SHA-256 hashed tokens, prior-unused tokens invalidated on mint so links can't be replayed.",
+      "endpoints": ["POST /portal/forgot-password", "POST /portal/reset-password", "GET /portal/reset", "GET /portal/verify", "POST /portal/resend-verification"],
+      "files": ["api-lanagent-net/email.mjs", "api-lanagent-net/portal.mjs"]
+    },
+    "gatewaySupportInbox2026_05_03": {
+      "status": "deployed",
+      "progress": "100%",
+      "addedDate": "2026-05-03",
+      "description": "support@lanagent.net mailbox monitored by a new support-poller PM2 service on the gateway VPS. Polls IMAPS every 60s for UNSEEN messages. v1: notification-only — Telegram alert with from/subject/body, skips bouncebacks/auto-replies/noreply senders. v2: same flow plus user-context enrichment — looks up the From: address in PortalUser, builds 7-day usage context (sub state with bucket %, credits, recent request totals, top failing routes, most recent failure with error message + age, last payment), and includes that in the Telegram message. Marks messages \\Seen after notify so each ticket pings exactly once. Roadmap to v3 (LLM-drafted replies + Telegram approve flow), v4 (auto-send for trusted categories), v5 (proactive outreach on internal events) documented in docs/proposals/ai-support-system.md.",
+      "service": "support-poller",
+      "files": ["api-lanagent-net/support-poller.mjs", "docs/proposals/ai-support-system.md"]
+    },
     "renderTierFlareSolverr2026_05_01": {
       "status": "deployed",
       "progress": "100%",

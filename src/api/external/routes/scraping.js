@@ -18,6 +18,32 @@ const TIER_COSTS = {
   render: 5
 };
 
+// Curated VPN rotation pool — well-distributed exits used when a paid scrape
+// is blocked by the upstream. Codes are ExpressVPN location IDs.
+const VPN_ROTATION_POOL = [
+  'usnj',  // US East — New Jersey
+  'usla',  // US West — Los Angeles
+  'usch',  // US Central — Chicago
+  'cato',  // Canada — Toronto
+  'uklo',  // UK — London
+  'nlam',  // Netherlands — Amsterdam
+  'defr',  // Germany — Frankfurt
+  'frpa',  // France — Paris
+  'jpto',  // Japan — Tokyo
+  'sgma'   // Singapore
+];
+
+const MAX_VPN_ROTATIONS = 2;
+
+// Detect whether a failed scrape result looks like an IP-level block / rate limit
+// vs an unrelated error (404, malformed URL, etc.). Only block-like failures justify
+// the latency cost of a VPN rotation.
+function isLikelyBlocked(result) {
+  if (!result || result.success) return false;
+  const err = String(result.error || '').toLowerCase();
+  return /\b(403|406|429|503)\b|forbidden|blocked|cloudflare|just a moment|attention required|access denied|rate limit|too many requests|challenge/i.test(err);
+}
+
 /**
  * Health check endpoint to verify service availability.
  */
@@ -294,6 +320,86 @@ async function executeScrape(req, { url, selectors, extractType = 'text', userAg
  * Single URL scrape — supports both credit and legacy payment
  * Tier: basic (1 credit), stealth (2 credits, forces Puppeteer), full (3 credits, +HTML), render (5 credits, +HTML+screenshot)
  */
+/**
+ * Wrap executeScrape with VPN rotation on block-like failures.
+ *
+ * Skipped for tier='basic' (cheerio fetches are fast and frequent — rotation
+ * latency would dominate). For stealth/full/render, on a block-like failure we
+ * switch the agent's ExpressVPN exit to a different region from the curated
+ * pool and retry, up to MAX_VPN_ROTATIONS times.
+ *
+ * Test hook: { _testBlock: 'always' | 'once' } in the request body simulates a
+ * block result on first attempt(s) so the rotation path is exercisable end-to-end
+ * without needing a real blocked target.
+ */
+async function executeScrapeWithVpnRotation(req, params, tier) {
+  let result = await executeScrape(req, params);
+
+  // Test hook — simulate a block on the first call (always or once).
+  const testBlock = req.body?._testBlock;
+  if (testBlock && result.success) {
+    logger.info(`[ExternalScrape] _testBlock=${testBlock}: simulating initial block for rotation test`);
+    result = { success: false, error: '403 Forbidden (simulated block — _testBlock hook)', targetError: true };
+  }
+
+  if (tier === 'basic' || result.success || !isLikelyBlocked(result)) return result;
+
+  const vpnEntry = req.app.locals.agent?.apiManager?.apis?.get('vpn');
+  const vpn = vpnEntry?.instance || vpnEntry;
+  if (!vpn?.connect || !vpn?.getVPNStatus) {
+    logger.warn('[ExternalScrape] Block detected but VPN plugin not available — cannot rotate');
+    return result;
+  }
+
+  let currentLocation = '';
+  try {
+    const status = await vpn.getVPNStatus();
+    currentLocation = status?.location || status?.smartLocation || '';
+  } catch { /* unknown — proceed with rotation */ }
+
+  const tried = new Set();
+  const cacheKey = `${params.extractType === 'structured' ? 'extract' : 'scrape'}:${params.url}:${JSON.stringify(params.selectors || '')}:render=${params.renderTier}`;
+
+  for (let i = 0; i < MAX_VPN_ROTATIONS; i++) {
+    const next = VPN_ROTATION_POOL.find(loc => loc !== currentLocation && !tried.has(loc));
+    if (!next) break;
+    tried.add(next);
+
+    logger.info(`[ExternalScrape] Block detected on tier=${tier} url=${params.url} — rotating VPN ${currentLocation || '?'} → ${next} (attempt ${i + 1}/${MAX_VPN_ROTATIONS})`);
+    try {
+      await vpn.connect({ location: next });
+      // Brief stabilization
+      await new Promise(r => setTimeout(r, 2500));
+      currentLocation = next;
+    } catch (e) {
+      logger.warn(`[ExternalScrape] VPN switch to ${next} failed: ${e.message}`);
+      continue;
+    }
+
+    scrapeCache.del(cacheKey);
+    result = await executeScrape(req, params);
+
+    // Test hook 'once' lets the second attempt succeed; 'always' keeps blocking.
+    if (testBlock === 'always' && result.success) {
+      result = { success: false, error: `403 Forbidden (simulated block — attempt ${i + 2})`, targetError: true };
+    }
+
+    if (result.success) {
+      logger.info(`[ExternalScrape] Recovery via VPN ${next} succeeded for ${params.url} after ${i + 1} rotation(s)`);
+      result._vpnRotated = true;
+      result._vpnLocation = next;
+      result._vpnRotations = i + 1;
+      return result;
+    }
+    if (!isLikelyBlocked(result)) break; // Non-block error: stop rotating
+  }
+
+  // Exhausted rotations — return last result with rotation metadata for visibility
+  result._vpnRotationsAttempted = tried.size;
+  result._vpnRotationsExhausted = true;
+  return result;
+}
+
 router.post('/',
   creditAuth(false), // Try credit auth but don't block legacy
   async (req, res) => {
@@ -318,7 +424,7 @@ router.post('/',
       try {
         const usePuppeteer = tier === 'stealth';
         const renderTier = tier === 'render';
-        const result = await executeScrape(req, { url, selectors, extractType, userAgent, usePuppeteer, renderTier });
+        const result = await executeScrapeWithVpnRotation(req, { url, selectors, extractType, userAgent, usePuppeteer, renderTier }, tier);
 
         if (!result.success) {
           // Refund on target failure
@@ -342,6 +448,15 @@ router.post('/',
         result.creditsRemaining = acc?.credits || 0;
         result.tier = tier;
         result.creditsCharged = creditCost;
+        // Surface rotation metadata for client visibility (and test verification)
+        if (result._vpnRotated) {
+          result.vpnRotation = { location: result._vpnLocation, rotations: result._vpnRotations };
+        }
+        delete result._vpnRotated;
+        delete result._vpnLocation;
+        delete result._vpnRotations;
+        delete result._vpnRotationsAttempted;
+        delete result._vpnRotationsExhausted;
         return res.json(result);
       } catch (error) {
         await ExternalCreditBalance.refundCredits(req.wallet, creditCost);

@@ -726,15 +726,26 @@ anime, chainlink, huggingface, lyrics, nasa, news, websearch, scraper, ytdlp, ff
 
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
-| POST | `/portal/signup` | None | Create account, get API key |
+| POST | `/portal/signup` | None | Create account, get API key. Also fires welcome + email-verification emails. |
 | POST | `/portal/login` | None | Login, get JWT |
 | GET | `/portal/dashboard` | JWT or API key | Credits, keys, payments |
 | GET | `/portal/usage?days=14` | JWT or API key | Usage chart data (daily/hourly) |
 | POST | `/portal/checkout` | JWT | Start Stripe checkout |
-| POST | `/portal/api-keys` | JWT | Create new API key |
-| POST | `/portal/api-keys/regenerate` | JWT | Revoke all keys + create new |
-| DELETE | `/portal/api-keys/:key` | JWT | Revoke specific key |
+| POST | `/portal/api-keys` | JWT | Create new API key (sends "key created" notification email) |
+| POST | `/portal/api-keys/regenerate` | JWT | Revoke all keys + create new (sends both notifications) |
+| DELETE | `/portal/api-keys/:key` | JWT | Revoke specific key (sends notification email) |
 | GET | `/portal/packages` | None | Available credit packages |
+| POST | `/portal/forgot-password` | None | Request password-reset email. Always returns 200 (doesn't leak which addresses are registered). |
+| POST | `/portal/reset-password` | None | Consume reset token + set new password. Body: `{ token, password }`. |
+| GET | `/portal/reset?token=…` | None | HTML form for resetting (linked from reset email). |
+| GET | `/portal/verify?token=…` | None | One-shot email verification page. Flips `emailVerified=true`. |
+| POST | `/portal/resend-verification` | JWT | Send a fresh verification email. |
+
+**Usage-threshold notifications** (v2.25.13+) — emails fire automatically as a user's subscription quota or credit balance crosses 80% / 90% / 100%. Subscription thresholds reset on `invoice.paid` (`subscription_cycle`); credit thresholds reset on each completed `checkout.session.completed`. Schema fields on `PortalUser`: `creditAlertBaseline` and `notifications.{credits,subBasic,subRender}{80,90,100}`. Send is fire-and-forget — request handlers never block on SMTP.
+
+**Email infrastructure** (v2.25.13+) — gateway has SMTP transport over `mail.lanagent.net:587` via a dedicated `noreply@lanagent.net` mailbox. Templates and `sendEmail()` helper live in `email.mjs`. Sender displays as `LANAgent API <noreply@lanagent.net>` to distinguish service-level alerts from agent-level mail.
+
+**Support inbox** (v2.25.13+) — `support@lanagent.net` mailbox is monitored by a `support-poller` PM2 service on the gateway VPS. New tickets fire enriched Telegram notifications including 7-day account context (sub state, credits, recent failures, top failing routes, last payment). See `docs/proposals/ai-support-system.md` for the v3+ roadmap (LLM-drafted replies, auto-send for trusted categories, proactive support).
 
 **Diamond contract:
 
