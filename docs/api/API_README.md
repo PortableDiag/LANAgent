@@ -393,6 +393,22 @@ The gateway calls `GET /api/external/catalog` on your agent and reads the `servi
 
 ## Recent Updates (May 5, 2026)
 
+### v2.25.22 — Gateway admin dashboard responsive overhaul
+
+Same-day follow-up to v2.25.21. Operator reported the Recent Payments table on the gateway admin dashboard was crammed even on desktop, and the top nav was unusable on mobile.
+
+**Fixed:**
+
+| Issue | Fix |
+|-------|-----|
+| Recent Payments table crammed even on desktop | Dashboard grid switched from `grid-3` (three equal columns) to a new `dash-grid` template — Payments 2fr, Agents 1fr, Tickets 1fr on desktop; Payments spans both columns on tablet (≤980px); all three stacked on phone (≤600px). |
+| Long emails (e.g. `portablediag@protonmail.com`) pushed numeric columns into a sliver | Email cells get the new `email-cell` class with `text-overflow: ellipsis` and a `title=` tooltip showing the full address on hover. |
+| Top nav unusable on mobile (9 links wrapped onto multiple lines, shoved sign-out off-screen) | Hamburger toggle button (☰) appears on screens ≤880px and collapses the topnav into a vertical drawer below the header. |
+| Wide tables (Wallets, Audit log) overflowed the page on narrow screens | Tables now `overflow-x: auto` inside their containers with momentum touch scrolling. |
+| Cards / KPIs / toolbars too dense on phone | Reduced card padding, smaller h1 + KPI values, `kv` grid drops to single column at narrow widths, toolbar inputs flex to fill, bar-row labels narrow. |
+
+Changes live in `/opt/api-gateway/admin.mjs` (untracked) — almost entirely additive CSS appended to `SHARED_STYLE`, plus one `<button class="nav-toggle">` injection in `layout()` and the grid-class swap in `dashboardBody()`.
+
 ### v2.25.21 — Gateway and BETA agent recovery
 
 Three independent fixes to the gateway/BETA pair. All gateway changes live in `/opt/api-gateway/index.mjs` (untracked); the only repo-side artifact is the new local backup script.

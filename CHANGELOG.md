@@ -2,6 +2,18 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.22] - 2026-05-05
+
+Gateway admin dashboard responsive overhaul. Same-day follow-up to v2.25.21 after operator reported the Recent Payments table was crammed even on desktop and the top nav was unusable on mobile.
+
+### Fixed (gateway — `/opt/api-gateway/admin.mjs`, untracked)
+- **Recent Payments table was crammed.** The dashboard used `grid-3` (three equal columns), so the four-column payments table (When / Email / Amount / Credits) had to fit in ~33% of the page width — long emails like `portablediag@protonmail.com` shoved the numeric columns into a sliver. Replaced with a new `dash-grid` template that gives Payments `2fr` and Agents/Tickets `1fr` each on desktop. On tablet (≤980px) Payments spans both columns. On phone (≤600px) all three stack. Email cell now has `email-cell` class with `text-overflow: ellipsis` and a `title=` tooltip showing the full address on hover, so even the longest emails render cleanly.
+- **Top nav was unusable on mobile.** Nine `topnav` links wrapped onto multiple lines and shoved the user/sign-out block off the visible header. Added a hamburger toggle (`☰` button, hidden on desktop) that collapses the nav into a vertical drawer below the header on screens ≤880px. Click outside or any link auto-closes via the same toggle.
+- **Tables on narrow screens** now `overflow-x: auto` instead of overflowing the card, so any wide table (Wallets, Payments page, Audit log) scrolls horizontally inside its container with momentum on touch devices instead of forcing the whole page to scroll.
+- **General mobile polish** — reduced card padding, smaller h1, `kv` grid drops to single-column, KPI value font shrinks at ≤600px, toolbar inputs flex to fill, bar-row labels narrow.
+
+No markup changes outside `layout()` and `dashboardBody()`; the fix is almost entirely additive CSS appended to `SHARED_STYLE` plus a single `<button class="nav-toggle">` injection.
+
 ## [2.25.21] - 2026-05-05
 
 Gateway and BETA agent recovery: fixed silently-broken admin login, reconnected gateway↔BETA after a 24-day stale-key outage, made BETA a real fallback in routing, and stood up backup tooling for BETA. Full incident analysis in `docs/sessions/SESSION-SUMMARY-2026-05-05.md`.
