@@ -2,6 +2,17 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.23] - 2026-05-05
+
+Admin dashboard mobile follow-up — Promotions and Scrapes pages were still rendering as wide multi-column layouts on phone screens.
+
+### Fixed (gateway — `/opt/api-gateway/admin.mjs`, untracked)
+- **Promotions page (`/admin/promotions`) scrolled horizontally on mobile.** The page used inline `style="grid-template-columns: 1fr 360px"` which doesn't collapse — the 360px sidebar form forced the page wider than any phone viewport, so the whole page (including the sticky header) had to scroll horizontally. Replaced the inline rule with a new `.grid-aside` class that's `1fr 360px` on desktop and `1fr` (form drops below the table) on screens ≤880px.
+- **Scrapes page (`/admin/scrapes`) had Top Services and Top Agents side-by-side on mobile.** Same root cause: inline `style="grid-template-columns: 1fr 1fr"` overrode the responsive grid rules. Replaced with a new `.grid-2` class that's `1fr 1fr` on desktop and stacked on screens ≤880px.
+
+### Principle going forward
+"Always stack on mobile unless they're small." Multi-column layouts in `admin.mjs` should now use one of the responsive grid classes — `.grid-2`, `.grid-3`, `.grid-4`, `.grid-6`, `.grid-aside`, `.dash-grid` — instead of inline `grid-template-columns`. The class defines both the desktop layout and the breakpoint at which it collapses, so the page can never end up wider than the viewport regardless of what's inside.
+
 ## [2.25.22] - 2026-05-05
 
 Gateway admin dashboard responsive overhaul. Same-day follow-up to v2.25.21 after operator reported the Recent Payments table was crammed even on desktop and the top nav was unusable on mobile.

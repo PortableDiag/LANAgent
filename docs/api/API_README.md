@@ -393,6 +393,19 @@ The gateway calls `GET /api/external/catalog` on your agent and reads the `servi
 
 ## Recent Updates (May 5, 2026)
 
+### v2.25.23 — Admin dashboard mobile follow-up
+
+Two pages from the v2.25.22 overhaul were still rendering as wide multi-column layouts on phone screens because they used inline `grid-template-columns` declarations that overrode the responsive rules in `SHARED_STYLE`.
+
+**Fixed:**
+
+| Page | Was | Now |
+|------|-----|-----|
+| `/admin/promotions` | Inline `grid-template-columns: 1fr 360px` — 360px sidebar form forced the page wider than any phone viewport, so the whole page (including the sticky header) had to scroll horizontally | New `.grid-aside` class — `1fr 360px` on desktop, collapses to `1fr` (form drops below the table) at ≤880px |
+| `/admin/scrapes` | Inline `grid-template-columns: 1fr 1fr` — Top Services and Top Agents charts stayed side-by-side at phone widths | New `.grid-2` class — `1fr 1fr` on desktop, stacks to `1fr` at ≤880px |
+
+**Principle going forward:** always stack on mobile unless the components are small (KPIs, pills, etc.). Multi-column layouts in `admin.mjs` should use one of the responsive grid classes — `.grid-2`, `.grid-3`, `.grid-4`, `.grid-6`, `.grid-aside`, `.dash-grid` — instead of inline `grid-template-columns`. The class defines both the desktop layout and the breakpoint at which it collapses, so the page can never end up wider than the viewport regardless of content.
+
 ### v2.25.22 — Gateway admin dashboard responsive overhaul
 
 Same-day follow-up to v2.25.21. Operator reported the Recent Payments table on the gateway admin dashboard was crammed even on desktop, and the top nav was unusable on mobile.
