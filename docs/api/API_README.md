@@ -393,6 +393,41 @@ The gateway calls `GET /api/external/catalog` on your agent and reads the `servi
 
 ## Recent Updates (May 5, 2026)
 
+### v2.25.24 — Admin dashboard per-page audit pass
+
+Audited every `*Body()` function in `admin.mjs` for the inline-style mobile-overflow class of issues fixed in v2.25.22 / v2.25.23. One remaining offender found and fixed; everything else passed.
+
+**Fixed:**
+
+The Grant-Credits row on User-detail and Wallet-detail pages used `<div class="row-flex">` with `<input style="width:160px;">` and `<input style="flex:1;">`. `.row-flex` is `display: flex` with no wrap, and the inline width/flex declarations sat at higher specificity than any responsive override, so the row spilled outside its card on phone widths. Added to the existing `@media (max-width: 880px)` block:
+
+```css
+.row-flex { flex-wrap: wrap; gap: 8px; }
+.row-flex > label { flex-basis: 100%; }
+.row-flex > input,
+.row-flex > select,
+.row-flex > textarea { flex: 1 1 100% !important; width: auto !important; min-width: 0; }
+```
+
+The `!important` is the only way to defeat the inline declarations without rewriting markup. On phone, the result is: label on its own row, each input full-width on its own row, button below — same applies to the Tickets-dialog Status row.
+
+**Audit summary (no other fixes needed):**
+
+| Page | Verdict |
+|------|---------|
+| Dashboard | `dash-grid` + `grid-6` KPIs already responsive |
+| Users / Wallets | `grid-4` KPIs + single-col list |
+| User detail / Wallet detail | **fixed in this release** |
+| Agents | single-col card |
+| Payments | `grid-3` KPIs + 7-col table; table scrolls inside card on mobile |
+| Subscriptions | 6-col table with embedded progress bars; same |
+| Promotions | `grid-aside` (fixed in v2.25.23) |
+| Tickets | wide table + `<dialog width=min(720px,90vw)>`; internal `row-flex` now wraps |
+| Scrapes | `grid-2` (fixed in v2.25.23) |
+| Audit | single-col + 6-col table; same |
+
+No remaining inline `grid-template-columns` declarations exist anywhere in `admin.mjs`.
+
 ### v2.25.23 — Admin dashboard mobile follow-up
 
 Two pages from the v2.25.22 overhaul were still rendering as wide multi-column layouts on phone screens because they used inline `grid-template-columns` declarations that overrode the responsive rules in `SHARED_STYLE`.

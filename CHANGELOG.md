@@ -2,6 +2,30 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.24] - 2026-05-05
+
+Per-page audit of every admin body for the same class of inline-style mobile-overflow issues fixed in v2.25.22 / v2.25.23. One remaining offender found and fixed.
+
+### Fixed (gateway — `/opt/api-gateway/admin.mjs`, untracked)
+- **User-detail and Wallet-detail "Grant credits" row overflowed on mobile.** The admin-actions card uses `<div class="row-flex">` with hardcoded inline widths on its inputs (`<input style="width:160px;">`, `<input style="flex:1;">`). `.row-flex` is `display: flex` with no wrap, and the inline widths sit on the same elements at higher specificity than any responsive override, so the row spilled outside its card on phone widths. Added a `@media (max-width: 880px)` block that makes `.row-flex` wrap, gives `<label>` its own row, and forces `<input>` / `<select>` / `<textarea>` children to `flex: 1 1 100% !important; width: auto !important;` (the `!important` is the only way to override the inline declarations without rewriting markup).
+
+### Audit results (no further fixes needed)
+
+| Page | Layout primitive | Status |
+|---|---|---|
+| Dashboard | `dash-grid` + `grid-6` KPIs | already responsive |
+| Users / Wallets | `grid-4` KPIs + single-col list | OK |
+| User detail / Wallet detail | `grid-4` KPIs + `row-flex` admin actions | **fixed in this release** |
+| Agents | single-col card | OK |
+| Payments | `grid-3` KPIs + 7-col table | OK (table scrolls inside card) |
+| Subscriptions | 6-col table with embedded progress bars | OK (table scrolls inside card) |
+| Promotions | `grid-aside` | fixed in v2.25.23 |
+| Tickets | wide table + `<dialog width=min(720px,90vw)>` with internal `row-flex` | OK (dialog viewport-bound, `row-flex` now wraps) |
+| Scrapes | `grid-2` | fixed in v2.25.23 |
+| Audit | single-col card + 6-col table | OK (table scrolls inside card) |
+
+No remaining inline `grid-template-columns` declarations exist anywhere in `admin.mjs`. All multi-column layouts now use named responsive grid classes (`.grid-2`, `.grid-3`, `.grid-4`, `.grid-6`, `.grid-aside`, `.dash-grid`) or already-handled flex containers.
+
 ## [2.25.23] - 2026-05-05
 
 Admin dashboard mobile follow-up — Promotions and Scrapes pages were still rendering as wide multi-column layouts on phone screens.
