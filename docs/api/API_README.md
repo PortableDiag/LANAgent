@@ -391,7 +391,29 @@ The gateway calls `GET /api/external/catalog` on your agent and reads the `servi
 
 ---
 
-## Recent Updates (May 4, 2026)
+## Recent Updates (May 5, 2026)
+
+### v2.25.21 — Gateway and BETA agent recovery
+
+Three independent fixes to the gateway/BETA pair. All gateway changes live in `/opt/api-gateway/index.mjs` (untracked); the only repo-side artifact is the new local backup script.
+
+**Fixed (gateway):**
+
+| Issue | Fix |
+|-------|-----|
+| Admin login at `/admin/login` silently dropped the email field | Added `app.use(express.urlencoded({ extended: true, limit: '1mb' }))` after the JSON parser. The HTML form posts `application/x-www-form-urlencoded`; without this middleware `req.body` was always `{}` and the handler fell into the anti-enumeration tarpit. |
+| Gateway↔BETA paired with a never-valid API key (24-day silent outage caused by April 11 mongo wipe) | Inserted the missing `externalcreditbalances` doc on BETA pairing wallet `0x40b03c8b…` with the gateway's existing key. 6,917 stale-key 401s on `/credits/balance` resolved immediately. |
+| `pickBestAgent` was weighted-random across funded agents — BETA at rep=0 still got ~0.5% of traffic even when ALICE was healthy | Replaced with strict primary/fallback by reputation. Among funded agents, prefer online (`lastSeen<10min`), sort by `successCount-failCount` descending, return top. ALICE always wins when online and funded; BETA only sees traffic when ALICE is offline or out of credits. |
+
+**Operations (one-time):**
+- Bootstrapped BETA with $5 of on-chain credits. Gateway wallet swapped 0.008 BNB → 268,770 SKYNET via PancakeSwap V2 then transferred 268,433 SKYNET to BETA's recipient. BETA verified the tx and credited 503 credits. Tx `0xca0942a0d5f91d787d8cf3bcb69b0a5a1f48c1857d9854eaf27c73a6427b9ae7`.
+- Assigned BETA `agentId: 2931` so `POST /agents/2931/:service` direct-route works.
+
+**Backup tooling (new):**
+- **Server-side:** `/root/backup-beta.sh` + cron `15 3 * * *` on BETA. Daily `mongodump --gzip --archive` to `/root/lanagent-backups/beta-YYYY-MM-DD.archive.gz`, 14-day retention. Restore: `docker exec -i BETA-mongodb mongorestore --gzip --archive --drop < <archive>`.
+- **Local pull:** `scripts/deployment/backup-beta.sh` runs from the dev machine. Streams a fresh mongodump over SSH plus rsynced configs (`.env`, `docker-compose.yml`, `CLAUDE.local.md`, `ecosystem.config.cjs`, `package.json`) and data dirs (`data/`, `workspace/`, `quarantine/` — excludes `logs/`, `node_modules/`), seals everything into a single tar.gz at `/media/veracrypt1/NodeJS/_BackUps_/beta-backup-<UTC-stamp>.tar.gz` with a manifest of git rev / container statuses / wallet addresses. 30-day local retention. Safe to run while BETA is live.
+
+**Capability note:** BETA's `services` array does not include `web-scraping` (or `media-transcode`, `image-generation`, `document-processing`, `code-sandbox`, `pdf-toolkit`, `social-*`). The gateway's `getAvailableAgents` filters by `services: service` at the DB query level, so render-tier scrapes can never route to BETA — there's no fallback for render tier when ALICE is down. Adding FlareSolverr to BETA's compose would close that gap.
 
 ### v2.25.20 — PR Review Pass: 10 AI-generated PRs
 

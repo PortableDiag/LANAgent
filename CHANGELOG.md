@@ -2,6 +2,31 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.21] - 2026-05-05
+
+Gateway and BETA agent recovery: fixed silently-broken admin login, reconnected gateway↔BETA after a 24-day stale-key outage, made BETA a real fallback in routing, and stood up backup tooling for BETA. Full incident analysis in `docs/sessions/SESSION-SUMMARY-2026-05-05.md`.
+
+### Fixed (gateway — `/opt/api-gateway/index.mjs`, untracked)
+- **Admin login form silently dropped the email field.** `app.use(express.json())` was registered without `express.urlencoded()`, so the HTML form's `application/x-www-form-urlencoded` POST to `/admin/auth/request` arrived with `req.body = {}`. The handler fell into the anti-enumeration tarpit branch and logged `magic link refused (non-admin) email=` — operator received `?sent=1` in the URL but no email. Added `app.use(express.urlencoded({ extended: true, limit: '1mb' }))` after the JSON parser. Confirmed end-to-end: form POST → 302 → `magic link issued` → `[email] sent to=…`.
+- **Gateway↔BETA paired with a never-valid API key.** BETA's `externalcreditbalances` collection was empty (0 docs) since the April 11 ransomware incident; the gateway's stored key (`lsk_af05eb64…`) had nothing to authenticate against. 6,917 calls to `/credits/balance` failed 401 over 24 days, BETA was excluded from the funded pool, and `Agent BETA refresh failed: 401` filled the gateway error log. Inserted the missing `externalcreditbalances` doc on BETA pairing the existing wallet (`0x40b03c8b…`) with the gateway's existing key. 401 spam stopped, BETA enters refresh cycle normally.
+- **PM2 restart counter reset** on `api-gateway` (was 50, now 0 plus 2 from today's deploys). Process state preserved.
+
+### Changed (gateway routing — `/opt/api-gateway/index.mjs`, untracked)
+- **`pickBestAgent` is now strict primary/fallback by reputation.** Was weighted-random across funded agents; with ALICE at rep=187 and BETA at rep=0, BETA still had ~0.5% probability of selection — enough to surface failures since BETA lacks several services (web-scraping with tiers, media-transcode, image-generation, etc.). New behavior: among funded agents, prefer online (`lastSeen < 10min`), sort by `successCount - failCount` descending, return the top. ALICE always wins when online and funded; BETA only sees traffic when ALICE is offline or out of credits. Capability gating untouched (`getAvailableAgents` filters by `services: service` at the DB query level), so render-tier scrapes still cannot route to BETA — there's no fallback for render tier when ALICE is down, which is correct since BETA has no FlareSolverr.
+
+### Operations
+- **BETA bootstrapped with $5 of on-chain credits.** Gateway wallet swapped 0.008 BNB → 268,770 SKYNET via PancakeSwap V2 then transferred 268,433 SKYNET ($5 at $0.00001863 each) to BETA's recipient address. BETA's `/credits/purchase` verified the transfer and credited the gateway with 503 credits. Tx `0xca0942a0d5f91d787d8cf3bcb69b0a5a1f48c1857d9854eaf27c73a6427b9ae7`. `gatewayagents.BETA.credits: 0 → 503`, `agentId: null → 2931` (so `POST /agents/2931/:service` direct-route works).
+
+### Added (BETA — `164.92.79.184`)
+- **`/root/backup-beta.sh`** + cron `15 3 * * *` — daily `mongodump --gzip --archive` to `/root/lanagent-backups/beta-YYYY-MM-DD.archive.gz`, 14-day retention. Restore: `docker exec -i BETA-mongodb mongorestore --gzip --archive --drop < beta-YYYY-MM-DD.archive.gz`.
+
+### Added (genesis repo)
+- **`scripts/deployment/backup-beta.sh`** — local pull script run from the dev machine. Streams a fresh `mongodump` over SSH, rsyncs config + data dirs (excludes `logs/`, `node_modules/`), writes a manifest with git rev / container statuses / wallet addresses, and seals everything into `/media/veracrypt1/NodeJS/_BackUps_/beta-backup-<UTC-stamp>.tar.gz`. 30-day local retention. First run: 14M archive. Safe to run while BETA is live.
+
+### Notes
+- **Pre-April-11 wallet seed is unrecoverable.** The ransomware wipe destroyed `cryptowallets`. Whatever address the original BETA wallet had, we no longer know it and can't sign for it. The current wallet `0x40b03c8b…` was auto-generated 18 minutes after the wipe; it has 200 SKYNET on-chain (negligible) plus the 268,433 SKYNET we just sent. Future-proofing: backups now in place.
+- **Render-tier fallback gap** — if ALICE goes down, render scrapes have no fallback because BETA lacks FlareSolverr. Adding it to BETA's compose is a separate piece of work; flagged.
+
 ## [2.25.20] - 2026-05-04
 
 PR review pass on 10 AI-generated PRs (#2083–#2092). One merged, five salvaged manually with corrected implementations, four closed as unimplementable.
