@@ -51,6 +51,8 @@ Both methods give you the same `gsk_*` API key and access the same services.
 | Batch Scrape | `POST /scrape/batch` | 1-5 each | Up to 100 URLs |
 | YouTube Download | `POST /youtube/download` | 10 | MP4 video |
 | YouTube Audio | `POST /youtube/audio` | 8 | MP3 audio |
+| Social Media Download | `POST /social/download` | 10 | MP4 video — TikTok, Rumble, BitChute, Dailymotion, Streamable, Bilibili, Twitch, x.com, SoundCloud, plus the long tail of yt-dlp's ~1800 extractors. x.com goes through the bespoke twitter plugin. Cloudflare-protected sites (Rumble, BitChute) are routed through a FlareSolverr session for cf_clearance + matching TLS fingerprint. Cookie-required sites (Instagram, Facebook) work when the operator has uploaded session cookies via the agent's `POST /api/admin/cookies/:host` endpoint. |
+| Social Media Audio | `POST /social/audio` | 8 | MP3 audio from any of the above. |
 | Media Transcode | `POST /transcode` | 20 | FFmpeg format conversion |
 | AI Image Gen | `POST /image/generate` | 30 | Text-to-image |
 | Document OCR | `POST /documents/process` | 10 | Text extraction |
@@ -100,6 +102,13 @@ POST /portal/signup
 POST /portal/login
 { "email": "you@example.com", "password": "..." }
 → { "token": "...", "credits": 400 }
+
+POST /portal/magic-link             # passwordless — works for new + existing accounts (v2.25.15+)
+{ "email": "you@example.com" }
+→ { "success": true, "message": "Check your inbox for a sign-in link." }
+# New email → account auto-created with default API key + welcome email
+# Existing email → sign-in link emailed
+# Link expires in 15 minutes, single-use; click to set JWT cookie + drop to dashboard
 
 POST /portal/checkout
 Authorization: Bearer <token>
@@ -382,7 +391,39 @@ The gateway calls `GET /api/external/catalog` on your agent and reads the `servi
 
 ---
 
-## Recent Updates (May 1, 2026)
+## Recent Updates (May 4, 2026)
+
+### v2.25.20 — PR Review Pass: 10 AI-generated PRs
+
+Reviewed AI-generated PRs #2083–#2092. One merged directly, five had good ideas but broken implementations — closed with rationale and reimplemented manually with corrections. Four were closed as fundamentally broken or missing prerequisites.
+
+**Salvaged features:**
+
+| Feature | Endpoint / Module | Notes |
+|---------|-------------------|-------|
+| `SystemLog` pagination | `SystemLog.findRecent(hours, filters, limit, skip)` and `findErrors(unresolved, limit, skip)` | Mongoose chainable Queries; defaults preserve previous behaviour |
+| `scammerRegistry` compression | `router.use(compression())` on `/api/scammer-registry` | Matches pattern in `contracts.js` / `signatures.js` |
+| Plugin evaluation analytics | `PluginDevelopment.calculateEvaluationAnalytics({status, since})` static | Returns `{count, averageScore, scoreTrend, topPerformingPlugins}` aggregating across documents |
+| Payment notification retry | `src/api/external/middleware/payment.js` | Fire-and-forget `retryOperation` so the user's payment confirmation isn't blocked by ~7s of backoff |
+| MCP tool usage analytics | `GET /api/tools/usage` (JWT) | Bounded ring buffer (1000 entries), per-tool aggregation (executions, success/failure, avg/min/max time, lastUsedAt); `logToolUsage` wired from `/api/tools/execute` in both success and failure paths |
+| FeatureRequest history | `FeatureRequest.statusHistory` | Auto-populated by `updateStatus`; array of `{status, timestamp, notes}` |
+
+**New endpoint:**
+
+```bash
+# MCP tool usage report
+curl http://localhost/api/tools/usage \
+  -H "Authorization: Bearer $JWT"
+# → { success: true, data: { tools: { 'serverName.toolName': { totalExecutions, successCount, failureCount, avgExecutionTime, ... } }, totalEntries, oldestEntry, newestEntry } }
+```
+
+### v2.25.19 — BYOK on the SKYNET API Telegram bot
+
+Users hitting the daily free-tier limit can now load their own gateway API key (`/setkey gsk_…`) and bill their own credit balance instead of consuming the bot's pool. Encrypted at rest with AES-256-GCM (`WALLET_ENCRYPTION_KEY`), validated against the gateway's `/credits/balance` before storing so typos and revoked keys are rejected up front. `/mykey` shows last 4 + load timestamp + live balance, `/clearkey` returns to free tier, and `autoDetect` captures `gsk_…` pasted in natural phrasing. See `SkynetAPIBot/CHANGELOG.md` for details.
+
+### v2.25.17 — Generic social-media downloader (gateway)
+
+`POST /social/download` (10 cr, MP4) and `POST /social/audio` (8 cr, MP3) on api.lanagent.net. Backed by an agent-side route that dispatches `x.com` to the bespoke twitter plugin and everything else to yt-dlp's ~1800-site extractor list. Cloudflare-gated hosts (Rumble, BitChute) route through long-lived FlareSolverr sessions for `cf_clearance` cookies + matching User-Agent + `--impersonate chrome-131` (TLS fingerprint must match the issuer). Per-host cookie-jar pipeline for Instagram/Facebook with operator-managed admin endpoints at `/api/admin/cookies` (JWT-protected GET/POST/DELETE per allow-listed host).
 
 ### v2.25.12 — Scraper Subscriptions + VPN Rotation on Block
 
@@ -771,8 +812,10 @@ anime, chainlink, huggingface, lyrics, nasa, news, websearch, scraper, ytdlp, ff
 
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
-| POST | `/portal/signup` | None | Create account, get API key. Also fires welcome + email-verification emails. |
-| POST | `/portal/login` | None | Login, get JWT |
+| POST | `/portal/signup` | None | Create account with email+password, get API key. Also fires welcome + email-verification emails. |
+| POST | `/portal/login` | None | Login with email+password, get JWT |
+| POST | `/portal/magic-link` | None | Passwordless sign-up or sign-in. New email auto-creates a passwordless account with a default API key + welcome email; existing email gets a sign-in link. Link is 15-minute, single-use. (v2.25.15+) |
+| GET | `/portal/magic-verify?t={token}` | None | Consumes the magic-link token, sets JWT cookie, marks email verified, redirects to dashboard. |
 | GET | `/portal/dashboard` | JWT or API key | Credits, keys, payments |
 | GET | `/portal/usage?days=14` | JWT or API key | Usage chart data (daily/hourly) |
 | POST | `/portal/checkout` | JWT | Start Stripe checkout |
@@ -896,6 +939,8 @@ Minimum purchase: 10 credits. Double-spend protected.
 | Web Scrape (+ HTML + screenshot, Cloudflare bypass) | 5 | render |
 | YouTube Download (MP4) | 10 | — |
 | YouTube Audio (MP3) | 8 | — |
+| Social Media Download (MP4) | 10 | — |
+| Social Media Audio (MP3) | 8 | — |
 | Media Transcoding | 20 | — |
 | AI Image Generation | 30 | — |
 | Document Processing (OCR) | 10 | — |
@@ -1163,7 +1208,7 @@ Reference implementation for the MindSwarm API — covers every endpoint in the 
 - PancakeSwap liquidity: $341 → $1,209 (39.6M SKYNET + 1 BNB)
 - Token economics docs: `docs/contracts/SKYNET-Token-Economics.md` (4.7yr runway, sustainability analysis)
 - All 3 sites updated (lanagent.net, api.lanagent.net, skynettoken.com)
-- **SKYNET Telegram Bot** (`@SkynetAPIBot`) — public showcase of all API services. 30+ commands, free with daily limits. On-chain event broadcasting to @skynet_events, token transfer tracking to @skynet_tracker. BSC wallet with auto-credit purchase from gateway.
+- **SKYNET Telegram Bot** (`@SkynetAPIBot`) — public showcase of all API services. 30+ commands, free with daily limits. On-chain event broadcasting to @skynet_events, token transfer tracking to @skynet_tracker. BSC wallet with auto-credit purchase from gateway. **BYOK (v2.25.19)**: users hitting the daily free-tier cap can run `/setkey gsk_…` (or paste the key directly in chat — auto-captured + scrubbed from history) to bill their own gateway account; AES-256-GCM encrypted at rest, validated against `/credits/balance` before storage. `/mykey` shows last 4 + live balance, `/clearkey` reverts to free tier.
 - **Welcome Package** — new agents auto-receive 200 SKYNET + @lanagent.net email from genesis agent via P2P after 60-min uptime verification. Toggle: `skynet.welcomePackageEnabled`.
 - **Identity API** — `GET /api/identity/status` (ENS + email + welcome status), `POST /api/identity/ens` (request subname), `POST /api/identity/email` (request email), `GET /api/identity/wallet` (balances), `POST /api/identity/buy-skynet` (BNB→SKYNET swap), `GET /api/identity/welcome-status`
 

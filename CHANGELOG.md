@@ -2,6 +2,131 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.20] - 2026-05-04
+
+PR review pass on 10 AI-generated PRs (#2083–#2092). One merged, five salvaged manually with corrected implementations, four closed as unimplementable.
+
+### Merged
+- **#2086** — `FeatureRequest.statusHistory` field. Small clean schema addition (array of `{status, timestamp, notes}`) populated automatically inside the existing `updateStatus` method. No breaking changes; data starts accumulating immediately and can be surfaced later.
+
+### Salvaged manually (PR closed, feature implemented correctly)
+- **#2084** — `SystemLog` pagination. PR added cache + retry + rate-limit-middleware-export with three blockers (no cache invalidation on insert, retry around in-memory `cache.get`, express middleware in a model file). Salvaged just the pagination piece: `findRecent(hours, filters, limit, skip)` and `findErrors(unresolved, limit, skip)` matching the existing `Journal.js` convention. Defaults preserve previous behaviour and methods still return chainable Mongoose Queries.
+- **#2088** — `scammerRegistry` compression middleware. PR also wrapped on-chain writes (`reportScammer`, `removeScammer`, `setReportFee`, etc.) in `retryOperation`, which can double-submit BSC transactions when an RPC reply is just slow. Salvaged just the safe part: added `router.use(compression())` matching the pattern in `src/api/{contracts,signatures}.js`.
+- **#2089** — `PluginDevelopment.calculateEvaluationAnalytics`. PR's instance method read `previousAttempts[].apiDetails.evaluation.score` but the `previousAttempts` schema only has `{prNumber, branchName, attemptedAt, status, rejectionReason}` — score lives at the document level. Always returned the empty default. Rewrote as a static method that aggregates across documents: `PluginDevelopment.calculateEvaluationAnalytics({status, since})` returns `{count, averageScore, scoreTrend, topPerformingPlugins}` with chronological score trend and descending-score top performers.
+- **#2091** — Payment notification retry. PR's `await notifyOwner(agent, message)` blocked the request lifecycle for up to ~7s of backoff before responding. Salvaged the retry wrapped fire-and-forget: `retryOperation(() => agent.notify(message), {retries: 3, context: 'paymentNotify'}).catch(...)` keeps the same retry semantics without delaying the user's payment confirmation.
+- **#2092** — MCP tool usage analytics. PR added `logToolUsage` and `generateUsageReport` to `mcpToolRegistry` but: (a) `toolUsageLog` was unbounded (slow OOM on long-running processes), (b) nothing called `logToolUsage` so the feature was dead infra. Salvaged with full integration: bounded ring buffer (`MAX_USAGE_LOG = 1000`, drops oldest), proper logging fields (`{intentId, toolName, serverName, executionTime, success, error, timestamp}`), per-tool aggregation (totalExecutions, successes/failures, avg/min/max execution time, lastUsedAt), wired the call from `mcp.js:/api/tools/execute` route in both success and failure paths, and exposed via new `GET /api/tools/usage` JWT-protected endpoint.
+
+### Closed without salvage
+- **#2083** — WHOIS history. Calls `whoisjson.lookup(domain)` and reads `result.history`, but the `@whoisjson/whoisjson` SDK has no history endpoint (only `/whois`, `/nslookup`, `/ssl-cert-check`, `/domain-availability`). Always returned `data: undefined`. Salvaging would require a different paid API or a substantial new local-snapshot store.
+- **#2085** — Currency conversion in revenue reports. `getRevenueSummary` returns `{totalRevenue, totalUSD, count, breakdown, records}` (object), not an iterable array — the PR's `for (let item of data)` would crash. Plus N+1 FX API calls, no rate cache, no timeout, and a semantic mismatch with the existing time-of-txn `usdValue` accounting.
+- **#2087** — Multilingual email templates. `sendMultilingualEmail` calls `agent.getUserLanguage(to)` but no such method exists, no user/identity model has a language preference field, and the 1-line template strings aren't customizable. Would need user-language storage as prerequisite work.
+- **#2090** — WebSocket "adaptive" backoff. Only real change was `Math.min(reconnectDelay * 2, MAX) → Math.min(reconnectDelay * 1.5, MAX)`. Still pure exponential backoff, just less aggressive. No actual adaptiveness, plus an unused `NodeCache`. The 2× multiplier is the RFC 5681 / TCP convention; lowering should be deliberate, not a side effect of an aspirational "adaptive" claim.
+
+## [2.25.19] - 2026-05-04
+
+SKYNET API bot gains BYOK (bring-your-own-key) so users hitting the daily free-tier limit can load their own gateway API key and bill their own credit balance instead of consuming the bot's pool.
+
+### Added (SKYNET API Telegram bot — `SkynetAPIBot`)
+- **Encrypted per-user API key** in `BotUser` schema. AES-256-GCM blob (`apiKey.{iv,encrypted,authTag}`) using the existing `WALLET_ENCRYPTION_KEY`. Plaintext `apiKeyHint` stores last 4 chars only — used by `/mykey` to identify which key is loaded without ever decrypting and echoing the secret. `apiKeySetAt` timestamp.
+- **`src/services/userKey.js`** — `setUserKey`, `getUserKey`, `clearUserKey`, `validateKey`, `isValidKeyFormat`, `redactKey`. `validateKey` hits the gateway's `/credits/balance` with the candidate key before storing so typos and revoked keys are rejected up front instead of failing at command time. `KEY_REGEX` matches `gsk_` + 32 hex chars.
+- **`src/services/access.js`** — centralized `checkPaidAccess(ctx, category)` returning `{ allowed, apiKey }`. BYOK users skip both the bot-disabled gate and the daily-limit check entirely (the gateway does its own metering on their account); free-tier users get the original limit message with `/setkey` instructions added.
+- **`/setkey gsk_…`** — validates against gateway, deletes the source message immediately to scrub the key from chat history, then stores encrypted. Replies with last-4 hint and live credit balance.
+- **`/mykey`** — shows last 4 + load timestamp + live gateway balance (no decryption beyond what the balance call needs).
+- **`/clearkey`** — wipes the stored key, returns user to free tier.
+- **Auto-detect for pasted keys** — when a user posts a message containing `gsk_…` (without using `/setkey`), the autoDetect handler captures it first, deletes the source message, validates, stores, and confirms — same flow as `/setkey` but works for "here's my key gsk_…" natural phrasing.
+
+### Refactored
+- **`src/services/gateway.js`** — `callService`, `socialDownload`, `getCreditsBalance` accept an `opts.apiKey` per-call override. Replaced the global request-interceptor pattern (which forced one key for the lifetime of the bot) with `buildAuthHeaders(opts)` that picks user key → bot key → JWT in priority order. Bot's own key remains the fallback.
+- **All paid command files** (`src/commands/{ai,code,crypto,media,meta,price,search}.js`, `src/handlers/autoDetect.js`) — replaced 7 duplicated local `checkPaidAccess` definitions with a single import from `services/access.js`. Threaded `{ apiKey: access.apiKey }` through ~30 `callService`/`socialDownload` callsites. `incrementUsage` now gated on `!access.apiKey` so BYOK calls don't tick the free-tier counters. Cashtag passive auto-replies stay on the bot pool (users didn't explicitly ask).
+
+### Verified end-to-end on prod (143.198.76.178)
+- Format validation: `gsk_short` rejected, arbitrary text rejected, real key accepted
+- `validateKey` against gateway: real key returns `{ ok: true, credits: 435 }`, fake-but-well-formed key returns `unauthorized`
+- Encrypt → decrypt roundtrip: stored bytes match original key exactly
+- `checkPaidAccess` flow: free-tier under-limit allowed (no key), free-tier over-limit blocked with `/setkey` hint, BYOK user over-limit still allowed with key threaded, BYOK user under-limit allowed without ticking counter
+
+## [2.25.18] - 2026-05-04
+
+Two follow-ups to the social-media download work landed in v2.25.17: ALICE intent coverage extended to the new platforms, and a Rumble 403 regression fixed.
+
+### Fixed
+- **Rumble 403 after Cloudflare bypass** (`src/api/plugins/ytdlp.js:917,920`) — pinned `--impersonate chrome-131` for Cloudflare and stored-cookie paths. Bare `--impersonate chrome` picks curl_cffi's default target (chrome-99), whose JA3/JA4 TLS fingerprint no longer matches the cf_clearance cookies that FlareSolverr (Chrome 142) issues. Sweep across available targets confirmed `chrome-124` and `chrome-131` work; `chrome-99/110/116/133` all 403. End-to-end re-test through ALICE's NL command: Rumble (`Bannon_s_Warroom...`, 7.1 MB) and BitChute (`Nima_R._Alkhorshid...`, 259 MB) both download cleanly.
+
+### Added
+- **Platform-named training examples for `downloadVideo` and `downloadAudio` intents** (`src/core/aiIntentDetector.js:661,710`) — 22 new `downloadVideo` examples (tiktok, rumble, bitchute, streamable, dailymotion, x.com, twitch, bilibili) and 8 new `downloadAudio` examples covering the same platforms plus soundcloud. Without these, "grab that rumble clip" or "save this tiktok" matched too weakly because every intent example was YouTube-only. Vector store auto-rebuilds on next agent restart (`indexAllIntents` in `src/core/agent.js:553`).
+
+### Verified end-to-end via ALICE NL command
+- **YouTube** ✅ `Me_at_the_zoo.mp4`
+- **TikTok** ✅ `Scramble_up_ur_name…` (Real video, full filename + caption)
+- **Rumble** ✅ `Bannon_s_Warroom_Is_Targeting_Specific_RINOs_to_Oppose_in_Primaries.mp4` (7.1 MB)
+- **BitChute** ✅ `Nima_R._Alkhorshid…` (259 MB)
+- Vector intent search: all 9 test phrasings (URL-only and natural-language) top-rank `ytdlp.download` or `ytdlp.audio` with similarity 0.52–0.64
+
+## [2.25.17] - 2026-05-04
+
+Phase 2 + 3 of the social-media download expansion. Same `POST /social/download` and `POST /social/audio` endpoints from v2.25.16 now also handle Cloudflare-gated sites (Rumble, BitChute) and cookie-required sites (Instagram, Facebook), and the SKYNET API Telegram bot auto-downloads any supported social-media link dropped into a chat.
+
+### Added
+- **Cloudflare-bypass plumbing in `ytdlp` plugin** (`src/api/plugins/ytdlp.js`) — for hosts in the Cloudflare allow-list (Rumble, BitChute, fb.watch). The plugin obtains `cf_clearance` cookies via a long-lived FlareSolverr browser session, persists them to a temp Netscape cookies file, and runs yt-dlp with `--cookies <file> --user-agent <fs-ua> --impersonate chrome`. The matching TLS fingerprint via `--impersonate` is required — Cloudflare's cf_clearance is bound to the issuing client's TLS, and `--cookies` alone gets re-challenged. Persistent FS sessions (`fsEnsureSession(host)` in `src/utils/flareSolverr.js`) avoid re-solving on every request, which Cloudflare escalates in difficulty until FS times out.
+- **Cookie-jar pipeline for stored-cookie sites** — Phase 3 hosts (`instagram.com`, `facebook.com`, `fb.watch`) read pre-stored Netscape cookies from `~/.config/lanagent/cookies/<host>.txt` (configurable via `LANAGENT_COOKIES_DIR`). Outside the deploy dir so cookies survive deployments.
+- **Agent admin endpoints for cookie management** — `src/interfaces/web/cookiesAdmin.js` mounted at `/api/admin/cookies` on the agent. JWT-protected: `GET /api/admin/cookies` lists configured hosts with file size + mtime; `POST /api/admin/cookies/:host` accepts a Netscape cookies body (text/plain ≤256 KB) and writes it with mode 0600, validating the host is in the allow-list and the body parses as Netscape format; `DELETE /api/admin/cookies/:host` removes the file. Allow-list rejects bogus hosts and malformed files with 400.
+- **`src/utils/ytdlpCookieJar.js`** — shared constants (`STORED_COOKIES_DIR`, `STORED_COOKIE_HOSTS`, `FLARESOLVERR_HOSTS`) + helpers (`hostMatches`, `extractHost`, `ensureCookiesDir`) used by both the plugin and the admin route.
+- **`fsEnsureSession(key)` / `fsDestroySession(key)`** in `src/utils/flareSolverr.js` — keyed in-memory cache of FlareSolverr session IDs so successive requests reuse the same browser context (and the same cf_clearance cookie), instead of solving fresh challenges every time.
+
+### SKYNET API Telegram bot (`SkynetAPIBot`)
+- **Auto-download on social-media link drops** (`src/handlers/autoDetect.js`) — when a TikTok, Rumble, BitChute, Streamable, Dailymotion, Bilibili, or Twitch URL appears in chat, the bot calls `POST /social/download` via the gateway and posts the resulting MP4 inline (≤45 MB) or as a direct download link if larger. YouTube and Instagram intentionally excluded — YouTube already has the info-card flow and full downloads spam channels with long videos; Instagram requires per-host cookies the operator may not have set yet. Charges 10 credits from the bot's gateway balance per download. Falls back to `replyWithDocument` when Telegram refuses the codec, then to a plain link if even that fails.
+- **New `/dl <url> [mp3|mp4]` command** (`src/commands/media.js`) — manual variant of the same pipeline, also supports MP3 audio extraction (8 credits).
+- **`socialDownload(url, format)` helper** (`src/services/gateway.js`) — POSTs to `/social/download` (mp4) or `/social/audio` (mp3) on the gateway with a 3-min timeout; `gatewayBaseUrl()` exposes the base URL for resolving relative `downloadUrl` tokens returned by the gateway.
+- **BotFather command menu updated** with the new `/dl` entry.
+
+### Improved
+- **Public landing on api.lanagent.net** (`portal.mjs`) — added a "Social Media Downloads" service card listing all supported sites with pricing, and updated the headline service count from 25 to 27.
+- **`/stats`** now counts `social-download` + `social-audio` in `dedicatedRoutes`, so the auto-loaded badges/counters on the landing reflect the real number.
+
+### Verified end-to-end
+- **Phase 2:** BitChute mp4 download via `POST /social/download` on the agent (`Who_The_Fed_Actually_Serves.mp4`, 2.22 MB). Rumble: ✅ FlareSolverr session bypass works (yt-dlp gets the page through the CF wall and starts streaming HLS at 1.05x); the test URLs available at the time of testing happened to be livestreams (DVR-style HLS that doesn't terminate), so a complete VOD download wasn't captured but the cookie+impersonate path is proven by the BitChute test plus the partial Rumble HLS read.
+- **Phase 3:** Admin endpoints round-trip — empty list → upload Instagram dummy cookies → list shows entry → DELETE → empty again. Validation rejects non-allow-listed hosts (400) and malformed cookies files (400). yt-dlp consumes the stored cookies file when present (verified `--cookies` flag in the executed command for `https://www.instagram.com/p/CL-GW9TBA0G/`); actual extraction failed because the dummy cookie isn't a real Instagram session — expected, the operator uploads real cookies via the admin endpoint to enable downloads.
+- **Bot:** code-level (gateway flow already verified at the API layer in v2.25.16; the bot just translates a chat URL into a `socialDownload(url)` call and a `replyWithVideo` send).
+
+## [2.25.16] - 2026-05-04
+
+Phase 1 of the social-media download expansion: a generic `/social/download` route on both the agent and the gateway that dispatches any URL to the right extractor, so the SKYNET API bot (and other gateway customers) can hand the gateway any video URL instead of being limited to YouTube.
+
+### Added
+- **Agent route `POST /api/external/social/download`** (`src/api/external/routes/social.js`) — accepts `{ url, format: "mp4"|"mp3", quality? }`. URLs on `x.com` / `twitter.com` route to the bespoke twitter plugin's `download` action; everything else routes to yt-dlp's ~1800-site extractor list. Returns the same `{ success, downloadUrl, filename, size, … }` token shape as `/youtube/download` so existing downstream consumers only need to swap the path. Same auth/payment chain as `/youtube/download` — credit auth first, falling back to legacy `externalAuth` + `paymentMiddleware` for non-credit clients.
+- **Agent route `POST /api/external/social/probe`** — given a URL, returns which extractor would handle it and (for yt-dlp URLs) basic metadata. No download, no credit charge — useful for checking whether a URL is supported before debiting credits.
+- **Gateway proxy routes `POST /social/download` (10 credits) and `POST /social/audio` (8 credits)** in `api-lanagent-net/index.mjs`. Same `proxyServiceToAgent` pattern as `/youtube/download` and `/youtube/audio`. mp3 requests sent to `/social/download` get a 400 with a hint pointing at `/social/audio`, so the cheaper rate isn't accidentally bypassed.
+- **`social-download` and `social-audio` registered in ALICE's `serviceCatalog`** on the gateway so `pickBestAgent` resolves them.
+
+### Improved
+- **`ytdlp` plugin curl-cffi impersonation** (`src/api/plugins/ytdlp.js`) — `_buildBaseCommand` now adds `--impersonate chrome` for hosts that block default-fingerprint HTTP (TikTok, Instagram, Facebook). Confirmed fix for TikTok HTTP 403 on the actual download phase. YouTube/SoundCloud paths unchanged so already-working extractors don't regress.
+
+### Verified end-to-end
+- **Direct agent (`192.168.0.52` via `lsk_*` key):** YouTube mp3 (`Me_at_the_zoo.mp3`, 653 KB), SoundCloud mp3 (`Flickermood.mp3`, 6.50 MB), TikTok mp4 (1.91 MB), Streamable mp4 (`me_irl.mp4`, 2.90 MB), Dailymotion mp4 (`Midnight_Sun_｜_Iceland.mp4`, 8.53 MB). Bilibili probe succeeded; download skipped because the test clip was large and China-hosted. Twitter and Twitch routing both dispatched correctly; specific test URLs happened to be deleted/expired.
+- **Gateway (`api.lanagent.net` via `gsk_*` key):** Streamable via `POST /social/download` charged 10 credits, returned downloadable mp4. SoundCloud via `POST /social/audio` charged 8 credits, returned downloadable mp3.
+
+### Phase 2/3 deferred
+Cloudflare-gated sites (Rumble, BitChute) need FlareSolverr; cookie-required sites (Instagram videos, Facebook, X.com video tweets that aren't public-API-accessible) need a cookie-jar pipeline. Both are scoped for follow-up sessions once Phase 1 has soaked.
+
+## [2.25.15] - 2026-05-04
+
+Gateway-side release. Agent code unchanged. All work lives in the `api-lanagent-net` gateway repo deployed to `api.lanagent.net`; this entry tracks it from the platform-level changelog.
+
+### Added
+- **Gateway admin console** (`/admin`) — magic-link sign-in for the operator only, allow-list driven by `ADMIN_EMAIL` env var (default `portablediag@protonmail.com`). Sessions are short-lived JWTs in an `HttpOnly; SameSite=Lax; Secure` cookie scoped to `/admin`. Existing `X-Admin-Key` header auth is preserved alongside cookie auth on every `/admin/api/*` endpoint, so curl-driven scripts keep working. Brute-force protection on the login submit endpoint (10/15min per IP). Non-admin email lookups get a 250–450ms tarpit + identical 200 response so timing/output can't enumerate which address is allow-listed. Every admin write action (grant credits, revoke key, mark verified, agent toggle/delete, promotion CRUD, ticket status, sign-in events) is recorded to a new `AdminAudit` collection visible at `/admin/audit`.
+- **Admin nav (9 sections)** — Dashboard (KPIs + 14-day request bar chart + recent payments + agents + open tickets), Users (paginated/searchable list of `portalusers`), Wallets (paginated/searchable list of `creditbalances` — crypto-bootstrapped accounts that didn't surface anywhere before), Agents (toggle/delete), Payments (Stripe USD + on-chain BNB/SKYNET merged chronologically with source filter), Subscriptions, Promotions (full CRUD), Tickets, Scrapes (volume/success/top-services/top-agents over 7–90 days), Audit. Per-account detail pages for both portal users and wallets include 30-day request totals, top failing services, payment history, recent requests, threshold-notification state, and admin actions (grant credits, revoke key, mark verified, BscScan tx links).
+- **Public portal: magic-link sign-up and sign-in** — `POST /portal/magic-link` accepts an email and emails a 15-minute single-use link. New email auto-creates a passwordless account with a default `gsk_*` API key + welcome email (stub bcrypt hash so the only way in is via magic links until the user opts to set a password through the standard reset flow). Existing email receives a sign-in link. `GET /portal/magic-verify?t=...` consumes the token, marks `emailVerified=true`, sets the JWT, and redirects to the dashboard. Auth modal updated: toggle link now correctly flips between "Already have an account? Log in" / "Don't have an account? Sign up" depending on mode; magic-link button reads "Email me a sign-up link" or "Email me a sign-in link" depending on mode.
+- **Email templates** — `notifyAdminMagicLink(email, url, ip, ua)` and `notifyPortalMagicLink(email, url, isNewAccount)` matching the existing branded layout (single button, expires-in line, paste-URL fallback, "you can ignore this email" reassurance). Both fire-and-forget through the existing `nodemailer` transport on `mail.lanagent.net:587`.
+- **SupportTicket persistence** — `support-poller.mjs` now writes each new email to a `supporttickets` collection (idempotent on Message-ID) so the admin Tickets page has real data alongside the existing Telegram notifications. Operator can change ticket status (open/pending/closed) and add notes from the admin UI.
+
+### Improved
+- **Wallet accounts visible** — Mindswarm and other crypto-bootstrapped accounts (separate `creditbalances` collection, no email) had no admin view at all before. They now have parallel coverage to portal users, including an "is this a real on-chain wallet vs. a `portal_*` bridge stub vs. a test record" type classifier.
+- **On-chain payment display fixed** — `GatewayPayment.amount` is the USD value at time of transaction (not raw BNB); previous admin display showed e.g. "2.2 BNB" which read as ~$1,300 instead of the correct $2.20. Payments page and wallet detail page now render `$2.20` with "paid in BNB" shown as a subtitle. Stripe + crypto totals roll up to a single Total revenue figure on the dashboard ($36.40 lifetime as of this release).
+- **`ecosystem.config.cjs`** — fixed stale `cwd: /opt/scrape-gateway` → `/opt/api-gateway`, app name `scrape-gateway` → `api-gateway` to match production. Added `ADMIN_EMAIL`, `ADMIN_JWT_SECRET`, `ADMIN_SESSION_HOURS` env vars.
+
+### Removed
+- **Redundant `/admin/agents` (GET), `/admin/wallet`, `/admin/promotions` (GET/POST/DELETE) endpoints** in `index.mjs` — replaced by `/admin/api/*` equivalents in `admin.mjs` which accept both cookie auth and the existing `X-Admin-Key` header. `POST /admin/agents` (agent registration with reachability + price negotiation) is preserved unchanged.
+
 ## [2.25.14] - 2026-05-03
 
 ALICE PR review pass: 18 auto-generated PRs (#2065-#2082) reviewed one by one. 1 merged, 1 salvaged, 16 closed. Each closed PR has an explanatory comment so the LLM can learn the failure pattern next time.

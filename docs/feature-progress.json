@@ -1,9 +1,89 @@
 {
-  "lastUpdated": "2026-05-03T23:59:00.000Z",
+  "lastUpdated": "2026-05-05T00:30:00.000Z",
   "overallProgress": "100%",
-  "status": "PRODUCTION READY - v2.25.14 - ALICE PR review pass: 18 auto-generated PRs (#2065-#2082) reviewed one by one. 1 merged (ipstack getTimezones batch command, mirrors fetchGeolocationBatch). 1 salvaged (repoInfo.js silent catch replaced with logger.debug for git-remote fallback observability). 16 closed with explanatory comments — failure patterns: breaking changes that would crash callers, would-crash-on-import code (__dirname in ESM, TaskScheduler.schedule called as static), stubs that return success:true without doing anything, on-chain double-spend hazards from blanket retry-wrapping of writes, misuses of validateJsonSchema, redundant duplicates of existing code, and description-vs-diff mismatches.",
-  "milestone": "Continued the ALICE PR triage cadence. Every closure includes a comment explaining the specific issues so the LLM has feedback to learn from. The salvage rule — 'If the PR had a good idea but bad implementation, and you can correctly fully implement it without rewriting or changing or breaking any functionality, then do that' — surfaced one safe one-line improvement (#2067 → debug logging on the git-remote catch). Headline output of v2.25.14: a single new public-API capability (ipstack getTimezones batch) and 17 closed PRs that won't ship code that would break production.",
+  "status": "PRODUCTION READY - v2.25.20 - PR review pass on 10 ALICE-generated PRs (#2083-#2092). 1 merged (FeatureRequest statusHistory), 5 salvaged manually with corrected implementations (SystemLog pagination, scammerRegistry compression, PluginDevelopment evaluation analytics rewritten as cross-doc static, payment notification retry now fire-and-forget, MCP tool usage analytics with bounded ring buffer + integration + endpoint), 4 closed as unimplementable due to missing prerequisites or semantic mismatches with the actual schema. v2.25.19 base: SKYNET API bot BYOK (per-user gateway keys, AES-256-GCM at rest, validated before storage, source message auto-deleted).",
+  "milestone": "Free-tier users hitting daily limits can self-serve unlimited access by buying credits at api.lanagent.net and loading their key into the bot. No operator intervention required. Bot's own credit pool is preserved for free-tier flow only; BYOK users' calls bypass it entirely and bill their own account.",
   "features": {
+    "skynetBotBYOK_2026_05_04": {
+      "status": "deployed",
+      "progress": "100%",
+      "addedDate": "2026-05-04",
+      "description": "Per-user gateway API keys for the SKYNET API Telegram bot. BotUser schema gains AES-256-GCM encrypted apiKey blob (sharing WALLET_ENCRYPTION_KEY with the wallet service) plus plaintext last-4 hint for identification without decryption. New src/services/userKey.js (set/get/clear/validate/redact + KEY_REGEX). Gateway service refactored: callService/socialDownload/getCreditsBalance accept opts.apiKey override; singleton key is now the bot's fallback only. New centralized src/services/access.js checkPaidAccess returning {allowed, apiKey} replaces 7 duplicated local copies across command files. ~30 callsites threaded with the user's key when present. incrementUsage gated on !access.apiKey so BYOK calls don't tick free-tier counters. Three new commands in meta.js: /setkey (validates against gateway → deletes source message → stores), /mykey (shows last 4 + load date + live balance), /clearkey. autoDetect handler captures gsk_-pattern keys pasted into chat and runs the same flow without requiring the /setkey verb. Verified: format validation, gateway validation against real/fake keys, encrypt/decrypt roundtrip, all four checkPaidAccess scenarios (free under/over limit, BYOK under/over limit).",
+      "files": [
+        "TelegramBots/SkynetAPIBot/src/models/BotUser.js",
+        "TelegramBots/SkynetAPIBot/src/services/userKey.js",
+        "TelegramBots/SkynetAPIBot/src/services/access.js",
+        "TelegramBots/SkynetAPIBot/src/services/gateway.js",
+        "TelegramBots/SkynetAPIBot/src/commands/meta.js",
+        "TelegramBots/SkynetAPIBot/src/commands/ai.js",
+        "TelegramBots/SkynetAPIBot/src/commands/code.js",
+        "TelegramBots/SkynetAPIBot/src/commands/crypto.js",
+        "TelegramBots/SkynetAPIBot/src/commands/media.js",
+        "TelegramBots/SkynetAPIBot/src/commands/price.js",
+        "TelegramBots/SkynetAPIBot/src/commands/search.js",
+        "TelegramBots/SkynetAPIBot/src/handlers/autoDetect.js",
+        "TelegramBots/SkynetAPIBot/src/index.js"
+      ]
+    },
+    "rumble403Fix_2026_05_04": {
+      "status": "deployed",
+      "progress": "100%",
+      "addedDate": "2026-05-04",
+      "description": "Pinned curl_cffi --impersonate target from bare 'chrome' (which picks chrome-99) to 'chrome-131' for both Cloudflare-bypass and stored-cookie paths in src/api/plugins/ytdlp.js. Bare 'chrome' default's JA3/JA4 fingerprint diverged from FlareSolverr's Chrome 142, so Cloudflare rejected the cf_clearance cookie despite the cookie being valid. Empirical sweep across yt-dlp's available impersonate targets: chrome-99/110/116/133 all 403 against Rumble; chrome-124/131 succeed. Also extended src/core/aiIntentDetector.js downloadVideo (intent 64) and downloadAudio (intent 166) with 30 platform-named training examples covering tiktok/rumble/bitchute/streamable/dailymotion/x.com/twitch/bilibili/soundcloud — vector store auto-rebuilds via indexAllIntents on next agent restart. Verified: Rumble (Bannon_s_Warroom_Is_Targeting_Specific_RINOs_to_Oppose_in_Primaries.mp4, 7.1 MB) and BitChute (Nima_R._Alkhorshid…, 259 MB) both download cleanly via ALICE's /api/command/execute endpoint with natural-language phrasings.",
+      "files": [
+        "src/api/plugins/ytdlp.js",
+        "src/core/aiIntentDetector.js"
+      ]
+    },
+    "socialDownloadPhase23_2026_05_04": {
+      "status": "deployed",
+      "progress": "100%",
+      "addedDate": "2026-05-04",
+      "description": "Phase 2: Cloudflare-bypass for Rumble, BitChute, fb.watch via long-lived FlareSolverr sessions (fsEnsureSession in src/utils/flareSolverr.js) — sessions persist cf_clearance across requests so Cloudflare doesn't escalate challenge difficulty into FS timeouts on repeated solves. yt-dlp invocation combines --cookies (Netscape file written from FS solution.cookies) + --user-agent (FS-issued UA) + --impersonate chrome. The TLS fingerprint match is required because Cloudflare's cf_clearance is bound to the TLS handshake of the client that solved the challenge — without --impersonate, the cookie is rejected. Phase 3: Cookie-required sites (instagram.com, facebook.com, fb.watch) read from a stored Netscape file at $LANAGENT_COOKIES_DIR/<host>.txt (default ~/.config/lanagent/cookies/) outside the deploy dir so cookies survive deployments. New JWT-protected admin endpoints at /api/admin/cookies on the agent (GET list / POST :host / DELETE :host) with allow-list of supported hosts and Netscape-format validation. SKYNET API Telegram bot auto-downloads supported URLs (tiktok/rumble/bitchute/streamable/dailymotion/bilibili/twitch) when posted to chat, plus a new /dl <url> [mp3|mp4] manual command. Verified: BitChute mp4 download (Who_The_Fed_Actually_Serves.mp4, 2.22 MB) end-to-end; Rumble cookies+impersonate pipeline validated by sustained HLS streaming through the CF wall; admin-endpoint round trip tested; yt-dlp confirmed to consume stored cookies file via --cookies flag.",
+      "files": [
+        "src/api/plugins/ytdlp.js",
+        "src/utils/flareSolverr.js",
+        "src/utils/ytdlpCookieJar.js",
+        "src/interfaces/web/cookiesAdmin.js",
+        "src/interfaces/web/webInterface.js",
+        "api-lanagent-net/portal.mjs",
+        "api-lanagent-net/index.mjs",
+        "TelegramBots/SkynetAPIBot/src/services/gateway.js",
+        "TelegramBots/SkynetAPIBot/src/handlers/autoDetect.js",
+        "TelegramBots/SkynetAPIBot/src/commands/media.js",
+        "TelegramBots/SkynetAPIBot/src/index.js"
+      ]
+    },
+    "socialDownloadPhase1_2026_05_04": {
+      "status": "deployed",
+      "progress": "100%",
+      "addedDate": "2026-05-04",
+      "description": "Generic /social/download route on agent (POST /api/external/social/download) and gateway (POST /social/download for MP4 at 10 credits, POST /social/audio for MP3 at 8 credits). Agent-side dispatcher: x.com / twitter.com / *.twitter.com → twitter plugin's bespoke download action; everything else → yt-dlp's ~1800-site extractor list. Returns the same downloadUrl-token shape as /youtube/download so existing consumers only need to swap the path. ytdlp plugin _buildBaseCommand now adds --impersonate chrome (via curl-cffi) for hosts that block default HTTP fingerprints — TikTok, Instagram, Facebook — without affecting YouTube/SoundCloud paths. Companion POST /api/external/social/probe (free, no credit charge) returns which extractor would handle a given URL plus extracted metadata. Verified end-to-end: YouTube mp3, SoundCloud mp3, TikTok mp4 (1.91 MB), Streamable mp4 (2.90 MB), Dailymotion mp4 (8.53 MB), Bilibili (probe), plus gateway-level Streamable /social/download and SoundCloud /social/audio with correct credit debits (10 and 8 respectively).",
+      "phase2": "Cloudflare-gated sites (Rumble, BitChute) — deferred until Phase 1 has soaked. Plan is to reuse the existing FlareSolverr infrastructure used by the scraper plugin.",
+      "phase3": "Cookie-required sites (Instagram videos, Facebook, X.com video tweets that aren't public-API-accessible). Deferred until Phase 2 ships. Plan is a cookie-jar pipeline managed via the admin UI.",
+      "files": ["src/api/external/routes/social.js", "src/api/external/externalGateway.js", "src/api/plugins/ytdlp.js", "api-lanagent-net/index.mjs"]
+    },
+    "gatewayAdminConsole2026_05_04": {
+      "status": "deployed",
+      "progress": "100%",
+      "addedDate": "2026-05-04",
+      "description": "Magic-link admin UI at /admin on the gateway VPS. Allow-listed to ADMIN_EMAIL (default portablediag@protonmail.com); link expires in 15 min and is single-use; non-admin email lookups get an identical 200 response after a 250-450ms tarpit so timing/output can't enumerate which address is allow-listed. Sessions are short-lived JWTs in HttpOnly + SameSite=Lax + Secure cookies scoped to /admin. Existing X-Admin-Key header auth preserved alongside cookie auth on every /admin/api/* endpoint so curl scripts keep working. 9 nav sections (Dashboard, Users, Wallets, Agents, Payments, Subscriptions, Promotions, Tickets, Scrapes, Audit) covering every entity in the gateway DB. Wallet-bootstrapped accounts (separate creditbalances collection that authenticates via wallet signature instead of email/password — Mindswarm and similar) had no admin view at all before this and now have parallel coverage to email-signup PortalUsers, with a type classifier (eth wallet vs portal-bridge stub vs test record) and BscScan tx links on the detail page. Every admin write action (grant credits, revoke key, mark verified, agent toggle/delete, promotion CRUD, ticket status) is recorded to a new AdminAudit collection visible at /admin/audit.",
+      "files": ["api-lanagent-net/admin.mjs", "api-lanagent-net/email.mjs", "api-lanagent-net/index.mjs", "api-lanagent-net/support-poller.mjs", "api-lanagent-net/ecosystem.config.cjs"]
+    },
+    "portalMagicLinkAuth2026_05_04": {
+      "status": "deployed",
+      "progress": "100%",
+      "addedDate": "2026-05-04",
+      "description": "Passwordless sign-up and sign-in on the public portal. Single endpoint POST /portal/magic-link covers both flows: existing user → sign-in link; new email → account auto-created (passwordless stub bcrypt hash, default gsk_* API key, welcome email) and a 'finish setting up' link is sent. GET /portal/magic-verify?t=<token> consumes the 15-min single-use token, marks emailVerified=true, sets the JWT, and redirects to the dashboard. Auth modal updated: toggle link now correctly flips between 'Already have an account? Log in' / 'Don't have an account? Sign up' depending on mode (was showing the wrong text in login mode); magic-link button reads 'Email me a sign-up link' or 'Email me a sign-in link' depending on mode. Sits alongside the existing email+password and BSC-wallet signup paths.",
+      "files": ["api-lanagent-net/portal.mjs", "api-lanagent-net/email.mjs"]
+    },
+    "supportTicketPersistence2026_05_04": {
+      "status": "deployed",
+      "progress": "100%",
+      "addedDate": "2026-05-04",
+      "description": "support-poller.mjs now writes each new email arriving at support@lanagent.net to a supporttickets Mongo collection (idempotent on Message-ID), in addition to the existing instant Telegram notification. Admin UI's Tickets page reads from this collection: triage list filtered by status (open/pending/closed), modal for each ticket showing the body + ctxSnapshot, ability to add notes and change status. Sets up the data foundation for v3 LLM-drafted replies described in docs/proposals/ai-support-system.md (still recommended to sit on v2 for 2+ weeks before building v3).",
+      "files": ["api-lanagent-net/support-poller.mjs", "api-lanagent-net/admin.mjs"]
+    },
     "alicePrReviewPass2026_05_03": {
       "status": "deployed",
       "progress": "100%",
