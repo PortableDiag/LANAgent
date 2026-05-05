@@ -376,15 +376,16 @@ router.get('/api/tools', authenticateToken, async (req, res) => {
 
 // Execute tool
 router.post('/api/tools/execute', authenticateToken, async (req, res) => {
+  const { serverId, serverName, toolName, args = {} } = req.body;
+  const startedAt = Date.now();
+  let toolInfo = null;
   try {
-    const { serverId, serverName, toolName, args = {} } = req.body;
-
     if (!toolName) {
       return res.status(400).json({ success: false, error: 'toolName is required' });
     }
 
     // Find the tool
-    const toolInfo = await mcpClient.findTool(
+    toolInfo = await mcpClient.findTool(
       serverName ? `${serverName}:${toolName}` : toolName
     );
 
@@ -397,6 +398,14 @@ router.post('/api/tools/execute', authenticateToken, async (req, res) => {
     // Execute the tool
     const result = await mcpClient.executeTool(server._id, tool.name, args);
 
+    toolRegistry.logToolUsage({
+      intentId: toolRegistry.getIntentId(server.name, tool.name),
+      toolName: tool.name,
+      serverName: server.name,
+      executionTime: Date.now() - startedAt,
+      success: true
+    });
+
     res.json({
       success: true,
       server: server.name,
@@ -404,6 +413,16 @@ router.post('/api/tools/execute', authenticateToken, async (req, res) => {
       result
     });
   } catch (error) {
+    if (toolInfo) {
+      toolRegistry.logToolUsage({
+        intentId: toolRegistry.getIntentId(toolInfo.server.name, toolInfo.tool.name),
+        toolName: toolInfo.tool.name,
+        serverName: toolInfo.server.name,
+        executionTime: Date.now() - startedAt,
+        success: false,
+        error: error.message
+      });
+    }
     logger.error('Execute MCP tool error:', error);
     res.status(500).json({ success: false, error: error.message });
   }
@@ -419,6 +438,19 @@ router.post('/api/tools/sync', authenticateToken, async (req, res) => {
     });
   } catch (error) {
     logger.error('Sync MCP tools error:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Tool usage analytics — aggregates from the in-memory ring buffer of recent
+// executions. Stats reset on process restart by design (this is for live
+// operational debugging, not audit). Returns per-tool success/failure counts
+// and avg/min/max execution time.
+router.get('/api/tools/usage', authenticateToken, async (req, res) => {
+  try {
+    res.json({ success: true, data: toolRegistry.generateUsageReport() });
+  } catch (error) {
+    logger.error('Generate tool usage report error:', error);
     res.status(500).json({ success: false, error: error.message });
   }
 });

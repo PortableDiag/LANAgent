@@ -183,29 +183,33 @@ systemLogSchema.statics.logPerformance = function(operation, duration, metrics =
   });
 };
 
-systemLogSchema.statics.findRecent = function(hours = 24, filters = {}) {
+systemLogSchema.statics.findRecent = function(hours = 24, filters = {}, limit = 0, skip = 0) {
   const since = new Date(Date.now() - hours * 60 * 60 * 1000);
-  
+
   const query = {
     createdAt: { $gte: since },
     ...filters
   };
-  
-  return this.find(query).sort({ createdAt: -1 });
+
+  let q = this.find(query).sort({ createdAt: -1 });
+  if (skip) q = q.skip(skip);
+  if (limit) q = q.limit(limit);
+  return q;
 };
 
-systemLogSchema.statics.findErrors = function(unresolved = true, limit = 100) {
+systemLogSchema.statics.findErrors = function(unresolved = true, limit = 100, skip = 0) {
   const query = {
     level: 'error'
   };
-  
+
   if (unresolved) {
     query['resolved.status'] = false;
   }
-  
-  return this.find(query)
-    .sort({ createdAt: -1 })
-    .limit(limit);
+
+  let q = this.find(query).sort({ createdAt: -1 });
+  if (skip) q = q.skip(skip);
+  if (limit) q = q.limit(limit);
+  return q;
 };
 
 systemLogSchema.statics.getStatistics = async function(hours = 24) {

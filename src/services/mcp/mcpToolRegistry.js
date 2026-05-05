@@ -14,6 +14,11 @@ export class MCPToolRegistry {
     this.agent = agent;
     this.registeredTools = new Map(); // intentId -> { serverId, serverName, tool, version, history }
     this.cache = new NodeCache({ stdTTL: 300, checkperiod: 60 }); // 5 min TTL
+    // Bounded in-memory log of tool executions. Wraps around at MAX_USAGE_LOG
+    // so a long-running process doesn't grow this unbounded. Stats are lost
+    // on restart by design — this is for live runtime debugging, not audit.
+    this.toolUsageLog = [];
+    this.MAX_USAGE_LOG = 1000;
   }
 
   /**
@@ -377,6 +382,69 @@ export class MCPToolRegistry {
 
     this.registeredTools.clear();
     logger.info('Cleared all registered MCP tools');
+  }
+
+  /**
+   * Record a single tool execution. Bounded ring-buffer — drops the oldest
+   * entry when the log fills, so a long-running process can't OOM here.
+   * Called from the express route after each invocation.
+   */
+  logToolUsage({ intentId, toolName, serverName, executionTime, success, error }) {
+    this.toolUsageLog.push({
+      intentId,
+      toolName,
+      serverName,
+      executionTime,
+      success,
+      error: error ? String(error).slice(0, 500) : null,
+      timestamp: new Date()
+    });
+    if (this.toolUsageLog.length > this.MAX_USAGE_LOG) {
+      this.toolUsageLog.splice(0, this.toolUsageLog.length - this.MAX_USAGE_LOG);
+    }
+  }
+
+  /**
+   * Aggregate the in-memory usage log into per-tool stats: total executions,
+   * successes/failures, and average/min/max execution time.
+   */
+  generateUsageReport() {
+    const report = {};
+    for (const log of this.toolUsageLog) {
+      const key = log.intentId || `${log.serverName}:${log.toolName}`;
+      if (!report[key]) {
+        report[key] = {
+          intentId: log.intentId,
+          toolName: log.toolName,
+          serverName: log.serverName,
+          totalExecutions: 0,
+          successes: 0,
+          failures: 0,
+          totalExecutionTime: 0,
+          minExecutionTime: Infinity,
+          maxExecutionTime: 0,
+          lastUsedAt: log.timestamp
+        };
+      }
+      const entry = report[key];
+      entry.totalExecutions += 1;
+      entry.totalExecutionTime += log.executionTime || 0;
+      entry.minExecutionTime = Math.min(entry.minExecutionTime, log.executionTime || 0);
+      entry.maxExecutionTime = Math.max(entry.maxExecutionTime, log.executionTime || 0);
+      if (log.timestamp > entry.lastUsedAt) entry.lastUsedAt = log.timestamp;
+      if (log.success) entry.successes += 1;
+      else entry.failures += 1;
+    }
+    for (const k of Object.keys(report)) {
+      const e = report[k];
+      e.averageExecutionTime = e.totalExecutions > 0 ? e.totalExecutionTime / e.totalExecutions : 0;
+      if (e.minExecutionTime === Infinity) e.minExecutionTime = 0;
+    }
+    return {
+      windowSize: this.MAX_USAGE_LOG,
+      totalLogged: this.toolUsageLog.length,
+      tools: report
+    };
   }
 }
 

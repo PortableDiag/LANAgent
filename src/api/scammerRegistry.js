@@ -1,4 +1,5 @@
 import express from 'express';
+import compression from 'compression';
 import { authenticateToken } from '../interfaces/web/auth.js';
 import scammerRegistryService from '../services/crypto/scammerRegistryService.js';
 import { logger } from '../utils/logger.js';
@@ -17,6 +18,7 @@ const limiter = rateLimit({
 
 router.use(authenticateToken);
 router.use(limiter);
+router.use(compression());
 
 router.use(async (req, res, next) => {
     if (!initialized) {

@@ -287,4 +287,56 @@ pluginDevelopmentSchema.methods.generateChangelog = function() {
   }
 };
 
+/**
+ * Aggregate evaluation analytics across all PluginDevelopment documents that
+ * have a recorded evaluation score. Returns the average, a chronological
+ * trend (createdAt → score) for charting, and the top performers — i.e.
+ * plugins whose score is at or above the average.
+ *
+ * Filters: optional { status, since } to constrain to e.g. only completed
+ * plugins or only the last 30 days.
+ */
+pluginDevelopmentSchema.statics.calculateEvaluationAnalytics = async function(filters = {}) {
+  try {
+    const query = { 'apiDetails.evaluation.score': { $exists: true, $ne: null } };
+    if (filters.status) query.status = filters.status;
+    if (filters.since) query.createdAt = { $gte: filters.since };
+
+    const docs = await this.find(query)
+      .select('api apiDetails.name apiDetails.evaluation createdAt status')
+      .sort({ createdAt: 1 })
+      .lean();
+
+    if (docs.length === 0) {
+      return { count: 0, averageScore: 0, scoreTrend: [], topPerformingPlugins: [] };
+    }
+
+    const scores = docs.map(d => d.apiDetails.evaluation.score);
+    const averageScore = scores.reduce((a, s) => a + s, 0) / scores.length;
+
+    const scoreTrend = docs.map(d => ({
+      api: d.api,
+      name: d.apiDetails?.name || d.api,
+      score: d.apiDetails.evaluation.score,
+      createdAt: d.createdAt,
+      status: d.status
+    }));
+
+    const topPerformingPlugins = scoreTrend
+      .filter(e => e.score >= averageScore)
+      .sort((a, b) => b.score - a.score)
+      .map(e => ({ api: e.api, name: e.name, score: e.score }));
+
+    return {
+      count: docs.length,
+      averageScore,
+      scoreTrend,
+      topPerformingPlugins
+    };
+  } catch (error) {
+    logger.error('Error calculating evaluation analytics:', error);
+    throw new Error('Failed to calculate evaluation analytics');
+  }
+};
+
 export const PluginDevelopment = mongoose.model('PluginDevelopment', pluginDevelopmentSchema);

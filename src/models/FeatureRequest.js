@@ -155,6 +155,16 @@ const FeatureRequestSchema = new mongoose.Schema({
       maxLength: 10000
     },
     language: String
+  }],
+
+  // New field to track the lifecycle of feature requests
+  statusHistory: [{
+    status: String,
+    timestamp: {
+      type: Date,
+      default: Date.now
+    },
+    notes: String
   }]
 }, {
   timestamps: true,
@@ -175,6 +185,12 @@ FeatureRequestSchema.methods.updateStatus = function(newStatus, notes = '') {
   this.status = newStatus;
   if (notes) this.notes = notes;
   
+  // Log the status change in the history
+  this.statusHistory.push({
+    status: newStatus,
+    notes: notes
+  });
+
   if (newStatus === 'analyzing') {
     this.analyzedAt = new Date();
   } else if (newStatus === 'completed') {

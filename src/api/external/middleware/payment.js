@@ -199,7 +199,10 @@ export function paymentMiddleware(serviceId) {
             `TX: ${truncatedTx}`,
             `Confirmations: ${confirmations}`
           ].join('\n');
-          agent.notify(message).catch(e => logger.error('Payment notification failed:', e));
+          // Fire-and-forget — owner-notification retries (up to ~7s with default
+          // backoff) must not block the user's payment-confirmation response.
+          retryOperation(() => agent.notify(message), { retries: 3, context: 'paymentNotify' })
+            .catch(e => logger.error('Payment notification failed after retries:', e));
         }
       } catch (notifyErr) {
         logger.error('Payment notification error:', notifyErr);
