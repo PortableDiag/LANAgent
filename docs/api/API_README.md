@@ -393,6 +393,59 @@ The gateway calls `GET /api/external/catalog` on your agent and reads the `servi
 
 ## Recent Updates (May 5, 2026)
 
+### v2.25.27 — Gateway repo workflow + today's gateway-side fixes pulled into source control
+
+The gateway code (`api.lanagent.net` portal, admin console, Stripe webhook, scrape proxies) is a **separate repo from `LANAgent` and `LANAgent-genesis`**. It lives at `PortableDiag/api-lanagent-net` (private), local at `/media/veracrypt3/Websites/LANAgent_Website/api-lanagent-net/`, and deploys to `/opt/api-gateway/` on `137.184.2.62`. Multiple sessions had been editing files directly on the production host with `ssh "sed -i …"` patches; the local repo had fallen six commits behind. This release reconciles.
+
+**Gateway commits (`PortableDiag/api-lanagent-net`):**
+
+- `0a0c5a0` v2.25.25-bundle: gateway recovery, logging coverage, admin/portal UX
+- `d75969a` `deploy.sh`: whitelisted rsync + pm2 restart + health check
+- `28e132e` fix: double-escape regex backslashes inside `getLandingPage` template literal
+
+**User-facing fixes bundled in `0a0c5a0`:**
+
+- `RequestLog.create` is now called from every credit-debiting endpoint (`/scrape`, `/scrape/batch`, `/agents/:agentId/:service`, and `proxyServiceToAgent`'s catch branch). Previously only the success/failure branches of the legacy proxy helper logged, so direct `/scrape` calls debited credits without writing a log row. Result: `web-scraping` never appeared in the admin Top Services panel and customer dashboard charts showed empty for users with real usage. Going forward, every billable call appears in usage analytics.
+- Admin "Top Agents" panel now populates — was matching/grouping on `agentUrl` (a field that doesn't exist on `RequestLog`); fixed to `agentName`. Also fixes the user-detail "Recent requests" agent column which used to show `—` for every row.
+- `express.urlencoded({ extended: true, limit: '1mb' })` middleware added so the admin login form (`application/x-www-form-urlencoded`) actually populates `req.body.email`. Was silently dropping the email field, so every magic-link request fell into the anti-enumeration tarpit branch.
+- Strict primary/fallback `pickBestAgent` — replaced weighted-random over funded agents with deterministic ALICE-first/BETA-fallback by reputation. ALICE always wins when online and funded; BETA only sees traffic when ALICE is offline or out of credits. Capability gating untouched at the DB query level, so render-tier scrapes still cannot route to BETA.
+- Promo banner now visibly shows old-vs-new on each price card. Credit packages render `~~400~~ 600 credits (+200 bonus)`; subscription cards render `~~$25~~ $12.50/mo first month` with a `then $25/mo` subtitle. Reverts cleanly when no promo is active.
+- Dashboard usage chart label updates with the selected range (`24 hours` / `7 days` / `14 days` instead of always saying "14 days"); `switchRange` now prefers JWT auth (matches initial-render); empty-state copy is "No usage in this range" instead of returning silently and leaving the previous chart visible.
+- HTML5 responsive scrolling tables in the admin: `html, body { overflow-x: hidden }` + every `<table>` wrapped in `<div class="table-wrap">` with `overflow-x: auto`. The table itself uses `min-width: max-content` so columns size naturally and the wrapper scrolls. The page never scrolls horizontally; wide tables scroll inside their card with all columns intact. `.mono { word-break: break-all; overflow-wrap: anywhere }` so tx hashes and wallet addresses don't widen their column.
+- Mobile responsive admin system: `nav-toggle` hamburger; named responsive grid classes (`.dash-grid`, `.grid-2`, `.grid-aside`) replacing inline `grid-template-columns`; `.row-flex` mobile-wrap rule for the Grant Credits admin-actions card whose inline-styled inputs were overflowing on phones.
+- Portal "Enter your email first" warning now renders amber (`#fbbf24`) instead of muted grey, so it's visible against the dark theme.
+
+**Workflow change:**
+
+- `deploy.sh` in the gateway repo: `cd /media/veracrypt3/Websites/LANAgent_Website/api-lanagent-net/ && ./deploy.sh` rsyncs the source files to `/opt/api-gateway/`, restarts the PM2 processes, and health-checks `http://127.0.0.1:3100/health`. Whitelisted (`*.mjs`, `package.json`, `package-lock.json`, `ecosystem.config.cjs`); excludes `.env`, `*.bak*`, `node_modules/`, `.git/`, `CLAUDE.md`, `deploy.sh` itself. Flags: `--dry-run`, `--no-restart`, `--no-poller`.
+- `CLAUDE.md` in the gateway repo documents the local-first workflow + rsync deploy command + what NOT to do.
+- Memory persisted at `~/.claude/projects/-media-veracrypt1-NodeJS-LANAgent-genesis/memory/gateway_repo.md` (reference) and `feedback_gateway_no_prod_edits.md` (rule + reason + how to apply) so this doesn't recur.
+
+**No genesis-side code changes** in v2.25.27. The agent (`LANAgent` / `LANAgent-genesis`) is unaffected. ALICE production stays at v2.25.26.
+
+### v2.25.26 — Operational hardening: public-repo scrub + beta deploy + git-remote fix
+
+Same-day follow-up to v2.25.25 covering downstream rollout. **No API contract changes** — all surfaces report the same prices, tiers, and routes as v2.25.25. The bump exists so the four surfaces (genesis, public, beta, ALICE) all report a matching version after the day's work.
+
+**Code:**
+
+- `src/api/external/routes/scraping.js` — comment above `TIER_COSTS` corrected from `(v2.25.21: render dropped from 5 → 3...)` to `(v2.25.25: ...)`. The render cut landed in v2.25.25, not v2.25.21 (which was the gateway/BETA-recovery work). Pure comment fix, no behavior change.
+
+**Public repo (`PortableDiag/LANAgent`):**
+
+- Synced v2.25.25 from genesis: render cut, `/extract` `/crawl` proposal, full session report, all docs (commit `e45fb98f`).
+- Scrubbed 46 mentions of genesis-only crypto strategy classes (`ArbitrageStrategy`, `DollarMaximizerStrategy`, `NativeMaximizerStrategy`, `RuleBasedStrategy`, `TokenTraderStrategy`, `VolatilityAdjustedStrategy`, `ArbitrageScan`) from `feature-progress.json`. 2 wholly-proprietary entries removed. Public-shipped strategies (`BaseStrategy`, `DCAStrategy`, `GridTradingStrategy`, `MeanReversionStrategy`, `MomentumStrategy`, `StrategyRegistry`) untouched. Public commit `6dd2c5f5`.
+
+**Beta agent (`beta.lanagent.net`):**
+
+- Deployed v2.25.25 image. `TIER_COSTS.render = 3` confirmed in the running container.
+- Recovered 3 GB mid-build by stopping the running BETA container — the Beta VPS is 25 GB and was at 86% pre-deploy; first two builds failed at the `unpack to overlayfs` step with `no space left on device`. Third attempt succeeded after the cleanup (354.9s exporting + 67.6s unpacking).
+- Fixed `origin` git-remote URL which had the GitHub PAT inserted twice (`https://ghp_…@ghp_…@github.com/…`), breaking every scheduled self-modification `git fetch` with `URL using bad/illegal format`.
+
+**Production (`192.168.0.52` / ALICE):**
+
+- v2.25.25 code was already live (TIER_COSTS render: 3 confirmed) but `package.json` on production was stuck at `v2.25.11` — the previous `deploy-quick.sh` auto-detect run didn't pick up `package.json`. v2.25.26 deploys via the full `deploy.sh` sync to make sure `package.json` lands too.
+
 ### v2.25.25 — Render tier price cut: 5 → 3 credits
 
 Cut the `render` tier price from 5 credits ($0.05) to 3 credits ($0.03) — same as `full`. FlareSolverr cost-to-serve is well under $0.001/call so the 5cr sticker was almost entirely margin and read expensive next to ScraperAPI ultra_premium ($0.03+/call) and ScrapeGraphAI's stealth-extract ($0.034/call on Pro). The new scheme keeps `render` semantically distinct from `full` (FlareSolverr-backed; handles real CF JS challenges) but aligned in price, so under a `full → render` escalation pattern the average per-fallback cost converges on $0.03 instead of $0.05.

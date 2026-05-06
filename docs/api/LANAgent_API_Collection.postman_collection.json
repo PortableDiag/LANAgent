@@ -2,9 +2,9 @@
   "info": {
     "_postman_id": "9b5edc66-ea34-4329-a9d5-baca5366e76d",
     "name": "LANAgent API Collection",
-    "description": "LANAgent API v2.25.25 \u2014 Render-tier price cut: 5 cr ($0.05) \u2192 3 cr ($0.03), matching the `full` tier. FlareSolverr cost-to-serve is well under $0.001/call so the 5cr sticker was almost entirely margin and read expensive next to ScraperAPI ultra_premium ($0.03+) and ScrapeGraphAI's stealth-extract ($0.034 on Pro). New scheme keeps render distinct from full semantically (FlareSolverr-backed; CF JS-challenge handler) but aligned in price; under a `full \u2192 render` escalation pattern, average per-fallback cost converges on $0.03. Headline price story is now \"1\u00a2 to 3\u00a2 per scrape\" (was 1\u00a2 to 5\u00a2). Subscription buckets unchanged \u2014 render still draws from the smaller render-bucket on Scraper Pro ($25/mo, 15K render calls) and Business ($50/mo, 50K render calls). Companion work in the work scraper repo at /media/veracrypt2/NodeJS/ScraperService: scrapeWithScraperApi and /raw-fetch migrated from ScraperAPI to LANAgent on 2026-05-05; both now use the same callLANAgentScrape helper with `full \u2192 render` escalation. End-to-end verified in production: [LANAGENT] PASS https://www.foxnews.com/... (tier=full, credits, charged=3). 5cr slot now open for a future premium tier (residential proxies, 4G mobile IPs) without breaking the existing pricing ladder. v2.25.24 base: Per-page audit of every admin body for the inline-style mobile-overflow class of issues fixed in v2.25.22 / v2.25.23. One remaining offender: the Grant Credits admin-actions row on user-detail and wallet-detail pages used class='row-flex' with inline 'width:160px' and 'flex:1' on inputs, which overrode the responsive rules and overflowed on phone widths. Fixed by adding a @media (max-width: 880px) block that makes .row-flex wrap, gives label its own row, and forces inputs/selects/textareas to flex: 1 1 100% !important and width: auto !important \u2014 the !important being the only way to defeat the inline declarations without rewriting markup. All other admin pages audited clean (Dashboard / Users / Wallets / Agents / Payments / Subscriptions / Tickets / Audit). No remaining inline grid-template-columns declarations exist anywhere in admin.mjs. v2.25.23 base: Admin dashboard mobile follow-up. Promotions page (/admin/promotions) used inline style='grid-template-columns: 1fr 360px' which overrode responsive rules and forced the whole page wider than any phone viewport, so the sticky header had to scroll horizontally with the rest. Scrapes page (/admin/scrapes) had the same problem with 1fr 1fr \u2014 Top Services and Top Agents charts stayed side-by-side on phones. Both replaced with new responsive grid classes (.grid-aside collapses to 1fr at \u2264880px; .grid-2 stacks at \u2264880px) so future multi-column layouts can declare intent without inline overrides. Principle: always stack on mobile unless components are small. v2.25.22 base: Gateway admin dashboard responsive overhaul. Recent Payments table no longer crammed (dashboard grid switched from grid-3 to dash-grid: Payments 2fr, Agents 1fr, Tickets 1fr on desktop; Payments spans both cols on tablet \u2264980px; all stacked on phone \u2264600px). Long emails in the table truncate with text-overflow ellipsis and a title= tooltip showing the full address. Top navigation now collapses into a hamburger drawer on screens \u2264880px (was wrapping nine links across multiple lines and shoving the user/sign-out controls off-screen). Wide tables scroll horizontally inside their cards via overflow-x:auto instead of overflowing the page. KPI values, h1, card padding, and bar-row labels all shrink at narrow breakpoints. No markup changes outside layout() and dashboardBody(); almost entirely additive CSS in SHARED_STYLE plus a single nav-toggle button. v2.25.21 base: Gateway and BETA agent recovery. Fixed silently-broken admin login (gateway was missing express.urlencoded middleware so the HTML form's email field never reached the handler \u2014 every login attempt fell into the anti-enumeration tarpit branch and silently dropped). Reconnected gateway\u2194BETA after a 24-day stale-API-key outage caused by the April 11 mongo ransomware wipe (gateway held a key BETA had no record of; 6,917 401s on /credits/balance over 24 days). Bootstrapped BETA with $5 of on-chain credits (gateway swapped 0.008 BNB \u2192 268,770 SKYNET via PancakeSwap V2 then transferred 268,433 SKYNET to BETA's recipient \u2014 BETA verified the tx and credited 503 credits). Reworked pickBestAgent for strict primary/fallback by reputation: ALICE always wins when online and funded; BETA only sees traffic when ALICE is offline or out of credits (was weighted-random which gave BETA ~0.5% probability even when ALICE was healthy). Capability gating untouched at the DB query level so render-tier scrapes still cannot route to BETA \u2014 there's no fallback for render tier when ALICE is down (BETA lacks FlareSolverr). Added BETA agentId 2931 so direct-route POST /agents/2931/:service works. Stood up backup tooling: server-side /root/backup-beta.sh + cron 15 3 * * * (mongodump --gzip --archive, 14-day retention) and local pull script scripts/deployment/backup-beta.sh that streams a fresh mongodump over SSH plus rsynced configs/data into a single tar.gz at _BackUps_/beta-backup-<UTC-stamp>.tar.gz (30-day retention). v2.25.20 base: PR review pass on 10 AI-generated PRs (#2083\u20132092). v2.25.19 shipped BYOK on the SKYNET API Telegram bot (/setkey gsk_\u2026 with AES-256-GCM at rest, validated against gateway before storing; /mykey, /clearkey). Updated May 5, 2026.",
+    "description": "LANAgent API v2.25.27 \u2014 Gateway repo workflow established + today's gateway-side fixes pulled into source control. The gateway code (api.lanagent.net portal/admin/Stripe webhook/scrape proxies) is a separate repo at PortableDiag/api-lanagent-net (private), local at /media/veracrypt3/Websites/LANAgent_Website/api-lanagent-net/. Multiple sessions had been editing /opt/api-gateway/ files directly on the production host with `ssh \"sed -i \u2026\"` patches; the local repo had fallen six commits behind. This release rsyncs prod\u2192local, commits the drift, adds a proper deploy.sh (whitelisted rsync + pm2 restart + health check), and persists memory notes so this doesn't recur. Bundled gateway commit 0a0c5a0 covers: RequestLog.create added at every credit-debiting endpoint (was only in the legacy proxy helper \u2014 /scrape, /scrape/batch, /agents/:agentId/:service all silently debited credits without logging, which is why customer dashboard charts and admin Top Services were empty for web-scraping); agentUrl \u2192 agentName fix in admin scrapes Top Agents aggregation; HTML5 responsive scrolling tables (html, body { overflow-x: hidden } + every <table> wrapped in .table-wrap); .row-flex mobile-wrap rule for Grant Credits admin-actions card; portal 'Enter your email first' amber warning; promo strikethrough on credit packages and subscription cards (~~$25~~ $12.50/mo first month); dashboard usage chart label updates with range + JWT-first auth + better empty-state copy; express.urlencoded middleware fix for admin login form. Follow-up commit 28e132e fixes a JS template literal escape issue: \\d and \\s were being silently stripped from regex sources at template evaluation time, so the promo strikethrough regexes never matched anything until the backslashes were doubled. v2.25.26 base \u2014 Operational hardening pass following v2.25.25's render-tier cut. Ships a one-line comment fix in scraping.js (TIER_COSTS comment misattributed the cut to v2.25.21 instead of v2.25.25). Companion downstream rollout: synced v2.25.25 to public repo (PortableDiag/LANAgent), scrubbed 46 mentions of genesis-only crypto strategy classes (ArbitrageStrategy, DollarMaximizerStrategy, NativeMaximizerStrategy, RuleBasedStrategy, TokenTraderStrategy, VolatilityAdjustedStrategy, ArbitrageScan) from the public feature-progress.json plus 2 wholly-proprietary feature entries; reformatted to consistent 2-space indentation. Deployed v2.25.25 image to beta agent (Docker Compose at beta.lanagent.net) after recovering disk space mid-build by stopping the running BETA container to free its writable layer (Beta VPS is 25 GB total and was at 86% pre-deploy; first two builds failed at the unpack-to-overlayfs step). Fixed beta's git origin remote which had the GitHub PAT inserted twice in the URL, breaking every scheduled self-modification git fetch with 'URL using bad/illegal format'. Production (192.168.0.52 / ALICE) v2.25.25 code was already live (TIER_COSTS render: 3 confirmed) but package.json was still showing v2.25.11 \u2014 v2.25.26 deploys via the full deploy.sh sync to make sure package.json lands too. v2.25.25 base \u2014 Render-tier price cut: 5 cr ($0.05) \u2192 3 cr ($0.03), matching the `full` tier. FlareSolverr cost-to-serve is well under $0.001/call so the 5cr sticker was almost entirely margin and read expensive next to ScraperAPI ultra_premium ($0.03+) and ScrapeGraphAI's stealth-extract ($0.034 on Pro). New scheme keeps render distinct from full semantically (FlareSolverr-backed; CF JS-challenge handler) but aligned in price; under a `full \u2192 render` escalation pattern, average per-fallback cost converges on $0.03. Headline price story is now \"1\u00a2 to 3\u00a2 per scrape\" (was 1\u00a2 to 5\u00a2). Subscription buckets unchanged \u2014 render still draws from the smaller render-bucket on Scraper Pro ($25/mo, 15K render calls) and Business ($50/mo, 50K render calls). Companion work in the work scraper repo at /media/veracrypt2/NodeJS/ScraperService: scrapeWithScraperApi and /raw-fetch migrated from ScraperAPI to LANAgent on 2026-05-05; both now use the same callLANAgentScrape helper with `full \u2192 render` escalation. End-to-end verified in production: [LANAGENT] PASS https://www.foxnews.com/... (tier=full, credits, charged=3). 5cr slot now open for a future premium tier (residential proxies, 4G mobile IPs) without breaking the existing pricing ladder. v2.25.24 base: Per-page audit of every admin body for the inline-style mobile-overflow class of issues fixed in v2.25.22 / v2.25.23. One remaining offender: the Grant Credits admin-actions row on user-detail and wallet-detail pages used class='row-flex' with inline 'width:160px' and 'flex:1' on inputs, which overrode the responsive rules and overflowed on phone widths. Fixed by adding a @media (max-width: 880px) block that makes .row-flex wrap, gives label its own row, and forces inputs/selects/textareas to flex: 1 1 100% !important and width: auto !important \u2014 the !important being the only way to defeat the inline declarations without rewriting markup. All other admin pages audited clean (Dashboard / Users / Wallets / Agents / Payments / Subscriptions / Tickets / Audit). No remaining inline grid-template-columns declarations exist anywhere in admin.mjs. v2.25.23 base: Admin dashboard mobile follow-up. Promotions page (/admin/promotions) used inline style='grid-template-columns: 1fr 360px' which overrode responsive rules and forced the whole page wider than any phone viewport, so the sticky header had to scroll horizontally with the rest. Scrapes page (/admin/scrapes) had the same problem with 1fr 1fr \u2014 Top Services and Top Agents charts stayed side-by-side on phones. Both replaced with new responsive grid classes (.grid-aside collapses to 1fr at \u2264880px; .grid-2 stacks at \u2264880px) so future multi-column layouts can declare intent without inline overrides. Principle: always stack on mobile unless components are small. v2.25.22 base: Gateway admin dashboard responsive overhaul. Recent Payments table no longer crammed (dashboard grid switched from grid-3 to dash-grid: Payments 2fr, Agents 1fr, Tickets 1fr on desktop; Payments spans both cols on tablet \u2264980px; all stacked on phone \u2264600px). Long emails in the table truncate with text-overflow ellipsis and a title= tooltip showing the full address. Top navigation now collapses into a hamburger drawer on screens \u2264880px (was wrapping nine links across multiple lines and shoving the user/sign-out controls off-screen). Wide tables scroll horizontally inside their cards via overflow-x:auto instead of overflowing the page. KPI values, h1, card padding, and bar-row labels all shrink at narrow breakpoints. No markup changes outside layout() and dashboardBody(); almost entirely additive CSS in SHARED_STYLE plus a single nav-toggle button. v2.25.21 base: Gateway and BETA agent recovery. Fixed silently-broken admin login (gateway was missing express.urlencoded middleware so the HTML form's email field never reached the handler \u2014 every login attempt fell into the anti-enumeration tarpit branch and silently dropped). Reconnected gateway\u2194BETA after a 24-day stale-API-key outage caused by the April 11 mongo ransomware wipe (gateway held a key BETA had no record of; 6,917 401s on /credits/balance over 24 days). Bootstrapped BETA with $5 of on-chain credits (gateway swapped 0.008 BNB \u2192 268,770 SKYNET via PancakeSwap V2 then transferred 268,433 SKYNET to BETA's recipient \u2014 BETA verified the tx and credited 503 credits). Reworked pickBestAgent for strict primary/fallback by reputation: ALICE always wins when online and funded; BETA only sees traffic when ALICE is offline or out of credits (was weighted-random which gave BETA ~0.5% probability even when ALICE was healthy). Capability gating untouched at the DB query level so render-tier scrapes still cannot route to BETA \u2014 there's no fallback for render tier when ALICE is down (BETA lacks FlareSolverr). Added BETA agentId 2931 so direct-route POST /agents/2931/:service works. Stood up backup tooling: server-side /root/backup-beta.sh + cron 15 3 * * * (mongodump --gzip --archive, 14-day retention) and local pull script scripts/deployment/backup-beta.sh that streams a fresh mongodump over SSH plus rsynced configs/data into a single tar.gz at _BackUps_/beta-backup-<UTC-stamp>.tar.gz (30-day retention). v2.25.20 base: PR review pass on 10 AI-generated PRs (#2083\u20132092). v2.25.19 shipped BYOK on the SKYNET API Telegram bot (/setkey gsk_\u2026 with AES-256-GCM at rest, validated against gateway before storing; /mykey, /clearkey). Updated May 5, 2026.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
-    "version": "2.25.25"
+    "version": "2.25.27"
   },
   "auth": {
     "type": "bearer",
@@ -15641,10 +15641,16 @@
             },
             "url": {
               "raw": "{{base_url}}/api/external/scrape",
-              "host": ["{{base_url}}"],
-              "path": ["api", "external", "scrape"]
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "external",
+                "scrape"
+              ]
             },
-            "description": "Scrape with stealth tier (2 credits) — forces Puppeteer rendering for Cloudflare-protected or ad-heavy sites. Returns clean og:title, validated og:image, and ad-filtered image list."
+            "description": "Scrape with stealth tier (2 credits) \u2014 forces Puppeteer rendering for Cloudflare-protected or ad-heavy sites. Returns clean og:title, validated og:image, and ad-filtered image list."
           }
         },
         {
@@ -17800,7 +17806,7 @@
                 "set-fee"
               ]
             },
-            "description": "Set the fee required to submit a scammer report. Genesis-agent-only (onlyOwner on the diamond). Note: this endpoint was broken prior to v2.24.3 due to a missing ABI entry. Also note that the genesis instance auto-prices this value to a USD target hourly via the skynet-auto-price-fee Agenda job — manual updates here will be overwritten on the next run if they drift >25% from the USD target."
+            "description": "Set the fee required to submit a scammer report. Genesis-agent-only (onlyOwner on the diamond). Note: this endpoint was broken prior to v2.24.3 due to a missing ABI entry. Also note that the genesis instance auto-prices this value to a USD target hourly via the skynet-auto-price-fee Agenda job \u2014 manual updates here will be overwritten on the next run if they drift >25% from the USD target."
           }
         },
         {
@@ -17828,7 +17834,7 @@
                 "set-immunity-threshold"
               ]
             },
-            "description": "Set the token holding threshold that grants immunity from being flagged. Genesis-agent-only (onlyOwner on the diamond). Note: this endpoint was broken prior to v2.24.3 due to a missing ABI entry. The genesis instance can auto-price this value via the skynet-auto-price-immunity Agenda job (off by default at launch due to SKYNET price conditions — re-enabled via skynet.immunityThreshold.autoPrice SystemSettings key)."
+            "description": "Set the token holding threshold that grants immunity from being flagged. Genesis-agent-only (onlyOwner on the diamond). Note: this endpoint was broken prior to v2.24.3 due to a missing ABI entry. The genesis instance can auto-price this value via the skynet-auto-price-immunity Agenda job (off by default at launch due to SKYNET price conditions \u2014 re-enabled via skynet.immunityThreshold.autoPrice SystemSettings key)."
           }
         },
         {
@@ -19063,9 +19069,26 @@
           "name": "Optimize Image",
           "request": {
             "method": "POST",
-            "header": [{"key": "Content-Type", "value": "application/json"}],
-            "body": {"mode": "raw", "raw": "{\n  \"plugin\": \"imageTools\",\n  \"action\": \"optimize\",\n  \"url\": \"https://picsum.photos/id/237/800/600\",\n  \"format\": \"webp\",\n  \"quality\": 80\n}"},
-            "url": {"raw": "{{base_url}}/api/plugin", "host": ["{{base_url}}"], "path": ["api", "plugin"]},
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"plugin\": \"imageTools\",\n  \"action\": \"optimize\",\n  \"url\": \"https://picsum.photos/id/237/800/600\",\n  \"format\": \"webp\",\n  \"quality\": 80\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/plugin",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "plugin"
+              ]
+            },
             "description": "Compress and optimize an image with optional format conversion. Returns base64 data URI."
           }
         },
@@ -19073,9 +19096,26 @@
           "name": "Resize Image",
           "request": {
             "method": "POST",
-            "header": [{"key": "Content-Type", "value": "application/json"}],
-            "body": {"mode": "raw", "raw": "{\n  \"plugin\": \"imageTools\",\n  \"action\": \"resize\",\n  \"url\": \"https://picsum.photos/id/237/800/600\",\n  \"width\": 400,\n  \"height\": 300,\n  \"fit\": \"cover\",\n  \"format\": \"jpeg\"\n}"},
-            "url": {"raw": "{{base_url}}/api/plugin", "host": ["{{base_url}}"], "path": ["api", "plugin"]},
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"plugin\": \"imageTools\",\n  \"action\": \"resize\",\n  \"url\": \"https://picsum.photos/id/237/800/600\",\n  \"width\": 400,\n  \"height\": 300,\n  \"fit\": \"cover\",\n  \"format\": \"jpeg\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/plugin",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "plugin"
+              ]
+            },
             "description": "Resize image to target dimensions. Fit modes: cover, contain, fill, inside, outside."
           }
         },
@@ -19083,9 +19123,26 @@
           "name": "Smart Crop",
           "request": {
             "method": "POST",
-            "header": [{"key": "Content-Type", "value": "application/json"}],
-            "body": {"mode": "raw", "raw": "{\n  \"plugin\": \"imageTools\",\n  \"action\": \"crop\",\n  \"url\": \"https://picsum.photos/id/237/800/600\",\n  \"width\": 400,\n  \"height\": 400,\n  \"strategy\": \"attention\"\n}"},
-            "url": {"raw": "{{base_url}}/api/plugin", "host": ["{{base_url}}"], "path": ["api", "plugin"]},
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"plugin\": \"imageTools\",\n  \"action\": \"crop\",\n  \"url\": \"https://picsum.photos/id/237/800/600\",\n  \"width\": 400,\n  \"height\": 400,\n  \"strategy\": \"attention\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/plugin",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "plugin"
+              ]
+            },
             "description": "Smart crop using attention-based center detection. Also supports manual region crop with left/top/width/height."
           }
         },
@@ -19093,9 +19150,26 @@
           "name": "Add Watermark",
           "request": {
             "method": "POST",
-            "header": [{"key": "Content-Type", "value": "application/json"}],
-            "body": {"mode": "raw", "raw": "{\n  \"plugin\": \"imageTools\",\n  \"action\": \"watermark\",\n  \"url\": \"https://picsum.photos/id/237/800/600\",\n  \"text\": \"\\u00a9 2026 MyCompany\",\n  \"position\": \"bottom-right\",\n  \"opacity\": 0.4,\n  \"fontSize\": 28\n}"},
-            "url": {"raw": "{{base_url}}/api/plugin", "host": ["{{base_url}}"], "path": ["api", "plugin"]},
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"plugin\": \"imageTools\",\n  \"action\": \"watermark\",\n  \"url\": \"https://picsum.photos/id/237/800/600\",\n  \"text\": \"\\u00a9 2026 MyCompany\",\n  \"position\": \"bottom-right\",\n  \"opacity\": 0.4,\n  \"fontSize\": 28\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/plugin",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "plugin"
+              ]
+            },
             "description": "Add text watermark. Positions: top-left, top-center, top-right, center, bottom-left, bottom-center, bottom-right."
           }
         },
@@ -19103,9 +19177,26 @@
           "name": "Multi-step Transform",
           "request": {
             "method": "POST",
-            "header": [{"key": "Content-Type", "value": "application/json"}],
-            "body": {"mode": "raw", "raw": "{\n  \"plugin\": \"imageTools\",\n  \"action\": \"transform\",\n  \"url\": \"https://picsum.photos/id/237/800/600\",\n  \"operations\": [\n    {\"op\": \"resize\", \"width\": 600},\n    {\"op\": \"grayscale\"},\n    {\"op\": \"sharpen\", \"sigma\": 2},\n    {\"op\": \"format\", \"format\": \"webp\", \"quality\": 75}\n  ]\n}"},
-            "url": {"raw": "{{base_url}}/api/plugin", "host": ["{{base_url}}"], "path": ["api", "plugin"]},
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"plugin\": \"imageTools\",\n  \"action\": \"transform\",\n  \"url\": \"https://picsum.photos/id/237/800/600\",\n  \"operations\": [\n    {\"op\": \"resize\", \"width\": 600},\n    {\"op\": \"grayscale\"},\n    {\"op\": \"sharpen\", \"sigma\": 2},\n    {\"op\": \"format\", \"format\": \"webp\", \"quality\": 75}\n  ]\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/plugin",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "plugin"
+              ]
+            },
             "description": "Chain multiple operations in one call (max 10). Available ops: resize, crop, rotate, flip, flop, sharpen, blur, grayscale, negate, tint, trim, flatten, format, stripMetadata."
           }
         },
@@ -19113,9 +19204,26 @@
           "name": "Get Image Metadata",
           "request": {
             "method": "POST",
-            "header": [{"key": "Content-Type", "value": "application/json"}],
-            "body": {"mode": "raw", "raw": "{\n  \"plugin\": \"imageTools\",\n  \"action\": \"metadata\",\n  \"url\": \"https://picsum.photos/id/237/800/600\"\n}"},
-            "url": {"raw": "{{base_url}}/api/plugin", "host": ["{{base_url}}"], "path": ["api", "plugin"]},
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"plugin\": \"imageTools\",\n  \"action\": \"metadata\",\n  \"url\": \"https://picsum.photos/id/237/800/600\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/plugin",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "plugin"
+              ]
+            },
             "description": "Get image dimensions, format, color space, channels, EXIF presence, file size."
           }
         }
@@ -19128,9 +19236,26 @@
           "name": "Honeypot Check",
           "request": {
             "method": "POST",
-            "header": [{"key": "Content-Type", "value": "application/json"}],
-            "body": {"mode": "raw", "raw": "{\"plugin\": \"tokenProfiler\", \"action\": \"honeypotCheck\", \"address\": \"0x0E09FaBB73Bd3Ade0a17ECC321fD13a19e81cE82\", \"network\": \"bsc\"}"},
-            "url": {"raw": "{{base_url}}/api/plugin", "host": ["{{base_url}}"], "path": ["api", "plugin"]},
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\"plugin\": \"tokenProfiler\", \"action\": \"honeypotCheck\", \"address\": \"0x0E09FaBB73Bd3Ade0a17ECC321fD13a19e81cE82\", \"network\": \"bsc\"}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/plugin",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "plugin"
+              ]
+            },
             "description": "Quick honeypot detection for an ERC20 token via GoPlus API"
           }
         },
@@ -19138,9 +19263,26 @@
           "name": "Token Safety Score",
           "request": {
             "method": "POST",
-            "header": [{"key": "Content-Type", "value": "application/json"}],
-            "body": {"mode": "raw", "raw": "{\"plugin\": \"tokenProfiler\", \"action\": \"score\", \"address\": \"0x0E09FaBB73Bd3Ade0a17ECC321fD13a19e81cE82\", \"network\": \"bsc\"}"},
-            "url": {"raw": "{{base_url}}/api/plugin", "host": ["{{base_url}}"], "path": ["api", "plugin"]},
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\"plugin\": \"tokenProfiler\", \"action\": \"score\", \"address\": \"0x0E09FaBB73Bd3Ade0a17ECC321fD13a19e81cE82\", \"network\": \"bsc\"}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/plugin",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "plugin"
+              ]
+            },
             "description": "0-100 safety score for an ERC20 token"
           }
         },
@@ -19148,9 +19290,26 @@
           "name": "Full Token Audit",
           "request": {
             "method": "POST",
-            "header": [{"key": "Content-Type", "value": "application/json"}],
-            "body": {"mode": "raw", "raw": "{\"plugin\": \"tokenProfiler\", \"action\": \"audit\", \"address\": \"0x0E09FaBB73Bd3Ade0a17ECC321fD13a19e81cE82\", \"network\": \"bsc\"}"},
-            "url": {"raw": "{{base_url}}/api/plugin", "host": ["{{base_url}}"], "path": ["api", "plugin"]},
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\"plugin\": \"tokenProfiler\", \"action\": \"audit\", \"address\": \"0x0E09FaBB73Bd3Ade0a17ECC321fD13a19e81cE82\", \"network\": \"bsc\"}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/plugin",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "plugin"
+              ]
+            },
             "description": "Full token audit including honeypot, tax, ownership, liquidity, holders"
           }
         },
@@ -19158,9 +19317,26 @@
           "name": "Holder Analysis",
           "request": {
             "method": "POST",
-            "header": [{"key": "Content-Type", "value": "application/json"}],
-            "body": {"mode": "raw", "raw": "{\"plugin\": \"tokenProfiler\", \"action\": \"holderAnalysis\", \"address\": \"0x0E09FaBB73Bd3Ade0a17ECC321fD13a19e81cE82\", \"network\": \"bsc\"}"},
-            "url": {"raw": "{{base_url}}/api/plugin", "host": ["{{base_url}}"], "path": ["api", "plugin"]},
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\"plugin\": \"tokenProfiler\", \"action\": \"holderAnalysis\", \"address\": \"0x0E09FaBB73Bd3Ade0a17ECC321fD13a19e81cE82\", \"network\": \"bsc\"}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/plugin",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "plugin"
+              ]
+            },
             "description": "Top holder concentration and distribution analysis"
           }
         }
@@ -19173,9 +19349,26 @@
           "name": "Wallet Profile",
           "request": {
             "method": "POST",
-            "header": [{"key": "Content-Type", "value": "application/json"}],
-            "body": {"mode": "raw", "raw": "{\"plugin\": \"walletProfiler\", \"action\": \"profile\", \"address\": \"0x8894e0a0c962cb723c1ef8a1b9f096b36c2c29de\", \"network\": \"bsc\"}"},
-            "url": {"raw": "{{base_url}}/api/plugin", "host": ["{{base_url}}"], "path": ["api", "plugin"]},
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\"plugin\": \"walletProfiler\", \"action\": \"profile\", \"address\": \"0x8894e0a0c962cb723c1ef8a1b9f096b36c2c29de\", \"network\": \"bsc\"}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/plugin",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "plugin"
+              ]
+            },
             "description": "Full wallet profile with balance, age, tx count, risk flags"
           }
         },
@@ -19183,9 +19376,26 @@
           "name": "Wallet Risk Score",
           "request": {
             "method": "POST",
-            "header": [{"key": "Content-Type", "value": "application/json"}],
-            "body": {"mode": "raw", "raw": "{\"plugin\": \"walletProfiler\", \"action\": \"riskScore\", \"address\": \"0x8894e0a0c962cb723c1ef8a1b9f096b36c2c29de\", \"network\": \"bsc\"}"},
-            "url": {"raw": "{{base_url}}/api/plugin", "host": ["{{base_url}}"], "path": ["api", "plugin"]},
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\"plugin\": \"walletProfiler\", \"action\": \"riskScore\", \"address\": \"0x8894e0a0c962cb723c1ef8a1b9f096b36c2c29de\", \"network\": \"bsc\"}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/plugin",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "plugin"
+              ]
+            },
             "description": "0-100 wallet risk score with weighted flags"
           }
         },
@@ -19193,9 +19403,26 @@
           "name": "Wallet Tokens",
           "request": {
             "method": "POST",
-            "header": [{"key": "Content-Type", "value": "application/json"}],
-            "body": {"mode": "raw", "raw": "{\"plugin\": \"walletProfiler\", \"action\": \"tokens\", \"address\": \"0x8894e0a0c962cb723c1ef8a1b9f096b36c2c29de\", \"network\": \"bsc\"}"},
-            "url": {"raw": "{{base_url}}/api/plugin", "host": ["{{base_url}}"], "path": ["api", "plugin"]},
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\"plugin\": \"walletProfiler\", \"action\": \"tokens\", \"address\": \"0x8894e0a0c962cb723c1ef8a1b9f096b36c2c29de\", \"network\": \"bsc\"}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/plugin",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "plugin"
+              ]
+            },
             "description": "List ERC20 token holdings for a wallet"
           }
         }
@@ -19208,9 +19435,26 @@
           "name": "Audit Solidity Code",
           "request": {
             "method": "POST",
-            "header": [{"key": "Content-Type", "value": "application/json"}],
-            "body": {"mode": "raw", "raw": "{\"plugin\": \"contractAudit\", \"action\": \"audit\", \"code\": \"pragma solidity ^0.8.0;\\ncontract Test {\\n  function withdraw() public {\\n    (bool ok,) = msg.sender.call{value: address(this).balance}(\\\"\\\");\\n    require(ok);\\n  }\\n}\"}"},
-            "url": {"raw": "{{base_url}}/api/plugin", "host": ["{{base_url}}"], "path": ["api", "plugin"]},
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\"plugin\": \"contractAudit\", \"action\": \"audit\", \"code\": \"pragma solidity ^0.8.0;\\ncontract Test {\\n  function withdraw() public {\\n    (bool ok,) = msg.sender.call{value: address(this).balance}(\\\"\\\");\\n    require(ok);\\n  }\\n}\"}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/plugin",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "plugin"
+              ]
+            },
             "description": "Full Solidity security audit with findings by severity"
           }
         },
@@ -19218,9 +19462,26 @@
           "name": "Quick Check",
           "request": {
             "method": "POST",
-            "header": [{"key": "Content-Type", "value": "application/json"}],
-            "body": {"mode": "raw", "raw": "{\"plugin\": \"contractAudit\", \"action\": \"quickCheck\", \"code\": \"pragma solidity ^0.8.0;\\ncontract Test {\\n  function destroy() public { selfdestruct(payable(msg.sender)); }\\n}\"}"},
-            "url": {"raw": "{{base_url}}/api/plugin", "host": ["{{base_url}}"], "path": ["api", "plugin"]},
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\"plugin\": \"contractAudit\", \"action\": \"quickCheck\", \"code\": \"pragma solidity ^0.8.0;\\ncontract Test {\\n  function destroy() public { selfdestruct(payable(msg.sender)); }\\n}\"}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/plugin",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "plugin"
+              ]
+            },
             "description": "Fast critical/high severity check only"
           }
         },
@@ -19228,9 +19489,26 @@
           "name": "Explain Contract",
           "request": {
             "method": "POST",
-            "header": [{"key": "Content-Type", "value": "application/json"}],
-            "body": {"mode": "raw", "raw": "{\"plugin\": \"contractAudit\", \"action\": \"explain\", \"code\": \"pragma solidity ^0.8.0;\\nimport \\\"@openzeppelin/contracts/token/ERC20/ERC20.sol\\\";\\ncontract MyToken is ERC20 {\\n  constructor() ERC20(\\\"MyToken\\\", \\\"MTK\\\") {\\n    _mint(msg.sender, 1000000 * 10**18);\\n  }\\n}\"}"},
-            "url": {"raw": "{{base_url}}/api/plugin", "host": ["{{base_url}}"], "path": ["api", "plugin"]},
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\"plugin\": \"contractAudit\", \"action\": \"explain\", \"code\": \"pragma solidity ^0.8.0;\\nimport \\\"@openzeppelin/contracts/token/ERC20/ERC20.sol\\\";\\ncontract MyToken is ERC20 {\\n  constructor() ERC20(\\\"MyToken\\\", \\\"MTK\\\") {\\n    _mint(msg.sender, 1000000 * 10**18);\\n  }\\n}\"}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/plugin",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "plugin"
+              ]
+            },
             "description": "Plain-English explanation of what a contract does"
           }
         }
@@ -19243,9 +19521,26 @@
           "name": "Generate With Answers",
           "request": {
             "method": "POST",
-            "header": [{"key": "Content-Type", "value": "application/json"}],
-            "body": {"mode": "raw", "raw": "{\"plugin\": \"challengeQuestions\", \"action\": \"generateWithAnswers\", \"count\": 3}"},
-            "url": {"raw": "{{base_url}}/api/plugin", "host": ["{{base_url}}"], "path": ["api", "plugin"]},
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\"plugin\": \"challengeQuestions\", \"action\": \"generateWithAnswers\", \"count\": 3}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/plugin",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "plugin"
+              ]
+            },
             "description": "Generate challenge questions with answers included (single request)"
           }
         },
@@ -19253,9 +19548,26 @@
           "name": "Generate (Token-Based)",
           "request": {
             "method": "POST",
-            "header": [{"key": "Content-Type", "value": "application/json"}],
-            "body": {"mode": "raw", "raw": "{\"plugin\": \"challengeQuestions\", \"action\": \"generate\", \"count\": 3}"},
-            "url": {"raw": "{{base_url}}/api/plugin", "host": ["{{base_url}}"], "path": ["api", "plugin"]},
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\"plugin\": \"challengeQuestions\", \"action\": \"generate\", \"count\": 3}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/plugin",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "plugin"
+              ]
+            },
             "description": "Generate questions with token for server-side verification"
           }
         },
@@ -19263,9 +19575,26 @@
           "name": "Verify Answers",
           "request": {
             "method": "POST",
-            "header": [{"key": "Content-Type", "value": "application/json"}],
-            "body": {"mode": "raw", "raw": "{\"plugin\": \"challengeQuestions\", \"action\": \"verify\", \"token\": \"chq_YOUR_TOKEN\", \"answers\": [{\"id\": 1, \"answer\": \"42\"}]}"},
-            "url": {"raw": "{{base_url}}/api/plugin", "host": ["{{base_url}}"], "path": ["api", "plugin"]},
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\"plugin\": \"challengeQuestions\", \"action\": \"verify\", \"token\": \"chq_YOUR_TOKEN\", \"answers\": [{\"id\": 1, \"answer\": \"42\"}]}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/plugin",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "plugin"
+              ]
+            },
             "description": "Verify answers against a challenge token"
           }
         },
@@ -19273,9 +19602,26 @@
           "name": "List Question Types",
           "request": {
             "method": "POST",
-            "header": [{"key": "Content-Type", "value": "application/json"}],
-            "body": {"mode": "raw", "raw": "{\"plugin\": \"challengeQuestions\", \"action\": \"types\"}"},
-            "url": {"raw": "{{base_url}}/api/plugin", "host": ["{{base_url}}"], "path": ["api", "plugin"]},
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\"plugin\": \"challengeQuestions\", \"action\": \"types\"}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/plugin",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "plugin"
+              ]
+            },
             "description": "List available question types and configuration"
           }
         }
@@ -19290,7 +19636,17 @@
           "request": {
             "method": "GET",
             "header": [],
-            "url": {"raw": "{{base_url}}/vpn/api/status", "host": ["{{base_url}}"], "path": ["vpn", "api", "status"]},
+            "url": {
+              "raw": "{{base_url}}/vpn/api/status",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "vpn",
+                "api",
+                "status"
+              ]
+            },
             "description": "Get status of both VPN providers. Returns expressvpn object (connected, location, protocol, publicIP) and wireguard object (interfaceUp, handshake, transfer, peerReachable, pingMs, healthy)."
           }
         },
@@ -19299,7 +19655,18 @@
           "request": {
             "method": "GET",
             "header": [],
-            "url": {"raw": "{{base_url}}/vpn/api/wireguard/status", "host": ["{{base_url}}"], "path": ["vpn", "api", "wireguard", "status"]},
+            "url": {
+              "raw": "{{base_url}}/vpn/api/wireguard/status",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "vpn",
+                "api",
+                "wireguard",
+                "status"
+              ]
+            },
             "description": "WireGuard tunnel status: interface up/down, last handshake age, transfer stats, peer endpoint, peer reachability (ping), and healthy boolean."
           }
         },
@@ -19308,7 +19675,18 @@
           "request": {
             "method": "POST",
             "header": [],
-            "url": {"raw": "{{base_url}}/vpn/api/wireguard/bounce", "host": ["{{base_url}}"], "path": ["vpn", "api", "wireguard", "bounce"]},
+            "url": {
+              "raw": "{{base_url}}/vpn/api/wireguard/bounce",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "vpn",
+                "api",
+                "wireguard",
+                "bounce"
+              ]
+            },
             "description": "Restart WireGuard tunnel (wg-quick down/up wg0). PostUp hooks in wg0.conf re-add the static route and iptables exception for ExpressVPN coexistence automatically."
           }
         },
@@ -19316,9 +19694,28 @@
           "name": "WireGuard Health Check",
           "request": {
             "method": "POST",
-            "header": [{"key": "Content-Type", "value": "application/json"}],
-            "body": {"mode": "raw", "raw": "{\n  \"maxHandshakeAge\": 180\n}"},
-            "url": {"raw": "{{base_url}}/vpn/api/wireguard/health", "host": ["{{base_url}}"], "path": ["vpn", "api", "wireguard", "health"]},
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"maxHandshakeAge\": 180\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/vpn/api/wireguard/health",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "vpn",
+                "api",
+                "wireguard",
+                "health"
+              ]
+            },
             "description": "Health check with auto-recovery. Bounces tunnel if handshake stale (>maxHandshakeAge seconds, default 180) or peer unreachable."
           }
         },
@@ -19326,9 +19723,27 @@
           "name": "Connect ExpressVPN",
           "request": {
             "method": "POST",
-            "header": [{"key": "Content-Type", "value": "application/json"}],
-            "body": {"mode": "raw", "raw": "{\n  \"location\": \"smart\"\n}"},
-            "url": {"raw": "{{base_url}}/vpn/api/connect", "host": ["{{base_url}}"], "path": ["vpn", "api", "connect"]},
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"location\": \"smart\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/vpn/api/connect",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "vpn",
+                "api",
+                "connect"
+              ]
+            },
             "description": "Connect ExpressVPN to a specific location. Pass empty location for smart location selection."
           }
         },
@@ -19337,7 +19752,17 @@
           "request": {
             "method": "POST",
             "header": [],
-            "url": {"raw": "{{base_url}}/vpn/api/disconnect", "host": ["{{base_url}}"], "path": ["vpn", "api", "disconnect"]},
+            "url": {
+              "raw": "{{base_url}}/vpn/api/disconnect",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "vpn",
+                "api",
+                "disconnect"
+              ]
+            },
             "description": "Disconnect ExpressVPN. Blocked when auto-connect is enabled unless force flag is set."
           }
         },
@@ -19345,9 +19770,27 @@
           "name": "Smart Connect ExpressVPN",
           "request": {
             "method": "POST",
-            "header": [{"key": "Content-Type", "value": "application/json"}],
-            "body": {"mode": "raw", "raw": "{\n  \"purpose\": \"security\"\n}"},
-            "url": {"raw": "{{base_url}}/vpn/api/smart-connect", "host": ["{{base_url}}"], "path": ["vpn", "api", "smart-connect"]},
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"purpose\": \"security\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/vpn/api/smart-connect",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "vpn",
+                "api",
+                "smart-connect"
+              ]
+            },
             "description": "Smart connect by purpose: security (Switzerland, Iceland, Sweden), streaming (US, UK), speed (closest servers)."
           }
         },
@@ -19356,7 +19799,17 @@
           "request": {
             "method": "GET",
             "header": [],
-            "url": {"raw": "{{base_url}}/vpn/api/locations", "host": ["{{base_url}}"], "path": ["vpn", "api", "locations"]},
+            "url": {
+              "raw": "{{base_url}}/vpn/api/locations",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "vpn",
+                "api",
+                "locations"
+              ]
+            },
             "description": "List available ExpressVPN server locations. Cached for 10 minutes."
           }
         },
@@ -19365,7 +19818,17 @@
           "request": {
             "method": "POST",
             "header": [],
-            "url": {"raw": "{{base_url}}/vpn/api/test", "host": ["{{base_url}}"], "path": ["vpn", "api", "test"]},
+            "url": {
+              "raw": "{{base_url}}/vpn/api/test",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "vpn",
+                "api",
+                "test"
+              ]
+            },
             "description": "Test ExpressVPN connectivity: ping multiple sites, check DNS, simple speed test."
           }
         },
@@ -19374,7 +19837,17 @@
           "request": {
             "method": "POST",
             "header": [],
-            "url": {"raw": "{{base_url}}/vpn/api/troubleshoot", "host": ["{{base_url}}"], "path": ["vpn", "api", "troubleshoot"]},
+            "url": {
+              "raw": "{{base_url}}/vpn/api/troubleshoot",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "vpn",
+                "api",
+                "troubleshoot"
+              ]
+            },
             "description": "Run diagnostics on both VPN providers: ExpressVPN installation/service, WireGuard tunnel health, network connectivity, DNS, firewall."
           }
         }

@@ -2,6 +2,79 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.27] - 2026-05-05
+
+Gateway repo workflow established + today's gateway-side fixes pulled into source control.
+
+### What this is
+
+The gateway code (the Node.js source that serves `api.lanagent.net` — landing page, customer portal, admin console, Stripe webhook, scrape proxies) is a separate repo from `LANAgent` and `LANAgent-genesis`. It lives at `/media/veracrypt3/Websites/LANAgent_Website/api-lanagent-net/` (remote `PortableDiag/api-lanagent-net`, private) and deploys to `/opt/api-gateway/` on `137.184.2.62`. Multiple sessions had been editing files directly on the production host with `ssh root@gateway "sed -i …"` patches; the local repo had fallen six commits behind. This release consolidates: rsynced prod → local, committed all the drift, added a proper deploy script, and persisted memory notes so it doesn't recur.
+
+### Gateway commits (`PortableDiag/api-lanagent-net`)
+
+| Commit | Title | Summary |
+|---|---|---|
+| `0a0c5a0` | v2.25.25-bundle: gateway recovery, logging coverage, admin/portal UX | Reconciles local with prod after a session of in-place patches. Includes every fix below. |
+| `d75969a` | `deploy.sh`: rsync source files + pm2 restart + health check | Whitelisted rsync (`*.mjs`, `package.json`, `package-lock.json`, `ecosystem.config.cjs`); `.env` / `*.bak*` / `node_modules/` excluded. `--dry-run`, `--no-restart`, `--no-poller` flags. |
+| `28e132e` | fix: double-escape regex backslashes inside getLandingPage template literal | Promo strikethrough regexes never matched anything because `\d`, `\s`, `\$` got silently stripped from the JS template literal at evaluation time. |
+
+### Specific fixes bundled in `0a0c5a0`
+
+- **`express.urlencoded`** middleware added — admin login form was POSTing `application/x-www-form-urlencoded` but the gateway only had `express.json()`, so the email field never reached the handler and every magic-link request fell into the anti-enumeration tarpit.
+- **Strict primary/fallback `pickBestAgent`** — replaced weighted-random over funded agents with deterministic ALICE-first/BETA-fallback by reputation. Capability gating untouched at the DB query level so render-tier scrapes still cannot route to BETA.
+- **`RequestLog.create` at every credit-debiting code path** — was previously only in `proxyServiceToAgent` success/failure branches. `/scrape`, `/scrape/batch`, `/agents/:agentId/:service`, and the catch branch of `proxyServiceToAgent` silently debited credits without logging. That's why `web-scraping` never appeared in the admin Top Services panel and customer dashboard charts showed empty for users with real usage.
+- **`agentUrl` → `agentName` fix** in admin scrapes Top Agents aggregation + user-detail recent-requests cell. The RequestLog schema field is `agentName`; aggregations were matching/grouping on a field that doesn't exist, so byAgent always came back empty.
+- **Mobile responsive admin system** — `nav-toggle` hamburger drawer; `dash-grid`, `grid-aside`, `grid-2` named responsive grid classes (replacing inline `grid-template-columns` on Promotions/Scrapes pages); `.row-flex` mobile-wrap rule for the Grant Credits admin-actions card.
+- **HTML5 responsive scrolling tables** — `html, body { overflow-x: hidden }` to clip page-level horizontal overflow; every `<table>` (15 sites) wrapped in `<div class="table-wrap">` with `overflow-x: auto`; the table itself uses `min-width: max-content` so columns size naturally and the wrapper scrolls. `.mono { word-break: break-all; overflow-wrap: anywhere }` so tx hashes and wallet addresses don't widen their column.
+- **Portal "Enter your email first" amber warning** — was rendering in `var(--muted)` grey on the dark theme and was hard to see; now `#fbbf24` and resets to default on subsequent status/error messages.
+- **Promo strikethrough on price cards** — credit packages show `~~400~~ 600 credits (+200 bonus)`-style; subscriptions show `~~$25~~ $12.50/mo first month` with a "then $25/mo" subtitle. Renders only when `/promotion` returns an active promo; reverts cleanly when it doesn't.
+- **Dashboard usage chart fixes** — `<h3 id="usage-chart-title">` updates with the active range so the label reflects the user's selection (24 hours / 7 days / 14 days) instead of always saying "14 days"; `switchRange` now prefers JWT auth (matches initial-render) and falls back to API key, was silently failing for users with a stale `portal_api_key` in localStorage but a valid JWT; clearer empty-state copy ("No usage in this range") instead of returning silently and leaving the previous chart visible.
+
+### Workflow change
+
+- **`CLAUDE.md` added to `api-lanagent-net`** documenting the local-first workflow + rsync deploy + what NOT to do (the 2026-05-05 in-place-edits incident is the cautionary tale).
+- **Memory persisted** in `~/.claude/projects/-media-veracrypt1-NodeJS-LANAgent-genesis/memory/`: `gateway_repo.md` (reference) and `feedback_gateway_no_prod_edits.md` (rule + reason + how to apply).
+
+### Why a separate repo
+
+The gateway is a different deployment unit from the agent: runs on one host (the gateway VPS), serves the public landing/portal/admin/Stripe surface, holds different secrets (Stripe keys, admin email, JWT). The agent runs on every customer/operator host with its own concerns. Sharing a repo would muddy both.
+
+### What this means for users
+
+- Customer portal dashboards now actually show usage data — every credit-debiting endpoint writes a RequestLog. Existing data isn't backfilled (charris's pre-fix 106 credits of usage stays missing) but new traffic populates immediately.
+- Admin "Top Agents" and "Top Services" populate correctly going forward.
+- The promo banner now visibly shows old-vs-new credit counts and old-vs-new subscription prices instead of just a "50% off first month" badge.
+- Admin pages don't horizontally scroll on phones; wide tables scroll inside their own card with all columns intact.
+- Magic-link admin login works (form posts now parse).
+
+## [2.25.26] - 2026-05-05
+
+Operational hardening pass — same-day follow-up to v2.25.25 covering downstream rollout to the public repo and beta agent, plus a small comment fix in the gateway scrape route.
+
+### Code
+
+- `src/api/external/routes/scraping.js` — comment above `TIER_COSTS` corrected from `(v2.25.21: render dropped from 5 → 3...)` to `(v2.25.25: ...)`. The render cut landed in v2.25.25, not v2.25.21 (which was the gateway/BETA-recovery work). Pure comment fix, no behavior change.
+
+### Public repo (`PortableDiag/LANAgent`)
+
+- Synced v2.25.25 from genesis: render-tier cut, `/extract` `/crawl` proposal, full session report, all updated docs. Public commit `e45fb98f`.
+- **Scrubbed proprietary strategy mentions from `feature-progress.json`.** 46 string mentions across `changes`, `filesModified`, and `closedPRs` arrays referencing genesis-only crypto strategy classes (`ArbitrageStrategy`, `DollarMaximizerStrategy`, `NativeMaximizerStrategy`, `RuleBasedStrategy`, `TokenTraderStrategy`, `VolatilityAdjustedStrategy`, `ArbitrageScan`) removed. 2 wholly-proprietary feature entries removed (`tokenTraderGridCooldownTighten2026_05_01`, `tokenTraderHeartbeatCleanup2026_05_01`). Public-shipped strategies (`BaseStrategy`, `DCAStrategy`, `GridTradingStrategy`, `MeanReversionStrategy`, `MomentumStrategy`, `StrategyRegistry`) untouched. Public commit `6dd2c5f5`.
+- File reformatted to consistent 2-space indentation as a side-effect (some `files` arrays were inline, others multi-line).
+
+### Beta agent (`beta.lanagent.net`)
+
+- Deployed v2.25.25 image via `scripts/deployment/deploy-beta.sh` after the public-repo sync. Verified `TIER_COSTS.render = 3` and `'web-scraping': { … render: 3 }` inside the running container. Reported version: v2.25.25.
+- **Disk-space recovery during build.** Beta VPS is 25 GB total, was at 86% pre-deploy. First two build attempts failed at the `unpack to overlayfs` step with `no space left on device` (Docker's containerd snapshotter needs to extract every layer to `/var/lib/containerd/io.containerd.snapshotter.v1.overlayfs/snapshots/` before the image is usable). Recovered by stopping the running BETA container mid-build to free its writable layer (~3 GB accumulated over weeks of operation). The third attempt then succeeded: 354.9s exporting + 67.6s unpacking. Final disk: 85% used, 3.6 GB free. Worth scripting an opportunistic prune into `deploy-beta.sh` if this recurs.
+- **Fixed duplicated-PAT in beta's `origin` git remote.** The `origin` URL had `https://ghp_…@ghp_…@github.com/beta-lanagent/LANAgent` — the GitHub PAT was concatenated twice with a stray `@` in the middle, which made every `git fetch origin` from `simple-git` fail with `URL using bad/illegal format` and crashed the scheduled self-modification cycle every 5 minutes. Fixed via `git remote set-url origin <correctly-formatted-URL>`. Verified `git fetch origin --dry-run` from inside the running container exits 0. `upstream` was already correctly formatted.
+
+### Production (`192.168.0.52` / ALICE)
+
+- v2.25.25 code was deployed earlier today (TIER_COSTS render: 3 confirmed in the running file at `src/api/external/routes/scraping.js`) but **`package.json` on production was not updated** — version on disk was still `2.25.11`. Likely cause: the previous run of `deploy-quick.sh` (auto-detect mode) didn't pick up `package.json`. v2.25.26 deploys via the full `deploy.sh` sync which guarantees `package.json` lands.
+
+### Why
+
+This release captures operational work that didn't change genesis behavior but mattered for the downstream rollout. Spinning a version bumps the release tag, the postman collection, and the production `package.json` so all four surfaces (genesis, public, beta, ALICE) report the same version after the day's work is done.
+
 ## [2.25.25] - 2026-05-05
 
 Render-tier price cut: **5 credits → 3 credits**, matching the `full` tier. Headline price story is now **1¢ to 3¢ per scrape** (was 1¢ to 5¢). Companion ScraperAPI → LANAgent migration on the work scraper at `dry-scraperservice.dry.ai` (separate repo).
