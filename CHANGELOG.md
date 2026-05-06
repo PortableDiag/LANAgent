@@ -2,6 +2,51 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.25] - 2026-05-05
+
+Render-tier price cut: **5 credits → 3 credits**, matching the `full` tier. Headline price story is now **1¢ to 3¢ per scrape** (was 1¢ to 5¢). Companion ScraperAPI → LANAgent migration on the work scraper at `dry-scraperservice.dry.ai` (separate repo).
+
+### Why
+
+FlareSolverr cost-to-serve is well under $0.001/call (long-running Docker container, no per-call cost on top of fixed VPN/server overhead). The 5cr sticker was almost entirely margin and read expensive next to:
+
+- **ScraperAPI** ultra_premium: $0.03+/call at the cheapest plan, plus a $49/mo floor
+- **ScrapeGraphAI** stealth-extract: $0.034/call on their $425/mo Pro plan
+
+Cutting render to 3cr eliminates the per-call price gap with `full` while keeping render semantically distinct (FlareSolverr-backed; handles real CF JS challenges that `full`'s puppeteer-stealth path doesn't). Under a `full → render` escalation pattern (which is the standard work-scraper fallback strategy), the average per-fallback cost converges on $0.03 instead of $0.05.
+
+### Changed
+
+- `TIER_COSTS` in `src/api/external/routes/scraping.js` — `render: 5` → `render: 3` with comment explaining the rationale
+- `SERVICE_CREDIT_COSTS['web-scraping']` in `src/api/external/routes/catalog.js` — `render: 5` → `render: 3`
+- `/scrape` endpoint docstring updated to reflect new render price (3 credits, +HTML+screenshot+FlareSolverr)
+- Pricing tables in `docs/api/API_README.md`
+- Batch tier range `1-5 each` → `1-3 each`
+- `docs/api/LANAgent_API_Collection.postman_collection.json` — version `2.25.24` → `2.25.25`, top-level description rewritten with render-cut summary, `/scrape` endpoint description updated
+- `docs/feature-progress.json` — new `renderTierPriceCut_2026_05_05` entry, `lastUpdated` bumped, status preamble rewritten
+- `package.json` version → `2.25.25`
+- Gateway portal at `api.lanagent.net` — render demo card label updated (5 cr → 3 cr) + service catalog price (`/opt/api-gateway/portal.mjs` on the gateway VPS, untracked)
+- `docs/proposals/gateway-extract-and-crawl.md` — render-tier pricing references in `/extract` and `/crawl` cost models updated
+- `/media/veracrypt2/AICodeLogs/2026-05-03-lanagent-vs-scraperapi-comparison.md` — pricing addendum table updated with new render rate
+
+### Unchanged
+
+- Subscription bucket counts. Scraper Starter ($10/mo): 100K basic + 2.5K render. Pro ($25): 500K + 15K. Business ($50): 2M + 50K. Subscribers see **no difference** — render still draws from the smaller render-bucket regardless of credit-pool price.
+- VPN auto-rotation, FlareSolverr availability check, subscription tier-mapping, `_testBlock` E2E hook.
+
+### Verification
+
+- Direct `/scrape` POST with `tier: 'render'` returned `creditsCharged: 3` post-deploy.
+- Live work-scraper fallback that fired earlier today logged `[LANAGENT] PASS https://www.foxnews.com/politics/rfk-jr-... (tier=full, credits, charged=3)` — that path uses the `full → render` escalation introduced in the same session, so the new render price will hit the existing happy path and the escalated path identically.
+
+### Companion work (work scraper repo at `/media/veracrypt2/NodeJS/ScraperService`)
+
+Not in this repo, but landed the same day:
+
+- `scrapeWithScraperApi(url)` migrated from ScraperAPI ultra_premium to LANAgent. Original preserved as a `/* */` reference block right under the new live function. Function signature and return shape unchanged so all 7 internal call sites continued to work without modification.
+- `/raw-fetch` endpoint also migrated to LANAgent. Both paths now share `callLANAgentScrape(url, tier)` as the single integration point.
+- `LANAGENT_API_KEY` const added to env loading. `SCRAPERAPI_KEY` retained but now unused. ScraperAPI's monthly credit budget was found exhausted during testing — every old `/raw-fetch` ScraperAPI fallback was silently failing with `"You have exhausted the API Credits available in this monthly cycle"`.
+
 ## [2.25.24] - 2026-05-05
 
 Per-page audit of every admin body for the same class of inline-style mobile-overflow issues fixed in v2.25.22 / v2.25.23. One remaining offender found and fixed.

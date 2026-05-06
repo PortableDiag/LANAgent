@@ -11,7 +11,7 @@ const cache = new NodeCache({ stdTTL: 300, checkperiod: 60 }); // 5 min TTL
 
 // Credit costs per legacy service (1 credit = $0.01 USD)
 const SERVICE_CREDIT_COSTS = {
-  'web-scraping': { basic: 1, stealth: 2, full: 3, render: 5 },
+  'web-scraping': { basic: 1, stealth: 2, full: 3, render: 3 },
   'youtube-download': 10,
   'youtube-audio': 8,
   'media-transcode': 20,

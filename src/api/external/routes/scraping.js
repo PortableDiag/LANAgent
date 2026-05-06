@@ -10,12 +10,16 @@ import NodeCache from 'node-cache';
 const router = Router();
 const scrapeCache = new NodeCache({ stdTTL: 600, checkperiod: 120 });
 
-// Credit costs per tier
+// Credit costs per tier (v2.25.25: render dropped from 5 → 3 to match `full` —
+// FlareSolverr cost-to-serve is ~$0.001/call, so the 5cr sticker was almost
+// entirely margin and reading expensive next to ScraperAPI/ScrapeGraphAI per-call
+// rates. New scheme keeps `render` distinct from `full` semantically (FS-backed)
+// but aligned in price; opens 5cr slot for a future premium tier.)
 const TIER_COSTS = {
   basic: 1,
   stealth: 2,
   full: 3,
-  render: 5
+  render: 3
 };
 
 // Curated VPN rotation pool — well-distributed exits used when a paid scrape
@@ -318,7 +322,7 @@ async function executeScrape(req, { url, selectors, extractType = 'text', userAg
 /**
  * POST /api/external/scrape
  * Single URL scrape — supports both credit and legacy payment
- * Tier: basic (1 credit), stealth (2 credits, forces Puppeteer), full (3 credits, +HTML), render (5 credits, +HTML+screenshot)
+ * Tier: basic (1 credit), stealth (2 credits, forces Puppeteer), full (3 credits, +HTML), render (3 credits, +HTML+screenshot+FlareSolverr)
  */
 /**
  * Wrap executeScrape with VPN rotation on block-like failures.

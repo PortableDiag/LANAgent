@@ -47,8 +47,8 @@ Both methods give you the same `gsk_*` API key and access the same services.
 | Web Scrape (basic) | `POST /scrape` | 1 | Metadata, text, links |
 | Web Scrape (stealth) | `POST /scrape` | 2 | Forces Puppeteer for difficult sites; auto-rotates VPN on block |
 | Web Scrape (full) | `POST /scrape` | 3 | + raw HTML; auto-rotates VPN on block |
-| Web Scrape (render) | `POST /scrape` | 5 | + HTML + screenshot, FlareSolverr-backed for Cloudflare-protected sites (Rumble, Bitchute, etc.); auto-rotates VPN on block |
-| Batch Scrape | `POST /scrape/batch` | 1-5 each | Up to 100 URLs |
+| Web Scrape (render) | `POST /scrape` | 3 | + HTML + screenshot, FlareSolverr-backed for Cloudflare-protected sites (Rumble, Bitchute, etc.); auto-rotates VPN on block |
+| Batch Scrape | `POST /scrape/batch` | 1-3 each | Up to 100 URLs |
 | YouTube Download | `POST /youtube/download` | 10 | MP4 video |
 | YouTube Audio | `POST /youtube/audio` | 8 | MP3 audio |
 | Social Media Download | `POST /social/download` | 10 | MP4 video — TikTok, Rumble, BitChute, Dailymotion, Streamable, Bilibili, Twitch, x.com, SoundCloud, plus the long tail of yt-dlp's ~1800 extractors. x.com goes through the bespoke twitter plugin. Cloudflare-protected sites (Rumble, BitChute) are routed through a FlareSolverr session for cf_clearance + matching TLS fingerprint. Cookie-required sites (Instagram, Facebook) work when the operator has uploaded session cookies via the agent's `POST /api/admin/cookies/:host` endpoint. |
@@ -392,6 +392,25 @@ The gateway calls `GET /api/external/catalog` on your agent and reads the `servi
 ---
 
 ## Recent Updates (May 5, 2026)
+
+### v2.25.25 — Render tier price cut: 5 → 3 credits
+
+Cut the `render` tier price from 5 credits ($0.05) to 3 credits ($0.03) — same as `full`. FlareSolverr cost-to-serve is well under $0.001/call so the 5cr sticker was almost entirely margin and read expensive next to ScraperAPI ultra_premium ($0.03+/call) and ScrapeGraphAI's stealth-extract ($0.034/call on Pro). The new scheme keeps `render` semantically distinct from `full` (FlareSolverr-backed; handles real CF JS challenges) but aligned in price, so under a `full → render` escalation pattern the average per-fallback cost converges on $0.03 instead of $0.05.
+
+**Headline price story:** **1¢ to 3¢ per scrape.** Was 1¢ to 5¢.
+
+**Changed:**
+
+- `TIER_COSTS` in `src/api/external/routes/scraping.js`: `render: 5` → `render: 3`
+- `SERVICE_CREDIT_COSTS['web-scraping']` in `src/api/external/routes/catalog.js`: `render: 5` → `render: 3`
+- All pricing tables in this README, the Postman collection, `feature-progress.json`, and the gateway portal at `api.lanagent.net` updated to match
+- The 2026-05-03 ScraperAPI comparison doc and the `gateway-extract-and-crawl` proposal updated where they referenced render pricing
+
+**Subscription buckets unchanged.** `render` still draws from the render-bucket on Scraper Pro/Business subs (15K and 50K calls/mo). Only the credit-pool per-call rate changed — subscribers see no difference.
+
+**Companion work** (in the work scraper repo at `/media/veracrypt2/NodeJS/ScraperService`, not this repo): `scrapeWithScraperApi` and `/raw-fetch` migrated from ScraperAPI to LANAgent on 2026-05-05; both now use the same `callLANAgentScrape(url, tier)` helper with `full → render` escalation. End-to-end verified in production after redeploy: `[LANAGENT] PASS https://www.foxnews.com/... (tier=full, credits, charged=3)`.
+
+5cr slot now open for a future premium tier (residential proxies, 4G mobile IPs, etc.) without breaking the existing pricing ladder.
 
 ### v2.25.24 — Admin dashboard per-page audit pass
 
@@ -1022,7 +1041,7 @@ Minimum purchase: 10 credits. Double-spend protected.
 | Web Scrape (metadata + text) | 1 | basic |
 | Web Scrape (Puppeteer forced) | 2 | stealth |
 | Web Scrape (+ raw HTML) | 3 | full |
-| Web Scrape (+ HTML + screenshot, Cloudflare bypass) | 5 | render |
+| Web Scrape (+ HTML + screenshot, Cloudflare bypass) | 3 | render |
 | YouTube Download (MP4) | 10 | — |
 | YouTube Audio (MP3) | 8 | — |
 | Social Media Download (MP4) | 10 | — |
