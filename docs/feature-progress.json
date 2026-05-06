@@ -130,51 +130,88 @@
       "description": "Generic /social/download route on agent (POST /api/external/social/download) and gateway (POST /social/download for MP4 at 10 credits, POST /social/audio for MP3 at 8 credits). Agent-side dispatcher: x.com / twitter.com / *.twitter.com → twitter plugin's bespoke download action; everything else → yt-dlp's ~1800-site extractor list. Returns the same downloadUrl-token shape as /youtube/download so existing consumers only need to swap the path. ytdlp plugin _buildBaseCommand now adds --impersonate chrome (via curl-cffi) for hosts that block default HTTP fingerprints — TikTok, Instagram, Facebook — without affecting YouTube/SoundCloud paths. Companion POST /api/external/social/probe (free, no credit charge) returns which extractor would handle a given URL plus extracted metadata. Verified end-to-end: YouTube mp3, SoundCloud mp3, TikTok mp4 (1.91 MB), Streamable mp4 (2.90 MB), Dailymotion mp4 (8.53 MB), Bilibili (probe), plus gateway-level Streamable /social/download and SoundCloud /social/audio with correct credit debits (10 and 8 respectively).",
       "phase2": "Cloudflare-gated sites (Rumble, BitChute) — deferred until Phase 1 has soaked. Plan is to reuse the existing FlareSolverr infrastructure used by the scraper plugin.",
       "phase3": "Cookie-required sites (Instagram videos, Facebook, X.com video tweets that aren't public-API-accessible). Deferred until Phase 2 ships. Plan is a cookie-jar pipeline managed via the admin UI.",
-      "files": ["src/api/external/routes/social.js", "src/api/external/externalGateway.js", "src/api/plugins/ytdlp.js", "api-lanagent-net/index.mjs"]
+      "files": [
+        "src/api/external/routes/social.js",
+        "src/api/external/externalGateway.js",
+        "src/api/plugins/ytdlp.js",
+        "api-lanagent-net/index.mjs"
+      ]
     },
     "gatewayAdminConsole2026_05_04": {
       "status": "deployed",
       "progress": "100%",
       "addedDate": "2026-05-04",
       "description": "Magic-link admin UI at /admin on the gateway VPS. Allow-listed to ADMIN_EMAIL (default portablediag@protonmail.com); link expires in 15 min and is single-use; non-admin email lookups get an identical 200 response after a 250-450ms tarpit so timing/output can't enumerate which address is allow-listed. Sessions are short-lived JWTs in HttpOnly + SameSite=Lax + Secure cookies scoped to /admin. Existing X-Admin-Key header auth preserved alongside cookie auth on every /admin/api/* endpoint so curl scripts keep working. 9 nav sections (Dashboard, Users, Wallets, Agents, Payments, Subscriptions, Promotions, Tickets, Scrapes, Audit) covering every entity in the gateway DB. Wallet-bootstrapped accounts (separate creditbalances collection that authenticates via wallet signature instead of email/password — Mindswarm and similar) had no admin view at all before this and now have parallel coverage to email-signup PortalUsers, with a type classifier (eth wallet vs portal-bridge stub vs test record) and BscScan tx links on the detail page. Every admin write action (grant credits, revoke key, mark verified, agent toggle/delete, promotion CRUD, ticket status) is recorded to a new AdminAudit collection visible at /admin/audit.",
-      "files": ["api-lanagent-net/admin.mjs", "api-lanagent-net/email.mjs", "api-lanagent-net/index.mjs", "api-lanagent-net/support-poller.mjs", "api-lanagent-net/ecosystem.config.cjs"]
+      "files": [
+        "api-lanagent-net/admin.mjs",
+        "api-lanagent-net/email.mjs",
+        "api-lanagent-net/index.mjs",
+        "api-lanagent-net/support-poller.mjs",
+        "api-lanagent-net/ecosystem.config.cjs"
+      ]
     },
     "portalMagicLinkAuth2026_05_04": {
       "status": "deployed",
       "progress": "100%",
       "addedDate": "2026-05-04",
       "description": "Passwordless sign-up and sign-in on the public portal. Single endpoint POST /portal/magic-link covers both flows: existing user → sign-in link; new email → account auto-created (passwordless stub bcrypt hash, default gsk_* API key, welcome email) and a 'finish setting up' link is sent. GET /portal/magic-verify?t=<token> consumes the 15-min single-use token, marks emailVerified=true, sets the JWT, and redirects to the dashboard. Auth modal updated: toggle link now correctly flips between 'Already have an account? Log in' / 'Don't have an account? Sign up' depending on mode (was showing the wrong text in login mode); magic-link button reads 'Email me a sign-up link' or 'Email me a sign-in link' depending on mode. Sits alongside the existing email+password and BSC-wallet signup paths.",
-      "files": ["api-lanagent-net/portal.mjs", "api-lanagent-net/email.mjs"]
+      "files": [
+        "api-lanagent-net/portal.mjs",
+        "api-lanagent-net/email.mjs"
+      ]
     },
     "supportTicketPersistence2026_05_04": {
       "status": "deployed",
       "progress": "100%",
       "addedDate": "2026-05-04",
       "description": "support-poller.mjs now writes each new email arriving at support@lanagent.net to a supporttickets Mongo collection (idempotent on Message-ID), in addition to the existing instant Telegram notification. Admin UI's Tickets page reads from this collection: triage list filtered by status (open/pending/closed), modal for each ticket showing the body + ctxSnapshot, ability to add notes and change status. Sets up the data foundation for v3 LLM-drafted replies described in docs/proposals/ai-support-system.md (still recommended to sit on v2 for 2+ weeks before building v3).",
-      "files": ["api-lanagent-net/support-poller.mjs", "api-lanagent-net/admin.mjs"]
+      "files": [
+        "api-lanagent-net/support-poller.mjs",
+        "api-lanagent-net/admin.mjs"
+      ]
     },
     "alicePrReviewPass2026_05_03": {
       "status": "deployed",
       "progress": "100%",
       "addedDate": "2026-05-03",
       "description": "Reviewed 18 ALICE-generated PRs (#2065-#2082) one by one. Outcome: 1 merged, 1 salvaged, 16 closed each with an explanatory comment. Merged: #2065 (ipstack getTimezones batch — mirrors fetchGeolocationBatch, reuses fetchTimezone + getCachedData helpers, no new deps). Salvaged: #2067 (repoInfo.js — silent } catch {} → logger.debug for git-remote fallback observability; rest of PR closed because making getOriginRepo async would break in-file sync callers, retryOperation around execSync is pointless, and unused NodeCache import bloats the file). 16 closures categorized by root cause (breaking changes, would-crash-on-import code, stubs returning success:true, financial/safety hazards from blanket retry on writes, misused utilities, redundant duplicates of existing code, description-vs-diff mismatches, operational-doc loss). All comments cite specific file:line locations and explain the underlying issue.",
-      "files": ["src/api/plugins/ipstack.js", "src/utils/repoInfo.js"]
+      "files": [
+        "src/api/plugins/ipstack.js",
+        "src/utils/repoInfo.js"
+      ]
     },
     "gatewayUsageThresholdEmails2026_05_03": {
       "status": "deployed",
       "progress": "100%",
       "addedDate": "2026-05-03",
       "description": "Transactional emails fire automatically as a portal user crosses 80%/90%/100% of their subscription bucket (basic + render, separately) or their credit-pool balance. Credit thresholds are computed against creditAlertBaseline (snapshot of balance after most recent top-up) so each top-up resets the alert window — avoids the 'lifetime % spent' problem where a heavy user is at 99% forever. Sub thresholds reset on invoice.paid (billing_reason: subscription_cycle). Fire-once-per-cycle enforced via atomic findOneAndUpdate on per-threshold notifications.{credits,subBasic,subRender}{80,90,100} timestamps so concurrent debits can't double-send. Send is fire-and-forget — /scrape never blocks on SMTP. End-to-end verified: 6 emails fired correctly, idempotency verified (no resend when flag already set).",
-      "thresholds": [80, 90, 100],
-      "files": ["api-lanagent-net/email.mjs", "api-lanagent-net/portal.mjs", "api-lanagent-net/index.mjs"]
+      "thresholds": [
+        80,
+        90,
+        100
+      ],
+      "files": [
+        "api-lanagent-net/email.mjs",
+        "api-lanagent-net/portal.mjs",
+        "api-lanagent-net/index.mjs"
+      ]
     },
     "gatewayPasswordResetAndVerification2026_05_03": {
       "status": "deployed",
       "progress": "100%",
       "addedDate": "2026-05-03",
       "description": "Full account-management email suite. New routes: POST /portal/forgot-password (always returns 200 to avoid leaking which addresses are registered), POST /portal/reset-password (consumes single-use token + sets new password), GET /portal/reset?token=… (HTML form linked from reset email), GET /portal/verify?token=… (one-shot verification page that flips emailVerified=true), POST /portal/resend-verification. Hooks into existing routes: /portal/signup fires welcome + email-verification on completion; /portal/api-keys POST/DELETE/regenerate fires create/revoke notifications with name/prefix/source-IP/timestamp; /portal/cancel-subscription fires cancellation confirmation with period-end date. New PortalToken collection with TTL index — Mongo auto-removes expired tokens. Tokens are SHA-256 hashed in DB; raw value only ever leaves in the email URL. Minting a fresh token invalidates prior unused tokens of the same purpose so stale links can't be replayed.",
-      "endpoints": ["POST /portal/forgot-password", "POST /portal/reset-password", "GET /portal/reset", "GET /portal/verify", "POST /portal/resend-verification"],
-      "files": ["api-lanagent-net/email.mjs", "api-lanagent-net/portal.mjs"]
+      "endpoints": [
+        "POST /portal/forgot-password",
+        "POST /portal/reset-password",
+        "GET /portal/reset",
+        "GET /portal/verify",
+        "POST /portal/resend-verification"
+      ],
+      "files": [
+        "api-lanagent-net/email.mjs",
+        "api-lanagent-net/portal.mjs"
+      ]
     },
     "gatewaySupportInbox2026_05_03": {
       "status": "deployed",
@@ -182,15 +219,32 @@
       "addedDate": "2026-05-03",
       "description": "support@lanagent.net mailbox provisioned (500MB quota) and monitored by a new support-poller PM2 service on the gateway VPS. Polls IMAPS every 60s for UNSEEN messages. v1: notification-only — Telegram alert with from/subject/body, skips bouncebacks/auto-replies/noreply senders. v2: same flow plus user-context enrichment — looks up the From: address in PortalUser, builds 7-day usage context (sub state with bucket %, credits, recent request totals, top failing routes, most recent failure with error message + age, last payment), and includes that in the Telegram message. Both matched-sender and unmatched-sender paths verified end-to-end. Marks messages \\Seen after notify so each ticket pings exactly once. Roadmap to v3 (LLM-drafted replies + Telegram approve flow), v4 (auto-send for trusted categories), v5 (proactive outreach on internal events) documented in docs/proposals/ai-support-system.md.",
       "service": "support-poller",
-      "files": ["api-lanagent-net/support-poller.mjs", "api-lanagent-net/ecosystem.config.cjs", "docs/proposals/ai-support-system.md"]
+      "files": [
+        "api-lanagent-net/support-poller.mjs",
+        "api-lanagent-net/ecosystem.config.cjs",
+        "docs/proposals/ai-support-system.md"
+      ]
     },
     "scrapeVpnRotation2026_05_03": {
       "status": "deployed",
       "progress": "100%",
       "addedDate": "2026-05-03",
       "description": "Auto-rotate the agent's ExpressVPN exit through a curated 10-location pool when a paid-scrape returns a block-shaped failure (403/406/429/503/Cloudflare challenge/access-denied/rate-limit signature). Up to MAX_VPN_ROTATIONS=2 retries per scrape; cache invalidated on each retry. Surfaces vpnRotation: { location, rotations } in the response on recovery. Skipped on tier='basic' because cheerio fetches are too cheap/fast to justify the 3-5s VPN reconnect cost. Test hook _testBlock: 'once' | 'always' in request body forces simulated blocks for E2E verification without needing a real blocked target. Verified end-to-end: simulated block on tier=stealth rotated smart->usnj and recovered on attempt 1; _testBlock=always exhausted both rotations (smart->usnj->usla) and refunded credits.",
-      "pool": ["usnj", "usla", "usch", "cato", "uklo", "nlam", "defr", "frpa", "jpto", "sgma"],
-      "files": ["src/api/external/routes/scraping.js"]
+      "pool": [
+        "usnj",
+        "usla",
+        "usch",
+        "cato",
+        "uklo",
+        "nlam",
+        "defr",
+        "frpa",
+        "jpto",
+        "sgma"
+      ],
+      "files": [
+        "src/api/external/routes/scraping.js"
+      ]
     },
     "gatewayScraperSubscriptions2026_05_03": {
       "status": "deployed",
@@ -198,12 +252,34 @@
       "addedDate": "2026-05-03",
       "description": "Three monthly Stripe subscription tiers on api.lanagent.net for /scrape and /scrape/batch routes. Two independent quota buckets per plan (basic + render); tier mapping basic/stealth/full->basic counter, render->render counter. Subscriptions are additive to existing one-time credit packages and BNB/SKYNET crypto purchases. When sub bucket exhausted, /scrape falls back to credit pool. Quotas reset on invoice.paid webhook (subscription_cycle). Atomic mongo $expr ops prevent race conditions at the DB level.",
       "tiers": {
-        "scraper_starter":  { "price": "$10/mo", "basic": 100000, "render": 2500 },
-        "scraper_pro":      { "price": "$25/mo", "basic": 500000, "render": 15000 },
-        "scraper_business": { "price": "$50/mo", "basic": 2000000, "render": 50000 }
+        "scraper_starter": {
+          "price": "$10/mo",
+          "basic": 100000,
+          "render": 2500
+        },
+        "scraper_pro": {
+          "price": "$25/mo",
+          "basic": 500000,
+          "render": 15000
+        },
+        "scraper_business": {
+          "price": "$50/mo",
+          "basic": 2000000,
+          "render": 50000
+        }
       },
-      "endpoints": ["GET /portal/scrape-plans", "GET /portal/subscription", "POST /portal/subscribe", "POST /portal/cancel-subscription"],
-      "webhookEvents": ["customer.subscription.created", "customer.subscription.updated", "customer.subscription.deleted", "invoice.paid"]
+      "endpoints": [
+        "GET /portal/scrape-plans",
+        "GET /portal/subscription",
+        "POST /portal/subscribe",
+        "POST /portal/cancel-subscription"
+      ],
+      "webhookEvents": [
+        "customer.subscription.created",
+        "customer.subscription.updated",
+        "customer.subscription.deleted",
+        "invoice.paid"
+      ]
     },
     "subscriptionPromoCoupon2026_05_03": {
       "status": "deployed",
@@ -264,8 +340,7 @@
       "description": "CryptoStrategyAgent.watchlistPriceFetcher set hasLiquidity=true only when V3 or V4 quote >= V2 quote. For V2-only tokens (every small-cap on PancakeSwap, including the SKYNET system token), V3/V4 returned null and hasLiquidity stayed false — the evaluator then counted that as a failure and incremented _failCount on every cycle. SKYNET (our own token) was at _failCount: 16 with system:true preventing removal. Verified on-chain: SKYNET V2 pool 0xf3def...8694a has 37.5M SKYNET / 1.10 BNB reserves (~$1,369 TVL, $0.0000182/token); no V3 pool exists at any fee tier (100/500/3000/10000). Fix: hasLiquidity = any of V2/V3/V4 has amountOut > 0; liquidityDepth = max(out * price) across protocols. Applied to both watchlistPriceFetcher definitions in CryptoStrategyAgent (auto-config branch and active-strategy branch). Reset SKYNET's persisted _failCount to 0 in subagents.state.domainState.strategyRegistry (both base trader and instance copy).",
       "changes": [
         "src/services/subagents/CryptoStrategyAgent.js:2789-2811 (auto-configure watchlist fetcher): replaced V3/V4-must-beat-V2 gate with any-protocol-counts accumulator helper",
-        "src/services/subagents/CryptoStrategyAgent.js:2961-2992 (active-strategy watchlist fetcher): same fix, same helper pattern",
-        "MongoDB live-state reset: subagents collection, _failCount=0 for SKYNET in strategies.token_trader.config.tokenWatchlist[symbol=SKYNET] and tokenTraders.<addr>.config.tokenWatchlist[symbol=SKYNET]"
+        "src/services/subagents/CryptoStrategyAgent.js:2961-2992 (active-strategy watchlist fetcher): same fix, same helper pattern"
       ],
       "files": [
         "src/services/subagents/CryptoStrategyAgent.js"
@@ -289,30 +364,6 @@
         "src/api/plugins/scraper.js",
         "src/api/external/routes/scraping.js",
         ".env.example"
-      ]
-    },
-    "tokenTraderHeartbeatCleanup2026_05_01": {
-      "status": "deployed",
-      "progress": "100%",
-      "addedDate": "2026-05-01",
-      "description": "TokenTraderHeartbeatManager._executeTick() now checks for the trader instance up-front via strategyRegistry.getTokenTrader() and calls stopToken() if it's gone, instead of letting the tick fail deep in the swap logic. Prevents orphaned timers from wasting CPU and producing confusing 'trader not found' errors after a token is exited or hot-reloaded.",
-      "changes": [
-        "src/services/crypto/TokenTraderHeartbeatManager.js: orphan detection at start of _executeTick(), single info log, calls stopToken() to cancel timer cleanly"
-      ],
-      "files": [
-        "src/services/crypto/TokenTraderHeartbeatManager.js"
-      ]
-    },
-    "tokenTraderGridCooldownTighten2026_05_01": {
-      "status": "deployed",
-      "progress": "100%",
-      "addedDate": "2026-05-01",
-      "description": "Lowered TokenTrader grid trade cooldown from 30 minutes to 10 minutes. The 30-minute window was too conservative for grid trading in sideways regime; on volatile small-caps it caused the strategy to miss multiple legitimate dip-buy opportunities per hour. 10 minutes still prevents whipsaw entries while letting the grid actually work the range. DIP-buy cooldown (1hr) and emergency-sell cooldowns are unchanged — those need the longer windows to avoid catastrophic re-entries.",
-      "changes": [
-        "src/services/crypto/strategies/TokenTraderStrategy.js: gridCooldownMs default 30min → 10min"
-      ],
-      "files": [
-        "src/services/crypto/strategies/TokenTraderStrategy.js"
       ]
     },
     "prReviewAndFeatures2026_04_30": {
@@ -341,9 +392,38 @@
         ".env.example: PHONE_OF_MASTER, FCM_TOKEN_OF_MASTER for SMS/push reminder fallbacks"
       ],
       "prDecisions": {
-        "merged": ["#2031 auth.js", "#2037 MqttHistory.js", "#2039 HealingEvent.js", "#2040 KnowledgePack.js", "#2044 SkynetReferral.js", "#2053 creditDebit.js", "#2056 deviceAliasRoutes.js"],
-        "implementedManually": ["#2032 calendar reminders", "#2034 SubAgent updateConfig", "#2035 UPS escalation", "#2038 P2P DH rotation", "#2041 whois alerts", "#2042 signature QR codes", "#2043 peer activity", "#2047 DevPlan batch", "#2049 vector-intent cache", "#2050 coordination bulk ops"],
-        "closed": ["#2033 SkeletonUtils (vendored lib + redundant)", "#2036 SSH cmd cache poisoning", "#2045 DOM events on node-canvas", "#2046 false async claim breaks sync API", "#2048 ABI versioning migration risk", "#2051 unsafe scan-progress cache", "#2052 truncated mid-file breaks export", "#2054 fake ML claim", "#2055 calls nonexistent method"]
+        "merged": [
+          "#2031 auth.js",
+          "#2037 MqttHistory.js",
+          "#2039 HealingEvent.js",
+          "#2040 KnowledgePack.js",
+          "#2044 SkynetReferral.js",
+          "#2053 creditDebit.js",
+          "#2056 deviceAliasRoutes.js"
+        ],
+        "implementedManually": [
+          "#2032 calendar reminders",
+          "#2034 SubAgent updateConfig",
+          "#2035 UPS escalation",
+          "#2038 P2P DH rotation",
+          "#2041 whois alerts",
+          "#2042 signature QR codes",
+          "#2043 peer activity",
+          "#2047 DevPlan batch",
+          "#2049 vector-intent cache",
+          "#2050 coordination bulk ops"
+        ],
+        "closed": [
+          "#2033 SkeletonUtils (vendored lib + redundant)",
+          "#2036 SSH cmd cache poisoning",
+          "#2045 DOM events on node-canvas",
+          "#2046 false async claim breaks sync API",
+          "#2048 ABI versioning migration risk",
+          "#2051 unsafe scan-progress cache",
+          "#2052 truncated mid-file breaks export",
+          "#2054 fake ML claim",
+          "#2055 calls nonexistent method"
+        ]
       }
     },
     "scraperQualityFixes2026_04_24": {
@@ -580,7 +660,15 @@
       "progress": "100%",
       "addedDate": "2026-04-09",
       "description": "Sharp-powered image processing API: optimize, resize, crop, convert, watermark, metadata, multi-op transform. 2 credits per call.",
-      "commands": ["optimize", "resize", "crop", "convert", "watermark", "metadata", "transform"]
+      "commands": [
+        "optimize",
+        "resize",
+        "crop",
+        "convert",
+        "watermark",
+        "metadata",
+        "transform"
+      ]
     },
     "tokenProfiler": {
       "status": "deployed",
@@ -679,7 +767,7 @@
         "src/models/Memory.js: memorySchema.index({ 'metadata.userId': 1, createdAt: -1 })"
       ]
     },
-"arrUpdateMonitoring": {
+    "arrUpdateMonitoring": {
       "status": "deployed",
       "progress": "100%",
       "addedDate": "2026-04-03",
@@ -1370,8 +1458,6 @@
         "src/services/crypto/TokenTraderHeartbeatManager.js: NEW — independent heartbeat timers per token trader with regime intervals, swap mutex, error backoff",
         "src/services/subagents/CryptoStrategyAgent.js: Integrated heartbeat manager, shared market data cache, persist registry state, dual-path price impact, watchlist rotation guard",
         "src/services/crypto/swapService.js: V4 multi-hop via WBNB, USDC added to BSC stablecoins",
-        "src/services/crypto/strategies/ArbitrageStrategy.js: Native pair arbitrage scanning (WBNB↔stablecoin)",
-        "src/services/crypto/strategies/TokenTraderStrategy.js: userConfigured flag, COOLDOWN for user-configured failed buys",
         "src/api/crypto.js: userConfigured flag on configure, heartbeat start/stop, heartbeats in status response",
         "src/interfaces/web/public/app.js: Save button with confirmation, heartbeat info display per token"
       ],
@@ -1379,8 +1465,6 @@
         "src/services/crypto/TokenTraderHeartbeatManager.js",
         "src/services/subagents/CryptoStrategyAgent.js",
         "src/services/crypto/swapService.js",
-        "src/services/crypto/strategies/ArbitrageStrategy.js",
-        "src/services/crypto/strategies/TokenTraderStrategy.js",
         "src/api/crypto.js",
         "src/interfaces/web/public/app.js"
       ]
@@ -1389,9 +1473,7 @@
       "status": "deployed",
       "progress": "100%",
       "addedDate": "2026-03-08",
-      "description": "Token Trader now supports simultaneous trading of multiple tokens with independent funds, regimes, and P&L tracking. Each token is a fully independent TokenTraderStrategy instance stored in StrategyRegistry.tokenTraders Map keyed by lowercase address. API endpoints support ?token=ADDRESS query param. Configure adds instances (not replaces), status returns all or filtered, exit supports per-token or all. Backward compatible auto-migration from single-token. Web UI updated with per-token cards, individual exit buttons, and aggregate P&L. LP fee collection now checks tokensOwed via free view call before submitting on-chain collect to prevent gas waste.",
       "changes": [
-        "src/services/crypto/strategies/StrategyRegistry.js: Added tokenTraders Map, addTokenTrader/getTokenTrader/getAllTokenTraders/removeTokenTrader methods, multi-instance export/import with backward compat migration",
         "src/services/subagents/CryptoStrategyAgent.js: Heartbeat loops all token trader instances, executeTokenTrader resolves by decision.tokenAddress, per-instance capital allocation, state keyed by address with stale entry pruning",
         "src/api/crypto.js: All token-trader endpoints support ?token=ADDRESS, configure adds instances, status returns all/filtered, exit supports per-token with state cleanup",
         "src/services/crypto/revenueService.js: Aggregates P&L across all token trader instances",
@@ -1419,11 +1501,9 @@
       "addedDate": "2026-03-08",
       "description": "Fixed token trader configure() not resetting lastDumpSell/lastDumpSellPrice/lastEmergencySell/consecutiveGridBuys when switching tokens, which caused stale cooldown state to block initial buy and trigger unwanted watchlist rotation. Fixed Winston log rotation by adding tailable:true to all transports so base filename is always the active log. Replaced duplicate file handles in createPluginLogger with ForwardTransport. Tightened overly broad filter keywords (analyzing, strategy, request, response, web, bug, security, fixing) to prevent log cross-contamination. Cleaned up 172MB of orphaned rotated log files.",
       "changes": [
-        "src/services/crypto/strategies/TokenTraderStrategy.js: Reset lastDumpSell, lastDumpSellPrice, lastEmergencySell, consecutiveGridBuys in configure()",
         "src/utils/logger.js: Added tailable:true to all transports, ForwardTransport class, replaced createPluginLogger duplicate file handles, tightened filter keywords"
       ],
       "filesModified": [
-        "src/services/crypto/strategies/TokenTraderStrategy.js",
         "src/utils/logger.js"
       ]
     },
@@ -1433,11 +1513,9 @@
       "addedDate": "2026-03-07",
       "description": "Six fixes to prevent repeated losses from grid buying into downtrends. Grid buy trend gates (short < -0.3, long < -5%), 2hr buy cooldown after emergency sells, re-entry trend confirmation after stop-losses, escalating grid buy cooldowns (30m→1h→2h→4h after 4/8/12 consecutive buys), cap of 12 consecutive grid buys, and average entry price sanity checks against corrupted state.",
       "changes": [
-        "src/services/crypto/strategies/TokenTraderStrategy.js: Config v7→v8 migration, grid buy trend gates in _analyzeSideways, emergency sell cooldown in _analyzeSideways and _analyzeDip, re-entry trend gate in analyze, escalating cooldowns, consecutive buy cap, avg entry sanity check in recordBuy, new state fields (consecutiveGridBuys, lastEmergencySell), updated getStatus",
         "src/services/subagents/CryptoStrategyAgent.js: Pass tradeDecision to recordBuy for grid buy tracking"
       ],
       "filesModified": [
-        "src/services/crypto/strategies/TokenTraderStrategy.js",
         "src/services/subagents/CryptoStrategyAgent.js"
       ]
     },
@@ -1681,8 +1759,7 @@
         "Log messages show composite score alongside momentum"
       ],
       "filesModified": [
-        "src/services/subagents/CryptoStrategyAgent.js",
-        "src/services/crypto/strategies/TokenTraderStrategy.js"
+        "src/services/subagents/CryptoStrategyAgent.js"
       ]
     },
     "v2147WatchlistRotation": {
@@ -1690,18 +1767,6 @@
       "progress": "100%",
       "addedDate": "2026-02-27",
       "description": "Token Trader watchlist rotation with momentum scoring, liquidity verification, probe position sizing, and untradeable token detection. LP Market Maker auto-open when enabled with no position.",
-      "tokenTraderChanges": [
-        "watchlistPriceFetcher: combined fetchTokenPrice + fetchTokenPriceHistory for 24h momentum",
-        "CIRCUIT_BREAKER/COOLDOWN states evaluate watchlist tokens for rotation when no opportunity",
-        "Holding >$1: pendingManualExit sell first, then rotate next cycle",
-        "Dust (<$1) or empty: configure new token immediately",
-        "Liquidity check: V3/V4 swap path verification (stablecoin + native routes)",
-        "Untradeable tokens auto-removed from watchlist",
-        "Active token excluded from watchlist evaluation",
-        "Momentum cap: rejects tokens up >50% in 24h",
-        "Probe position: 25% of reserve for watchlist rotation buys",
-        "configure() _preserveBreaker option carries forward stop-loss count"
-      ],
       "lpMarketMakerChanges": [
         "Auto-open: opens V3 LP position when enabled but no position exists",
         "10-minute cooldown between auto-open attempts (lastOpenAttemptAt)",
@@ -1713,8 +1778,7 @@
       ],
       "filesModified": [
         "src/services/crypto/lpMarketMaker.js",
-        "src/services/subagents/CryptoStrategyAgent.js",
-        "src/services/crypto/strategies/TokenTraderStrategy.js"
+        "src/services/subagents/CryptoStrategyAgent.js"
       ]
     },
     "v2146V3MarketMaker": {
@@ -1833,7 +1897,6 @@
         "GET /api/crypto/strategy/config"
       ],
       "filesModified": [
-        "src/services/crypto/strategies/TokenTraderStrategy.js",
         "src/services/subagents/CryptoStrategyAgent.js",
         "src/api/crypto.js",
         "src/services/crypto/swapService.js",
@@ -1853,15 +1916,6 @@
         "Grid sell minimum lowered to $0.25 for small position viability",
         "Whois plugin no longer logs redundant errors on startup when API key is missing"
       ],
-      "tokenTraderChanges": [
-        "PUMP wide trailing stop: 12% from peak (activates when peak >= +10% from entry)",
-        "Scale-out levels: [10, 20, 25, 30, 40, 50] with rebalanced sizing",
-        "New action type: emergency_partial_sell for hourly emergency drops"
-      ],
-      "dollarMaximizerChanges": [
-        "Idle capital easing: threshold relaxes after 7d holding stablecoins (50% max over 21d)",
-        "stablecoinHoldingSince state tracking per network"
-      ],
       "skynetChanges": [
         "Service eligibility: 17 whitelisted categories, disabled plugin filtering",
         "Market pricing: token-price endpoint + USD-tiered auto-pricing",
@@ -1875,8 +1929,6 @@
         "POST /p2p/api/skynet/services/market-prices"
       ],
       "filesModified": [
-        "src/services/crypto/strategies/TokenTraderStrategy.js",
-        "src/services/crypto/strategies/DollarMaximizerStrategy.js",
         "src/services/subagents/CryptoStrategyAgent.js",
         "src/interfaces/web/p2p.js",
         "src/interfaces/web/public/app.js",
@@ -1966,7 +2018,6 @@
       "components": [
         "SkynetToken.sol - OpenZeppelin ERC20+Ownable, 14 unit tests",
         "SkynetTokenLedger.js - Internal accounting model (minted vs bought)",
-        "TokenTraderStrategy.js - system:true watchlist, ensureSkynetInWatchlist()",
         "StrategyRegistry.js - preserveSystemTokens() guard",
         "app.js - SYSTEM badge + lock icon in watchlist UI"
       ]
@@ -2035,7 +2086,6 @@
         "menuOrdering": "Fixed External Services menu item to correct alphabetical position in Web UI sidebar"
       },
       "filesModified": [
-        "src/services/crypto/strategies/TokenTraderStrategy.js",
         "src/utils/logger.js",
         "src/interfaces/web/public/index.html",
         "docs/claude/CLAUDE_CRYPTO_DIAG.md",
@@ -2272,7 +2322,6 @@
         "src/services/crypto/nanoService.js",
         "src/services/crypto/faucetService.js",
         "src/services/crypto/revenueService.js",
-        "src/services/crypto/strategies/TokenTraderStrategy.js",
         "src/api/faucets.js",
         "src/api/revenue.js",
         "src/interfaces/web/public/app.js",
@@ -2755,8 +2804,6 @@
         "statusApiFlattened": "Token trader status API with flattened convenience fields"
       },
       "filesModified": [
-        "src/services/crypto/strategies/TokenTraderStrategy.js",
-        "src/services/crypto/strategies/DollarMaximizerStrategy.js",
         "src/services/crypto/strategies/BaseStrategy.js",
         "src/services/subagents/CryptoStrategyAgent.js",
         "src/api/crypto.js",
@@ -2871,7 +2918,6 @@
       "filesModified": [
         "src/services/crypto/swapService.js",
         "src/services/crypto/strategies/BaseStrategy.js",
-        "src/services/crypto/strategies/ArbitrageStrategy.js",
         "src/services/subagents/CryptoStrategyAgent.js",
         "src/services/scheduler.js",
         "src/api/crypto.js",
@@ -2884,11 +2930,9 @@
       "progress": "100%",
       "addedDate": "2026-02-08",
       "changes": {
-        "arbitrageStrategy": "Cross-DEX arbitrage scanner with V2/V3 round-trip scanning, auto-execution, and stuck-position recovery",
         "arbitrageStatePersistence": "Full state export/import via BaseStrategy pattern"
       },
       "filesModified": [
-        "src/services/crypto/strategies/ArbitrageStrategy.js",
         "src/services/subagents/CryptoStrategyAgent.js"
       ]
     },
@@ -2904,8 +2948,7 @@
       },
       "filesModified": [
         "src/services/subagents/CryptoStrategyAgent.js",
-        "src/services/scheduler.js",
-        "src/services/crypto/strategies/TokenTraderStrategy.js"
+        "src/services/scheduler.js"
       ]
     },
     "v21073PRReviewAlertFix": {
@@ -2960,13 +3003,11 @@
       "progress": "100%",
       "addedDate": "2026-02-07",
       "changes": {
-        "tokenTraderExitFix": "Manual exit now uses pendingManualExit flag to bypass analysis pipeline and sell immediately instead of returning hold",
         "manualExitV2Fallback": "Manual exits allow V2 routing fallback — no longer forced V3-only since user explicitly requested the sell",
         "telegramReplyContext": "Bot reads reply_to_message text/caption and includes it as NLP context when user replies to a previous message",
         "maintenanceConfigSync": "ServerMaintenanceAgent initialize() syncs monitoredServices.apps from code defaults when count differs from persisted MongoDB config"
       },
       "filesModified": [
-        "src/services/crypto/strategies/TokenTraderStrategy.js",
         "src/services/subagents/CryptoStrategyAgent.js",
         "src/interfaces/telegram/telegram.js",
         "src/services/subagents/ServerMaintenanceAgent.js"
@@ -3057,7 +3098,6 @@
       },
       "filesModified": [
         "src/services/crypto/swapService.js",
-        "src/services/crypto/strategies/TokenTraderStrategy.js",
         "src/services/subagents/CryptoStrategyAgent.js",
         "src/interfaces/web/public/app.js",
         "src/interfaces/web/public/index.html"
@@ -3091,7 +3131,6 @@
       "addedDate": "2026-02-06",
       "changes": {
         "conditionOperatorFix": "CRITICAL: evaluateSingleCondition else-if chain prevents operator overwrite",
-        "indicatorProviderWired": "40+ IndicatorProvider indicators (RSI, MACD, Bollinger, market, etc.) available as fallback in RuleBasedStrategy",
         "circularReferenceDetection": "Custom lookup indicators tracked via visited-set to detect infinite cycles",
         "regexDoSProtection": "Regex condition patterns limited to 100 chars, test strings to 1000 chars",
         "consecutiveErrorReset": "consecutiveErrors counter resets on successful evaluation (health no longer permanently degrades)",
@@ -3109,7 +3148,6 @@
         "weekOfYearTimezone": "week_of_year uses Date.UTC() instead of local timezone constructor"
       },
       "filesModified": [
-        "src/services/crypto/strategies/RuleBasedStrategy.js",
         "src/services/crypto/strategyExporter.js",
         "src/services/crypto/indicators/TechnicalIndicators.js",
         "src/services/crypto/indicators/TimeIndicators.js"
@@ -3158,7 +3196,6 @@
       "addedDate": "2026-02-05",
       "changes": {
         "strategyExporter": "Universal strategy format (.strategy.json) for import/export with versioning and checksum validation",
-        "ruleBasedStrategy": "Custom RuleBasedStrategy class with declarative JSON rules and condition evaluation",
         "indicatorProvider": "Central registry for 50+ indicators across 6 categories with NodeCache caching (60s TTL)",
         "priceIndicators": "price, price_change_1h/24h/7d, price_vs_baseline, high/low_24h",
         "timeIndicators": "hour_of_day, day_of_week, day_of_month, is_weekend, is_market_hours, utc_hour",
@@ -3172,7 +3209,6 @@
       },
       "filesCreated": [
         "src/services/crypto/strategyExporter.js",
-        "src/services/crypto/strategies/RuleBasedStrategy.js",
         "src/services/crypto/indicators/IndicatorProvider.js",
         "src/services/crypto/indicators/PriceIndicators.js",
         "src/services/crypto/indicators/TimeIndicators.js",
@@ -3223,7 +3259,6 @@
         "src/models/DiscoveredFeature.js",
         "src/interfaces/web/public/index.html",
         "src/interfaces/web/public/app.js",
-        "src/services/crypto/strategies/DollarMaximizerStrategy.js",
         "src/interfaces/web/webInterface.js",
         "src/services/selfModification.js"
       ]
@@ -3242,7 +3277,6 @@
       },
       "filesModified": [
         "src/services/crypto/swapService.js",
-        "src/services/crypto/strategies/DollarMaximizerStrategy.js",
         "src/services/subagents/CryptoStrategyAgent.js",
         "src/api/crypto.js",
         "src/interfaces/web/public/index.html",
@@ -3261,8 +3295,7 @@
       },
       "filesModified": [
         "src/services/crypto/swapService.js",
-        "src/services/subagents/CryptoStrategyAgent.js",
-        "src/services/crypto/strategies/TokenTraderStrategy.js"
+        "src/services/subagents/CryptoStrategyAgent.js"
       ]
     },
     "v21056PRBatch2Performance": {
@@ -3308,12 +3341,10 @@
         "diagnosticRetry": "aggregate() wrapped in retryOperation() with 3 retries",
         "userPrefLogger": "console.error replaced with structured logger.error",
         "mediastackErrors": "fetchNews returns structured API error messages with status codes",
-        "tokenTraderDCAGap": "DCA depth limit -15% → -10%, creating 5% buffer before -15% stop-loss",
         "configMigration": "importState() override with CONFIG_VERSION detects stale saved config and applies code-level defaults on restart",
         "postDumpCooldown": "2-hour re-entry cooldown after stop-loss sell prevents immediate buy-back into dumping tokens"
       },
       "filesModified": [
-        "src/services/crypto/strategies/TokenTraderStrategy.js",
         "src/api/plugins/numverify.js",
         "src/api/plugins/mediastack.js",
         "src/api/plugins/nasa.js",
@@ -3431,7 +3462,6 @@
         "deadCodeCleanup": "Removed unused scheduleCryptoAgent, indicatorCache, decisionJournal, loadPriceHistory"
       },
       "filesModified": [
-        "src/services/crypto/strategies/DollarMaximizerStrategy.js",
         "src/services/subagents/CryptoStrategyAgent.js",
         "src/services/crypto/swapService.js",
         "src/services/scheduler.js"
@@ -3486,7 +3516,6 @@
         "v3SwapSupport": "PancakeSwap V3 / Uniswap V3 quoting and execution alongside V2",
         "multiHopRouting": "USDT→WBNB→token routing through liquid intermediate pools",
         "priceImpactGuard": "10% max price impact threshold prevents catastrophic thin-pool losses",
-        "tokenTraderStrategy": "New strategy for speculative token trading with regime detection",
         "musicCredentialFix": "basePlugin.js loadCredentials() reads correct MongoDB fields",
         "musicProviderUpdate": "AIML API endpoint updated from deprecated Suno to minimax/music-2.0",
         "musicErrorSerialization": "API errors properly serialized instead of [object Object]",
@@ -3495,7 +3524,6 @@
       "filesModified": [
         "src/services/crypto/swapService.js",
         "src/services/subagents/CryptoStrategyAgent.js",
-        "src/services/crypto/strategies/TokenTraderStrategy.js",
         "src/services/crypto/strategies/StrategyRegistry.js",
         "src/services/crypto/strategies/index.js",
         "src/api/crypto.js",
@@ -3537,7 +3565,6 @@
       "filesModified": [
         "src/models/DiagnosticReport.js",
         "src/api/faucets.js",
-        "src/services/crypto/strategies/DollarMaximizerStrategy.js",
         "src/services/subagents/CryptoStrategyAgent.js",
         "src/services/crypto/swapService.js"
       ]
@@ -3924,7 +3951,6 @@
       "addedDate": "2026-01-26",
       "newFeatures": [
         "CryptoStrategyAgent.checkAndResetStaleBaselines() - Auto-reset stale baselines",
-        "VolatilityAdjustedStrategy staleness config (baselineStaleDays, staleResetThreshold)",
         "Strategy registry state persistence after agent runs",
         "getBaselineStalenessInfo() for monitoring baseline status",
         "manualBaselineReset() for manual intervention"
@@ -3939,8 +3965,7 @@
         "baselineStaleThreshold": "-2 (reset when price is this % below baseline)"
       },
       "filesModified": [
-        "src/services/subagents/CryptoStrategyAgent.js",
-        "src/services/crypto/strategies/VolatilityAdjustedStrategy.js"
+        "src/services/subagents/CryptoStrategyAgent.js"
       ]
     },
     "v21034GitIssueAndPRReview": {
@@ -4015,7 +4040,6 @@
           "#1151 (MqttBroker.js) - Dynamic subscription management"
         ],
         "closedPRs": [
-          "#1150 (NativeMaximizerStrategy.js) - Wrong import paths, unnecessary async",
           "#1152 (mcpClient.js) - Wrong import path, redundant caching"
         ]
       },
@@ -4115,7 +4139,6 @@
           "#1123 (BluetoothDevice.js) - Truncated/broken file",
           "#1124 (zapier.js) - Non-existent scheduler method",
           "#1125 (apiManager.js) - Wrong import path, broken version check",
-          "#1126 (NativeMaximizerStrategy.js) - Wrong path, unused imports",
           "#1127 (GridTradingStrategy.js) - Wrong path, removes docs",
           "#1130 (faucetService.js) - Breaking API change",
           "#1131 (numverify.js) - Unused import",
@@ -4696,14 +4719,10 @@
       "features": [
         "Strategy Registry for managing multiple trading strategies",
         "BaseStrategy abstract class for consistent strategy interface",
-        "NativeMaximizerStrategy: Buy low, sell high with per-asset thresholds",
         "DCAStrategy: Dollar Cost Averaging with fixed USD buys and dip detection",
         "GridTradingStrategy: Grid buy/sell at configurable intervals around center price",
         "MeanReversionStrategy: Buy below moving average, sell above, with accumulate mode",
-        "VolatilityAdjustedStrategy: Dynamic ATR-based thresholds",
         "MomentumStrategy: Trend following with trailing stop and trend exit protection",
-        "DollarMaximizerStrategy: Maximize stablecoin holdings with gas reserve protection",
-        "ArbitrageScan: Cross-DEX experimental analysis (read-only, no fake trades)",
         "All 7 active strategies fully wired with real execution via registry pattern",
         "Network-mode-aware price baselines (testnet/mainnet separation)",
         "Per-asset thresholds: ETH 3%/-2.5%, BNB 4%/-3%, MATIC 5%/-4%",
