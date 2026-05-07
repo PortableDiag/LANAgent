@@ -61,6 +61,16 @@ developmentItemSchema.statics.filterItems = async function(query) {
     if (query.type) {
       filter.type = query.type;
     }
+    if (query.creationDateRange) {
+      const { startDate, endDate } = query.creationDateRange;
+      filter.createdAt = {};
+      if (startDate) {
+        filter.createdAt.$gte = new Date(startDate);
+      }
+      if (endDate) {
+        filter.createdAt.$lte = new Date(endDate);
+      }
+    }
 
     const results = await this.find(filter).exec();
     return results;
@@ -149,7 +159,7 @@ developmentItemSchema.statics.archiveOldCompletedItemsBatch = async function(day
 const DevelopmentPlan = mongoose.model('DevelopmentPlan', developmentItemSchema);
 
 DevelopmentPlan.commands = [
-  { command: 'filterItems', description: 'Filter development items based on criteria', usage: 'filterItems({ tags, priority, status, type })' },
+  { command: 'filterItems', description: 'Filter development items based on criteria', usage: 'filterItems({ tags, priority, status, type, creationDateRange })' },
   { command: 'archiveOldCompletedItems', description: 'Archive completed items older than N days', usage: 'archiveOldCompletedItems(days)' },
   { command: 'archiveOldCompletedItemsBatch', description: 'Archive completed items older than N days in batches', usage: 'archiveOldCompletedItemsBatch({ days, batchSize })' }
 ];

@@ -43,10 +43,14 @@ class SelfDiagnosticsService {
   async initialize() {
     // Schedule automatic diagnostics if enabled
     if (this.config.enabled && this.config.autoRunInterval) {
+      // Adapt the interval to the host's current load before scheduling.
+      // Light loads → poll more often; heavy loads → back off.
+      await this.adjustAutoRunInterval();
+
       setInterval(() => {
         this.runDiagnostics('scheduled');
       }, this.config.autoRunInterval);
-      
+
       logger.info(`Self-diagnostics scheduled to run every ${this.config.autoRunInterval / 1000 / 60} minutes`);
     }
   }
@@ -242,6 +246,30 @@ class SelfDiagnosticsService {
     const data = await fetchFunc();
     this.cache.set(key, data);
     return data;
+  }
+
+  /**
+   * Adjust the autoRunInterval based on system load and historical trends
+   */
+  async adjustAutoRunInterval() {
+    try {
+      const systemInfo = await this.collectSystemInfo();
+      const loadAverage = systemInfo.loadAverage[0]; // 1-minute load average
+      const memoryUsage = systemInfo.memoryUsage.percentage;
+
+      // Adjust interval based on load and memory usage
+      if (loadAverage < 1 && memoryUsage < 70) {
+        this.config.autoRunInterval = 3 * 60 * 60 * 1000; // 3 hours
+      } else if (loadAverage < 2 && memoryUsage < 80) {
+        this.config.autoRunInterval = 4 * 60 * 60 * 1000; // 4 hours
+      } else {
+        this.config.autoRunInterval = 6 * 60 * 60 * 1000; // 6 hours
+      }
+
+      logger.info(`Auto-run interval adjusted to every ${this.config.autoRunInterval / 1000 / 60} minutes based on system load`);
+    } catch (error) {
+      logger.error('Failed to adjust auto-run interval:', error);
+    }
   }
 }
 

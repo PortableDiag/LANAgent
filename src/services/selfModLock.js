@@ -4,6 +4,7 @@ import path from 'path';
 import NodeCache from 'node-cache';
 import { EventEmitter } from 'events';
 import { retryOperation } from '../utils/retryUtils.js';
+import { safeTimeout } from '../utils/errorHandlers.js';
 
 /**
  * Shared lock manager for self-modification processes
@@ -14,6 +15,11 @@ export class SelfModLock extends EventEmitter {
     super();
     this.lockFile = path.join(process.cwd(), '.selfmod.lock');
     this.lockTimeout = 30 * 60 * 1000; // 30 minutes timeout
+    this.notificationLeadTime = 5 * 60 * 1000; // 5 minutes before timeout
+    // Tracked timer handle so release() can cancel a pending expiration
+    // notification — otherwise the warning fires for a lock that was
+    // properly released minutes earlier.
+    this._expirationTimer = null;
     // Use node-cache for in-memory caching with 5 minute TTL
     this.cache = new NodeCache({ stdTTL: 300 });
   }
@@ -58,6 +64,10 @@ export class SelfModLock extends EventEmitter {
       this.cache.set('lock', newLock);
       logger.info(`Lock acquired by ${service}`);
       this.emit('lockAcquired', service);
+
+      // Schedule notification for lock expiration
+      this.scheduleLockExpirationNotification(service);
+
       return true;
       
     } catch (error) {
@@ -73,6 +83,10 @@ export class SelfModLock extends EventEmitter {
         this.cache.set('lock', newLock);
         logger.info(`Lock created and acquired by ${service}`);
         this.emit('lockAcquired', service);
+
+        // Schedule notification for lock expiration
+        this.scheduleLockExpirationNotification(service);
+
         return true;
       }
       
@@ -92,6 +106,10 @@ export class SelfModLock extends EventEmitter {
       if (lockData && lockData.service === service) {
         await retryOperation(() => fs.unlink(this.lockFile), { retries: 3 });
         this.cache.del('lock');
+        if (this._expirationTimer) {
+          clearTimeout(this._expirationTimer);
+          this._expirationTimer = null;
+        }
         logger.info(`Lock released by ${service}`);
         this.emit('lockReleased', service);
       } else {
@@ -258,6 +276,34 @@ export class SelfModLock extends EventEmitter {
     } catch (error) {
       logger.error(`Failed to update lock info for ${service}:`, error);
     }
+  }
+
+  /**
+   * Schedule a notification for when the lock is about to expire
+   * @param {string} service - Service holding the lock
+   * @private
+   */
+  scheduleLockExpirationNotification(service) {
+    const lockData = this.cache.get('lock');
+    if (!lockData) return;
+
+    const lockAge = Date.now() - new Date(lockData.timestamp).getTime();
+    const timeUntilNotification = this.lockTimeout - lockAge - this.notificationLeadTime;
+    if (timeUntilNotification <= 0) return;
+
+    // Cancel any prior pending notification (acquire-after-release reuse)
+    if (this._expirationTimer) clearTimeout(this._expirationTimer);
+
+    this._expirationTimer = safeTimeout(() => {
+      this._expirationTimer = null;
+      // Guard — the lock might have been released or re-acquired by a
+      // different service since we scheduled this. Only warn if the
+      // original holder is still in possession.
+      const current = this.cache.get('lock');
+      if (current?.service !== service) return;
+      this.emit('lockExpiring', service);
+      logger.info(`Lock for ${service} is about to expire.`);
+    }, timeUntilNotification, 'selfModLock-expirationNotice');
   }
 }
 

@@ -137,6 +137,13 @@ const NetworkDeviceSchema = new mongoose.Schema({
   metadata: {
     type: Map,
     of: mongoose.Schema.Types.Mixed
+  },
+
+  // Device lifecycle management
+  lifecycleStatus: {
+    type: String,
+    enum: ['active', 'deprecated', 'retired'],
+    default: 'active'
   }
 }, {
   timestamps: true,
@@ -217,6 +224,30 @@ NetworkDeviceSchema.methods.updateServices = function(services) {
 
 NetworkDeviceSchema.methods.getDisplayName = function() {
   return this.name || this.hostname || this.ip;
+};
+
+/**
+ * Mark the device as deprecated if it hasn't been seen for a specified number of days
+ * @param {number} days - Number of days to consider a device as deprecated
+ */
+NetworkDeviceSchema.methods.markAsDeprecated = function(days = 30) {
+  const cutoff = new Date();
+  cutoff.setDate(cutoff.getDate() - days);
+  if (this.lastSeen < cutoff) {
+    this.lifecycleStatus = 'deprecated';
+  }
+};
+
+/**
+ * Mark the device as retired if it hasn't been seen for a specified number of days
+ * @param {number} days - Number of days to consider a device as retired
+ */
+NetworkDeviceSchema.methods.markAsRetired = function(days = 90) {
+  const cutoff = new Date();
+  cutoff.setDate(cutoff.getDate() - days);
+  if (this.lastSeen < cutoff) {
+    this.lifecycleStatus = 'retired';
+  }
 };
 
 // Statics

@@ -4,6 +4,7 @@ import pathGrav from 'path';
 import NodeCache from 'node-cache';
 import { logger } from './logger.js';
 import { safePromiseAll } from './errorHandlers.js';
+import { retryOperation } from '../utils/retryUtils.js';
 
 // Gravatar API configuration
 const GRAVATAR_API_BASE = 'https://api.gravatar.com/v3';
@@ -94,10 +95,11 @@ export async function processBulkGravatarUrls(emails, options = {}) {
   const defaultImage = options.defaultImage || 'robohash';
   const rating = options.rating || 'G';
 
+  // getGravatarUrl is fully synchronous (md5 + string format) — no concurrency
+  // limiter needed. A plain loop is faster and brings no extra deps.
   for (const email of emails) {
     try {
-      const url = getGravatarUrl(email, size, defaultImage, rating);
-      results.push(url);
+      results.push(getGravatarUrl(email, size, defaultImage, rating));
     } catch (error) {
       console.error(`Error processing email ${email}:`, error);
     }
@@ -133,11 +135,11 @@ export async function fetchGravatarProfile(email) {
       headers['Authorization'] = `Bearer ${GRAVATAR_API_KEY}`;
     }
 
-    const response = await fetch(`${GRAVATAR_API_BASE}/profiles/${hash}`, {
+    const response = await retryOperation(() => fetch(`${GRAVATAR_API_BASE}/profiles/${hash}`, {
       method: 'GET',
       headers,
       timeout: 5000
-    });
+    }));
 
     if (!response.ok) {
       if (response.status === 404) {

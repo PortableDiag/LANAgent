@@ -1,6 +1,7 @@
 import { BaseProvider } from './BaseProvider.js';
 import axios from 'axios';
 import { logger } from '../utils/logger.js';
+import { retryOperation } from '../utils/retryUtils.js';
 
 /**
  * BitNet Provider
@@ -113,10 +114,10 @@ export class BitNetProvider extends BaseProvider {
         requestBody.stop = options.stop;
       }
 
-      const response = await axios.post(`${this.baseUrl}/v1/chat/completions`, requestBody, {
+      const response = await retryOperation(() => axios.post(`${this.baseUrl}/v1/chat/completions`, requestBody, {
         timeout: this.timeout,
         headers: { 'Content-Type': 'application/json' }
-      });
+      }), { retries: 3 });
 
       const responseTime = Date.now() - startTime;
       const result = response.data;
@@ -191,11 +192,11 @@ export class BitNetProvider extends BaseProvider {
         stream: true
       };
 
-      const response = await axios.post(`${this.baseUrl}/v1/chat/completions`, requestBody, {
+      const response = await retryOperation(() => axios.post(`${this.baseUrl}/v1/chat/completions`, requestBody, {
         timeout: this.timeout,
         headers: { 'Content-Type': 'application/json' },
         responseType: 'stream'
-      });
+      }), { retries: 3 });
 
       return new Promise((resolve, reject) => {
         let fullContent = '';

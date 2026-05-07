@@ -1123,8 +1123,8 @@ class AvatarService {
         return Avatar.getByOwner(owner);
     }
 
-    async getGallery(limit = 20) {
-        return Avatar.getGallery(limit);
+    async getGallery(limit = 20, filters = {}) {
+        return Avatar.getGallery(limit, filters);
     }
 
     async getStats() {

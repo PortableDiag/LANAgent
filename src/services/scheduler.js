@@ -1516,6 +1516,19 @@ Respond with ONLY the rephrased message, no explanation:`;
       }
     });
     
+    // Auto-archive AutoAccount entries that have been inactive past their
+    // archiveAfterDays threshold. Persists across restarts via Agenda
+    // (in-process timers in the model would not).
+    this.agenda.define('auto-account-archive', async (job) => {
+      try {
+        const { default: AutoAccount } = await import('../models/AutoAccount.js');
+        const inactivityMs = 30 * 24 * 60 * 60 * 1000; // 30 days
+        await AutoAccount.archiveInactiveAccounts(inactivityMs);
+      } catch (error) {
+        logger.error('Auto-account archive error:', error);
+      }
+    });
+
     // System status report (frequency configurable)
     this.agenda.define('system-status-report', async (job) => {
       logger.info('🔄 System status report job started...');
@@ -2173,6 +2186,9 @@ Respond with ONLY the rephrased message, no explanation:`;
     
     // Cleanup old reminders daily at 4 AM (production schedule)
     await this.agenda.every('0 4 * * *', 'cleanup-old-reminders');
+
+    // Auto-archive inactive AutoAccount entries — daily at midnight
+    await this.agenda.every('0 0 * * *', 'auto-account-archive');
     
     // Cleanup all completed jobs every hour
     await this.agenda.every('0 * * * *', 'cleanup-completed-jobs');

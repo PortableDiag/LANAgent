@@ -272,4 +272,26 @@ export class BaseProvider extends EventEmitter {
     logger.info(`Health check for ${this.name}:`, status);
     return status;
   }
+
+  /**
+   * Retrieve detailed token usage statistics.
+   * @returns {Object} - A comprehensive breakdown of token usage by model, day, and request type.
+   */
+  async getDetailedTokenUsageStats() {
+    try {
+      const detailedStats = {
+        tokensByDay: this.metrics.tokensByDay,
+        tokensByModel: this.metrics.tokensByModel,
+        totalTokens: this.metrics.totalTokens,
+        totalRequests: this.metrics.totalRequests,
+        averageResponseTime: this.metrics.averageResponseTime,
+        costEstimate: this.metrics.costEstimate
+      };
+      logger.info(`Detailed token usage stats for ${this.name}:`, detailedStats);
+      return detailedStats;
+    } catch (error) {
+      logger.error(`Failed to retrieve detailed token usage stats for ${this.name}:`, error);
+      throw new Error('Failed to retrieve detailed token usage statistics');
+    }
+  }
 }

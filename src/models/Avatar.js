@@ -111,8 +111,15 @@ AvatarSchema.statics.getByAgent = function (agentName) {
   return this.find({ agentName }).sort({ createdAt: -1 });
 };
 
-AvatarSchema.statics.getGallery = function (limit = 20) {
-  return this.find().sort({ createdAt: -1 }).limit(limit);
+AvatarSchema.statics.getGallery = function (limit = 20, filters = {}) {
+  const query = {};
+  if (filters.owner) query.owner = filters.owner;
+  if (filters.createdAfter || filters.createdBefore) {
+    query.createdAt = {};
+    if (filters.createdAfter) query.createdAt.$gte = new Date(filters.createdAfter);
+    if (filters.createdBefore) query.createdAt.$lte = new Date(filters.createdBefore);
+  }
+  return this.find(query).sort({ createdAt: -1 }).limit(limit);
 };
 
 export const Avatar = mongoose.model('Avatar', AvatarSchema);

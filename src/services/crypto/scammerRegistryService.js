@@ -264,6 +264,58 @@ class ScammerRegistryService {
   }
 
   /**
+   * Get the chronological audit trail for an address — every
+   * ScammerRegistered event that targeted this address. The contract's
+   * getScamReport() only returns the *current* report; this returns the
+   * full event history (useful when reports get revoked + re-filed, or
+   * when an admin wants to see who originally flagged an address).
+   *
+   * Returns an array sorted oldest → newest. Empty if the address was
+   * never reported.
+   */
+  async getReportHistory(address) {
+    if (!this.isAvailable()) throw new Error('Scammer registry not configured');
+    const { ethers } = await import('ethers');
+    const { contractServiceWrapper } = await import('./contractServiceWrapper.js');
+    const provider = await contractServiceWrapper.getProvider(this.network);
+
+    const registry = new ethers.Contract(this.registryAddress, [
+      'event ScammerRegistered(address indexed scammer, address indexed reporter, uint8 category, bytes32 evidenceTxHash)'
+    ], provider);
+
+    // Filter by indexed scammer — provider returns only matching logs.
+    const filter = registry.filters.ScammerRegistered(address);
+    const logs = await registry.queryFilter(filter);
+
+    // Resolve block timestamps in parallel so the response is fast even
+    // for addresses with several events.
+    const timestamps = await Promise.all(
+      logs.map(async (log) => {
+        try {
+          const block = await provider.getBlock(log.blockNumber);
+          return Number(block?.timestamp || 0);
+        } catch {
+          return 0;
+        }
+      })
+    );
+
+    return logs
+      .map((log, i) => ({
+        scammer: log.args.scammer,
+        reporter: log.args.reporter,
+        category: Number(log.args.category),
+        categoryName: CATEGORIES[Number(log.args.category)] || 'Unknown',
+        evidenceTxHash: log.args.evidenceTxHash === ethers.ZeroHash ? null : log.args.evidenceTxHash,
+        blockNumber: log.blockNumber,
+        txHash: log.transactionHash,
+        timestamp: timestamps[i],
+        date: timestamps[i] ? new Date(timestamps[i] * 1000).toISOString() : null
+      }))
+      .sort((a, b) => a.blockNumber - b.blockNumber);
+  }
+
+  /**
    * Check if an address has immunity
    */
   async checkImmunity(address) {

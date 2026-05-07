@@ -8,6 +8,7 @@ import rateLimit from 'express-rate-limit';
 import fs from 'fs/promises';
 import path from 'path';
 import os from 'os';
+import compression from 'compression';
 
 const router = Router();
 const reportCache = new NodeCache({ stdTTL: 300, checkperiod: 60 }); // 5 minute cache
@@ -19,6 +20,7 @@ const limiter = rateLimit({
 });
 
 router.use(limiter);
+router.use(compression());
 
 /**
  * Export system reports in specified format
@@ -49,18 +51,28 @@ router.get('/reports/export', authenticateToken, async (req, res) => {
       if (endDate) query['dateRange.start'].$lte = new Date(endDate);
     }
 
+    const cacheKey = `export_${format}_${type || 'all'}_${startDate || 'any'}_${endDate || 'any'}`;
+    const cached = reportCache.get(cacheKey);
+    if (cached) {
+      // Restore the original headers + body. Without this, a cached CSV
+      // export was being JSON-encoded by res.json() and missing
+      // Content-Type/Disposition headers entirely.
+      res.setHeader('Content-Type', cached.contentType);
+      res.setHeader('Content-Disposition', cached.contentDisposition);
+      return res.send(cached.body);
+    }
+
     const reports = await retryOperation(
       () => SystemReport.find(query).sort({ createdAt: -1 }).lean(),
       { retries: 3, context: 'SystemReport.find' }
     );
 
+    let body, contentType, contentDisposition;
     if (format === 'json') {
-      // Return as JSON with download headers
-      res.setHeader('Content-Type', 'application/json');
-      res.setHeader('Content-Disposition', 'attachment; filename="system-reports.json"');
-      res.json(reports);
+      body = JSON.stringify({ success: true, reports });
+      contentType = 'application/json';
+      contentDisposition = 'attachment; filename="system-reports.json"';
     } else if (format === 'csv') {
-      // Generate CSV content
       const csvHeaders = ['ID', 'Type', 'Title', 'Start Date', 'End Date', 'Created At', 'Performance - Avg Response Time', 'Performance - Job Success Rate', 'Issues - Errors Logged', 'Issues - Critical'];
       const csvRows = [csvHeaders.join(',')];
 
@@ -80,12 +92,15 @@ router.get('/reports/export', authenticateToken, async (req, res) => {
         csvRows.push(row.join(','));
       });
 
-      const csvContent = csvRows.join('\n');
-      
-      res.setHeader('Content-Type', 'text/csv');
-      res.setHeader('Content-Disposition', 'attachment; filename="system-reports.csv"');
-      res.send(csvContent);
+      body = csvRows.join('\n');
+      contentType = 'text/csv';
+      contentDisposition = 'attachment; filename="system-reports.csv"';
     }
+
+    reportCache.set(cacheKey, { body, contentType, contentDisposition });
+    res.setHeader('Content-Type', contentType);
+    res.setHeader('Content-Disposition', contentDisposition);
+    res.send(body);
   } catch (error) {
     logger.error('Failed to export reports:', error);
     res.status(500).json({

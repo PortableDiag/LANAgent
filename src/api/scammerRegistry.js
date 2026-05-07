@@ -174,4 +174,16 @@ router.post('/set-immunity-threshold', async (req, res) => {
     }
 });
 
+// GET /api/scammer-registry/report-history/:address
+router.get('/report-history/:address', async (req, res) => {
+    try {
+        const { address } = req.params;
+        const reportHistory = await scammerRegistryService.getReportHistory(address);
+        res.json({ success: true, data: reportHistory });
+    } catch (error) {
+        logger.error('Failed to fetch report history:', error);
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
 export default router;

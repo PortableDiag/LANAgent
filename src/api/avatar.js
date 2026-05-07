@@ -3,8 +3,11 @@ import multer from 'multer';
 import { authenticateToken } from '../interfaces/web/auth.js';
 import { logger } from '../utils/logger.js';
 import avatarService from '../services/avatar/avatarService.js';
+import { retryOperation } from '../utils/retryUtils.js';
+import NodeCache from 'node-cache';
 
 const router = express.Router();
+const cache = new NodeCache({ stdTTL: 300, checkperiod: 320 });
 
 const upload = multer({
     storage: multer.memoryStorage(),
@@ -73,8 +76,22 @@ router.post('/create', upload.single('photo'), async (req, res) => {
 // GET /api/avatar/gallery
 router.get('/gallery', async (req, res) => {
     try {
+        const cacheKey = `gallery:${JSON.stringify(req.query)}`;
+        const cachedData = cache.get(cacheKey);
+        if (cachedData) {
+            return res.json({ success: true, data: cachedData });
+        }
+
         const limit = Math.min(parseInt(req.query.limit) || 20, 100);
-        const avatars = await avatarService.getGallery(limit);
+        // Avatar schema has no tags field — only owner + createdAt are filterable.
+        const filters = {
+            createdAfter: req.query.createdAfter,
+            createdBefore: req.query.createdBefore,
+            owner: req.query.owner
+        };
+
+        const avatars = await retryOperation(() => avatarService.getGallery(limit, filters), { retries: 3 });
+        cache.set(cacheKey, avatars);
         res.json({ success: true, data: avatars });
     } catch (error) {
         logger.error('Failed to get avatar gallery:', error);
@@ -251,6 +268,11 @@ router.post('/:avatarId/items/unlock', async (req, res) => {
         logger.error('Failed to unlock avatar item:', error);
         res.status(error.message.includes('not found') ? 404 : 500).json({ success: false, error: error.message });
     }
+});
+
+// Health check endpoint
+router.get('/health', (req, res) => {
+    res.json({ success: true, message: 'Avatar service is healthy' });
 });
 
 export default router;

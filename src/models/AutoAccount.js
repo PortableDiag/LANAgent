@@ -255,6 +255,26 @@ autoAccountSchema.methods.archiveAccount = async function() {
     logger.info(`Account archived: ${this.serviceName}`);
 };
 
+/**
+ * Automatically archive inactive accounts
+ * @param {number} inactivityThreshold - Duration in milliseconds for inactivity
+ * @returns {Promise<void>}
+ */
+autoAccountSchema.statics.archiveInactiveAccounts = async function(inactivityThreshold) {
+    try {
+        const thresholdDate = new Date(Date.now() - inactivityThreshold);
+        const inactiveAccounts = await this.find({ lastActivityDate: { $lt: thresholdDate }, status: { $ne: 'expired' } });
+
+        for (const account of inactiveAccounts) {
+            account.status = 'expired';
+            await account.save();
+            logger.info(`Archived inactive account: ${account.serviceName}`);
+        }
+    } catch (error) {
+        logger.error('Failed to archive inactive accounts', { error });
+    }
+};
+
 const AutoAccount = mongoose.model('AutoAccount', autoAccountSchema);
 
 export default AutoAccount;
