@@ -2,9 +2,9 @@
   "info": {
     "_postman_id": "9b5edc66-ea34-4329-a9d5-baca5366e76d",
     "name": "LANAgent API Collection",
-    "description": "LANAgent API v2.25.27 \u2014 Gateway repo workflow established + today's gateway-side fixes pulled into source control. The gateway code (api.lanagent.net portal/admin/Stripe webhook/scrape proxies) is a separate repo at PortableDiag/api-lanagent-net (private), local at /media/veracrypt3/Websites/LANAgent_Website/api-lanagent-net/. Multiple sessions had been editing /opt/api-gateway/ files directly on the production host with `ssh \"sed -i \u2026\"` patches; the local repo had fallen six commits behind. This release rsyncs prod\u2192local, commits the drift, adds a proper deploy.sh (whitelisted rsync + pm2 restart + health check), and persists memory notes so this doesn't recur. Bundled gateway commit 0a0c5a0 covers: RequestLog.create added at every credit-debiting endpoint (was only in the legacy proxy helper \u2014 /scrape, /scrape/batch, /agents/:agentId/:service all silently debited credits without logging, which is why customer dashboard charts and admin Top Services were empty for web-scraping); agentUrl \u2192 agentName fix in admin scrapes Top Agents aggregation; HTML5 responsive scrolling tables (html, body { overflow-x: hidden } + every <table> wrapped in .table-wrap); .row-flex mobile-wrap rule for Grant Credits admin-actions card; portal 'Enter your email first' amber warning; promo strikethrough on credit packages and subscription cards (~~$25~~ $12.50/mo first month); dashboard usage chart label updates with range + JWT-first auth + better empty-state copy; express.urlencoded middleware fix for admin login form. Follow-up commit 28e132e fixes a JS template literal escape issue: \\d and \\s were being silently stripped from regex sources at template evaluation time, so the promo strikethrough regexes never matched anything until the backslashes were doubled. v2.25.26 base \u2014 Operational hardening pass following v2.25.25's render-tier cut. Ships a one-line comment fix in scraping.js (TIER_COSTS comment misattributed the cut to v2.25.21 instead of v2.25.25). Companion downstream rollout: synced v2.25.25 to public repo (PortableDiag/LANAgent), scrubbed 46 mentions of genesis-only crypto strategy classes (ArbitrageStrategy, DollarMaximizerStrategy, NativeMaximizerStrategy, RuleBasedStrategy, TokenTraderStrategy, VolatilityAdjustedStrategy, ArbitrageScan) from the public feature-progress.json plus 2 wholly-proprietary feature entries; reformatted to consistent 2-space indentation. Deployed v2.25.25 image to beta agent (Docker Compose at beta.lanagent.net) after recovering disk space mid-build by stopping the running BETA container to free its writable layer (Beta VPS is 25 GB total and was at 86% pre-deploy; first two builds failed at the unpack-to-overlayfs step). Fixed beta's git origin remote which had the GitHub PAT inserted twice in the URL, breaking every scheduled self-modification git fetch with 'URL using bad/illegal format'. Production (192.168.0.52 / ALICE) v2.25.25 code was already live (TIER_COSTS render: 3 confirmed) but package.json was still showing v2.25.11 \u2014 v2.25.26 deploys via the full deploy.sh sync to make sure package.json lands too. v2.25.25 base \u2014 Render-tier price cut: 5 cr ($0.05) \u2192 3 cr ($0.03), matching the `full` tier. FlareSolverr cost-to-serve is well under $0.001/call so the 5cr sticker was almost entirely margin and read expensive next to ScraperAPI ultra_premium ($0.03+) and ScrapeGraphAI's stealth-extract ($0.034 on Pro). New scheme keeps render distinct from full semantically (FlareSolverr-backed; CF JS-challenge handler) but aligned in price; under a `full \u2192 render` escalation pattern, average per-fallback cost converges on $0.03. Headline price story is now \"1\u00a2 to 3\u00a2 per scrape\" (was 1\u00a2 to 5\u00a2). Subscription buckets unchanged \u2014 render still draws from the smaller render-bucket on Scraper Pro ($25/mo, 15K render calls) and Business ($50/mo, 50K render calls). Companion work in the work scraper repo at /media/veracrypt2/NodeJS/ScraperService: scrapeWithScraperApi and /raw-fetch migrated from ScraperAPI to LANAgent on 2026-05-05; both now use the same callLANAgentScrape helper with `full \u2192 render` escalation. End-to-end verified in production: [LANAGENT] PASS https://www.foxnews.com/... (tier=full, credits, charged=3). 5cr slot now open for a future premium tier (residential proxies, 4G mobile IPs) without breaking the existing pricing ladder. v2.25.24 base: Per-page audit of every admin body for the inline-style mobile-overflow class of issues fixed in v2.25.22 / v2.25.23. One remaining offender: the Grant Credits admin-actions row on user-detail and wallet-detail pages used class='row-flex' with inline 'width:160px' and 'flex:1' on inputs, which overrode the responsive rules and overflowed on phone widths. Fixed by adding a @media (max-width: 880px) block that makes .row-flex wrap, gives label its own row, and forces inputs/selects/textareas to flex: 1 1 100% !important and width: auto !important \u2014 the !important being the only way to defeat the inline declarations without rewriting markup. All other admin pages audited clean (Dashboard / Users / Wallets / Agents / Payments / Subscriptions / Tickets / Audit). No remaining inline grid-template-columns declarations exist anywhere in admin.mjs. v2.25.23 base: Admin dashboard mobile follow-up. Promotions page (/admin/promotions) used inline style='grid-template-columns: 1fr 360px' which overrode responsive rules and forced the whole page wider than any phone viewport, so the sticky header had to scroll horizontally with the rest. Scrapes page (/admin/scrapes) had the same problem with 1fr 1fr \u2014 Top Services and Top Agents charts stayed side-by-side on phones. Both replaced with new responsive grid classes (.grid-aside collapses to 1fr at \u2264880px; .grid-2 stacks at \u2264880px) so future multi-column layouts can declare intent without inline overrides. Principle: always stack on mobile unless components are small. v2.25.22 base: Gateway admin dashboard responsive overhaul. Recent Payments table no longer crammed (dashboard grid switched from grid-3 to dash-grid: Payments 2fr, Agents 1fr, Tickets 1fr on desktop; Payments spans both cols on tablet \u2264980px; all stacked on phone \u2264600px). Long emails in the table truncate with text-overflow ellipsis and a title= tooltip showing the full address. Top navigation now collapses into a hamburger drawer on screens \u2264880px (was wrapping nine links across multiple lines and shoving the user/sign-out controls off-screen). Wide tables scroll horizontally inside their cards via overflow-x:auto instead of overflowing the page. KPI values, h1, card padding, and bar-row labels all shrink at narrow breakpoints. No markup changes outside layout() and dashboardBody(); almost entirely additive CSS in SHARED_STYLE plus a single nav-toggle button. v2.25.21 base: Gateway and BETA agent recovery. Fixed silently-broken admin login (gateway was missing express.urlencoded middleware so the HTML form's email field never reached the handler \u2014 every login attempt fell into the anti-enumeration tarpit branch and silently dropped). Reconnected gateway\u2194BETA after a 24-day stale-API-key outage caused by the April 11 mongo ransomware wipe (gateway held a key BETA had no record of; 6,917 401s on /credits/balance over 24 days). Bootstrapped BETA with $5 of on-chain credits (gateway swapped 0.008 BNB \u2192 268,770 SKYNET via PancakeSwap V2 then transferred 268,433 SKYNET to BETA's recipient \u2014 BETA verified the tx and credited 503 credits). Reworked pickBestAgent for strict primary/fallback by reputation: ALICE always wins when online and funded; BETA only sees traffic when ALICE is offline or out of credits (was weighted-random which gave BETA ~0.5% probability even when ALICE was healthy). Capability gating untouched at the DB query level so render-tier scrapes still cannot route to BETA \u2014 there's no fallback for render tier when ALICE is down (BETA lacks FlareSolverr). Added BETA agentId 2931 so direct-route POST /agents/2931/:service works. Stood up backup tooling: server-side /root/backup-beta.sh + cron 15 3 * * * (mongodump --gzip --archive, 14-day retention) and local pull script scripts/deployment/backup-beta.sh that streams a fresh mongodump over SSH plus rsynced configs/data into a single tar.gz at _BackUps_/beta-backup-<UTC-stamp>.tar.gz (30-day retention). v2.25.20 base: PR review pass on 10 AI-generated PRs (#2083\u20132092). v2.25.19 shipped BYOK on the SKYNET API Telegram bot (/setkey gsk_\u2026 with AES-256-GCM at rest, validated against gateway before storing; /mykey, /clearkey). Updated May 5, 2026.",
+    "description": "LANAgent API v2.25.30 — ALICE-authored capability upgrades. 23 open self-modification PRs triaged one by one: 12 merged with corrections (added /api/avatar/health, added query-filter support to /api/avatar/gallery with owner / createdAfter / createdBefore plus 5-min cache and 3× retry, added /api/scammer-registry/report-history/:address with chronological event audit trail, added NetworkDevice lifecycleStatus + mark helpers, added BaseProvider.getDetailedTokenUsageStats, added Email.batchProcessEmails chunking + getEmailsByConversation pagination, added DevelopmentPlan.filterItems creationDateRange, added AutoAccount.archiveInactiveAccounts wired through Agenda daily 00:00, added selfModLock pre-expiration warning, made selfDiagnostics interval adaptive at startup, retry-wrapped gravatar fetch and BitNet provider, fixed systemReports cached-export to preserve Content-Type and not JSON-encode CSV); 11 closed with substantive comments explaining defects (placeholder code, hallucinated NASA endpoint /planetary/data — verified 404 via DEMO_KEY curl, security regression that would leak this.config credentials via external gateway, redundant globalLimiter, deletes-working-rate-limiter that calls non-existent service methods, ordering bug in adaptive circuit breaker, etc.). v2.25.29 base — ALICE auto-post lockout fix: Twitter/X and MindSwarm posting stopped 2026-05-01 (5-day silence) because the dedup filter in _gatherPostContext checked the last 8 posts against a catalog of only 7 topic categories, so once recent posts covered them all every candidate item got stripped (filteredItems.length === 0, hasContent: false, silent .debug() skip). Self-perpetuating because posting halt meant the recent-8-posts window never advanced. Fixed by expanding the topic catalog from 7 to 12 (added healing, skynetEcon, shipped, capabilities, providers — each pulling from data the agent already collects via selfHealing.getStatus, p2pFederation.getSkynetServiceStats, selfModification.getStats, apiManager.apis.size, providerManager.getProviderList) and converting the silent .debug() skip messages to .info() with diagnostic context (raw item count, post-dedup count, recent-topic matches, first 60 chars of each raw item) so future silent skips show their cause. SkynetAPIBot Telegraf handlerTimeout bumped from 90s default to 5 min so /dl downloads on slow extractors (Rumble via FlareSolverr, 60-180s) don't fire spurious 'unexpected error' replies mid-download. Persistent chat-action keepalive (upload_video / upload_voice / typing) re-sent every 4s so the indicator doesn't expire during 10-60s yt-dlp runs. Threaded replies via reply_to_message_id so bot responses don't float to the bottom of busy group chats. Status message updates as work progresses ('Fetching mp4 from youtube.com…' → 'Got Me_at_the_zoo.mp4 (614 KB), uploading…') and auto-deletes once the file lands. v2.25.28 base — External media-download fixes: /api/external/service/ytdlp/download was returning file.path: '[redacted]' (paying customers paid 3 cr, agent downloaded the file, but no fetchable URL came back) because the responseSanitizer correctly redacts /root/lanagent-deploy/downloads/<file> internal paths. Fixed in src/api/external/routes/plugins.js by minting a 60-min download token URL (mirroring /youtube/download) before sanitizer runs — applies to ytdlp/ffmpeg/imageTools/pdf when result.file.path or string file is present. /api/external/youtube/download was 502'ing with 'ytdlp.execute is not a function' because apiManager.apis.get('ytdlp') returns a wrapper { instance, enabled, ... } not the plugin instance — fixed in youtube.js by unwrapping .instance. v2.25.27 base — Gateway repo workflow + bundled gateway-side fixes (RequestLog coverage, agentName fix, mobile responsive admin, etc).",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
-    "version": "2.25.27"
+    "version": "2.25.30"
   },
   "auth": {
     "type": "bearer",
@@ -17634,6 +17634,26 @@
           }
         },
         {
+          "name": "Report History",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/scammer-registry/report-history/0xc0C0D080650C941D8901889248c6eD4C31Ef08F4",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "scammer-registry",
+                "report-history",
+                "0xc0C0D080650C941D8901889248c6eD4C31Ef08F4"
+              ]
+            },
+            "description": "Chronological audit trail of every ScammerRegistered event targeting this address (reporter, category, evidence, block + tx hash, timestamp). Useful for revoke-and-re-flag scenarios; getReport() only shows current state."
+          }
+        },
+        {
           "name": "Check Address Immunity",
           "request": {
             "method": "GET",
@@ -18179,7 +18199,7 @@
             "method": "GET",
             "header": [],
             "url": {
-              "raw": "{{base_url}}/api/avatar/gallery",
+              "raw": "{{base_url}}/api/avatar/gallery?limit=20&owner=&createdAfter=&createdBefore=",
               "host": [
                 "{{base_url}}"
               ],
@@ -18187,9 +18207,34 @@
                 "api",
                 "avatar",
                 "gallery"
+              ],
+              "query": [
+                { "key": "limit", "value": "20", "description": "Max results, capped at 100" },
+                { "key": "owner", "value": "", "description": "Filter by owner identifier (optional)" },
+                { "key": "createdAfter", "value": "", "description": "ISO 8601 datetime — only return avatars created at or after this time (optional)" },
+                { "key": "createdBefore", "value": "", "description": "ISO 8601 datetime — only return avatars created at or before this time (optional)" }
               ]
             },
-            "description": "List all created avatars"
+            "description": "List avatars with optional filters. Results cached 5 min server-side; underlying lookup retries 3× on transient failures."
+          }
+        },
+        {
+          "name": "Avatar Service Health",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/avatar/health",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "avatar",
+                "health"
+              ]
+            },
+            "description": "Liveness probe for the avatar service. Returns { success: true, message: 'Avatar service is healthy' } when the router is mounted."
           }
         },
         {

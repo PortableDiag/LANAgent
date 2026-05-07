@@ -2,6 +2,69 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.30] - 2026-05-06
+
+ALICE-authored capability upgrades — 12 PRs triaged, fixed where needed, merged.
+
+23 open PRs from ALICE's self-modification system were reviewed one by one. 12 merged with corrections; 11 closed with substantive comments explaining why (each PR comment lists the specific defect — hallucinated endpoint, dead code, security regression, redundant with existing functionality, etc.). Per-PR rationale lives on the closed PRs themselves and in `docs/sessions/SESSION-SUMMARY-2026-05-06.md`.
+
+### Added
+
+- **`GET /api/avatar/gallery` — filtering** by `owner`, `createdAfter`, `createdBefore` query params; route-level cache (5 min TTL) and 3× retry on the underlying lookup. (genesis #2095)
+- **`GET /api/avatar/health`** — service liveness probe. (genesis #2095)
+- **`GET /api/scammer-registry/report-history/:address`** — chronological audit trail of every `ScammerRegistered` event targeting an address (resolves block timestamps in parallel; sorts oldest → newest). Useful for revoke-and-re-flag scenarios where `getReport()` only shows current state. (genesis #2103)
+- **`NetworkDevice.lifecycleStatus`** field (`active|deprecated|retired`) + `markAsDeprecated(days)` / `markAsRetired(days)` instance methods. (genesis #2096)
+- **`BaseProvider.getDetailedTokenUsageStats()`** — focused token-usage view alongside the existing `getMetrics()`. (genesis #2098)
+- **`Email.batchProcessEmails`** — chunked bulkWrite (100/chunk) with results aggregated into a single BulkWriteResult-shaped object. **`Email.getEmailsByConversation(id, page, limit)`** — pagination support (default 50/page). (genesis #2105)
+- **`DevelopmentPlan.filterItems`** — new `creationDateRange={startDate,endDate}` filter. (genesis #2108)
+- **`AutoAccount.archiveInactiveAccounts(inactivityMs)`** + Agenda `auto-account-archive` job (daily 00:00, 30-day default threshold) that survives restarts. The original PR scheduled this via an in-process timer that would have been lost on restart; rewired through Agenda. (genesis #2114)
+- **`selfModLock` `lockExpiring` event** — fired 5 min before `lockTimeout` (default 30 min), cancelled on release, race-guarded so it doesn't fire for a lock acquired by a different service. (genesis #2115)
+
+### Changed
+
+- **`selfDiagnostics` startup interval is now adaptive** — picks 3h / 4h / 6h based on host load average and memory pressure at boot, rather than a fixed 6h. (genesis #2093)
+- **`gravatarHelper.fetchGravatarProfile` retry-wraps the upstream fetch** so transient Gravatar API failures don't bubble. (genesis #2101)
+- **`bitnet` provider retries chat + streaming completions** on transient network/5xx errors via `retryOperation` (default 3 retries; 4xx logical errors not retried). (genesis #2110)
+- **`/api/admin/system-reports/export`** now caches per-query results (5 min TTL) with both body and `Content-Type` / `Content-Disposition` headers preserved on cache hits. Original PR cached only the body and re-emitted via `res.json()`, which JSON-encoded CSV exports into quoted strings. Also adds `compression` middleware on the report router. (genesis #2107)
+
+### Closed without merging
+
+11 PRs closed with explanations on each: #2094 (placeholder code), #2097 (duplicates winston native rotation), #2099 (hallucinated NASA endpoint — `api.nasa.gov/planetary/data` returns 404), #2100 (rate-limit middleware in a Mongoose model file), #2102 (`getPluginConfig` template change would expose credentials via external gateway), #2104 (`cache.options.stdTTL` mutation only affects new writes; module-level `setInterval`), #2106 (`TaskScheduler.scheduleJob` doesn't exist; in-process timers lose state on restart), #2109 (ordering bug — `adjustThreshold()` already prunes to 5 min before the new analyzer runs), #2111 (redundant with existing `globalLimiter`), #2112 (deletes working IP rate limiter, calls non-existent service methods), #2113 (`version` is not a JSON Schema keyword and no consumer reads it).
+
+## [2.25.29] - 2026-05-06
+
+ALICE auto-post lockout fix — 5-day silence on Twitter/X and MindSwarm.
+
+### Fixed
+
+- **5 days of zero auto-posts on Twitter/X and MindSwarm** (last post on both: 2026-05-01). The schedule gates were passing every 5–10 min (visible in logs), but every cycle silently bailed at one of two `pluginLogger.debug(...)` skip paths that aren't visible in the default log level. Root cause: the dedup filter in `_gatherPostContext()` (twitter.js, mindswarm.js) checks the last 8 posts against a catalog of 7 topic categories (`scammer`, `plugins`, `p2p`, `uptime`, `selfmod`, `email`, `upgrades`). Once recent posts cover all 7, every candidate item gets stripped, `filteredItems.length === 0`, `hasContent: false`, silent skip — and because posting stops, the recent-8-posts window never advances, so the same topics keep matching. Self-perpetuating deadlock.
+
+### Changed
+
+- **Visibility:** silent `pluginLogger.debug(...)` skip messages converted to `.info()` with diagnostic context — raw item count, post-dedup count, which `recentTopics` matched, and the first 60 chars of each raw item. Same treatment for the AI-returned-invalid-content path. Future silent skips now show their cause in `logs/plugins/{twitter,mindswarm}.log`.
+- **Topic catalog expanded** from 7 to 12 categories in both plugins. Five new candidate items added to `_gatherPostContext()`, each pulling from data the agent already collects:
+  - `healing` — `selfHealing.getStatus().stats24h` last-24h auto-fix count
+  - `skynetEcon` — `p2pFederation.getSkynetServiceStats()` peer-to-peer service revenue/requests
+  - `shipped` — `selfModification.getStats().today` self-authored PRs shipped today (separate from cumulative `merged`)
+  - `capabilities` — `apiManager.apis.size` integrated plugin count, framed as "Operating with N integrated capabilities" (avoids the old "Running 99/100 plugins" flip-flop pattern)
+  - `providers` — `providerManager.getProviderList()` AI provider redundancy
+- Each new item has corresponding keyword groups in `topicToKeywords` so dedup detects them.
+
+The dedup filter intent is preserved (don't tweet about the same topic twice in a row), but with a wider catalog of categories the filter can no longer collapse to empty when the agent has been busy.
+
+## [2.25.28] - 2026-05-06
+
+External media-download fixes — clients couldn't actually fetch downloaded files.
+
+### Fixed
+
+- **`/api/external/service/ytdlp/download` returned `file.path: "[redacted]"`** — plugin returned a real on-disk path (`/root/lanagent-deploy/downloads/<file>`) which the response sanitizer correctly redacted. Net effect: external clients paid 3 credits, the agent downloaded the file successfully, but the client got no fetchable URL. Fixed in `src/api/external/routes/plugins.js` by minting a short-lived download token URL (mirroring `/youtube/download`) before the response goes through the sanitizer. Applies to any plugin in `FILE_PRODUCING_PLUGINS` (ytdlp, ffmpeg, imageTools, pdf): when the result includes `file.path` (object) or `file` (string path), it is rewritten to `{ filename, size, downloadUrl: "/api/external/download/<token>", tokenExpires, maxDownloads }`. The `command` field is also stripped — it was always 100% redacted internal paths anyway.
+- **`/api/external/youtube/download` returned 502 (`ytdlp.execute is not a function`)** — `apiManager.apis.get('ytdlp')` returns a wrapper `{ instance, enabled, ... }`, not the plugin instance directly. Fixed in `src/api/external/routes/youtube.js` by unwrapping `.instance` before calling `.execute()`, matching the pattern already in `plugins.js`.
+
+### Why this matters
+
+`/service/ytdlp/download` is a paid 3cr endpoint — partners were being charged for downloads they couldn't retrieve. The dedicated `/youtube/download` wrapper (10cr, includes the download-URL flow) was also broken since the wrapper-vs-instance bug landed, leaving zero working paths for paid media downloads through the gateway.
+
 ## [2.25.27] - 2026-05-05
 
 Gateway repo workflow established + today's gateway-side fixes pulled into source control.

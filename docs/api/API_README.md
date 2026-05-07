@@ -2080,7 +2080,8 @@ Photo/text-to-3D avatar creation with customization, NFT minting, and gallery.
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | POST | `/api/avatar/create` | Create avatar from photo upload or text prompt |
-| GET | `/api/avatar/gallery` | List all avatars |
+| GET | `/api/avatar/gallery` | List avatars (supports `?limit=`, `?owner=`, `?createdAfter=`, `?createdBefore=`) — results cached 5 min, 3× retry |
+| GET | `/api/avatar/health` | Avatar service liveness probe |
 | GET | `/api/avatar/stats` | Avatar creation statistics |
 | GET | `/api/avatar/:avatarId` | Get avatar details |
 | PUT | `/api/avatar/:avatarId/customize` | Update customizations |
@@ -2458,6 +2459,7 @@ Deployed an on-chain ScammerRegistry smart contract on BSC with soulbound SCAMME
 |--------|----------|-------------|
 | GET | `/api/scammer-registry/stats` | Registry stats (count, fee, immunity threshold, genesis agent) |
 | GET | `/api/scammer-registry/check/:address` | Check if address is flagged as scammer |
+| GET | `/api/scammer-registry/report-history/:address` | Chronological audit trail of every `ScammerRegistered` event for the address (reporter, category, evidence, block + tx, timestamp) |
 | GET | `/api/scammer-registry/immunity/:address` | Check if address has immunity (2/3 trust factors) |
 | GET | `/api/scammer-registry/list?limit=50` | List all flagged scammer addresses |
 | GET | `/api/scammer-registry/categories` | Get scam category definitions (1-7) |
