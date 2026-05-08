@@ -16,6 +16,7 @@ import { DATA_PATH } from '../../utils/paths.js';
 import vpnRoutes from './vpn.js';
 import firewallRoutes from './firewall.js';
 import sshRoutes from './ssh.js';
+import cookiesAdminRoutes from './cookiesAdmin.js';
 // import sambaRoutes from './samba.js'; // Now handled by generic plugin router
 import networkRoutes from './network.js';
 import devenvRoutes from './devenv.js';
@@ -225,6 +226,9 @@ export class WebInterface {
     
     // Setup SSH management routes
     this.app.use('/ssh', sshRoutes);
+
+    // Cookie-jar admin endpoints for the ytdlp plugin (Phase 3 social-media)
+    this.app.use('/api/admin', cookiesAdminRoutes);
     
     // Samba routes now handled by generic plugin router
     
@@ -235,6 +239,14 @@ export class WebInterface {
     this.app.use('/devenv', devenvRoutes);
     
     // Setup Crypto wallet management routes
+    // lpMarketMakerRoutes must mount BEFORE the broader /api/crypto router —
+    // cryptoRoutes applies router-level authMiddleware that 401s any request
+    // hitting `/api/crypto/*` before it can fall through to deeper mounts. Mount
+    // the LP MM router first so its public /health endpoint (defined above the
+    // auth middleware in lpMarketMaker.js) is reachable without a JWT. The
+    // remaining /api/crypto/lp/mm/* routes still gate on lpMarketMaker.js's
+    // own router-level authMiddleware.
+    this.app.use('/api/crypto/lp/mm', lpMarketMakerRoutes);
     this.app.use('/api/crypto', cryptoRoutes);
     this.app.use('/api/contracts', contractsRoutes);
     this.app.use('/api/transactions', transactionsRoutes);
@@ -247,7 +259,6 @@ export class WebInterface {
     this.app.use('/api/ens', ensRoutes);
     this.app.use('/api/identity', identityRoutes);
     this.app.use('/api/scammer-registry', scammerRegistryRoutes);
-    this.app.use('/api/crypto/lp/mm', lpMarketMakerRoutes);
     this.app.use('/api/coordination', coordinationRoutes);
     this.app.use('/api/avatar', avatarRoutes);
     this.app.use('/api/music-library', musicLibraryRoutes);
