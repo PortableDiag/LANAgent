@@ -33,6 +33,10 @@ ALICE-authored capability-upgrade PR triage (#2116–#2126) — 11 PRs reviewed 
 - **#2124 outputSchemas.js** — adds inert `version: 1` field with no version-aware logic. Same defect as previously-closed #2113.
 - **#2126 metricsUpdater.js** — wraps `ImprovementMetrics.updateMetrics(date)` (a write operation) in a 5-min result cache, defeating the recurring metrics rebuild.
 
+### Follow-up: mount-order fix for `/api/crypto/lp/mm/health`
+
+Post-deploy verification surfaced that the new public `/health` endpoint was returning `401 Authentication required` instead of the liveness payload. `cryptoRoutes` (mounted at `/api/crypto`) has `router.use(authMiddleware)` at line 53 that 401s any request matching the `/api/crypto/*` prefix before Express can fall through to the deeper `/api/crypto/lp/mm` mount. Fixed by swapping mount order in `src/interfaces/web/webInterface.js` so `lpMarketMakerRoutes` mounts before `cryptoRoutes`. Verified: `curl http://…/api/crypto/lp/mm/health` returns `{"success":true,"enabled":true,"initialized":false}` HTTP 200 unauthenticated.
+
 ## [2.25.31] - 2026-05-07
 
 Crypto token-trader heartbeat-manager auto-start fix and restore-state persistence fix.
