@@ -2,6 +2,48 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.32] - 2026-05-08
+
+ALICE-authored capability-upgrade PR triage (#2116–#2126) — 11 PRs reviewed one by one. 1 merged, 4 manually re-implemented, 6 closed.
+
+### Added (manual salvage of closed PRs)
+
+- **`POST /api/crypto/lp/mm/health`** — public unauthenticated liveness probe for the LP market maker. Mounted above `router.use(authenticateToken)`. Calls `lpMarketMaker.getConfig()` to verify the underlying service is responsive; returns `{ success, enabled, initialized }` on 200, 503 if the config fetch throws. (Replacement for #2122.)
+- **Self-healing service: scheduled actions.** `selfHealing` plugin gains three new actions backed by the existing Agenda `taskScheduler` singleton:
+  - `schedule({ actionType, time, reason?, force?, targetPaths? })` — one-shot future healing action. The named Agenda job `'self-healing-action'` is registered at plugin init so the handler is present on every restart. Persisted in MongoDB.
+  - `listScheduled` — `{ jobId, actionType, scheduledFor, reason, lastRunAt, failCount, failReason }`.
+  - `cancelScheduled({ jobId })` — `ObjectId`-validates the id and calls `agenda.cancel({ name, _id })`.
+  - (Replacement for #2119.)
+- **Checkly plugin: scheduled polls.** Same Agenda pattern, recurring instead of one-shot:
+  - `schedule_check({ checkId, interval })` — uses `agenda.every(interval, 'checkly-scheduled-poll', { checkId })`. Idempotent re-scheduling.
+  - `list_scheduled_checks` — `{ jobId, checkId, interval, nextRunAt, lastRunAt, failCount, failReason }`.
+  - `cancel_scheduled_check({ checkId })`.
+  - (Replacement for #2125.)
+
+### Merged (PR #2121)
+
+- **`ModelCache.getUsageAnalyticsData()`** — static aggregation across all ModelCache documents producing `{ totalRequests, averageResponseTime, errorRate }` global rollup. Mirrors the existing per-document `getUsageAnalytics()` instance method. Underlying `usageAnalytics` field is currently dead infrastructure (no caller invokes `trackUsage()`), so the method returns zeros until something starts populating the data. (genesis #2121.)
+
+### Closed without salvage
+
+- **#2116 agentAccessor.js** — `validateAgent()` placeholder property names that would always return false, blocking `setGlobalAgent` at agent boot.
+- **#2117 ContractABI.js** — projection that strips the `abi` field, defeating the only reason to call `getByAddressAndNetwork`.
+- **#2120 documentLoader.js** — conditional GET branch unreachable behind cache-first early-return; axios default `validateStatus` rejects 304 anyway.
+- **#2123 UserPreference.js** — placeholder templates `{ theme, notifications }` unrelated to any real plugin's preference schema.
+- **#2124 outputSchemas.js** — adds inert `version: 1` field with no version-aware logic. Same defect as previously-closed #2113.
+- **#2126 metricsUpdater.js** — wraps `ImprovementMetrics.updateMetrics(date)` (a write operation) in a 5-min result cache, defeating the recurring metrics rebuild.
+
+## [2.25.31] - 2026-05-07
+
+Crypto token-trader heartbeat-manager auto-start fix and restore-state persistence fix.
+
+Operator noticed that the `tokenTraderStatus` block on the crypto strategy agent reported a stale `lastAnalysis` — ~36 hours old — despite the agent itself being healthy and ticking dollar_maximizer every 10 minutes. Investigation surfaced that the runtime token_trader instance for a configured token had been wiped from the registry during a registry-rebuild incident; the wallet still held the tokens entirely unmanaged (no trailing stop, no scale-out logic, no monitoring). Fixing it via `/strategy/token-trader/configure` + `/strategy/token-trader/restore-state` exposed two latent bugs in `src/api/crypto.js`:
+
+### Fixed
+
+- **Token-trader heartbeat manager doesn't auto-start when first instance is added at runtime.** `src/api/crypto.js:1441` guarded the `startToken()` call on `if (handler.tokenHeartbeatManager?.started)` — but `started` only flips to `true` inside `TokenTraderHeartbeatManager.startAll()`, which `CryptoStrategyAgent.initialize()` only calls when `allTokenTraders.size > 0` at agent init. Configure on a fresh registry registered the new instance and persisted it, but never started the per-token heartbeat. The token then only ticked via the slower main-heartbeat fallback. Configure now calls `startAll()` if the manager exists but isn't started yet (idempotent; picks up the newly-registered instance).
+- **`/strategy/token-trader/restore-state` mutated state in-memory only, never persisted.** The endpoint at `src/api/crypto.js:1568-1642` writes restored `position`, `pnl`, `tracking`, `circuitBreaker`, `regime` directly to `tokenStrategy.state.*` and returned 200 — but no `persistRegistryState()` call, so the restored cost basis / realized PnL / trailing-stop / peak-price values only survived in memory until the next full `execute()` cycle ran. Compare `/configure` at line 1436 which does call `persistRegistryState()` before returning. `/restore-state` now matches.
+
 ## [2.25.30] - 2026-05-06
 
 ALICE-authored capability upgrades — 12 PRs triaged, fixed where needed, merged.

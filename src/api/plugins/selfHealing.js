@@ -11,13 +11,24 @@ import { logger } from '../../utils/logger.js';
  * - Manually trigger healing actions
  * - View healing event history
  * - Update configuration
+ * - Schedule healing actions for a future time (Agenda-backed; survives restarts)
  */
+const SCHEDULED_JOB_NAME = 'self-healing-action';
+const SCHEDULABLE_ACTIONS = [
+  'memory_cleanup',
+  'disk_cleanup',
+  'db_reconnect',
+  'cache_clear',
+  'log_rotation'
+];
+
 export default class SelfHealingPlugin extends BasePlugin {
   constructor(agent) {
     super(agent);
     this.name = 'selfHealing';
     this.version = '1.0.0';
     this.description = 'Self-healing and auto-remediation service for runtime issues';
+    this.scheduler = null;
 
     this.commands = [
       {
@@ -80,8 +91,69 @@ export default class SelfHealingPlugin extends BasePlugin {
           'update memory threshold',
           'configure self-healing'
         ]
+      },
+      {
+        command: 'schedule',
+        description: 'Schedule a healing action for a future time (one-shot, persisted)',
+        usage: 'schedule({ actionType: "memory_cleanup", time: "2026-05-08T10:00:00Z", reason?: "..." })',
+        examples: [
+          'schedule memory cleanup at 10am',
+          'set disk cleanup for tomorrow',
+          'schedule cache clear at midnight'
+        ]
+      },
+      {
+        command: 'listScheduled',
+        description: 'List pending scheduled healing actions',
+        usage: 'listScheduled',
+        examples: [
+          'show scheduled healing actions',
+          'list pending healing jobs'
+        ]
+      },
+      {
+        command: 'cancelScheduled',
+        description: 'Cancel a scheduled healing action by id',
+        usage: 'cancelScheduled({ jobId: "<agenda-job-id>" })',
+        examples: [
+          'cancel scheduled memory cleanup',
+          'remove pending healing job'
+        ]
       }
     ];
+  }
+
+  /**
+   * Wire up the Agenda job handler that runs scheduled healing actions.
+   * Uses the agent's singleton taskScheduler service (Agenda-backed; jobs are
+   * persisted in MongoDB so they survive restarts). If the scheduler isn't
+   * available — agent boot failure or a stripped runtime — schedule/list/cancel
+   * return a clean error rather than throwing.
+   */
+  async initialize() {
+    this.scheduler = this.agent?.services?.get('taskScheduler');
+    if (!this.scheduler?.agenda) {
+      logger.warn('[SelfHealingPlugin] taskScheduler unavailable; schedule/listScheduled/cancelScheduled disabled');
+      return;
+    }
+    this.scheduler.agenda.define(SCHEDULED_JOB_NAME, async (job) => {
+      const { actionType, reason, force, targetPaths } = job.attrs.data || {};
+      const service = this.agent?.selfHealingService;
+      if (!service) {
+        logger.error(`[SelfHealingPlugin] scheduled ${actionType}: self-healing service not initialized`);
+        throw new Error('Self-healing service not initialized');
+      }
+      logger.info(`[SelfHealingPlugin] running scheduled action ${actionType} (job ${job.attrs._id})`);
+      const result = await service.triggerAction(actionType, {
+        force: force || false,
+        reason: reason || `scheduled execution (job ${job.attrs._id})`,
+        targetPaths
+      });
+      if (!result?.success) {
+        // Throw so Agenda records the failure on the job document
+        throw new Error(result?.message || `Scheduled ${actionType} failed`);
+      }
+    });
   }
 
   async execute(params) {
@@ -135,10 +207,19 @@ export default class SelfHealingPlugin extends BasePlugin {
         case 'systemState':
           return await this.getSystemState(service);
 
+        case 'schedule':
+          return await this.scheduleAction(data);
+
+        case 'listScheduled':
+          return await this.listScheduledActions();
+
+        case 'cancelScheduled':
+          return await this.cancelScheduledAction(data);
+
         default:
           return {
             success: false,
-            error: `Unknown action: ${action}. Available: status, enable, disable, setDryRun, trigger, events, stats, config, updateConfig, runCheck, cleanup, systemState`
+            error: `Unknown action: ${action}. Available: status, enable, disable, setDryRun, trigger, events, stats, config, updateConfig, runCheck, cleanup, systemState, schedule, listScheduled, cancelScheduled`
           };
       }
     } catch (error) {
@@ -372,6 +453,94 @@ export default class SelfHealingPlugin extends BasePlugin {
       },
       message: 'Current system state'
     };
+  }
+
+  /**
+   * Schedule a one-shot healing action via Agenda. Persisted in MongoDB so
+   * it survives agent restarts. Same actionType allow-list as triggerAction.
+   */
+  async scheduleAction(data) {
+    if (!this.scheduler?.agenda) {
+      return { success: false, error: 'Scheduler not available' };
+    }
+    this.validateParams(data, {
+      actionType: { required: true, type: 'string', enum: SCHEDULABLE_ACTIONS },
+      time: { required: true, type: 'string' }
+    });
+    const when = new Date(data.time);
+    if (isNaN(when.getTime())) {
+      return { success: false, error: 'Invalid time. Provide an ISO 8601 timestamp.' };
+    }
+    if (when.getTime() <= Date.now()) {
+      return { success: false, error: 'time must be in the future' };
+    }
+    const job = await this.scheduler.agenda.schedule(when, SCHEDULED_JOB_NAME, {
+      actionType: data.actionType,
+      reason: data.reason,
+      force: !!data.force,
+      targetPaths: data.targetPaths
+    });
+    logger.info(`[SelfHealingPlugin] scheduled ${data.actionType} for ${when.toISOString()} (job ${job.attrs._id})`);
+    return {
+      success: true,
+      data: {
+        jobId: String(job.attrs._id),
+        actionType: data.actionType,
+        scheduledFor: when.toISOString()
+      },
+      message: `Scheduled ${data.actionType} for ${when.toISOString()}`
+    };
+  }
+
+  /**
+   * List pending scheduled healing actions.
+   */
+  async listScheduledActions() {
+    if (!this.scheduler?.agenda) {
+      return { success: false, error: 'Scheduler not available' };
+    }
+    const jobs = await this.scheduler.agenda.jobs(
+      { name: SCHEDULED_JOB_NAME, nextRunAt: { $ne: null } },
+      { nextRunAt: 1 }
+    );
+    return {
+      success: true,
+      data: jobs.map(j => ({
+        jobId: String(j.attrs._id),
+        actionType: j.attrs.data?.actionType,
+        scheduledFor: j.attrs.nextRunAt ? new Date(j.attrs.nextRunAt).toISOString() : null,
+        reason: j.attrs.data?.reason,
+        lastRunAt: j.attrs.lastRunAt ? new Date(j.attrs.lastRunAt).toISOString() : null,
+        failCount: j.attrs.failCount || 0,
+        failReason: j.attrs.failReason
+      })),
+      count: jobs.length
+    };
+  }
+
+  /**
+   * Cancel a pending scheduled healing action by Agenda job id.
+   */
+  async cancelScheduledAction(data) {
+    if (!this.scheduler?.agenda) {
+      return { success: false, error: 'Scheduler not available' };
+    }
+    this.validateParams(data, {
+      jobId: { required: true, type: 'string' }
+    });
+    const mongoose = (await import('mongoose')).default;
+    let _id;
+    try {
+      _id = new mongoose.Types.ObjectId(data.jobId);
+    } catch {
+      return { success: false, error: 'Invalid jobId' };
+    }
+    const cancelled = await this.scheduler.agenda.cancel({ name: SCHEDULED_JOB_NAME, _id });
+    if (!cancelled) {
+      return { success: false, error: 'Job not found' };
+    }
+    logger.info(`[SelfHealingPlugin] cancelled scheduled job ${data.jobId} (${cancelled} match)`);
+    return { success: true, message: `Cancelled scheduled job ${data.jobId}` };
   }
 
   /**

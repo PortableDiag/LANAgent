@@ -1437,9 +1437,15 @@ router.post('/strategy/token-trader/configure', async (req, res) => {
             await handler.persistRegistryState();
         }
 
-        // Start independent heartbeat for this token if manager is available
-        if (handler.tokenHeartbeatManager?.started) {
-            handler.tokenHeartbeatManager.startToken(tokenAddress);
+        // Start independent heartbeat for this token if manager is available.
+        // If the manager was never started (registry was empty at agent init),
+        // bring it up now — startAll() picks up the newly registered instance.
+        if (handler.tokenHeartbeatManager) {
+            if (!handler.tokenHeartbeatManager.started) {
+                handler.tokenHeartbeatManager.startAll();
+            } else {
+                handler.tokenHeartbeatManager.startToken(tokenAddress);
+            }
         }
 
         res.json({
@@ -1630,6 +1636,11 @@ router.post('/strategy/token-trader/restore-state', async (req, res) => {
         }
 
         logger.info(`TokenTrader state restored for ${tokenStrategy.config.tokenSymbol}: balance=${position.tokenBalance}, regime=${tokenStrategy.state.regime}`);
+
+        // Persist registry so the restored cost basis / PnL / tracking survive a restart
+        if (handler.persistRegistryState) {
+            await handler.persistRegistryState();
+        }
 
         res.json({
             success: true,

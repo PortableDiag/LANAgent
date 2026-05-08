@@ -205,6 +205,49 @@ modelCacheSchema.methods.getUsageAnalytics = function() {
   };
 };
 
+/**
+ * Static method to aggregate usage analytics data
+ * and format it for external consumption.
+ */
+modelCacheSchema.statics.getUsageAnalyticsData = async function() {
+  try {
+    const analyticsData = await this.aggregate([
+      {
+        $group: {
+          _id: null,
+          totalRequests: { $sum: "$usageAnalytics.requestCount" },
+          totalResponseTime: { $sum: "$usageAnalytics.totalResponseTime" },
+          totalErrors: { $sum: "$usageAnalytics.errorCount" }
+        }
+      },
+      {
+        $project: {
+          _id: 0,
+          totalRequests: 1,
+          averageResponseTime: {
+            $cond: {
+              if: { $eq: ["$totalRequests", 0] },
+              then: 0,
+              else: { $divide: ["$totalResponseTime", "$totalRequests"] }
+            }
+          },
+          errorRate: {
+            $cond: {
+              if: { $eq: ["$totalRequests", 0] },
+              then: 0,
+              else: { $divide: ["$totalErrors", "$totalRequests"] }
+            }
+          }
+        }
+      }
+    ]);
+    return analyticsData[0] || { totalRequests: 0, averageResponseTime: 0, errorRate: 0 };
+  } catch (error) {
+    logger.error('Error aggregating usage analytics data:', error);
+    throw new Error('Failed to retrieve usage analytics data');
+  }
+};
+
 modelCacheSchema.statics.getLatestModels = async function(provider) {
   try {
     const cacheKey = `latestModels:${provider}`;

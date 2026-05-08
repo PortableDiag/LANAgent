@@ -5,6 +5,8 @@ import { retryOperation } from '../../utils/retryUtils.js';
 import { safeJsonParse } from '../../utils/jsonUtils.js';
 import NodeCache from 'node-cache';
 
+const CHECKLY_POLL_JOB = 'checkly-scheduled-poll';
+
 export default class ChecklyPlugin extends BasePlugin {
   constructor(agent) {
     super(agent);
@@ -54,6 +56,33 @@ export default class ChecklyPlugin extends BasePlugin {
           'delete check with ID 12345',
           'remove a specific monitoring check'
         ]
+      },
+      {
+        command: 'schedule_check',
+        description: 'Poll a Checkly check at a recurring interval (Agenda-backed; persists across restarts)',
+        usage: 'schedule_check({ checkId: "12345", interval: "5 minutes" })',
+        examples: [
+          'poll check 12345 every 5 minutes',
+          'monitor check 67890 hourly'
+        ]
+      },
+      {
+        command: 'list_scheduled_checks',
+        description: 'List active recurring polls',
+        usage: 'list_scheduled_checks()',
+        examples: [
+          'show scheduled checks',
+          'list checkly polls'
+        ]
+      },
+      {
+        command: 'cancel_scheduled_check',
+        description: 'Cancel a recurring poll for a Checkly check',
+        usage: 'cancel_scheduled_check({ checkId: "12345" })',
+        examples: [
+          'stop polling check 12345',
+          'cancel scheduled check 67890'
+        ]
       }
     ];
 
@@ -64,6 +93,7 @@ export default class ChecklyPlugin extends BasePlugin {
 
     this.initialized = false;
     this.cache = new NodeCache({ stdTTL: 300, checkperiod: 60 });
+    this.scheduler = null;
   }
 
   async initialize() {
@@ -87,6 +117,25 @@ export default class ChecklyPlugin extends BasePlugin {
 
       const { apiKey, ...configToCache } = this.config;
       await PluginSettings.setCached(this.name, 'config', configToCache);
+
+      // Wire up the recurring-poll Agenda job. Checks are persisted in the
+      // shared scheduled_jobs collection so they survive agent restarts.
+      this.scheduler = this.agent?.services?.get('taskScheduler');
+      if (this.scheduler?.agenda) {
+        this.scheduler.agenda.define(CHECKLY_POLL_JOB, async (job) => {
+          const { checkId } = job.attrs.data || {};
+          if (!checkId) return;
+          this.logger.info(`[checkly] polling scheduled check ${checkId}`);
+          // Bypass cache — we want a fresh read on every scheduled poll
+          this.cache.del(`check_${checkId}`);
+          const result = await this.getCheckDetails(checkId);
+          if (!result?.success) {
+            throw new Error(result?.error || `Poll for check ${checkId} failed`);
+          }
+        });
+      } else {
+        this.logger.warn('[checkly] taskScheduler unavailable; schedule_check disabled');
+      }
 
       this.initialized = true;
       this.logger.info(`${this.name} plugin initialized successfully`);
@@ -132,6 +181,19 @@ export default class ChecklyPlugin extends BasePlugin {
             checkId: { required: true, type: 'string' }
           });
           return await this.deleteCheck(data.checkId);
+        case 'schedule_check':
+          this.validateParams(data, {
+            checkId: { required: true, type: 'string' },
+            interval: { required: true, type: 'string' }
+          });
+          return await this.scheduleCheck(data.checkId, data.interval);
+        case 'list_scheduled_checks':
+          return await this.listScheduledChecks();
+        case 'cancel_scheduled_check':
+          this.validateParams(data, {
+            checkId: { required: true, type: 'string' }
+          });
+          return await this.cancelScheduledCheck(data.checkId);
         default:
           throw new Error(`Unknown action: ${action}`);
       }
@@ -270,6 +332,67 @@ export default class ChecklyPlugin extends BasePlugin {
         error: error.message
       };
     }
+  }
+
+  /**
+   * Schedule a recurring poll for a Checkly check. Uses Agenda's `every()` so
+   * the schedule is persisted in MongoDB (survives restarts) and Agenda's
+   * existing concurrency / lock semantics apply. Re-scheduling the same
+   * checkId replaces the prior schedule (cancel + re-create).
+   */
+  async scheduleCheck(checkId, interval) {
+    if (!this.scheduler?.agenda) {
+      return { success: false, error: 'Scheduler not available' };
+    }
+    // Replace any existing schedule for this checkId so we don't run two pollers.
+    await this.scheduler.agenda.cancel({ name: CHECKLY_POLL_JOB, 'data.checkId': checkId });
+    const job = await this.scheduler.agenda.every(interval, CHECKLY_POLL_JOB, { checkId });
+    this.logger.info(`[checkly] scheduled poll for check ${checkId} every ${interval} (job ${job.attrs._id})`);
+    return {
+      success: true,
+      data: {
+        jobId: String(job.attrs._id),
+        checkId,
+        interval,
+        nextRunAt: job.attrs.nextRunAt ? new Date(job.attrs.nextRunAt).toISOString() : null
+      },
+      message: `Polling check ${checkId} every ${interval}`
+    };
+  }
+
+  async listScheduledChecks() {
+    if (!this.scheduler?.agenda) {
+      return { success: false, error: 'Scheduler not available' };
+    }
+    const jobs = await this.scheduler.agenda.jobs(
+      { name: CHECKLY_POLL_JOB },
+      { nextRunAt: 1 }
+    );
+    return {
+      success: true,
+      data: jobs.map(j => ({
+        jobId: String(j.attrs._id),
+        checkId: j.attrs.data?.checkId,
+        interval: j.attrs.repeatInterval,
+        nextRunAt: j.attrs.nextRunAt ? new Date(j.attrs.nextRunAt).toISOString() : null,
+        lastRunAt: j.attrs.lastRunAt ? new Date(j.attrs.lastRunAt).toISOString() : null,
+        failCount: j.attrs.failCount || 0,
+        failReason: j.attrs.failReason
+      })),
+      count: jobs.length
+    };
+  }
+
+  async cancelScheduledCheck(checkId) {
+    if (!this.scheduler?.agenda) {
+      return { success: false, error: 'Scheduler not available' };
+    }
+    const cancelled = await this.scheduler.agenda.cancel({ name: CHECKLY_POLL_JOB, 'data.checkId': checkId });
+    if (!cancelled) {
+      return { success: false, error: `No scheduled poll found for check ${checkId}` };
+    }
+    this.logger.info(`[checkly] cancelled scheduled poll for check ${checkId}`);
+    return { success: true, message: `Cancelled scheduled poll for check ${checkId}` };
   }
 
   async cleanup() {

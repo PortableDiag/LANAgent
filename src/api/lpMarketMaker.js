@@ -9,6 +9,23 @@ const router = express.Router();
 const cache = new NodeCache({ stdTTL: 60, checkperiod: 30 });
 let initialized = false;
 
+// Public liveness probe — must be mounted BEFORE the auth middleware so it
+// can serve as an unauthenticated health check. Reports whether the LP market
+// maker service can load its config (a soft signal for "the route + service
+// wiring is functional"). Doesn't leak position details.
+router.get('/health', async (req, res) => {
+    try {
+        const cfg = await lpMarketMaker.getConfig();
+        res.json({
+            success: true,
+            enabled: !!cfg?.enabled,
+            initialized
+        });
+    } catch (err) {
+        res.status(503).json({ success: false, error: err.message });
+    }
+});
+
 router.use(authenticateToken);
 
 // Lazy-initialize on first request
