@@ -320,6 +320,15 @@ class LPMarketMaker {
       tickLower: result.tickLower,
       tickUpper: result.tickUpper,
       active: true,
+      // Per-position scope — `openedAt` describes the *current* tokenId's mint
+      // time. Without this reset it stays at whichever position was first
+      // opened, even after multiple rebalances replace the tokenId.
+      openedAt: now,
+      // Strategy-level scope — kept rolling/cumulative on purpose:
+      //   `rebalanceCount` is the lifetime count of rebalances done by the
+      //   strategy across all positions.
+      //   `rebalancesLast24h` is the rolling window the circuit breaker uses
+      //   (line 492 below); zeroing it would let the strategy spam-rebalance.
       rebalanceCount: (this._state.rebalanceCount || 0) + 1,
       rebalancesLast24h,
       lastRebalanceAt: now,
@@ -353,17 +362,29 @@ class LPMarketMaker {
 
     const result = await lpManager.collectFeesV3(this._state.tokenId, this._config.network);
 
-    // Always update timestamp so we don't retry every heartbeat
-    await this.saveState({
-      lastFeeCollectAt: new Date().toISOString(),
-    });
-
     if (result.skipped) {
+      // Still update timestamp so we don't retry every heartbeat
+      await this.saveState({ lastFeeCollectAt: new Date().toISOString() });
       return { success: true, skipped: true, reason: result.reason };
     }
 
-    logger.info(`LP MM: Fees collected for position #${this._state.tokenId}`);
-    return { success: true, txHash: result.txHash };
+    // Increment lifetime totals. Pool ordering is canonical (token0 < token1 by
+    // address); for SKYNET/WBNB on BSC, SKYNET=token0, WBNB=token1 (see TOKEN0/TOKEN1).
+    const addSKYNET = parseFloat(result.amount0 || '0');
+    const addWBNB = parseFloat(result.amount1 || '0');
+    const prevSKYNET = parseFloat(this._state.totalFeesCollectedSKYNET || '0');
+    const prevWBNB = parseFloat(this._state.totalFeesCollectedWBNB || '0');
+    const newSKYNET = (prevSKYNET + addSKYNET).toString();
+    const newWBNB = (prevWBNB + addWBNB).toString();
+
+    await this.saveState({
+      lastFeeCollectAt: new Date().toISOString(),
+      totalFeesCollectedSKYNET: newSKYNET,
+      totalFeesCollectedWBNB: newWBNB,
+    });
+
+    logger.info(`LP MM: Fees collected for position #${this._state.tokenId} — +${addSKYNET.toFixed(4)} SKYNET, +${addWBNB.toFixed(6)} WBNB (lifetime: ${parseFloat(newSKYNET).toFixed(2)} SKYNET, ${parseFloat(newWBNB).toFixed(6)} WBNB)`);
+    return { success: true, txHash: result.txHash, amount0: result.amount0, amount1: result.amount1 };
   }
 
   /**

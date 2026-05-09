@@ -391,6 +391,22 @@ The gateway calls `GET /api/external/catalog` on your agent and reads the `servi
 
 ---
 
+## Recent Updates (May 8, 2026)
+
+### v2.25.33 — LP market-maker accounting fixes
+
+Routine `/api/crypto/lp/mm/status` audit found the position had been showing `'0/0'` lifetime fees and an `openedAt` timestamp that didn't match the active tokenId.
+
+**`collectFeesV3` now returns the actual amounts collected.** Previously returned only `{txHash, success}`. Now reads `tokensOwed0/1` just before the collect tx (free view call already in the function), formats to ether-units, and returns `{txHash, success, amount0, amount1}` (same value the chain withdraws, modulo trailing-block accruals).
+
+**`collectFees` increments lifetime totals.** Previously updated only the `lastFeeCollectAt` timestamp and never touched `totalFeesCollectedSKYNET` / `totalFeesCollectedWBNB`. Now reads the amounts from `collectFeesV3`, increments the totals, persists in one `saveState({lastFeeCollectAt, totalFeesCollectedSKYNET, totalFeesCollectedWBNB})` call, and logs `+X SKYNET, +Y WBNB (lifetime: ...)` per collection. Pool ordering is canonical (token0 < token1 by address); for SKYNET/WBNB on BSC, SKYNET = token0, WBNB = token1.
+
+**`rebalancePosition` resets `openedAt` on the new tokenId.** The rebalance flow correctly minted new positions and updated `state.tokenId`, but never refreshed `openedAt` — so the displayed value stuck on the very first position's mint time even after several rebalances rotated through new tokenIds. Fix adds `openedAt: now` to the `saveState` call alongside the new `tokenId`. Comments document why `rebalanceCount` (strategy-lifetime telemetry) and `rebalancesLast24h` (rolling 24h window the circuit breaker reads to enforce `maxRebalancesPerDay`) intentionally stay rolling — zeroing the latter would let the strategy spam-rebalance.
+
+**New tool: `scripts/backfill-lpmm-fees.js`** — one-shot tool that walks NPM Collect events for a tokenId across a 70-day window. Uses NodeReal's free-tier archive RPC (50k-block range cap, ~272 chunks in ~30s for a 70-day window). Print-only; produces a paste-ready mongosh update if amounts are non-zero. The first run on the active position returned `0` events (single mint, no Decrease, no Collect, on-chain `tokensOwed=0` and `feeGrowthInside last=0`) — `'0/0'` lifetime totals were factually correct, just for a different reason than the audit assumed.
+
+For the v2.25.28–v2.25.32 changes, see `CHANGELOG.md` — they covered ALICE-authored PR triages, external media-download fixes, ALICE auto-post lockout fix, gateway repo workflow, the public LP MM `/health` endpoint, and Agenda-backed scheduling actions for `selfHealing` and `checkly`.
+
 ## Recent Updates (May 5, 2026)
 
 ### v2.25.27 — Gateway repo workflow + today's gateway-side fixes pulled into source control

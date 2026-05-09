@@ -413,8 +413,13 @@ class LPManager {
       await dbPos.save();
     }
 
-    logger.info(`V3 fees collected: tokenId=${tokenId}, owed0=${owed0}, owed1=${owed1}, tx=${receipt.hash}`);
-    return { txHash: receipt.hash, success: true };
+    // Return formatted amounts so callers can persist lifetime totals.
+    // tokensOwed0/1 read just before collect equal what the tx withdrew
+    // (modulo trailing-block fee accruals — close enough for accounting).
+    const amount0Str = ethers.formatUnits(owed0, 18);
+    const amount1Str = ethers.formatUnits(owed1, 18);
+    logger.info(`V3 fees collected: tokenId=${tokenId}, amount0=${amount0Str}, amount1=${amount1Str}, tx=${receipt.hash}`);
+    return { txHash: receipt.hash, success: true, amount0: amount0Str, amount1: amount1Str };
   }
 
   /**

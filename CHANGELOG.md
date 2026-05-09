@@ -2,6 +2,27 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.33] - 2026-05-08
+
+LP market-maker accounting fixes prompted by a routine status audit. The position had been showing `'0/0'` lifetime fees and an `openedAt` timestamp that didn't match the active tokenId.
+
+### Fixed
+
+- **LP MM: 70 days of zero fee accounting.** `lpManager.collectFeesV3` returned only `{txHash, success}` — never the actual amounts collected. `lpMarketMaker.collectFees` updated `lastFeeCollectAt` but never incremented `totalFeesCollectedSKYNET` / `totalFeesCollectedWBNB`. Status payloads displayed `0/0` lifetime fees no matter how many on-chain Collects had happened. Fix: `collectFeesV3` now reads `tokensOwed0/1` just before the collect tx (free view call already in the function), formats to ether-units, and returns `{txHash, success, amount0, amount1}` (same value the chain withdraws, modulo trailing-block accruals). `lpMarketMaker.collectFees` reads those, increments the lifetime totals, persists in one `saveState` call, and logs `+X SKYNET, +Y WBNB (lifetime: ...)` per collection. Pool ordering is canonical (token0 < token1 by address); for SKYNET/WBNB on BSC, SKYNET = token0, WBNB = token1.
+- **LP MM: `openedAt` stale across rebalances.** `rebalancePosition` correctly updated `state.tokenId` when it minted a new position, but never refreshed `openedAt` — so the displayed value stuck on the very first position's mint time, even after rebalances created several new tokenIds. Fix in `rebalancePosition` adds `openedAt: now` to the `saveState` call alongside the new tokenId. Comments document why `rebalanceCount` (strategy-lifetime telemetry) and `rebalancesLast24h` (the rolling window the circuit breaker reads to enforce `maxRebalancesPerDay`) intentionally stay rolling — zeroing the latter would let the strategy spam-rebalance.
+
+### Added
+
+- **`scripts/backfill-lpmm-fees.js`** — one-shot tool that walks NPM Collect events for a tokenId across a 70-day window. Uses NodeReal's free-tier archive RPC (50k-block range cap, ~272 chunks in ~30s for a 70-day window). Print-only; produces a paste-ready mongosh update if amounts are non-zero. Re-runnable any time. The first run found `0` Collect events for the active LP MM position (`IncreaseLiquidity` × 1 at the mint, no `DecreaseLiquidity`, no `Collect`, on-chain `tokensOwed=0` and `feeGrowthInside last=0`) — the `'0/0'` lifetime totals were factually correct, just for a different reason than the audit assumed (no fees were ever collected because no Collects ever fired, not because they fired and weren't tracked).
+
+### Files changed
+
+- `src/services/crypto/lpManager.js` — `collectFeesV3` returns formatted `amount0`/`amount1`
+- `src/services/crypto/lpMarketMaker.js` — `collectFees` increments lifetime totals; `rebalancePosition` resets `openedAt` on new tokenId
+- `scripts/backfill-lpmm-fees.js` — new tool
+- `package.json` — 2.25.32 → 2.25.33
+- `CHANGELOG.md` — this entry
+
 ## [2.25.32] - 2026-05-08
 
 ALICE-authored capability-upgrade PR triage (#2116–#2126) — 11 PRs reviewed one by one. 1 merged, 4 manually re-implemented, 6 closed.
