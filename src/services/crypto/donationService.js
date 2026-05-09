@@ -47,10 +47,13 @@ class DonationService {
             format = 'png',
             network = 'ethereum',
             amount = null,
-            message = null
+            message = null,
+            colorDark = '#000000',
+            colorLight = '#FFFFFF',
+            errorCorrectionLevel = 'M'
         } = options;
 
-        const cacheKey = `${address}-${size}-${format}-${amount}`;
+        const cacheKey = `${address}-${size}-${format}-${amount}-${colorDark}-${colorLight}-${errorCorrectionLevel}`;
         
         // Check cache
         if (this.qrCache.has(cacheKey)) {
@@ -76,10 +79,10 @@ class DonationService {
                 width: size,
                 margin: 1,
                 color: {
-                    dark: '#000000',
-                    light: '#FFFFFF'
+                    dark: colorDark,
+                    light: colorLight
                 },
-                errorCorrectionLevel: 'M'
+                errorCorrectionLevel
             };
 
             let qrCode;

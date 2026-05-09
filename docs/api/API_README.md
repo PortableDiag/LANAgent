@@ -393,6 +393,25 @@ The gateway calls `GET /api/external/catalog` on your agent and reads the `servi
 
 ## Recent Updates (May 8, 2026)
 
+### v2.25.34 — ALICE PR triage round (#2127–#2137): 3 merged, 2 salvaged, 5 closed
+
+10 ALICE-authored capability-upgrade PRs reviewed one by one. Per-PR rationale on each closed PR.
+
+**New API surface:**
+
+- `MoonIndicators.getMoonPhaseForDate(date)` — public-named wrapper around the existing `calculateMoonPhase(date)` (#2129).
+- `PeerManager.getPeerAnalytics()` — read-only aggregation across `P2PPeer` documents. Returns `{averageSessionDurationTrend (by date), peakConnectionTimes (by hour), trustLevelDistribution}` (#2131).
+- `donationService.generateDonationQR({colorDark, colorLight, errorCorrectionLevel, ...})` — three new options with backwards-compat defaults `'#000000'` / `'#FFFFFF'` / `'M'`. Cache key extended to include the new params (#2133).
+- `GitHostingProvider.batchCreateMergeRequests(requests[])` — `Promise.allSettled`-based batch fan-out. Returns `Array<{success, ...}>` per item (#2137 salvage — original used `Promise.all` which aborts the whole batch on a single failure).
+- `GitHostingProvider.batchMergeMergeRequests(mrNumbers[], options?)` — same pattern (#2137 salvage).
+- `GitHostingProvider.batchCloseMergeRequests(mrNumbers[], comment?)` — same (#2137 salvage).
+- `GitHostingProvider.batchCreateIssues(issues[])` — same (#2137 salvage).
+- `GitHostingProvider.batchCloseIssues(issueNumbers[], comment?)` — same (#2137 salvage).
+
+**Internal fix:** `validation.js` now wraps custom `rules.validate(value)` calls in try/catch — a throwing custom validator now surfaces as a normal validation error message ("Validation error for field 'X': msg") instead of bubbling out as an unhandled 500 (#2127 salvage). Function stays sync; the original PR's async change would have cascaded through every plugin's `execute()` method.
+
+**Closed without salvage:** #2128 (ytdlpCookieJar dead helpers), #2130 (payment.js array return breaks call sites), #2132 (Node logger in browser file that's not loaded), #2134 (outputSchemas inert version field — same as #2113/#2124), #2136 (auditLog rate-limiter targets non-existent route).
+
 ### v2.25.33 — LP market-maker accounting fixes
 
 Routine `/api/crypto/lp/mm/status` audit found the position had been showing `'0/0'` lifetime fees and an `openedAt` timestamp that didn't match the active tokenId.

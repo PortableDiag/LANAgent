@@ -77,6 +77,15 @@ export class MoonIndicators {
     };
   }
 
+  /**
+   * Get moon phase for a specific date
+   * @param {Date} date - The date for which to calculate the moon phase
+   * @returns {Object} - Moon phase data
+   */
+  getMoonPhaseForDate(date) {
+    return this.calculateMoonPhase(date);
+  }
+
   registerIndicators() {
     // Moon phase name
     this.register('moon_phase', async () => {

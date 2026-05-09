@@ -111,6 +111,46 @@ export class GitHostingProvider {
     throw new Error('closeMergeRequest() must be implemented by subclass');
   }
 
+  /**
+   * Batch create merge/pull requests. Each item is processed in parallel via
+   * Promise.allSettled so a single failure doesn't abort the rest of the
+   * batch — callers get one result per request describing success/failure.
+   * @param {Array<object>} requests - Array of options objects (one per createMergeRequest call)
+   * @returns {Promise<Array<{success: boolean, number?: number, url?: string, error?: string}>>}
+   */
+  async batchCreateMergeRequests(requests) {
+    const settled = await Promise.allSettled(requests.map(opts => this.createMergeRequest(opts)));
+    return settled.map(r => r.status === 'fulfilled'
+      ? { success: true, ...r.value }
+      : { success: false, error: r.reason?.message || String(r.reason) });
+  }
+
+  /**
+   * Batch merge merge/pull requests.
+   * @param {Array<number>} mrNumbers
+   * @param {object} options - Forwarded to each mergeMergeRequest call
+   * @returns {Promise<Array<{success: boolean, error?: string}>>}
+   */
+  async batchMergeMergeRequests(mrNumbers, options = {}) {
+    const settled = await Promise.allSettled(mrNumbers.map(n => this.mergeMergeRequest(n, options)));
+    return settled.map((r, i) => r.status === 'fulfilled'
+      ? { success: true, mrNumber: mrNumbers[i], ...r.value }
+      : { success: false, mrNumber: mrNumbers[i], error: r.reason?.message || String(r.reason) });
+  }
+
+  /**
+   * Batch close merge/pull requests without merging.
+   * @param {Array<number>} mrNumbers
+   * @param {string} comment - Optional closing comment forwarded to each call
+   * @returns {Promise<Array<{success: boolean, error?: string}>>}
+   */
+  async batchCloseMergeRequests(mrNumbers, comment = null) {
+    const settled = await Promise.allSettled(mrNumbers.map(n => this.closeMergeRequest(n, comment)));
+    return settled.map((r, i) => r.status === 'fulfilled'
+      ? { success: true, mrNumber: mrNumbers[i], ...r.value }
+      : { success: false, mrNumber: mrNumbers[i], error: r.reason?.message || String(r.reason) });
+  }
+
   // ==================== ISSUE OPERATIONS ====================
 
   /**
@@ -165,6 +205,31 @@ export class GitHostingProvider {
    */
   async closeIssue(issueNumber, comment = null) {
     throw new Error('closeIssue() must be implemented by subclass');
+  }
+
+  /**
+   * Batch create issues. Failures don't abort the rest of the batch.
+   * @param {Array<object>} issues - Array of options objects (one per createIssue call)
+   * @returns {Promise<Array<{success: boolean, number?: number, url?: string, error?: string}>>}
+   */
+  async batchCreateIssues(issues) {
+    const settled = await Promise.allSettled(issues.map(opts => this.createIssue(opts)));
+    return settled.map(r => r.status === 'fulfilled'
+      ? { success: true, ...r.value }
+      : { success: false, error: r.reason?.message || String(r.reason) });
+  }
+
+  /**
+   * Batch close issues. Failures don't abort the rest of the batch.
+   * @param {Array<number>} issueNumbers
+   * @param {string} comment - Optional closing comment forwarded to each call
+   * @returns {Promise<Array<{success: boolean, error?: string}>>}
+   */
+  async batchCloseIssues(issueNumbers, comment = null) {
+    const settled = await Promise.allSettled(issueNumbers.map(n => this.closeIssue(n, comment)));
+    return settled.map((r, i) => r.status === 'fulfilled'
+      ? { success: true, issueNumber: issueNumbers[i], ...r.value }
+      : { success: false, issueNumber: issueNumbers[i], error: r.reason?.message || String(r.reason) });
   }
 
   // ==================== REPOSITORY OPERATIONS ====================

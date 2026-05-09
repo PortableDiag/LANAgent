@@ -2,6 +2,39 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.34] - 2026-05-08
+
+ALICE-authored capability-upgrade PR triage round (#2127–#2137). 10 PRs reviewed one by one. 3 merged as-is, 2 closed-and-replaced with manually-implemented working versions, 5 closed without salvage.
+
+### Merged as-is
+
+- **#2129 `MoonIndicators.getMoonPhaseForDate(date)`** — public-named wrapper around the existing `calculateMoonPhase(date)` so callers can request the moon phase for an arbitrary date.
+- **#2131 `PeerManager.getPeerAnalytics()`** — read-only aggregation across `P2PPeer` documents. Returns `{averageSessionDurationTrend, peakConnectionTimes, trustLevelDistribution}`.
+- **#2133 `donationService.generateDonationQR()` color customization** — adds `colorDark`, `colorLight`, `errorCorrectionLevel` options (defaults match the previous hardcoded values, cache key extended).
+
+### Closed and re-implemented (manual salvage)
+
+- **#2127 `validation.js`** — closed because making `validateInput` async cascades through every plugin's `execute()` method via `basePlugin.validateParams` (line 317 calls `validateInput` synchronously). Salvaged the try/catch around `rules.validate(value)` so a throwing custom validator now produces a normal validation error message ("Validation error for field 'X': msg") instead of bubbling out as a 500. Function stays sync.
+- **#2137 `GitHostingProvider` batch ops** — closed because `Promise.all` aborts the entire batch on a single failure, but the function signature `Promise<Array<{success: boolean, error?: string}>>` implies per-item results. Re-implemented `batchCreateMergeRequests`, `batchMergeMergeRequests`, `batchCloseMergeRequests`, `batchCreateIssues`, `batchCloseIssues` with `Promise.allSettled` so each item gets its own `{success, ...}` (or `{success: false, error}`) entry. `mrNumber` / `issueNumber` echoed back so callers can correlate.
+
+### Closed without salvage
+
+- **#2128 `ytdlpCookieJar.js`** — adds helpers and a NodeCache to a module whose role is just providing path constants. Cookie content is read by the yt-dlp subprocess (`--cookies <path>`), not by Node code, so the new helpers have no callers and the cache has nothing to hold.
+- **#2130 `payment.js`** — changes `paymentMiddleware` return value from function to array, which breaks the four call sites that invoke it directly (`paymentMiddleware(serviceId)(req, res, next)` in `hybridAuth.js`, `youtube.js`, `scraping.js`, `social.js` — calling array as function = TypeError). Plus the gateway already has `globalLimiter` covering all external traffic, and payments have inherent per-tx idempotency.
+- **#2132 `pluginUIManager.js`** — imports Node winston logger into a browser file (uses `fetch`, `DOMParser`, `document`, `window`); wraps DOM mutations in retry causing duplicate styles + double events on retry; the file doesn't appear to be loaded anywhere.
+- **#2134 `outputSchemas.js`** — adds inert `version: '1.0'` field with no version-aware logic. Same defect as previously-closed #2113 and #2124.
+- **#2136 `auditLog.js`** — `applyRateLimiting` targets `/api/audit-logs`, a route that doesn't exist anywhere; `applyRateLimiting`/`applyCompression` are exported but never wired up; compression at the audit-log layer is wrong (compresses HTTP responses but `auditLogMiddleware` writes to MongoDB).
+
+### Files changed
+
+- `src/utils/validation.js` (#2127 salvage)
+- `src/services/gitHosting/GitHostingProvider.js` (#2137 salvage)
+- `src/services/crypto/indicators/MoonIndicators.js` (#2129)
+- `src/services/p2p/peerManager.js` (#2131)
+- `src/services/crypto/donationService.js` (#2133)
+- `package.json` — 2.25.33 → 2.25.34
+- `CHANGELOG.md` — this entry
+
 ## [2.25.33] - 2026-05-08
 
 LP market-maker accounting fixes prompted by a routine status audit. The position had been showing `'0/0'` lifetime fees and an `openedAt` timestamp that didn't match the active tokenId.

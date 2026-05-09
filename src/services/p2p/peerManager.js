@@ -344,6 +344,59 @@ class PeerManager {
   }
 
   /**
+   * Get peer analytics report — insights into peer behavior such as average session duration trends over time,
+   * peak connection times, and distribution of trust levels.
+   * @returns {Promise<{averageSessionDurationTrend: Array<{date: string, averageDuration: number}>, peakConnectionTimes: Array<{hour: number, count: number}>, trustLevelDistribution: {trusted: number, untrusted: number}}>}
+   */
+  async getPeerAnalytics() {
+    const peers = await P2PPeer.find({}, {
+      fingerprint: 1,
+      totalConnectionSeconds: 1,
+      sessionCount: 1,
+      lastSeen: 1,
+      trustLevel: 1
+    }).lean();
+
+    const sessionDurationsByDate = {};
+    const connectionTimes = Array(24).fill(0);
+    const trustLevelDistribution = { trusted: 0, untrusted: 0 };
+
+    peers.forEach(peer => {
+      if (peer.sessionCount > 0) {
+        const averageSessionDuration = (peer.totalConnectionSeconds || 0) / peer.sessionCount;
+        const lastSeenDate = peer.lastSeen ? peer.lastSeen.toISOString().split('T')[0] : null;
+
+        if (lastSeenDate) {
+          if (!sessionDurationsByDate[lastSeenDate]) {
+            sessionDurationsByDate[lastSeenDate] = [];
+          }
+          sessionDurationsByDate[lastSeenDate].push(averageSessionDuration);
+        }
+      }
+
+      if (peer.lastSeen) {
+        const hour = peer.lastSeen.getUTCHours();
+        connectionTimes[hour]++;
+      }
+
+      if (peer.trustLevel) {
+        trustLevelDistribution[peer.trustLevel]++;
+      }
+    });
+
+    const averageSessionDurationTrend = Object.entries(sessionDurationsByDate).map(([date, durations]) => ({
+      date,
+      averageDuration: durations.reduce((sum, duration) => sum + duration, 0) / durations.length
+    }));
+
+    return {
+      averageSessionDurationTrend,
+      peakConnectionTimes: connectionTimes.map((count, hour) => ({ hour, count })),
+      trustLevelDistribution
+    };
+  }
+
+  /**
    * Shutdown - cleanup
    */
   shutdown() {

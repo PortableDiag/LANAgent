@@ -87,11 +87,18 @@ export function validateInput(input, schema) {
         }
       }
       
-      // Custom validation function
+      // Custom validation function — wrap in try/catch so a throwing custom
+      // validator doesn't crash the whole request (the previous pattern would
+      // surface as an unhandled 500 with a stack trace; now it's a normal
+      // validation error message).
       if (rules.validate && typeof rules.validate === 'function') {
-        const customError = rules.validate(value);
-        if (customError) {
-          errors.push(customError);
+        try {
+          const customError = rules.validate(value);
+          if (customError) {
+            errors.push(customError);
+          }
+        } catch (err) {
+          errors.push(`Validation error for field '${field}': ${err.message}`);
         }
       }
     }
