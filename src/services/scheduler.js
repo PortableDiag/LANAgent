@@ -394,24 +394,35 @@ Respond with ONLY the rephrased message, no explanation:`;
     
     // Email check job with comprehensive auto-reply logic
     this.agenda.define('check-emails', async (job) => {
-      logger.info('Running scheduled email check...');
-      
       try {
         this.lastEmailCheck = new Date();
         this.saveActivityTimestamps(); // Persist to database
-        
+
         const emailPlugin = this.apiManager.getPlugin('email');
         if (!emailPlugin) {
           logger.warn('Email plugin not found');
           return;
         }
-        
+
         // Check if plugin is enabled
         const pluginStatus = this.apiManager.getPluginStatus('email');
         if (!pluginStatus || !pluginStatus.enabled) {
           logger.warn('Email plugin disabled');
           return;
         }
+
+        // Skip silently when no IMAP credentials are configured. Without this
+        // guard we'd log "Failed to initialize IMAP" + "Email check job failed"
+        // every 3 minutes for the lifetime of the process.
+        if (!emailPlugin.gmailUser || !emailPlugin.gmailPassword) {
+          if (!this._emailNotConfiguredLogged) {
+            logger.info('Email check job: IMAP credentials not configured — disabling scheduled checks');
+            this._emailNotConfiguredLogged = true;
+          }
+          return;
+        }
+
+        logger.info('Running scheduled email check...');
         
         logger.info('Getting unread emails...');
         const result = await emailPlugin.execute({
@@ -1375,6 +1386,21 @@ Respond with ONLY the rephrased message, no explanation:`;
         const { exec } = await import('child_process');
         const { promisify } = await import('util');
         const execAsync = promisify(exec);
+
+        // Skip entirely if WireGuard isn't installed or no wg0 config exists.
+        // Avoids spamming "bounce failed" every 2 minutes on hosts (e.g. Docker
+        // beta) where WG was never set up.
+        if (this._wgWatchdogDisabled) return;
+        try {
+          await execAsync('command -v wg-quick >/dev/null && test -f /etc/wireguard/wg0.conf');
+        } catch {
+          if (!this._wgWatchdogLogged) {
+            logger.info('WireGuard watchdog: wg-quick or /etc/wireguard/wg0.conf not present — disabling');
+            this._wgWatchdogLogged = true;
+          }
+          this._wgWatchdogDisabled = true;
+          return;
+        }
 
         // Quick check: is wg0 up and has a recent handshake?
         let handshakeAge = null;

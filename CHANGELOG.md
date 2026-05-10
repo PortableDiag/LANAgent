@@ -2,6 +2,32 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.36] - 2026-05-10
+
+Operational quiet-the-noise pass on beta. Beta VPS hit 99% disk and the agent went unreachable; cleanup recovered the host (build cache, npm/cache, arduino-cli toolchain) but a fresh diagnostic run still flagged the agent "critical" — turned out the diagnostic suite + four background jobs were all hard-coded for the alice (PM2 + port 80, WireGuard installed, Gmail creds present, full RPC quota) shape and spammed errors on any leaner deployment. This release makes them deployment-shape-aware.
+
+### Fixed
+
+- **Diagnostics suite reported false-criticals on Docker deploys.** `selfDiagnosticsEnhanced.js` had three deployment-shape assumptions baked in: `apiBaseUrl` defaulted to `http://localhost:80` (beta listens on 3000), the Process Status test ran `pm2 jlist` (no PM2 in the container), and the Telegram test reported `failed` when the bot wasn't initialized (a config gap, not a system fault). Fix: `apiBaseUrl` now picks up `WEB_PORT`/`AGENT_PORT`; Process Status detects `/.dockerenv` and reports the live Node process directly; Telegram returns `warning` (not `failed`) when `TELEGRAM_BOT_TOKEN` isn't set.
+- **WireGuard watchdog spammed "bounce failed" every 2 minutes when WG wasn't installed.** `scheduler.js` defined a 2-min watchdog that ran `wg show wg0` → fell through to `wg-quick up wg0` → logged `WireGuard watchdog: bounce failed` on every cycle on hosts without WireGuard (beta had 125 of these in the active errors log). Fix: probe for `wg-quick` + `/etc/wireguard/wg0.conf` once at job entry; if either is missing, log a single info line and short-circuit subsequent runs via `_wgWatchdogDisabled` flag.
+- **Email check job spammed "Failed to initialize IMAP" every 3 minutes on credentialless deploys.** Same shape as the WG watchdog — beta had no Gmail/IMAP creds, every poll cycle threw twice (`Failed to initialize IMAP connection: Gmail credentials not configured` + `Email check job failed: <same>`), 83 of each in the log. Fix: at the top of the `check-emails` Agenda job, skip with a one-time info log when `emailPlugin.gmailUser` / `gmailPassword` aren't populated.
+- **`cryptoMonitor.getAddressBalance` bypassed the existing RPC fallback mechanism.** When the active Ethereum RPC returned `missing response` (e.g. Ankr free tier rotated to require an API key), `cryptoMonitor` logged at `error` level and returned `'0'` without rotating to the next configured RPC — `contractServiceWrapper` already exposed `withRpcFallback` for exactly this case but `getAddressBalance` called `getProvider` directly. Fix: wrap the balance fetch in `withRpcFallback`; failure log demoted to `warn` since the value safely defaults to `'0'`.
+
+### Operations
+
+- Beta VPS cleanup (separate from the code fixes above): `docker builder prune -af` reclaimed 4.27 GB of stale build cache; removed `~/.npm`, `~/.cache`, `~/.arduino15` (the entire arduino-cli toolchain, 7.2 GB total — wholly unused on a Docker-only Node host). Disk: `99% / 455M free` → `52% / 12G free`.
+
+### Note on versioning
+
+Public repo skipped from `2.25.34` to `2.25.36` — the `2.25.35` genesis entry (per-agent admin endpoints, sanitizer Date-passthrough, payment audit field gaps, ghost-record fix) is still pending sync; this release was cut from beta-debug urgency and should be re-synced over once the upstream `2.25.35` lands.
+
+### Files changed
+
+- `src/services/selfDiagnosticsEnhanced.js` (port from env, Docker-aware Process Status, soft Telegram check)
+- `src/services/scheduler.js` (WG watchdog skip-when-absent guard, email job cred guard)
+- `src/api/plugins/cryptoMonitor.js` (`getAddressBalance` uses `withRpcFallback`)
+- `package.json` (version bump)
+
 ## [2.25.34] - 2026-05-08
 
 ALICE-authored capability-upgrade PR triage round (#2127–#2137). 10 PRs reviewed one by one. 3 merged as-is, 2 closed-and-replaced with manually-implemented working versions, 5 closed without salvage.

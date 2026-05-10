@@ -43,7 +43,7 @@ class EnhancedSelfDiagnosticsService {
         responseTime: 5000, // milliseconds
         apiTimeout: 10000 // milliseconds for API tests
       },
-      apiBaseUrl: process.env.API_BASE_URL || 'http://localhost:80'
+      apiBaseUrl: process.env.API_BASE_URL || `http://localhost:${process.env.WEB_PORT || process.env.AGENT_PORT || 80}`
     };
     
     logger.info('Enhanced self-diagnostics service initialized', { service: 'diagnostics' });
@@ -504,8 +504,11 @@ class EnhancedSelfDiagnosticsService {
     try {
       const telegramInterface = this.agent.interfaces.get('telegram');
       if (!telegramInterface || !telegramInterface.bot) {
-        test.status = 'failed';
-        test.details = { error: 'Telegram interface not initialized' };
+        const tokenSet = !!process.env.TELEGRAM_BOT_TOKEN;
+        test.status = tokenSet ? 'failed' : 'warning';
+        test.details = {
+          error: tokenSet ? 'Telegram interface not initialized' : 'Telegram bot not configured (TELEGRAM_BOT_TOKEN not set)'
+        };
       } else {
         // Check if bot is active - node-telegram-bot-api doesn't have isPolling method
         // Instead check if the bot object exists and has required properties
@@ -664,6 +667,24 @@ class EnhancedSelfDiagnosticsService {
     };
 
     try {
+      // When running in a container, PM2 isn't the process manager — Docker is.
+      // Report the live Node process directly instead of failing on missing pm2.
+      const fs = await import('fs');
+      const inDocker = fs.existsSync('/.dockerenv');
+      if (inDocker) {
+        const mem = process.memoryUsage();
+        test.status = 'passed';
+        test.details = {
+          status: 'online',
+          processManager: 'docker',
+          uptime: Math.floor(process.uptime() / 60) + ' minutes',
+          memory: Math.floor(mem.rss / 1024 / 1024) + ' MB',
+          pid: process.pid
+        };
+        test.duration = Date.now() - test.startTime;
+        return test;
+      }
+
       const { stdout } = await execAsync('pm2 jlist');
       // PM2 sometimes outputs non-JSON messages before the JSON array
       // e.g., ">>>> In-memory PM2 is started" - extract the JSON array
@@ -674,7 +695,7 @@ class EnhancedSelfDiagnosticsService {
       }
       const processes = JSON.parse(jsonStr);
       const lanAgent = processes.find(p => p.name === 'lan-agent');
-      
+
       if (lanAgent) {
         test.status = lanAgent.pm2_env.status === 'online' ? 'passed' : 'warning';
         test.details = {

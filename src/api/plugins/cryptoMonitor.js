@@ -285,12 +285,18 @@ export default class CryptoMonitorPlugin extends BasePlugin {
 
     async getAddressBalance(address, network) {
         try {
+            // withRpcFallback rotates through the configured RPC list when the
+            // current one is rate-limited, auth-gated (e.g. Ankr free tier), or
+            // returns "missing response". Without it a single bad RPC produced
+            // a stream of error logs every poll cycle.
             const ethers = await getEthers();
-            const provider = await contractService.getProvider(network);
-            const balance = await provider.getBalance(address);
-            return ethers.formatEther(balance);
+            return await contractService.withRpcFallback(network, async () => {
+                const provider = await contractService.getProvider(network);
+                const balance = await provider.getBalance(address);
+                return ethers.formatEther(balance);
+            });
         } catch (error) {
-            this.logger.error(`Failed to get balance for ${address}:`, error);
+            this.logger.warn(`Failed to get balance for ${address} on ${network} after RPC fallback: ${error.message}`);
             return '0';
         }
     }
