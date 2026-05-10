@@ -48,6 +48,11 @@ function sanitizeString(str) {
 function sanitizeValue(val) {
   if (typeof val === 'string') return sanitizeString(val);
   if (Array.isArray(val)) return val.map(sanitizeValue);
+  // Pass dates and buffers through unchanged. Object.entries(date) === [], so
+  // without this guard every Date in every external response gets flattened
+  // to {} and downstream consumers can't read it.
+  if (val instanceof Date) return val;
+  if (Buffer.isBuffer(val)) return val;
   if (val && typeof val === 'object') {
     const result = {};
     for (const [key, v] of Object.entries(val)) {

@@ -24,6 +24,7 @@ import oracleRoutes from './routes/oracle.js';
 import authRoutes from './routes/auth.js';
 import creditRoutes from './routes/credits.js';
 import pluginRoutes from './routes/plugins.js';
+import adminRoutes from './routes/admin.js';
 
 const router = Router();
 
@@ -61,6 +62,11 @@ router.use('/jobs', jobsRoutes);
 router.use('/trust', trustRoutes);
 router.use('/oracle', oracleRoutes);
 router.use('/service', pluginRoutes); // Generic plugin service proxy
+
+// Per-agent admin endpoints (X-Admin-Key header auth, not JWT). The api
+// gateway fans out to each registered agent's /admin/wallets and
+// /admin/payments/recent to build a cross-agent operator view.
+router.use('/admin', adminRoutes);
 
 // Admin routes (standard JWT auth)
 router.get('/admin/dashboard', authenticateToken, async (req, res) => {

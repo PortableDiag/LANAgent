@@ -2,6 +2,31 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.37] - 2026-05-10
+
+Partial backfill of the v2.25.35 admin endpoints so the api gateway's wallets dashboard can fan out to beta. The gateway calls `/api/external/admin/wallets` on each registered agent with a shared `X-Admin-Key` header; beta returned 404 because the route + supporting middleware fix were genesis-only.
+
+### Added
+
+- **`GET /api/external/admin/wallets`** — returns `ExternalCreditBalance` rows + summary totals for this agent. `X-Admin-Key` header matched against the new `AGENT_ADMIN_KEY` env var; absent → 503, mismatch → 401.
+- **`GET /api/external/admin/payments/recent?limit=20`** — recent `ExternalPayment` rows. Same admin-key auth.
+- **`AGENT_ADMIN_KEY` env var** (instance config). Required for the new admin endpoints. Keep matched on every cooperating agent + the gateway that fans out to them.
+
+### Fixed
+
+- **`responseSanitizer` flattened every Date in every external response to `{}`.** The middleware rebuilt objects via `Object.entries(val)`. Date instances passed `typeof val === 'object'` but `Object.entries(date) === []`, so every Date got rebuilt as `{}` — `lastPurchase`, `lastUsed`, `createdAt`, etc. all came through empty to consumers. Wide-scope, affecting every external response with a date, not just the new admin endpoints. Fix: pass `Date` and `Buffer` instances through unchanged before the generic object branch.
+
+### Note on versioning
+
+Public skipped from `2.25.36` to `2.25.37` because this release also implicitly carries the `responseSanitizer` Date passthrough (genesis `2.25.35`). The remaining `2.25.35` work — `loadAgentModel` `AGENT_NAME` fix, `ExternalPayment` schema fields (`currency` / `creditsIssued` / `bonusCredits` / `promotion` / `usdValue`), and the `credits.js` 3-line addition that populates them on credit-purchase records — is still pending sync. Those don't affect the gateway's wallets read path, only the audit completeness of new credit-purchase records on this agent.
+
+### Files changed
+
+- `src/api/external/routes/admin.js` (NEW — admin-key-auth endpoints)
+- `src/api/external/externalGateway.js` (import + `/admin` route mount; social routes intentionally not synced)
+- `src/api/external/middleware/responseSanitizer.js` (Date + Buffer passthrough)
+- `package.json` (version bump)
+
 ## [2.25.36] - 2026-05-10
 
 Operational quiet-the-noise pass on beta. Beta VPS hit 99% disk and the agent went unreachable; cleanup recovered the host (build cache, npm/cache, arduino-cli toolchain) but a fresh diagnostic run still flagged the agent "critical" — turned out the diagnostic suite + four background jobs were all hard-coded for the alice (PM2 + port 80, WireGuard installed, Gmail creds present, full RPC quota) shape and spammed errors on any leaner deployment. This release makes them deployment-shape-aware.
