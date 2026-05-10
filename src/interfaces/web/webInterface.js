@@ -16,7 +16,8 @@ import { DATA_PATH } from '../../utils/paths.js';
 import vpnRoutes from './vpn.js';
 import firewallRoutes from './firewall.js';
 import sshRoutes from './ssh.js';
-import cookiesAdminRoutes from './cookiesAdmin.js';
+// cookiesAdminRoutes import removed — supporting cookiesAdmin.js + ytdlpCookieJar.js
+// utility files weren't synced from genesis; route was dead code in public.
 // import sambaRoutes from './samba.js'; // Now handled by generic plugin router
 import networkRoutes from './network.js';
 import devenvRoutes from './devenv.js';
@@ -227,9 +228,9 @@ export class WebInterface {
     // Setup SSH management routes
     this.app.use('/ssh', sshRoutes);
 
-    // Cookie-jar admin endpoints for the ytdlp plugin (Phase 3 social-media)
-    this.app.use('/api/admin', cookiesAdminRoutes);
-    
+    // Cookie-jar admin endpoints removed in public — see import comment above.
+
+
     // Samba routes now handled by generic plugin router
     
     // Setup Network security monitoring routes
