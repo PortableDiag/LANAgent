@@ -53,6 +53,7 @@ Both methods give you the same `gsk_*` API key and access the same services.
 | YouTube Audio | `POST /youtube/audio` | 8 | MP3 audio |
 | Social Media Download | `POST /social/download` | 10 | MP4 video — TikTok, Rumble, BitChute, Dailymotion, Streamable, Bilibili, Twitch, x.com, SoundCloud, plus the long tail of yt-dlp's ~1800 extractors. x.com goes through the bespoke twitter plugin. Cloudflare-protected sites (Rumble, BitChute) are routed through a FlareSolverr session for cf_clearance + matching TLS fingerprint. Cookie-required sites (Instagram, Facebook) work when the operator has uploaded session cookies via the agent's `POST /api/admin/cookies/:host` endpoint. |
 | Social Media Audio | `POST /social/audio` | 8 | MP3 audio from any of the above. |
+| Social — Supported Sites | `GET /social/supported-sites` | 0 | Returns the loaded extractors (`twitter`, `ytdlp`) with their capabilities and the Phase-1-verified host list. Lets clients probe coverage without trial-against-`/probe`. |
 | Media Transcode | `POST /transcode` | 20 | FFmpeg format conversion |
 | AI Image Gen | `POST /image/generate` | 30 | Text-to-image |
 | Document OCR | `POST /documents/process` | 10 | Text extraction |
@@ -389,38 +390,67 @@ X-Admin-Key: <admin-key>
 
 The gateway calls `GET /api/external/catalog` on your agent and reads the `services` array to discover what you offer. It also fetches pricing and credit balance. **You must re-call this endpoint after adding new services** — the gateway does not auto-refresh the services list (only pricing refreshes every 5 minutes).
 
+### Per-agent admin endpoints (v2.25.35+)
+
+Operator-only endpoints exposed by each LANAgent for cross-agent visibility. The gateway calls these to surface per-agent `ExternalCreditBalance` rows (the customer wallets that pay each agent directly, plus the gateway-as-a-customer wallet that receives auto-replenishment SKYNET) in its `/admin/wallets` page. Auth is a shared secret in the `X-Admin-Key` header matched against `process.env.AGENT_ADMIN_KEY` on each agent — the same value must be set on the calling gateway. If the env var is unset on the agent, the endpoint returns 503; mismatch returns 401.
+
+```
+GET /api/external/admin/wallets
+X-Admin-Key: <AGENT_ADMIN_KEY>
+→ {
+    "success": true,
+    "summary": { "count": 5, "credits": 2020, "totalPurchased": 4096, "totalSpent": 3368, "totalRefunded": 500 },
+    "wallets": [
+      {
+        "wallet": "0x8b1ed1...",
+        "credits": 538,
+        "totalPurchased": 3596,
+        "totalSpent": 3350,
+        "totalRefunded": 500,
+        "lastPurchase": "2026-05-09T17:39:51.611Z",
+        "lastUsed": "2026-05-09T17:39:40.382Z",
+        "createdAt": "2026-03-27T16:51:49.484Z"
+      }, ...
+    ]
+  }
+```
+
+```
+GET /api/external/admin/payments/recent?limit=20         (max 100; default 20)
+X-Admin-Key: <AGENT_ADMIN_KEY>
+→ {
+    "success": true,
+    "payments": [
+      {
+        "txHash": "0x158e84...",
+        "chain": "bsc",
+        "serviceId": "credit-purchase",
+        "callerAgentId": "0x8b1ed1...",
+        "amount": "255940",
+        "currency": "SKYNET",
+        "creditsIssued": 496,
+        "usdValue": 4.96,
+        "createdAt": "2026-05-09T17:39:51.606Z"
+      }, ...
+    ]
+  }
+```
+
+The wallet identity for credit-purchase records is in `callerAgentId` (existing field — kept for backwards compatibility); `currency` / `creditsIssued` / `usdValue` are populated from v2.25.35 onwards. Pre-v2.25.35 records will show those three as `null`.
+
 ---
 
 ## Recent Updates (May 10, 2026)
 
-### v2.25.39 — Backfill of genesis v2.25.35 remainder (loadAgentModel + ExternalPayment audit fields)
+### v2.25.37 — MindSwarm ad automation: end-to-end `createAd` + `editAd`
 
-Completes the partial v2.25.35 sync that v2.25.37 deliberately scoped down to just the admin/wallets endpoint. Three small changes, all backwards-compatible:
+Built end-to-end advertisement capability on the existing `mindswarm` plugin so agents can advertise autonomously. The plugin had the surface (`submitAd`, `getAdSettings`, `payForAd`, `uploadMedia`) but creating an ad needed six manual steps and two outright bugs blocked the autonomous path: `_submitAd` treated `imageUrl` as optional (server validation requires it, returned a generic 400), and `_payForAd` insisted on all six crypto fields even when MindSwarm is in `ad_free_mode` (server accepts empty body there).
 
-- **`loadAgentModel` honors `AGENT_NAME`** (`src/core/agent.js:295-329`). Previously hardcoded to `name:"LANAgent"`, producing two `agents` documents on any install where `AGENT_NAME` was set to something else. Dormant for default installs; bites every multi-instance setup. See the genesis v2.25.35 changelog entry for the full diagnostic.
-- **`ExternalPayment` schema additions**: `currency`, `creditsIssued`, `bonusCredits` (default 0), `promotion` (default null), `usdValue`. All optional; existing records keep working as-is.
-- **`credits.js` populates the new fields** on every credit-purchase record so the row alone is enough to reconstruct the purchase.
+**`createAd` command (NEW)** — single call: resolves an image (`imageUrl` | `imageFilePath` | `imagePrompt` for AI generation via `imageGenerationService`), uploads to MindSwarm `/posts/upload` if needed, submits the ad, reads `/ads/settings`, then either (free mode) calls `/ads/:adId/pay` with empty body or (paid mode) sends native crypto via `transactionService.sendNative` and submits the txHash for on-chain verification. Returns a result with `stage` (`pending_review` / `active` / `payment_submitted` / etc.), `imageUrl`, `txHash` + `amount` when paid. Native-only for paid mode today (eth/bnb/matic). USDT/USDC rates exist server-side but a `sendToken` (ERC-20) path isn't wired yet — surface a clear error instead of burning gas.
 
-### v2.25.38 — Sync from genesis: MindSwarm ad automation (`createAd` + `editAd`)
+**`editAd` command (NEW)** — calls MindSwarm's `PATCH /api/ads/:adId` (shipped same day on their side). Owner can edit `title` / `description` / `linkUrl` / `duration` / `placement` / `targetTags`; `_id` / `impressions` / `clicks` / `payment` history preserved across edits. Real field changes on approved/active/rejected ads run back through the approval pipeline — instant under `ad_auto_approve:true` (current prod), drops to `pending_review` otherwise (deliberate anti-bait-and-switch behavior). `imageUrl` is intentionally non-patchable; image swaps require cancel + recreate.
 
-Brings end-to-end advertisement capability to the public `mindswarm` plugin. Two existing methods got bug fixes plus two new orchestration commands landed; see "MindSwarm ad automation" in the **Recent Updates (May 10, 2026)** notes of the genesis fork for the full narrative. Summary:
-
-**`createAd` command (NEW)** — single call: resolves an image (`imageUrl` | `imageFilePath` | `imagePrompt` for AI generation via `imageGenerationService`), uploads to MindSwarm `/posts/upload` if needed, submits the ad, reads `/ads/settings`, then either (free mode) calls `/ads/:adId/pay` with empty body or (paid mode) sends native crypto via `transactionService.sendNative` and submits the txHash for on-chain verification. Returns `stage` (`pending_review` / `active` / `payment_submitted` / etc.), `imageUrl`, `txHash` + `amount` when paid. Native-only for paid mode today (eth/bnb/matic); USDT/USDC daily rates exist but a `sendToken` (ERC-20) path isn't wired yet — plugin surfaces a clear error instead of burning gas.
-
-**`editAd` command (NEW)** — calls MindSwarm's `PATCH /api/ads/:adId`. Owner can edit `title` / `description` / `linkUrl` / `duration` / `placement` / `targetTags`; `_id` / `impressions` / `clicks` / `payment` history preserved across edits. Real field changes on approved/active/rejected ads run back through the approval pipeline (instant if `ad_auto_approve` is on, otherwise drops to `pending_review`). `imageUrl` is intentionally non-patchable; image swaps require cancel + recreate.
-
-**Two bug fixes**: `_submitAd` now properly requires `imageUrl` (matches server validation); `_payForAd` accepts empty body in free mode (was hardcoded to require all six crypto fields). Also: magic-byte sniff before image upload (fal-ai returns JPEG even when called for PNG); `_apiRequest` patch-body whitelist fix.
-
-### v2.25.37 — Per-agent admin endpoints + responseSanitizer Date passthrough
-
-Partial backfill of genesis v2.25.35 admin pieces. The api gateway's `/admin/wallets` dashboard fans out to each registered agent's `/api/external/admin/wallets` with a shared `X-Admin-Key` header; beta was 404'ing because the route + supporting middleware fix were genesis-only.
-
-- **`GET /api/external/admin/wallets`** — returns all `ExternalCreditBalance` rows + summary (`{count, credits, totalPurchased, totalSpent, totalRefunded}`), sorted by `lastPurchase` desc.
-- **`GET /api/external/admin/payments/recent?limit=N`** (max 100, default 20) — recent `ExternalPayment` rows with `currency` / `creditsIssued` / `usdValue` surfaced.
-- **Auth**: `X-Admin-Key` header matched against `process.env.AGENT_ADMIN_KEY`. Absent → 503; mismatch → 401. Keep the same value on every cooperating agent + the gateway that calls them.
-- **`responseSanitizer` Date passthrough**: middleware was rebuilding objects via `Object.entries(val)` which yields `[]` for Date instances — every `lastPurchase` / `lastUsed` / `createdAt` was being flattened to `{}` for downstream consumers. Fix passes `Date` and `Buffer` through unchanged.
-
-Public skipped from `2.25.34` to `2.25.37` because this release also implicitly carries the sanitizer fix from genesis `2.25.35`. The remaining `2.25.35` work — `loadAgentModel` `AGENT_NAME` fix, `ExternalPayment` schema fields (`currency` / `creditsIssued` / `bonusCredits` / `promotion` / `usdValue`), and `credits.js` populating them — is still pending sync. None of it affects the wallets read path.
+**Two latent bugs caught**: image-buffer format mismatch (fal-ai returns JPEG regardless of request — added magic-byte sniffer that picks the matching file extension before write), and `_apiRequest` body-bearing-method whitelist had `post|put|delete` but not `patch` so PATCH bodies were silently dropped. Only `editAd` uses PATCH today.
 
 ### v2.25.36 — Quiet-the-noise pass for non-alice deployments
 
@@ -429,46 +459,125 @@ Beta VPS went unreachable after hitting 99% disk; cleanup recovered the host but
 - `selfDiagnosticsEnhanced.apiBaseUrl` now uses `WEB_PORT`/`AGENT_PORT` instead of hardcoded `:80`
 - Process Status test detects `/.dockerenv` and reports the live Node process directly instead of failing on missing `pm2 jlist`
 - Telegram Interface test returns `warning` (not `failed`) when `TELEGRAM_BOT_TOKEN` isn't set
-- `vpn-wireguard-watchdog` job probes for `wg-quick` + `/etc/wireguard/wg0.conf` and short-circuits when absent (was logging `bounce failed` every 2 min)
-- `check-emails` job guards on `emailPlugin.gmailUser` at entry and logs a single "disabling" line (was logging `Failed to initialize IMAP` + `Email check job failed` every 3 min)
+- `vpn-wireguard-watchdog` job probes for `wg-quick` + `/etc/wireguard/wg0.conf` and short-circuits when absent (was logging `bounce failed` every 2 min — beta had 125 of these)
+- `check-emails` job guards on `emailPlugin.gmailUser` at entry and logs a single "disabling" line (was logging `Failed to initialize IMAP` + `Email check job failed` every 3 min — beta had 83 of each)
 - `cryptoMonitor.getAddressBalance` now wraps in the existing `contractService.withRpcFallback` (was bypassing it); error → warn since the value safely defaults to `'0'`
+
+Companion beta-side operational cleanup (separate from the code fix): `docker builder prune -af` reclaimed 4.27 GB of stale build cache; removed `~/.npm`, `~/.cache`, `~/.arduino15` (entire arduino-cli toolchain, 7.2 GB total, wholly unused on a Docker-only host). Disk: 99%/455M free → 52%/12G free.
+
+---
+
+## Recent Updates (May 9, 2026)
+
+### v2.25.35 — Per-agent admin endpoints + dual-record agent bug fix + payment audit-trail / sanitizer date fix
+
+Triggered by a "wallet purchased credits" Telegram notification that didn't show up anywhere in the gateway admin panel. The wallet wasn't *on* the gateway — it lived on ALICE's `externalcreditbalances` collection and the gateway admin had no cross-agent view. Fixing that surfaced two more bugs (sanitizer flattening dates, ExternalPayment missing audit fields) and a long-standing dual-record agent bug.
+
+**Per-agent admin endpoints** — see "Per-agent admin endpoints (v2.25.35+)" above for full schema. Two endpoints, both shared-secret auth via `AGENT_ADMIN_KEY` env var. The gateway repo's matching fan-out endpoint (`GET /admin/api/agent-wallets`) calls each enabled agent in parallel and aggregates totals; the admin `/admin/wallets` page now has a "Per-agent wallets" section rendering each agent's table.
+
+**`responseSanitizer` was flattening every Date to `{}`.** The middleware walks the response body via `Object.entries(val)`; Date instances pass `typeof === 'object'` but `Object.entries(date) === []`, so every Date got rebuilt as an empty object — `lastPurchase`, `lastUsed`, `createdAt` etc. all came through as `{}` to consumers. Wide-scope bug affecting every external response that contained a date. Fix: pass `Date` and `Buffer` instances through unchanged before the generic object branch.
+
+**`ExternalPayment` records for credit purchases were missing audit fields.** `credits.js` was creating the doc with `txHash`, `chain`, `serviceId='credit-purchase'`, `callerAgentId`, `amount` (raw crypto amount as string), `recipientAddress`, `blockNumber`, `confirmations`, `verifiedAt`, `consumed`, `consumedAt` — but not the currency, the credits issued, or the USD value. Replenishment records in production showed `wallet=undefined, currency=undefined, credits=undefined` to anyone querying by those names (the wallet was actually in `callerAgentId`, the currency / credits were never written at all). Fix: schema gained `currency` / `creditsIssued` / `bonusCredits` (default 0) / `promotion` (default null) / `usdValue` — all optional / backwards-compatible. `credits.js` now passes the relevant ones on every credit-purchase record.
+
+**`loadAgentModel` was hardcoded to `name:"LANAgent"` regardless of `AGENT_NAME`** (`src/core/agent.js:295-329`). Comment was self-incriminating: `// Always try to load the LANAgent record first, regardless of AGENT_NAME`. Result on multi-instance installs: two `agents` documents per agent — one by the instance name (ALICE), one by the framework default (`LANAgent`) — both written continually by different code paths. Production drift: `aiProviders.configurations` (ALICE had `gab` and `huggingface` configs the ghost didn't), `mediaGeneration.image.provider` (`huggingface` vs `openai`), `erc8004.status` (`active` with `agentId 2930` vs `none`), `serviceConfigs.*.lastCheckTime` (real timestamps vs `null`), several others. Anything reading `this.agentModel` was getting the stale ghost while the web UI / providerManager wrote to the correct record — split-brain on the agent's own settings. Fix: `loadAgentModel` now uses `process.env.AGENT_NAME || "LANAgent"` like the rest of the codebase. The LANAgent ghost record was deleted from production after verifying ALICE was being written (its only "newer" value was `state.lastHeartbeat`, now written to ALICE on every heartbeat). Crypto wallet / ERC-8004 registration data untouched (lives on ALICE record + separate `cryptowallets` collection).
+
+**Companion gateway repo** (`api-lanagent-net`, separate commits): `GET /admin/api/agent-wallets` fan-out endpoint; `Per-agent wallets` section + `Refunded` column on `/admin/wallets` (the data was already in `CreditBalance.totalRefunded`, just never displayed — wallets where `totalSpent` exceeded `totalPurchased` looked like accounting drift when in fact `totalSpent` is gross debits and `totalRefunded` is the offset, e.g. `0xce8efb55…`: balance 238 = totalPurchased 1794 − totalSpent 1966 + totalRefunded 410); `display:block` CSS fix on `.bar-fill` so blue bars render on `/admin/scrapes` Top services / Top agents.
 
 ---
 
 ## Recent Updates (May 8, 2026)
 
-### v2.25.34 — ALICE PR triage round (#2127–#2137): 3 merged, 2 salvaged, 5 closed
+### v2.25.33 — Crypto strategy hardening (TokenTrader buy-path balance gate, trailing-stop display, LP MM fee accounting)
 
-10 ALICE-authored capability-upgrade PRs reviewed one by one. Per-PR rationale on each closed PR.
+Three fixes prompted by a routine status audit. The SIREN trader was profitable (+$229 lifetime realized) but the daily error log had four `INSUFFICIENT_FUNDS` swap rejections on grid-buys. The status payload showed a misleading trailing-stop value. The LP MM had been silently running for 70+ days with `'0/0'` lifetime fees no matter what.
 
-**New API surface:**
+**TokenTrader: `INSUFFICIENT_FUNDS` on native-paired buys.** Two bugs in `executeTokenTrader` (`src/services/subagents/CryptoStrategyAgent.js`):
 
-- `MoonIndicators.getMoonPhaseForDate(date)` — public-named wrapper around the existing `calculateMoonPhase(date)` (#2129).
-- `PeerManager.getPeerAnalytics()` — read-only aggregation across `P2PPeer` documents. Returns `{averageSessionDurationTrend (by date), peakConnectionTimes (by hour), trustLevelDistribution}` (#2131).
-- `donationService.generateDonationQR({colorDark, colorLight, errorCorrectionLevel, ...})` — three new options with backwards-compat defaults `'#000000'` / `'#FFFFFF'` / `'M'`. Cache key extended to include the new params (#2133).
-- `GitHostingProvider.batchCreateMergeRequests(requests[])` — `Promise.allSettled`-based batch fan-out. Returns `Array<{success, ...}>` per item (#2137 salvage — original used `Promise.all` which aborts the whole batch on a single failure).
-- `GitHostingProvider.batchMergeMergeRequests(mrNumbers[], options?)` — same pattern (#2137 salvage).
-- `GitHostingProvider.batchCloseMergeRequests(mrNumbers[], comment?)` — same (#2137 salvage).
-- `GitHostingProvider.batchCreateIssues(issues[])` — same (#2137 salvage).
-- `GitHostingProvider.batchCloseIssues(issueNumbers[], comment?)` — same (#2137 salvage).
+- The "use native if stablecoin insufficient" branch read `marketData.prices?.[network]?.nativeBalance` — that field doesn't exist; native balance is at `marketData.balances?.[network]?.native`. Always read 0, the gate never approved a native switch.
+- The price-impact branch right after switched to native path **without checking the wallet's actual BNB**. Native almost always wins on impact for BSC tokens (1-hop via WBNB pair), so the trader dispatched a 0.6 BNB swap when the wallet had 0.09 BNB. Chain rejected with `INSUFFICIENT_FUNDS`.
 
-**Internal fix:** `validation.js` now wraps custom `rules.validate(value)` calls in try/catch — a throwing custom validator now surfaces as a normal validation error message ("Validation error for field 'X': msg") instead of bubbling out as an unhandled 500 (#2127 salvage). Function stays sync; the original PR's async change would have cascaded through every plugin's `execute()` method.
+Fix gates the price-impact-driven switch on `requiredNative + 0.005 (gas reserve) <= actualNative`. If insufficient, falls back to the stablecoin path with a `Native path lower impact ... falling back to stablecoin path` warn line. The prior branch also reads from the right field for sane logging.
 
-**Closed without salvage:** #2128 (ytdlpCookieJar dead helpers), #2130 (payment.js array return breaks call sites), #2132 (Node logger in browser file that's not loaded), #2134 (outputSchemas inert version field — same as #2113/#2124), #2136 (auditLog rate-limiter targets non-existent route).
+**TokenTrader: misleading trailing-stop display.** `state.trailingStopPrice` was always set with `pumpTrailingStopPercent` (4.5%) for both PUMP and MOON regimes, but `_analyzePump` ignores that value and triggers on its own inline 12% wide stop. Status payloads showed a stop that never actually fired in PUMP. Fix: the stored value now reflects the regime-applicable stop:
 
-### v2.25.33 — LP market-maker accounting fixes
+| Regime | Stop |
+|---|---|
+| PUMP | `pumpWideTrailingStopPercent` (12%) — used by `_analyzePump` |
+| MOON, gain ≥ tight | `tightTrailingStopPercent` (5%) — high-gain MOON |
+| MOON | `pumpTrailingStopPercent` (4.5%) — used by `_analyzeMoon` |
+| else (SIDEWAYS/DIP) | `trailingStopPercent` (8%) — standard |
 
-Routine `/api/crypto/lp/mm/status` audit found the position had been showing `'0/0'` lifetime fees and an `openedAt` timestamp that didn't match the active tokenId.
+`_analyzePump`'s inline calc is unchanged so PUMP exits trigger identically. `_analyzeMoon` continues to read `state.trailingStopPrice` and gets the 4.5% MOON value as before. Only the displayed value moves.
 
-**`collectFeesV3` now returns the actual amounts collected.** Previously returned only `{txHash, success}`. Now reads `tokensOwed0/1` just before the collect tx (free view call already in the function), formats to ether-units, and returns `{txHash, success, amount0, amount1}` (same value the chain withdraws, modulo trailing-block accruals).
+**LP MM: 70 days of zero fee accounting.** `lpManager.collectFeesV3` returned only `{txHash, success}` — never the amounts. `lpMarketMaker.collectFees` updated `lastFeeCollectAt` but never incremented `totalFeesCollectedSKYNET`/`totalFeesCollectedWBNB`. Fix: `collectFeesV3` now reads `tokensOwed0/1` just before the collect tx (free view call already in the function), formats to ether-units, and returns `{txHash, success, amount0, amount1}` (same value the chain withdraws, modulo trailing-block accruals). `collectFees` reads those, increments the lifetime totals, persists in one `saveState({lastFeeCollectAt, totalFeesCollectedSKYNET, totalFeesCollectedWBNB})` call, and logs `+X SKYNET, +Y WBNB (lifetime: ...)` per collection.
 
-**`collectFees` increments lifetime totals.** Previously updated only the `lastFeeCollectAt` timestamp and never touched `totalFeesCollectedSKYNET` / `totalFeesCollectedWBNB`. Now reads the amounts from `collectFeesV3`, increments the totals, persists in one `saveState({lastFeeCollectAt, totalFeesCollectedSKYNET, totalFeesCollectedWBNB})` call, and logs `+X SKYNET, +Y WBNB (lifetime: ...)` per collection. Pool ordering is canonical (token0 < token1 by address); for SKYNET/WBNB on BSC, SKYNET = token0, WBNB = token1.
+A separate one-time backfill from on-chain Collect events (`scripts/backfill-lpmm-fees.js`) was attempted for historical totals — found `0` events across the full 70-day window for the active position. The on-chain `tokensOwed0/1=0` and `feeGrowthInside last=0` confirm the position has been completely untouched since mint. `'0/0'` lifetime totals were factually correct, just for a different reason than the audit assumed (no fees were ever collected because no Collects ever fired, not because they fired and weren't tracked).
 
-**`rebalancePosition` resets `openedAt` on the new tokenId.** The rebalance flow correctly minted new positions and updated `state.tokenId`, but never refreshed `openedAt` — so the displayed value stuck on the very first position's mint time even after several rebalances rotated through new tokenIds. Fix adds `openedAt: now` to the `saveState` call alongside the new `tokenId`. Comments document why `rebalanceCount` (strategy-lifetime telemetry) and `rebalancesLast24h` (rolling 24h window the circuit breaker reads to enforce `maxRebalancesPerDay`) intentionally stay rolling — zeroing the latter would let the strategy spam-rebalance.
+**LP MM `openedAt` stale across rebalances (follow-up).** During the backfill investigation, found that `rebalancePosition` correctly updates `state.tokenId` on the new position but never refreshed `openedAt` — so the displayed value stuck on the very first position's mint time even after the strategy rotated through new tokenIds. Confirmed live: state reported `openedAt: 2026-02-27T02:50:01` but the active `tokenId: 6694001` was minted at block 89,508,147 (= `2026-03-29T23:43:43Z`). Fix in `lpMarketMaker.rebalancePosition` adds `openedAt: now` to the `saveState` call alongside the new tokenId. Comments document why `rebalanceCount` (strategy-lifetime telemetry) and `rebalancesLast24h` (circuit-breaker rolling window) stay rolling — zeroing the latter would let the strategy spam-rebalance. Prod state corrected in-place via `mongosh`; PM2 restarted afterward so the in-memory state matches the DB row.
 
-**New tool: `scripts/backfill-lpmm-fees.js`** — one-shot tool that walks NPM Collect events for a tokenId across a 70-day window. Uses NodeReal's free-tier archive RPC (50k-block range cap, ~272 chunks in ~30s for a 70-day window). Print-only; produces a paste-ready mongosh update if amounts are non-zero. The first run on the active position returned `0` events (single mint, no Decrease, no Collect, on-chain `tokensOwed=0` and `feeGrowthInside last=0`) — `'0/0'` lifetime totals were factually correct, just for a different reason than the audit assumed.
+**Tooling left behind:** `scripts/backfill-lpmm-fees.js` is committed and re-runnable. Uses NodeReal's free public archive endpoint (50k-block range cap, 272 chunks in ~30s for a 70-day window), prints a paste-ready mongosh update if it ever finds non-zero amounts.
 
-For the v2.25.28–v2.25.32 changes, see `CHANGELOG.md` — they covered ALICE-authored PR triages, external media-download fixes, ALICE auto-post lockout fix, gateway repo workflow, the public LP MM `/health` endpoint, and Agenda-backed scheduling actions for `selfHealing` and `checkly`.
+### v2.25.32 — ALICE PR triage (#2116-#2126): 1 merged, 4 salvaged + manually re-implemented, 6 closed
+
+11 ALICE-authored capability-upgrade PRs reviewed one by one. Per-PR rationale on each closed PR (full breakdown in `CHANGELOG.md`).
+
+**New endpoints / actions from manual salvages:**
+
+- `GET /api/crypto/lp/mm/health` — public unauthenticated liveness probe (mounted above `router.use(authenticateToken)`). Returns `{ success, enabled, initialized }` on 200, 503 if `lpMarketMaker.getConfig()` throws. (Replaces #2122 which placed an auth-gated payload-less endpoint *after* the auth middleware.)
+- `selfHealing` plugin actions:
+  - `schedule({ actionType, time, reason?, force?, targetPaths? })` — one-shot future healing action via Agenda. Returns `{ jobId, actionType, scheduledFor }`.
+  - `listScheduled` — returns pending jobs with `{ jobId, actionType, scheduledFor, reason, lastRunAt, failCount, failReason }`.
+  - `cancelScheduled({ jobId })` — cancels a scheduled job by id.
+  - All persist via Agenda (`scheduled_jobs` collection in MongoDB), survive restarts. (Replaces #2119 which invented `TaskScheduler.scheduleJob` and used in-process closures.)
+- `checkly` plugin actions:
+  - `schedule_check({ checkId, interval })` — recurring poll via `agenda.every(interval, 'checkly-scheduled-poll', { checkId })`. Idempotent re-schedule (cancels prior schedule for the same checkId first).
+  - `list_scheduled_checks` — returns active polls.
+  - `cancel_scheduled_check({ checkId })` — drops a poll.
+  - (Replaces #2125 which had the same scheduler-invention defect plus no list/cancel actions.)
+
+**Pattern note:** All scheduling actions follow the established Agenda pattern from `src/api/plugins/integromatnowmake.js:80-95, 261` — get the singleton `taskScheduler` from `this.agent.services.get('taskScheduler')`, define a *named* job in `initialize()` so its handler is re-registered on restart, then schedule via `agenda.schedule()` (one-shot) or `agenda.every()` (recurring). Agenda's MongoDB persistence layer means the schedule survives PM2 restarts and deploys without the plugin needing to track its own state.
+
+**`ModelCache.getUsageAnalyticsData()`** — new static aggregation method (PR #2121, merged as-is) that returns a global `{ totalRequests, averageResponseTime, errorRate }` rollup. Returns zeros today because the underlying `trackUsage()` write side has no callers; the read side is correct for the moment something starts populating the data.
+
+**`cookiesAdmin`** — `POST /cookies/:host` and `DELETE /cookies/:host` log lines now include `by=jwt:<user>` or `by=apikey:<name>` for audit trail in the central log.
+
+## Recent Updates (May 7, 2026)
+
+### v2.25.31 — Crypto token-trader heartbeat-manager auto-start + restore-state persistence
+
+Two latent bugs in `src/api/crypto.js` surfaced while restoring the SIREN token-trader instance after the previous day's strategy-registry rebuild incident.
+
+**Bug 1: Heartbeat manager doesn't auto-start when first instance is added at runtime.**
+
+```js
+// Before — src/api/crypto.js:1441 (POST /strategy/token-trader/configure)
+if (handler.tokenHeartbeatManager?.started) {
+    handler.tokenHeartbeatManager.startToken(tokenAddress);
+}
+```
+
+`tokenHeartbeatManager.started` only flips `true` inside `startAll()`, which `CryptoStrategyAgent.initialize()` only calls when `allTokenTraders.size > 0` at agent init. Configure on a fresh registry (after a restart with empty `tokenTraders` map) registered the new instance, set `secondaryStrategy='token_trader'`, and persisted to MongoDB — but never started the per-token heartbeat. The token then ticked only via the 10-min main-heartbeat fallback (`CryptoStrategyAgent.js:567-589`), missing the regime-based intervals (3 min in `PUMP`, 1 min in `DUMP`, etc.). For a token in `PUMP` that's a 7× slowdown.
+
+```js
+// After
+if (handler.tokenHeartbeatManager) {
+    if (!handler.tokenHeartbeatManager.started) {
+        handler.tokenHeartbeatManager.startAll();
+    } else {
+        handler.tokenHeartbeatManager.startToken(tokenAddress);
+    }
+}
+```
+
+`startAll()` is idempotent for already-started managers and picks up the newly-registered instance from the registry on its first call.
+
+**Bug 2: `POST /api/crypto/strategy/token-trader/restore-state` mutated state in-memory only.**
+
+The endpoint at `src/api/crypto.js:1568-1642` writes restored `position`, `pnl`, `tracking`, `circuitBreaker`, `regime` directly to `tokenStrategy.state.*` and returned 200 — but no `persistRegistryState()` call, so the restored cost basis / realized PnL / trailing-stop / peak-price values only survived in memory until the next full `execute()` cycle ran (where the `finally` block at `CryptoStrategyAgent.js:747` finally persists). If the agent restarted before that, the restore was lost. Compare `/configure` at line 1436, which does call `persistRegistryState()` before returning. `/restore-state` now matches.
+
+**Same-day rescue:** Recovered the SIREN token-trader live with `POST /api/crypto/strategy/token-trader/configure` (`tokenAddress=0x997a…18e1`, `tokenNetwork=bsc`, `capitalAllocationPercent=50`, `tokenTaxPercent=0`) followed by `POST /api/crypto/strategy/token-trader/restore-state?token=0x997a…18e1` with the cached cost basis from the stale `tokenTraderStatus` block. SIREN had pumped from $0.75 to $1.024 (+37%) while the trader was offline; the first three ticks after restore caught the pump (scale-out at +20% / +25% / +30% levels, +$33.46 realized in 7 minutes; lifetime realized PnL $50.43 → $83.89). Trailing stop updated $0.803 → $0.978. Verified post-deploy: `heartbeats.started: true`, `tokenCount: 1`, SIREN `regime: PUMP`, `interval: 180s (3m)`, `consecutiveErrors: 0`.
+
+**Genesis-only fix** — public repo's scrubbed registry stays as-is per the v2.25.26 strategy-name scrub. Do NOT sync to public.
 
 ## Recent Updates (May 5, 2026)
 
