@@ -391,6 +391,42 @@ The gateway calls `GET /api/external/catalog` on your agent and reads the `servi
 
 ---
 
+## Recent Updates (May 10, 2026)
+
+### v2.25.38 — Sync from genesis: MindSwarm ad automation (`createAd` + `editAd`)
+
+Brings end-to-end advertisement capability to the public `mindswarm` plugin. Two existing methods got bug fixes plus two new orchestration commands landed; see "MindSwarm ad automation" in the **Recent Updates (May 10, 2026)** notes of the genesis fork for the full narrative. Summary:
+
+**`createAd` command (NEW)** — single call: resolves an image (`imageUrl` | `imageFilePath` | `imagePrompt` for AI generation via `imageGenerationService`), uploads to MindSwarm `/posts/upload` if needed, submits the ad, reads `/ads/settings`, then either (free mode) calls `/ads/:adId/pay` with empty body or (paid mode) sends native crypto via `transactionService.sendNative` and submits the txHash for on-chain verification. Returns `stage` (`pending_review` / `active` / `payment_submitted` / etc.), `imageUrl`, `txHash` + `amount` when paid. Native-only for paid mode today (eth/bnb/matic); USDT/USDC daily rates exist but a `sendToken` (ERC-20) path isn't wired yet — plugin surfaces a clear error instead of burning gas.
+
+**`editAd` command (NEW)** — calls MindSwarm's `PATCH /api/ads/:adId`. Owner can edit `title` / `description` / `linkUrl` / `duration` / `placement` / `targetTags`; `_id` / `impressions` / `clicks` / `payment` history preserved across edits. Real field changes on approved/active/rejected ads run back through the approval pipeline (instant if `ad_auto_approve` is on, otherwise drops to `pending_review`). `imageUrl` is intentionally non-patchable; image swaps require cancel + recreate.
+
+**Two bug fixes**: `_submitAd` now properly requires `imageUrl` (matches server validation); `_payForAd` accepts empty body in free mode (was hardcoded to require all six crypto fields). Also: magic-byte sniff before image upload (fal-ai returns JPEG even when called for PNG); `_apiRequest` patch-body whitelist fix.
+
+### v2.25.37 — Per-agent admin endpoints + responseSanitizer Date passthrough
+
+Partial backfill of genesis v2.25.35 admin pieces. The api gateway's `/admin/wallets` dashboard fans out to each registered agent's `/api/external/admin/wallets` with a shared `X-Admin-Key` header; beta was 404'ing because the route + supporting middleware fix were genesis-only.
+
+- **`GET /api/external/admin/wallets`** — returns all `ExternalCreditBalance` rows + summary (`{count, credits, totalPurchased, totalSpent, totalRefunded}`), sorted by `lastPurchase` desc.
+- **`GET /api/external/admin/payments/recent?limit=N`** (max 100, default 20) — recent `ExternalPayment` rows with `currency` / `creditsIssued` / `usdValue` surfaced.
+- **Auth**: `X-Admin-Key` header matched against `process.env.AGENT_ADMIN_KEY`. Absent → 503; mismatch → 401. Keep the same value on every cooperating agent + the gateway that calls them.
+- **`responseSanitizer` Date passthrough**: middleware was rebuilding objects via `Object.entries(val)` which yields `[]` for Date instances — every `lastPurchase` / `lastUsed` / `createdAt` was being flattened to `{}` for downstream consumers. Fix passes `Date` and `Buffer` through unchanged.
+
+Public skipped from `2.25.34` to `2.25.37` because this release also implicitly carries the sanitizer fix from genesis `2.25.35`. The remaining `2.25.35` work — `loadAgentModel` `AGENT_NAME` fix, `ExternalPayment` schema fields (`currency` / `creditsIssued` / `bonusCredits` / `promotion` / `usdValue`), and `credits.js` populating them — is still pending sync. None of it affects the wallets read path.
+
+### v2.25.36 — Quiet-the-noise pass for non-alice deployments
+
+Beta VPS went unreachable after hitting 99% disk; cleanup recovered the host but a fresh diagnostic still flagged `health: critical` with 8 failed tests. None were real failures — the diagnostic suite and four background jobs all hard-coded the alice shape (PM2 + port 80, WireGuard installed, Gmail creds present, full RPC quota) and spammed errors on any leaner deployment. This release makes them deployment-shape-aware:
+
+- `selfDiagnosticsEnhanced.apiBaseUrl` now uses `WEB_PORT`/`AGENT_PORT` instead of hardcoded `:80`
+- Process Status test detects `/.dockerenv` and reports the live Node process directly instead of failing on missing `pm2 jlist`
+- Telegram Interface test returns `warning` (not `failed`) when `TELEGRAM_BOT_TOKEN` isn't set
+- `vpn-wireguard-watchdog` job probes for `wg-quick` + `/etc/wireguard/wg0.conf` and short-circuits when absent (was logging `bounce failed` every 2 min)
+- `check-emails` job guards on `emailPlugin.gmailUser` at entry and logs a single "disabling" line (was logging `Failed to initialize IMAP` + `Email check job failed` every 3 min)
+- `cryptoMonitor.getAddressBalance` now wraps in the existing `contractService.withRpcFallback` (was bypassing it); error → warn since the value safely defaults to `'0'`
+
+---
+
 ## Recent Updates (May 8, 2026)
 
 ### v2.25.34 — ALICE PR triage round (#2127–#2137): 3 merged, 2 salvaged, 5 closed

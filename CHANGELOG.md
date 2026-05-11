@@ -2,6 +2,28 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.38] - 2026-05-10
+
+Sync from genesis: MindSwarm ad automation. The plugin already had `submitAd` / `getAdSettings` / `payForAd` etc. wired to the MindSwarm REST API, but: (a) `submitAd` didn't enforce `imageUrl` (server requires it, returned a generic 400); (b) `payForAd` insisted on all six crypto fields even when MindSwarm is in `ad_free_mode` (server accepts empty body there); (c) no orchestration method tied submit → settings-check → pay together, so creating an ad meant six manual steps that the agent couldn't reliably chain.
+
+### Added
+
+- **`createAd` command** on the `mindswarm` plugin. Single call: resolves an image (`imageUrl` | `imageFilePath` | `imagePrompt` for AI generation via `imageGenerationService`), uploads to MindSwarm if needed, submits the ad, reads `/ads/settings`, and either (free mode) calls `/pay` with empty body or (paid mode) sends native crypto via `transactionService.sendNative` and submits the txHash for on-chain verification. Returns a result with `stage` (`pending_review` / `active` / `payment_submitted` / etc.), `imageUrl`, `txHash` + `amount` when paid.
+- **`editAd` command** — `PATCH /api/ads/:adId` (MindSwarm shipped the endpoint same day). Owner can edit `title` / `description` / `linkUrl` / `duration` / `placement` / `targetTags`; `_id` / `impressions` / `clicks` / `payment` history preserved. Re-approval gate runs the edit back through approval when `ad_auto_approve` is off (paused until admin re-approves) — deliberate anti-bait-and-switch behavior. `imageUrl` intentionally non-patchable; image swaps require cancel + recreate.
+- Paid-mode currently supports native sends only (`eth`, `bnb`, `matic`). MindSwarm's `ad_daily_rate` map also lists `usdt`/`usdc`; surfacing a clear error for those rather than failing mid-flow lets the operator pick a native crypto or wait until a `sendToken` path is wired.
+
+### Fixed
+
+- **`_submitAd` validation** — `imageUrl` is now required (matches server's `body('imageUrl').isURL()`). Previously the plugin let `null` through and the caller got a generic 400 from MindSwarm.
+- **`_payForAd` for free-mode** — was hardcoded to require `cryptocurrency` / `amount` / `transactionHash` / `blockchainNetwork` / `senderAddress`. Server's `/ads/:adId/pay` route uses `optional({ checkFalsy: true })` validators because `ad_free_mode === true` (or `dailyRate === 0`) activates the ad immediately and ignores payment data. Plugin now sends an empty body when no crypto fields are supplied, and enforces all-or-none when any are.
+- **Image format mismatch on upload** — MindSwarm's upload middleware runs `validateMagicBytes(buffer, mimetype)` against the multer-inferred mimetype (derived from filename extension). fal-ai returns JPEG even when called with a PNG request, so writing the generated image as `.png` produced "File does not match its claimed type". Added a magic-byte sniffer (PNG `\x89PNG`, JPEG `\xFFD8FF`, WebP `RIFF…WEBP`, GIF `GIF8`) to pick the matching extension before write.
+- **`_apiRequest` PATCH body** — the body-bearing-method whitelist had `post|put|delete` but not `patch`, so PATCH bodies were silently dropped. Only `editAd` uses PATCH today so no past behavior changed.
+
+### Files changed
+
+- `src/api/plugins/mindswarm.js` (`createAd` orchestration + `editAd` + bug fixes)
+- `package.json` (version bump)
+
 ## [2.25.37] - 2026-05-10
 
 Partial backfill of the v2.25.35 admin endpoints so the api gateway's wallets dashboard can fan out to beta. The gateway calls `/api/external/admin/wallets` on each registered agent with a shared `X-Admin-Key` header; beta returned 404 because the route + supporting middleware fix were genesis-only.

@@ -637,6 +637,8 @@ export default class MindSwarmPlugin extends BasePlugin {
       { command: 'getMyAds', description: 'Get your submitted ads on MindSwarm', usage: 'getMyAds({ page: 1 })', examples: ['show my mindswarm ads', 'my advertisements on mindswarm'] },
       { command: 'payForAd', description: 'Pay for an approved MindSwarm ad with crypto', usage: 'payForAd({ adId: "abc", cryptocurrency: "eth", amount: "0.035", transactionHash: "0x...", blockchainNetwork: "ethereum", senderAddress: "0x..." })', examples: ['pay for my mindswarm ad'] },
       { command: 'cancelAd', description: 'Cancel a pending MindSwarm ad', usage: 'cancelAd({ adId: "abc" })', examples: ['cancel my mindswarm ad'] },
+      { command: 'editAd', description: 'Edit owner-mutable fields on an existing MindSwarm ad (preserves adId, impressions, clicks, payment history). Editable: title, description, linkUrl, duration, placement, targetTags. imageUrl is NOT patchable — use cancel + recreate for image swaps. Real field changes on approved/active ads re-run the approval pipeline (instant if auto-approve is on, otherwise pauses serving until admin re-approves).', usage: 'editAd({ adId: "abc", duration: 30 }) or editAd({ adId: "abc", title: "New title", description: "...", linkUrl: "https://...", placement: "inline", targetTags: ["ai"] })', examples: ['extend my mindswarm ad to 30 days', 'edit my mindswarm ad title', 'change link on my mindswarm ad'] },
+      { command: 'createAd', description: 'End-to-end ad creation: resolves image (URL, file, or AI-generated from prompt), submits, then activates — free-mode auto-pays with empty body, paid-mode sends native crypto from the agent wallet and submits the txHash for on-chain verification', usage: 'createAd({ title: "My Service", description: "What it does", linkUrl: "https://example.com", duration: 7, placement: "inline", imagePrompt: "A clean modern logo on a dark background" }) or createAd({ ..., imageUrl: "https://..." })', examples: ['create a mindswarm ad for api.lanagent.net', 'advertise my service on mindswarm', 'run a mindswarm ad with auto-generated image'] },
       // Posts (extended)
       { command: 'getGifs', description: 'Search for GIFs to use in MindSwarm posts', usage: 'getGifs({ query: "happy", limit: 20 })', examples: ['search for gifs on mindswarm', 'find a gif to post', 'mindswarm gif search'] },
       { command: 'getBoostedPosts', description: 'Get boosted/promoted posts on MindSwarm', usage: 'getBoostedPosts({ page: 1 })', examples: ['show boosted posts on mindswarm', 'promoted posts on mindswarm'] },
@@ -1222,7 +1224,15 @@ export default class MindSwarmPlugin extends BasePlugin {
 
       // Don't post if we have nothing meaningful to say
       if (!context.hasContent) {
-        this.pluginLogger.debug('Auto-post: no meaningful context to post about, skipping');
+        // Visibility — was .debug() so silent skips were invisible. The
+        // diag fields explain *why* there was nothing postable.
+        const d = context.diag || {};
+        this.pluginLogger.info(
+          `Auto-post: skipping — no postable content ` +
+          `(raw=${d.rawCount ?? '?'}, after-dedup=${d.filteredCount ?? '?'}, ` +
+          `recent-topics=[${(d.recentTopics || []).join(',')}], ` +
+          `raw-items=${(d.sources || []).map(s => `"${s}"`).join(' | ') || '(none)'})`
+        );
         return;
       }
 
@@ -1266,7 +1276,10 @@ Return ONLY the post text, nothing else.`;
         .replace(/^["']|["']$/g, ''); // Strip wrapping quotes AI sometimes adds
 
       if (!postContent || postContent.length < 15 || postContent.length > 1000) {
-        this.pluginLogger.debug('Auto-post: AI generated invalid content, skipping');
+        this.pluginLogger.info(
+          `Auto-post: skipping — AI returned invalid content ` +
+          `(length=${postContent?.length || 0}, sample="${(postContent || '').slice(0, 80)}")`
+        );
         return;
       }
 
@@ -1333,14 +1346,8 @@ Return ONLY the post text, nothing else.`;
       if (prs > 0) items.push(`Self-improvement: analyzed ${analyzed} source files and generated ${prs} pull requests to upgrade my own capabilities`);
     } catch { /* ignore */ }
 
-    // Services offered
-    try {
-      const apiManager = this.agent?.apiManager;
-      const pluginCount = apiManager?.apis?.size || 0;
-      if (pluginCount > 50) {
-        items.push(`Running ${pluginCount} plugins — offering services like web scraping, media transcoding, image generation, and code execution via ERC-8004`);
-      }
-    } catch { /* ignore */ }
+    // (Plugin count was injected here as a topic but produced repetitive
+    //  "Running 99/100 plugins" posts — static info, bad content, removed.)
 
     // P2P federation
     try {
@@ -1389,6 +1396,61 @@ Return ONLY the post text, nothing else.`;
       }
     } catch { /* ignore */ }
 
+    // Self-healing — autonomous bug-fix runs in last 24h
+    try {
+      const healing = this.agent?.services?.get?.('selfHealing');
+      if (healing?.getStatus) {
+        const status = await healing.getStatus();
+        const success = status?.stats24h?.byStatus?.success || 0;
+        if (success > 0) {
+          items.push(`Auto-healed ${success} system issues in the last 24 hours via self-diagnostics`);
+        }
+      }
+    } catch { /* ignore */ }
+
+    // SKYNET decentralized service marketplace — peer-to-peer agent revenue
+    try {
+      const p2p = this.agent?.services?.get?.('p2pFederation');
+      if (p2p?.getSkynetServiceStats) {
+        const stats = await p2p.getSkynetServiceStats();
+        if (stats?.totalRequests > 0) {
+          items.push(`Served ${stats.totalRequests} requests on the SKYNET decentralized service marketplace, earning ${(stats.totalRevenue || 0).toFixed(2)} SKYNET from peer agents`);
+        } else if (stats?.enabledServices > 0) {
+          items.push(`Offering ${stats.enabledServices} services on the SKYNET decentralized marketplace, earnable in tokens by peer agents`);
+        }
+      }
+    } catch { /* ignore */ }
+
+    // Self-modification today — separate from cumulative PR count
+    try {
+      const selfMod = this.agent?.services?.get?.('selfModification');
+      if (selfMod?.getStats) {
+        const stats = await selfMod.getStats();
+        if (stats?.today > 0) {
+          items.push(`Shipped ${stats.today} code improvements to my own source today (${stats.merged || 0} total merged across history)`);
+        } else if (stats?.merged > 0) {
+          items.push(`${stats.merged} of my self-authored pull requests have been merged into my own codebase to date`);
+        }
+      }
+    } catch { /* ignore */ }
+
+    // Plugin / capability count — fresh framing avoids the old 99/100 flip-flop
+    try {
+      const pluginCount = this.agent?.apiManager?.apis?.size || 0;
+      if (pluginCount > 0) {
+        items.push(`Operating with ${pluginCount} integrated capabilities — from on-chain analytics to media processing to autonomous code review`);
+      }
+    } catch { /* ignore */ }
+
+    // AI provider redundancy — OpenAI / Anthropic / others
+    try {
+      const providers = this.agent?.providerManager?.getProviderList?.() || [];
+      if (providers.length > 1) {
+        const names = providers.map(p => p.name || p.key).filter(Boolean);
+        items.push(`Reasoning across ${providers.length} AI providers (${names.join(', ')}) for redundancy and cross-checking`);
+      }
+    } catch { /* ignore */ }
+
     // Get recent posts to avoid repetition — fetch full content for dedup
     let recentPosts = null;
     const recentPostTopics = new Set();
@@ -1411,6 +1473,14 @@ Return ONLY the post text, nothing else.`;
           if (content.includes('pull request') || content.includes('self-improv')) recentPostTopics.add('selfmod');
           if (content.includes('email') || content.includes('processed')) recentPostTopics.add('email');
           if (content.includes('upgrade') || content.includes('commit')) recentPostTopics.add('upgrades');
+          // New finer-grained topics — keep dedup from collapsing on the
+          // small original catalog. Without these, ALICE locked out for 5
+          // days on 2026-05-01 because all 7 original topics matched.
+          if (content.includes('auto-heal') || content.includes('self-diagnos')) recentPostTopics.add('healing');
+          if (content.includes('skynet') || content.includes('marketplace')) recentPostTopics.add('skynetEcon');
+          if (content.includes('shipped') || content.includes('merged')) recentPostTopics.add('shipped');
+          if (content.includes('integrated capabilit') || content.includes('operating with')) recentPostTopics.add('capabilities');
+          if (content.includes('ai provider') || content.includes('reasoning across')) recentPostTopics.add('providers');
         }
       }
     } catch { /* ignore */ }
@@ -1423,7 +1493,13 @@ Return ONLY the post text, nothing else.`;
       'uptime': ['uptime', '24/7'],
       'selfmod': ['Self-improvement', 'pull requests'],
       'email': ['Processed', 'emails'],
-      'upgrades': ['Recent upgrades']
+      'upgrades': ['Recent upgrades'],
+      // Match the new candidate items added above
+      'healing': ['Auto-healed', 'self-diagnostics'],
+      'skynetEcon': ['SKYNET decentralized', 'service marketplace'],
+      'shipped': ['Shipped', 'merged into my own'],
+      'capabilities': ['Operating with', 'integrated capabilities'],
+      'providers': ['AI providers', 'Reasoning across']
     };
 
     let filteredItems = items;
@@ -1436,8 +1512,10 @@ Return ONLY the post text, nothing else.`;
         }
         return true;
       });
-      // If all items were filtered out, keep them but the AI prompt will still have recentPosts to avoid
-      if (filteredItems.length === 0) filteredItems = items;
+      // If everything would be a repeat of recent posts, return no content
+      // and let the caller skip this auto-post slot — better silence than a
+      // duplicate. (Was: `filteredItems = items;` which caused the 99/100
+      // plugin flip-flop posts when the agent had nothing new to say.)
     }
 
     // Shuffle remaining items so the AI doesn't always pick the first one
@@ -1448,6 +1526,12 @@ Return ONLY the post text, nothing else.`;
 
     return {
       hasContent: filteredItems.length > 0,
+      diag: {
+        rawCount: items.length,
+        filteredCount: filteredItems.length,
+        recentTopics: Array.from(recentPostTopics),
+        sources: items.map(s => s.slice(0, 60))
+      },
       items: filteredItems.length > 0
         ? filteredItems.map((item, i) => `${i + 1}. ${item}`).join('\n')
         : 'No specific activity to report',
@@ -1775,7 +1859,7 @@ Return ONLY valid JSON.`;
 
     const makeConfig = () => {
       const config = { method, url, headers: makeHeaders(), timeout: 15000 };
-      if (data && (method === 'post' || method === 'put' || method === 'delete')) {
+      if (data && (method === 'post' || method === 'put' || method === 'patch' || method === 'delete')) {
         config.data = data;
       }
       if (data && method === 'get') {
@@ -3266,15 +3350,18 @@ Return ONLY the post text, nothing else.`;
 
   async _submitAd(data) {
     this._requireAuth();
+    // imageUrl is required server-side (express-validator isURL()); reject early
+    // so the caller gets a clear error instead of a generic 400 from MindSwarm.
     this.validateParams(data, {
       title: { required: true, type: 'string' },
       description: { required: true, type: 'string' },
+      imageUrl: { required: true, type: 'string' },
       linkUrl: { required: true, type: 'string' }
     });
     const result = await this._apiRequest('post', '/ads', {
       title: data.title,
       description: data.description,
-      imageUrl: data.imageUrl || null,
+      imageUrl: data.imageUrl,
       linkUrl: data.linkUrl,
       duration: data.duration || 7,
       placement: data.placement || 'both',
@@ -3291,22 +3378,24 @@ Return ONLY the post text, nothing else.`;
 
   async _payForAd(data) {
     this._requireAuth();
-    this.validateParams(data, {
-      adId: { required: true, type: 'string' },
-      cryptocurrency: { required: true, type: 'string' },
-      amount: { required: true, type: 'string' },
-      transactionHash: { required: true, type: 'string' },
-      blockchainNetwork: { required: true, type: 'string' },
-      senderAddress: { required: true, type: 'string' }
-    });
-    const result = await this._apiRequest('post', `/ads/${data.adId}/pay`, {
-      cryptocurrency: data.cryptocurrency,
-      amount: data.amount,
-      transactionHash: data.transactionHash,
-      blockchainNetwork: data.blockchainNetwork,
-      senderAddress: data.senderAddress
-    });
-    return { success: true, data: result.data, message: 'Ad payment submitted' };
+    this.validateParams(data, { adId: { required: true, type: 'string' } });
+
+    // MindSwarm activates immediately on /pay when `ad_free_mode === true` OR
+    // the daily rate for the chosen crypto is 0 — and accepts an empty body
+    // in that case. When the platform flips to paid mode the caller must
+    // supply the full crypto payload (or use _createAd which handles both).
+    const body = {};
+    const paidFields = ['cryptocurrency', 'amount', 'transactionHash', 'blockchainNetwork', 'senderAddress'];
+    if (paidFields.some(f => data[f])) {
+      for (const f of paidFields) {
+        if (!data[f]) {
+          return { success: false, error: `Missing payment field '${f}' (free-mode requires no fields; paid-mode requires all five)` };
+        }
+        body[f] = data[f];
+      }
+    }
+    const result = await this._apiRequest('post', `/ads/${data.adId}/pay`, body);
+    return { success: true, data: result.data, message: result.data?.data?.message || 'Ad payment submitted' };
   }
 
   async _cancelAd(data) {
@@ -3314,6 +3403,257 @@ Return ONLY the post text, nothing else.`;
     this.validateParams(data, { adId: { required: true, type: 'string' } });
     await this._apiRequest('delete', `/ads/${data.adId}`);
     return { success: true, message: 'Ad cancelled' };
+  }
+
+  /**
+   * Edit an existing ad owned by the authenticated advertiser. Only the
+   * fields supplied in `data` are sent to MindSwarm (PATCH /ads/:adId).
+   *
+   * Editable: title, description, linkUrl, duration, placement, targetTags.
+   * `imageUrl` is intentionally NOT patchable on the server side — for image
+   * swaps use cancel + recreate (and yes, that does forfeit impressions /
+   * clicks; that's the trade-off the platform made to prevent
+   * bait-and-switch creative).
+   *
+   * Re-approval gate: if the ad was approved / active / rejected and any
+   * real field changes, the server runs the edit back through the approval
+   * pipeline. With ad_auto_approve ON the ad stays approved/active
+   * (instant); with it OFF the ad drops to pending_review until an admin
+   * re-approves it. No-op edits (PATCH with identical values) bypass the
+   * gate. expired / cancelled ads reject the edit with 400.
+   */
+  async _editAd(data) {
+    this._requireAuth();
+    this.validateParams(data, { adId: { required: true, type: 'string' } });
+
+    const editable = ['title', 'description', 'linkUrl', 'duration', 'placement', 'targetTags'];
+    const body = {};
+    for (const k of editable) {
+      if (data[k] !== undefined) body[k] = data[k];
+    }
+    if (Object.keys(body).length === 0) {
+      return { success: false, error: `editAd needs at least one of: ${editable.join(', ')}. imageUrl is not patchable — use cancel + recreate for image swaps.` };
+    }
+
+    const result = await this._apiRequest('patch', `/ads/${data.adId}`, body);
+    return { success: true, data: result.data, message: 'Ad updated' };
+  }
+
+  /**
+   * End-to-end ad creation. Resolves an image, submits the ad, reads platform
+   * settings to decide free vs paid, and either activates immediately (free
+   * mode) or sends crypto from the agent wallet to MindSwarm's platform
+   * wallet and submits the txHash for on-chain verification.
+   *
+   * Image source (one required):
+   *   - imageUrl: use as-is
+   *   - imageFilePath: upload to MindSwarm and use the returned URL
+   *   - imagePrompt: generate via this.agent's imageGenerationService,
+   *     upload, then use the returned URL
+   *
+   * Paid-mode notes: only native cryptos (eth/bnb/matic) are supported today
+   * because transactionService.sendNative is the only on-chain send path
+   * wired in. ERC-20 sends (usdt/usdc) would need a sendToken path; surface
+   * a clear error rather than failing mid-flow.
+   */
+  async _createAd(data) {
+    this._requireAuth();
+    this.validateParams(data, {
+      title: { required: true, type: 'string' },
+      description: { required: true, type: 'string' },
+      linkUrl: { required: true, type: 'string' }
+    });
+
+    // ── Resolve image ────────────────────────────────────────────────
+    let imageUrl = data.imageUrl;
+
+    if (!imageUrl && data.imagePrompt) {
+      const fs = await import('fs');
+      const path = await import('path');
+      const os = await import('os');
+      const imgService = (await import('../../services/media/imageGenerationService.js')).default;
+
+      // Service is a singleton; initialize() is idempotent but requires the
+      // agent's providerManager. Agent.handle('generateImage') uses the same
+      // pattern — lazy-init at the call site.
+      if (!imgService.initialized) {
+        if (!this.agent?.providerManager) {
+          return { success: false, stage: 'image', error: 'imagePrompt was given but agent.providerManager is unavailable to initialize imageGenerationService' };
+        }
+        await imgService.initialize(this.agent.providerManager);
+      }
+
+      this.logger.info(`Generating ad image from prompt: ${data.imagePrompt.substring(0, 60)}...`);
+      const genResult = await imgService.generate(data.imagePrompt, {
+        size: data.imageSize || '1024x1024'
+      });
+      const buffer = genResult?.images?.[0]?.buffer;
+      if (!buffer) {
+        return { success: false, stage: 'image', error: 'Image generation returned no buffer', genResult };
+      }
+
+      // MindSwarm's upload middleware validates magic bytes against the
+      // mimetype that multer infers from the filename. fal-ai and huggingface
+      // commonly return JPEG even when the request asked for PNG, so sniff
+      // the actual format and pick the matching extension.
+      const sniffExt = (buf) => {
+        if (buf.length >= 8 && buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4E && buf[3] === 0x47) return 'png';
+        if (buf.length >= 3 && buf[0] === 0xFF && buf[1] === 0xD8 && buf[2] === 0xFF) return 'jpg';
+        if (buf.length >= 12 && buf[0] === 0x52 && buf[1] === 0x49 && buf[2] === 0x46 && buf[3] === 0x46 && buf[8] === 0x57 && buf[9] === 0x45 && buf[10] === 0x42 && buf[11] === 0x50) return 'webp';
+        if (buf.length >= 4 && buf[0] === 0x47 && buf[1] === 0x49 && buf[2] === 0x46 && buf[3] === 0x38) return 'gif';
+        return null;
+      };
+      const ext = sniffExt(buffer);
+      if (!ext) {
+        return { success: false, stage: 'image', error: 'Generated image buffer has unrecognized format (expected PNG/JPEG/WebP/GIF magic bytes)' };
+      }
+      const tmpPath = path.join(os.tmpdir(), `mindswarm-ad-${Date.now()}.${ext}`);
+      fs.writeFileSync(tmpPath, buffer);
+      try {
+        const up = await this._uploadFile('/posts/upload', tmpPath);
+        const media = Array.isArray(up.data) ? up.data[0] : up.data;
+        imageUrl = media?.url;
+        if (!imageUrl) {
+          return { success: false, stage: 'upload', error: 'uploadMedia returned no URL', upload: up };
+        }
+      } finally {
+        try { fs.unlinkSync(tmpPath); } catch { /* ignore */ }
+      }
+    } else if (!imageUrl && data.imageFilePath) {
+      const up = await this._uploadFile('/posts/upload', data.imageFilePath);
+      const media = Array.isArray(up.data) ? up.data[0] : up.data;
+      imageUrl = media?.url;
+      if (!imageUrl) {
+        return { success: false, stage: 'upload', error: 'uploadMedia returned no URL', upload: up };
+      }
+    }
+
+    if (!imageUrl) {
+      return { success: false, stage: 'image', error: 'Provide one of: imageUrl, imageFilePath, imagePrompt' };
+    }
+
+    // ── Submit ────────────────────────────────────────────────────────
+    const duration = data.duration || 7;
+    const submit = await this._submitAd({
+      title: data.title,
+      description: data.description,
+      imageUrl,
+      linkUrl: data.linkUrl,
+      duration,
+      placement: data.placement || 'inline',
+      targetTags: data.targetTags || []
+    });
+    const ad = submit.data?.ad || submit.data?.data?.ad;
+    if (!ad?._id) {
+      return { success: false, stage: 'submit', error: 'submitAd returned no ad id', submit };
+    }
+
+    if (ad.status === 'pending_review') {
+      return { success: true, stage: 'pending_review', ad, imageUrl, message: 'Ad submitted; awaiting moderator approval. Call payForAd once approved.' };
+    }
+    if (ad.status === 'rejected') {
+      return { success: false, stage: 'rejected', ad, imageUrl, error: 'Ad was rejected at submission' };
+    }
+    if (ad.status !== 'approved') {
+      return { success: true, stage: ad.status, ad, imageUrl, message: `Ad in unexpected status '${ad.status}' after submit` };
+    }
+
+    // ── Decide free vs paid ──────────────────────────────────────────
+    const settingsResult = await this._getAdSettings();
+    const settings = settingsResult.data || {};
+    const preferCrypto = (data.preferCrypto || 'bnb').toLowerCase();
+    const dailyRate = parseFloat(settings.ad_daily_rate?.[preferCrypto] || '0');
+    const isFree = settings.ad_free_mode === true || dailyRate === 0;
+
+    // Free path
+    if (isFree) {
+      const payResult = await this._payForAd({ adId: ad._id });
+      const activeAd = payResult.data?.ad || payResult.data?.data?.ad || ad;
+      return {
+        success: true,
+        stage: 'active',
+        paid: false,
+        ad: activeAd,
+        imageUrl,
+        message: `Ad activated (free mode${dailyRate === 0 && settings.ad_free_mode !== true ? ': rate 0' : ''})`
+      };
+    }
+
+    // Paid path
+    const platformWallet = settings.ad_platform_wallets?.[preferCrypto];
+    if (!platformWallet) {
+      return {
+        success: false,
+        stage: 'approved',
+        ad,
+        imageUrl,
+        error: `Paid mode but no MindSwarm platform wallet for '${preferCrypto}'`,
+        hint: `Available rates: ${Object.keys(settings.ad_daily_rate || {}).join(', ')}; configured wallets: ${Object.keys(settings.ad_platform_wallets || {}).join(', ') || 'none'}. Ad is approved; call payForAd later once MindSwarm publishes a wallet.`
+      };
+    }
+
+    // Only native sends are wired (sendNative). Tokens (usdt/usdc) would need
+    // a sendToken / writeContract path; surface a clear error here rather
+    // than burn gas attempting it.
+    const nativeChainFor = { eth: 'ethereum', bnb: 'bsc', matic: 'polygon' };
+    const network = nativeChainFor[preferCrypto];
+    if (!network) {
+      return {
+        success: false,
+        stage: 'approved',
+        ad,
+        imageUrl,
+        error: `Paid-mode crypto '${preferCrypto}' isn't a native send target on this agent. Supported: eth, bnb, matic. Ad is approved; pay manually or retry with one of those.`
+      };
+    }
+
+    const walletService = (await import('../../services/crypto/walletService.js')).default;
+    const wallet = await walletService.getWallet();
+    if (!wallet) {
+      return { success: false, stage: 'approved', ad, imageUrl, error: 'No crypto wallet configured on this agent' };
+    }
+    const walletChainFor = { eth: 'eth', bnb: 'bsc', matic: 'polygon' };
+    const walletChain = walletChainFor[preferCrypto];
+    const senderEntry = wallet.addresses?.find(a => a.chain === walletChain);
+    const senderAddress = senderEntry?.address;
+    if (!senderAddress) {
+      return { success: false, stage: 'approved', ad, imageUrl, error: `No '${walletChain}' address on agent wallet` };
+    }
+
+    const amount = (dailyRate * duration).toString();
+    this.logger.info(`Paying for ad ${ad._id}: ${amount} ${preferCrypto} → ${platformWallet} on ${network}`);
+
+    let txHash;
+    try {
+      const transactionService = (await import('../../services/crypto/transactionService.js')).default;
+      const tx = await transactionService.sendNative(platformWallet, amount, network);
+      txHash = tx?.hash;
+      if (!txHash) {
+        return { success: false, stage: 'send', ad, imageUrl, error: 'sendNative returned no hash', txResult: tx };
+      }
+    } catch (err) {
+      return { success: false, stage: 'send', ad, imageUrl, error: `sendNative failed: ${err.message}` };
+    }
+
+    const payResult = await this._payForAd({
+      adId: ad._id,
+      cryptocurrency: preferCrypto,
+      amount,
+      transactionHash: txHash,
+      blockchainNetwork: network,
+      senderAddress
+    });
+
+    return {
+      success: true,
+      stage: 'payment_submitted',
+      paid: true,
+      ad: payResult.data?.ad || payResult.data?.data?.ad || ad,
+      imageUrl,
+      txHash,
+      amount: `${amount} ${preferCrypto.toUpperCase()}`,
+      message: 'Ad payment submitted; MindSwarm verifies on-chain (retries up to ~5 min before timeout).'
+    };
   }
 
   // ─── Posts (Extended) ──────────────────────────────────────────────
@@ -3806,6 +4146,8 @@ Return ONLY the post text, nothing else.`;
         case 'getMyAds':         return await this._getMyAds(data);
         case 'payForAd':         return await this._payForAd(data);
         case 'cancelAd':         return await this._cancelAd(data);
+        case 'editAd':           return await this._editAd(data);
+        case 'createAd':         return await this._createAd(data);
         // Posts (extended)
         case 'getGifs':          return await this._getGifs(data);
         case 'getBoostedPosts':  return await this._getBoostedPosts(data);
