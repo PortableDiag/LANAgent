@@ -2,6 +2,26 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.39] - 2026-05-10
+
+Backfill of the remaining genesis v2.25.35 work that the v2.25.37 admin/wallets sync intentionally skipped. None of these affect the gateway's wallets read path that v2.25.37 fixed — they were left out only so the urgent wallets-reachability fix could ship in isolation. With this release, public is fully caught up with genesis v2.25.35.
+
+### Fixed
+
+- **`loadAgentModel` honors `AGENT_NAME`** (`src/core/agent.js:295-329`). Previous code hardcoded the query to `name:"LANAgent"` regardless of `process.env.AGENT_NAME`, while the rest of the codebase (providerManager, web UI, scheduler, bugFixing, selfHealing, git plugin, mindswarm plugin) all wrote to `AGENT_NAME`. On multi-instance installs this produced two `agents` documents per agent — one by the instance name, one by the framework default `"LANAgent"` — continually written by different code paths. Anything reading `this.agentModel` got the stale record while the web UI / providerManager wrote to the correct one (split-brain on `aiProviders.configurations`, `mediaGeneration.image.provider`, `erc8004.status`, `serviceConfigs.*.lastCheckTime`, etc.). Fix uses `process.env.AGENT_NAME || "LANAgent"` consistently. Dormant for default installs where `AGENT_NAME` is unset or equals `"LANAgent"`; bites every multi-instance setup.
+
+### Added
+
+- **`ExternalPayment` schema fields**: `currency`, `creditsIssued`, `bonusCredits` (default 0), `promotion` (default null), `usdValue`. All optional / backwards-compatible. Populated for credit-purchase records by `credits.js` so the payment row alone tells the full audit story without joining to the balance. Auto-replenishment payments had been logging `amount=255940` with currency / credits / usdValue effectively `undefined` to anyone querying by those names.
+- **`credits.js` populates the new fields** on every credit-purchase record (3-line addition to the existing `new ExternalPayment({…})` call).
+
+### Files changed
+
+- `src/core/agent.js` (loadAgentModel honors AGENT_NAME)
+- `src/models/ExternalPayment.js` (5 optional schema fields)
+- `src/api/external/routes/credits.js` (populate currency / creditsIssued / usdValue)
+- `package.json` (version bump)
+
 ## [2.25.38] - 2026-05-10
 
 Sync from genesis: MindSwarm ad automation. The plugin already had `submitAd` / `getAdSettings` / `payForAd` etc. wired to the MindSwarm REST API, but: (a) `submitAd` didn't enforce `imageUrl` (server requires it, returned a generic 400); (b) `payForAd` insisted on all six crypto fields even when MindSwarm is in `ad_free_mode` (server accepts empty body there); (c) no orchestration method tied submit → settings-check → pay together, so creating an ad meant six manual steps that the agent couldn't reliably chain.

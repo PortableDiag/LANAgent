@@ -47,7 +47,14 @@ const externalPaymentSchema = new mongoose.Schema({
   consumedAt: {
     type: Date,
     default: null
-  }
+  },
+  // Credit-purchase records (serviceId === 'credit-purchase') populate these so
+  // the payment row alone tells the full story without joining to the balance.
+  currency: { type: String, default: null },
+  creditsIssued: { type: Number, default: null },
+  bonusCredits: { type: Number, default: 0 },
+  promotion: { type: String, default: null },
+  usdValue: { type: Number, default: null }
 }, {
   timestamps: true
 });

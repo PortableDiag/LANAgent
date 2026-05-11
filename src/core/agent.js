@@ -294,15 +294,18 @@ export class Agent extends EventEmitter {
   
   async loadAgentModel() {
     try {
-      // Always try to load the LANAgent record first, regardless of AGENT_NAME
-      this.agentModel = await AgentModel.findOne({ 
-        name: "LANAgent" 
-      });
-      
+      // Per-instance record. AGENT_NAME identifies this instance (ALICE, BETA,
+      // etc); falling back to the framework default keeps single-instance
+      // installs working. Earlier code hardcoded "LANAgent" here while the
+      // rest of the codebase wrote to AGENT_NAME — that produced two records
+      // per instance and split-brain reads of aiProviders/mediaGeneration/
+      // erc8004/serviceConfigs.
+      const agentName = process.env.AGENT_NAME || "LANAgent";
+      this.agentModel = await AgentModel.findOne({ name: agentName });
+
       if (!this.agentModel) {
-        // Create new agent model with LANAgent name for consistency
         this.agentModel = new AgentModel({
-          name: "LANAgent",
+          name: agentName,
           personality: "I am a helpful, proactive, technical, and friendly AI assistant ready to manage your home server!",
           security: {
             authorizedUsers: [{

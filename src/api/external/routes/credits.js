@@ -368,7 +368,10 @@ router.post('/purchase', creditAuth(true), async (req, res) => {
       confirmations,
       verifiedAt: new Date(),
       consumed: true,
-      consumedAt: new Date()
+      consumedAt: new Date(),
+      currency: normalizedCurrency,
+      creditsIssued: credits,
+      usdValue
     });
 
     // Add credits to account

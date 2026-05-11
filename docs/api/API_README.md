@@ -393,6 +393,14 @@ The gateway calls `GET /api/external/catalog` on your agent and reads the `servi
 
 ## Recent Updates (May 10, 2026)
 
+### v2.25.39 — Backfill of genesis v2.25.35 remainder (loadAgentModel + ExternalPayment audit fields)
+
+Completes the partial v2.25.35 sync that v2.25.37 deliberately scoped down to just the admin/wallets endpoint. Three small changes, all backwards-compatible:
+
+- **`loadAgentModel` honors `AGENT_NAME`** (`src/core/agent.js:295-329`). Previously hardcoded to `name:"LANAgent"`, producing two `agents` documents on any install where `AGENT_NAME` was set to something else. Dormant for default installs; bites every multi-instance setup. See the genesis v2.25.35 changelog entry for the full diagnostic.
+- **`ExternalPayment` schema additions**: `currency`, `creditsIssued`, `bonusCredits` (default 0), `promotion` (default null), `usdValue`. All optional; existing records keep working as-is.
+- **`credits.js` populates the new fields** on every credit-purchase record so the row alone is enough to reconstruct the purchase.
+
 ### v2.25.38 — Sync from genesis: MindSwarm ad automation (`createAd` + `editAd`)
 
 Brings end-to-end advertisement capability to the public `mindswarm` plugin. Two existing methods got bug fixes plus two new orchestration commands landed; see "MindSwarm ad automation" in the **Recent Updates (May 10, 2026)** notes of the genesis fork for the full narrative. Summary:
