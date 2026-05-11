@@ -2,6 +2,26 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.40] - 2026-05-11
+
+Sync from genesis v2.25.40 — three merges from the auto-improve PR loop. The other 17 PRs in the same round were either closed-with-rationale (15) or salvaged manually in genesis-only files (1: the `/api/external/social/supported-sites` endpoint, which doesn't apply to public because `socialRoutes` isn't mounted on public's `externalGateway.js`). The `ytdlpCookieJar.js` improvement from genesis #2151 also stays genesis-only since the cookie-jar admin surface isn't synced to public.
+
+### Added
+
+- **`MqttDevice.notifyStatusChange(status, details)`** observability hook called fire-and-forget from `addStatusHistory()` and `transitionLifecycleState()`. Currently a structured `logger.info` wrapped in `withErrorHandler` for Sentry capture; placeholder shape for future notification integration. Useful for tracking device state churn from a single chokepoint.
+
+### Fixed
+
+- **`SSHConnection.startSession()`** guards against double-starting a session while one is already active (`endTime: null`). Returns early with a warn log instead of pushing a second concurrent entry into `sessionLogs`. Defensive against double-trigger races.
+- **`fsRequestGet()`** in `flareSolverr.js` now passes caller-provided headers through to the FlareSolverr request, falling back to the existing `Content-Type: application/json` default. Lets callers forward `User-Agent` / `Cookie` for sites that need them, without losing the JSON content-type. No behavior change for existing callers (no callers currently pass `options.headers`).
+
+### Files changed
+
+- `src/models/MqttDevice.js` (notifyStatusChange hook)
+- `src/models/SSHConnection.js` (double-start guard)
+- `src/utils/flareSolverr.js` (caller-provided headers passthrough)
+- `package.json` (version bump)
+
 ## [2.25.39] - 2026-05-10
 
 Backfill of the remaining genesis v2.25.35 work that the v2.25.37 admin/wallets sync intentionally skipped. None of these affect the gateway's wallets read path that v2.25.37 fixed — they were left out only so the urgent wallets-reachability fix could ship in isolation. With this release, public is fully caught up with genesis v2.25.35.

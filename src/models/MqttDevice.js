@@ -1,4 +1,7 @@
 import mongoose from 'mongoose';
+import { logger } from '../utils/logger.js';
+import { safeJsonStringify } from '../utils/jsonUtils.js';
+import { withErrorHandler } from '../utils/errorHandlers.js';
 
 /**
  * MQTT Device Registry
@@ -159,6 +162,7 @@ mqttDeviceSchema.virtual('stateTopic').get(function() {
 mqttDeviceSchema.methods.addStatusHistory = async function(status, details = {}) {
   this.statusHistory.push({ status, details });
   await this.save();
+  this.notifyStatusChange(status, details);
 };
 
 /**
@@ -181,6 +185,19 @@ mqttDeviceSchema.methods.transitionLifecycleState = async function(newState) {
   this.lifecycleState = newState;
   this.statusHistory.push({ status: `Lifecycle: ${newState}`, details: {} });
   await this.save();
+  this.notifyStatusChange(`Lifecycle: ${newState}`, {});
 };
+
+/**
+ * Notify about a device status change
+ * @param {String} status - The status that changed
+ * @param {Object} details - Additional details about the change
+ */
+mqttDeviceSchema.methods.notifyStatusChange = withErrorHandler(async function(status, details) {
+  const message = `Device ${this.deviceId} status changed: ${status} - ${safeJsonStringify(details)}`;
+  logger.info(message);
+  // Here you would integrate with an actual notification service
+  // For example, sending an email or a message to a messaging platform
+});
 
 export default mongoose.model('MqttDevice', mqttDeviceSchema);

@@ -68,6 +68,13 @@ const sessionLogsCache = new NodeCache({ stdTTL: 300, checkperiod: 60 });
  * Start a new session log entry with timeout management
  */
 sshConnectionSchema.methods.startSession = async function(maxDuration) {
+  // Check for active sessions
+  const activeSession = this.sessionLogs.find(log => !log.endTime);
+  if (activeSession) {
+    logger.warn(`Cannot start a new session for connection ${this.connectionId} as an active session already exists.`);
+    return this;
+  }
+
   this.sessionLogs.push({
     startTime: new Date(),
     endTime: null,

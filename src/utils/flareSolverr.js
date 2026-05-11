@@ -56,11 +56,14 @@ export async function fsRequestGet(url, options = {}) {
   if (options.cookies) body.cookies = options.cookies;
   if (options.session) body.session = options.session;
 
+  const defaultHeaders = { 'Content-Type': 'application/json' };
+  const headers = { ...defaultHeaders, ...options.headers };
+
   let res;
   try {
     res = await axios.post(FLARESOLVERR_URL, body, {
       timeout: maxTimeout + 15000,
-      headers: { 'Content-Type': 'application/json' }
+      headers
     });
   } catch (err) {
     if (err.code === 'ECONNREFUSED' || err.code === 'ECONNABORTED') {
@@ -80,4 +83,48 @@ export async function fsRequestGet(url, options = {}) {
   }
   logger.info(`[FlareSolverr] ${solution.status} ${url} (${(solution.response || '').length} bytes, ${(solution.cookies || []).length} cookies)`);
   return solution;
+}
+
+/**
+ * Create or reuse a long-lived FlareSolverr browser session. Once a session
+ * has solved a Cloudflare challenge, it keeps the resulting cf_clearance
+ * cookie for subsequent requests — avoiding re-challenges that escalate in
+ * difficulty (and eventually time out) when the same IP solves repeatedly.
+ *
+ * Each session is keyed by an arbitrary `key` (e.g. host name). Once
+ * created, the session ID is cached in-memory for the agent's lifetime.
+ * Sessions auto-expire on the FlareSolverr side after ~10 min of inactivity;
+ * we recreate transparently on cache miss.
+ */
+const sessionCache = new Map(); // key → sessionId
+
+export async function fsEnsureSession(key) {
+  if (sessionCache.has(key)) return sessionCache.get(key);
+  try {
+    const res = await axios.post(
+      FLARESOLVERR_URL,
+      { cmd: 'sessions.create' },
+      { timeout: 30000, headers: { 'Content-Type': 'application/json' } }
+    );
+    const sid = res.data?.session;
+    if (!sid) throw new Error(`FlareSolverr did not return a session: ${JSON.stringify(res.data)}`);
+    sessionCache.set(key, sid);
+    logger.info(`[FlareSolverr] session created for ${key}: ${sid}`);
+    return sid;
+  } catch (err) {
+    throw new Error(`FlareSolverr session create failed: ${err.message}`);
+  }
+}
+
+export async function fsDestroySession(key) {
+  const sid = sessionCache.get(key);
+  if (!sid) return;
+  sessionCache.delete(key);
+  try {
+    await axios.post(
+      FLARESOLVERR_URL,
+      { cmd: 'sessions.destroy', session: sid },
+      { timeout: 5000, headers: { 'Content-Type': 'application/json' } }
+    );
+  } catch {}
 }
