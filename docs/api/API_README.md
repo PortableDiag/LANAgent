@@ -1154,6 +1154,99 @@ anime, chainlink, huggingface, lyrics, nasa, news, websearch, scraper, ytdlp, ff
 
 **Temporarily unavailable:** Weatherstack (needs API key). HuggingFace text generation requires HF Pro (free tier no longer supports it).
 
+### Challenge Questions API — Reference
+
+Bot-filtering challenge questions for registration / verification flows. 2 credits per call. Two flows: single-shot (server returns answers, you verify) or two-step (server holds answers, you submit for verification).
+
+**Example — Single-shot (`generateWithAnswers`):**
+```bash
+curl -X POST https://api.lanagent.net/service/challengeQuestions/generateWithAnswers \
+  -H 'X-API-Key: gsk_your_key' \
+  -H 'Content-Type: application/json' \
+  -d '{"count": 3}'
+# → { "success": true,
+#     "data": { "count": 3, "passThreshold": 0.7,
+#               "questions": [ { "id":1, "question":"What is twelve plus seven?", "type":"arithmetic",
+#                                "answer":"19", "acceptableAnswers":["19"] }, ... ] },
+#     "creditsCharged": 2, "creditsRemaining": 498 }
+```
+
+**Example — Two-step (`generate` → `verify`):**
+```bash
+# 1) Get questions + token; answers held server-side
+curl -X POST https://api.lanagent.net/service/challengeQuestions/generate \
+  -H 'X-API-Key: gsk_your_key' -H 'Content-Type: application/json' \
+  -d '{"count": 3}'
+# → { "success": true,
+#     "data": { "token":"chq_abc123…", "expiresIn":600, "count":3,
+#               "questions":[ { "id":1, "question":"…", "type":"arithmetic" }, ... ] },
+#     "creditsCharged": 2 }
+
+# 2) Submit answers (within 10 min, ≤3 attempts per token)
+curl -X POST https://api.lanagent.net/service/challengeQuestions/verify \
+  -H 'X-API-Key: gsk_your_key' -H 'Content-Type: application/json' \
+  -d '{"token":"chq_abc123…","answers":[{"id":1,"answer":"19"},{"id":2,"answer":"red"},{"id":3,"answer":"5"}]}'
+# → { "success": true,
+#     "data": { "passed":true, "score":3, "total":3,
+#               "receipt":"cvr_xyz789…", "results":[{ "id":1, "correct":true }, ...] },
+#     "creditsCharged": 2 }
+```
+
+**Reference table:**
+
+| Property | Value |
+|---|---|
+| Credit cost | 2 credits per call (all actions: `generate`, `generateWithAnswers`, `verify`, `types`, `trackPerformance`) |
+| Question count | 1–20 per call (default 3); clamped server-side |
+| Token format | `chq_` + 48 hex chars (24 random bytes) |
+| **Token TTL** | **600 seconds (10 minutes)** from `generate`; also returned as `data.expiresIn` |
+| Max verify attempts per token | **3** — token is deleted on success or after the 3rd wrong submission, after which the token returns `{ success:false, error:"Max verification attempts exceeded" }` |
+| Pass threshold | 70% (`Math.ceil(total * 0.7)` correct answers) |
+| Receipt | `cvr_` + 48 hex chars, present only when `passed: true` — can be persisted by your app as proof-of-pass |
+| Question types | `arithmetic`, `sequence`, `letter-count`, `odd-one-out`, `reverse`, `logic`, `geography`, `knowledge` (see `/service/challengeQuestions/types`) |
+| Answer matching | Case-insensitive, trimmed; each question has an `acceptableAnswers` list (e.g. "12" or "all of them" both pass for "how many months have 28 days") |
+| **Wrong-answer billing** | **A `verify` call that returns `passed:false` is billable** — the service ran successfully and returned a real answer (`success: true` at the protocol level). Only `success:false` outcomes auto-refund (see refund table below). |
+
+**Failure modes on `verify`** — all return `success: false` so the credit is auto-refunded:
+
+| Condition | `error` |
+|---|---|
+| Missing `token` or `answers[]` | `"token and answers[] are required"` |
+| Token unknown or expired | `"Invalid or expired challenge token"` |
+| 4th submission with same token | `"Max verification attempts exceeded"` (token is deleted) |
+
+### Paid API Conventions — Billing, Refunds, Errors, Rate Limits
+
+These apply to all `/service/<plugin>/<action>` calls and dedicated paid routes on `api.lanagent.net`.
+
+**Authentication.** `X-API-Key: gsk_…` (preferred) or `Authorization: Bearer <jwt>`. Missing/invalid auth returns `401 { success:false, error:"Authentication required. Use X-API-Key or Authorization: Bearer <jwt>" }`.
+
+**Credit cost.** Fixed per service (1 cr ≈ $0.01 USD). Live cost map at `GET /service/catalog`. Credits are debited before the agent runs; success responses include `creditsCharged` and `creditsRemaining`.
+
+**Refund rules** — what counts as refund-eligible failure vs. billable answer:
+
+| Outcome | HTTP | Refunded? | Body shape |
+|---|---|---|---|
+| Successful response (`success: true`) | 200 | No | `{ success:true, …, creditsCharged, creditsRemaining }` |
+| Agent returned `success: false` (validation, expired token, etc.) | 500 | **Yes** | `{ …agent body, credited:true, creditsRefunded, creditsRemaining }` |
+| Agent unreachable / threw mid-request | 502 | **Yes** | `{ success:false, error, targetError:true, credited:true, creditsRefunded, creditsRemaining }` |
+| No agents online for service | 503 | No (not debited) | `{ success:false, error:"No agents available for <service>" }` |
+| Gateway out of credits on its agents | 503 | No (not debited) | `{ success:false, error:"Gateway has no credits on available agents. Please try again later." }` |
+| **Caller out of credits** | **402** | **No (not debited)** | `{ success:false, error:"Insufficient credits", required:<n>, balance:<n> }` |
+| Auth missing/invalid | 401 | No | `{ success:false, error:"Authentication required. Use X-API-Key or Authorization: Bearer <jwt>" }` |
+
+A `success:true` response with a "negative" application-level result — `passed:false` on challenge verify, a honeypot flag on token audit, an empty wallet-profile, no-feed-found on a Chainlink lookup — is **billable**. The service ran and produced a real answer. Auto-refunds fire only on infrastructure or service-availability failures, not on factual results the caller didn't want.
+
+*Exception:* a few plugins explicitly auto-refund successful responses produced via a fallback path (e.g. Chainlink price falling through to CoinGecko returns `creditsCharged:0, creditsRefunded:1`). These are documented in their per-plugin example. The default rule is: `success:true` ⇒ billed.
+
+**Detecting "out of credits" client-side** — match HTTP `402` with `error:"Insufficient credits"`. The `error` string is the stable identifier; `balance` is current balance, `required` is what the call would have cost. (Note: this is **402**, not 503 — 503 means the gateway can't serve the call at all.)
+
+**Rate limits.** No per-API-key rate limit on paid endpoints — throughput is bounded only by your credit balance. The only IP-based rate limits on the gateway are on portal/admin auth pages (`/portal/signup`, `/portal/login`, `/portal/forgot-password`, `/admin/login`): **10 attempts per 15-minute window**, returning `429` with `{ success:false, error:"Too many attempts. Try again in 15 minutes." }`. IPv6 clients are bucketed by /64 prefix.
+
+**Retries.** Endpoints are not idempotent — a retry after a `200` will re-bill. Safe to retry on `502/503` and network errors (those were either refunded or never debited). On `402`, top up credits before retrying.
+
+**Timeouts.** Gateway default is 60s. Per-route overrides where they apply: image generation 120s, YouTube/social download 120–180s, media transcode 300s.
+
 ### Portal Management Endpoints
 
 | Method | Path | Auth | Description |
