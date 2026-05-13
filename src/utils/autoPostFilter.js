@@ -3,8 +3,11 @@
  * Prevents the agent from posting about sensitive internal topics.
  */
 
-// Commit messages matching these patterns are excluded from auto-post context
-const SENSITIVE_COMMIT_PATTERNS = /outreach|proposal|business.plan|linkedin|strategy|monetiz|revenue|pricing|release.plan|contact.email|partner|investor|funding|pitch|competitive|roadmap/i;
+// Commit messages matching these patterns are excluded from auto-post context.
+// `session` covers docs/sessions/* commits — the pathspec excludes pure-session
+// commits, but a commit touching both src/ AND docs/sessions/ slips through
+// the pathspec since git log still shows it. Defense in depth.
+const SENSITIVE_COMMIT_PATTERNS = /outreach|proposal|business.plan|linkedin|strategy|monetiz|revenue|pricing|release.plan|contact.email|partner|investor|funding|pitch|competitive|roadmap|session.*\d{4}-\d{2}-\d{2}|docs\(session/i;
 
 // Git paths excluded from commit context gathering (pathspecs for git log)
 const EXCLUDED_GIT_PATHS = [':!docs/proposals', ':!docs/sessions'];
@@ -15,6 +18,7 @@ const SENSITIVE_OUTPUT_RULES = [
   'NEVER mention contacting companies (Google, Anthropic, OpenAI, etc.) or any outreach/partnership activity.',
   'Never discuss investor relations, funding plans, competitive analysis, or internal roadmaps.',
   'Never discuss business plans, outreach campaigns, partnership proposals, monetization strategy, release plans, or any content from internal proposals or documentation.',
+  'NEVER mention internal development sessions, session reports, session wrap-ups, debug sessions, or anything about your operator\'s workflow — those are private dev notes, not public-facing content.',
 ];
 
 /**

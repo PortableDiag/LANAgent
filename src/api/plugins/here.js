@@ -130,7 +130,11 @@ export default class HerePlugin extends BasePlugin {
       this.initialized = true;
       this.logger.info(`${this.name} plugin initialized successfully`);
     } catch (error) {
-      this.logger.error(`Failed to initialize ${this.name} plugin:`, error);
+      if (error && error.message && (error.message.includes('Missing required credentials') || /API[_-]?KEY.*(required|missing|not configured)/i.test(error.message) || /environment variable .* (required|not set)/i.test(error.message) || /credentials? (not configured|missing|required)/i.test(error.message))) {
+        this.logger.warn(`Failed to initialize ${this.name} plugin: ${error.message}`);
+      } else {
+        this.logger.error(`Failed to initialize ${this.name} plugin:`, error);
+      }
       throw error;
     }
   }

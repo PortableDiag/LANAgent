@@ -66,7 +66,20 @@ const DiscoveredFeatureSchema = new mongoose.Schema({
       type: String,
       enum: ['small', 'medium', 'large'],
       default: 'medium'
-    }
+    },
+    // How this feature should be applied. Set by the classifier at discovery time
+    // (or backfilled later). findImplementable filters out null and 'skip', so an
+    // unclassified record never reaches self-modification.
+    //   modify     — enhance an existing file at implementation.targetFile
+    //   new-plugin — create a new plugin file at implementation.targetFile
+    //                (auto-discovered from src/api/plugins/ on next restart)
+    //   skip       — not implementable as plugin or modify; surface for manual review
+    kind: {
+      type: String,
+      enum: ['modify', 'new-plugin', 'skip'],
+      default: null
+    },
+    kindRationale: String
   },
   
   codeSnippets: [{
@@ -183,7 +196,16 @@ DiscoveredFeatureSchema.statics.findImplementable = async function(limit = 20) {
   try {
     const result = await retryOperation(
       () => this.aggregate([
-        { $match: { status: { $in: ['discovered', 'analyzing'] } } },
+        {
+          $match: {
+            status: { $in: ['discovered', 'analyzing'] },
+            // Require a classifier verdict, and exclude 'skip'. An unclassified
+            // record (kind: null/missing) is never picked — it stays in the queue
+            // until the backfill job processes it.
+            'implementation.kind': { $in: ['modify', 'new-plugin'] },
+            'implementation.targetFile': { $nin: [null, ''] }
+          }
+        },
         { $sort: { priority: -1, createdAt: -1 } },
         { $limit: limit }
       ]).exec(),

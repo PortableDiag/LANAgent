@@ -1,6 +1,24 @@
 #!/bin/bash
 # LANAgent Partial Deployment Script
 # Deploy specific files or directories to production
+#
+# Safety: this script must FAIL LOUDLY if the deploy doesn't fully land.
+# History: 2026-05-12, multiple deploys silently no-op'd when caller piped
+# the output through `head -N`. The decorated banner prints in the first
+# 5 lines so head closed the pipe before the actual scp/extract steps.
+# The remote tar-extract had no return-code check, so the script then
+# happily continued to print "deployment completed!" at the end.
+#
+# Hardening:
+#   1. set -o pipefail — broken pipes inside our own pipelines fail loudly.
+#      (We don't `set -e` because the existing glob-expansion via
+#      `ls $pattern 2>/dev/null` is allowed to return non-zero on no-match.)
+#   2. The critical remote tar-extract step now checks its return code.
+#   3. Post-deploy md5 verification — every deployed file is hashed locally
+#      and on prod, and mismatches cause a non-zero exit with a clear error.
+#      This is the safety net: even if some other step gets killed by a
+#      broken pipe, the md5 check turns a silent no-op into a loud failure.
+set -o pipefail
 
 # Get script directory and source configuration
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -221,10 +239,47 @@ fi
 
 # Extract on production
 echo -e "${BLUE}→${NC} Extracting files on production..."
-remote_exec "cd $PRODUCTION_PATH && tar -xzf $ARCHIVE_NAME && rm -f $ARCHIVE_NAME" "Extracting files"
+if ! remote_exec "cd $PRODUCTION_PATH && tar -xzf $ARCHIVE_NAME && rm -f $ARCHIVE_NAME" "Extracting files"; then
+    echo -e "${RED}✗ Tar extraction on production failed. Aborting.${NC}" >&2
+    rm -f "$ARCHIVE_PATH"
+    exit 1
+fi
 
 # Clean up local archive
 rm -f "$ARCHIVE_PATH"
+
+# Verify the deployed files actually match local. Without this check, an
+# SIGPIPE or broken ssh during extraction can leave prod stale while the
+# script still reports success. Build a list of regular files (skip dirs)
+# and compare md5s on both sides.
+echo -e "${BLUE}→${NC} Verifying deployed file hashes..."
+HASH_FILES=()
+for file in "${VALID_FILES[@]}"; do
+    if [ -f "$file" ]; then
+        HASH_FILES+=("$file")
+    elif [ -d "$file" ]; then
+        # For directories: hash every regular file inside (depth-first)
+        while IFS= read -r f; do
+            HASH_FILES+=("$f")
+        done < <(find "$file" -type f)
+    fi
+done
+
+if [ ${#HASH_FILES[@]} -gt 0 ]; then
+    # Local hashes — md5sum prints "<hash>  <relpath>"
+    LOCAL_HASHES=$(md5sum "${HASH_FILES[@]}" | sort)
+    # Remote hashes — same file list, cd'd into $PRODUCTION_PATH so paths align
+    REMOTE_HASHES=$(sshpass -p "$PRODUCTION_PASS" ssh -o StrictHostKeyChecking=no "$PRODUCTION_USER@$PRODUCTION_SERVER" "cd $PRODUCTION_PATH && md5sum $(printf '%q ' "${HASH_FILES[@]}") 2>/dev/null" | sort)
+
+    if [ "$LOCAL_HASHES" = "$REMOTE_HASHES" ]; then
+        echo -e "${GREEN}✓${NC} All ${#HASH_FILES[@]} files verified (md5 match)"
+    else
+        echo -e "${RED}✗ MD5 MISMATCH — deployment did not land cleanly${NC}" >&2
+        echo -e "${RED}  Local vs remote diff:${NC}" >&2
+        diff <(echo "$LOCAL_HASHES") <(echo "$REMOTE_HASHES") >&2 || true
+        exit 1
+    fi
+fi
 
 # Check if package.json was updated
 NEEDS_NPM=false

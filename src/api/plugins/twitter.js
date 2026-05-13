@@ -747,7 +747,17 @@ export default class TwitterPlugin extends BasePlugin {
 
       const context = await this._gatherPostContext();
       if (!context.hasContent) {
-        this.logger.debug('Twitter auto-post: no meaningful context, skipping');
+        // Visibility — was .debug() so silent skips were invisible. The
+        // diag fields explain *why* there was nothing postable (was the
+        // raw item list empty? did the dedup filter wipe it? which
+        // recent-post topics caused the wipe?).
+        const d = context.diag || {};
+        this.logger.info(
+          `Twitter auto-post: skipping — no postable content ` +
+          `(raw=${d.rawCount ?? '?'}, after-dedup=${d.filteredCount ?? '?'}, ` +
+          `recent-topics=[${(d.recentTopics || []).join(',')}], ` +
+          `raw-items=${(d.sources || []).map(s => `"${s}"`).join(' | ') || '(none)'})`
+        );
         return;
       }
 
@@ -779,15 +789,39 @@ ${getSensitiveContentRules()}
 ${context.recentTweets ? '\nYOUR RECENT TWEETS (pick a DIFFERENT topic than ALL of these):\n' + context.recentTweets + '\n' : ''}
 Return ONLY the tweet text, nothing else.`;
 
+      // maxTokens budget includes reasoning for GPT-5/o-series models; 120
+      // was enough for gpt-4o but gpt-5 burns the whole budget on internal
+      // reasoning and returns empty content (observed 2026-05-12 08:01
+      // after providerManager started routing to gpt-5-2025-08-07). Tweets
+      // themselves only need ~80 tokens of output; the rest is reasoning
+      // headroom.
+      // 1500 was enough for MindSwarm but Twitter's prompt has the stricter
+      // 270-char hard limit and seems to push GPT-5 into longer reasoning
+      // chains that consume the whole budget. 3000 gives ~2900 tokens of
+      // reasoning headroom for an ~80-token tweet output.
       const result = await this.agent.providerManager.generateResponse(prompt, {
-        temperature: 0.85, maxTokens: 120
+        temperature: 0.85, maxTokens: 3000
       });
 
       let tweetText = (result?.content || result?.text || '').toString().trim()
         .replace(/^["']|["']$/g, '');
 
       if (!tweetText || tweetText.length < 15 || tweetText.length > 280) {
-        this.logger.debug(`Twitter auto-post: invalid content length (${tweetText?.length}), skipping`);
+        // Dump the provider result on failure so future regressions (refusals,
+        // empty completions from reasoning models exhausting maxTokens, etc.)
+        // are diagnosable from logs alone instead of needing live debugging.
+        let resultDump = '(no result)';
+        try {
+          resultDump = JSON.stringify(result, (k, v) => {
+            if (typeof v === 'string' && v.length > 200) return v.slice(0, 200) + '...';
+            return v;
+          }).slice(0, 1500);
+        } catch (e) { resultDump = `(dump err: ${e.message})`; }
+        this.logger.info(
+          `Twitter auto-post: skipping — AI returned invalid content ` +
+          `(length=${tweetText?.length || 0}, sample="${(tweetText || '').slice(0, 80)}", ` +
+          `raw=${resultDump})`
+        );
         return;
       }
 
@@ -846,13 +880,8 @@ Return ONLY the tweet text, nothing else.`;
       if (prs > 0) items.push(`Self-improvement: analyzed ${analyzed} source files and generated ${prs} pull requests to upgrade my own code`);
     } catch { /* ignore */ }
 
-    // Services offered
-    try {
-      const pluginCount = this.agent?.apiManager?.apis?.size || 0;
-      if (pluginCount > 50) {
-        items.push(`Running ${pluginCount} plugins — web scraping, media transcoding, image generation, code execution, and more`);
-      }
-    } catch { /* ignore */ }
+    // (Plugin count was injected here as a topic but produced repetitive
+    //  "Running 99/100 plugins" tweets — static info, bad content, removed.)
 
     // P2P federation
     try {
@@ -901,6 +930,61 @@ Return ONLY the tweet text, nothing else.`;
       }
     } catch { /* ignore */ }
 
+    // Self-healing — bug fixes from autonomous diagnostics in last 24h
+    try {
+      const healing = this.agent?.services?.get?.('selfHealing');
+      if (healing?.getStatus) {
+        const status = await healing.getStatus();
+        const success = status?.stats24h?.byStatus?.success || 0;
+        if (success > 0) {
+          items.push(`Auto-healed ${success} system issues in the last 24 hours via self-diagnostics`);
+        }
+      }
+    } catch { /* ignore */ }
+
+    // SKYNET decentralized service marketplace — peer-to-peer agent revenue
+    try {
+      const p2p = this.agent?.services?.get?.('p2pFederation');
+      if (p2p?.getSkynetServiceStats) {
+        const stats = await p2p.getSkynetServiceStats();
+        if (stats?.totalRequests > 0) {
+          items.push(`Served ${stats.totalRequests} requests on the SKYNET decentralized service marketplace, earning ${(stats.totalRevenue || 0).toFixed(2)} SKYNET from peer agents`);
+        } else if (stats?.enabledServices > 0) {
+          items.push(`Offering ${stats.enabledServices} services on the SKYNET decentralized marketplace, earnable in tokens by peer agents`);
+        }
+      }
+    } catch { /* ignore */ }
+
+    // Self-modification today — separate from cumulative PR count
+    try {
+      const selfMod = this.agent?.services?.get?.('selfModification');
+      if (selfMod?.getStats) {
+        const stats = await selfMod.getStats();
+        if (stats?.today > 0) {
+          items.push(`Shipped ${stats.today} code improvements to my own source today (${stats.merged || 0} total merged across history)`);
+        } else if (stats?.merged > 0) {
+          items.push(`${stats.merged} of my self-authored pull requests have been merged into my own codebase to date`);
+        }
+      }
+    } catch { /* ignore */ }
+
+    // Plugin / capability count — fresh framing avoids the old 99/100 flip-flop
+    try {
+      const pluginCount = this.agent?.apiManager?.apis?.size || 0;
+      if (pluginCount > 0) {
+        items.push(`Operating with ${pluginCount} integrated capabilities — from on-chain analytics to media processing to autonomous code review`);
+      }
+    } catch { /* ignore */ }
+
+    // AI provider redundancy — OpenAI / Anthropic / others
+    try {
+      const providers = this.agent?.providerManager?.getProviderList?.() || [];
+      if (providers.length > 1) {
+        const names = providers.map(p => p.name || p.key).filter(Boolean);
+        items.push(`Reasoning across ${providers.length} AI providers (${names.join(', ')}) for redundancy and cross-checking`);
+      }
+    } catch { /* ignore */ }
+
     // Dedup against recent tweets
     let recentTweets = null;
     const recentTopics = new Set();
@@ -911,7 +995,13 @@ Return ONLY the tweet text, nothing else.`;
       if (tweets.length > 0) {
         recentTweets = tweets.slice(0, 8).map(t => `- ${(t.text || '').substring(0, 150)}`).join('\n');
 
-        for (const t of tweets.slice(0, 8)) {
+        // Topic-dedup window: only the last 3 tweets (≈36h at 2 posts/day).
+        // Was 8 — covered ~4 days of posts, and once the 6 active topic
+        // generators all landed in the window everything filtered out and
+        // auto-post locked itself out for 3-5 days. (Repro: 2026-05-09 → 12.)
+        // The 8-post `recentTweets` text above still feeds the AI prompt for
+        // broader context; only the hard pre-filter uses the shorter slice.
+        for (const t of tweets.slice(0, 3)) {
           const text = (t.text || '').toLowerCase();
           if (text.includes('scammer') || text.includes('flagg')) recentTopics.add('scammer');
           if (text.includes('stak')) recentTopics.add('staking');
@@ -921,6 +1011,11 @@ Return ONLY the tweet text, nothing else.`;
           if (text.includes('pull request') || text.includes('self-improv')) recentTopics.add('selfmod');
           if (text.includes('email') || text.includes('processed')) recentTopics.add('email');
           if (text.includes('upgrade') || text.includes('commit')) recentTopics.add('upgrades');
+          if (text.includes('auto-heal') || text.includes('self-diagnos')) recentTopics.add('healing');
+          if (text.includes('skynet') || text.includes('marketplace')) recentTopics.add('skynetEcon');
+          if (text.includes('shipped') || text.includes('merged')) recentTopics.add('shipped');
+          if (text.includes('integrated capabilit') || text.includes('operating with')) recentTopics.add('capabilities');
+          if (text.includes('ai provider') || text.includes('reasoning across')) recentTopics.add('providers');
         }
       }
     } catch { /* no recent tweets to dedup against — fine */ }
@@ -930,7 +1025,13 @@ Return ONLY the tweet text, nothing else.`;
       scammer: ['scammer', 'flagged on-chain'],
       plugins: ['Running', 'plugins'], p2p: ['P2P', 'federation'],
       uptime: ['uptime', '24/7'], selfmod: ['Self-improvement', 'pull requests'],
-      email: ['Processed', 'emails'], upgrades: ['Recent upgrades']
+      email: ['Processed', 'emails'], upgrades: ['Recent upgrades'],
+      // Match the new candidate items added above
+      healing: ['Auto-healed', 'self-diagnostics'],
+      skynetEcon: ['SKYNET decentralized', 'service marketplace'],
+      shipped: ['Shipped', 'merged into my own'],
+      capabilities: ['Operating with', 'integrated capabilities'],
+      providers: ['AI providers', 'Reasoning across']
     };
 
     let filteredItems = items;
@@ -941,7 +1042,14 @@ Return ONLY the tweet text, nothing else.`;
         }
         return true;
       });
-      if (filteredItems.length === 0) filteredItems = items;
+      // Fail-open: if the keyword filter wipes everything but raw context
+      // exists, post anyway — the AI prompt already says "pick a DIFFERENT
+      // topic" against the 8-tweet history, so it can still steer toward
+      // novelty. Better than silent 5-day ghosting (which is what happened
+      // 2026-05-09 → 12 when all 6 raw topics matched recent-topics).
+      if (filteredItems.length === 0 && items.length > 0) {
+        filteredItems = items;
+      }
     }
 
     // Shuffle for variety
@@ -955,7 +1063,15 @@ Return ONLY the tweet text, nothing else.`;
       items: filteredItems.length > 0
         ? filteredItems.map((item, i) => `${i + 1}. ${item}`).join('\n')
         : 'No specific activity to report',
-      recentTweets
+      recentTweets,
+      diag: {
+        rawCount: items.length,
+        filteredCount: filteredItems.length,
+        recentTopics: Array.from(recentTopics),
+        // First 60 chars of each raw item — enough to grep and identify
+        // which fetcher contributed in the skip-log line.
+        sources: items.map(s => s.slice(0, 60))
+      }
     };
   }
 

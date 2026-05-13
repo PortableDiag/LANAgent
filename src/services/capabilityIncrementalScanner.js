@@ -77,31 +77,24 @@ export class CapabilityIncrementalScanner {
     try {
       const scanId = `capability_scan_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
       logger.info(`Starting capability upgrade scan: ${scanId}`);
-      console.error('DEBUG: scanForCapabilityUpgrades called');
-      
+
       // Get current AI provider info
       const providerInfo = await this.getCurrentProviderInfo();
-      console.error('DEBUG: providerInfo:', providerInfo);
-      
+
       // Get existing PRs to avoid duplicates in analysis
       const existingPRs = await this.getExistingPRsContext();
       logger.info(`Found ${existingPRs.length} existing PRs to consider during analysis`);
-      
+
       // Find all plugins and core files to analyze
-      console.error('DEBUG: About to call discoverUpgradeTargets');
       const targetFiles = await this.discoverUpgradeTargets();
-      console.error('DEBUG: targetFiles length:', targetFiles.length);
       logger.info(`Found ${targetFiles.length} files to analyze for upgrades`);
-      
+
       // Shuffle files for random order
       const shuffledFiles = this.shuffleArray([...targetFiles]);
-      console.error('DEBUG: shuffledFiles length after shuffle:', shuffledFiles.length);
-      
+
       // Calculate max files based on context limit and average file size
       const maxFilesForContext = this.calculateMaxFilesForContext(providerInfo.contextLimit);
-      console.error('DEBUG: maxFilesForContext:', maxFilesForContext);
       const maxFiles = Math.min(shuffledFiles.length, maxFilesForContext);
-      console.error('DEBUG: maxFiles to analyze:', maxFiles);
       
       logger.info(`Analyzing ${maxFiles} files (context limit: ${providerInfo.contextLimit} tokens)`);
       

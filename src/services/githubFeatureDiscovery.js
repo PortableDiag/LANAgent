@@ -550,13 +550,30 @@ export class GitHubFeatureDiscovery {
    * Check if a feature is generic/common
    */
   isGenericFeature(feature) {
+    // Reject malformed extracted text: JSON-ish fragments, code blobs, and
+    // anything that's clearly not a natural-language feature description.
+    // These surface from README files generated/edited by other AIs that
+    // accidentally leaked structured data into bullet lists, e.g.
+    //   - D {"file":"logs/diagnostics.log","severity":"high"}
+    const trimmed = feature.trim();
+    if (
+      trimmed.length < 6 ||                          // too short to be a real feature
+      trimmed.length > 200 ||                        // bullet lines longer than this are almost always prose paragraphs or copy-pasted code
+      /^[\{\[]/.test(trimmed) ||                     // starts with { or [ — JSON-ish
+      /[\{\}][^\s]*[\{\}]/.test(trimmed) ||          // contains adjacent brace pairs — likely JSON
+      /^[A-Z]\s+[\{\[]/.test(trimmed) ||             // single-letter + JSON, e.g. "D {...}"
+      /["']:\s*["']/.test(trimmed)                   // has "key":"value" — JSON-ish
+    ) {
+      return true;
+    }
+
     const generic = [
       'bug fix', 'fixed', 'update', 'updated', 'refactor',
       'cleanup', 'improve', 'enhancement', 'test', 'tests',
       'docs', 'documentation', 'readme', 'typo', 'lint'
     ];
-    
-    const lowerFeature = feature.toLowerCase();
+
+    const lowerFeature = trimmed.toLowerCase();
     return generic.some(g => lowerFeature.includes(g));
   }
   

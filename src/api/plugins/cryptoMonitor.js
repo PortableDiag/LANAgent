@@ -359,11 +359,12 @@ export default class CryptoMonitorPlugin extends BasePlugin {
             );
 
             if (this.config.enableNotifications && this.agent.notify) {
-                await this.agent.notify({
-                    title: `Balance changed on ${network}`,
-                    message: `Address: ${address.substring(0, 10)}...\nOld: ${oldBalance}\nNew: ${newBalance}\nChange: ${change > 0 ? '+' : ''}${change.toFixed(6)}`,
-                    priority: 'high'
-                });
+                await this.agent.notify(
+                    `💰 Balance changed on ${network}\n` +
+                    `Address: ${address.substring(0, 10)}...\n` +
+                    `Old: ${oldBalance}\nNew: ${newBalance}\n` +
+                    `Change: ${change > 0 ? '+' : ''}${change.toFixed(6)}`
+                );
             }
         }
     }
@@ -377,11 +378,7 @@ export default class CryptoMonitorPlugin extends BasePlugin {
         this.logger.info(`Crypto alert: ${messages[type]}`);
 
         if (this.config.enableNotifications && this.agent.notify) {
-            await this.agent.notify({
-                title: 'Crypto Alert',
-                message: messages[type],
-                priority: 'high'
-            });
+            await this.agent.notify(`🚨 Crypto Alert: ${messages[type]}`);
         }
     }
 

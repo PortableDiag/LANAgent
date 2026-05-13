@@ -3523,8 +3523,9 @@ class SwapService {
                 swap.balanceVerified = true;
             }
         } catch (error) {
-            logger.error('Balance verification failed:', error.message);
-            swap.verificationError = error.message;
+            const detail = error?.message || error?.code || error?.reason || (error ? String(error) : 'unknown error');
+            logger.error(`Balance verification failed (${tokenOut} on ${network}): ${detail}`);
+            swap.verificationError = detail;
         }
     }
 

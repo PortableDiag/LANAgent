@@ -249,6 +249,26 @@ export class Agent extends EventEmitter {
       await this.scheduler.initialize(this);
       this.services.set('taskScheduler', this.scheduler);
       logger.info('Task scheduler (Agenda) initialized');
+
+      // Plugin scheduler-job registration hook. Plugins load before the
+      // scheduler exists (apiManager.initialize runs at the top of this
+      // bootstrap, scheduler is constructed here), so any agenda.define /
+      // agenda.every calls in plugin.initialize() silently bail on the
+      // `if (!this.agent.scheduler)` guard. Give each plugin a second pass
+      // now that agenda is up. Plugins implement defineSchedulerJobs() to
+      // opt in.
+      if (this.apiManager?.apis) {
+        for (const [name, entry] of this.apiManager.apis.entries()) {
+          const plugin = entry?.instance || entry;
+          if (typeof plugin?.defineSchedulerJobs === 'function') {
+            try {
+              await plugin.defineSchedulerJobs();
+            } catch (hookErr) {
+              logger.warn(`[scheduler] defineSchedulerJobs failed for plugin '${name}': ${hookErr.message}`);
+            }
+          }
+        }
+      }
     } catch (error) {
       logger.warn('Task scheduler not available:', error.message);
     }
@@ -5551,6 +5571,12 @@ Important:
    */
   async notify(message, userId = null) {
     try {
+      if (message && typeof message === 'object' && !Array.isArray(message)) {
+        const { title, message: body, text } = message;
+        message = [title, body || text].filter(Boolean).join('\n') || JSON.stringify(message);
+      } else if (typeof message !== 'string') {
+        message = String(message ?? '');
+      }
       logger.info('Sending notification:', message.substring(0, 100) + '...');
       
       // Send via Telegram if available

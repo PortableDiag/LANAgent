@@ -2,6 +2,76 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.44] - 2026-05-13
+
+Sync from genesis covering v2.25.41 through v2.25.44 — four versions worth of work bundled into a single public release.
+
+### Added (v2.25.41 — self-mod new-plugin routing)
+
+- **`src/services/featureClassifier.js`** — new service that decides whether a github-discovered feature should be added as a new plugin file or modify an existing one. Uses the AI provider to classify before the self-modification engine writes code. Routes new-plugin candidates to a fresh `src/api/plugins/<name>.js` skeleton instead of trying to retrofit an unrelated file.
+- **`DiscoveredFeature.js`** model gains classification fields (`targetType: 'new-plugin' | 'modify-existing'`, `targetPath`, `classificationReasoning`) populated by the classifier.
+- **`scheduler.js`** new-feature discovery job calls the classifier before queueing the self-modification action.
+- **`selfModification.js`** routes new-plugin tasks through a different code path (skeleton scaffold + targeted edits) than modify-existing tasks (full-file rewrite).
+- **`githubFeatureDiscovery.js`** classifier hook integration.
+
+### Added (v2.25.43 — API-mode account registration + reapption strategy)
+
+- **API-mode registration in `accountRegistrationService.js`.** Strategies now support `mode: 'api'` alongside the existing browser path. API-mode skips Puppeteer entirely — talks JSON directly to the site's signup endpoint, far more reliable for SPAs (selector matching against React-rendered DOM is brittle, especially when forms live inside `<details>` panels or share input id namespaces with multiple forms on the same page). Strategy fields: `challengeUrl`, `registerUrl`, optional `loginUrl`, and a `buildBody(creds)` mapper to translate generic credentials into the API's expected body shape.
+- **`reapption` strategy** wired up. Calls `/api/auth/challenge` (handles both the active challenge-question gate and the `{disabled:true}` off-state), then `POST /api/auth/register`. When the gate is on, semantic challenge questions are answered by the agent's own AI via `providerManager.generateResponse` (low temperature, 1500-token budget for reasoning headroom). Up to 3 retries on `challenge_failed` / `challenge_expired`, matching the reapption frontend's behavior. Server response (user id, auth token) is merged into the encrypted credential blob under `_server` so downstream usage doesn't need a re-login.
+
+### Fixed (v2.25.42 — social-media auto-post unwedge + privacy hardening)
+
+- **Auto-post dedup window in `twitter.js` and `mindswarm.js`.** The topic-dedup pre-filter scanned the last 8 posts to build `recentTopics`, then filtered out any raw context item matching any topic in that set. With ~6 actively-generated topics and 2 posts/day, after 4 days every topic ended up in the recent-set and ALL raw items got filtered → "no postable content" → indefinite silence. Same failure class as a 2026-05-01 incident the previous comment already flagged. Shrank the topic-extraction window to the last 3 posts (≈36h at 2/day) and added fail-open: if the filter would still zero everything, post the raw items anyway. The AI prompt still sees the 8-post text history for diversity guidance.
+- **Empty completions from GPT-5 with `maxTokens: 120`.** The OpenAI provider correctly routes to `max_completion_tokens` for GPT-5/o-series, but that budget includes reasoning tokens — a 120-token cap leaves zero for visible output. Bumped MindSwarm to 1500, Twitter to 3000 (Twitter's stricter 270-char hard limit pushes longer reasoning chains).
+- **Permanent diagnostic dump on auto-post AI failures.** Both plugins now stringify the provider's full `result` (with 200-char string truncation, 1500-char total cap) into the skip-log line, so refusals / `finish_reason=length` / empty completions are diagnosable from logs alone in future regressions.
+
+### Hardened (v2.25.42 privacy)
+
+- **`autoPostFilter.js` `SENSITIVE_COMMIT_PATTERNS`** extended to match `session.*\d{4}-\d{2}-\d{2}|docs\(session` (defense in depth on top of the existing `EXCLUDED_GIT_PATHS` pathspec). Commits touching both `src/` and `docs/sessions/` no longer surface their full subject line in auto-post context. Added an explicit `SENSITIVE_OUTPUT_RULES` entry telling the AI never to mention dev sessions, session reports, or operator workflow.
+
+### Fixed (v2.25.42 — `deploy-files.sh` md5 verify)
+
+- **Operational hardening in `scripts/deployment/deploy-files.sh`.** The script silently no-op'd on multiple pushes during a recent session — success message printed, but md5 between local and prod diverged. Added md5 verification after extract + return-code check on the remote `tar xz` so a silent partial deploy can never claim success again.
+
+### Fixed (v2.25.44 — production log hygiene pass)
+
+- **`agent.notify` `message.substring is not a function` TypeError.** `cryptoMonitor.js:362` and `:380` were calling `agent.notify({title, message, priority})` while every other caller in the codebase passes a string. `agent.notify(message, userId)` then did `message.substring(0,100)` and crashed. Fixed both call sites to pass formatted strings (`💰 Balance changed on …`, `🚨 Crypto Alert: …`) AND hardened `agent.notify` to coerce object/non-string inputs (extracts `title`/`message`/`text` fields) so a future caller passing an object can't break notifications again. Recurring crash since at least 2026-05-02.
+- **ExpressVPN `connect "uk"` regression.** ExpressVPN client no longer accepts country names — `expressvpnctl connect "uk"` fails with "Could not find a unique match" and a list of region IDs (slugs like `uk-london`, `usa-los-angeles-1`). Added `getRegionList()` (1h cached) and `resolveRegion(input)` to `vpn.js`: tries exact slug, then `prefix-` match (so "uk" → first `uk-*`), then a small alias map (`uk → uk-london`, `usa → usa-new-york`), then substring fallback. Wired into `connect()` so the existing hardcoded `['usa', 'canada', 'uk']` preferred-locations and `['usa-losangeles', 'uk-london']` streaming presets all keep working.
+- **Plugin missing-credentials spam in errors.log.** Paid-API plugins (aviationstack, currencylayer, fixer, ipgeolocation, ipstack, mediastack, messagebird, sinch, numverify, numbersapi, weatherstack, zapier, googlecloudfunctions, checkly, here, anime, jsonplaceholder) all logged `[ERROR] Failed to initialize <X> plugin: Missing required credentials` on every boot when API keys aren't configured. apiManager already gracefully handles this case (registers as disabled, warn-level), but each plugin's own catch block emitted an error first. Downgraded those 17 catch blocks to `logger.warn` when the cause is missing credentials (real init errors still go to error). Also extended `apiManager.registerPlugin`'s credential-error detection to recognize bespoke patterns like `IPGEOLOCATION_API_KEY environment variable is required` so they too get the disabled-plugin warn path.
+- **Empty `Balance verification failed:` in errors.log.** `swapService.js:3526` logged just `error.message`, which was empty for some swap-monitor errors. Now logs `error.message || error.code || error.reason || String(error)` plus the token/network context.
+- **DEBUG noise in pm2-errors-0.log.** Removed 7 leftover `console.error('DEBUG: ...')` calls from `capabilityIncrementalScanner.scanForCapabilityUpgrades` (surrounding `logger.info` lines already capture intent).
+
+### Files changed
+
+```
+src/services/featureClassifier.js                   (NEW — feature classifier)
+src/services/githubFeatureDiscovery.js              (classifier integration)
+src/services/scheduler.js                           (classifier hook in discovery job)
+src/services/selfModification.js                    (new-plugin vs modify-existing routing)
+src/models/DiscoveredFeature.js                     (classification fields)
+src/services/accountRegistrationService.js          (API-mode + reapption strategy)
+src/api/plugins/twitter.js                          (dedup window + maxTokens + diagnostics)
+src/api/plugins/mindswarm.js                        (dedup window + maxTokens + diagnostics)
+src/utils/autoPostFilter.js                         (privacy patterns extension)
+src/api/plugins/cryptoMonitor.js                    (notify object→string)
+src/core/agent.js                                   (notify accepts object/non-string)
+src/api/plugins/vpn.js                              (getRegionList + resolveRegion + connect wiring)
+src/api/core/apiManager.js                          (extended credential-error pattern detection)
+src/api/plugins/{aviationstack,anime,checkly,currencylayer,fixer,googlecloudfunctions,here,
+                 ipgeolocation,ipstack,jsonplaceholder,mediastack,messagebird,numbersapi,
+                 numverify,sinch,weatherstack,zapier}.js  (downgrade missing-credentials)
+src/services/crypto/swapService.js                  (error.code/reason/String fallback)
+src/services/capabilityIncrementalScanner.js        (remove 7 console.error DEBUG)
+scripts/deployment/deploy-files.sh                  (md5 verify + return-code check)
+package.json                                        (2.25.40 → 2.25.44)
+CHANGELOG.md                                        (this entry)
+```
+
+### Notes
+
+- This is a sync release — all changes were already shipped to genesis (v2.25.41-44). Public was four versions behind.
+- Verified post-deploy on the genesis production host: notify TypeError count since boot 0, plugin-init `[ERROR]` count down from ~22 per boot to 0, DEBUG leak count 0, no new crashes.
+
 ## [2.25.40] - 2026-05-11
 
 Sync from genesis v2.25.40 — three merges from the auto-improve PR loop. The other 17 PRs in the same round were either closed-with-rationale (15) or salvaged manually in genesis-only files (1: the `/api/external/social/supported-sites` endpoint, which doesn't apply to public because `socialRoutes` isn't mounted on public's `externalGateway.js`). The `ytdlpCookieJar.js` improvement from genesis #2151 also stays genesis-only since the cookie-jar admin surface isn't synced to public.

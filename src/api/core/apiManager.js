@@ -91,7 +91,12 @@ export class APIManager extends EventEmitter {
           await plugin.initialize();
         } catch (initError) {
           // If only missing credentials, register as disabled so users can add keys via UI
-          if (initError.message.includes('Missing required credentials')) {
+          const msg = initError.message || '';
+          const isCredentialError = msg.includes('Missing required credentials')
+            || /API[_-]?KEY.*(required|missing|not configured)/i.test(msg)
+            || /environment variable .* required/i.test(msg)
+            || /credentials? (not configured|missing|required)/i.test(msg);
+          if (isCredentialError) {
             this.apis.set(plugin.name, {
               instance: plugin,
               filename: filename,

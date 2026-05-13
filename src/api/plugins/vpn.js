@@ -362,6 +362,14 @@ export class VPNPlugin extends BasePlugin {
    */
   async connect({ location = null, protocol = null, retry = true }) {
     try {
+      const originalLocation = location;
+      if (location && location !== 'smart') {
+        const resolved = await this.resolveRegion(location);
+        if (resolved && resolved !== location) {
+          logger.info(`Resolved VPN location "${location}" → "${resolved}"`);
+          location = resolved;
+        }
+      }
       logger.info(`Connecting to VPN${location ? ` (location: ${location})` : ''}`);
 
       // Disconnect first if already connected
@@ -1077,6 +1085,38 @@ export class VPNPlugin extends BasePlugin {
       loc => loc !== failedLocation
     );
     return availableLocations[Math.floor(Math.random() * availableLocations.length)];
+  }
+
+  async getRegionList(force = false) {
+    const ttl = 60 * 60 * 1000;
+    if (!force && this._regionCache && (Date.now() - this._regionCacheAt) < ttl) {
+      return this._regionCache;
+    }
+    try {
+      const { stdout } = await execAsync('expressvpnctl get regions');
+      const regions = stdout.split('\n').map(s => s.trim()).filter(Boolean);
+      this._regionCache = regions;
+      this._regionCacheAt = Date.now();
+      return regions;
+    } catch (err) {
+      logger.warn(`Failed to load expressvpn region list: ${err.message}`);
+      return this._regionCache || [];
+    }
+  }
+
+  async resolveRegion(input) {
+    if (!input || input === 'smart') return input;
+    const regions = await this.getRegionList();
+    if (!regions.length) return input;
+    const needle = String(input).toLowerCase().trim();
+    if (regions.includes(needle)) return needle;
+    const prefix = regions.filter(r => r.startsWith(needle + '-') || r === needle);
+    if (prefix.length) return prefix[0];
+    const aliasMap = { uk: 'uk-london', usa: 'usa-new-york', us: 'usa-new-york' };
+    if (aliasMap[needle] && regions.includes(aliasMap[needle])) return aliasMap[needle];
+    const substr = regions.filter(r => r.includes(needle));
+    if (substr.length) return substr[0];
+    return input;
   }
 
   async getClosestLocations() {

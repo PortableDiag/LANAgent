@@ -3,6 +3,8 @@ import { logger } from '../utils/logger.js';
 import { encrypt, decrypt } from '../utils/encryption.js';
 import AutoAccount from '../models/AutoAccount.js';
 import emailService from './emailService.js';
+import { getGlobalAgent } from '../core/agentAccessor.js';
+import axios from 'axios';
 import crypto from 'crypto';
 
 class AccountRegistrationService {
@@ -47,6 +49,26 @@ class AccountRegistrationService {
             },
             requiresEmail: true,
             verificationType: 'auto'
+        });
+
+        // Reapption — pure-API signup. The site is a SPA so browser-based form
+        // filling needs to wait for JS, open a <details> panel, and pick the
+        // right form out of three email inputs on the page. Easier and more
+        // reliable to call its public JSON endpoints directly. Anti-spam is a
+        // LANAgent challenge-question gate; our AI answers the questions.
+        this.addStrategy('reapption', {
+            mode: 'api',
+            challengeUrl: 'https://reapption.net/api/auth/challenge',
+            registerUrl: 'https://reapption.net/api/auth/register',
+            loginUrl: 'https://reapption.net/api/auth/login',
+            requiresEmail: false,
+            verificationType: 'auto',
+            buildBody: (creds) => ({
+                username: creds.username,
+                password: creds.password,
+                email: creds.email,
+                display_name: creds.displayName || creds.username
+            })
         });
     }
 
@@ -276,7 +298,34 @@ class AccountRegistrationService {
             // Get strategy
             const strategy = this.registrationStrategies.get(serviceName.toLowerCase()) ||
                            this.registrationStrategies.get('generic');
-            
+
+            // API-mode strategies bypass the browser entirely — talk JSON to
+            // the site's signup endpoint. Reliable for SPAs, avoids selector
+            // fragility, and supports challenge-question gates (LANAgent's
+            // own anti-spam service is used by some sites, including
+            // reapption.net — our AI answers the questions).
+            if (strategy.mode === 'api') {
+                const result = await this._registerViaApi(strategy, credentials);
+                account.status = result.success ? 'active' : 'failed';
+                account.verificationStatus = result.requiresVerification ? 'email_sent' : 'verified';
+                if (result.error) {
+                    account.lastError = { message: result.error, timestamp: new Date() };
+                }
+                // Persist any extra fields the server gave us (user id, auth
+                // token, etc.) so downstream usage doesn't need to re-login.
+                if (result.success && result.serverResponse) {
+                    const merged = { ...credentials, _server: result.serverResponse };
+                    account.encryptedCredentials = encrypt(JSON.stringify(merged));
+                }
+                await account.save();
+                await this.logActivity('register', {
+                    serviceName, accountId: account._id?.toString(), success: result.success, mode: 'api'
+                });
+                logger.info(`API registration ${result.success ? 'successful' : 'failed'} for ${serviceName}`);
+                if (!result.success) throw new Error(result.error || 'Registration failed');
+                return account;
+            }
+
             // Launch browser and navigate
             await this.initBrowser();
             const page = await this.browser.newPage();
@@ -343,6 +392,99 @@ class AccountRegistrationService {
             };
             await account.save();
             throw error;
+        }
+    }
+
+    /**
+     * Pure-HTTP registration for SPAs / API-mode strategies. Handles optional
+     * challenge-question anti-spam by calling the AI to answer questions, with
+     * up to 3 retries on `challenge_failed` (matches reapption's UI behavior).
+     */
+    async _registerViaApi(strategy, credentials) {
+        const buildBody = strategy.buildBody || ((c) => ({
+            username: c.username, password: c.password, email: c.email
+        }));
+
+        const maxAttempts = strategy.challengeUrl ? 3 : 1;
+        let lastError = null;
+
+        for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+            try {
+                const body = buildBody(credentials);
+
+                // Fetch + answer challenge if the strategy uses one. If the
+                // server has its anti-spam gate switched off (it returns
+                // `{disabled:true}` or `{enabled:false}` per reapption's API),
+                // skip the challenge fields entirely — the register endpoint
+                // accepts the body without them in that case.
+                if (strategy.challengeUrl) {
+                    const ch = await axios.post(strategy.challengeUrl, {}, { timeout: 15000 });
+                    const { token, questions, disabled, enabled } = ch.data || {};
+                    const gateOff = disabled === true || enabled === false;
+                    if (gateOff) {
+                        logger.info(`Challenge gate is off for ${strategy.registerUrl} — skipping`);
+                    } else if (!token || !Array.isArray(questions)) {
+                        throw new Error(`Bad challenge response: ${JSON.stringify(ch.data).slice(0, 200)}`);
+                    } else {
+                        body.challenge_token = token;
+                        body.challenge_answers = await Promise.all(
+                            questions.map(async (q) => ({ id: q.id, answer: await this._answerChallengeQuestion(q.question) }))
+                        );
+                        logger.info(`Challenge answered (${questions.length} q's) for ${strategy.registerUrl}`);
+                    }
+                }
+
+                const reg = await axios.post(strategy.registerUrl, body, {
+                    timeout: 30000,
+                    validateStatus: () => true  // we inspect status ourselves
+                });
+
+                if (reg.status >= 200 && reg.status < 300 && reg.data) {
+                    return {
+                        success: true,
+                        requiresVerification: !!reg.data.requiresVerification,
+                        serverResponse: reg.data
+                    };
+                }
+
+                // Challenge-specific retry: server says the answer was wrong;
+                // loop with a fresh challenge (the reapption UI does the same).
+                const errCode = reg.data?.error;
+                if (errCode === 'challenge_failed' || errCode === 'challenge_expired') {
+                    lastError = `${errCode} (attempt ${attempt}/${maxAttempts})`;
+                    continue;
+                }
+                // Non-retryable error
+                return { success: false, error: reg.data?.error || `HTTP ${reg.status}` };
+            } catch (err) {
+                lastError = err.message;
+                // Network errors are worth retrying; auth errors are not
+                if (attempt === maxAttempts) break;
+            }
+        }
+        return { success: false, error: lastError || 'Registration failed after retries' };
+    }
+
+    /**
+     * Ask the agent's AI to answer a single semantic challenge question.
+     * Falls back to an empty string if no provider is wired — caller will
+     * surface that as `challenge_failed` from the server.
+     */
+    async _answerChallengeQuestion(question) {
+        try {
+            const agent = getGlobalAgent();
+            const provider = agent?.providerManager;
+            if (!provider?.generateResponse) return '';
+            const result = await provider.generateResponse(
+                `Answer this short anti-spam question concisely. ` +
+                `Reply with ONLY the answer — no explanation, no punctuation unless required, no quotes.\n\n` +
+                `Question: ${question}`,
+                { temperature: 0.2, maxTokens: 1500 }
+            );
+            return (result?.content || result?.text || '').toString().trim().replace(/^["']|["']$/g, '');
+        } catch (err) {
+            logger.warn(`Challenge-answer AI call failed: ${err.message}`);
+            return '';
         }
     }
 

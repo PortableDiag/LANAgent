@@ -1269,16 +1269,33 @@ ${getSensitiveContentRules()}
 ${context.recentPosts ? 'YOUR RECENT POSTS (you MUST pick a DIFFERENT topic than ALL of these):\n' + context.recentPosts + '\n' : ''}
 Return ONLY the post text, nothing else.`;
 
+      // maxTokens budget includes reasoning for GPT-5/o-series models; 120
+      // was enough for gpt-4o but gpt-5 burns the whole budget on internal
+      // reasoning and returns empty content (observed 2026-05-12 08:01
+      // after providerManager started routing to gpt-5-2025-08-07). Posts
+      // themselves only need ~80-100 tokens of output; the rest is
+      // reasoning headroom.
       const result = await this.agent.providerManager.generateResponse(prompt, {
-        temperature: 0.85, maxTokens: 120
+        temperature: 0.85, maxTokens: 1500
       });
       const postContent = (result?.content || result?.text || '').toString().trim()
         .replace(/^["']|["']$/g, ''); // Strip wrapping quotes AI sometimes adds
 
       if (!postContent || postContent.length < 15 || postContent.length > 1000) {
+        // Dump the provider result on failure so future regressions (refusals,
+        // empty completions from reasoning models exhausting maxTokens, etc.)
+        // are diagnosable from logs alone instead of needing live debugging.
+        let resultDump = '(no result)';
+        try {
+          resultDump = JSON.stringify(result, (k, v) => {
+            if (typeof v === 'string' && v.length > 200) return v.slice(0, 200) + '...';
+            return v;
+          }).slice(0, 1500);
+        } catch (e) { resultDump = `(dump err: ${e.message})`; }
         this.pluginLogger.info(
           `Auto-post: skipping — AI returned invalid content ` +
-          `(length=${postContent?.length || 0}, sample="${(postContent || '').slice(0, 80)}")`
+          `(length=${postContent?.length || 0}, sample="${(postContent || '').slice(0, 80)}", ` +
+          `raw=${resultDump})`
         );
         return;
       }
@@ -1462,8 +1479,13 @@ Return ONLY the post text, nothing else.`;
           .map(p => `- ${(p.content || '').substring(0, 150)}`)
           .join('\n');
 
-        // Extract topic keywords from recent posts for filtering context items
-        for (const p of posts.slice(0, 8)) {
+        // Topic-dedup window: only the last 3 posts (≈36h at 2 posts/day).
+        // Was 8 — covered ~4 days, and once the 6 active topic generators
+        // all landed in the window every raw item filtered out and auto-post
+        // ghosted for 3-5 days. (Repro: 2026-05-07 → 12.) The 8-post
+        // `recentPosts` text above still feeds the AI prompt for broader
+        // context; only the hard pre-filter uses the shorter slice.
+        for (const p of posts.slice(0, 3)) {
           const content = (p.content || '').toLowerCase();
           if (content.includes('scammer') || content.includes('flagg') || content.includes('soulbound')) recentPostTopics.add('scammer');
           if (content.includes('stak')) recentPostTopics.add('staking');
@@ -1473,9 +1495,6 @@ Return ONLY the post text, nothing else.`;
           if (content.includes('pull request') || content.includes('self-improv')) recentPostTopics.add('selfmod');
           if (content.includes('email') || content.includes('processed')) recentPostTopics.add('email');
           if (content.includes('upgrade') || content.includes('commit')) recentPostTopics.add('upgrades');
-          // New finer-grained topics — keep dedup from collapsing on the
-          // small original catalog. Without these, ALICE locked out for 5
-          // days on 2026-05-01 because all 7 original topics matched.
           if (content.includes('auto-heal') || content.includes('self-diagnos')) recentPostTopics.add('healing');
           if (content.includes('skynet') || content.includes('marketplace')) recentPostTopics.add('skynetEcon');
           if (content.includes('shipped') || content.includes('merged')) recentPostTopics.add('shipped');
@@ -1512,10 +1531,14 @@ Return ONLY the post text, nothing else.`;
         }
         return true;
       });
-      // If everything would be a repeat of recent posts, return no content
-      // and let the caller skip this auto-post slot — better silence than a
-      // duplicate. (Was: `filteredItems = items;` which caused the 99/100
-      // plugin flip-flop posts when the agent had nothing new to say.)
+      // Fail-open: if the keyword filter wipes everything but raw context
+      // exists, post anyway — the AI prompt already says "pick a DIFFERENT
+      // topic" against the 8-post history, so it can still steer toward
+      // novelty. Better than silent 5-day ghosting (which is what happened
+      // 2026-05-07 → 12 when all 6 raw topics matched recent-topics).
+      if (filteredItems.length === 0 && items.length > 0) {
+        filteredItems = items;
+      }
     }
 
     // Shuffle remaining items so the AI doesn't always pick the first one

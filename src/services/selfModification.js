@@ -752,13 +752,21 @@ export class SelfModificationService extends EventEmitter {
       // Note: findImplementable uses .lean() so we get plain objects, not Mongoose docs
       const discoveredFeatures = await DiscoveredFeature.findImplementable(20);
 
-      // Convert to improvement format (manually since .lean() returns plain objects)
+      // Convert to improvement format (manually since .lean() returns plain objects).
+      // Carry kind/targetFile/rationale via `implementationDetails` (not
+      // `implementation` — that name is used elsewhere in this service as a
+      // free-form string in PR bodies, and would render '[object Object]'
+      // if we put a structured doc there).
       const improvements = discoveredFeatures.map(feature => ({
         id: `discovered-${feature._id}`,
         type: 'github_discovered_feature',
         title: feature.title,
         description: feature.description,
         file: feature.implementation?.targetFile,
+        targetFile: feature.implementation?.targetFile,
+        kind: feature.implementation?.kind,
+        implementationDetails: feature.implementation,
+        codeSnippets: feature.codeSnippets,
         priority: 'low', // Always low priority for discovered features
         effort: feature.implementation?.estimatedEffort || 'medium',
         value: 'medium',
@@ -1298,13 +1306,36 @@ Only suggest realistic enhancements. Return empty array if no good opportunities
   }
 
   /**
-   * Apply AI-driven capability upgrade (internal method)
+   * Apply AI-driven capability upgrade (internal method).
+   *
+   * Routes on improvement.implementation.kind set by the classifier at
+   * discovery time:
+   *   - 'new-plugin' → applyNewPluginFromFeature (creates a fresh file in
+   *                    src/api/plugins/, auto-discovered on next restart)
+   *   - 'modify' or absent → modify-existing-file flow below (with the
+   *                    legacy AI file-discovery fallback for improvements
+   *                    that bypass the classifier, e.g. feature_request)
    */
   async applyAICapabilityUpgrade(improvement) {
+    const kind = improvement.kind || improvement.implementationDetails?.kind;
+    if (kind === 'new-plugin') {
+      return this.applyNewPluginFromFeature(improvement);
+    }
+    return this.applyModifyExistingFile(improvement);
+  }
+
+  /**
+   * Modify-existing-file flow. Reads the target file, asks AI for an
+   * upgraded version, validates, writes, and stages a commit.
+   */
+  async applyModifyExistingFile(improvement) {
     try {
       let targetFile = improvement.targetFile || improvement.file;
 
-      // If no target file, ask AI to determine the best file to modify
+      // If no target file, ask AI to determine the best file to modify.
+      // This fallback exists for legacy/feature_request improvements that
+      // bypass the classifier; github_discovered_feature improvements now
+      // always arrive with targetFile set (classifier picks it at discovery).
       if (!targetFile) {
         logger.info(`🤖 No target file specified for ${improvement.type} — asking AI to determine best file...`);
         const fileDiscoveryPrompt = `You are analyzing a codebase to determine the best file to modify for this improvement:
@@ -1429,6 +1460,152 @@ Pick the single most relevant existing file that should be enhanced.`;
       logger.error(`Failed to apply AI capability upgrade: ${error.message}`);
       throw error;
     }
+  }
+
+  /**
+   * Create a new plugin file from a discovered feature.
+   *
+   * Plugins under src/api/plugins/ are auto-discovered by APIManager at
+   * startup, so we just need to drop a valid file there — no registry
+   * edit. We generate the file with AI (using 2 existing plugins as
+   * few-shot examples), node --check it for syntax, write it, and stage
+   * a commit. The outer git-workflow handles branch + PR.
+   */
+  async applyNewPluginFromFeature(improvement) {
+    const targetFile = improvement.targetFile || improvement.file || improvement.implementationDetails?.targetFile;
+    if (!targetFile || !targetFile.startsWith('src/api/plugins/')) {
+      throw new Error(`new-plugin path not under src/api/plugins/: ${targetFile}`);
+    }
+    const repoFile = path.join(this.developmentPath, targetFile);
+
+    // Defensive: classifier already verified, but the queue can be hours/days
+    // old by the time apply runs — recheck the file doesn't exist.
+    try {
+      await fs.access(repoFile);
+      throw new Error(`Plugin file already exists at ${targetFile} — aborting to avoid clobber`);
+    } catch (err) {
+      if (err.code !== 'ENOENT' && !err.message.includes('already exists')) {
+        // ENOENT is what we want. Re-throw anything else (including the "already exists" we just threw).
+        if (err.message.includes('already exists')) throw err;
+      }
+    }
+
+    logger.info(`🆕 Creating new plugin: ${targetFile} for "${improvement.title}"`);
+
+    // Few-shot example: one short plugin as a structural reference. Two
+    // examples + a verbose prompt blew through GPT-5's reasoning+output
+    // budget and the model returned 0 chars. nasa.js is the leaner of the
+    // two and shows caching + retryOperation + commands.
+    const exampleNames = ['nasa.js'];
+    const examples = [];
+    for (const name of exampleNames) {
+      try {
+        const exPath = path.join(this.developmentPath, 'src/api/plugins', name);
+        const exContent = await fs.readFile(exPath, 'utf8');
+        examples.push({ name, content: exContent.slice(0, 3500) });
+      } catch (exErr) {
+        logger.warn(`could not load example plugin ${name}: ${exErr.message}`);
+      }
+    }
+
+    const snippetsBlock = Array.isArray(improvement.codeSnippets) && improvement.codeSnippets.length > 0
+      ? improvement.codeSnippets.slice(0, 3).map((s, i) =>
+          `Snippet ${i + 1} (${s.language || 'unknown'}${s.filePath ? `, from ${s.filePath}` : ''}):\n\`\`\`\n${(s.code || '').slice(0, 2000)}\n\`\`\``
+        ).join('\n\n')
+      : '(no code snippets attached)';
+
+    const prompt = `You are generating a complete new plugin file for the LANAgent framework.
+
+The plugin extends BasePlugin from '../core/basePlugin.js'. Plugins are
+auto-discovered from src/api/plugins/*.js at startup — no registry edit is needed.
+Required: a default export class with \`name\`, \`version\`, \`description\`, and
+an async \`execute(params)\` method. Use \`this.logger\` for logging (set by the
+base class). Use NodeCache for response caching where appropriate. Use
+\`retryOperation\` from '../../utils/retryUtils.js' for external HTTP calls.
+
+FEATURE TO IMPLEMENT:
+Title:       ${improvement.title}
+Description: ${improvement.description || ''}
+${improvement.implementation?.suggestion ? `Suggestion:  ${improvement.implementation.suggestion}` : ''}
+
+CODE SNIPPETS FROM SOURCE PROJECT (for behavioral reference, not literal copy):
+${snippetsBlock}
+
+EXISTING PLUGIN EXAMPLE (match this structural style):
+
+=== ${examples[0]?.name || 'example.js'} ===
+${examples[0]?.content || '(unavailable)'}
+
+TARGET FILE: ${targetFile}
+
+OUTPUT REQUIREMENTS:
+- Return ONLY the JavaScript file contents — no markdown fences, no prose, no commentary.
+- The first line should be an import or a comment, not blank.
+- Must be valid ES module syntax (import/export, no require).
+- Default-export a class extending BasePlugin.
+- Set \`this.name\` to "${path.basename(targetFile, '.js')}".
+- Set \`this.version\` to "1.0.0".
+- Implement at least one meaningful command in \`execute({ action, ...params })\` matching the feature description.
+- Add a \`this.commands = [...]\` array describing each action for intent detection.
+- Do NOT invent credentials or require API keys that aren't documented in the feature description. If credentials are needed, read from \`this.agent.serviceConfigs?.${path.basename(targetFile, '.js')}\` and surface a clear error if missing.
+- Keep the file under 300 lines.`;
+
+    // maxTokens needs to cover both GPT-5's reasoning budget AND the actual
+    // output. With the previous 6000 cap the model burned everything on
+    // reasoning and returned 0 chars. 16000 leaves comfortable headroom.
+    const response = await this.agent.providerManager.generateResponse(prompt, {
+      maxTokens: 16000,
+      temperature: 0.2
+    });
+
+    let code = response?.content || response?.text || response?.message || '';
+    // Strip code fences if the model added them despite instructions.
+    const fenced = code.match(/```(?:javascript|js)?\s*([\s\S]*?)```/i);
+    if (fenced) code = fenced[1];
+    code = code.trim();
+
+    if (!code || code.length < 200) {
+      // Log usage so the next failure is debuggable — reasoning_tokens
+      // exhausting the budget is the most likely cause of an empty response.
+      logger.warn(`[new-plugin] empty AI response — usage: ${JSON.stringify(response?.usage || {})} prompt_len=${prompt.length}`);
+      throw new Error(`AI produced empty or too-short plugin code (${code.length} chars) for "${improvement.title}"`);
+    }
+    if (!/export\s+default\s+class/.test(code)) {
+      throw new Error(`AI did not produce a default-export class for "${improvement.title}"`);
+    }
+    if (!/extends\s+BasePlugin/.test(code)) {
+      throw new Error(`AI did not produce a BasePlugin subclass for "${improvement.title}"`);
+    }
+
+    // Ensure trailing newline.
+    if (!code.endsWith('\n')) code += '\n';
+
+    // Write provisionally so we can syntax-check, then delete on failure.
+    // This is safer than writing to a temp file because node --check needs the
+    // file to resolve relative imports correctly.
+    await fs.mkdir(path.dirname(repoFile), { recursive: true });
+    await fs.writeFile(repoFile, code);
+    logger.info(`📝 Wrote ${code.split('\n').length} lines to ${targetFile} (provisional, pre-syntax-check)`);
+
+    try {
+      execSync(`node --check "${repoFile}"`, { timeout: 10000, stdio: 'pipe' });
+      logger.info(`✅ Syntax check passed for ${targetFile}`);
+    } catch (syntaxErr) {
+      // Roll back the provisional file so we don't leave invalid code in the repo.
+      try { await fs.unlink(repoFile); } catch { /* best-effort */ }
+      const stderr = syntaxErr.stderr?.toString() || syntaxErr.message;
+      throw new Error(`Syntax check failed for generated plugin ${targetFile}: ${stderr.slice(0, 500)}`);
+    }
+
+    logger.info(`🔄 Adding file to git: ${targetFile}`);
+    await this.git.add(targetFile);
+
+    const commitMsg = `feat: new plugin ${path.basename(targetFile, '.js')} — ${improvement.title}`;
+    logger.info(`🔄 Creating commit: ${commitMsg}`);
+    const commitResult = await this.git.commit(commitMsg);
+    logger.info(`✅ Git commit successful: ${JSON.stringify(commitResult)}`);
+
+    logger.info(`✅ Created new plugin ${targetFile} from discovered feature`);
   }
 
   /**

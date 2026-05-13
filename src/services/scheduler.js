@@ -1613,7 +1613,7 @@ Respond with ONLY the rephrased message, no explanation:`;
 
           const defaultModels = {
             anthropic: 'claude-opus-4-5-20251101',
-            openai: 'gpt-4o'
+            openai: 'gpt-5'
           };
 
           for (const [provName, defaults] of Object.entries(defaultModels)) {
@@ -1706,16 +1706,19 @@ Respond with ONLY the rephrased message, no explanation:`;
         // Import the discovery service
         const { GitHubFeatureDiscovery } = await import('./githubFeatureDiscovery.js');
         const { DiscoveredFeature } = await import('../models/DiscoveredFeature.js');
-        
+        const { classifyDiscoveredFeature } = await import('./featureClassifier.js');
+
         // Initialize discovery
         const discovery = new GitHubFeatureDiscovery(this.agent, process.env.GIT_PERSONAL_ACCESS_TOKEN);
-        
+
         // Run discovery
         const features = await discovery.discoverFeaturesFromGitHub();
         logger.info(`Discovered ${features.length} features from GitHub`);
-        
+
         // Store features in database
         let newFeaturesCount = 0;
+        let classifiedCount = 0;
+        let skipCount = 0;
         for (const feature of features) {
           try {
             // Create feature data
@@ -1732,14 +1735,14 @@ Respond with ONLY the rephrased message, no explanation:`;
               implementation: {
                 suggestion: feature.implementation,
                 confidence: feature.confidence || 'medium',
-                targetFile: null, // Will be determined later
+                targetFile: null, // Filled in by classifyDiscoveredFeature below
                 estimatedEffort: 'medium'
               },
               status: 'discovered',
               discoveredBy: 'github_discovery_scheduler',
               tags: ['github', 'discovered', feature.type]
             };
-            
+
             // Add code snippets if available
             if (feature.githubReference && feature.githubReference.codeSnippet) {
               featureData.codeSnippets = [{
@@ -1749,21 +1752,45 @@ Respond with ONLY the rephrased message, no explanation:`;
                 contextNotes: feature.githubReference.contextNotes
               }];
             }
-            
+
+            let createdDoc;
             try {
-              await DiscoveredFeature.create(featureData);
+              createdDoc = await DiscoveredFeature.create(featureData);
               newFeaturesCount++;
             } catch (err) {
               if (err.code === 11000) {
                 logger.debug(`Feature already exists: ${feature.description}`);
-              } else {
-                throw err;
+                continue;
               }
+              throw err;
+            }
+
+            // Classify immediately so the self-modification consumer never sees
+            // an unclassified record. findImplementable filters on kind, so
+            // anything unclassified just stays out of the queue until backfilled.
+            try {
+              const verdict = await classifyDiscoveredFeature(this.agent, createdDoc);
+              const update = {
+                'implementation.kind': verdict.kind,
+                'implementation.targetFile': verdict.targetFile,
+                'implementation.kindRationale': verdict.rationale
+              };
+              if (verdict.kind === 'skip') {
+                update.status = 'rejected';
+                update.rejectionReason = verdict.rationale;
+                skipCount++;
+              } else {
+                classifiedCount++;
+              }
+              await DiscoveredFeature.findByIdAndUpdate(createdDoc._id, { $set: update });
+            } catch (cErr) {
+              logger.warn(`[github-discovery] classifier wrap failed for ${createdDoc._id}: ${cErr.message}`);
             }
           } catch (error) {
             logger.error(`Failed to store feature: ${error.message}`);
           }
         }
+        logger.info(`[github-discovery] classification: ${classifiedCount} actionable, ${skipCount} skipped`);
         
         if (newFeaturesCount > 0) {
           await this.agent.notify(`🌟 GitHub Discovery: Found ${newFeaturesCount} new features from analyzing similar AI agent projects!`);
@@ -1772,6 +1799,68 @@ Respond with ONLY the rephrased message, no explanation:`;
         logger.info(`GitHub discovery completed: ${newFeaturesCount} new features stored`);
       } catch (error) {
         logger.error('GitHub discovery job failed:', error);
+      }
+    });
+
+    // Backfill classification for pre-existing DiscoveredFeature records that
+    // were created before the classifier was wired in (kind missing/null).
+    // Processes a small batch per tick to avoid burning AI quota and rate
+    // limits in one big run. Logs queue depth so we can watch it drain;
+    // becomes a no-op once everything is classified.
+    this.agenda.define('backfill-discovered-feature-kinds', async (job) => {
+      try {
+        const { DiscoveredFeature } = await import('../models/DiscoveredFeature.js');
+        const { classifyDiscoveredFeature } = await import('./featureClassifier.js');
+
+        const BATCH_SIZE = 10;
+        const remaining = await DiscoveredFeature.countDocuments({
+          status: { $in: ['discovered', 'analyzing'] },
+          $or: [
+            { 'implementation.kind': { $exists: false } },
+            { 'implementation.kind': null }
+          ]
+        });
+
+        if (remaining === 0) {
+          logger.debug('[backfill-classifier] queue empty, nothing to do');
+          return;
+        }
+
+        logger.info(`[backfill-classifier] ${remaining} unclassified record(s) remaining; processing batch of ${BATCH_SIZE}`);
+
+        const batch = await DiscoveredFeature.find({
+          status: { $in: ['discovered', 'analyzing'] },
+          $or: [
+            { 'implementation.kind': { $exists: false } },
+            { 'implementation.kind': null }
+          ]
+        }).sort({ createdAt: -1 }).limit(BATCH_SIZE).lean();
+
+        let classified = 0;
+        let skipped = 0;
+        for (const feature of batch) {
+          try {
+            const verdict = await classifyDiscoveredFeature(this.agent, feature);
+            const update = {
+              'implementation.kind': verdict.kind,
+              'implementation.targetFile': verdict.targetFile,
+              'implementation.kindRationale': verdict.rationale
+            };
+            if (verdict.kind === 'skip') {
+              update.status = 'rejected';
+              update.rejectionReason = verdict.rationale;
+              skipped++;
+            } else {
+              classified++;
+            }
+            await DiscoveredFeature.findByIdAndUpdate(feature._id, { $set: update });
+          } catch (err) {
+            logger.warn(`[backfill-classifier] failed on ${feature._id}: ${err.message}`);
+          }
+        }
+        logger.info(`[backfill-classifier] batch done: ${classified} actionable, ${skipped} skipped, ${remaining - batch.length} left in queue`);
+      } catch (error) {
+        logger.error('[backfill-classifier] job failed:', error);
       }
     });
 
@@ -2209,6 +2298,11 @@ Respond with ONLY the rephrased message, no explanation:`;
     
     // GitHub feature discovery at 9 AM and 9 PM (twice daily)
     await this.agenda.every('0 9,21 * * *', 'github-discovery');
+
+    // Backfill classifier — drains the legacy queue of unclassified
+    // DiscoveredFeature records 10-at-a-time. Becomes a no-op once empty;
+    // safe to leave running indefinitely.
+    await this.agenda.every('30 minutes', 'backfill-discovered-feature-kinds');
     
     // Cleanup old reminders daily at 4 AM (production schedule)
     await this.agenda.every('0 4 * * *', 'cleanup-old-reminders');
