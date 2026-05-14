@@ -97,7 +97,7 @@ export function paymentMiddleware(serviceId) {
 
       const tx = await retryOperation(
         () => provider.getTransaction(txHash),
-        { retries: 2, context: `getTransaction(${txHash})` }
+        { retries: 5, minTimeout: 1000, maxTimeout: 5000, context: `getTransaction(${txHash})` }
       );
 
       if (!tx) {
@@ -109,7 +109,7 @@ export function paymentMiddleware(serviceId) {
 
       const receipt = await retryOperation(
         () => provider.getTransactionReceipt(txHash),
-        { retries: 2, context: `getReceipt(${txHash})` }
+        { retries: 5, minTimeout: 1000, maxTimeout: 5000, context: `getReceipt(${txHash})` }
       );
 
       if (!receipt || receipt.status !== 1) {

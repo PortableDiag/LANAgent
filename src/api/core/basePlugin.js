@@ -232,7 +232,7 @@ export class BasePlugin extends EventEmitter {
 
   /**
    * Update configuration value and emit change event
-   * 
+   *
    * @param {string} key - Configuration key
    * @param {*} value - New configuration value
    * @fires BasePlugin#config:changed
@@ -240,6 +240,53 @@ export class BasePlugin extends EventEmitter {
   setConfig(key, value) {
     this.config[key] = value;
     this.emit('config:changed', { key, value });
+  }
+
+  /**
+   * Return a sanitized snapshot of this.config for status / debug surfaces.
+   * Filters out anything that looks like a credential by key name AND
+   * scrubs primitive secret-shaped strings nested inside objects. Plugins
+   * that need richer redaction can override.
+   *
+   * Subclasses MAY define `this.safeConfigKeys = ['fieldA', 'fieldB']`
+   * to opt into an explicit allow-list (most secure). When unset, the
+   * deny-list pattern below applies.
+   */
+  getPluginConfig() {
+    const denyPattern = /key|secret|token|password|credential|apikey|privatekey|seed|mnemonic|webhook/i;
+    const scrub = (val, depth = 0) => {
+      if (depth > 4 || val == null) return val;
+      if (Array.isArray(val)) return val.map(v => scrub(v, depth + 1));
+      if (typeof val === 'object') {
+        const out = {};
+        for (const [k, v] of Object.entries(val)) {
+          if (denyPattern.test(k)) {
+            out[k] = v == null ? null : '[redacted]';
+          } else {
+            out[k] = scrub(v, depth + 1);
+          }
+        }
+        return out;
+      }
+      return val;
+    };
+
+    let snapshot;
+    if (Array.isArray(this.safeConfigKeys) && this.safeConfigKeys.length) {
+      snapshot = {};
+      for (const k of this.safeConfigKeys) {
+        if (k in this.config) snapshot[k] = this.config[k];
+      }
+    } else {
+      snapshot = scrub(this.config);
+    }
+    return {
+      success: true,
+      plugin: this.name,
+      version: this.version,
+      enabled: this.enabled !== false,
+      config: snapshot
+    };
   }
 
   /**

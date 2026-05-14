@@ -2,6 +2,28 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.45] - 2026-05-13
+
+Sync from genesis — ALICE PR triage round (#2158-#2164, 7 PRs from the auto-improve loop). All 7 closed; 5 manually re-implemented with corrections, 2 partially-applied with the unsafe/dead pieces dropped. Genesis-only items (BaseStrategy/StrategyRegistry trade-metrics methods from #2158) skipped per the standing crypto-strategy policy.
+
+### Added
+
+- **`oauthmanager` plugin** (closed-and-reimplemented from #2162) — full OAuth 2.0 Authorization Code flow with PKCE/S256, refresh, RFC 7009 revoke, CSRF state tracking, configurable per-provider basic vs body-secret token-auth modes. The PR's design was already solid — what it was missing and got added in the manual version: token persistence via `PluginSettings.setCached` (PR stored tokens in in-memory NodeCache only — every PM2 restart would silently drop every OAuth session and force re-auth); encryption at rest via `encrypt()`/`decrypt()` from `src/utils/encryption.js` (AES-256-GCM, same scheme used elsewhere for credential storage — tokens are bearer credentials with privileged scope on third-party services and can't be plaintext in the DB); stripped the raw provider response from the persisted payload so we don't accidentally store undocumented provider fields; `getPluginConfig` action wired to BasePlugin's redacted version with `safeConfigKeys = ['providerCount']` allow-list; `revoke` now drops local tokens even when no `revokeUrl` is configured (some providers don't expose one); `examples` arrays added to every command for vector intent matching.
+- **`xueqiu` plugin** (closed-and-applied with one fix from #2163) — Xueqiu (雪球) Chinese stock data plugin: zero-config session bootstrap by scraping homepage Set-Cookie, A-share/HK/US ticker normalization, four actions `quote`/`search`/`hotPosts`/`hotStocks`, retry-on-401/403 with session refresh, multi-shape response parsing, NodeCache with per-action TTLs. Single change before applying: made session bootstrap lazy (PR called `await this.ensureSession()` from `initialize()` — bootstrapping at boot means a single network blip on xueqiu.com or running outside its reachable region fails plugin init and disables the plugin entirely). Bootstrap now happens on first `execute()` call.
+- **`googlesecops` plugin** (closed-and-applied with two additions from #2164) — Google SecOps Detection Engine integration with `listRules` / `getRule` / `searchDetections` actions, Bearer-token auth, NodeCache for rule lookups (5min, no cache for time-windowed detection searches — correct call), pagination via `pageSize`/`pageToken`, formats Google API errors via `error.response.data.error.message`, ISO8601 timestamp normalization. Additions: `safeConfigKeys = ['baseUrl']` explicit allow-list (more conservative than the deny-list default since access tokens here are 1h Google-service-account JWT-derived), and `getPluginConfig` action wired in.
+- **`BasePlugin.getPluginConfig()`** — sanitized config snapshot for status/debug surfaces. Two redaction paths: explicit allow-list when subclass sets `this.safeConfigKeys = ['fieldA', 'fieldB']` (most secure — used by oauthmanager and googlesecops), or recursive deny-pattern scrub matching `/key|secret|token|password|credential|apikey|privatekey|seed|mnemonic|webhook/i` against keys at any depth (depth-capped at 4). Returns `{success, plugin, version, enabled, config}`. Underpins the `getPluginConfig` action that #2160 tried to add unsafely to `_ai_template.js`.
+- **`_ai_template.js` `getPluginConfig` action** (closed-and-reimplemented from #2160) — PR returned raw `this.config` which would leak credentials on every future AI-generated plugin (same defect as previously-closed #2102). Now wires the action through to `BasePlugin.getPluginConfig()` so future scaffolded plugins get the safe redaction automatically, with no copy-pasted unsafe code.
+- **`/api/external/image/health` endpoint** in `imageGen.js` (closed-and-applied from #2161) — useful for monitoring, matches the convention on `sandbox.js` and `scraping.js`. Enriched to also report `supportedFormats` mirroring the sandbox `/health` shape that lists supported languages. Skipped the rest of #2161 — unused NodeCache import and a description-vs-diff mismatch claiming retry/fallback work that was already in place at the imageGenerationService layer.
+
+### Fixed
+
+- **Blockchain RPC retry tuning in `payment.js`** (closed-and-partial-applied from #2159) — bumped `getTransaction` and `getTransactionReceipt` retries from 2 → 5 with `minTimeout: 1000, maxTimeout: 5000`. `retryOperation` already does exponential backoff so no util refactor was needed despite what the PR description claimed. Worst-case extra latency for a permanently-failing tx becomes ~17s with default factor=2 — fine for blockchain confirmations that already span minutes. Skipped the rest of #2159 — module-scope `apiLimiter = rateLimit(...)` declaration that was never wired into any route handler. Pure dead code.
+
+### Notes
+
+- Genesis-only changes from this round that were intentionally skipped: `BaseStrategy.calculateAverageTradeDuration` / `calculateMaximumDrawdown` / `calculateSharpeRatio` and `StrategyRegistry.generatePerformanceReport` (from PR #2158). These stay genesis-only per the standing crypto-strategy policy.
+- All 7 PRs got per-PR closure comments on the genesis side explaining what was kept, what was changed, and why.
+
 ## [2.25.44] - 2026-05-13
 
 Sync from genesis covering v2.25.41 through v2.25.44 — four versions worth of work bundled into a single public release.

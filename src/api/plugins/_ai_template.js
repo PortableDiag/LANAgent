@@ -42,7 +42,15 @@ export default class {{PLUGIN_NAME}}Plugin extends BasePlugin {
     // Commands array for vector intent detection
     // Each command will be automatically indexed when the plugin is enabled
     // Include 'examples' array for better natural language matching
-    this.commands = {{PLUGIN_COMMANDS}};
+    this.commands = [
+      ...{{PLUGIN_COMMANDS}},
+      {
+        command: 'getPluginConfig',
+        description: 'Return a sanitized snapshot of this plugin\'s current configuration (credentials redacted)',
+        usage: 'getPluginConfig',
+        examples: ['getPluginConfig', 'show plugin config', 'what is this plugin configured with']
+      }
+    ];
     
     // Plugin configuration
     this.config = {{PLUGIN_CONFIG}};
@@ -96,6 +104,8 @@ export default class {{PLUGIN_NAME}}Plugin extends BasePlugin {
     try {
       switch (action) {
         {{PLUGIN_HANDLERS}}
+        case 'getPluginConfig':
+          return this.getPluginConfig();
         default:
           throw new Error(`Unknown action: ${action}`);
       }

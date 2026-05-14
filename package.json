@@ -1,6 +1,6 @@
 {
   "name": "lan-agent",
-  "version": "2.25.44",
+  "version": "2.25.45",
   "description": "AI-powered personal assistant agent for home server management",
   "type": "module",
   "main": "src/index.js",

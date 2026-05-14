@@ -110,4 +110,12 @@ router.post('/generate',
   }
 );
 
+router.get('/health', (req, res) => {
+  res.json({
+    success: true,
+    status: 'healthy',
+    supportedFormats: SUPPORTED_FORMATS
+  });
+});
+
 export default router;
