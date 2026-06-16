@@ -719,6 +719,13 @@ async function executeScrape(req, { url, selectors, extractType = 'text', userAg
         ssOptions.cookies = result._cookies;
       }
       if (result._userAgent) ssOptions.userAgent = result._userAgent;
+      // Pass the already-rendered HTML so the screenshot can be taken from it
+      // (setContent) instead of re-navigating the live bot-block — this is what
+      // gets thumbnails on the hardest CF/Akamai pages (e.g. congress.gov) where
+      // re-navigating would re-trigger the challenge and skip the screenshot.
+      if (typeof result._rawHtml === 'string' && result._rawHtml.length > 100) {
+        ssOptions.html = result._rawHtml;
+      }
       // Hard-cap the screenshot so it can NEVER hang the content response. The
       // page content is already captured above; the screenshot is a bonus. A
       // render that hits a slow navigation or an unresolved bot-check
