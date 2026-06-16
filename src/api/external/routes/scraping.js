@@ -447,7 +447,7 @@ async function executeScrape(req, { url, selectors, extractType = 'text', userAg
         const axiosMod = (await import('axios')).default;
         const waybackInfo = await axiosMod.get(
           `https://archive.org/wayback/available?url=${encodeURIComponent(url)}`,
-          { timeout: 8000 }
+          { timeout: 5000 }
         );
         const snapshot = waybackInfo.data?.archived_snapshots?.closest;
         if (snapshot?.available && snapshot.url) {
@@ -526,7 +526,12 @@ async function executeScrape(req, { url, selectors, extractType = 'text', userAg
     // returns the actual body — kept last in the chain as a long-tail bet.
     // Set REMOVEPAYWALL_ENABLED=false in env to disable.
     const removepaywallEnabled = process.env.REMOVEPAYWALL_ENABLED !== 'false';
-    if (rawResult.success && removepaywallEnabled && !options._removepaywallRetried && isUnusableResult(rawResult)) {
+    // removepaywalls.com is a METERED-PAYWALL bypass — only useful on the known
+    // paywall hosts. Firing it for other blocks (e.g. federalregister.gov's
+    // "Request Access" rate-limit wall) just burns ~10s on a useless lookup
+    // before the VPN-rotation + FS-retry that actually recovers those. Host-gate it.
+    if (rawResult.success && removepaywallEnabled && !options._removepaywallRetried
+        && isUnusableResult(rawResult) && CRAWLER_FRIENDLY_PAYWALL_HOSTS.has(hostnameOf(url))) {
       const rpwUrl = `https://removepaywalls.com/${url}`;
       logger.info(`[ExternalScrape] Still stub-shaped after archive.ph for ${url}, trying removepaywalls.com (${rpwUrl})`);
       try {
@@ -733,7 +738,7 @@ async function executeScrape(req, { url, selectors, extractType = 'text', userAg
       // (federalregister/presidency/congress all timed the client out at 130s
       // even though FlareSolverr had already returned the content). Bound it and
       // return the content without a screenshot on overrun.
-      const SCREENSHOT_BUDGET_MS = Number(process.env.RENDER_SCREENSHOT_BUDGET_MS) || 18000;
+      const SCREENSHOT_BUDGET_MS = Number(process.env.RENDER_SCREENSHOT_BUDGET_MS) || 22000;
       const ssResult = await Promise.race([
         scraper.execute({ action: 'screenshot', url, options: ssOptions }),
         new Promise((resolve) => setTimeout(() => resolve({ success: false, _timedOut: true }), SCREENSHOT_BUDGET_MS))
