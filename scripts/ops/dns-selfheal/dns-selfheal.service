@@ -1,0 +1,9 @@
+[Unit]
+Description=LANAgent DNS self-heal (recover name resolution behind a DNS-hijacking VPN)
+After=network.target
+# Best-effort: run after the VPN is up if present, but don't require it.
+After=expressvpn-service.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/dns-selfheal.sh

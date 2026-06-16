@@ -1,0 +1,61 @@
+title = "LANAgent Credential Leak Detection"
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "anthropic-api-key"
+description = "Anthropic API Key"
+regex = '''sk-ant-api\d+-[A-Za-z0-9_-]{20,}'''
+tags = ["key", "anthropic"]
+
+[[rules]]
+id = "openai-api-key"
+description = "OpenAI API Key"
+regex = '''sk-proj-[A-Za-z0-9_-]{20,}'''
+tags = ["key", "openai"]
+
+[[rules]]
+id = "telegram-bot-token"
+description = "Telegram Bot Token"
+regex = '''\d{8,10}:AA[A-Za-z0-9_-]{33,}'''
+tags = ["key", "telegram"]
+
+[[rules]]
+id = "github-token"
+description = "GitHub Personal Access Token"
+regex = '''ghp_[A-Za-z0-9]{36,}'''
+tags = ["key", "github"]
+
+[[rules]]
+id = "lanagent-api-key"
+description = "LANAgent API Key"
+regex = '''la_[A-Za-z0-9+/=_-]{20,}'''
+tags = ["key", "lanagent"]
+
+[[rules]]
+id = "private-key-hex"
+description = "Ethereum Private Key"
+regex = '''0x[a-fA-F0-9]{64}'''
+tags = ["key", "crypto"]
+
+[[rules]]
+id = "huggingface-token"
+description = "HuggingFace Token"
+regex = '''hf_[A-Za-z0-9]{20,}'''
+tags = ["key", "huggingface"]
+
+[[rules]]
+id = "hardcoded-password"
+description = "Hardcoded password in sshpass"
+regex = '''sshpass\s+-p\s+['"][^'"]+['"]'''
+tags = ["password"]
+
+[allowlist]
+paths = [
+    '''.env.example''',
+    '''.gitleaks.toml''',
+    '''SECURITY.md''',
+    '''docs/proposals/multi-instance-framework.md''',
+    '''docs/SECURITY-AUDIT-PRE-PUBLIC.md''',
+]
