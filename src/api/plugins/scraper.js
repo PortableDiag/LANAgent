@@ -889,9 +889,19 @@ export default class ScraperPlugin extends BasePlugin {
           ? html.replace(/<head[^>]*>/i, m => `${m}${baseTag}`)
           : `${baseTag}${html}`;
         try {
-          await page.setContent(htmlWithBase, { waitUntil: 'load', timeout: 12000 });
-        } catch { /* slow/blocked assets — DOM is set; screenshot what painted */ }
-        await new Promise(r => setTimeout(r, 800)); // brief settle for late images/fonts
+          // domcontentloaded (not 'load'): 'load' waits for EVERY asset to fetch
+          // from the live origin, which on asset-heavy pages (e.g. presidency.ucsb.edu)
+          // ran the full timeout every time and blew the screenshot budget → no
+          // thumbnail. Set the DOM fast, then give images a bounded beat to paint.
+          await page.setContent(htmlWithBase, { waitUntil: 'domcontentloaded', timeout: 10000 });
+        } catch { /* slow DOM — screenshot what painted */ }
+        // Let above-the-fold images/CSS paint, but cap it so we never approach the budget.
+        try {
+          await page.evaluate(() => Promise.race([
+            Promise.all([...document.images].filter(i => !i.complete).map(i => new Promise(r => { i.onload = i.onerror = r; }))),
+            new Promise(r => setTimeout(r, 3500))
+          ]));
+        } catch { /* ignore */ }
         // No challenge wait — we never navigated to the live bot-block.
       } else {
         // v2.25.89: prime with persistent anti-bot cookies (datadome, cf_clearance, etc.)

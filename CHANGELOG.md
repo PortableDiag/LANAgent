@@ -2,6 +2,21 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.103] - 2026-06-15
+
+### Fixed — screenshot regression + slow cold-render recovery (client-reported)
+
+- Render-tier screenshots regressed to none on normal pages (e.g. presidency.ucsb.edu):
+  the setContent screenshot used `waitUntil:'load'`, which waits for every asset to
+  fetch from the live origin → blew the 18s budget → no thumbnail. Switched to
+  `domcontentloaded` + a bounded image-settle; screenshots now complete in ~4s.
+  Screenshot budget 18s → 22s for headroom on heavy pages.
+- federalregister.gov cold render could exceed the ~90s deadline when FlareSolverr hit
+  its rate-limit "Request Access" wall: the recovery chain ran removepaywalls.com (a
+  metered-paywall bypass, useless for a gov block) — ~10s wasted — before the
+  VPN-rotation + FS-retry that actually recovers it. Host-gated removepaywalls to the
+  known paywall hosts; tightened the Wayback availability lookup 8s → 5s.
+
 ## [2.25.102] - 2026-06-15
 
 ### Improved — render-tier screenshots on hard CF/Akamai pages
