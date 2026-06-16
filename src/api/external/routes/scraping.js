@@ -60,7 +60,13 @@ const CHALLENGE_FINGERPRINTS = [
   // security check to access" + "Why do I have to complete a CAPTCHA?"
   /please complete the security check|completing the captcha proves you/i,
   // Generic human-verification wording used by several anti-bot vendors
-  /human verification|verify (you are|that you('re| are) a human)/i
+  /human verification|verify (you are|that you('re| are) a human)/i,
+  // federalregister.gov / eCFR.gov rolled out an explicit anti-scraping wall
+  // ("Request Access — Due to aggressive automated scraping … programmatic
+  // access to these sites …") that returns 200 with ~13KB of block text. It's
+  // not a standard CAPTCHA, so treat the wording itself as the fingerprint so
+  // the result is flagged unusable and the archive fallback kicks in.
+  /due to aggressive automated scraping|programmatic access to these sites|request access[\s\S]{0,160}automated scraping/i
 ];
 function looksLikeChallengePage(result) {
   if (!result?.content) return false;
@@ -88,8 +94,28 @@ function isRemovepaywallsWrapper(result) {
   return false;
 }
 
+// A JavaScript app-shell: the server hands a non-JS client a chunk of HTML
+// (script tags + an empty mount node) but almost no real text — the content only
+// exists after a client-side render. This is the federalregister.gov failure mode:
+// a 10.5KB shell that the old length gate (htmlLen < 8000) let through as a
+// "successful full" snapshot. Signature: substantial _rawHtml but tiny extracted
+// text, or explicit app-shell / "enable JavaScript" markers. (_rawHtml is only
+// populated by the cheerio path; Puppeteer/FlareSolverr execute the JS, so their
+// output is real content, not a shell — hence the html-present guard.)
+const APP_SHELL_MARKERS = /<div id=["'](root|app|__next|__nuxt|svelte|gatsby-focus-wrapper)["'][^>]*>\s*<\/div>|you (need to )?enable javascript|please enable javascript|enable js to|<noscript>[^<]*(javascript|enable)/i;
+function looksLikeJsShell(result) {
+  const html = typeof result?._rawHtml === 'string' ? result._rawHtml : '';
+  if (!html) return false;
+  const text = String(result?.content?.text || '');
+  // Lots of markup/scripts, almost no rendered text → an unrendered shell.
+  if (html.length > 4000 && text.length < 600) return true;
+  // Explicit shell / needs-JS markers with little real text.
+  if (text.length < 1500 && APP_SHELL_MARKERS.test(html)) return true;
+  return false;
+}
+
 // Single source of truth for "this result is unusable, try the next fallback".
-// Used by Twitterbot, Wayback, and archive.ph gates.
+// Used by the Puppeteer-escalation, Twitterbot, Wayback, and archive.ph gates.
 function isUnusableResult(result) {
   if (!result?.success) return true;
   const htmlLen = typeof result._rawHtml === 'string' ? result._rawHtml.length : 0;
@@ -97,7 +123,21 @@ function isUnusableResult(result) {
   // textLen is primary (Puppeteer doesn't surface _rawHtml). htmlLen is a
   // belt-and-suspenders gate when raw HTML IS available.
   const lengthLooksStub = textLen < 500 && (htmlLen === 0 || htmlLen < 8000);
-  return lengthLooksStub || looksLikeChallengePage(result);
+  return lengthLooksStub || looksLikeChallengePage(result) || looksLikeJsShell(result);
+}
+
+// Whether to reach for an archive (Wayback / archive.ph). Two cases:
+//   (a) a "successful" but stub/shell/challenge result, OR
+//   (b) a hard BLOCK-like failure (403/Akamai/Cloudflare/etc.) — this is the
+//       congress.gov case the old gates missed, because they required
+//       success === true. Archives were captured when the page was openly
+//       crawlable, so they bypass live bot-blocks. We do NOT chase archives for
+//       dead hosts (nxdomain), connection resets, or plain timeouts — those
+//       won't have a useful snapshot and shouldn't pay the lookup cost.
+function shouldTryArchiveFallback(result) {
+  if (result?.success) return isUnusableResult(result);
+  const err = String(result?.error || '');
+  return /\b(403|406|429|503)\b|forbidden|blocked|cloudflare|akamai|access denied|attention required|just a moment|challenge|rate limit|too many requests/i.test(err);
 }
 
 // Classify a scrape error so we can (a) skip pointless tier escalation when
@@ -136,7 +176,7 @@ function cacheFailure(cacheKey, errMsg) {
 }
 
 // Credit costs per tier (v2.25.25: render dropped from 5 → 3 to match `full` —
-// FlareSolverr cost-to-serve is ~[redacted]/call, so the 5cr sticker was almost
+// FlareSolverr cost-to-serve is ~$0.001/call, so the 5cr sticker was almost
 // entirely margin and reading expensive next to ScraperAPI/ScrapeGraphAI per-call
 // rates. New scheme keeps `render` distinct from `full` semantically (FS-backed)
 // but aligned in price; opens 5cr slot for a future premium tier.)
@@ -265,16 +305,22 @@ async function executeScrape(req, { url, selectors, extractType = 'text', userAg
     const gotChallengePage = rawResult.success && rawResult.content?.title &&
       challengeTitles.some(t => rawResult.content.title.includes(t));
 
-    // If cheerio failed, got blocked, or got a challenge page, auto-retry with Puppeteer
+    // A cheerio result that's a JS app-shell or stub also warrants a render retry:
+    // Puppeteer executes the page's JS, turning the shell into real content. This
+    // is what rescues federalregister.gov (and any SPA) instead of storing the shell.
+    const cheerioLooksUnusable = rawResult.success && rawResult.method !== 'flaresolverr' && isUnusableResult(rawResult);
+
+    // If cheerio failed, got blocked, got a challenge page, or returned a shell/stub, auto-retry with Puppeteer
     const shouldRetryWithPuppeteer = !options.usePuppeteer && rawResult.method !== 'flaresolverr' && (
       !rawResult.success ||
       !rawResult.content?.title ||
-      gotChallengePage
+      gotChallengePage ||
+      cheerioLooksUnusable
     );
 
     if (shouldRetryWithPuppeteer) {
       const errMsg = rawResult.error || cheerioError || (gotChallengePage ? 'Cloudflare challenge page' : '');
-      const isBlocked = gotChallengePage || errMsg.includes('403') || errMsg.includes('406') || errMsg.includes('503')
+      const isBlocked = gotChallengePage || cheerioLooksUnusable || errMsg.includes('403') || errMsg.includes('406') || errMsg.includes('503')
         || errMsg.includes('Forbidden') || errMsg.includes('blocked') || errMsg.includes('Failed to scrape');
 
       if (isBlocked) {
@@ -307,14 +353,10 @@ async function executeScrape(req, { url, selectors, extractType = 'text', userAg
       }
     }
 
-    // Final escalation: if cheerio/Puppeteer failed or was Cloudflare-blocked,
-    // try FlareSolverr — regardless of tier. FS renders pages that crash our
-    // Puppeteer extraction (e.g. OpenSecrets, whose page JS throws via hooked
-    // element getters), and it's the proven-working path. The shouldBailEscalation
-    // check above already returned for intrinsically-dead URLs (4xx/DNS), so by
-    // here the failure is the retryable kind and FS is worth the attempt. Gated on
-    // FS availability + not-already-FS below, so it's a no-op when FS is down.
-    if ((!rawResult.success || rawResult.cloudflareBlocked) && rawResult.method !== 'flaresolverr') {
+    // Render tier final escalation: if Puppeteer was Cloudflare-blocked, try FlareSolverr.
+    // This covers the case where renderTier=true but FS was unavailable initially, or
+    // where the upstream tried puppeteer first and hit a managed challenge.
+    if (renderTier && (!rawResult.success || rawResult.cloudflareBlocked) && rawResult.method !== 'flaresolverr') {
       if (await isFlareSolverrAvailable()) {
         logger.info(`[ExternalScrape] Render tier: escalating to FlareSolverr after Puppeteer block on ${url}`);
         try {
@@ -397,7 +439,7 @@ async function executeScrape(req, { url, selectors, extractType = 'text', userAg
     // contemporary auth walls and bot blocks. Free, no auth, broad
     // coverage on major news sites. Cost: ~2s availability check plus
     // ~3s snapshot fetch when triggered.
-    if (rawResult.success && !options._waybackRetried && isUnusableResult(rawResult)) {
+    if (!options._waybackRetried && shouldTryArchiveFallback(rawResult)) {
       const htmlLen = typeof rawResult._rawHtml === 'string' ? rawResult._rawHtml.length : 0;
       const textLen = typeof rawResult.content?.text === 'string' ? rawResult.content.text.length : 0;
       logger.info(`[ExternalScrape] Still stub-shaped after retries for ${url} (html=${htmlLen}B, text=${textLen}B), trying Wayback Machine`);
@@ -446,7 +488,7 @@ async function executeScrape(req, { url, selectors, extractType = 'text', userAg
     // accumulates URLs people submit by hand, so high-traffic recent paywalled
     // articles often land here before Wayback. Cost: ~6-8s (Cloudflare-protected,
     // needs Puppeteer). Only fires when we're still stub-shaped after Wayback.
-    if (rawResult.success && !options._archivePhRetried && isUnusableResult(rawResult)) {
+    if (!options._archivePhRetried && shouldTryArchiveFallback(rawResult)) {
       const archivePhUrl = `https://archive.ph/newest/${url}`;
       logger.info(`[ExternalScrape] Still stub-shaped after Wayback for ${url}, trying archive.ph (${archivePhUrl})`);
       try {
@@ -667,18 +709,31 @@ async function executeScrape(req, { url, selectors, extractType = 'text', userAg
   const wantScreenshot = usePuppeteer || renderTier;
   if (wantScreenshot && scraper.execute) {
     try {
-      // Whole-page screenshot by default — the full scrolled page, not just the
-      // viewport (these are archived to ScrapeCache and are far more valuable
-      // full-page). Read the raw body so "unset" means full-page; callers can
-      // still force viewport with fullPage:false.
-      const ssOptions = { fullPage: req.body?.fullPage !== false };
+      // v2.25.88: Honor the caller's fullPage flag. Was hardcoded to false,
+      // which silently swallowed render-tier customers who asked for
+      // fullPage:true and got a viewport-sized PNG back. Default stays false
+      // for backward compat with callers that don't set it.
+      const ssOptions = { fullPage: !!fullPage };
       if (viewport && typeof viewport === 'object') ssOptions.viewport = viewport;
       if (Array.isArray(result._cookies) && result._cookies.length > 0) {
         ssOptions.cookies = result._cookies;
       }
       if (result._userAgent) ssOptions.userAgent = result._userAgent;
-      const ssResult = await scraper.execute({ action: 'screenshot', url, options: ssOptions });
-      if (ssResult.success && ssResult.screenshot) {
+      // Hard-cap the screenshot so it can NEVER hang the content response. The
+      // page content is already captured above; the screenshot is a bonus. A
+      // render that hits a slow navigation or an unresolved bot-check
+      // interstitial used to block the whole request on its 30s+ internal waits
+      // (federalregister/presidency/congress all timed the client out at 130s
+      // even though FlareSolverr had already returned the content). Bound it and
+      // return the content without a screenshot on overrun.
+      const SCREENSHOT_BUDGET_MS = Number(process.env.RENDER_SCREENSHOT_BUDGET_MS) || 18000;
+      const ssResult = await Promise.race([
+        scraper.execute({ action: 'screenshot', url, options: ssOptions }),
+        new Promise((resolve) => setTimeout(() => resolve({ success: false, _timedOut: true }), SCREENSHOT_BUDGET_MS))
+      ]);
+      if (ssResult?._timedOut) {
+        logger.warn(`[ExternalScrape] Screenshot exceeded ${SCREENSHOT_BUDGET_MS}ms budget for ${url} — returning content without screenshot`);
+      } else if (ssResult?.success && ssResult.screenshot) {
         response._screenshot = ssResult.screenshot;
       }
     } catch { /* screenshot optional, don't fail the scrape */ }
@@ -833,22 +888,16 @@ router.post('/',
           return res.status(status).json({ ...result, credited: true, creditsRefunded: creditCost, creditsRemaining: acc?.credits || 0 });
         }
 
-        // Add HTML to the customer-facing payload only for full/render tiers
-        // (what they paid for). For other tiers, _rawHtml is intentionally
-        // retained on the response so the gateway can ingest the FULL page to
-        // ScrapeCache — the gateway strips _rawHtml before returning to the
-        // customer, so basic-tier callers still only get extracted text.
+        // Add HTML for full/render tiers
         if ((tier === 'full' || tier === 'render') && result._rawHtml) {
           result.data.html = result._rawHtml;
-          delete result._rawHtml; // already surfaced in data.html; avoid duplicating it
         }
-        // Add screenshot to the customer payload for render tier; for other
-        // tiers (e.g. stealth) _screenshot is retained on the response so the
-        // gateway can ingest it to ScrapeCache (stripped before the customer).
+        // Add screenshot for render tier
         if (tier === 'render' && result._screenshot) {
           result.data.screenshot = result._screenshot;
-          delete result._screenshot; // surfaced in data.screenshot
         }
+        delete result._rawHtml;
+        delete result._screenshot;
 
         const acc = await ExternalCreditBalance.findByWallet(req.wallet);
         result.creditsRemaining = acc?.credits || 0;

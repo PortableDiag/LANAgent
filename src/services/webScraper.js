@@ -216,12 +216,28 @@ export class WebScraperService {
         height: options.height || 1080
       });
 
-      // Navigate with retry logic
+      // Navigate with retry logic.
+      // waitUntil defaults to 'domcontentloaded' (not 'networkidle2'): on
+      // tracker/ad-heavy pages the network never goes idle, so networkidle2 hits
+      // the full timeout every time — and retried 3× that's a 90s hang for a page
+      // that actually loaded fine. We only RETRY recoverable HTTP errors
+      // (403/429/5xx); a navigation *timeout* means the DOM is most likely usable
+      // already, so we proceed and extract rather than retry the hang.
       await retryOperation(async () => {
-        const response = await page.goto(url, {
-          waitUntil: options.waitUntil || 'networkidle2',
-          timeout: options.timeout || 30000
-        });
+        let response;
+        try {
+          response = await page.goto(url, {
+            waitUntil: options.waitUntil || 'domcontentloaded',
+            timeout: options.timeout || 30000
+          });
+        } catch (navErr) {
+          if (/timeout|timed out/i.test(navErr.message)) {
+            logger.warn(`Navigation wait timed out for ${url} (${navErr.message}) — proceeding with the loaded DOM`);
+            return; // do not retry; extract whatever rendered
+          }
+          throw navErr; // genuine connection error — let retryOperation handle it
+        }
+        if (!response) return;
 
         if (response.status() === 403 && this.expressVPN.enabled) {
           logger.warn(`Got 403, rotating VPN location...`);
@@ -244,11 +260,20 @@ export class WebScraperService {
         }
       }, { retries: 3 });
 
+      // Give JS-rendered (SPA) content a bounded chance to populate after
+      // domcontentloaded — wait up to 6s for real body text, but never hang on it.
+      // If it never fills (a true JS shell or a genuinely short page), we extract
+      // what's there and let the caller's quality gate decide.
+      await page.waitForFunction(
+        () => document.body && document.body.innerText && document.body.innerText.trim().length > 500,
+        { timeout: options.contentSettleTimeout || 6000 }
+      ).catch(() => { /* shell or short page — extract anyway */ });
+
       // Wait for selector if specified
       if (options.waitForSelector) {
         await page.waitForSelector(options.waitForSelector, {
           timeout: options.selectorTimeout || 10000
-        });
+        }).catch(() => { /* selector optional — don't fail the whole render */ });
       }
 
       // Execute custom function if provided
