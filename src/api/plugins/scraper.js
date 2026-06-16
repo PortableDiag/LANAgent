@@ -456,7 +456,7 @@ export default class ScraperPlugin extends BasePlugin {
 
       return result;
     } catch (error) {
-      logger.error(`Scraping error for ${url}: ${error.message || error.code || String(error)}`);
+      logger.error(`Scraping error for ${url}:`, error.message);
       throw new Error(`Failed to scrape ${url}: ${error.message}`);
     }
   }
@@ -655,10 +655,7 @@ export default class ScraperPlugin extends BasePlugin {
         success: true,
         url,
         content,
-        method: 'cheerio',
-        // Raw HTML so the external route / gateway can ingest the full page to
-        // ScrapeCache (FlareSolverr already returns this; cheerio didn't).
-        _rawHtml: typeof response.data === 'string' ? response.data : undefined
+        method: 'cheerio'
       };
     } catch (error) {
       if (error.response && error.response.status === 304) {
@@ -770,16 +767,8 @@ export default class ScraperPlugin extends BasePlugin {
       }
       
       const content = await page.evaluate((selector) => {
-        // Defensive: some sites override the innerText/textContent getters with
-        // code that throws in headless (TypeError on an undefined logger, e.g.
-        // OpenSecrets' app.js `.warn`). Fall back through textContent to '' so a
-        // hostile getter can't abort the whole evaluate and fail the scrape.
         const getTextContent = (element) => {
-          if (!element) return '';
-          try { return element.innerText || element.textContent || ''; }
-          catch (_) {
-            try { return element.textContent || ''; } catch (_) { return ''; }
-          }
+          return element ? element.innerText || element.textContent : '';
         };
         
         const result = {
@@ -802,26 +791,18 @@ export default class ScraperPlugin extends BasePlugin {
           result.text = getTextContent(mainContent || document.body);
         }
         
-        // Per-element try/catch: some sites (e.g. OpenSecrets) override element
-        // getters with code that throws in a headless context (TypeError on an
-        // undefined logger). Without isolation, one bad getter rejects the whole
-        // page.evaluate and aborts the scrape. Skip the offending node instead.
         document.querySelectorAll('a[href]').forEach(link => {
-          try {
-            result.links.push({
-              href: link.href,
-              text: (link.innerText || '').trim()
-            });
-          } catch (_) { /* hostile getter — skip this link */ }
+          result.links.push({
+            href: link.href,
+            text: link.innerText.trim()
+          });
         });
-
+        
         document.querySelectorAll('img[src]').forEach(img => {
-          try {
-            result.images.push({
-              src: img.src,
-              alt: img.alt || ''
-            });
-          } catch (_) { /* hostile getter — skip this image */ }
+          result.images.push({
+            src: img.src,
+            alt: img.alt || ''
+          });
         });
         
         return result;
@@ -833,55 +814,23 @@ export default class ScraperPlugin extends BasePlugin {
         content.text = content.text.substring(0, 5000) + '...';
       }
       
-      // Non-fatal: these run their own page.evaluate and touch innerText on
-      // arbitrary nodes (microdata propElem.innerText), which throws on sites
-      // that override the getter (OpenSecrets). A structured-data miss must not
-      // fail an otherwise-successful scrape.
-      try { content.jsonld = await this.extractJsonLdFromPage(page); }
-      catch (e) { logger.debug(`jsonld extraction skipped for ${url}: ${e.message}`); content.jsonld = []; }
-      try { content.microdata = await this.extractMicrodataFromPage(page); }
-      catch (e) { logger.debug(`microdata extraction skipped for ${url}: ${e.message}`); content.microdata = []; }
-
-      // Capture the raw page + a screenshot while the page is still open — cheap
-      // here since the browser already rendered it (this is why stealth tier never
-      // returned them before: it only ran content extraction). Both best-effort and
-      // never fail the scrape. Used for ScrapeCache ingest and stealth/render output.
-      let _rawHtml, _screenshot;
-      try { _rawHtml = await page.content(); } catch (_) { /* keep going without raw html */ }
-      // Only screenshot when the caller actually wants one (stealth/render). The
-      // route also has a screenshot path; capturing unconditionally here added a
-      // full-page screenshot to EVERY puppeteer scrape (incl. basic/full
-      // escalations) — wasted work + latency/timeout risk. Gated off by default.
-      if (options.captureScreenshot) {
-        try {
-          // Full-page screenshot (the whole scrolled page, not just the viewport).
-          const shot = await page.screenshot({ fullPage: true, encoding: 'base64' });
-          // Guard against pathologically tall pages blowing the agent→gateway
-          // transfer / ScrapeCache's 25 MiB cap (base64 ≈ 1.33× bytes).
-          if (shot && shot.length < 32 * 1024 * 1024) {
-            _screenshot = `data:image/png;base64,${shot}`;
-          } else if (shot) {
-            logger.debug(`Screenshot for ${url} too large (${shot.length}b base64) — skipping`);
-          }
-        } catch (_) { /* screenshot optional */ }
-      }
-
+      content.jsonld = await this.extractJsonLdFromPage(page);
+      content.microdata = await this.extractMicrodataFromPage(page);
+      
       return {
         success: true,
         url,
         content,
-        method: 'puppeteer',
-        _rawHtml,
-        _screenshot
+        method: 'puppeteer'
       };
-
+      
     } finally {
       await page.close();
     }
   }
 
   async takeScreenshot(url, options) {
-    const { fullPage = false, viewport, userAgent, cookies } = options;
+    const { fullPage = false, viewport, userAgent, cookies, html } = options;
 
     if (!this.browser) {
       this.browser = await launchBrowser();
@@ -927,42 +876,63 @@ export default class ScraperPlugin extends BasePlugin {
 
       await page.setViewport(viewport || { width: 1920, height: 1080, deviceScaleFactor: 1 });
 
-      // v2.25.89: prime with persistent anti-bot cookies (datadome, cf_clearance, etc.)
-      await primePageWithSavedCookies(page, url);
+      if (html && typeof html === 'string' && html.length > 100) {
+        // Screenshot from pre-rendered HTML (e.g. FlareSolverr's output for a
+        // render-tier scrape) instead of re-navigating the live site. The live
+        // page is behind a bot-block that issued cf_clearance to FlareSolverr's
+        // browser fingerprint; puppeteer presenting the same cookie re-challenges,
+        // so the screenshot used to be skipped on exactly the hardest pages (e.g.
+        // congress.gov). Rendering the already-fetched HTML sidesteps the block.
+        // <base> makes relative CSS/img resolve against the origin so it paints.
+        const baseTag = `<base href="${url}">`;
+        const htmlWithBase = /<head[^>]*>/i.test(html)
+          ? html.replace(/<head[^>]*>/i, m => `${m}${baseTag}`)
+          : `${baseTag}${html}`;
+        try {
+          await page.setContent(htmlWithBase, { waitUntil: 'load', timeout: 12000 });
+        } catch { /* slow/blocked assets — DOM is set; screenshot what painted */ }
+        await new Promise(r => setTimeout(r, 800)); // brief settle for late images/fonts
+        // No challenge wait — we never navigated to the live bot-block.
+      } else {
+        // v2.25.89: prime with persistent anti-bot cookies (datadome, cf_clearance, etc.)
+        await primePageWithSavedCookies(page, url);
 
-      await page.goto(url, { waitUntil: 'networkidle2', timeout: 45000 });
+        // domcontentloaded (not networkidle2): tracker/ad-heavy pages never go
+        // network-idle, so networkidle2 burned the full timeout on every capture.
+        await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
 
-      // v2.25.89: harvest anti-bot cookies the host set during this navigation.
-      harvestPageCookies(page, url).catch(() => {});
+        // v2.25.89: harvest anti-bot cookies the host set during this navigation.
+        harvestPageCookies(page, url).catch(() => {});
 
-      // Wait out any JS bot-check interstitial (wp.com Jetpack, Cloudflare,
-      // Akamai, etc.) before capturing. Without this, networkidle2 fires
-      // while the interstitial is still up and we ship a screenshot of
-      // "Checking your browser..." while the HTML pass (which has its own
-      // wait) returns the real article — caller then has mismatched data.
-      const resolved = await waitForChallengeResolution(page, { url, timeoutMs: 30000 });
-      if (!resolved) {
-        logger.warn(`Screenshot skipped for ${url}: bot-check interstitial did not resolve`);
-        return {
-          success: false,
-          url,
-          error: 'Challenge interstitial did not resolve — not screenshotting the interstitial',
-          challengeUnresolved: true
-        };
-      }
+        // Wait out any JS bot-check interstitial (wp.com Jetpack, Cloudflare,
+        // Akamai, etc.) before capturing. Without this we'd ship a screenshot of
+        // "Checking your browser..." while the HTML pass returns the real article.
+        const resolved = await waitForChallengeResolution(page, { url, timeoutMs: 30000 });
+        if (!resolved) {
+          logger.warn(`Screenshot skipped for ${url}: bot-check interstitial did not resolve`);
+          return {
+            success: false,
+            url,
+            error: 'Challenge interstitial did not resolve — not screenshotting the interstitial',
+            challengeUnresolved: true
+          };
+        }
 
-      // Wait for real article content (not just title-clear). Some
-      // Jetpack-protected WP sites do a SECOND verification after the main
-      // interstitial that briefly replaces the body with "Error; please
-      // refresh to try again." Title is already the real one by then, so
-      // the title-only check is fooled.
-      const contentReady = await waitForRealContent(page, { url, timeoutMs: 10000 });
-      if (!contentReady) {
-        // Don't refuse the screenshot — the challenge-resolution gate above already
-        // passed, so "thin" content here is almost always a legitimately sparse page
-        // (e.g. example.com), not an unresolved challenge. Capture the current DOM so
-        // render customers always get the screenshot they paid for.
-        logger.warn(`Screenshot for ${url}: content looked thin after render — capturing current DOM anyway`);
+        // Wait for real article content (not just title-clear). Some
+        // Jetpack-protected WP sites do a SECOND verification after the main
+        // interstitial that briefly replaces the body with "Error; please
+        // refresh to try again." Title is already the real one by then, so
+        // the title-only check is fooled.
+        const contentReady = await waitForRealContent(page, { url, timeoutMs: 10000 });
+        if (!contentReady) {
+          logger.warn(`Screenshot skipped for ${url}: post-challenge content did not paint (likely secondary JS verification overlay)`);
+          return {
+            success: false,
+            url,
+            error: 'Page content did not render after challenge resolution — likely a second-stage verification or JS error overlay',
+            contentUnresolved: true
+          };
+        }
       }
 
       const screenshot = await page.screenshot({
@@ -1039,9 +1009,13 @@ export default class ScraperPlugin extends BasePlugin {
       // overlay on some Jetpack-protected sites.
       const contentReady = await waitForRealContent(page, { url, timeoutMs: 10000 });
       if (!contentReady) {
-        // Challenge gate already passed — thin content is usually a sparse legit
-        // page, not an unresolved challenge. Generate the PDF anyway.
-        logger.warn(`PDF for ${url}: content looked thin after render — capturing current DOM anyway`);
+        logger.warn(`PDF skipped for ${url}: post-challenge content did not paint`);
+        return {
+          success: false,
+          url,
+          error: 'Page content did not render after challenge resolution — likely a second-stage verification or JS error overlay',
+          contentUnresolved: true
+        };
       }
 
       const pdfBuffer = await page.pdf({

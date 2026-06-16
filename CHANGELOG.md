@@ -2,6 +2,18 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.102] - 2026-06-15
+
+### Improved — render-tier screenshots on hard CF/Akamai pages
+
+Screenshots were skipped on heavily bot-protected sites (e.g. congress.gov): the
+screenshot pass re-navigated the live page, re-hit the Cloudflare interstitial
+(cf_clearance is bound to FlareSolverr's browser fingerprint, not puppeteer's),
+and the challenge-wait blew the budget → HTML/WACZ but no thumbnail. Now the
+screenshot renders from the already-fetched HTML via `setContent` (no live nav =
+no re-challenge), so the hardest pages get a thumbnail too. Screenshot path's own
+`networkidle2` → `domcontentloaded` as well.
+
 ## [2.25.101] - 2026-06-15
 
 ### Fixed — scraper render-tier hangs + silent block-page storage
