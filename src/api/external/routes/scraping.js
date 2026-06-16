@@ -146,8 +146,21 @@ function shouldTryArchiveFallback(result) {
 // DNS misses stay cached longer than transient timeouts.
 function classifyScrapeError(errMsg) {
   const m = String(errMsg || '').toLowerCase();
-  if (/err_name_not_resolved|enotfound|nxdomain|getaddrinfo/i.test(errMsg))
-    return { kind: 'nxdomain', status: 400, message: 'Invalid host — DNS resolution failed', cacheTtl: 86400 };
+  // Transient resolver failures: EAI_AGAIN ("try again") and chromium's
+  // ERR_NAME_NOT_RESOLVED are how a VPN-tunnel DNS flap surfaces on this host for
+  // perfectly valid domains. Must NOT be cached as a permanent miss — one flap
+  // would otherwise blackhole a good URL for the whole TTL. This was the gov-site
+  // snapshot regression: a 24h-cached nxdomain on congress.gov / federalregister.gov
+  // / presidency.ucsb.edu / trumpwhitehouse.archives.gov — domains that resolve
+  // fine (and scrape to 200/real content via FlareSolverr) seconds later. Short
+  // TTL, and deliberately NOT in the escalation-skip set below so the same request
+  // still runs the FlareSolverr/retry chain.
+  if (/eai_again|err_name_not_resolved|err_name_resolution_failed/i.test(errMsg))
+    return { kind: 'dns_temp', status: 503, message: 'DNS resolution temporarily failed (transient)', cacheTtl: 30 };
+  // Genuine "this host does not exist" — the resolver gave a definitive answer.
+  // 1h (not 24h) so a flap-induced ENOTFOUND on a valid host still self-heals.
+  if (/enotfound|nxdomain/i.test(errMsg))
+    return { kind: 'nxdomain', status: 400, message: 'Invalid host — DNS resolution failed', cacheTtl: 3600 };
   if (/err_connection_closed|econnreset|socket hang up|err_connection_refused|econnrefused/i.test(errMsg))
     return { kind: 'tcp_reset', status: 502, message: 'Target site refused the connection', cacheTtl: 300 };
   if (/err_connection_timed_out|err_timed_out|navigation timeout|etimedout|timeout of \d+ms exceeded/i.test(errMsg))
@@ -249,7 +262,7 @@ router.get('/health', (req, res) => {
  * Render-tier callers pass renderTier=true so a CF managed-challenge block
  * escalates to FlareSolverr instead of returning 500.
  */
-async function executeScrape(req, { url, selectors, extractType = 'text', userAgent, usePuppeteer = false, renderTier = false, fullPage = false, viewport = null }) {
+async function executeScrape(req, { url, selectors, extractType = 'text', userAgent, usePuppeteer = false, renderTier = false, fsOnBlock = false, fullPage = false, viewport = null }) {
   const scraperEntry = req.app.locals.agent?.apiManager?.apis?.get('scraper');
   const scraper = scraperEntry?.instance || scraperEntry;
   if (!scraper?.execute) {
@@ -353,12 +366,19 @@ async function executeScrape(req, { url, selectors, extractType = 'text', userAg
       }
     }
 
-    // Render tier final escalation: if Puppeteer was Cloudflare-blocked, try FlareSolverr.
-    // This covers the case where renderTier=true but FS was unavailable initially, or
-    // where the upstream tried puppeteer first and hit a managed challenge.
-    if (renderTier && (!rawResult.success || rawResult.cloudflareBlocked) && rawResult.method !== 'flaresolverr') {
+    // FlareSolverr escalation on a hard block. Render tier always allows this;
+    // `full` tier opts in via fsOnBlock so heavily bot-protected sources
+    // (congress.gov / federalregister.gov / presidency.ucsb.edu /
+    // trumpwhitehouse.archives.gov — Akamai/Cloudflare managed challenges that
+    // Puppeteer can't clear because cf_clearance is bound to FS's fingerprint)
+    // get a real frozen copy instead of falling through to a thin Wayback stub.
+    // FS cost-to-serve is ~$0.001/call and only fires when we're actually blocked.
+    // Catches !success, an explicit CF flag, AND a stub/challenge "success".
+    const fsBlocked = !rawResult.success || rawResult.cloudflareBlocked
+      || (rawResult.success && isUnusableResult(rawResult));
+    if ((renderTier || fsOnBlock) && fsBlocked && rawResult.method !== 'flaresolverr') {
       if (await isFlareSolverrAvailable()) {
-        logger.info(`[ExternalScrape] Render tier: escalating to FlareSolverr after Puppeteer block on ${url}`);
+        logger.info(`[ExternalScrape] Escalating to FlareSolverr after block on ${url} (renderTier=${renderTier}, fsOnBlock=${fsOnBlock})`);
         try {
           const fsResult = await scraper.execute({ action, url, options: { ...options, useFlareSolverr: true } });
           if (fsResult?.success) {
@@ -887,7 +907,11 @@ router.post('/',
       try {
         const usePuppeteer = tier === 'stealth';
         const renderTier = tier === 'render';
-        const result = await executeScrapeWithVpnRotation(req, { url, selectors, extractType, userAgent, usePuppeteer, renderTier, fullPage, viewport }, tier);
+        // `full` tier auto-escalates to FlareSolverr when Puppeteer hits a hard
+        // CF/Akamai block (managed challenges Puppeteer can't clear) so bot-blocked
+        // gov sources still produce a real frozen copy. render already does FS-first.
+        const fsOnBlock = tier === 'full';
+        const result = await executeScrapeWithVpnRotation(req, { url, selectors, extractType, userAgent, usePuppeteer, renderTier, fsOnBlock, fullPage, viewport }, tier);
 
         if (!result.success) {
           // Refund on target failure
