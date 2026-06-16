@@ -1,7 +1,7 @@
 {
   "lastUpdated": "2026-06-15T00:00:00.000Z",
   "overallProgress": "100%",
-  "status": "PRODUCTION READY — v2.25.95",
+  "status": "PRODUCTION READY — v2.25.101",
   "milestone": "273 features tracked; see CHANGELOG.md for history.",
   "features": {
     "v2_25_54_2026_05_24": {
@@ -7388,6 +7388,13 @@
       "addedDate": "2026-06-15",
       "version": "2.25.100",
       "description": "Image transcode paid service. New imageTools `transcode` action (sharp; avif/png/jpeg/webp; AVIF q82/effort2/4:4:4; header-only oversize-passthrough via maxPixels; passthroughBytes:false for metadata-only). External route POST /api/external/service/imageTools/transcode (multipart ≤100MB / base64 / url), flat 2 credits with refund-on-failure, in-process concurrency limiter (env IMAGE_TRANSCODE_MAX_CONCURRENT default 2) + sharp.concurrency(4). Gateway exposes it via a streaming-multipart proxy (POST /imageTools/transcode). Registered in the service catalog (image-transcode, 2cr)."
+    },
+    "scraperRenderHangFix_2026_06_15": {
+      "status": "deployed",
+      "progress": "100%",
+      "addedDate": "2026-06-15",
+      "version": "2.25.101",
+      "description": "Scraper reliability fix. Render-tier screenshot hard-capped (RENDER_SCREENSHOT_BUDGET_MS, 18s) so it can't hang the content response (was ~130s/gateway-502). Browser nav networkidle2->domcontentloaded + bounded settle, no timeout-retry. JS app-shell detection + Puppeteer escalation (no silent shell storage). Wayback/archive.ph fallback now triggers on hard block failures too. Detect federalregister/eCFR 'Request Access' anti-scrape wall -> archive fallback. Verified live: congress/federalregister/presidency return real content in 5-30s."
     }
   },
   "deploymentStatus": {

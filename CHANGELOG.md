@@ -2,6 +2,25 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.101] - 2026-06-15
+
+### Fixed — scraper render-tier hangs + silent block-page storage
+
+Paid scrape clients were getting nothing on hard sites (gov / anti-bot). Four causes:
+- **Render-tier screenshot pass had no timeout** — content came back fast via
+  FlareSolverr but the screenshot navigation / bot-interstitial wait blocked the
+  whole request to ~130s (gateway 502). Hard-capped via `RENDER_SCREENSHOT_BUDGET_MS`
+  (default 18s); returns content without a screenshot on overrun.
+- Browser navigation used `networkidle2` + 3 retries (30s×3 = 90s hang on
+  tracker-heavy pages) → `domcontentloaded` + a bounded content-settle wait; no
+  longer retries navigation timeouts.
+- JS app-shells (large HTML, ~no extracted text) were accepted as success and
+  stored silently → added shell detection + Puppeteer escalation.
+- Wayback / archive.ph fallbacks now also fire on hard block-like FAILURES
+  (e.g. Akamai 403), not just stub-successes.
+- Detect the federalregister.gov / eCFR "Request Access / aggressive automated
+  scraping" wall → flagged unusable → archive fallback returns the real document.
+
 ## [2.25.100] - 2026-06-15
 
 ### Added — image transcode paid service (`imageTools.transcode`)
