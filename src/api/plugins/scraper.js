@@ -676,12 +676,26 @@ export default class ScraperPlugin extends BasePlugin {
     }
   }
 
+  // Return a live shared browser, relaunching if the previous one disconnected.
+  // A bare `if (!this.browser)` guard is insufficient: when Chromium crashes or is
+  // killed (heavy Cloudflare/Akamai challenge pages, OOM), `this.browser` stays a
+  // non-null but dead handle, so every subsequent `newPage()` throws "Protocol
+  // error: Connection closed" until the process restarts — which is what wedged
+  // the gov-site scrapes (all four failing in the same second). Check liveness,
+  // not just null, and recycle a dead handle.
+  async _ensureBrowser() {
+    const alive = this.browser && (this.browser.connected ?? this.browser.isConnected?.());
+    if (!alive) {
+      if (this.browser) { try { await this.browser.close(); } catch { /* already dead */ } }
+      this.browser = await launchBrowser();
+    }
+    return this.browser;
+  }
+
   async scrapeWithPuppeteer(url, options) {
     const { selector, waitForSelector, viewport, userAgent } = options;
 
-    if (!this.browser) {
-      this.browser = await launchBrowser();
-    }
+    await this._ensureBrowser();
 
     const page = await this.browser.newPage();
 
@@ -832,9 +846,7 @@ export default class ScraperPlugin extends BasePlugin {
   async takeScreenshot(url, options) {
     const { fullPage = false, viewport, userAgent, cookies, html } = options;
 
-    if (!this.browser) {
-      this.browser = await launchBrowser();
-    }
+    await this._ensureBrowser();
 
     const page = await this.browser.newPage();
 
@@ -998,10 +1010,8 @@ export default class ScraperPlugin extends BasePlugin {
       }
     }
     
-    if (!this.browser) {
-      this.browser = await launchBrowser();
-    }
-    
+    await this._ensureBrowser();
+
     const page = await this.browser.newPage();
     
     try {

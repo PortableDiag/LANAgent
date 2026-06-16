@@ -2,6 +2,31 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.105] - 2026-06-16
+
+### Fixed — bot-protected sources intermittently failed to scrape/snapshot
+
+Heavily bot-protected pages (e.g. government sources behind Akamai/Cloudflare managed
+challenges) could intermittently fail to return real content, falling back to archive
+stubs even though the same URL scraped fine when retried. Two root causes:
+
+- **Transient DNS resolution failures cached as permanent.** On hosts that resolve
+  through a VPN tunnel, a brief resolver flap surfaces as `EAI_AGAIN` /
+  `ERR_NAME_NOT_RESOLVED` for perfectly valid domains. These were misclassified as a
+  permanent NXDOMAIN and cached as a failure for 24h, so one flap blocked a good URL
+  for a day. Now classified as a transient `dns_temp` error (30s TTL) that still runs
+  the full retry chain; genuine NXDOMAIN cache cut from 24h to 1h.
+- **Stale headless-browser handle.** The shared Puppeteer browser was guarded by a
+  null-check that stayed truthy after Chromium crashed/disconnected, so every
+  subsequent page open threw "Connection closed" until a restart. Added a liveness
+  check that recycles a dead browser handle.
+
+### Added — `full` scrape tier auto-escalates to FlareSolverr on a hard block
+
+The `full` tier now escalates to FlareSolverr when the headless browser hits a managed
+Cloudflare/Akamai challenge it can't clear, instead of returning a thin archive stub —
+so bot-protected sources still produce real content without requiring the render tier.
+
 ## [2.25.104] - 2026-06-15
 
 ### Fixed — render-tier fullPage screenshots on tall pages (client-reported)
