@@ -263,7 +263,7 @@ async function executeScrape(req, { url, selectors, extractType = 'text', userAg
   if (usePuppeteer) options.usePuppeteer = true;
 
   // Check cache
-  const cacheKey = `${action}:${url}:${JSON.stringify(selectors || '')}:render=${renderTier}`;
+  const cacheKey = `${action}:${url}:${JSON.stringify(selectors || '')}:render=${renderTier}:fp=${!!fullPage}`;
   const cached = scrapeCache.get(cacheKey);
   if (cached) return cached;
 
@@ -738,7 +738,7 @@ async function executeScrape(req, { url, selectors, extractType = 'text', userAg
       // (federalregister/presidency/congress all timed the client out at 130s
       // even though FlareSolverr had already returned the content). Bound it and
       // return the content without a screenshot on overrun.
-      const SCREENSHOT_BUDGET_MS = Number(process.env.RENDER_SCREENSHOT_BUDGET_MS) || 22000;
+      const SCREENSHOT_BUDGET_MS = Number(process.env.RENDER_SCREENSHOT_BUDGET_MS) || 45000;
       const ssResult = await Promise.race([
         scraper.execute({ action: 'screenshot', url, options: ssOptions }),
         new Promise((resolve) => setTimeout(() => resolve({ success: false, _timedOut: true }), SCREENSHOT_BUDGET_MS))
@@ -815,7 +815,7 @@ async function executeScrapeWithVpnRotation(req, params, tier) {
   } catch { /* unknown — proceed with rotation */ }
 
   const tried = new Set();
-  const cacheKey = `${params.extractType === 'structured' ? 'extract' : 'scrape'}:${params.url}:${JSON.stringify(params.selectors || '')}:render=${params.renderTier}`;
+  const cacheKey = `${params.extractType === 'structured' ? 'extract' : 'scrape'}:${params.url}:${JSON.stringify(params.selectors || '')}:render=${params.renderTier}:fp=${!!params.fullPage}`;
 
   for (let i = 0; i < MAX_VPN_ROTATIONS; i++) {
     // Random pick from the unused pool. `.find()` always picked the FIRST
