@@ -2,6 +2,22 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.104] - 2026-06-15
+
+### Fixed — render-tier fullPage screenshots on tall pages (client-reported)
+
+- `fullPage:true` screenshots returned nothing on tall pages: an uncapped fullPage
+  capture forces `captureBeyondViewport` to lay out the entire multi-thousand-px
+  surface while late `<base href>` assets stream in — the capture alone ran 30–45s+
+  and blew even a raised 45s budget, so no thumbnail shipped. Now the captured height
+  is clipped to `RENDER_SCREENSHOT_MAX_HEIGHT` (default 6000px) via `clip`; capture
+  completes in ~130–470ms regardless of document height. A top-of-page thumbnail is
+  what the frozen-copy preview needs.
+- Fixed the render cache key omitting `fullPage`, which let a cached screenshot-less
+  result satisfy a later `fullPage:true` request. Cache key now includes `fp=<bool>`.
+- Raised the screenshot budget 22s → 45s as headroom (no longer the limiting factor
+  now that capture is bounded).
+
 ## [2.25.103] - 2026-06-15
 
 ### Fixed — screenshot regression + slow cold-render recovery (client-reported)

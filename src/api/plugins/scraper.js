@@ -945,10 +945,28 @@ export default class ScraperPlugin extends BasePlugin {
         }
       }
 
-      const screenshot = await page.screenshot({
-        fullPage,
-        encoding: 'base64'
-      });
+      // fullPage on very tall pages (e.g. a multi-thousand-px congress.gov bill)
+      // makes captureBeyondViewport lay out the whole surface while late assets
+      // stream in — that capture alone ran 30s+ and blew the budget, so no
+      // thumbnail shipped at all. Cap the captured height with clip(): a tall
+      // top-of-page thumbnail is what the frozen-copy preview needs, and it's
+      // bounded regardless of document height.
+      const MAX_SS_HEIGHT = Number(process.env.RENDER_SCREENSHOT_MAX_HEIGHT) || 6000;
+      let shotOpts = { fullPage, encoding: 'base64' };
+      let capNote = '';
+      if (fullPage) {
+        const dims = await page.evaluate(() => ({
+          w: Math.min(Math.max(document.documentElement.scrollWidth, document.body ? document.body.scrollWidth : 0, 1920), 1920),
+          h: Math.max(document.documentElement.scrollHeight, document.body ? document.body.scrollHeight : 0, 1080)
+        })).catch(() => ({ w: 1920, h: 1080 }));
+        if (dims.h > MAX_SS_HEIGHT) {
+          shotOpts = { clip: { x: 0, y: 0, width: dims.w, height: MAX_SS_HEIGHT }, encoding: 'base64' };
+          capNote = ` (capped ${dims.h}->${MAX_SS_HEIGHT}px)`;
+        }
+      }
+      const _ssStart = Date.now();
+      const screenshot = await page.screenshot(shotOpts);
+      logger.info(`[Screenshot] captured ${Math.round(screenshot.length / 1024)}KB in ${Date.now() - _ssStart}ms${capNote} for ${url}`);
 
       return {
         success: true,
