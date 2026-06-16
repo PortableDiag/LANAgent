@@ -1,0 +1,396 @@
+{
+  "templateGuide": {
+    "description": "Guide for AI Plugin Development Service to generate plugins using _ai_template.js",
+    "requiredReplacements": {
+      "{{PLUGIN_NAME}}": {
+        "description": "Lowercase plugin identifier",
+        "example": "weather",
+        "rules": ["lowercase", "no spaces", "no special characters"]
+      },
+      "{{PLUGIN_TITLE}}": {
+        "description": "Human-readable display title for menu and headers",
+        "example": "Weather Forecast",
+        "rules": ["Title case", "spaces allowed", "used in UI menu and page header"]
+      },
+      "{{PLUGIN_VERSION}}": {
+        "description": "Semantic version",
+        "example": "1.0.0",
+        "default": "1.0.0"
+      },
+      "{{PLUGIN_DESCRIPTION}}": {
+        "description": "One-line description of functionality",
+        "example": "Get weather forecasts and current conditions for any location"
+      },
+      "{{PLUGIN_COMMANDS}}": {
+        "description": "JSON array of command objects with examples for vector matching",
+        "example": "[{\"command\": \"current\", \"description\": \"Get current weather for any location\", \"usage\": \"current({ location: 'New York' })\", \"examples\": [\"what's the weather in New York\", \"current weather for NYC\", \"how's the weather in manhattan\", \"is it raining in new york\", \"temperature in NYC right now\"]}, {\"command\": \"forecast\", \"description\": \"Get multi-day weather forecast\", \"usage\": \"forecast({ location: 'London', days: 5 })\", \"examples\": [\"weather forecast for London\", \"what's the weather like in London next week\", \"5 day forecast for UK\", \"will it rain in London tomorrow\", \"weekend weather in London\"]}]"
+      },
+      "{{PLUGIN_CONFIG}}": {
+        "description": "Initial configuration object",
+        "example": "{ apiKey: process.env.WEATHER_API_KEY, baseUrl: 'https://api.weather.com', cacheTimeout: 300000 }"
+      },
+      "{{PLUGIN_INITIALIZE}}": {
+        "description": "Initialization code",
+        "example": "// Check for API key\nif (!this.config.apiKey) {\n  throw new Error('WEATHER_API_KEY environment variable is required');\n}\n\n// Test API connection\nawait this.testConnection();"
+      },
+      "{{PLUGIN_HANDLERS}}": {
+        "description": "Case statements for each command",
+        "example": "case 'current':\n  return await this.getCurrentWeather(data);\ncase 'forecast':\n  return await this.getForecast(data);"
+      },
+      "{{PLUGIN_METHODS}}": {
+        "description": "Implementation methods",
+        "example": "async getCurrentWeather(data) {\n  this.validateParams(data, {\n    location: { required: true, type: 'string' }\n  });\n  \n  const response = await fetch(`${this.config.baseUrl}/current?q=${data.location}&key=${this.config.apiKey}`);\n  return await response.json();\n}"
+      }
+    },
+    "exampleUsage": {
+      "instruction": "To create a weather plugin, replace all {{PLACEHOLDER}} markers with appropriate code",
+      "apiDiscovery": "First discover the API structure and authentication method",
+      "commandMapping": "Map API endpoints to natural language commands",
+      "errorHandling": "Add try-catch blocks and meaningful error messages",
+      "caching": "Implement caching for frequently accessed data",
+      "vectorIntents": "Commands array is automatically indexed for vector search"
+    },
+    "vectorIntentSystem": {
+      "overview": "The commands array is automatically indexed by the vector intent detection system",
+      "automatic": "When a plugin is enabled, its intents are indexed. When disabled, they are removed",
+      "structure": "Each command must have: command, description, usage, and optionally examples array",
+      "examples": "The examples array should contain natural language variations users might say",
+      "bestPractice": "Include 3-5 diverse examples per command for better NLP matching"
+    },
+    "helperFiles": {
+      "when": "Create helper files when the plugin exceeds 500 lines or has distinct feature sets",
+      "naming": "Use format: pluginname-feature.js (e.g., govee-enhancements.js, spotify-player.js)",
+      "location": "Place in same directory as main plugin: src/api/plugins/",
+      "exports": "Export named objects/functions that the main plugin imports",
+      "examples": {
+        "enhancements": "export const PluginEnhancements = { themes: {...}, helpers: {...} }",
+        "management": "export const DataManagement = { async create() {...}, async update() {...} }",
+        "ui": "export const UIComponents = { getModalHTML() {...}, getStyles() {...} }"
+      },
+      "benefits": ["Code organization", "Reusability", "Easier testing", "Better maintainability"]
+    },
+    "pluginSettings": {
+      "overview": "Use PluginSettings for persistent configuration with built-in caching",
+      "import": "import { PluginSettings } from '../../models/PluginSettings.js';",
+      "usage": {
+        "getCached": "const settings = await PluginSettings.getCached(this.name, 'config');",
+        "setCached": "await PluginSettings.setCached(this.name, 'config', this.config);",
+        "customTTL": "await PluginSettings.getCached(this.name, 'apiTokens', 600); // 10 minute cache",
+        "clearCache": "await PluginSettings.clearCache(this.name);"
+      },
+      "benefits": [
+        "Automatic caching reduces database queries",
+        "Cache invalidation on updates",
+        "5-minute default TTL with custom options",
+        "Better performance for frequently accessed settings"
+      ],
+      "examples": {
+        "configuration": "Store plugin configuration with auto-caching",
+        "apiTokens": "Cache API tokens with custom TTL",
+        "userPreferences": "Store user-specific settings",
+        "featureFlags": "Cache feature toggles"
+      }
+    },
+    "pluginAPI": {
+      "overview": "Plugins are called via the generic plugin API endpoint",
+      "endpoint": "POST /api/plugin",
+      "requestFormat": {
+        "plugin": "Plugin name (lowercase)",
+        "action": "Command/action to execute",
+        "...params": "Additional parameters for the action"
+      },
+      "responseFormat": {
+        "success": "Boolean - true if action succeeded",
+        "data": "Result data (on success)",
+        "error": "Error message (on failure)"
+      },
+      "example": {
+        "request": "{ \"plugin\": \"weather\", \"action\": \"current\", \"location\": \"New York\" }",
+        "successResponse": "{ \"success\": true, \"data\": { \"temp\": 72, \"conditions\": \"Sunny\" } }",
+        "errorResponse": "{ \"success\": false, \"error\": \"Location not found\" }"
+      },
+      "authentication": "Requires Bearer token or X-API-Key header"
+    },
+    "credentialSystem": {
+      "overview": "Plugins can require API keys that users configure via the web UI",
+      "methods": {
+        "loadCredentials": {
+          "description": "Load credentials from database (encrypted) or env vars as fallback",
+          "usage": "const creds = await this.loadCredentials([{ key: 'apiKey', envVar: 'MY_API_KEY', required: true }])",
+          "returns": "Object with credential values, throws if required creds missing"
+        },
+        "checkCredentials": {
+          "description": "Check if credentials are configured without loading values",
+          "usage": "const status = await this.checkCredentials([{ key: 'apiKey', envVar: 'MY_API_KEY', required: true }])",
+          "returns": "{ configured: boolean, credentials: { apiKey: boolean } }"
+        }
+      },
+      "webUIIntegration": "Users can configure credentials in Plugins tab > Settings modal",
+      "priority": "1. Encrypted DB storage (PluginSettings), 2. Environment variables"
+    },
+    "basePluginMethods": {
+      "overview": "Methods inherited from BasePlugin - available in all plugins via 'this.'",
+      "methods": {
+        "executeCommand": {
+          "description": "Execute shell commands with optional approval",
+          "usage": "await this.executeCommand('ls -la /tmp', false)",
+          "returns": "Command execution result"
+        },
+        "storeMemory": {
+          "description": "Store data in agent's persistent memory",
+          "usage": "await this.storeMemory('lastResult', { data: 'value' }, { tags: ['cache'] })"
+        },
+        "getMemory": {
+          "description": "Retrieve data from agent's memory",
+          "usage": "const data = await this.getMemory('lastResult')"
+        },
+        "notify": {
+          "description": "Send Telegram notification to user",
+          "usage": "await this.notify('Task completed!', { parse_mode: 'HTML' })"
+        },
+        "processWithAI": {
+          "description": "Process text using current AI provider",
+          "usage": "const response = await this.processWithAI('Summarize this text: ...')"
+        },
+        "getService": {
+          "description": "Access agent services (scheduler, emailService, etc.)",
+          "usage": "const scheduler = this.getService('scheduler')"
+        },
+        "getInterface": {
+          "description": "Access agent interfaces (telegram, web)",
+          "usage": "const telegram = this.getInterface('telegram')"
+        },
+        "sanitizeParams": {
+          "description": "Sanitize user input parameters",
+          "usage": "const safe = this.sanitizeParams(params)"
+        },
+        "getConfig": {
+          "description": "Get plugin config value with default",
+          "usage": "const timeout = this.getConfig('timeout', 5000)"
+        },
+        "setConfig": {
+          "description": "Set plugin config value (emits config:changed event)",
+          "usage": "this.setConfig('timeout', 10000)"
+        }
+      }
+    },
+    "customHTTPRoutes": {
+      "overview": "Plugins can define custom HTTP endpoints via getRoutes()",
+      "method": "getRoutes()",
+      "returns": "Array of route definitions",
+      "routeFormat": {
+        "method": "HTTP method (GET, POST, PUT, DELETE)",
+        "path": "Route path (will be prefixed with /api/{pluginName}/)",
+        "handler": "Async function (req, res) => { ... }",
+        "middleware": "Optional array of middleware functions"
+      },
+      "example": "getRoutes() {\n  return [\n    {\n      method: 'GET',\n      path: '/status',\n      handler: async (req, res) => {\n        res.json({ status: 'ok' });\n      }\n    },\n    {\n      method: 'POST',\n      path: '/webhook',\n      handler: async (req, res) => {\n        // Handle webhook\n        res.json({ received: true });\n      }\n    }\n  ];\n}",
+      "notes": [
+        "Routes are auto-mounted at /api/{pluginName}/{path}",
+        "Use for webhooks, streaming endpoints, or custom API formats",
+        "Standard plugin actions should use execute() instead"
+      ]
+    },
+    "bestPractices": [
+      "Keep command names short and intuitive",
+      "Write detailed descriptions for vector matching",
+      "Include usage examples in command definitions",
+      "Handle missing API keys gracefully",
+      "Implement rate limiting if needed",
+      "Use PluginSettings.getCached/setCached for persistent settings",
+      "Cache API responses when appropriate using node-cache",
+      "Log errors with context for debugging",
+      "Store sensitive data (API keys) via loadCredentials/credential system",
+      "Always return { success: true/false, data/error } from execute()",
+      "Use this.logger for logging (auto-creates plugin-specific log file)",
+      "Validate all user input with validateParams()"
+    ],
+    "projectUtilities": {
+      "overview": "Available utility modules - use these instead of creating new implementations",
+      "importPaths": "Plugins are in src/api/plugins/ so use ../../utils/ for utility imports",
+      "utilities": {
+        "nodeCache": {
+          "import": "import NodeCache from 'node-cache'",
+          "usage": "const cache = new NodeCache({ stdTTL: 300, checkperiod: 60 });",
+          "methods": ["cache.get(key)", "cache.set(key, value)", "cache.del(key)", "cache.has(key)"],
+          "note": "Use for temporary in-memory caching. For persistent config, use PluginSettings instead."
+        },
+        "retryUtils": {
+          "import": "import { retryOperation } from '../../utils/retryUtils.js'",
+          "functions": {
+            "retryOperation": "retryOperation(asyncFn, options) - retry with exponential backoff and circuit breaker"
+          },
+          "usage": "await retryOperation(() => axios.get(url), { retries: 3, context: 'API call' })",
+          "note": "DO NOT use retry() or retryWithCircuitBreaker() - they do not exist"
+        },
+        "jsonUtils": {
+          "import": "import { safeJsonParse, safeJsonStringify } from '../../utils/jsonUtils.js'",
+          "functions": {
+            "safeJsonParse": "safeJsonParse(text, defaultValue) - parse JSON without throwing",
+            "safeJsonStringify": "safeJsonStringify(obj) - stringify without throwing"
+          }
+        },
+        "encryption": {
+          "import": "import { encrypt, decrypt } from '../../utils/encryption.js'",
+          "functions": {
+            "encrypt": "encrypt(text) - encrypt sensitive data",
+            "decrypt": "decrypt(encryptedData) - decrypt data"
+          },
+          "usage": "Use for storing sensitive API keys or tokens"
+        },
+        "rateLimit": {
+          "import": "import rateLimit from 'express-rate-limit'",
+          "usage": "Apply to plugin routes that need rate limiting"
+        }
+      },
+      "warnings": [
+        "DO NOT import logger directly - use this.logger (inherited from BasePlugin)",
+        "DO NOT create new Winston instances",
+        "DO NOT use non-existent functions like retry() or retryWithCircuitBreaker()",
+        "DO NOT import Agenda directly - scheduled tasks are managed by TaskScheduler service"
+      ]
+    },
+    "webUIIntegration": {
+      "overview": "Plugins can add menu items and custom pages to the web dashboard",
+      "menuItems": {
+        "description": "Add a getUIConfig() method to register a menu item",
+        "method": "getUIConfig()",
+        "returns": {
+          "menuItem": {
+            "id": "Plugin identifier (lowercase, matches plugin name)",
+            "title": "Display title shown in sidebar menu",
+            "icon": "FontAwesome icon class (e.g., 'fas fa-lightbulb')",
+            "order": "Numeric position in menu (lower = higher in list)",
+            "section": "Menu section: 'main' (default)"
+          },
+          "hasUI": "Boolean - true if plugin has a web UI"
+        },
+        "example": "getUIConfig() {\n  return {\n    menuItem: {\n      id: 'myplugin',\n      title: 'My Plugin',\n      icon: 'fas fa-cog',\n      order: 80,\n      section: 'main'\n    },\n    hasUI: true\n  };\n}"
+      },
+      "pageContent": {
+        "description": "Add a getUIContent() method to return the HTML for your plugin's page",
+        "method": "getUIContent()",
+        "returns": "HTML string - the content for your plugin's tab/page",
+        "notes": [
+          "Content is loaded when user clicks the menu item",
+          "Include inline <style> tags for plugin-specific CSS (auto-prefixed)",
+          "Include inline <script> tags for plugin JavaScript",
+          "Use class names like 'plugin-header', 'plugin-content' for consistent styling",
+          "Access API via fetch('/api/plugin', { method: 'POST', body: JSON.stringify({ plugin: 'name', action: 'action' }) })"
+        ],
+        "example": "getUIContent() {\n  return `\n    <style>.my-plugin-card { background: var(--card-bg); padding: 1rem; }</style>\n    <div class=\"plugin-header\"><h2>My Plugin</h2></div>\n    <div class=\"plugin-content\">\n      <div class=\"my-plugin-card\">Content here</div>\n    </div>\n    <script>/* Plugin JavaScript */</script>\n  `;\n}"
+      },
+      "menuOrderGuide": {
+        "description": "Suggested order ranges to keep menus organized",
+        "ranges": {
+          "10-29": "Core system (Dashboard, Monitoring, Diagnostics)",
+          "30-49": "Communication (Telegram, Email)",
+          "50-69": "Development (Git, Projects, DevOps)",
+          "70-89": "Home/IoT (Govee, smart devices)",
+          "90-109": "Media (YouTube, FFmpeg)",
+          "110+": "Utilities and misc plugins"
+        }
+      },
+      "themeCompatibility": {
+        "description": "Follow these guidelines for consistent theming",
+        "cssVariables": [
+          "var(--bg-primary) - Main background",
+          "var(--bg-secondary) - Card/panel background",
+          "var(--text-primary) - Main text color",
+          "var(--text-secondary) - Muted text",
+          "var(--accent-primary) - Primary accent/link color",
+          "var(--border-color) - Border color",
+          "var(--card-bg) - Card background",
+          "var(--success) - Success state color",
+          "var(--error) - Error state color"
+        ],
+        "classes": [
+          "plugin-header - Header section with title",
+          "plugin-content - Main content area",
+          "card, stats-card - Card containers",
+          "btn, btn-primary, btn-secondary - Buttons",
+          "form-group, form-control - Form elements"
+        ]
+      }
+    },
+    "testTemplate": {
+      "overview": "Tests are in tests/plugins/ directory, one test file per plugin",
+      "template": "tests/plugins/_ai_test_template.js",
+      "naming": "{{PLUGIN_NAME}}.test.js (e.g., weather.test.js)",
+      "requirements": [
+        "Import the plugin class from ../../src/api/plugins/",
+        "Mock axios for HTTP requests",
+        "Mock logger from ../../src/utils/logger.js",
+        "Test each action using its ACTUAL command name from commands array",
+        "NEVER use placeholder action names like 'validAction'"
+      ],
+      "structure": {
+        "pluginStructure": "Test plugin has required properties (name, description, commands)",
+        "actionTests": "Test each action from commands array with success and error cases",
+        "errorHandling": "Test unknown actions and API failures"
+      },
+      "example": {
+        "correct": "await plugin.execute({ action: 'getLocation', ip: '8.8.8.8' })",
+        "incorrect": "await plugin.execute({ action: 'validAction', someParam: 'value' })"
+      }
+    },
+    "commonMistakes": {
+      "description": "Common errors to AVOID when generating plugins and tests",
+      "criticalErrors": [
+        {
+          "mistake": "Using placeholder action names in tests",
+          "wrong": "plugin.execute({ action: 'validAction' })",
+          "correct": "plugin.execute({ action: 'getLocation' }) // Use actual command from commands array",
+          "why": "Tests must use actual action names that exist in the plugin's commands"
+        },
+        {
+          "mistake": "Wrong import paths from plugins directory",
+          "wrong": "import { retryOperation } from '../utils/retryUtils.js'",
+          "correct": "import { retryOperation } from '../../utils/retryUtils.js'",
+          "why": "Plugins are in src/api/plugins/, utils are in src/utils/ - need ../../"
+        },
+        {
+          "mistake": "Importing non-existent functions",
+          "wrong": "import { retry, retryWithCircuitBreaker } from '../../utils/retryUtils.js'",
+          "correct": "import { retryOperation } from '../../utils/retryUtils.js'",
+          "why": "Only retryOperation exists in retryUtils.js"
+        },
+        {
+          "mistake": "Calling non-existent methods",
+          "wrong": "this.scheduleJob('task', cronPattern, handler)",
+          "correct": "const scheduler = this.getService('scheduler'); scheduler.addTask(...)",
+          "why": "Use getService() to access scheduler, don't call non-existent plugin methods"
+        },
+        {
+          "mistake": "Creating stub/placeholder implementations",
+          "wrong": "async getCurrentData() { return null; // TODO implement }",
+          "correct": "async getCurrentData() { const response = await axios.get(...); return response.data; }",
+          "why": "All methods must have working implementations, not stubs"
+        },
+        {
+          "mistake": "Unused imports",
+          "wrong": "import { safeJsonParse } from '../../utils/jsonUtils.js'; // never used",
+          "correct": "// Only import what you actually use",
+          "why": "Unused imports indicate incomplete implementation"
+        }
+      ],
+      "importPaths": {
+        "fromPlugins": "Plugins are in src/api/plugins/",
+        "toUtils": "../../utils/ (e.g., ../../utils/retryUtils.js)",
+        "toModels": "../../models/ (e.g., ../../models/PluginSettings.js)",
+        "toCore": "../core/ (e.g., ../core/basePlugin.js)"
+      },
+      "availableFunctions": {
+        "retryUtils": ["retryOperation"],
+        "jsonUtils": ["safeJsonParse", "safeJsonStringify"],
+        "encryption": ["encrypt", "decrypt"],
+        "note": "Do NOT import functions that don't exist - check the actual utility files"
+      },
+      "testActionNames": {
+        "rule": "ALWAYS use actual action names from the plugin's commands array",
+        "how": "Look at the plugin's this.commands array - each object has a 'command' property",
+        "example": "If plugin has commands: [{command: 'getLocation'}, {command: 'getOwnLocation'}], tests must use 'getLocation' or 'getOwnLocation', NEVER 'validAction'"
+      }
+    }
+  }
+}

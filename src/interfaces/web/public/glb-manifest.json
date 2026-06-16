@@ -1,0 +1,90 @@
+[
+  {
+    "id": "survival_girl",
+    "name": "Survival Girl (4K)",
+    "file": "survival_girl.glb",
+    "type": "glb",
+    "sizeMB": 476,
+    "polyCount": 52476,
+    "description": "4K textures — highest quality, slower load",
+    "blendShapeCount": 52,
+    "boneCount": 555,
+    "outfits": [
+      { "id": "full", "label": "Full Outfit", "meshes": ["SK_SurvivalGirlSafe", "SK_Hair", "SK_TankTop", "SK_Pants", "SK_Sneakers", "SK_Backpack", "SK_Respirator"] },
+      { "id": "casual", "label": "Casual", "meshes": ["SK_SurvivalGirlSafe", "SK_Hair", "SK_TankTop", "SK_Pants", "SK_Sneakers"] },
+      { "id": "underwear", "label": "Underwear", "meshes": ["SK_SurvivalGirl18", "SK_Hair", "SK_Underwear"] },
+      { "id": "nude", "label": "Nude", "meshes": ["SK_SurvivalGirl18", "SK_Hair", "SK_Pubic"] }
+    ],
+    "bodyMeshes": ["SK_SurvivalGirl18", "SK_SurvivalGirlSafe"],
+    "allMeshes": ["SK_SurvivalGirl18", "SK_SurvivalGirlSafe", "SK_Hair", "SK_TankTop", "SK_Pants", "SK_Sneakers", "SK_Underwear", "SK_Pubic", "SK_Backpack", "SK_Respirator"],
+    "springBones": {
+      "breast": ["c_breast_01l", "c_breast_02l", "c_breast_01r", "c_breast_02r"],
+      "hair": ["hair_side_01l", "hair_side_02l", "hair_back_01l", "hair_back_02l", "hair_side_01r", "hair_side_02r", "hair_back_01r", "hair_back_02r", "hair_back_01", "hair_back_02", "hair_frontside_01r", "hair_frontside_02r", "hair_front_01r", "hair_front_02r"]
+    },
+    "headBone": "headx",
+    "chestBone": "spine_03x",
+    "eyeBones": ["c_eyel", "c_eyer"],
+    "blendShapes": [
+      "browInnerUp", "browDownLeft", "browDownRight", "browOuterUpLeft", "browOuterUpRight",
+      "eyeLookUpLeft", "eyeLookUpRight", "eyeLookDownLeft", "eyeLookDownRight",
+      "eyeLookInLeft", "eyeLookInRight", "eyeLookOutLeft", "eyeLookOutRight",
+      "eyeBlinkLeft", "eyeBlinkRight", "eyeSquintLeft", "eyeSquintRight",
+      "eyeWideLeft", "eyeWideRight",
+      "cheekPuff", "cheekSquintLeft", "cheekSquintRight",
+      "noseSneerLeft", "noseSneerRight",
+      "jawOpen", "mouthClose", "tongueOut", "jawForward", "jawLeft", "jawRight",
+      "mouthFunnel", "mouthPucker", "mouthLeft", "mouthRight",
+      "mouthRollUpper", "mouthRollLower", "mouthShrugUpper", "mouthShrugLower",
+      "mouthSmileLeft", "mouthSmileRight", "mouthFrownLeft", "mouthFrownRight",
+      "mouthDimpleLeft", "mouthDimpleRight",
+      "mouthUpperUpLeft", "mouthUpperUpRight", "mouthLowerDownLeft", "mouthLowerDownRight",
+      "mouthPressLeft", "mouthPressRight", "mouthStretchLeft", "mouthStretchRight"
+    ],
+    "source": "CGTrader",
+    "credit": "CGTrader artist"
+  },
+  {
+    "id": "survival_girl_2k",
+    "name": "Survival Girl (2K)",
+    "file": "survival_girl_2k.glb",
+    "type": "glb",
+    "sizeMB": 166,
+    "polyCount": 52476,
+    "description": "2K textures — faster load, good quality",
+    "blendShapeCount": 52,
+    "boneCount": 555,
+    "outfits": [
+      { "id": "full", "label": "Full Outfit", "meshes": ["SK_SurvivalGirlSafe", "SK_Hair", "SK_TankTop", "SK_Pants", "SK_Sneakers", "SK_Backpack", "SK_Respirator"] },
+      { "id": "casual", "label": "Casual", "meshes": ["SK_SurvivalGirlSafe", "SK_Hair", "SK_TankTop", "SK_Pants", "SK_Sneakers"] },
+      { "id": "underwear", "label": "Underwear", "meshes": ["SK_SurvivalGirl18", "SK_Hair", "SK_Underwear"] },
+      { "id": "nude", "label": "Nude", "meshes": ["SK_SurvivalGirl18", "SK_Hair", "SK_Pubic"] }
+    ],
+    "bodyMeshes": ["SK_SurvivalGirl18", "SK_SurvivalGirlSafe"],
+    "allMeshes": ["SK_SurvivalGirl18", "SK_SurvivalGirlSafe", "SK_Hair", "SK_TankTop", "SK_Pants", "SK_Sneakers", "SK_Underwear", "SK_Pubic", "SK_Backpack", "SK_Respirator"],
+    "springBones": {
+      "breast": ["c_breast_01l", "c_breast_02l", "c_breast_01r", "c_breast_02r"],
+      "hair": ["hair_side_01l", "hair_side_02l", "hair_back_01l", "hair_back_02l", "hair_side_01r", "hair_side_02r", "hair_back_01r", "hair_back_02r", "hair_back_01", "hair_back_02", "hair_frontside_01r", "hair_frontside_02r", "hair_front_01r", "hair_front_02r"]
+    },
+    "headBone": "headx",
+    "chestBone": "spine_03x",
+    "eyeBones": ["c_eyel", "c_eyer"],
+    "blendShapes": [
+      "browInnerUp", "browDownLeft", "browDownRight", "browOuterUpLeft", "browOuterUpRight",
+      "eyeLookUpLeft", "eyeLookUpRight", "eyeLookDownLeft", "eyeLookDownRight",
+      "eyeLookInLeft", "eyeLookInRight", "eyeLookOutLeft", "eyeLookOutRight",
+      "eyeBlinkLeft", "eyeBlinkRight", "eyeSquintLeft", "eyeSquintRight",
+      "eyeWideLeft", "eyeWideRight",
+      "cheekPuff", "cheekSquintLeft", "cheekSquintRight",
+      "noseSneerLeft", "noseSneerRight",
+      "jawOpen", "mouthClose", "tongueOut", "jawForward", "jawLeft", "jawRight",
+      "mouthFunnel", "mouthPucker", "mouthLeft", "mouthRight",
+      "mouthRollUpper", "mouthRollLower", "mouthShrugUpper", "mouthShrugLower",
+      "mouthSmileLeft", "mouthSmileRight", "mouthFrownLeft", "mouthFrownRight",
+      "mouthDimpleLeft", "mouthDimpleRight",
+      "mouthUpperUpLeft", "mouthUpperUpRight", "mouthLowerDownLeft", "mouthLowerDownRight",
+      "mouthPressLeft", "mouthPressRight", "mouthStretchLeft", "mouthStretchRight"
+    ],
+    "source": "CGTrader",
+    "credit": "CGTrader artist"
+  }
+]

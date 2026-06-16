@@ -1,0 +1,219 @@
+import express from 'express';
+import { authenticateToken } from './auth.js';
+
+const router = express.Router();
+
+/**
+ * Samba/CIFS Mount Management Web Interface
+ * Provides comprehensive mount management for network file shares
+ */
+
+// API Routes for Samba/CIFS Mount Management
+
+// Get All Mounts
+router.get('/api/mounts', authenticateToken, async (req, res) => {
+  try {
+    const agent = req.app.locals.agent;
+    const result = await agent.apiManager.executeAPI('samba', 'listMounts');
+    res.json(result);
+  } catch (error) {
+    console.error('Samba mounts API error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to get Samba mounts'
+    });
+  }
+});
+
+// Create Mount Configuration
+router.post('/api/mounts', authenticateToken, async (req, res) => {
+  try {
+    const agent = req.app.locals.agent;
+    const { name, server, share, mountPoint, username, password, domain, options } = req.body;
+    
+    const result = await agent.apiManager.executeAPI('samba', 'createMount', {
+      name,
+      server,
+      share,
+      mountPoint,
+      username,
+      password,
+      domain,
+      options
+    });
+    
+    res.json(result);
+  } catch (error) {
+    console.error('Samba create mount API error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to create Samba mount'
+    });
+  }
+});
+
+// Update Mount Configuration
+router.put('/api/mounts/:id', authenticateToken, async (req, res) => {
+  try {
+    const agent = req.app.locals.agent;
+    const { id } = req.params;
+    const { name, server, share, mountPoint, username, password, domain, options } = req.body;
+    
+    const result = await agent.apiManager.executeAPI('samba', 'updateMount', {
+      id,
+      name,
+      server,
+      share,
+      mountPoint,
+      username,
+      password,
+      domain,
+      options
+    });
+    
+    res.json(result);
+  } catch (error) {
+    console.error('Samba update mount API error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to update Samba mount'
+    });
+  }
+});
+
+// Delete Mount Configuration
+router.delete('/api/mounts/:id', authenticateToken, async (req, res) => {
+  try {
+    const agent = req.app.locals.agent;
+    const { id } = req.params;
+    
+    const result = await agent.apiManager.executeAPI('samba', 'deleteMount', { id });
+    res.json(result);
+  } catch (error) {
+    console.error('Samba delete mount API error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to delete Samba mount'
+    });
+  }
+});
+
+// Mount a Share
+router.post('/api/mounts/:id/mount', authenticateToken, async (req, res) => {
+  try {
+    const agent = req.app.locals.agent;
+    const { id } = req.params;
+    
+    const result = await agent.apiManager.executeAPI('samba', 'mount', { id });
+    res.json(result);
+  } catch (error) {
+    console.error('Samba mount API error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to mount Samba share'
+    });
+  }
+});
+
+// Unmount a Share
+router.post('/api/mounts/:id/unmount', authenticateToken, async (req, res) => {
+  try {
+    const agent = req.app.locals.agent;
+    const { id } = req.params;
+    
+    const result = await agent.apiManager.executeAPI('samba', 'unmount', { id });
+    res.json(result);
+  } catch (error) {
+    console.error('Samba unmount API error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to unmount Samba share'
+    });
+  }
+});
+
+// Test Mount Connection
+router.post('/api/mounts/:id/test', authenticateToken, async (req, res) => {
+  try {
+    const agent = req.app.locals.agent;
+    const { id } = req.params;
+    
+    const result = await agent.apiManager.executeAPI('samba', 'testMount', { id });
+    res.json(result);
+  } catch (error) {
+    console.error('Samba test mount API error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to test Samba mount'
+    });
+  }
+});
+
+// Get Mount Status
+router.get('/api/status', authenticateToken, async (req, res) => {
+  try {
+    const agent = req.app.locals.agent;
+    const result = await agent.apiManager.executeAPI('samba', 'getStatus');
+    res.json(result);
+  } catch (error) {
+    console.error('Samba status API error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to get Samba status'
+    });
+  }
+});
+
+// Auto-mount All Configured Shares
+router.post('/api/mount-all', authenticateToken, async (req, res) => {
+  try {
+    const agent = req.app.locals.agent;
+    const result = await agent.apiManager.executeAPI('samba', 'mountAll');
+    res.json(result);
+  } catch (error) {
+    console.error('Samba mount-all API error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to mount all Samba shares'
+    });
+  }
+});
+
+// Unmount All Mounted Shares
+router.post('/api/unmount-all', authenticateToken, async (req, res) => {
+  try {
+    const agent = req.app.locals.agent;
+    const result = await agent.apiManager.executeAPI('samba', 'unmountAll');
+    res.json(result);
+  } catch (error) {
+    console.error('Samba unmount-all API error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to unmount all Samba shares'
+    });
+  }
+});
+
+// Browse Share Contents
+router.post('/api/mounts/:id/browse', authenticateToken, async (req, res) => {
+  try {
+    const agent = req.app.locals.agent;
+    const { id } = req.params;
+    const { path } = req.body;
+    
+    const result = await agent.apiManager.executeAPI('samba', 'browse', { 
+      id, 
+      path: path || '/' 
+    });
+    
+    res.json(result);
+  } catch (error) {
+    console.error('Samba browse API error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to browse Samba share'
+    });
+  }
+});
+
+export default router;

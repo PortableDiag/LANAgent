@@ -1,0 +1,12 @@
+[Unit]
+Description=Run LANAgent DNS self-heal every 2 minutes
+
+[Timer]
+# Fire shortly after boot (catches a VPN that hijacks DNS before the agent
+# starts), then every 2 minutes. Persistent so a missed window runs on resume.
+OnBootSec=30s
+OnUnitActiveSec=120s
+Persistent=true
+
+[Install]
+WantedBy=timers.target
