@@ -582,15 +582,20 @@ export class Agent extends EventEmitter {
           this.services.set('embeddingService', embeddingService);
           logger.info('✓ Vector store and embedding services initialized');
           
-          // Perform initial intent indexing now that vector store is ready
+          // Perform initial intent indexing now that vector store is ready.
+          // Run it in the BACKGROUND — never await it on the boot path. indexAllIntents
+          // embeds ~1065 plugin intents via the OpenAI API; ALICE routes through a VPN
+          // tunnel, and a single embedding request that hangs during a tunnel flap (the
+          // OpenAI client has no boot-time timeout) used to wedge the ENTIRE boot before
+          // the web server bound to port 80 — turning a transient network blip into a
+          // full API outage (2026-06-17). Indexing now completes whenever it can; vector
+          // intent search is simply unavailable until then (keyword/AI intent detection
+          // still works), and the box always comes up serving.
           if (this.vectorIntentDetector && this.vectorIntentDetector.initialized) {
-            try {
-              logger.info('Performing initial intent indexing for all plugins...');
-              await intentIndexer.indexAllIntents(this);
-              logger.info('Initial intent indexing completed');
-            } catch (error) {
-              logger.error('Failed to perform initial intent indexing:', error);
-            }
+            logger.info('Performing initial intent indexing for all plugins (background)...');
+            intentIndexer.indexAllIntents(this)
+              .then(() => logger.info('Initial intent indexing completed'))
+              .catch((error) => logger.error('Failed to perform initial intent indexing:', error));
           }
         } catch (error) {
           logger.error('Failed to initialize vector services:', error);
@@ -803,9 +808,10 @@ export class Agent extends EventEmitter {
     this.emit("stopped");
   }
   
-  // AI Provider methods
+  // AI Provider methods — force:true so the lock check (providerManager.switchProvider)
+  // recognizes this as user-driven UI action, not a background service flip.
   async switchAIProvider(providerName) {
-    return await this.providerManager.switchProvider(providerName);
+    return await this.providerManager.switchProvider(providerName, { force: true });
   }
   
   getCurrentAIProvider() {
@@ -1802,7 +1808,7 @@ Respond conversationally — elaborate, clarify, or answer based on what was jus
 
                 let msg = `🪙 **SKYNET Token Info**\n\n`;
                 msg += `**Contract:** \`0x8b77CC5c6cB3d846608d9d5Dd03fA406BA03b8F1\` (BEP-20, BSC)\n`;
-                msg += `**Total Supply:** [redacted] SKYNET (fixed, no mint)\n`;
+                msg += `**Total Supply:** 100,000,000 SKYNET (fixed, no mint)\n`;
                 msg += `**LP Pair:** PancakeSwap V2 \`0x2AC2...601\`\n\n`;
 
                 msg += `**Allocation Ledger:**\n`;
@@ -4619,7 +4625,7 @@ Return ONLY a valid JSON object with the extracted parameters, nothing else.`;
     systemPrompt += `🪙 SKYNET TOKEN & SKYNET P2P NETWORK:\n`;
     systemPrompt += `- Website: https://lanagent.net (main project site) | https://skynettoken.com (SKYNET token info & staking)\n`;
     systemPrompt += `- SKYNET is a BEP-20 token on Binance Smart Chain (BSC), contract: 0x8b77CC5c6cB3d846608d9d5Dd03fA406BA03b8F1\n`;
-    systemPrompt += `- Fixed supply: [redacted] SKYNET — no mint function, no tax on transfers\n`;
+    systemPrompt += `- Fixed supply: 100,000,000 SKYNET — no mint function, no tax on transfers\n`;
     systemPrompt += `- Liquidity: PancakeSwap V2 pair 0x2AC21524188988025E54429a40B83460098eB601\n`;
     systemPrompt += `- Allocation ledger: LP 50M, Staking 20M, Bounty Pool 10M, Treasury 10M, Reserve 10M\n`;
     systemPrompt += `- Purpose: SKYNET powers the Skynet P2P federation network — used for service payments, bounties, governance, trust scores, tipping, data marketplace, compute rental, and more\n`;

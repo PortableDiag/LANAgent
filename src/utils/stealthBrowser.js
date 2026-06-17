@@ -83,20 +83,30 @@ async function launchBrowser(options = {}) {
 
   // Check if Xvfb display is available for non-headless mode
   let useHeadless = options.headless ?? 'new';
-  if (useHeadless !== false && !process.env.DISPLAY) {
-    // Try to start Xvfb for non-headless (better anti-detection)
-    try {
-      const { execSync } = await import('child_process');
-      execSync('pgrep -x Xvfb > /dev/null 2>&1 || (Xvfb :99 -screen 0 1920x1080x24 &)', { stdio: 'ignore' });
-      await new Promise(r => setTimeout(r, 500));
-      process.env.DISPLAY = ':99';
+  // When the caller EXPLICITLY asks for headless, honor it and skip the Xvfb /
+  // shared-DISPLAY override entirely (v2.25.107). The non-headless-on-Xvfb path
+  // exists for anti-detection on LIVE navigations, but it forces every browser
+  // onto the single :99 display — concurrent rasters then serialize on one X
+  // compositor (a tall screenshot ballooned to 175s under load). The screenshot
+  // browser renders pre-fetched setContent HTML (no live bot wall), so it wants
+  // true headless: off-display, no compositor contention.
+  const explicitHeadless = Object.prototype.hasOwnProperty.call(options, 'headless');
+  if (!explicitHeadless) {
+    if (useHeadless !== false && !process.env.DISPLAY) {
+      // Try to start Xvfb for non-headless (better anti-detection)
+      try {
+        const { execSync } = await import('child_process');
+        execSync('pgrep -x Xvfb > /dev/null 2>&1 || (Xvfb :99 -screen 0 1920x1080x24 &)', { stdio: 'ignore' });
+        await new Promise(r => setTimeout(r, 500));
+        process.env.DISPLAY = ':99';
+        useHeadless = false;
+        logger.info('Started Xvfb :99 for non-headless stealth mode');
+      } catch {
+        logger.debug('Xvfb not available, using headless mode');
+      }
+    } else if (process.env.DISPLAY) {
       useHeadless = false;
-      logger.info('Started Xvfb :99 for non-headless stealth mode');
-    } catch {
-      logger.debug('Xvfb not available, using headless mode');
     }
-  } else if (process.env.DISPLAY) {
-    useHeadless = false;
   }
 
   // v2.25.89: GPU detection. DataDome's fingerprint check treats SwiftShader
@@ -106,10 +116,16 @@ async function launchBrowser(options = {}) {
   // render node and pasing --disable-gpu was forcing Chrome to SwiftShader, we
   // now enable hardware acceleration and let Chrome talk to /dev/dri.
   let gpuArgs;
+  // Hardware desktop-GL (--use-gl=desktop) needs a real/Xvfb display. In TRUE
+  // headless (no X) it crashes the renderer mid-capture ("Target closed"), so a
+  // headless browser must use software raster. Only the non-headless (Xvfb)
+  // path gets hardware GL — which is also the only path that needs it (the
+  // anti-detection WebGL-vendor reason below applies to live navigations).
+  const trulyHeadless = useHeadless !== false;
   try {
     const { existsSync } = await import('fs');
     const hasRenderNode = existsSync('/dev/dri/renderD128') || existsSync('/dev/dri/card0');
-    if (hasRenderNode) {
+    if (hasRenderNode && !trulyHeadless) {
       gpuArgs = [
         '--enable-gpu-rasterization',
         '--enable-zero-copy',
@@ -119,7 +135,7 @@ async function launchBrowser(options = {}) {
       logger.info('GPU args: hardware acceleration enabled (/dev/dri present)');
     } else {
       gpuArgs = ['--disable-gpu', '--disable-accelerated-2d-canvas'];
-      logger.info('GPU args: software fallback (no /dev/dri)');
+      logger.info(`GPU args: software raster (${trulyHeadless ? 'headless' : 'no /dev/dri'})`);
     }
   } catch {
     gpuArgs = ['--disable-gpu', '--disable-accelerated-2d-canvas'];
@@ -145,15 +161,23 @@ async function launchBrowser(options = {}) {
       '--no-first-run',
       '--no-default-browser-check',
       '--ignore-certificate-errors',
-      '--user-data-dir=/tmp/puppeteer-profile'
+      // Parameterized so a second, isolated browser (e.g. the dedicated
+      // screenshot browser) can run concurrently. Two Chromium processes CANNOT
+      // share one --user-data-dir — they collide on the profile SingletonLock and
+      // the second launch fails/attaches to the first. Pass a distinct
+      // `userDataDir` for any concurrent instance.
+      `--user-data-dir=${options.userDataDir || '/tmp/puppeteer-profile'}`
     ]
   };
 
+  // userDataDir is consumed into an arg above, not a launch option.
+  const { userDataDir: _udd, ...optionsRest } = options;
+
   const merged = {
     ...defaults,
-    ...options,
+    ...optionsRest,
     headless: useHeadless,
-    args: [...(defaults.args), ...(options.args || [])].filter((v, i, a) => a.indexOf(v) === i)
+    args: [...(defaults.args), ...(optionsRest.args || [])].filter((v, i, a) => a.indexOf(v) === i)
   };
 
   logger.debug('Launching Puppeteer browser', { headless: merged.headless, stealth: stealthApplied });
