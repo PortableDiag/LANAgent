@@ -138,6 +138,11 @@ export default class YtDlpPlugin extends BasePlugin {
 
     this.downloadDir = path.join(process.cwd(), 'downloads');
     this.ensureDownloadDirectory();
+
+    // In-flight de-dup: two concurrent requests for the same URL+format would
+    // otherwise race yt-dlp on the same .part file and the second would fail
+    // in 4-5 seconds with a 500. We coalesce them onto a single promise.
+    this._inflight = new Map();
   }
 
   async ensureDownloadDirectory() {
@@ -275,6 +280,17 @@ export default class YtDlpPlugin extends BasePlugin {
       return { success: false, error: 'URL or search query required' };
     }
 
+    const dedupKey = `video|${url}|${format}|${quality}|${subtitles ? 1 : 0}|${output || ''}`;
+    if (this._inflight.has(dedupKey)) {
+      logger.info(`[ytdlp] Joining in-flight video download for: ${url}`);
+      return this._inflight.get(dedupKey);
+    }
+    const promise = this._runVideoDownload({ url, format, quality, subtitles, output, data });
+    this._inflight.set(dedupKey, promise);
+    try { return await promise; } finally { this._inflight.delete(dedupKey); }
+  }
+
+  async _runVideoDownload({ url, format, quality, subtitles, output, data }) {
     await this._ensureVpn();
 
     // Resolve any cookie context (Cloudflare bypass or stored cookies) for
@@ -394,6 +410,14 @@ export default class YtDlpPlugin extends BasePlugin {
       };
 
     } catch (error) {
+      // Log full stderr so future failures aren't invisible — the route's
+      // responseSanitizer strips internal paths from the API response, and
+      // the previous version of this catch never wrote anything to disk.
+      logger.error(`[ytdlp] Video download failed for ${url}: ${error.message}`, {
+        stderr: (error.stderr || '').toString().slice(-2000),
+        stdout: (error.stdout || '').toString().slice(-500),
+        code: error.code
+      });
       return {
         success: false,
         error: `Download failed: ${error.message}`,
@@ -653,6 +677,17 @@ export default class YtDlpPlugin extends BasePlugin {
       return { success: false, error: 'URL or search query required' };
     }
 
+    const dedupKey = `audio|${url}|${format}|${quality}|${output || ''}`;
+    if (this._inflight.has(dedupKey)) {
+      logger.info(`[ytdlp] Joining in-flight audio download for: ${url}`);
+      return this._inflight.get(dedupKey);
+    }
+    const promise = this._runAudioDownload({ url, format, quality, output, data });
+    this._inflight.set(dedupKey, promise);
+    try { return await promise; } finally { this._inflight.delete(dedupKey); }
+  }
+
+  async _runAudioDownload({ url, format, quality, output, data }) {
     await this._ensureVpn();
 
     let cookieCtx = null;
@@ -742,6 +777,11 @@ export default class YtDlpPlugin extends BasePlugin {
       };
 
     } catch (error) {
+      logger.error(`[ytdlp] Audio download failed for ${url}: ${error.message}`, {
+        stderr: (error.stderr || '').toString().slice(-2000),
+        stdout: (error.stdout || '').toString().slice(-500),
+        code: error.code
+      });
       return {
         success: false,
         error: `Audio download failed: ${error.message}`,

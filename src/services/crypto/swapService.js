@@ -15,6 +15,17 @@ async function getEthers() {
     return ethersLib;
 }
 
+// Safely convert a JS number/string amount to wei, clamping any extra fractional
+// digits to the token's decimal precision. parseUnits throws NUMERIC_FAULT
+// (underflow) if the input has more decimals than the token supports — common
+// when amounts come from balance reconciliation or float math (e.g. 23.5733675
+// USDC, which has 7 decimals but USDC only allows 6).
+function safeParseUnits(ethers, amount, decimals) {
+    const dec = Number(decimals);
+    const safe = Number(amount).toFixed(dec);
+    return ethers.parseUnits(safe, dec);
+}
+
 // DEX Router addresses for various networks
 const DEX_ROUTERS = {
     // Mainnets
@@ -186,6 +197,20 @@ const V4_HOOKED_POOLS_STATIC = {
 // Cache for dynamically discovered V4 pool keys: "network:token0:token1" → [{ hooks, fee, tickSpacing, hookFlags }]
 const _v4PoolKeyCache = new Map();
 const _v4PoolKeyCacheTimestamps = new Map();
+
+// Negative cache for V4 pools: "network:tokenIn:tokenOut" → timestamp.
+// Each _getV4Quote miss probes ~109 RPC calls (4 std pools × fee tiers +
+// 3 hooked + 98 multi-hop + 4 V4-direct). At ~70ms/call that's ~7s per
+// probe — done per token in residual-sweep, this is the dominant
+// contributor to the 20-min session-timeout bug (the residual-sweep stage
+// can iterate over dozens of tokens per heartbeat). Tokens that have
+// already been confirmed pool-less get a 24h negative cache hit and skip
+// the probe entirely. Cache is invalidated when an actual V4 quote
+// succeeds for the same pair (proof a pool exists now).
+const _v4NoPoolCache = new Map();
+const _V4_NO_POOL_TTL_MS = 24 * 60 * 60 * 1000;
+const _v4NoPoolKey = (network, tokenIn, tokenOut) =>
+  `${network}:${String(tokenIn || '').toLowerCase()}:${String(tokenOut || '').toLowerCase()}`;
 
 // Get the combined list of hooked pool configs for a network + cached discoveries for a pair
 function _getV4HookedPools(network, tokenA, tokenB) {
@@ -795,7 +820,7 @@ class SwapService {
             const tokenContract = new ethers.Contract(srcToken, ERC20_ABI, provider);
             decimalsIn = Number(await tokenContract.decimals());
         }
-        const amountInWei = ethers.parseUnits(amountIn.toString(), decimalsIn);
+        const amountInWei = safeParseUnits(ethers, amountIn, decimalsIn);
 
         // Approve if not native
         if (!isNativeIn) {
@@ -973,7 +998,7 @@ class SwapService {
         const signer = derivedWallet.connect(provider);
         const wrappedNative = this.getWrappedNative(network);
         const decimalsIn = options.decimalsIn || await this._resolveDecimals(srcToken, wrappedNative, network);
-        const amountInWei = ethers.parseUnits(amountIn.toString(), decimalsIn);
+        const amountInWei = safeParseUnits(ethers, amountIn, decimalsIn);
 
         // Ensure approval to CoW VaultRelayer
         await this.ensureCowApproval(network, srcToken, amountInWei, signer);
@@ -1100,7 +1125,7 @@ class SwapService {
         const wrappedNative = this.getWrappedNative(network);
         const decimalsIn = options.decimalsIn || await this._resolveDecimals(tokenIn, wrappedNative, network);
         const decimalsOut = options.decimalsOut || await this._resolveDecimals(tokenOut, wrappedNative, network);
-        const amountInWei = ethers.parseUnits(amountIn.toString(), decimalsIn);
+        const amountInWei = safeParseUnits(ethers, amountIn, decimalsIn);
 
         // Fire both quotes in parallel
         const [directResult, oneInchResult] = await Promise.allSettled([
@@ -1491,6 +1516,18 @@ class SwapService {
         const poolConfigs = V4_POOL_CONFIGS[network];
         if (!quoterAddr || !poolConfigs) return null;
 
+        // Negative-cache fast-path: if this pair was confirmed pool-less
+        // within the TTL, skip the ~109-RPC probe and return null. Massive
+        // win for residual-sweep over a wallet full of unsellable airdrops.
+        const _noPoolCacheKey = _v4NoPoolKey(network, tokenIn, tokenOut);
+        const _noPoolCachedAt = _v4NoPoolCache.get(_noPoolCacheKey);
+        if (_noPoolCachedAt && (Date.now() - _noPoolCachedAt) < _V4_NO_POOL_TTL_MS) {
+            return null;
+        } else if (_noPoolCachedAt) {
+            // TTL expired — drop the stale entry before the actual probe runs
+            _v4NoPoolCache.delete(_noPoolCacheKey);
+        }
+
         const ethers = await getEthers();
         // Use a dedicated provider for V4 quotes to avoid rate-limit contention with V2/V3
         let provider;
@@ -1795,8 +1832,15 @@ class SwapService {
             const multiCount = multiHopPromises.length;
             const uniV4Count = uniV4BscPromises.length;
             logger.info(`V4 quote: no viable pool found on ${network} (${stdCount} standard, ${hookCount} hooked, ${multiCount} multi-hop${uniV4Count ? `, ${uniV4Count} uniswap-v4` : ''} attempts)`);
+            // Cache the negative result so the next probe for this pair
+            // within the TTL skips the 109-RPC scan.
+            _v4NoPoolCache.set(_noPoolCacheKey, Date.now());
             return null;
         }
+        // Pool exists for this pair — drop any stale negative-cache entry.
+        // (Won't normally exist since the cached-null fast-path returns
+        // before we get here, but defensive cleanup keeps the cache honest.)
+        _v4NoPoolCache.delete(_noPoolCacheKey);
 
         const hopType = bestResult.isMultiHop ? 'multi-hop' : 'single-hop';
         const feeStr = bestResult.fees ? bestResult.fees.join('/') : `${bestResult.fee}`;
@@ -2201,7 +2245,7 @@ class SwapService {
             // Auto-fetch decimals for 6-decimal tokens (USDT/USDC on Ethereum)
             const decimalsIn = options.decimalsIn || await this._resolveDecimals(tokenIn, wrappedNative, network);
             const decimalsOut = options.decimalsOut || await this._resolveDecimals(tokenOut, wrappedNative, network);
-            const amountInWei = ethers.parseUnits(amountIn.toString(), decimalsIn);
+            const amountInWei = safeParseUnits(ethers, amountIn, decimalsIn);
 
             // Build candidate paths
             const candidatePaths = [];
@@ -2427,7 +2471,7 @@ class SwapService {
 
         const decimalsIn = options.decimalsIn || await this._resolveDecimals(tokenIn, wrappedNative, network);
         const decimalsOut = options.decimalsOut || await this._resolveDecimals(tokenOut, wrappedNative, network);
-        const amountInWei = ethers.parseUnits(amountIn.toString(), decimalsIn);
+        const amountInWei = safeParseUnits(ethers, amountIn, decimalsIn);
 
         // V2 quote (parallel path exploration)
         const v2Promise = (async () => {
@@ -2553,7 +2597,7 @@ class SwapService {
 
         const decimalsIn = options.decimalsIn || 18;
         const decimalsOut = options.decimalsOut || 18;
-        const amountInWei = ethers.parseUnits(amountIn.toString(), decimalsIn);
+        const amountInWei = safeParseUnits(ethers, amountIn, decimalsIn);
         const quoter = new ethers.Contract(checksumAddr(quoterAddr), UNISWAP_V3_QUOTER_ABI, provider);
 
         const results = {};
@@ -2671,7 +2715,7 @@ class SwapService {
             const tokenOutContract = new ethers.Contract(isNativeOut ? wrappedNative : tokenOut, ERC20_ABI, provider);
             const decimalsOut = isNativeOut ? 18 : await tokenOutContract.decimals();
 
-            let amountInWei = ethers.parseUnits(amountIn.toString(), decimals);
+            let amountInWei = safeParseUnits(ethers, amountIn, decimals);
 
             // Find best swap path across multiple routes
             const inAddr = isNativeIn ? wrappedNative : tokenIn;
@@ -3670,8 +3714,8 @@ class SwapService {
             tokenAContract.decimals(), tokenBContract.decimals()
         ]);
 
-        const amountAWei = ethers.parseUnits(amountA.toString(), decimalsA);
-        const amountBWei = ethers.parseUnits(amountB.toString(), decimalsB);
+        const amountAWei = safeParseUnits(ethers, amountA, decimalsA);
+        const amountBWei = safeParseUnits(ethers, amountB, decimalsB);
         const slippageMultiplier = BigInt(Math.floor((100 - slippage) * 100));
         const amountAMin = (amountAWei * slippageMultiplier) / 10000n;
         const amountBMin = (amountBWei * slippageMultiplier) / 10000n;

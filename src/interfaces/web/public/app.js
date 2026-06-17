@@ -9338,17 +9338,12 @@ class LANAgentDashboard {
     populatePnLDashboard(data) {
         if (!data || data.success === false) return;
         const state = data.state || {};
-        // Combine DollarMaximizer P&L + Token Trader lifetime P&L for total
-        const stratPnL = state.totalPnL || 0;
-        // Aggregate token trader P&L across all instances (address-keyed entries start with 0x)
-        let ttPnL = 0;
-        const ttStatus = data.tokenTraderStatus || {};
-        for (const [key, val] of Object.entries(ttStatus)) {
-            if (key.startsWith('0x') && val && val.pnl) {
-                ttPnL += (val.pnl.lifetimeRealized != null ? val.pnl.lifetimeRealized : val.pnl.realized || 0) + (val.pnl.unrealized || 0);
-            }
-        }
-        const totalPnL = stratPnL + ttPnL;
+        // state.totalPnL is realized lifetime P&L (DollarMaximizer + Token Trader combined).
+        // state.unrealizedPnL is current mark-to-market on open positions.
+        // Headline "Total P&L" shows the realized + unrealized snapshot.
+        const realizedPnL = state.totalPnL || 0;
+        const unrealizedPnL = state.unrealizedPnL || 0;
+        const totalPnL = realizedPnL + unrealizedPnL;
         const dailyPnL = state.dailyPnL || 0;
 
         const totalEl = document.getElementById('dashTotalPnL');
@@ -9714,7 +9709,19 @@ class LANAgentDashboard {
             });
             const result = await resp.json();
             if (result.success && result.data) {
-                this.renderPnLHistoryChart(result.data);
+                // Also fetch current unrealized P&L across token trader instances so the
+                // chart can render today's mark-to-market on top of the realized line.
+                let currentUnrealized = 0;
+                try {
+                    const ttResp = await fetch('/api/crypto/strategy/token-trader/status', {
+                        headers: { 'Authorization': `Bearer ${this.token}` }
+                    });
+                    const ttData = await ttResp.json();
+                    for (const [k, v] of Object.entries(ttData.instances || {})) {
+                        if (k && v && v.pnl) currentUnrealized += v.pnl.unrealized || 0;
+                    }
+                } catch { /* non-fatal */ }
+                this.renderPnLHistoryChart(result.data, currentUnrealized);
             } else {
                 container.innerHTML = '<span style="color:#666; font-size:0.85em;">No P&L data available</span>';
             }
@@ -9724,7 +9731,7 @@ class LANAgentDashboard {
         }
     }
 
-    renderPnLHistoryChart(data) {
+    renderPnLHistoryChart(data, currentUnrealized = 0) {
         const container = document.getElementById('pnlHistoryChart');
         if (!container || !data.length) {
             if (container) container.innerHTML = '<span style="color:#666; font-size:0.85em;">No P&L data available</span>';
@@ -9748,7 +9755,12 @@ class LANAgentDashboard {
             .range([0, width])
             .padding(0.1);
 
-        const yExtent = d3.extent(data, d => d.cumulativePnL);
+        // Y-domain must accommodate today's realized+unrealized peak so the unrealized
+        // marker doesn't fall outside the plot area.
+        const lastRealized = data[data.length - 1].cumulativePnL;
+        const todaySnapshot = lastRealized + currentUnrealized;
+        const valuesForExtent = data.map(d => d.cumulativePnL).concat([todaySnapshot]);
+        const yExtent = d3.extent(valuesForExtent);
         const yPad = Math.max(Math.abs(yExtent[1] - yExtent[0]) * 0.15, 1);
         const y = d3.scaleLinear()
             .domain([Math.min(yExtent[0], 0) - yPad, Math.max(yExtent[1], 0) + yPad])
@@ -9814,6 +9826,36 @@ class LANAgentDashboard {
             .style('stroke', '#1a1a2e')
             .style('stroke-width', 1.5);
 
+        // Unrealized (mark-to-market) marker on today's data point.
+        // Drawn as a dashed segment from today's realized cumulative up/down to the
+        // realized+unrealized snapshot, with a hollow circle at the snapshot value.
+        if (currentUnrealized !== 0 && data.length > 0) {
+            const lastDate = data[data.length - 1].date;
+            const lastX = x(lastDate);
+            const realizedY = y(lastRealized);
+            const snapshotY = y(lastRealized + currentUnrealized);
+            const unrealizedColor = currentUnrealized >= 0 ? '#81c784' : '#e57373';
+
+            svg.append('line')
+                .attr('class', 'unrealized-bar')
+                .attr('x1', lastX).attr('x2', lastX)
+                .attr('y1', realizedY).attr('y2', snapshotY)
+                .style('stroke', unrealizedColor)
+                .style('stroke-width', 2)
+                .style('stroke-dasharray', '3,2');
+
+            svg.append('circle')
+                .attr('class', 'unrealized-marker')
+                .attr('cx', lastX)
+                .attr('cy', snapshotY)
+                .attr('r', 4)
+                .style('fill', 'none')
+                .style('stroke', unrealizedColor)
+                .style('stroke-width', 2)
+                .append('title')
+                .text(`Unrealized: $${currentUnrealized.toFixed(2)} (snapshot $${(lastRealized + currentUnrealized).toFixed(2)})`);
+        }
+
         // X axis
         const tickInterval = Math.max(1, Math.floor(data.length / 6));
         const tickValues = data.filter((_, i) => i % tickInterval === 0 || i === data.length - 1).map(d => d.date);
@@ -9844,13 +9886,23 @@ class LANAgentDashboard {
             .style('pointer-events', 'none')
             .style('opacity', 0);
 
+        const lastDataDate = data[data.length - 1].date;
         svg.selectAll('.dot')
             .on('mouseover', function(event, d) {
                 d3.select(this).attr('r', data.length <= 14 ? 6 : 4);
                 const pnlColor = d.cumulativePnL >= 0 ? '#4caf50' : '#f44336';
                 const dayColor = d.dailyPnL >= 0 ? '#4caf50' : '#f44336';
-                tooltip.style('opacity', 1)
-                    .html(`<strong>${d.date}</strong><br>Cumulative: <span style="color:${pnlColor}">$${d.cumulativePnL.toFixed(2)}</span><br>Day: <span style="color:${dayColor}">$${d.dailyPnL.toFixed(2)}</span>`);
+                let html = `<strong>${d.date}</strong><br>` +
+                    `Realized cum: <span style="color:${pnlColor}">$${d.cumulativePnL.toFixed(2)}</span><br>` +
+                    `Day (realized): <span style="color:${dayColor}">$${d.dailyPnL.toFixed(2)}</span>`;
+                if (d.date === lastDataDate && currentUnrealized !== 0) {
+                    const uColor = currentUnrealized >= 0 ? '#81c784' : '#e57373';
+                    const snap = d.cumulativePnL + currentUnrealized;
+                    const snapColor = snap >= 0 ? '#4caf50' : '#f44336';
+                    html += `<br>Unrealized: <span style="color:${uColor}">$${currentUnrealized.toFixed(2)}</span>` +
+                        `<br>Snapshot: <span style="color:${snapColor}">$${snap.toFixed(2)}</span>`;
+                }
+                tooltip.style('opacity', 1).html(html);
             })
             .on('mousemove', function(event) {
                 tooltip.style('left', (event.offsetX + 15) + 'px')
@@ -12213,7 +12265,7 @@ class LANAgentDashboard {
             const price = priceRes.price;
             const confirmed = await this._skynetConfirm(
                 'Set Market Prices',
-                `SKYNET is currently $${price.toFixed(6)}/token. This will enable all services and set prices based on market rate (e.g., simple lookups ~[redacted], AI compute ~$0.10 in SKYNET).`,
+                `SKYNET is currently $${price.toFixed(6)}/token. This will enable all services and set prices based on market rate (e.g., simple lookups ~$0.005, AI compute ~$0.10 in SKYNET).`,
                 'Set Prices',
                 false
             );

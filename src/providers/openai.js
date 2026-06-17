@@ -163,6 +163,10 @@ export class OpenAIProvider extends BaseProvider {
         }
       } else {
         completionParams.max_tokens = callerMax;
+        // Non-reasoning models reject reasoning_effort with a 400. Callers
+        // spread additionalParams that include it (capabilityIncrementalScanner
+        // et al), so scrub it here when routing to gpt-4o / gpt-4.1 / 3.5.
+        delete completionParams.reasoning_effort;
       }
 
       const completion = await this.client.chat.completions.create(completionParams);
@@ -208,6 +212,7 @@ export class OpenAIProvider extends BaseProvider {
         completionParams.max_completion_tokens = options.maxTokens || 1000;
       } else {
         completionParams.max_tokens = options.maxTokens || 1000;
+        delete completionParams.reasoning_effort;
       }
 
       const stream = await this.client.chat.completions.create(completionParams);

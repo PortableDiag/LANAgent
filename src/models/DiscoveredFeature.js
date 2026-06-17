@@ -137,7 +137,7 @@ DiscoveredFeatureSchema.index({ status: 1, priority: -1 });
 DiscoveredFeatureSchema.index({ 'source.repository': 1 });
 DiscoveredFeatureSchema.index({ type: 1 });
 DiscoveredFeatureSchema.index({ createdAt: -1 });
-DiscoveredFeatureSchema.index({ fingerprint: 1 });
+// fingerprint: unique+sparse on the field-level decl already creates this index
 
 // Initialize cache
 const cache = new NodeCache({ stdTTL: 600, checkperiod: 120 });

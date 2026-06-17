@@ -816,41 +816,92 @@ Respond with ONLY the rephrased message, no explanation:`;
         let significantMoveDetected = false;
         const moves = [];
 
+        // CoinGecko ids for the REST fallback (same source ensService uses) so a
+        // Chainlink/RPC outage doesn't blind the strategy on a stale tick.
+        const COINGECKO_IDS = { ethereum: 'ethereum', bsc: 'binancecoin' };
+        // decimals() never changes — cache it so we don't pay a second RPC round-trip
+        // every poll (one more call that could time out).
+        if (!this.cryptoFeedDecimals) this.cryptoFeedDecimals = {};
+
         for (const [network, feed] of Object.entries(FEEDS)) {
-          try {
-            const provider = await contractServiceWrapper.getProvider(network);
-            const contract = new ethers.Contract(feed.feedAddress, FEED_ABI, provider);
-            const [, answer, , updatedAt] = await contract.latestRoundData();
-            const decimals = await contract.decimals();
-            const price = Number(answer) / Math.pow(10, Number(decimals));
+          let price = null;
+          let source = null;
+          let priceUpdatedAt = null;
 
-            currentPrices[network] = {
-              price,
-              symbol: feed.symbol,
-              source: 'chainlink',
-              updatedAt: new Date(Number(updatedAt) * 1000),
-              network
-            };
-
-            const last = this.cryptoPriceState.get(network);
-            if (last) {
-              const changePct = (price - last.price) / last.price;
-              if (Math.abs(changePct) >= MOVE_THRESHOLD) {
-                significantMoveDetected = true;
-                moves.push({
-                  network,
-                  symbol: feed.symbol,
-                  previousPrice: last.price,
-                  currentPrice: price,
-                  changePercent: (changePct * 100).toFixed(2)
-                });
+          // Chainlink read with RPC rotation: a single RPC timeout used to skip the
+          // whole tick (~100+ ETH read failures/window). Now we retry across the
+          // network's fallback RPCs before giving up.
+          const MAX_RPC_TRIES = 3;
+          for (let attempt = 0; attempt < MAX_RPC_TRIES; attempt++) {
+            try {
+              const provider = await contractServiceWrapper.getProvider(network);
+              const contract = new ethers.Contract(feed.feedAddress, FEED_ABI, provider);
+              const round = await contract.latestRoundData();
+              let decimals = this.cryptoFeedDecimals[network];
+              if (decimals === undefined) {
+                decimals = Number(await contract.decimals());
+                this.cryptoFeedDecimals[network] = decimals;
+              }
+              price = Number(round[1]) / Math.pow(10, decimals);
+              priceUpdatedAt = new Date(Number(round[3]) * 1000);
+              source = 'chainlink';
+              break;
+            } catch (error) {
+              const rotated = await contractServiceWrapper.switchToNextRpc(network);
+              if (attempt === MAX_RPC_TRIES - 1 || !rotated) {
+                logger.warn(`Price monitor: Chainlink read for ${feed.symbol} failed after ${attempt + 1} attempt(s): ${error.message}`);
               }
             }
-
-            this.cryptoPriceState.set(network, { price, symbol: feed.symbol, timestamp: Date.now() });
-          } catch (error) {
-            logger.warn(`Price monitor: failed to read ${feed.symbol} from Chainlink: ${error.message}`);
           }
+
+          // Fallback: CoinGecko REST
+          if (price === null && COINGECKO_IDS[network]) {
+            try {
+              const resp = await fetch(`https://api.coingecko.com/api/v3/simple/price?ids=${COINGECKO_IDS[network]}&vs_currencies=usd`);
+              if (resp.ok) {
+                const data = await resp.json();
+                const cg = data?.[COINGECKO_IDS[network]]?.usd;
+                if (cg > 0) {
+                  price = cg;
+                  priceUpdatedAt = new Date();
+                  source = 'coingecko';
+                  logger.info(`Price monitor: ${feed.symbol} via CoinGecko fallback = $${price}`);
+                }
+              }
+            } catch (cgErr) {
+              logger.warn(`Price monitor: CoinGecko fallback for ${feed.symbol} also failed: ${cgErr.message}`);
+            }
+          }
+
+          if (price === null) {
+            logger.warn(`Price monitor: no price for ${feed.symbol} this tick (Chainlink + fallback both failed)`);
+            continue;
+          }
+
+          currentPrices[network] = {
+            price,
+            symbol: feed.symbol,
+            source,
+            updatedAt: priceUpdatedAt,
+            network
+          };
+
+          const last = this.cryptoPriceState.get(network);
+          if (last) {
+            const changePct = (price - last.price) / last.price;
+            if (Math.abs(changePct) >= MOVE_THRESHOLD) {
+              significantMoveDetected = true;
+              moves.push({
+                network,
+                symbol: feed.symbol,
+                previousPrice: last.price,
+                currentPrice: price,
+                changePercent: (changePct * 100).toFixed(2)
+              });
+            }
+          }
+
+          this.cryptoPriceState.set(network, { price, symbol: feed.symbol, timestamp: Date.now() });
         }
 
         // Price check for tracked tokens (token_trader) using Chainlink oracles
@@ -1638,27 +1689,17 @@ Respond with ONLY the rephrased message, no explanation:`;
           const pm = this.agent.providerManager;
           if (!pm) return;
 
-          const defaultModels = {
-            anthropic: 'claude-opus-4-5-20251101',
-            openai: 'gpt-5'
-          };
-
-          for (const [provName, defaults] of Object.entries(defaultModels)) {
-            const savedModel = configs[provName]?.model || configs[provName]?.chatModel;
+          // Warn only — never auto-overwrite user's chosen model. Past behavior hardcoded
+          // openai to 'gpt-5' which silently undid cost-saving switches and caused surprise bills.
+          const lock = agentData?.aiProviders?.lock;
+          for (const [provName, cfg] of Object.entries(configs)) {
+            const savedModel = cfg?.model || cfg?.chatModel;
             if (!savedModel) continue;
             const provider = pm.providers.get(provName);
             if (!provider) continue;
-
-            // Check if saved model is still valid by checking available models
             const available = provider.getAvailableModels ? provider.getAvailableModels() : [];
             if (available.length > 0 && !available.includes(savedModel)) {
-              logger.warn(`Model ${savedModel} for ${provName} is no longer available — resetting to ${defaults}`);
-              await Agent.updateOne(
-                { name: process.env.AGENT_NAME || 'LANAgent' },
-                { $set: { [`aiProviders.configurations.${provName}.model`]: defaults } }
-              );
-              // Also update the live provider
-              if (provider.models) provider.models.chat = defaults;
+              logger.warn(`Model ${savedModel} for ${provName} not in available list — leaving user choice intact (lock=${lock?.enabled ? 'on' : 'off'})`);
             }
           }
         } catch (valErr) {

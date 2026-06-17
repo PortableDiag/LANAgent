@@ -97,7 +97,7 @@ const BLOCKED_ACTIONS = new Set([
 export const PLUGIN_CREDIT_COSTS = {
   anime: 1,      // $0.01
   chainlink: 1,  // $0.01 — on-chain read, no API key needed
-  lyrics: 1,     // [redacted] → round up to 1
+  lyrics: 1,     // $0.005 → round up to 1
   nasa: 1,       // $0.01
   weatherstack: 1, // $0.01
   news: 1,       // $0.01
