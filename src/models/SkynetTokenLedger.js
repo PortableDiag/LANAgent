@@ -79,6 +79,22 @@ const historicalTransactionSchema = new mongoose.Schema({
   idempotencyKey: {
     type: String,
     default: null
+  },
+  // On-chain address associated with the transaction (counterparty / sender /
+  // recipient depending on transactionType). Optional — older rows don't have it.
+  address: {
+    type: String,
+    default: null,
+    index: true
+  },
+  // Settlement status. pending = broadcast but not yet mined; confirmed = mined
+  // with receipt.status === 1; failed = mined with receipt.status !== 1.
+  // Null on rows logged before this field existed.
+  status: {
+    type: String,
+    enum: ['pending', 'confirmed', 'failed', null],
+    default: null,
+    index: true
   }
 });
 

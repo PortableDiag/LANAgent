@@ -233,7 +233,31 @@ export class ProviderManager extends EventEmitter {
     }
   }
 
-  async switchProvider(name) {
+  async switchProvider(name, options = {}) {
+    // Audit: who's calling switchProvider? Stack helps find any new offenders.
+    const stack = new Error().stack.split('\n').slice(2, 6).map(s => s.trim()).join(' ← ');
+    const currentName = this.activeProvider?.name;
+
+    // Lock gate: when aiProviders.locked is true, only callers with options.force
+    // can change the active provider. The web UI's /api/ai/switch endpoint is
+    // the only legitimate force-caller (JWT-authenticated, user intent).
+    // Switching to the same provider, or initializing from null, always proceeds.
+    if (!options.force && currentName && currentName !== name) {
+      try {
+        const { Agent } = await import('../models/Agent.js');
+        const agentName = process.env.AGENT_NAME || 'LANAgent';
+        const agentDoc = await Agent.findOne({ name: agentName }, { 'aiProviders.locked': 1 });
+        if (agentDoc?.aiProviders?.locked === true) {
+          logger.warn(`[provider-lock] switchProvider(${name}) BLOCKED — locked to ${currentName} | caller: ${stack}`);
+          return;
+        }
+      } catch (lockErr) {
+        logger.warn(`[provider-lock] lock check failed (${lockErr.message}) — proceeding without lock | caller: ${stack}`);
+      }
+    } else if (options.force) {
+      logger.info(`[provider-lock] switchProvider(${name}) forced (UI/explicit) | caller: ${stack}`);
+    }
+
     const provider = this.providers.get(name);
     if (!provider) {
       throw new Error(`Provider ${name} not found`);

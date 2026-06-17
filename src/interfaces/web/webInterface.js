@@ -990,6 +990,42 @@ export class WebInterface {
       }
     });
 
+    // Provider lock — when locked=true, only this JWT-gated endpoint (via /api/ai/switch)
+    // can change aiProviders.current. Internal callers (pluginDevelopment, websearch)
+    // that call providerManager.switchProvider without { force: true } get no-op'd.
+    this.app.post('/api/ai/lock', authenticateToken, async (req, res) => {
+      try {
+        const { locked } = req.body;
+        if (typeof locked !== 'boolean') {
+          return res.status(400).json({ success: false, error: 'locked must be boolean' });
+        }
+        const { Agent } = await import('../../models/Agent.js');
+        const agentName = process.env.AGENT_NAME || 'LANAgent';
+        await Agent.updateOne({ name: agentName }, { $set: { 'aiProviders.locked': locked } });
+        logger.info(`[provider-lock] lock set to ${locked} via API`);
+        res.json({ success: true, locked });
+      } catch (error) {
+        logger.error('AI lock error:', error);
+        res.status(500).json({ success: false, error: error.message });
+      }
+    });
+
+    this.app.get('/api/ai/lock', authenticateToken, async (req, res) => {
+      try {
+        const { Agent } = await import('../../models/Agent.js');
+        const agentName = process.env.AGENT_NAME || 'LANAgent';
+        const doc = await Agent.findOne({ name: agentName }, { 'aiProviders.locked': 1, 'aiProviders.current': 1 });
+        res.json({
+          success: true,
+          locked: doc?.aiProviders?.locked === true,
+          current: doc?.aiProviders?.current || null
+        });
+      } catch (error) {
+        logger.error('AI lock status error:', error);
+        res.status(500).json({ success: false, error: error.message });
+      }
+    });
+
     // Update AI models endpoint
     this.app.post('/api/ai/update-models', authenticateToken, async (req, res) => {
       try {
