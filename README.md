@@ -78,7 +78,7 @@ All repo references resolve from git remotes — no hardcoded URLs.
 - 9 interactive Three.js visualizations (agent brain, network topology, P2P, trust graph, portfolio, …)
 
 **Web & Security**
-- Web scraping (content/screenshots/PDF) with a cheerio → Puppeteer-stealth → FlareSolverr fallback chain
+- Web scraping (content/screenshots/PDF) with a cheerio → Puppeteer-stealth → FlareSolverr fallback chain, plus a dedicated headless render-tier screenshot pipeline (viewport-bounded capture, isolated browser)
 - Image analysis, real-time web search, software management, Git integration, task management
 - User authorization, command approval, audit logging
 

@@ -1,9 +1,21 @@
 {
-  "lastUpdated": "2026-06-15T23:00:00.000Z",
+  "lastUpdated": "2026-06-17T16:00:00.000Z",
   "overallProgress": "100%",
-  "status": "PRODUCTION READY — v2.25.104",
+  "status": "PRODUCTION READY — v2.25.107",
   "milestone": "273 features tracked; see CHANGELOG.md for history.",
   "features": {
+    "v2_25_107_2026_06_17": {
+      "status": "deployed",
+      "progress": "100%",
+      "addedDate": "2026-06-17",
+      "version": "2.25.107",
+      "description": "Render-tier screenshots made reliable under concurrent load (the screenshot field had been absent ~87% of the time, even on unblocked sites — local rendering contention, not the target's bot wall). Three compounding causes fixed: (1) capture the VIEWPORT sized to RENDER_SCREENSHOT_MAX_HEIGHT (default 3000) instead of {fullPage:true}/clip, which avoids Chromium's captureBeyondViewport full-document raster (~14.6s -> ~0.2s on a ~34000px page); (2) render on a dedicated HEADLESS software-raster browser isolated from the live scrape page pool (launchBrowser honors an explicit headless option and uses headless-safe GPU args; each browser gets its own --user-data-dir); (3) on the setContent path block script/xhr/font/media subresources (the DOM is already rendered) and guard every page.evaluate with a Node-side timeout, since live-origin JS pinned the renderer thread and hung the in-page evaluate waits. Serialized (RENDER_SCREENSHOT_CONCURRENCY default 1 — two concurrent heavy headless renders crash the renderer), sheds when saturated (content still returned), and a blank-render guard skips shipping a white PNG from empty upstream HTML. Separately: initial vector intent indexing (embeds plugin intents via an external embedding API) was awaited before the web server bound its port, so a slow/hung embedding request could wedge the entire boot; indexing now runs in the background and the web server binds immediately.",
+      "files": [
+        "src/api/plugins/scraper.js (dedicated headless screenshot browser + concurrency limiter + viewport-sized capture + setContent request-interception + Node-side evaluate timeouts + blank-render guard)",
+        "src/utils/stealthBrowser.js (launchBrowser honors explicit headless option; headless uses software-raster GPU args; parameterized userDataDir)",
+        "src/core/agent.js (initial intent indexing runs in the background, never awaited on the boot path)"
+      ]
+    },
     "v2_25_54_2026_05_24": {
       "status": "deployed",
       "progress": "100%",
