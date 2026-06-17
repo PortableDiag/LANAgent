@@ -210,30 +210,37 @@ const TIER_COSTS = {
 // practice — once those were Cloudflare-banned for a domain, recovery
 // dropped to zero. 30 regions × random pick lets us survive much longer
 // before saturating the available ASN diversity.
-const VPN_ROTATION_POOL = [
-  // US East
-  'usa-new-york', 'usa-new-jersey-1', 'usa-new-jersey-2', 'usa-new-jersey-3',
-  'usa-washington-dc', 'usa-boston', 'usa-miami',
-  // US Central / South
-  'usa-chicago', 'usa-dallas', 'usa-atlanta', 'usa-denver',
-  // US West
-  'usa-los-angeles-1', 'usa-los-angeles-3', 'usa-san-francisco', 'usa-seattle',
-  // Canada
-  'canada-toronto', 'canada-vancouver',
-  // UK
-  'uk-london', 'uk-docklands', 'uk-manchester',
-  // Continental Europe
-  'netherlands-amsterdam', 'netherlands-the-hague',
-  'germany-frankfurt-1', 'germany-berlin',
-  'france-paris-1', 'france-marseille',
-  'switzerland', 'italy-milan', 'sweden',
-  // Asia
-  'japan-tokyo', 'japan-osaka',
-  'singapore-marina-bay', 'singapore-jurong',
-  'hong-kong-1'
-];
+// US-ONLY rotation pool. The paid scrape workload is overwhelmingly US gov /
+// global-CDN content, and non-US exits make US sites (congress, federalregister,
+// trumpwhitehouse) serve a *harder* Cloudflare/Akamai challenge that FlareSolverr
+// can't solve — so a rotation that landed on canada/sweden/hong-kong used to leave
+// the whole box on a bad exit and break every subsequent gov scrape. Rotating only
+// among US exits still gives a fresh IP for rate-limit walls (federalregister)
+// while keeping FS able to clear the challenge. The scraper is the primary VPN
+// user (other services ride the dns-pin daemon through flaps), so optimising the
+// exit set for scraping is the right tradeoff. Set SCRAPE_VPN_POOL to override.
+const VPN_ROTATION_POOL = (process.env.SCRAPE_VPN_POOL
+  ? process.env.SCRAPE_VPN_POOL.split(',').map(s => s.trim()).filter(Boolean)
+  : [
+    // US East
+    'usa-new-york', 'usa-new-jersey-1', 'usa-new-jersey-2', 'usa-new-jersey-3',
+    'usa-washington-dc', 'usa-boston', 'usa-miami',
+    // US Central / South
+    'usa-chicago', 'usa-dallas', 'usa-atlanta', 'usa-denver',
+    // US West
+    'usa-los-angeles-1', 'usa-los-angeles-3', 'usa-san-francisco', 'usa-seattle',
+  ]);
 
 const MAX_VPN_ROTATIONS = 2;
+
+// Overall best-effort wall-clock budget for a single scrape request. The agent
+// has historically run the full fallback ladder + every VPN rotation to
+// completion (observed 350s on hard gov sites), long past the gateway's deadline
+// — so the caller already gave up and the work is wasted. This budget makes the
+// agent stop *escalating* once it's spent and return the best result it has so
+// far. Set below the gateway's SCRAPE_DEADLINE_MS (gateway 180s → agent 165s)
+// so the response still makes it back in time. Tunable via SCRAPE_BUDGET_MS.
+const SCRAPE_BUDGET_MS = Number(process.env.SCRAPE_BUDGET_MS) || 165000;
 
 // Detect whether a failed scrape result looks like an IP-level block / rate limit
 // vs an unrelated error (404, malformed URL, etc.). Only block-like failures justify
@@ -262,7 +269,48 @@ router.get('/health', (req, res) => {
  * Render-tier callers pass renderTier=true so a CF managed-challenge block
  * escalates to FlareSolverr instead of returning 500.
  */
-async function executeScrape(req, { url, selectors, extractType = 'text', userAgent, usePuppeteer = false, renderTier = false, fsOnBlock = false, fullPage = false, viewport = null }) {
+
+// FlareSolverr with retry on a transient tunnel flap. On this shared-VPN box a
+// concurrent basic/stealth-tier scrape's VPN rotation briefly drops DNS/the
+// tunnel; an FS call caught in that window throws EAI_AGAIN / ECONNRESET /
+// timeout even though FS bypasses the site fine seconds later. Retry up to 3×
+// with a short backoff so a render-tier scrape survives someone else's rotation
+// instead of collapsing to a thin Wayback stub. Only THROWN transient errors are
+// retried — a returned !success (genuine block/empty) is passed straight back to
+// the normal fallback chain. Respects the overall budget (won't retry past it).
+const FS_TRANSIENT = /eai_again|enotfound|econnreset|econnrefused|etimedout|socket hang up|network error|timeout|tunnel|status code 50[234]/i;
+async function flareSolverrWithRetry(scraper, { action, url, options }, label = '', deadline = 0) {
+  let lastErr = null;
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    try {
+      return await scraper.execute({ action, url, options: { ...options, useFlareSolverr: true } });
+    } catch (e) {
+      lastErr = e;
+      const msg = e?.message || String(e);
+      const budgetLeft = deadline > 0 ? deadline - Date.now() : Infinity;
+      if (attempt < 2 && FS_TRANSIENT.test(msg) && budgetLeft > 20000) {
+        const backoff = 2500;
+        logger.warn(`[ExternalScrape] FlareSolverr transient failure for ${label || url} (attempt ${attempt}/3): ${msg.slice(0, 80)} — retrying in ${backoff}ms`);
+        await new Promise(r => setTimeout(r, backoff));
+        continue;
+      }
+      throw e;
+    }
+  }
+  throw lastErr;
+}
+
+async function executeScrape(req, { url, selectors, extractType = 'text', userAgent, usePuppeteer = false, renderTier = false, fsOnBlock = false, fullPage = false, viewport = null, _deadline = 0 }) {
+  // Best-effort budget: once spent, stop reaching for slower fallback layers and
+  // return whatever we have. _deadline is an absolute epoch-ms set once by the
+  // top-level orchestrator so it spans the initial attempt + every VPN rotation.
+  const outOfBudget = () => _deadline > 0 && Date.now() >= _deadline;
+  // If the budget is already spent (e.g. a prior VPN-rotation re-scrape ate it),
+  // don't start another full attempt — bail immediately so the orchestrator
+  // returns the best result it already has instead of running past the deadline.
+  if (outOfBudget()) {
+    return { success: false, error: 'scrape budget exceeded before attempt', targetError: true, httpStatus: 504 };
+  }
   const scraperEntry = req.app.locals.agent?.apiManager?.apis?.get('scraper');
   const scraper = scraperEntry?.instance || scraperEntry;
   if (!scraper?.execute) {
@@ -289,7 +337,7 @@ async function executeScrape(req, { url, selectors, extractType = 'text', userAg
     if (renderTier && await isFlareSolverrAvailable()) {
       try {
         logger.info(`[ExternalScrape] Render tier: trying FlareSolverr for ${url}`);
-        rawResult = await scraper.execute({ action, url, options: { ...options, useFlareSolverr: true } });
+        rawResult = await flareSolverrWithRetry(scraper, { action, url, options }, url, _deadline);
         if (rawResult?.success) {
           logger.info(`[ExternalScrape] FlareSolverr succeeded for ${url}`);
         }
@@ -380,7 +428,7 @@ async function executeScrape(req, { url, selectors, extractType = 'text', userAg
       if (await isFlareSolverrAvailable()) {
         logger.info(`[ExternalScrape] Escalating to FlareSolverr after block on ${url} (renderTier=${renderTier}, fsOnBlock=${fsOnBlock})`);
         try {
-          const fsResult = await scraper.execute({ action, url, options: { ...options, useFlareSolverr: true } });
+          const fsResult = await flareSolverrWithRetry(scraper, { action, url, options }, url, _deadline);
           if (fsResult?.success) {
             logger.info(`[ExternalScrape] FlareSolverr succeeded after Puppeteer fallback for ${url}`);
             rawResult = fsResult;
@@ -398,7 +446,7 @@ async function executeScrape(req, { url, selectors, extractType = 'text', userAg
     // a crawler UA, try once more with Twitterbot — many of these sites
     // allow Twitter card previews through where they'd block Googlebot
     // verification.
-    if (rawResult.success && !options._crawlerUARetried) {
+    if (rawResult.success && !options._crawlerUARetried && !outOfBudget()) {
       const hostname = hostnameOf(url);
       if (hostname && CRAWLER_FRIENDLY_PAYWALL_HOSTS.has(hostname)) {
         const htmlLen = typeof rawResult._rawHtml === 'string' ? rawResult._rawHtml.length : 0;
@@ -459,7 +507,7 @@ async function executeScrape(req, { url, selectors, extractType = 'text', userAg
     // contemporary auth walls and bot blocks. Free, no auth, broad
     // coverage on major news sites. Cost: ~2s availability check plus
     // ~3s snapshot fetch when triggered.
-    if (!options._waybackRetried && shouldTryArchiveFallback(rawResult)) {
+    if (!options._waybackRetried && shouldTryArchiveFallback(rawResult) && !outOfBudget()) {
       const htmlLen = typeof rawResult._rawHtml === 'string' ? rawResult._rawHtml.length : 0;
       const textLen = typeof rawResult.content?.text === 'string' ? rawResult.content.text.length : 0;
       logger.info(`[ExternalScrape] Still stub-shaped after retries for ${url} (html=${htmlLen}B, text=${textLen}B), trying Wayback Machine`);
@@ -508,7 +556,7 @@ async function executeScrape(req, { url, selectors, extractType = 'text', userAg
     // accumulates URLs people submit by hand, so high-traffic recent paywalled
     // articles often land here before Wayback. Cost: ~6-8s (Cloudflare-protected,
     // needs Puppeteer). Only fires when we're still stub-shaped after Wayback.
-    if (!options._archivePhRetried && shouldTryArchiveFallback(rawResult)) {
+    if (!options._archivePhRetried && shouldTryArchiveFallback(rawResult) && !outOfBudget()) {
       const archivePhUrl = `https://archive.ph/newest/${url}`;
       logger.info(`[ExternalScrape] Still stub-shaped after Wayback for ${url}, trying archive.ph (${archivePhUrl})`);
       try {
@@ -550,7 +598,7 @@ async function executeScrape(req, { url, selectors, extractType = 'text', userAg
     // paywall hosts. Firing it for other blocks (e.g. federalregister.gov's
     // "Request Access" rate-limit wall) just burns ~10s on a useless lookup
     // before the VPN-rotation + FS-retry that actually recovers those. Host-gate it.
-    if (rawResult.success && removepaywallEnabled && !options._removepaywallRetried
+    if (rawResult.success && removepaywallEnabled && !options._removepaywallRetried && !outOfBudget()
         && isUnusableResult(rawResult) && CRAWLER_FRIENDLY_PAYWALL_HOSTS.has(hostnameOf(url))) {
       const rpwUrl = `https://removepaywalls.com/${url}`;
       logger.info(`[ExternalScrape] Still stub-shaped after archive.ph for ${url}, trying removepaywalls.com (${rpwUrl})`);
@@ -593,8 +641,14 @@ async function executeScrape(req, { url, selectors, extractType = 'text', userAg
       return cacheFailure(cacheKey, `Scrape blocked: ${reason}`);
     }
 
-    // Quality-based escalation: if result looks suspicious, retry with Puppeteer
-    if (rawResult.success && !options.usePuppeteer && rawResult.content) {
+    // Quality-based escalation: if result looks suspicious, retry with Puppeteer.
+    // Skip when the content came from FlareSolverr — FS returns the real rendered
+    // page, so a "corrupted-looking" title (e.g. trumpwhitehouse.archives.gov's
+    // repeated-text <title>) is the genuine page, not a scrape artifact. Without
+    // this, a good 86KB FS result was thrown away to re-scrape with Puppeteer for
+    // 5+ minutes, blowing the budget entirely. Also gated on the overall budget.
+    if (rawResult.success && !options.usePuppeteer && rawResult.method !== 'flaresolverr'
+        && !outOfBudget() && rawResult.content) {
       const title = rawResult.content.title || '';
       const ogImage = rawResult.content.ogImage || '';
       const images = rawResult.content.images || [];
@@ -758,15 +812,24 @@ async function executeScrape(req, { url, selectors, extractType = 'text', userAg
       // (federalregister/presidency/congress all timed the client out at 130s
       // even though FlareSolverr had already returned the content). Bound it and
       // return the content without a screenshot on overrun.
-      const SCREENSHOT_BUDGET_MS = Number(process.env.RENDER_SCREENSHOT_BUDGET_MS) || 45000;
-      const ssResult = await Promise.race([
-        scraper.execute({ action: 'screenshot', url, options: ssOptions }),
-        new Promise((resolve) => setTimeout(() => resolve({ success: false, _timedOut: true }), SCREENSHOT_BUDGET_MS))
-      ]);
-      if (ssResult?._timedOut) {
-        logger.warn(`[ExternalScrape] Screenshot exceeded ${SCREENSHOT_BUDGET_MS}ms budget for ${url} — returning content without screenshot`);
-      } else if (ssResult?.success && ssResult.screenshot) {
-        response._screenshot = ssResult.screenshot;
+      // Bound the screenshot to its own budget AND the remaining overall budget —
+      // it's a bonus, so it must never push the response past the deadline. Skip
+      // entirely if under 2s of budget is left (the content already returned).
+      const ssMax = Number(process.env.RENDER_SCREENSHOT_BUDGET_MS) || 45000;
+      const ssRemaining = _deadline > 0 ? (_deadline - Date.now() - 1500) : ssMax;
+      const SCREENSHOT_BUDGET_MS = Math.min(ssMax, ssRemaining);
+      if (SCREENSHOT_BUDGET_MS < 2000) {
+        logger.info(`[ExternalScrape] Skipping screenshot for ${url} — only ${Math.max(0, ssRemaining)}ms of budget left`);
+      } else {
+        const ssResult = await Promise.race([
+          scraper.execute({ action: 'screenshot', url, options: ssOptions }),
+          new Promise((resolve) => setTimeout(() => resolve({ success: false, _timedOut: true }), SCREENSHOT_BUDGET_MS))
+        ]);
+        if (ssResult?._timedOut) {
+          logger.warn(`[ExternalScrape] Screenshot exceeded ${SCREENSHOT_BUDGET_MS}ms budget for ${url} — returning content without screenshot`);
+        } else if (ssResult?.success && ssResult.screenshot) {
+          response._screenshot = ssResult.screenshot;
+        }
       }
     } catch { /* screenshot optional, don't fail the scrape */ }
   }
@@ -810,6 +873,9 @@ async function executeScrape(req, { url, selectors, extractType = 'text', userAg
  * without needing a real blocked target.
  */
 async function executeScrapeWithVpnRotation(req, params, tier) {
+  // Stamp the overall budget once so it spans the initial attempt AND every VPN
+  // rotation/fallback below — not per-executeScrape-call.
+  if (!params._deadline) params._deadline = Date.now() + SCRAPE_BUDGET_MS;
   let result = await executeScrape(req, params);
 
   // Test hook — simulate a block on the first call (always or once).
@@ -819,6 +885,12 @@ async function executeScrapeWithVpnRotation(req, params, tier) {
     result = { success: false, error: '403 Forbidden (simulated block — _testBlock hook)', targetError: true };
   }
 
+  // Render tier rotates as a last resort (after FS-first + cheerio + puppeteer all
+  // failed) — now SAFE because the pool is US-only, so a rotation gives a fresh US
+  // IP that still lets FlareSolverr clear the challenge, instead of stranding the
+  // box on a non-US exit. This is what recovers a rate-limit wall like
+  // federalregister.gov. flareSolverrWithRetry absorbs the brief flap for any
+  // concurrent render scrape; the budget + hard cap bound the total time.
   if (tier === 'basic' || result.success || !isLikelyBlocked(result)) return result;
 
   const vpnEntry = req.app.locals.agent?.apiManager?.apis?.get('vpn');
@@ -838,6 +910,13 @@ async function executeScrapeWithVpnRotation(req, params, tier) {
   const cacheKey = `${params.extractType === 'structured' ? 'extract' : 'scrape'}:${params.url}:${JSON.stringify(params.selectors || '')}:render=${params.renderTier}:fp=${!!params.fullPage}`;
 
   for (let i = 0; i < MAX_VPN_ROTATIONS; i++) {
+    // Stop rotating if the overall budget is spent — return the best result so
+    // far rather than spending another rotation + re-scrape past the gateway's
+    // deadline (where the caller has already given up).
+    if (params._deadline && Date.now() >= params._deadline) {
+      logger.info(`[ExternalScrape] Budget spent (${SCRAPE_BUDGET_MS}ms) — stopping VPN rotation for ${params.url}, returning best result`);
+      break;
+    }
     // Random pick from the unused pool. `.find()` always picked the FIRST
     // non-current/non-tried entry, which meant we ping-ponged between the
     // first 2-3 regions and never exercised the rest — once Cloudflare burned
@@ -911,7 +990,19 @@ router.post('/',
         // CF/Akamai block (managed challenges Puppeteer can't clear) so bot-blocked
         // gov sources still produce a real frozen copy. render already does FS-first.
         const fsOnBlock = tier === 'full';
-        const result = await executeScrapeWithVpnRotation(req, { url, selectors, extractType, userAgent, usePuppeteer, renderTier, fsOnBlock, fullPage, viewport }, tier);
+        // Hard wall-clock cap. The internal SCRAPE_BUDGET_MS guards make the
+        // orchestrator return best-effort between escalations, but a single
+        // in-flight op (a slow FS call, a VPN reconnect, a Puppeteer nav) can
+        // still overshoot. This race guarantees the route returns under the
+        // gateway's SCRAPE_DEADLINE_MS (180s) regardless — the abandoned work
+        // finishes harmlessly in the background (bounded by the same guards).
+        const HARD_CAP_MS = SCRAPE_BUDGET_MS + 10000; // 175s
+        const result = await Promise.race([
+          executeScrapeWithVpnRotation(req, { url, selectors, extractType, userAgent, usePuppeteer, renderTier, fsOnBlock, fullPage, viewport }, tier),
+          new Promise((resolve) => setTimeout(() => resolve({
+            success: false, error: 'Scrape exceeded time budget — all bypass layers too slow', targetError: true, httpStatus: 504, _hardCap: true
+          }), HARD_CAP_MS).unref())
+        ]);
 
         if (!result.success) {
           // Refund on target failure

@@ -2,6 +2,27 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.106] - 2026-06-16
+
+### Fixed — bot-protected render scrapes: exit selection, time budget, quality regression
+
+Follow-up to v2.25.105 for heavily bot-protected sources behind Cloudflare/Akamai.
+
+- **VPN rotation pool restricted to a configurable region set** (`SCRAPE_VPN_POOL`,
+  default US). A scrape worker that rotates through a wide geographic pool can strand
+  itself on an exit where the bot-protection challenge is unsolvable; keeping the pool
+  aligned to the target content's region avoids that.
+- **Overall scrape time budget + hard cap** so the worker returns best-effort content
+  instead of running the full fallback chain past the gateway's deadline.
+- **Quality-escalation no longer re-renders already-good headless-browser-bypass
+  content** — a page whose title merely *looks* malformed was being thrown away and
+  re-scraped for minutes.
+- **Transient-failure retry** for the headless-bypass tier so a brief network blip
+  doesn't collapse a render scrape to an archive stub.
+- **`full` tier escalates to the managed-challenge bypass on a hard block.**
+- Headless-browser tier no longer force-resets the tunnel mid-rotation (a failed
+  reconnect could otherwise interrupt connectivity).
+
 ## [2.25.105] - 2026-06-16
 
 ### Fixed — bot-protected sources intermittently failed to scrape/snapshot

@@ -427,7 +427,17 @@ export class VPNPlugin extends BasePlugin {
       }
       logger.info(`Connecting to VPN${location ? ` (location: ${location})` : ''}`);
 
-      // Disconnect first if already connected
+      // Disconnect first if already connected — WITHOUT force, deliberately.
+      // A forced disconnect here lets rotation actually switch exits, BUT it also
+      // tears the tunnel down: when ExpressVPN's daemon then fails to reconnect to
+      // the new exit (observed repeatedly — connect times out, the lightway process
+      // dies, internet stays down until a daemon service-restart), the box is left
+      // with NO VPN and NO internet, which crash-loops the whole agent (BSC RPC at
+      // boot can't be reached). The autoConnect guard blocking this disconnect is a
+      // SAFETY feature: the tunnel never drops, so a failed rotation degrades to "no
+      // exit change" instead of "ALICE offline". Render relies on FlareSolverr (not
+      // rotation) and the box is pinned to a US exit, so this is acceptable; bounded
+      // by the scrape budget + hard cap. (2026-06-16: forcing this caused 3 outages.)
       if (this.connectionState.connected) {
         await this.disconnect();
       }
