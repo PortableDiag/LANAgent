@@ -7,7 +7,11 @@ import { retryOperation } from '../../../utils/retryUtils.js';
 import rateLimit from 'express-rate-limit';
 
 const router = Router();
-const cache = new NodeCache({ stdTTL: 300, checkperiod: 60 }); // 5 min TTL
+// 20 min TTL (was 5 min). The gateway is the only caller and re-fetches every ~15 min,
+// so a 5-min TTL meant every fetch hit an expired cache and paid a cold rebuild (~5-6s on
+// a smaller box), which used to time out the gateway's registration catalog fetch. A TTL
+// above the gateway's fetch interval keeps the catalog warm across fetches. Env-tunable.
+const cache = new NodeCache({ stdTTL: Number(process.env.CATALOG_CACHE_TTL_SECONDS) || 1200, checkperiod: 120 });
 
 // Credit costs per legacy service (1 credit = $0.01 USD)
 const SERVICE_CREDIT_COSTS = {
