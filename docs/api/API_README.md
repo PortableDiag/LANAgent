@@ -47,7 +47,7 @@ Both methods give you the same `gsk_*` API key and access the same services.
 | Web Scrape (basic) | `POST /scrape` | 1 | Metadata, text, links |
 | Web Scrape (stealth) | `POST /scrape` | 2 | Forces Puppeteer for difficult sites; auto-rotates VPN on block |
 | Web Scrape (full) | `POST /scrape` | 3 | + raw HTML; auto-rotates VPN on block |
-| Web Scrape (render) | `POST /scrape` | 3 | + HTML + screenshot, FlareSolverr-backed for Cloudflare-protected sites (Rumble, Bitchute, etc.); auto-rotates VPN on block |
+| Web Scrape (render) | `POST /scrape` | 3 | + HTML + a bounded full-page screenshot (`fullPage:true`; headless-rendered, capped at `RENDER_SCREENSHOT_MAX_HEIGHT` ≈ 3000px), FlareSolverr-backed for Cloudflare-protected sites (Rumble, Bitchute, etc.); auto-rotates VPN on block |
 | Batch Scrape | `POST /scrape/batch` | 1-3 each | Up to 100 URLs |
 | YouTube Download | `POST /youtube/download` | 10 | MP4 video |
 | YouTube Audio | `POST /youtube/audio` | 8 | MP3 audio |
