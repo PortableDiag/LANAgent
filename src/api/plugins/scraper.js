@@ -4,6 +4,7 @@ import { fsRequestGet, isFlareSolverrAvailable } from '../../utils/flareSolverr.
 import { logger } from '../../utils/logger.js';
 import { safeJsonStringify } from '../../utils/jsonUtils.js';
 import ScrapeCookieJar from '../../models/ScrapeCookieJar.js';
+import { ConcurrencyLimiter } from '../../utils/concurrencyLimiter.js';
 import axios from 'axios';
 import * as cheerio from 'cheerio';
 import http from 'http';
@@ -182,7 +183,31 @@ export default class ScraperPlugin extends BasePlugin {
       }
     ];
     this.browser = null;
-    
+
+    // Dedicated screenshot browser + concurrency limiter (v2.25.107).
+    // Render-tier screenshots were timing out at the 45s budget ~87% of the time
+    // (1019 timeouts vs 147 captures over 2 days, 2026-06-16) — even on unblocked
+    // control sites (wikipedia, example.com), so it was NOT the gov bot-wall but
+    // load-induced contention: the JS-enabled setContent→raster screenshot was
+    // starved by 20+ live scrape pages sharing the single browser singleton. The
+    // code path is fast when not contended (a cold 3.2MB fandom shot took 707ms).
+    // Two levers: (1) an ISOLATED browser process so screenshot renderers don't
+    // fight the scrape page pool, and (2) a small concurrency cap so a burst of
+    // heavy rasters can't all starve each other past the budget. Both bounded by
+    // env; the queue sheds (QUEUE_FULL → content returned without a screenshot)
+    // rather than buffering unbounded waiters that would just blow the budget.
+    this.ssBrowser = null;
+    // Serialize screenshots (maxConcurrent 1). The dedicated browser renders
+    // headless/software-raster (fast: ~0.4s/shot even for a 34k-px page), but
+    // two concurrent heavy renders crash the headless renderer ("Target
+    // closed"). Serializing keeps it both fast AND crash-free; each shot is only
+    // ~4s end-to-end, so even a queued burst still clears the screenshot budget.
+    // Queue overflow sheds (content returned without a screenshot), never blocks.
+    this.ssLimiter = new ConcurrencyLimiter({
+      maxConcurrent: Number(process.env.RENDER_SCREENSHOT_CONCURRENCY) || 1,
+      maxQueue: Number(process.env.RENDER_SCREENSHOT_QUEUE) || 6
+    });
+
     // Initialize caching with 1 hour TTL
     this.cache = new Map();
     this.cacheTimeout = 3600000; // 1 hour (60 * 60 * 1000 milliseconds)
@@ -357,6 +382,10 @@ export default class ScraperPlugin extends BasePlugin {
     if (this.browser) {
       await this.browser.close();
       this.browser = null;
+    }
+    if (this.ssBrowser) {
+      try { await this.ssBrowser.close(); } catch { /* already dead */ }
+      this.ssBrowser = null;
     }
   }
 
@@ -692,6 +721,42 @@ export default class ScraperPlugin extends BasePlugin {
     return this.browser;
   }
 
+  // Live ISOLATED browser reserved for screenshots, separate from the scrape
+  // singleton above (v2.25.107). Keeping screenshot renderers in their own
+  // browser process means a scrape-heavy moment (20+ pages, the occasional
+  // Chromium crash on a hard CF/Akamai page) can't starve or kill the screenshot
+  // render, which is what blew the 45s budget under load. Same liveness-recycle
+  // contract as _ensureBrowser — a non-null-but-dead handle gets relaunched.
+  async _ensureScreenshotBrowser() {
+    const alive = this.ssBrowser && (this.ssBrowser.connected ?? this.ssBrowser.isConnected?.());
+    if (!alive) {
+      if (this.ssBrowser) { try { await this.ssBrowser.close(); } catch { /* already dead */ } }
+      // headless:'new' — render off-display. The default non-headless-on-Xvfb
+      // path (for live-nav anti-detection) puts every browser on the single :99
+      // X display, so concurrent rasters serialize on one compositor (a tall
+      // screenshot ballooned to 175s under load). This browser only rasters
+      // pre-fetched setContent HTML — no live bot wall — so true headless is both
+      // safe and far faster. Distinct profile dir — two Chromium processes can't
+      // share one user-data-dir.
+      this.ssBrowser = await launchBrowser({
+        headless: 'new',
+        userDataDir: process.env.RENDER_SCREENSHOT_PROFILE_DIR || '/tmp/puppeteer-profile-ss'
+      });
+    }
+    return this.ssBrowser;
+  }
+
+  // Race a page operation against a Node-side timer so a hung page main thread
+  // (e.g. a setContent'd page whose origin JS pins the CPU) can never stall the
+  // screenshot past its budget. CDP-level page.evaluate timeouts run IN the page
+  // thread, so they don't fire when that thread is blocked — this one does.
+  _nodeTimeout(promise, ms, fallback) {
+    return Promise.race([
+      Promise.resolve(promise).catch(() => fallback),
+      new Promise((resolve) => setTimeout(() => resolve(fallback), ms))
+    ]);
+  }
+
   async scrapeWithPuppeteer(url, options) {
     const { selector, waitForSelector, viewport, userAgent } = options;
 
@@ -844,11 +909,28 @@ export default class ScraperPlugin extends BasePlugin {
   }
 
   async takeScreenshot(url, options) {
+    // v2.25.107: run through the screenshot limiter on the isolated screenshot
+    // browser so a burst of heavy rasters can't starve each other past the budget
+    // (the load-contention failure that dropped ~87% of render screenshots). The
+    // limiter sheds with QUEUE_FULL when saturated — surfaced as a non-fatal
+    // result so the caller still returns content, never an unbounded wait.
+    try {
+      return await this.ssLimiter.run(() => this._captureScreenshot(url, options));
+    } catch (err) {
+      if (err && err.code === 'QUEUE_FULL') {
+        logger.info(`[Screenshot] shed for ${url} — limiter saturated (${JSON.stringify(this.ssLimiter.stats())})`);
+        return { success: false, url, error: 'screenshot_busy', queueFull: true };
+      }
+      throw err;
+    }
+  }
+
+  async _captureScreenshot(url, options) {
     const { fullPage = false, viewport, userAgent, cookies, html } = options;
 
-    await this._ensureBrowser();
+    await this._ensureScreenshotBrowser();
 
-    const page = await this.browser.newPage();
+    const page = await this.ssBrowser.newPage();
 
     try {
       // v2.25.89: stealth plugin owns webdriver/chrome/etc. evasions globally;
@@ -896,24 +978,51 @@ export default class ScraperPlugin extends BasePlugin {
         // so the screenshot used to be skipped on exactly the hardest pages (e.g.
         // congress.gov). Rendering the already-fetched HTML sidesteps the block.
         // <base> makes relative CSS/img resolve against the origin so it paints.
+
+        // v2.25.107: block live-origin JS/XHR/fonts/media — keep only document,
+        // CSS and images. FlareSolverr already rendered the DOM into this HTML, so
+        // re-running the page's scripts adds NOTHING visual but does real harm: the
+        // origin's scripts execute and thrash the page's main thread, which made
+        // every subsequent page.evaluate() (image-wait, blank-guard, dims) HANG —
+        // their in-page setTimeout never fires on a blocked thread — until the 45s
+        // budget killed the whole capture. That was the residual screenshot-loss
+        // after the viewport fix (wikipedia/congress timed out; federalregister,
+        // script-light, captured in 417ms). CSS+images still paint a faithful shot.
+        try {
+          await page.setRequestInterception(true);
+          page.on('request', (req) => {
+            const t = req.resourceType();
+            if (t === 'script' || t === 'xhr' || t === 'fetch' || t === 'websocket' ||
+                t === 'eventsource' || t === 'media' || t === 'font' || t === 'manifest') {
+              req.abort().catch(() => {});
+            } else {
+              req.continue().catch(() => {});
+            }
+          });
+        } catch { /* interception best-effort */ }
+
         const baseTag = `<base href="${url}">`;
         const htmlWithBase = /<head[^>]*>/i.test(html)
           ? html.replace(/<head[^>]*>/i, m => `${m}${baseTag}`)
           : `${baseTag}${html}`;
-        try {
-          // domcontentloaded (not 'load'): 'load' waits for EVERY asset to fetch
-          // from the live origin, which on asset-heavy pages (e.g. presidency.ucsb.edu)
-          // ran the full timeout every time and blew the screenshot budget → no
-          // thumbnail. Set the DOM fast, then give images a bounded beat to paint.
-          await page.setContent(htmlWithBase, { waitUntil: 'domcontentloaded', timeout: 10000 });
-        } catch { /* slow DOM — screenshot what painted */ }
+        // domcontentloaded (not 'load'): 'load' waits for EVERY asset to fetch
+        // from the live origin, which on asset-heavy pages (e.g. presidency.ucsb.edu)
+        // ran the full timeout every time and blew the screenshot budget → no
+        // thumbnail. Set the DOM fast, then give images a bounded beat to paint.
+        // Node-level timeout wrapper (not the in-page one) so a hung page thread
+        // can never stall us past the budget.
+        await this._nodeTimeout(
+          page.setContent(htmlWithBase, { waitUntil: 'domcontentloaded', timeout: 10000 }).catch(() => {}),
+          11000
+        );
         // Let above-the-fold images/CSS paint, but cap it so we never approach the budget.
-        try {
-          await page.evaluate(() => Promise.race([
+        await this._nodeTimeout(
+          page.evaluate(() => Promise.race([
             Promise.all([...document.images].filter(i => !i.complete).map(i => new Promise(r => { i.onload = i.onerror = r; }))),
-            new Promise(r => setTimeout(r, 3500))
-          ]));
-        } catch { /* ignore */ }
+            new Promise(r => setTimeout(r, 3000))
+          ])).catch(() => {}),
+          4000
+        );
         // No challenge wait — we never navigated to the live bot-block.
       } else {
         // v2.25.89: prime with persistent anti-bot cookies (datadome, cf_clearance, etc.)
@@ -957,27 +1066,50 @@ export default class ScraperPlugin extends BasePlugin {
         }
       }
 
-      // fullPage on very tall pages (e.g. a multi-thousand-px congress.gov bill)
-      // makes captureBeyondViewport lay out the whole surface while late assets
-      // stream in — that capture alone ran 30s+ and blew the budget, so no
-      // thumbnail shipped at all. Cap the captured height with clip(): a tall
-      // top-of-page thumbnail is what the frozen-copy preview needs, and it's
-      // bounded regardless of document height.
-      const MAX_SS_HEIGHT = Number(process.env.RENDER_SCREENSHOT_MAX_HEIGHT) || 6000;
-      let shotOpts = { fullPage, encoding: 'base64' };
+      // Blank-content guard (v2.25.107): the setContent path trusts the HTML
+      // handed in by the caller (FlareSolverr's output). When FS intermittently
+      // returns an empty/garbage body we'd render and ship a pure-white PNG — a
+      // present-but-blank preview is WORSE than an absent one (it reads as "we
+      // have a thumbnail"). Those showed up as ~11KB captures. Measure the
+      // painted surface cheaply in-page (no sharp on the hot path): if there's
+      // essentially no text AND no images, treat it as blank and bail so the
+      // caller returns content without a misleading thumbnail.
+      const paint = await this._nodeTimeout(page.evaluate(() => {
+        const txt = (document.body && document.body.innerText || '').trim().length;
+        const imgs = document.images ? [...document.images].filter(i => i.naturalWidth > 2 && i.naturalHeight > 2).length : 0;
+        return { txt, imgs };
+      }).catch(() => ({ txt: -1, imgs: -1 })), 4000, { txt: -1, imgs: -1 });
+      if (paint.txt >= 0 && paint.txt < 30 && paint.imgs === 0) {
+        logger.warn(`[Screenshot] blank render for ${url} (text=${paint.txt} imgs=${paint.imgs}) — not shipping a white thumbnail`);
+        return { success: false, url, error: 'blank_render', blank: true };
+      }
+
+      // fullPage capture, the fast way (v2.25.107). The previous {fullPage:true}
+      // / clip-beyond-viewport approach forced Chromium's captureBeyondViewport,
+      // which lays out and rasters the ENTIRE document. On a tall page (a
+      // ~34k-px congress/wikipedia bill) that single call ran 15s+ even
+      // uncontended and blew the 45s budget under any concurrency — the real
+      // cause of the ~87% render-screenshot loss (NOT the bot-wall; unblocked
+      // wikipedia/example.com failed too). Instead, size the VIEWPORT to a
+      // bounded cap and capture the viewport only — captureBeyondViewport stays
+      // off, so we never lay out the full surface. Same tall top-of-page
+      // thumbnail, ~60x faster (measured: 14.6s -> ~0.2s on a 34k-px page).
+      const MAX_SS_HEIGHT = Number(process.env.RENDER_SCREENSHOT_MAX_HEIGHT) || 3000;
       let capNote = '';
       if (fullPage) {
-        const dims = await page.evaluate(() => ({
-          w: Math.min(Math.max(document.documentElement.scrollWidth, document.body ? document.body.scrollWidth : 0, 1920), 1920),
-          h: Math.max(document.documentElement.scrollHeight, document.body ? document.body.scrollHeight : 0, 1080)
-        })).catch(() => ({ w: 1920, h: 1080 }));
-        if (dims.h > MAX_SS_HEIGHT) {
-          shotOpts = { clip: { x: 0, y: 0, width: dims.w, height: MAX_SS_HEIGHT }, encoding: 'base64' };
-          capNote = ` (capped ${dims.h}->${MAX_SS_HEIGHT}px)`;
-        }
+        const ssW = (viewport && viewport.width) || 1920;
+        const docH = await this._nodeTimeout(page.evaluate(() =>
+          Math.max(document.documentElement.scrollHeight, document.body ? document.body.scrollHeight : 0, 1080)
+        ).catch(() => 1080), 3000, 1080);
+        const capH = Math.min(docH, MAX_SS_HEIGHT);
+        await page.setViewport({ width: ssW, height: capH, deviceScaleFactor: 1 }).catch(() => {});
+        // Let the resized viewport reflow + paint the now-visible region.
+        await new Promise(r => setTimeout(r, 300));
+        if (docH > MAX_SS_HEIGHT) capNote = ` (capped ${docH}->${MAX_SS_HEIGHT}px)`;
       }
       const _ssStart = Date.now();
-      const screenshot = await page.screenshot(shotOpts);
+      // Viewport-only capture — no fullPage, no beyond-viewport clip.
+      const screenshot = await page.screenshot({ encoding: 'base64' });
       logger.info(`[Screenshot] captured ${Math.round(screenshot.length / 1024)}KB in ${Date.now() - _ssStart}ms${capNote} for ${url}`);
 
       return {
@@ -988,7 +1120,7 @@ export default class ScraperPlugin extends BasePlugin {
       };
 
     } finally {
-      await page.close();
+      await page.close().catch(() => {});
     }
   }
 
@@ -1110,7 +1242,11 @@ export default class ScraperPlugin extends BasePlugin {
       await this.browser.close();
       this.browser = null;
     }
-    
+    if (this.ssBrowser) {
+      try { await this.ssBrowser.close(); } catch { /* already dead */ }
+      this.ssBrowser = null;
+    }
+
     this.cache.clear();
   }
 

@@ -2,6 +2,40 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.107] - 2026-06-17
+
+### Fixed — render-tier screenshots now reliable under concurrent load
+
+Render-tier scrape content worked, but the `screenshot` field was frequently absent under
+load — even on unblocked sites — so it was not the target's bot wall but local rendering
+contention. Three compounding causes, each fixed:
+
+- **`fullPage`/clip forced a full-document raster.** `{fullPage:true}` (and a clip beyond the
+  viewport) trigger Chromium's `captureBeyondViewport`, which lays out and rasters the entire
+  document. On a very tall page (tens of thousands of px) that single call ran ~15s even
+  uncontended — too slow for the screenshot budget. Fix: size the viewport to a bounded cap
+  (`RENDER_SCREENSHOT_MAX_HEIGHT`, default 3000) and capture the viewport only, so
+  `captureBeyondViewport` never fires (~60x faster).
+- **Display-server contention.** Screenshots now render on a dedicated headless browser
+  (software raster), isolated from the live scrape page pool. `launchBrowser` honors an
+  explicit `headless` option and uses software-raster GPU args when headless. Each browser
+  instance gets its own `--user-data-dir` (two Chromium processes can't share one profile).
+- **Page JS hung the capture.** On the `setContent` path with live-origin scripts enabled, the
+  page's JS pinned the renderer thread, hanging every `page.evaluate`. Fix: block
+  script/xhr/font/media subresources on that path (the DOM is already rendered) and guard every
+  evaluate with a Node-side timeout.
+
+Screenshots are serialized (`RENDER_SCREENSHOT_CONCURRENCY`, default 1 — two concurrent heavy
+headless renders crash the renderer), shed when saturated (content still returned), and a
+blank-render guard skips shipping a white PNG when upstream HTML is empty.
+
+### Fixed — boot no longer blocks on network-dependent intent indexing
+
+Initial vector intent indexing (which embeds plugin intents via an external embedding API) was
+awaited before the web server bound its port, so a slow or hung embedding request could wedge
+the entire boot. Indexing now runs in the background; the web server binds immediately and
+vector intent search populates whenever it can (keyword/AI intent detection works meanwhile).
+
 ## [2.25.106] - 2026-06-16
 
 ### Fixed — bot-protected render scrapes: exit selection, time budget, quality regression
