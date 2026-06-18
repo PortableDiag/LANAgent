@@ -12,6 +12,18 @@ const router = Router();
 // Price cache — 5 minute TTL
 const priceCache = new NodeCache({ stdTTL: 300, checkperiod: 60 });
 
+// Last-good prices — NEVER expire. The 5-min priceCache hard-expires, so the
+// "use stale price if available" fallbacks below (priceCache.get after a miss)
+// were always undefined — dead code. That let GET /price return 503 whenever a
+// cold-cache fetch failed (e.g. both external price sources erroring through the
+// VPN at the same moment). cachePrice() mirrors every successful price into this
+// non-expiring store so reads degrade to the last known value instead of failing.
+const lastGoodPrice = {};
+function cachePrice(key, value) {
+  priceCache.set(key, value);
+  lastGoodPrice[key] = value;
+}
+
 // Double-spend prevention cache (also checked in DB)
 const usedTxHashes = new NodeCache({ stdTTL: 3600, checkperiod: 300 });
 
@@ -59,7 +71,7 @@ async function getBnbPriceUsd() {
     // Chainlink returns 8 decimals for BNB/USD
     const price = Number(answer) / 1e8;
     if (price > 0) {
-      priceCache.set('bnbPriceUsd', price);
+      cachePrice('bnbPriceUsd', price);
       return price;
     }
   } catch (err) {
@@ -74,16 +86,15 @@ async function getBnbPriceUsd() {
     );
     const price = response.data?.binancecoin?.usd;
     if (price && price > 0) {
-      priceCache.set('bnbPriceUsd', price);
+      cachePrice('bnbPriceUsd', price);
       return price;
     }
   } catch (err) {
     logger.warn('CoinGecko BNB price failed:', err.message);
   }
 
-  // Use stale price if available
-  const stale = priceCache.get('bnbPriceUsd');
-  if (stale) return stale;
+  // Use last-good price if available (never expires — see cachePrice)
+  if (lastGoodPrice.bnbPriceUsd) return lastGoodPrice.bnbPriceUsd;
 
   throw new Error('Unable to fetch BNB price');
 }
@@ -107,7 +118,7 @@ async function getSkynetPriceUsd() {
       const bestPair = pairs.sort((a, b) => (b.liquidity?.usd || 0) - (a.liquidity?.usd || 0))[0];
       const price = parseFloat(bestPair.priceUsd);
       if (price > 0) {
-        priceCache.set('skynetPriceUsd', price);
+        cachePrice('skynetPriceUsd', price);
         return price;
       }
     }
@@ -138,7 +149,7 @@ async function getSkynetPriceUsd() {
         const bnbPrice = await getBnbPriceUsd();
         const skynetPriceUsd = (bnbReserve / skynetReserve) * bnbPrice;
         if (skynetPriceUsd > 0) {
-          priceCache.set('skynetPriceUsd', skynetPriceUsd);
+          cachePrice('skynetPriceUsd', skynetPriceUsd);
           logger.info(`SKYNET price from LP reserves: $${skynetPriceUsd.toFixed(8)}`);
           return skynetPriceUsd;
         }
@@ -148,9 +159,8 @@ async function getSkynetPriceUsd() {
     logger.warn('LP reserve SKYNET price fallback failed:', err.message);
   }
 
-  // Use stale price if available
-  const stale = priceCache.get('skynetPriceUsd');
-  if (stale) return stale;
+  // Use last-good price if available (never expires — see cachePrice)
+  if (lastGoodPrice.skynetPriceUsd) return lastGoodPrice.skynetPriceUsd;
 
   throw new Error('Unable to fetch SKYNET price');
 }
