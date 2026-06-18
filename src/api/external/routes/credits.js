@@ -367,7 +367,13 @@ router.post('/purchase', creditAuth(true), async (req, res) => {
 
     // Calculate credits: (amountPaid * pricePerUnit) / 0.01
     const usdValue = amountPaid * pricePerUnit;
-    const credits = Math.floor(usdValue / 0.01);
+    // Round (not floor) to the nearest credit. A customer quoted the price for N
+    // credits pays that amount, but the price is re-fetched at settlement and the
+    // float product lands fractionally below N (e.g. 499.997, 499.56) — flooring
+    // silently shortchanged them by 1 ("paid for 500, got 499"). Rounding honors
+    // the quoted whole amount; it's revenue-neutral (rounds up AND down) and a
+    // genuine large shortfall (e.g. 497.06) still correctly yields 497.
+    const credits = Math.round(usdValue / 0.01);
 
     if (credits < 10) {
       return res.status(400).json({
