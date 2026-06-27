@@ -111,5 +111,142 @@ externalAuditLogSchema.pre('save', function(next) {
   }
 });
 
+/**
+ * Get daily aggregates of audit logs within a date range
+ * @param {Object} options - Aggregation options
+ * @param {Date} options.startDate - Start date for aggregation
+ * @param {Date} options.endDate - End date for aggregation
+ * @returns {Promise<Array>} Array of daily aggregation results
+ */
+externalAuditLogSchema.statics.getDailyAggregates = async function({ startDate, endDate }) {
+  const pipeline = [
+    {
+      $match: {
+        timestamp: {
+          $gte: new Date(startDate),
+          $lte: new Date(endDate)
+        }
+      }
+    },
+    {
+      $group: {
+        _id: {
+          $dateToString: {
+            format: "%Y-%m-%d",
+            date: "$timestamp"
+          }
+        },
+        count: { $sum: 1 },
+        avgDuration: { $avg: "$duration" },
+        successCount: {
+          $sum: {
+            $cond: [{ $eq: ["$success", true] }, 1, 0]
+          }
+        },
+        failureCount: {
+          $sum: {
+            $cond: [{ $eq: ["$success", false] }, 1, 0]
+          }
+        }
+      }
+    },
+    {
+      $sort: { _id: 1 }
+    }
+  ];
+
+  return await this.aggregate(pipeline).exec();
+};
+
+/**
+ * Get distribution of status codes for a specific agent or all agents
+ * @param {Object} options - Aggregation options
+ * @param {string} [options.agentId] - Agent ID to filter by (optional)
+ * @param {number} [options.days=30] - Number of days to look back
+ * @returns {Promise<Array>} Array of status code distribution results
+ */
+externalAuditLogSchema.statics.getStatusCodeDistribution = async function({ agentId, days = 30 }) {
+  const matchCondition = {
+    timestamp: {
+      $gte: new Date(Date.now() - days * 24 * 60 * 60 * 1000)
+    }
+  };
+
+  if (agentId) {
+    matchCondition.agentId = agentId;
+  }
+
+  const pipeline = [
+    {
+      $match: matchCondition
+    },
+    {
+      $group: {
+        _id: "$statusCode",
+        count: { $sum: 1 }
+      }
+    },
+    {
+      $sort: { count: -1 }
+    }
+  ];
+
+  return await this.aggregate(pipeline).exec();
+};
+
+/**
+ * Get agent activity summary
+ * @param {Object} options - Aggregation options
+ * @param {number} [options.days=30] - Number of days to look back
+ * @returns {Promise<Array>} Array of agent activity summary results
+ */
+externalAuditLogSchema.statics.getAgentActivitySummary = async function({ days = 30 }) {
+  const pipeline = [
+    {
+      $match: {
+        agentId: { $ne: null },
+        timestamp: {
+          $gte: new Date(Date.now() - days * 24 * 60 * 60 * 1000)
+        }
+      }
+    },
+    {
+      $group: {
+        _id: "$agentId",
+        requestCount: { $sum: 1 },
+        avgDuration: { $avg: "$duration" },
+        successCount: {
+          $sum: {
+            $cond: [{ $eq: ["$success", true] }, 1, 0]
+          }
+        },
+        failureCount: {
+          $sum: {
+            $cond: [{ $eq: ["$success", false] }, 1, 0]
+          }
+        },
+        uniqueIPs: { $addToSet: "$ip" },
+        lastActivity: { $max: "$timestamp" }
+      }
+    },
+    {
+      $project: {
+        _id: 1,
+        requestCount: 1,
+        avgDuration: 1,
+        successCount: 1,
+        failureCount: 1,
+        uniqueIPCount: { $size: "$uniqueIPs" },
+        lastActivity: 1
+      }
+    },
+    {
+      $sort: { requestCount: -1 }
+    }
+  ];
+
+  return await this.aggregate(pipeline).exec();
+};
+
 const ExternalAuditLog = mongoose.model('ExternalAuditLog', externalAuditLogSchema);
 export default ExternalAuditLog;

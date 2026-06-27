@@ -16,6 +16,51 @@ function buildContentDisposition(filename) {
   return `attachment; filename="${asciiFallback}"; filename*=UTF-8''${encoded}`;
 }
 
+/**
+ * Retrieve metadata for a download token without consuming a download attempt
+ */
+router.get('/:token/metadata', (req, res) => {
+  const { token } = req.params;
+
+  const decoded = verifyDownloadToken(token);
+  if (!decoded) {
+    return res.status(401).json({
+      success: false,
+      error: 'Invalid or expired download token'
+    });
+  }
+
+  const filePath = decoded.filePath;
+  const filename = decoded.filename || path.basename(filePath);
+
+  // Stat the file to get metadata
+  let stat;
+  try {
+    stat = fs.statSync(filePath);
+  } catch (err) {
+    logger.warn(`Download file missing: ${filePath} (${err.code})`);
+    return res.status(404).json({
+      success: false,
+      error: 'File no longer available'
+    });
+  }
+
+  // Get content type - for now we'll use a generic binary type since we don't store
+  // the original content type in the token, but this could be extended in the future
+  const contentType = 'application/octet-stream';
+
+  // Return metadata without consuming download
+  return res.json({
+    success: true,
+    data: {
+      size: stat.size,
+      created: stat.birthtime.toISOString(),
+      filename: filename,
+      contentType: contentType
+    }
+  });
+});
+
 router.get('/:token', (req, res) => {
   const { token } = req.params;
 
