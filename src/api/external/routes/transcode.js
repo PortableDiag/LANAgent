@@ -33,7 +33,7 @@ router.post('/convert',
   validateMagicBytes,
   scanWithVirusTotal,
   async (req, res) => {
-    const { targetFormat, quality, customProfile } = req.body;
+    const { targetFormat, quality, customProfile, extractMetadata } = req.body;
 
     if (!targetFormat || !ALLOWED_OUTPUT_FORMATS.includes(targetFormat)) {
       return res.status(400).json({
@@ -52,6 +52,22 @@ router.post('/convert',
       const outputPath = path.resolve('data/external-uploads', outputName);
 
       const options = {};
+
+      // Extract metadata if requested (ffprobe via the ffmpeg plugin's 'info' action)
+      let metadata = null;
+      if (extractMetadata) {
+        const metadataResult = await ffmpeg.execute({
+          action: 'info',
+          file: req.file.path
+        });
+
+        if (metadataResult && metadataResult.success) {
+          const { success, ...info } = metadataResult;
+          metadata = info;
+        } else {
+          logger.warn('Failed to extract metadata:', metadataResult && metadataResult.error);
+        }
+      }
 
       if (customProfile) {
         // Parse custom profile (may arrive as JSON string from multipart form)
@@ -120,13 +136,20 @@ router.post('/convert',
         expiresInMinutes: 120
       });
 
-      res.json({
+      const response = {
         success: true,
         downloadUrl: `/api/external/download/${token}`,
         filename: `transcoded.${targetFormat}`,
         tokenExpires: '120 minutes',
         maxDownloads: 3
-      });
+      };
+
+      // Include metadata in response if extracted
+      if (metadata) {
+        response.metadata = metadata;
+      }
+
+      res.json(response);
     } catch (error) {
       logger.error('Transcode failed:', error);
       res.status(500).json({ success: false, error: 'Transcoding failed' });

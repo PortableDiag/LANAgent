@@ -2,6 +2,24 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.108] - 2026-06-26
+
+### Added — six framework capability additions
+
+Non-breaking additions across utils, models, and the external API:
+
+- **`ConcurrencyLimiter` runtime config** — `updateConfig({maxConcurrent,maxQueue})`, `getConfig()`,
+  `reset()`; adjusts bounds at runtime and drains the queue when capacity grows.
+- **`ExternalAuditLog` aggregation statics** — `getDailyAggregates`, `getStatusCodeDistribution`,
+  `getAgentActivitySummary` (MongoDB aggregation).
+- **`ArbSignal` query statics** — `getByNetwork`, `getBySymbol`, `getByProfitabilityRange`, average
+  spread / profit-stats helpers, plus `{network,createdAt}` and `{netProfit}` indexes.
+- **Audit-log search filters + export** — status-code/duration/IP/success filters on `searchAuditLogs`,
+  plus `exportAuditLogs` (CSV/JSON).
+- **`GET /api/external/download/:token/metadata`** — file size/created/filename without consuming a
+  download attempt.
+- **Transcode `extractMetadata`** — optional ffprobe metadata (`action:'info'`) in the convert response.
+
 ## [2.25.107] - 2026-06-17
 
 ### Fixed — render-tier screenshots now reliable under concurrent load

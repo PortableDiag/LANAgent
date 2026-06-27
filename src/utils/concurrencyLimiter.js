@@ -16,6 +16,8 @@ export class ConcurrencyLimiter {
     this.maxQueue = Math.max(0, maxQueue);
     this.active = 0;
     this.queue = [];
+    this.initialMax = this.max;
+    this.initialMaxQueue = this.maxQueue;
   }
 
   run(fn) {
@@ -49,6 +51,63 @@ export class ConcurrencyLimiter {
 
   stats() {
     return { active: this.active, queued: this.queue.length, max: this.max, maxQueue: this.maxQueue };
+  }
+
+  /**
+   * Update the concurrency limiter configuration at runtime
+   * @param {Object} config - Configuration object
+   * @param {number} [config.maxConcurrent] - Maximum concurrent operations
+   * @param {number} [config.maxQueue] - Maximum queue size
+   * @returns {Object} Updated configuration
+   */
+  updateConfig(config) {
+    if (typeof config !== 'object' || config === null) {
+      throw new Error('Configuration must be an object');
+    }
+
+    if (config.maxConcurrent !== undefined) {
+      if (typeof config.maxConcurrent !== 'number' || config.maxConcurrent < 1) {
+        throw new Error('maxConcurrent must be a number greater than 0');
+      }
+      this.max = Math.floor(config.maxConcurrent);
+    }
+
+    if (config.maxQueue !== undefined) {
+      if (typeof config.maxQueue !== 'number' || config.maxQueue < 0) {
+        throw new Error('maxQueue must be a non-negative number');
+      }
+      this.maxQueue = Math.floor(config.maxQueue);
+    }
+
+    // Process queued tasks if capacity has increased
+    while (this.queue.length > 0 && this.active < this.max) {
+      const next = this.queue.shift();
+      next();
+    }
+
+    return this.getConfig();
+  }
+
+  /**
+   * Get current configuration
+   * @returns {Object} Current configuration
+   */
+  getConfig() {
+    return {
+      maxConcurrent: this.max,
+      maxQueue: this.maxQueue
+    };
+  }
+
+  /**
+   * Reset configuration to initial values
+   * @returns {Object} Reset configuration
+   */
+  reset() {
+    return this.updateConfig({
+      maxConcurrent: this.initialMax,
+      maxQueue: this.initialMaxQueue
+    });
   }
 }
 
