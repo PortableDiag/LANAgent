@@ -43,6 +43,22 @@ if [ -f "$REPO/.env" ]; then
   set +a
 fi
 
+# --- make HOME, node, and pm2 resolvable under a minimal systemd PATH ---
+# systemd oneshot services run with a bare PATH and (on some systems) no HOME,
+# but node/pm2 are frequently installed under nvm in the user's home. Derive
+# HOME if missing, source nvm, and add common node bin dirs so the restart +
+# node --check steps work whether the app is managed by pm2-in-PATH or nvm.
+: "${HOME:=$(getent passwd "$(id -un)" 2>/dev/null | cut -d: -f6)}"
+export HOME
+if ! command -v node >/dev/null 2>&1 || ! command -v pm2 >/dev/null 2>&1; then
+  [ -s "$HOME/.nvm/nvm.sh" ] && . "$HOME/.nvm/nvm.sh" >/dev/null 2>&1 || true
+  for d in "$HOME"/.nvm/versions/node/*/bin /usr/local/bin /usr/bin; do
+    [ -d "$d" ] || continue
+    case ":$PATH:" in *":$d:"*) ;; *) PATH="$d:$PATH" ;; esac
+  done
+  export PATH
+fi
+
 ENABLED="${LANAGENT_AUTO_UPDATE:-true}"
 STRATEGY="${LANAGENT_AUTO_UPDATE_STRATEGY:-merge}"
 BRANCH="${LANAGENT_AUTO_UPDATE_BRANCH:-main}"
