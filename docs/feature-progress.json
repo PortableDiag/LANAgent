@@ -1,9 +1,23 @@
 {
-  "lastUpdated": "2026-06-30T20:00:00.000Z",
+  "lastUpdated": "2026-07-01T18:30:00.000Z",
   "overallProgress": "100%",
-  "status": "PRODUCTION READY — v2.25.138",
+  "status": "PRODUCTION READY — v2.25.139",
   "milestone": "273 features tracked; see CHANGELOG.md for history.",
   "features": {
+    "v2_25_139_2026_07_01": {
+      "status": "deployed",
+      "progress": "100%",
+      "addedDate": "2026-07-01",
+      "version": "2.25.139",
+      "description": "Instance self-update: every instance keeps itself current with the official repo (upstream/main), even when deployed from a personal fork. install.sh installs an hourly systemd timer (scripts/ops/self-update/) that fetches upstream and applies it with safety rails. origin stays the user's fork (self-mod PRs); updates always come from upstream. Two strategies via LANAGENT_AUTO_UPDATE_STRATEGY: merge (default) fast-forwards or clean-merges and SKIPS without clobbering when local edits don't merge cleanly; mirror hard-resets to upstream for appliance instances that customize only via .env. Rails: npm install on dep change, node --check, restart (pm2 or systemd), adaptive /health poll, auto-rollback to prior commit on failure. Gitignored instance state (.env/data/logs) untouched; no git clean. Master off switch LANAGENT_AUTO_UPDATE=false.",
+      "files": [
+        "scripts/ops/self-update/lanagent-self-update.sh (generic updater: merge-or-skip + mirror, rails, rollback)",
+        "scripts/ops/self-update/lanagent-self-update.{service,timer} (systemd templates)",
+        "scripts/ops/self-update/README.md",
+        "scripts/setup/install.sh (upstream remote + install/enable the timer)",
+        ".env.example (LANAGENT_AUTO_UPDATE / _STRATEGY / _BRANCH / _REMOTE)"
+      ]
+    },
     "v2_25_138_2026_06_30": {
       "status": "deployed",
       "progress": "100%",

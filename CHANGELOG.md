@@ -2,6 +2,26 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.139] - 2026-07-01
+
+### Added — instance self-update (keep your fork current with the official repo)
+
+Every instance can now keep itself current with the official LANAgent repo, even when you deploy
+from your own fork. `scripts/setup/install.sh` installs an hourly systemd timer
+(`scripts/ops/self-update/`) that fetches `upstream/main` and applies it with safety rails.
+
+- **Fork-friendly.** `origin` stays your fork (where self-modification PRs go); updates always come
+  from `upstream` (the official repo), independent of what `origin` is.
+- **Two strategies** (`LANAGENT_AUTO_UPDATE_STRATEGY`): `merge` (default) fast-forwards or does a
+  clean merge, and **skips without clobbering** if your local edits don't merge cleanly — the
+  instance keeps running its current version; `mirror` hard-resets to upstream for appliance
+  instances that customize only via `.env`.
+- **Safety rails:** npm install only on dependency change, `node --check` on key boot files, restart
+  (pm2 or systemd), adaptive `/health` poll, and **auto-rollback** to the previous commit if the new
+  version fails to come up healthy. Instance state in gitignored files (`.env`, `data/`, `logs/`) is
+  never touched, and no `git clean` runs.
+- **Off switch:** `LANAGENT_AUTO_UPDATE=false` for heavily-edited forks that prefer to update by hand.
+
 ## [2.25.138] - 2026-06-30
 
 Framework sync from the development line: scraping reliability, download management, and

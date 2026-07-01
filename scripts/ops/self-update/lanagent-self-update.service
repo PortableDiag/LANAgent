@@ -1,0 +1,15 @@
+# LANAgent self-update — oneshot pulled by lanagent-self-update.timer.
+# Template: install.sh substitutes @USER@ and @REPO@ (or edit by hand).
+[Unit]
+Description=LANAgent self-update (pull framework updates from upstream)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=@USER@
+WorkingDirectory=@REPO@
+# Keep going even if a single run exits non-zero; the next timer tick retries.
+ExecStart=@REPO@/scripts/ops/self-update/lanagent-self-update.sh
+# The updater restarts the app via pm2/systemd itself; give it room to health-poll.
+TimeoutStartSec=600
