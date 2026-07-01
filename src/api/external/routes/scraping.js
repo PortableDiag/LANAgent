@@ -332,9 +332,18 @@ async function executeScrape(req, { url, selectors, extractType = 'text', userAg
   try {
     let rawResult;
     let cheerioError = null;
+    // True when the http fast-path below forced a direct fetch on a tier that
+    // actually wanted the browser (stealth = usePuppeteer). If that cheap probe
+    // doesn't yield usable content we must still run the browser attempt the
+    // tier asked for — otherwise we'd skip straight to archive/FS and fail a
+    // site Puppeteer could have rendered.
+    let httpFastPathDirect = false;
 
     // Render tier: try FlareSolverr first (most likely to bypass Cloudflare).
-    if (renderTier && await isFlareSolverrAvailable()) {
+    // Skip FS-first for plain-http targets — FlareSolverr's Chrome flaps on http
+    // over the VPN exit (slow chrome-error), so go straight to the direct fetch
+    // below; the FS escalation later still covers a genuine http block.
+    if (renderTier && !/^http:\/\//i.test(url) && await isFlareSolverrAvailable()) {
       try {
         logger.info(`[ExternalScrape] Render tier: trying FlareSolverr for ${url}`);
         rawResult = await flareSolverrWithRetry(scraper, { action, url, options }, url, _deadline);
@@ -350,7 +359,17 @@ async function executeScrape(req, { url, selectors, extractType = 'text', userAg
     // Try cheerio first (fast) — only if FS path didn't already produce a result
     if (!rawResult || !rawResult.success) {
       try {
-        const cheerioResult = await scraper.execute({ action, url, options });
+        // http fast-path: the headless browser (Puppeteer/FlareSolverr) flaps on
+        // plain-http targets over the VPN exit and wastes ~20s landing on a
+        // chrome-error page before the fallback rescues it. For http URLs on a
+        // browser tier, do the FIRST attempt as a direct fetch — it's what
+        // succeeds anyway, ~20x faster. (https keeps the browser-first path; if
+        // the direct fetch is blocked/thin, the escalation paths below still run.)
+        httpFastPathDirect = /^http:\/\//i.test(url) && options.usePuppeteer === true;
+        const firstOpts = (/^http:\/\//i.test(url) && (options.usePuppeteer || renderTier))
+          ? { ...options, usePuppeteer: false }
+          : options;
+        const cheerioResult = await scraper.execute({ action, url, options: firstOpts });
         // Don't overwrite a successful FS result with a cheerio failure
         if (cheerioResult?.success || !rawResult) {
           rawResult = cheerioResult;
@@ -371,8 +390,11 @@ async function executeScrape(req, { url, selectors, extractType = 'text', userAg
     // is what rescues federalregister.gov (and any SPA) instead of storing the shell.
     const cheerioLooksUnusable = rawResult.success && rawResult.method !== 'flaresolverr' && isUnusableResult(rawResult);
 
-    // If cheerio failed, got blocked, got a challenge page, or returned a shell/stub, auto-retry with Puppeteer
-    const shouldRetryWithPuppeteer = !options.usePuppeteer && rawResult.method !== 'flaresolverr' && (
+    // If cheerio failed, got blocked, got a challenge page, or returned a shell/stub, auto-retry with Puppeteer.
+    // httpFastPathDirect also opens the retry gate: on a usePuppeteer tier whose
+    // first attempt we downgraded to a direct fetch, an unusable/failed probe must
+    // still escalate to the browser the tier originally asked for.
+    const shouldRetryWithPuppeteer = (!options.usePuppeteer || httpFastPathDirect) && rawResult.method !== 'flaresolverr' && (
       !rawResult.success ||
       !rawResult.content?.title ||
       gotChallengePage ||
@@ -381,7 +403,9 @@ async function executeScrape(req, { url, selectors, extractType = 'text', userAg
 
     if (shouldRetryWithPuppeteer) {
       const errMsg = rawResult.error || cheerioError || (gotChallengePage ? 'Cloudflare challenge page' : '');
-      const isBlocked = gotChallengePage || cheerioLooksUnusable || errMsg.includes('403') || errMsg.includes('406') || errMsg.includes('503')
+      // When the http fast-path probe came up empty/unusable, always run the
+      // browser — the whole point was to try cheap-first, not to replace it.
+      const isBlocked = httpFastPathDirect || gotChallengePage || cheerioLooksUnusable || errMsg.includes('403') || errMsg.includes('406') || errMsg.includes('503')
         || errMsg.includes('Forbidden') || errMsg.includes('blocked') || errMsg.includes('Failed to scrape');
 
       if (isBlocked) {
@@ -395,6 +419,33 @@ async function executeScrape(req, { url, selectors, extractType = 'text', userAg
           logger.warn(`[ExternalScrape] Puppeteer also failed for ${url}: ${puppeteerErr.message}`);
           // Keep the original cheerio error
           rawResult = { success: false, error: cheerioError || puppeteerErr.message };
+        }
+      }
+    }
+
+    // Browser-tier → direct-fetch (cheerio) fallback for "couldn't reach" failures.
+    // The browser (Puppeteer or FlareSolverr's Chrome) can land on Chromium's
+    // chrome-error page for a target it can't reach over the VPN exit even when a
+    // plain HTTP fetch sails through — seen on plain http:// sites, where the
+    // browser flaps but axios doesn't. The `stealth` tier is Puppeteer-ONLY (cheerio
+    // is never in its path), so without this it hard-errors on those sites. If the
+    // browser couldn't reach it, try a direct fetch before giving up — it recovers
+    // the content. cheerio can't defeat a real bot-wall, so a genuinely-blocked site
+    // still fails here (as intended); this only rescues reachability, not blocks.
+    if (!rawResult.success && (options.usePuppeteer || renderTier) && !outOfBudget()) {
+      const browserErr = String(rawResult.error || '');
+      const couldNotReach = /net::ERR_|ERR_BLOCKED_BY_CLIENT|could not reach site/i.test(browserErr);
+      if (couldNotReach) {
+        logger.info(`[ExternalScrape] Browser tier couldn't reach ${url} (${browserErr.slice(0, 70)}) — falling back to direct fetch`);
+        try {
+          const direct = await scraper.execute({ action, url, options: { ...options, usePuppeteer: false } });
+          if (direct?.success) {
+            logger.info(`[ExternalScrape] Direct-fetch fallback recovered ${url}`);
+            direct._browserFallback = true;
+            rawResult = direct;
+          }
+        } catch (e) {
+          logger.warn(`[ExternalScrape] Direct-fetch fallback also failed for ${url}: ${e.message}`);
         }
       }
     }
@@ -929,7 +980,14 @@ async function executeScrapeWithVpnRotation(req, params, tier) {
 
     logger.info(`[ExternalScrape] Block detected on tier=${tier} url=${params.url} — rotating VPN ${currentLocation || '?'} → ${next} (attempt ${i + 1}/${MAX_VPN_ROTATIONS})`);
     try {
-      await vpn.connect({ location: next });
+      const sw = await vpn.connect({ location: next });
+      // Exit-switching is impossible while the box is auto-connect pinned (the
+      // common case on the production box). Don't burn the remaining rotations
+      // re-scraping the same exit — stop and return the block honestly.
+      if (sw && sw.success === false && sw.autoConnect) {
+        logger.info(`[ExternalScrape] VPN exit pinned by auto-connect — cannot rotate for ${params.url}; returning block`);
+        break;
+      }
       // Brief stabilization
       await new Promise(r => setTimeout(r, 2500));
       currentLocation = next;

@@ -439,7 +439,26 @@ export class VPNPlugin extends BasePlugin {
       // rotation) and the box is pinned to a US exit, so this is acceptable; bounded
       // by the scrape budget + hard cap. (2026-06-16: forcing this caused 3 outages.)
       if (this.connectionState.connected) {
-        await this.disconnect();
+        const disc = await this.disconnect();
+        // If auto-connect pinned the tunnel, the disconnect was refused — and we
+        // CANNOT switch exits without it. Attempting `expressvpnctl connect` while
+        // still connected just times out (5s) and cycles the box's DNS; on a burst
+        // of scrape rotations that becomes a storm of failing connects (observed:
+        // 288 in a day to uk-docklands/canada-vancouver) that destabilizes the
+        // tunnel for every other request. Bail cleanly instead: the caller degrades
+        // to "no exit change" (staying on the current US exit) with NO DNS thrash
+        // and NO alternative-location retry cascade. Switching exits requires
+        // disabling auto-connect first. (Returns early — never reaches the connect.)
+        if (disc && disc.success === false && disc.autoConnect) {
+          logger.info(`VPN exit switch${location ? ` to ${location}` : ''} skipped — auto-connect pinned; staying on current exit (no thrash)`);
+          return {
+            success: false,
+            error: 'exit_switch_blocked_autoconnect',
+            message: 'Cannot switch VPN exit while auto-connect is enabled — staying on current exit',
+            autoConnect: true,
+            location: this.connectionState.currentLocation
+          };
+        }
       }
 
       // Set protocol if specified
@@ -1154,10 +1173,37 @@ export class VPNPlugin extends BasePlugin {
   }
 
   async getAlternativeLocation(failedLocation) {
-    const availableLocations = this.config.preferredLocations.filter(
+    // Stay within the SAME COUNTRY as the requested exit. The scrape pipeline
+    // pins this box to US exits (a non-US exit makes US-CDN/gov targets serve a
+    // harder challenge FlareSolverr can't clear, and strands every subsequent
+    // scrape on a bad exit). When a US-pool rotation's connect times out, the
+    // retry must pick ANOTHER US exit — not hop to canada/uk from the generic
+    // preferredLocations list. That generic fallback was firing hundreds of
+    // failing connects to uk-docklands/canada-vancouver during scrape rotations,
+    // cycling DNS on every attempt and destabilizing the tunnel for all scrapes.
+    const country = this._countryOf(failedLocation);
+    if (country) {
+      try {
+        const regions = await this.getRegionList();
+        const sameCountry = regions.filter(r => r.startsWith(country + '-') && r !== failedLocation);
+        if (sameCountry.length) {
+          return sameCountry[Math.floor(Math.random() * sameCountry.length)];
+        }
+      } catch { /* region list unavailable — fall back to preferredLocations */ }
+    }
+    const availableLocations = (this.config.preferredLocations || []).filter(
       loc => loc !== failedLocation
     );
-    return availableLocations[Math.floor(Math.random() * availableLocations.length)];
+    return availableLocations.length
+      ? availableLocations[Math.floor(Math.random() * availableLocations.length)]
+      : failedLocation;
+  }
+
+  /** Country/region prefix of an ExpressVPN location id (e.g. 'usa' from 'usa-new-jersey-3'). */
+  _countryOf(loc) {
+    if (!loc || typeof loc !== 'string' || loc === 'smart') return null;
+    const m = loc.match(/^([a-z]+)-/i);
+    return m ? m[1].toLowerCase() : null;
   }
 
   async getRegionList(force = false) {

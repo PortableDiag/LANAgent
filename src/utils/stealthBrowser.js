@@ -78,6 +78,49 @@ async function getPuppeteer() {
  * Uses non-headless mode via Xvfb when available for better fingerprinting.
  * Falls back to headless: 'new' when no display is available.
  */
+/**
+ * Clear a STALE Chromium SingletonLock before launching.
+ *
+ * Chromium guards a profile with `<profile>/SingletonLock`, a symlink whose
+ * target is `<hostname>-<pid>`. If a browser crashes or is killed without a
+ * clean shutdown (a timed-out launch, an OOM, a `kill -9`), the symlink is left
+ * behind pointing at a now-dead PID. Every subsequent launch on that profile
+ * then fails instantly with "Failed to launch the browser process! undefined"
+ * — and each failed attempt re-creates the stale lock, so the profile stays
+ * wedged until the process is restarted by hand. Seen on DELTA 2026-06-27: the
+ * failover's browser scraping was silently dead for over an hour.
+ *
+ * This removes the lock ONLY when its owning PID is not alive — so it's a no-op
+ * when a real browser legitimately holds the profile (the concurrent-instance
+ * case the userDataDir comment below warns about), and self-heals the crash case.
+ */
+async function clearStaleSingletonLock(profileDir) {
+  try {
+    const { readlinkSync, unlinkSync, existsSync } = await import('fs');
+    const path = (await import('path')).default;
+    const lockPath = path.join(profileDir, 'SingletonLock');
+    if (!existsSync(lockPath)) return;
+    let ownerPid = null;
+    try {
+      const target = readlinkSync(lockPath); // e.g. "squid-1395727"
+      const m = String(target).match(/-(\d+)$/);
+      if (m) ownerPid = parseInt(m[1], 10);
+    } catch { /* not a symlink / unreadable — treat as stale below */ }
+    let alive = false;
+    if (ownerPid) {
+      try { process.kill(ownerPid, 0); alive = true; } catch { alive = false; }
+    }
+    if (!alive) {
+      for (const f of ['SingletonLock', 'SingletonSocket', 'SingletonCookie']) {
+        try { unlinkSync(path.join(profileDir, f)); } catch { /* already gone */ }
+      }
+      logger.info(`Cleared stale Chromium SingletonLock in ${profileDir} (owner pid ${ownerPid || '?'} dead)`);
+    }
+  } catch (e) {
+    logger.debug(`SingletonLock stale-check skipped: ${e.message}`);
+  }
+}
+
 async function launchBrowser(options = {}) {
   const pptr = await getPuppeteer();
 
@@ -91,21 +134,46 @@ async function launchBrowser(options = {}) {
   // browser renders pre-fetched setContent HTML (no live bot wall), so it wants
   // true headless: off-display, no compositor contention.
   const explicitHeadless = Object.prototype.hasOwnProperty.call(options, 'headless');
-  if (!explicitHeadless) {
-    if (useHeadless !== false && !process.env.DISPLAY) {
-      // Try to start Xvfb for non-headless (better anti-detection)
-      try {
-        const { execSync } = await import('child_process');
-        execSync('pgrep -x Xvfb > /dev/null 2>&1 || (Xvfb :99 -screen 0 1920x1080x24 &)', { stdio: 'ignore' });
-        await new Promise(r => setTimeout(r, 500));
-        process.env.DISPLAY = ':99';
-        useHeadless = false;
-        logger.info('Started Xvfb :99 for non-headless stealth mode');
-      } catch {
-        logger.debug('Xvfb not available, using headless mode');
+  if (!explicitHeadless && useHeadless !== false) {
+    // Non-headless on Xvfb gives better anti-detection, but ONLY if the display
+    // is actually connectable. The old check was `pgrep -x Xvfb || start :99` —
+    // which is wrong: a STRAY Xvfb on some other display (seen on DELTA 2026-06-27:
+    // `Xvfb :1867971576` from an unrelated process) makes pgrep succeed, so :99 is
+    // never started, yet DISPLAY=:99 is set anyway → :99 is dead → Chrome fails to
+    // launch with the opaque "Failed to launch the browser process! undefined", and
+    // the scraper's browser scraping goes silently dead. Validate the SPECIFIC
+    // display's socket (/tmp/.X11-unix/X99), start a dedicated :99 if absent, and
+    // fall back to true headless if it never comes up — so a missing/broken Xvfb
+    // degrades to working-headless instead of breaking all browser scrapes.
+    const displayNum = 99;
+    const sock = `/tmp/.X11-unix/X${displayNum}`;
+    try {
+      const { existsSync } = await import('fs');
+      const alreadyOnDisplay = process.env.DISPLAY === `:${displayNum}` && existsSync(sock);
+      let xvfbUp = existsSync(sock);
+      if (!xvfbUp && !alreadyOnDisplay) {
+        const { spawn } = await import('child_process');
+        // Detached + unref so it outlives this call; gate on the socket, not pgrep.
+        try {
+          spawn('Xvfb', [`:${displayNum}`, '-screen', '0', '1920x1080x24', '-nolisten', 'tcp'],
+            { detached: true, stdio: 'ignore' }).unref();
+        } catch { /* Xvfb binary missing — handled by the fallback below */ }
+        for (let i = 0; i < 16 && !xvfbUp; i++) {
+          await new Promise(r => setTimeout(r, 250));
+          xvfbUp = existsSync(sock);
+        }
       }
-    } else if (process.env.DISPLAY) {
-      useHeadless = false;
+      if (xvfbUp) {
+        process.env.DISPLAY = `:${displayNum}`;
+        useHeadless = false;
+        logger.info(`Using Xvfb :${displayNum} for non-headless stealth mode`);
+      } else {
+        useHeadless = 'new';
+        logger.warn(`Xvfb :${displayNum} not connectable — falling back to headless (browser scraping stays up)`);
+      }
+    } catch (e) {
+      useHeadless = 'new';
+      logger.debug(`Xvfb setup skipped (${e.message}) — using headless`);
     }
   }
 
@@ -166,9 +234,20 @@ async function launchBrowser(options = {}) {
       // share one --user-data-dir — they collide on the profile SingletonLock and
       // the second launch fails/attaches to the first. Pass a distinct
       // `userDataDir` for any concurrent instance.
-      `--user-data-dir=${options.userDataDir || '/tmp/puppeteer-profile'}`
+      //
+      // DISK-backed by default (/var/tmp), NOT /tmp. /tmp is a RAM tmpfs on the
+      // agents; the profile's Chrome cache grows unbounded (12G seen on DELTA
+      // 2026-06-27) and filling the tmpfs took the whole box down (a full /tmp
+      // made dns-pin write an empty /etc/hosts → localhost dead → Mongo → outage).
+      // On disk it can grow harmlessly. Override with PUPPETEER_PROFILE_DIR.
+      `--user-data-dir=${options.userDataDir || process.env.PUPPETEER_PROFILE_DIR || '/var/tmp/puppeteer-profile'}`
     ]
   };
+
+  // Self-heal a stale SingletonLock on the target profile before launching, so a
+  // previously-crashed browser doesn't wedge every future launch (see helper).
+  const resolvedProfileDir = options.userDataDir || process.env.PUPPETEER_PROFILE_DIR || '/var/tmp/puppeteer-profile';
+  await clearStaleSingletonLock(resolvedProfileDir);
 
   // userDataDir is consumed into an arg above, not a launch option.
   const { userDataDir: _udd, ...optionsRest } = options;

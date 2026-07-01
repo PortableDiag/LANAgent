@@ -126,6 +126,17 @@ export default class YtDlpPlugin extends BasePlugin {
         description: 'Show current yt-dlp version',
         usage: 'version',
         offerAsService: false
+      },
+      {
+        command: 'storage',
+        description: 'Report downloads-directory disk usage vs the retention cap; pass prune=true to trim now',
+        usage: 'storage [prune]',
+        offerAsService: false,
+        examples: [
+          'how much disk are downloads using',
+          'check downloads storage',
+          'trim the downloads folder now'
+        ]
       }
     ];
     
@@ -139,10 +150,245 @@ export default class YtDlpPlugin extends BasePlugin {
     this.downloadDir = path.join(process.cwd(), 'downloads');
     this.ensureDownloadDirectory();
 
+    // Download-directory retention. Without this the downloads dir grows
+    // unbounded (8-12 GB videos, never cleaned) and eventually fills the disk —
+    // which on the production box took mongod down for ~20h (it could no longer
+    // write its log). We cap total size and optionally age, and trim
+    // oldest-first. All env-driven; 0 disables a given limit.
+    // Cap is a PERCENTAGE of the filesystem holding the downloads dir (drive
+    // size differs per install, so an absolute GB cap doesn't port). The
+    // absolute GB var remains as an optional override for instances that want a
+    // fixed ceiling; when set (>0) it wins over the percentage.
+    this.retention = {
+      maxPct: Math.min(100, Math.max(0, parseFloat(process.env.YTDLP_MAX_DOWNLOAD_PCT ?? '15'))),
+      maxBytesAbs: Math.max(0, parseFloat(process.env.YTDLP_MAX_DOWNLOAD_GB ?? '0')) * 1024 ** 3,
+      maxAgeMs: Math.max(0, parseFloat(process.env.YTDLP_DOWNLOAD_RETENTION_DAYS ?? '0')) * 86400_000,
+      intervalMs: Math.max(0, parseFloat(process.env.YTDLP_PRUNE_INTERVAL_HOURS ?? '6')) * 3600_000,
+      // Never touch files modified within this grace window — protects
+      // in-progress downloads and their .part files from the trim.
+      graceMs: 15 * 60_000,
+      // Trim down to this fraction of maxBytes so we don't re-trim on every
+      // small download once we cross the cap (hysteresis).
+      lowWaterFrac: 0.9,
+    };
+    this._pruneTimer = null;
+    this._pruning = false;
+
     // In-flight de-dup: two concurrent requests for the same URL+format would
     // otherwise race yt-dlp on the same .part file and the second would fail
     // in 4-5 seconds with a 500. We coalesce them onto a single promise.
     this._inflight = new Map();
+  }
+
+  /**
+   * Plugin lifecycle: schedule the periodic downloads-dir trim. The first sweep
+   * is deferred (not run at construction/boot) so it never blocks ALICE's boot
+   * chain, and the interval is unref'd so it can't keep the process alive.
+   */
+  async initialize() {
+    try {
+      if (this.retention.intervalMs > 0 && !this._pruneTimer) {
+        // First sweep a couple minutes after boot, then on the interval.
+        setTimeout(() => this.pruneDownloads().catch(() => {}), 120_000).unref?.();
+        this._pruneTimer = setInterval(
+          () => this.pruneDownloads().catch(() => {}),
+          this.retention.intervalMs
+        );
+        this._pruneTimer.unref?.();
+        const cap = await this._effectiveMaxBytes().catch(() => 0);
+        const how = this.retention.maxBytesAbs > 0
+          ? `${(this.retention.maxBytesAbs / 1024 ** 3).toFixed(0)}GB (absolute)`
+          : `${this.retention.maxPct}% of disk`;
+        logger.info(
+          `[ytdlp] downloads retention active: cap=${how}` +
+          `${cap ? ` ≈ ${(cap / 1024 ** 3).toFixed(0)}GB` : ''}` +
+          `${this.retention.maxAgeMs ? `, maxAge=${(this.retention.maxAgeMs / 86400_000).toFixed(0)}d` : ''}` +
+          `, sweep every ${(this.retention.intervalMs / 3600_000).toFixed(0)}h`
+        );
+      }
+    } catch (e) {
+      logger.error('[ytdlp] failed to schedule downloads retention:', e?.message || e);
+    }
+  }
+
+  /**
+   * Resolve the effective downloads-size cap in bytes. Percentage of the
+   * filesystem total by default (ports across installs with different drive
+   * sizes); an explicit YTDLP_MAX_DOWNLOAD_GB overrides it. Returns 0 (no cap)
+   * if neither is configured or the disk size can't be read.
+   */
+  async _effectiveMaxBytes() {
+    if (this.retention.maxBytesAbs > 0) return this.retention.maxBytesAbs;
+    if (this.retention.maxPct > 0) {
+      try {
+        const st = await fs.statfs(this.downloadDir);
+        const total = st.blocks * st.bsize;
+        if (total > 0) return total * (this.retention.maxPct / 100);
+      } catch (e) {
+        logger.warn('[ytdlp] statfs failed, downloads size cap disabled this run:', e?.message || e);
+      }
+    }
+    return 0;
+  }
+
+  async cleanup() {
+    if (this._pruneTimer) {
+      clearInterval(this._pruneTimer);
+      this._pruneTimer = null;
+    }
+  }
+
+  /**
+   * Recursively list regular files under the downloads dir with size + mtime.
+   * Skips the yt-dlp download archive (small, must persist for de-dup).
+   */
+  async _collectDownloadFiles() {
+    const out = [];
+    const walk = async (dir) => {
+      let entries;
+      try {
+        entries = await fs.readdir(dir, { withFileTypes: true });
+      } catch {
+        return;
+      }
+      for (const ent of entries) {
+        const full = path.join(dir, ent.name);
+        if (ent.isDirectory()) {
+          await walk(full);
+        } else if (ent.isFile()) {
+          if (ent.name === 'archive.txt') continue;
+          try {
+            const st = await fs.stat(full);
+            out.push({ path: full, size: st.size, mtimeMs: st.mtimeMs });
+          } catch { /* file vanished mid-walk; ignore */ }
+        }
+      }
+    };
+    await walk(this.downloadDir);
+    return out;
+  }
+
+  /**
+   * Trim the downloads directory back under its size/age caps, oldest-first.
+   * Safe to call concurrently (guards with _pruning) and never throws.
+   * @returns {Promise<{freedBytes:number, removed:number, totalBytes:number}>}
+   */
+  async pruneDownloads() {
+    if (this._pruning) return { freedBytes: 0, removed: 0, totalBytes: 0, skipped: 'in-progress' };
+    this._pruning = true;
+    let freedBytes = 0, removed = 0;
+    try {
+      const { maxAgeMs, graceMs, lowWaterFrac } = this.retention;
+      const maxBytes = await this._effectiveMaxBytes();
+      const now = Date.now();
+      let files = await this._collectDownloadFiles();
+      let totalBytes = files.reduce((s, f) => s + f.size, 0);
+      const startBytes = totalBytes;
+
+      const remove = async (f) => {
+        try {
+          await fs.unlink(f.path);
+          freedBytes += f.size;
+          totalBytes -= f.size;
+          removed++;
+        } catch { /* already gone */ }
+      };
+
+      // Files inside the grace window are off-limits (in-progress downloads).
+      const eligible = files.filter((f) => now - f.mtimeMs > graceMs);
+
+      // 1) Age cap: drop anything older than maxAge.
+      if (maxAgeMs > 0) {
+        for (const f of eligible) {
+          if (now - f.mtimeMs > maxAgeMs) await remove(f);
+        }
+      }
+
+      // 2) Size cap: if still over, delete oldest-first down to the low-water mark.
+      if (maxBytes > 0 && totalBytes > maxBytes) {
+        const target = maxBytes * lowWaterFrac;
+        const remaining = eligible
+          .filter((f) => f.size > 0)
+          .sort((a, b) => a.mtimeMs - b.mtimeMs); // oldest first
+        for (const f of remaining) {
+          if (totalBytes <= target) break;
+          await remove(f);
+        }
+      }
+
+      // Remove directories left empty by the trim (keep the root).
+      await this._removeEmptyDirs(this.downloadDir);
+
+      if (removed > 0) {
+        logger.info(
+          `[ytdlp] downloads trim: removed ${removed} file(s), freed ` +
+          `${(freedBytes / 1024 ** 3).toFixed(1)}GB ` +
+          `(${(startBytes / 1024 ** 3).toFixed(1)}GB → ${(totalBytes / 1024 ** 3).toFixed(1)}GB)`
+        );
+      }
+      return { freedBytes, removed, totalBytes };
+    } catch (e) {
+      logger.error('[ytdlp] downloads trim failed:', e?.message || e);
+      return { freedBytes, removed, totalBytes: 0, error: e?.message || String(e) };
+    } finally {
+      this._pruning = false;
+    }
+  }
+
+  async _removeEmptyDirs(dir) {
+    let entries;
+    try {
+      entries = await fs.readdir(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const ent of entries) {
+      if (ent.isDirectory()) {
+        const sub = path.join(dir, ent.name);
+        await this._removeEmptyDirs(sub);
+        try {
+          const rest = await fs.readdir(sub);
+          if (rest.length === 0) await fs.rmdir(sub);
+        } catch { /* ignore */ }
+      }
+    }
+  }
+
+  /**
+   * Report downloads-dir usage vs the configured cap. With prune=true, runs a
+   * trim first and reports what was freed.
+   */
+  async getStorageStatus(data = {}) {
+    try {
+      const wantPrune = data.prune === true || data.prune === 'true' || data.action === 'prune';
+      let pruneResult = null;
+      if (wantPrune) pruneResult = await this.pruneDownloads();
+
+      const files = await this._collectDownloadFiles();
+      const totalBytes = files.reduce((s, f) => s + f.size, 0);
+      const { maxPct, maxBytesAbs, maxAgeMs, intervalMs } = this.retention;
+      const maxBytes = await this._effectiveMaxBytes();
+      const gb = (b) => +(b / 1024 ** 3).toFixed(2);
+      return {
+        success: true,
+        storage: {
+          path: this.downloadDir,
+          usedGB: gb(totalBytes),
+          capGB: maxBytes ? gb(maxBytes) : null,
+          capMode: maxBytesAbs > 0 ? 'absolute' : (maxPct > 0 ? `${maxPct}% of disk` : 'none'),
+          percentOfCap: maxBytes ? Math.round((totalBytes / maxBytes) * 100) : null,
+          fileCount: files.length,
+          retentionDays: maxAgeMs ? maxAgeMs / 86400_000 : null,
+          sweepHours: intervalMs ? intervalMs / 3600_000 : null,
+        },
+        ...(pruneResult ? { pruned: {
+          removed: pruneResult.removed,
+          freedGB: gb(pruneResult.freedBytes),
+        } } : {}),
+      };
+    } catch (e) {
+      return { success: false, error: e?.message || String(e) };
+    }
   }
 
   async ensureDownloadDirectory() {
@@ -249,6 +495,9 @@ export default class YtDlpPlugin extends BasePlugin {
 
         case 'version':
           return await this.getVersion();
+
+        case 'storage':
+          return await this.getStorageStatus(data);
 
         default:
           return {
@@ -425,6 +674,9 @@ export default class YtDlpPlugin extends BasePlugin {
       };
     } finally {
       if (cookieCtx?.cleanup) await cookieCtx.cleanup();
+      // Keep the downloads dir under its cap right after a new (big) file lands,
+      // without blocking the response.
+      this.pruneDownloads().catch(() => {});
     }
   }
 
@@ -579,6 +831,9 @@ export default class YtDlpPlugin extends BasePlugin {
         error: `Playlist download failed: ${error.message}`,
         stderr: error.stderr
       };
+    } finally {
+      // Playlists land many files at once — trim back to cap when done.
+      this.pruneDownloads().catch(() => {});
     }
   }
 
@@ -789,6 +1044,7 @@ export default class YtDlpPlugin extends BasePlugin {
       };
     } finally {
       if (cookieCtx?.cleanup) await cookieCtx.cleanup();
+      this.pruneDownloads().catch(() => {});
     }
   }
 
@@ -994,6 +1250,16 @@ export default class YtDlpPlugin extends BasePlugin {
       }
     } else if (this._needsImpersonate(data.url)) {
       cmd += ' --impersonate chrome-131';
+    }
+    // YouTube media downloads now 403 ("unable to download video data") under the
+    // default/tv player clients due to PO-token (Proof-of-Origin) enforcement — even
+    // with valid cookies and the JS runtime solving challenges. The web_safari client
+    // returns non-token-gated media URLs and downloads cleanly (verified). NOTE: pin to
+    // web_safari ALONE — adding mweb/default to the list re-introduces the 403 because
+    // the format selector merges their PO-token-gated formats. Namespaced to the youtube
+    // extractor, so it is a no-op for every other site.
+    if (/(?:youtube\.com|youtu\.be)\//i.test(data.url || '')) {
+      cmd += ' --extractor-args "youtube:player_client=web_safari"';
     }
     // Per-request proxy overrides config
     const proxy = data.proxy || this.config.proxy;

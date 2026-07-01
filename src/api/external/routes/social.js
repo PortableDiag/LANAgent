@@ -115,11 +115,17 @@ router.post('/download',
       // No file produced — could be a text-only post, oversized, or extractor
       // failure. Return whatever the plugin captured so the caller can show
       // the user something meaningful.
+      //
+      // A graceful extraction failure (no downloadable video at the URL: a non-video
+      // article, a removed/deleted video, an unsupported/private URL) is a CLIENT input
+      // problem, not a server fault — return 422 so it isn't a 5xx that the public
+      // gateway surfaces as a 502. Genuine processing exceptions still hit the catch
+      // below and return 500. The real reason (yt-dlp's message) is passed in `error`.
       if (!result?.success || !result?.file?.path) {
-        return res.status(result?.success ? 200 : 500).json({
+        return res.status(result?.success ? 200 : 422).json({
           success: !!result?.success,
           extractor,
-          error: result?.error || (result?.success ? null : 'Download failed'),
+          error: result?.error || (result?.success ? null : 'No downloadable video found at this URL'),
           result: result?.result || null
         });
       }

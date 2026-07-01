@@ -1,9 +1,26 @@
 {
-  "lastUpdated": "2026-06-17T16:00:00.000Z",
+  "lastUpdated": "2026-06-30T20:00:00.000Z",
   "overallProgress": "100%",
-  "status": "PRODUCTION READY — v2.25.107",
+  "status": "PRODUCTION READY — v2.25.138",
   "milestone": "273 features tracked; see CHANGELOG.md for history.",
   "features": {
+    "v2_25_138_2026_06_30": {
+      "status": "deployed",
+      "progress": "100%",
+      "addedDate": "2026-06-30",
+      "version": "2.25.138",
+      "description": "Framework sync from the development line: scraping reliability, download management, and network/monitoring improvements. (1) Automatic retention for the yt-dlp downloads directory — percentage-of-disk cap (YTDLP_MAX_DOWNLOAD_PCT, default 15%, resolved live from filesystem size; optional YTDLP_MAX_DOWNLOAD_GB override), oldest-first trim to a low-water mark with a 15-min grace window and archive.txt skip, optional age cap, deferred 6h background sweep plus per-download trims, and a storage command. (2) Scraping robustness — Chromium net-error-page detector so error interstitials no longer leak as success, direct-fetch fallback for unreachable http targets, http fast-path, browser-launch self-heal of a stale SingletonLock, Xvfb display validation with headless fallback, and VPN-exit rotation that no longer thrashes DNS on auto-connect-pinned hosts. (3) YouTube downloads — web_safari player client for PO-token 403s, youtube.com cookie host and youtu.be short-link alias. (4) Richer new-device network alerts (IP/MAC/vendor/hostname). (5) /social/download returns 422 (not 5xx) for no-video URLs. (6) Email auto-reply scam/spam [SKIP] screen plus an empty-response ReferenceError fix. (7) Crypto API watchlist management endpoints and a shared-wallet capital-allocation guard.",
+      "files": [
+        "src/api/plugins/ytdlp.js (percentage-of-disk retention, oldest-first trim, grace window, storage command)",
+        "src/api/plugins/scraper.js, src/utils/stealthBrowser.js, src/api/external/routes/scraping.js (error-page detection, http fast-path/fallback, browser self-heal, Xvfb validation)",
+        "src/api/plugins/vpn.js (no-thrash exit rotation)",
+        "src/utils/ytdlpCookieJar.js (youtube.com cookie host + youtu.be alias)",
+        "src/api/plugins/network.js (richer new-device alerts)",
+        "src/api/external/routes/social.js (422 for no-video URLs)",
+        "src/services/scheduler.js (email auto-reply scam screen + empty-response fix)",
+        "src/api/crypto.js (watchlist management endpoints + shared-wallet allocation guard)"
+      ]
+    },
     "v2_25_107_2026_06_17": {
       "status": "deployed",
       "progress": "100%",

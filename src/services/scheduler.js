@@ -2712,6 +2712,8 @@ Content: ${emailContent}
 
 Please provide a helpful, friendly response that directly addresses their question or message. Be conversational and informative. NEVER break character - you are ALWAYS ${this.agent.config.name}, never admit to being Claude, GPT, or any other AI model.
 
+SCAM/SPAM SCREEN: If this email is a scam, phishing attempt, advance-fee/lottery/inheritance fraud, crypto/investment solicitation, romance scam, account-verification phishing, or unsolicited mass-marketing, do NOT reply to it — respond with exactly "[SKIP]" and nothing else. A normal personal message from a real person is NOT spam; only use [SKIP] for genuinely malicious or junk mail.
+
 IMPORTANT: Respond with ONLY the email text content - no JSON, no formatting, just the plain text message that should be sent to the person.
 
 Your response:`;
@@ -2739,7 +2741,10 @@ Your response:`;
         
         logger.info(`AI response generated for ${fromEmail}, length: ${replyText.length}`);
         if (replyText.length === 0) {
-          logger.warn(`Empty AI response for ${fromEmail}, using fallback. Original response object:`, response);
+          // NB: log `aiResponse` (the actual variable) — referencing an undefined
+          // `response` here threw a ReferenceError that aborted the whole reply,
+          // so an empty AI response silently sent nothing instead of the fallback.
+          logger.warn(`Empty AI response for ${fromEmail}, using fallback. Original response object:`, aiResponse);
         }
         
         // Create meaningful fallback based on email content
@@ -2755,6 +2760,19 @@ Your response:`;
         if (errorPatterns.some(p => replyText.includes(p))) {
           logger.warn(`Auto-reply contained error text, using fallback instead: ${replyText.substring(0, 100)}`);
           replyText = '';
+        }
+
+        // Scam/spam screen: the prompt instructs the model to emit [SKIP] for
+        // scam/phishing/mass-marketing. Honor it — never engage scammers. Mark the
+        // email processed (so it isn't re-screened every cycle) and stop here.
+        if (/\[SKIP\]/i.test(replyText)) {
+          logger.info(`Suspected scam/spam from ${fromEmail} — skipping auto-reply (AI screen)`);
+          if (email._id || email.messageId) {
+            const { Email } = await import('../models/Email.js');
+            const query = email._id ? { _id: email._id } : { messageId: email.messageId };
+            await Email.updateOne(query, { $set: { processed: true, processedAt: new Date(), read: true } });
+          }
+          return;
         }
 
         // Use AI response if available, otherwise intelligent fallback
