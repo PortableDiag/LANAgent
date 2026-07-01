@@ -1253,6 +1253,33 @@ else
 fi
 
 # ═══════════════════════════════════════════════════
+# Self-update timer (keep this instance current with upstream)
+# ═══════════════════════════════════════════════════
+SELF_UPDATE_SVC="$PROJECT_ROOT/scripts/ops/self-update/lanagent-self-update.service"
+if [ "${LANAGENT_AUTO_UPDATE:-true}" = "false" ]; then
+    info "Self-update disabled (LANAGENT_AUTO_UPDATE=false) — skipping timer install"
+elif command -v systemctl &>/dev/null && [ -f "$SELF_UPDATE_SVC" ]; then
+    SU_USER="${RUN_AS_USER:-${SUDO_USER:-$(id -un)}}"
+    chmod +x "$PROJECT_ROOT/scripts/ops/self-update/lanagent-self-update.sh" 2>/dev/null
+    if [ "$(id -u)" = "0" ] || [ -w /etc/systemd/system ]; then
+        sed -e "s#@USER@#${SU_USER}#g" -e "s#@REPO@#${PROJECT_ROOT}#g" \
+            "$SELF_UPDATE_SVC" > /etc/systemd/system/lanagent-self-update.service 2>/dev/null
+        cp "$PROJECT_ROOT/scripts/ops/self-update/lanagent-self-update.timer" \
+            /etc/systemd/system/lanagent-self-update.timer 2>/dev/null
+        systemctl daemon-reload &>/dev/null
+        if systemctl enable --now lanagent-self-update.timer &>/dev/null; then
+            ok "Self-update timer installed — hourly pull from upstream (toggle via LANAGENT_AUTO_UPDATE in .env)"
+        else
+            warn "Self-update units written but not enabled — run: sudo systemctl enable --now lanagent-self-update.timer"
+        fi
+    else
+        info "Self-update: re-run install as root to auto-enable the timer, or see scripts/ops/self-update/README.md"
+    fi
+else
+    [ -f "$SELF_UPDATE_SVC" ] || warn "Self-update template missing — skipping timer install"
+fi
+
+# ═══════════════════════════════════════════════════
 # Write CLAUDE.local.md
 # ═══════════════════════════════════════════════════
 cat > "$PROJECT_ROOT/CLAUDE.local.md" << CLEOF

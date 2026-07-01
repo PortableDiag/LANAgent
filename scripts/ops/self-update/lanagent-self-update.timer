@@ -1,0 +1,15 @@
+# LANAgent self-update timer — runs the updater hourly (with jitter).
+# Enable with: systemctl enable --now lanagent-self-update.timer
+[Unit]
+Description=Run LANAgent self-update periodically
+
+[Timer]
+# First run shortly after boot, then hourly. RandomizedDelaySec spreads a fleet
+# of instances so they don't all hammer the upstream at the same second.
+OnBootSec=10min
+OnUnitActiveSec=1h
+RandomizedDelaySec=5min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
