@@ -280,9 +280,19 @@ export default class NetworkPlugin extends BasePlugin {
         newCount: newDevices.length
       });
 
-      // Notify if new devices found
+      // Notify if new devices found — include MAC, vendor and hostname so the
+      // alert is actionable (a bare subnet IP can't be identified on its own).
       if (newDevices.length > 0 && this.settings.alertNewDevices) {
-        await this.notify(`🆕 New devices on network:\n${newDevices.map(d => `${d.ip} - ${d.hostname || d.vendor || 'Unknown'}`).join('\n')}`);
+        const blocks = newDevices.map(d => {
+          const lines = [`📱 ${d.ip}`, `   MAC: ${d.mac || 'unknown'}`];
+          if (d.vendor) lines.push(`   Vendor: ${d.vendor}`);
+          if (d.hostname) lines.push(`   Host: ${d.hostname}`);
+          return lines.join('\n');
+        });
+        const heading = newDevices.length === 1
+          ? 'New device on network'
+          : `${newDevices.length} new devices on network`;
+        await this.notify(`🆕 ${heading}:\n\n${blocks.join('\n\n')}`);
       }
 
       // Keep scan history trimmed

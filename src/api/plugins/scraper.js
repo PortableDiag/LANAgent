@@ -144,6 +144,54 @@ async function waitForRealContent(page, { url = '', timeoutMs = 10000 } = {}) {
   }
 }
 
+// Chromium net-error codes that mean "the browser could not reach the site".
+const CHROME_NET_ERROR_RE = /\b(ERR_NAME_NOT_RESOLVED|ERR_NAME_RESOLUTION_FAILED|ERR_INTERNET_DISCONNECTED|ERR_CONNECTION_REFUSED|ERR_CONNECTION_RESET|ERR_CONNECTION_CLOSED|ERR_CONNECTION_FAILED|ERR_CONNECTION_TIMED_OUT|ERR_ADDRESS_UNREACHABLE|ERR_NETWORK_CHANGED|ERR_TIMED_OUT|ERR_EMPTY_RESPONSE|ERR_SSL_PROTOCOL_ERROR|ERR_SSL_VERSION_OR_CIPHER_MISMATCH|ERR_CERT_[A-Z_]+|ERR_TUNNEL_CONNECTION_FAILED|ERR_PROXY_CONNECTION_FAILED|ERR_SOCKS_CONNECTION_FAILED|DNS_PROBE_FINISHED_NXDOMAIN|DNS_PROBE_FINISHED_NO_INTERNET|ERR_HTTP2_PROTOCOL_ERROR|ERR_QUIC_PROTOCOL_ERROR)\b/;
+
+/**
+ * Detect Chromium's "This site can't be reached" net-error interstitial in a
+ * blob of HTML (e.g. FlareSolverr's rendered output). When the browser can't
+ * reach a site mid-navigation — common during a VPN exit flap — Chromium renders
+ * its OWN error page. Capturing that as content and returning success ships a
+ * real-looking error page to the caller as if it were the real site. Returns the
+ * specific ERR_ code (so the caller's error classifier can map it to the right
+ * status + retry) or null. Requires a STRUCTURAL marker so a genuine article that
+ * merely mentions an ERR_ code in prose is never misclassified.
+ */
+function detectChromeErrorPage(html) {
+  if (!html || typeof html !== 'string' || html.length > 200000) return null;
+  const structural = /id=["']main-frame-error["']/i.test(html)
+    || /chrome-error:\/\//i.test(html)
+    || /jscontent=["']?errorCode/i.test(html);
+  const headline = /This site can.{0,3}t be reached|took too long to respond|refused to connect|server (?:IP address|DNS address) could not be found|Your internet access is blocked|This page isn.{0,3}t working|No internet/i.test(html);
+  const code = html.match(CHROME_NET_ERROR_RE);
+  if ((structural && (headline || code)) || (headline && code)) {
+    return code ? code[1] : 'ERR_FAILED';
+  }
+  return null;
+}
+
+/**
+ * After a Puppeteer navigation, detect whether the page is sitting on Chromium's
+ * internal error page (chrome-error://chromewebdata/). page.goto usually throws
+ * on an unreachable site, but not always — during a tunnel flap the error can
+ * commit after the navigation resolves, leaving us on the interstitial. Returns
+ * the ERR_ code string, or null if the page is a real document.
+ */
+async function detectPageNetError(page) {
+  try {
+    const navUrl = page.url() || '';
+    if (!navUrl.startsWith('chrome-error://')) return null;
+    const txt = await page.evaluate(() => {
+      const el = document.querySelector('#main-frame-error, #sub-frame-error-details, .error-code');
+      return (el && el.textContent) || (document.body && document.body.innerText) || '';
+    }).catch(() => '');
+    const m = String(txt).match(/ERR_[A-Z0-9_]+|DNS_PROBE_[A-Z_]+/);
+    return m ? m[0] : 'ERR_FAILED';
+  } catch {
+    return null;
+  }
+}
+
 export default class ScraperPlugin extends BasePlugin {
   constructor(agent) {
     super(agent);
@@ -568,6 +616,15 @@ export default class ScraperPlugin extends BasePlugin {
       throw new Error(`FlareSolverr fetched ${url} but target returned HTTP ${httpStatus}`);
     }
 
+    // FlareSolverr's own Chrome can fail to reach the target (DNS/connection
+    // error during a VPN flap) yet still return status 200 with the rendered
+    // "This site can't be reached" interstitial as the body. Parsing that ships
+    // a Chromium error page to the caller as success — detect + fail instead.
+    const fsNetErr = detectChromeErrorPage(html);
+    if (fsNetErr) {
+      throw new Error(`net::${fsNetErr} for ${url} (FlareSolverr could not reach site)`);
+    }
+
     const { content, $ } = this.parseHtmlContent(html, url, selector);
     content.jsonld = await this.extractJsonLd($);
     content.microdata = this.extractMicrodata($);
@@ -739,8 +796,10 @@ export default class ScraperPlugin extends BasePlugin {
       // safe and far faster. Distinct profile dir — two Chromium processes can't
       // share one user-data-dir.
       this.ssBrowser = await launchBrowser({
+        // DISK-backed (/var/tmp), not the /tmp RAM tmpfs — the profile cache grows
+        // unbounded and a full tmpfs takes the box down (see stealthBrowser.js).
         headless: 'new',
-        userDataDir: process.env.RENDER_SCREENSHOT_PROFILE_DIR || '/tmp/puppeteer-profile-ss'
+        userDataDir: process.env.RENDER_SCREENSHOT_PROFILE_DIR || '/var/tmp/puppeteer-profile-ss'
       });
     }
     return this.ssBrowser;
@@ -812,6 +871,16 @@ export default class ScraperPlugin extends BasePlugin {
         waitUntil: 'networkidle2',
         timeout: 45000
       });
+
+      // The site was unreachable and Chromium committed its own error page
+      // (chrome-error://). goto doesn't always throw on this — during a VPN exit
+      // flap it can resolve onto the interstitial — and the "extract anyway"
+      // fallback below would then ship "This site can't be reached" as success.
+      // Fail with the net error code so the caller classifies + retries it.
+      const navErr = await detectPageNetError(page);
+      if (navErr) {
+        throw new Error(`net::${navErr} for ${url} (browser could not reach site)`);
+      }
 
       // v2.25.89: harvest any anti-bot cookies the host issued during this
       // navigation. Fire-and-forget — failure here shouldn't block the scrape.

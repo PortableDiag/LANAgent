@@ -18,7 +18,13 @@ export const STORED_COOKIES_DIR = process.env.LANAGENT_COOKIES_DIR
 // Hosts whose video extractors require an authenticated session cookie.
 // `Host` here is the registrable domain — subdomain matching (m.facebook.com,
 // www.instagram.com, etc.) is handled by the matcher below.
-export const STORED_COOKIE_HOSTS = ['instagram.com', 'facebook.com', 'fb.watch'];
+//
+// youtube.com is included because YouTube's bot-check rejects uncredentialed
+// requests from many server IPs ("Sign in to confirm you're not a bot").
+// yt-dlp 2026.05.16+ additionally requires the `yt-dlp-ejs` Python package on
+// PATH for n-challenge solving — without it the cookied request still resolves
+// to only storyboard images.
+export const STORED_COOKIE_HOSTS = ['instagram.com', 'facebook.com', 'fb.watch', 'youtube.com'];
 
 // Hosts that sit behind a Cloudflare wall — yt-dlp + curl-cffi alone can't
 // fetch the page; we route through FlareSolverr for cf_clearance cookies.
@@ -29,9 +35,19 @@ export function hostMatches(host, domains) {
   return domains.some(d => host === d || host.endsWith('.' + d));
 }
 
+// Short-link / alternate domains that are the same property as their canonical
+// host. Normalizing here means cookie matching AND the per-host cookie-file
+// lookup (`<host>.txt`) both resolve to the canonical jar. Without this,
+// youtu.be links download uncredentialed → YouTube serves only the android_vr
+// (HLS) client → media URLs 403.
+const HOST_ALIASES = { 'youtu.be': 'youtube.com' };
+
 export function extractHost(url) {
   if (!url) return null;
-  try { return new URL(url).hostname.toLowerCase().replace(/^www\./, ''); } catch { return null; }
+  try {
+    const host = new URL(url).hostname.toLowerCase().replace(/^www\./, '');
+    return HOST_ALIASES[host] || host;
+  } catch { return null; }
 }
 
 /**

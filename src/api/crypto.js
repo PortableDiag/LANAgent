@@ -1414,6 +1414,28 @@ router.post('/strategy/token-trader/configure', async (req, res) => {
             userConfigured: true  // Prevents watchlist rotation — user explicitly added this token
         };
 
+        // Guard: token-trader instances share ONE wallet, so their capital allocations must not
+        // sum to more than 100%. Reconfiguring the same token replaces its own allocation rather
+        // than adding to it. Without this, N instances each budget against the full shared pool
+        // and collectively try to deploy >100% of the wallet.
+        {
+            const newAlloc = capitalAllocationPercent || 20;
+            const existingTraders = strategyRegistry.getAllTokenTraders();
+            let othersAlloc = 0;
+            for (const [addr, inst] of existingTraders) {
+                if (addr === tokenAddress.toLowerCase()) continue; // same token = replace, not add
+                othersAlloc += inst.config?.capitalAllocationPercent || 20;
+            }
+            if (othersAlloc + newAlloc > 100) {
+                return res.status(400).json({
+                    error: `Capital allocation would exceed 100% of the shared wallet: other token-trader instances already use ${othersAlloc}%, requested ${newAlloc}% (total ${othersAlloc + newAlloc}%). Set this allocation to ≤ ${Math.max(0, 100 - othersAlloc)}% or lower another instance first.`,
+                    othersAllocationPercent: othersAlloc,
+                    requestedPercent: newAlloc,
+                    maxAllowedPercent: Math.max(0, 100 - othersAlloc)
+                });
+            }
+        }
+
         // Add or update instance in multi-token map
         const tokenStrategy = strategyRegistry.addTokenTrader(tokenAddress, instanceConfig);
 
@@ -1458,6 +1480,111 @@ router.post('/strategy/token-trader/configure', async (req, res) => {
         });
     } catch (error) {
         logger.error('Failed to configure token trader:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Add a token to the token-trader rotation watchlist (a fallback candidate the trader can
+// rotate into when the active token is abandoned/underperforms — NOT an active position).
+// The watchlist is shared by reference across the base token_trader and all instances
+// (StrategyRegistry.addTokenTrader), so adding to the base propagates to every instance.
+router.post('/strategy/token-trader/watchlist', async (req, res) => {
+    try {
+        const { tokenAddress, tokenNetwork } = req.body;
+        if (!tokenAddress || !tokenNetwork) {
+            return res.status(400).json({ error: 'tokenAddress and tokenNetwork are required' });
+        }
+        const validNetworks = ['ethereum', 'bsc', 'polygon', 'base'];
+        if (!validNetworks.includes(tokenNetwork)) {
+            return res.status(400).json({ error: `Invalid network. Must be one of: ${validNetworks.join(', ')}` });
+        }
+
+        const { strategyRegistry } = await import('../services/crypto/strategies/StrategyRegistry.js');
+        const handler = await getCryptoHandler();
+        const swapService = (await import('../services/crypto/swapService.js')).default;
+
+        // Resolve metadata on-chain (reject undeployed/garbage addresses)
+        const metadata = await swapService.getTokenMetadata(tokenAddress, tokenNetwork);
+        if (!metadata || metadata.symbol === '???' || metadata.name === 'Unknown') {
+            return res.status(400).json({ error: `Could not resolve token metadata for ${tokenAddress} on ${tokenNetwork} — is it deployed?` });
+        }
+
+        const entry = {
+            address: tokenAddress,
+            network: tokenNetwork,
+            symbol: metadata.symbol,
+            decimals: metadata.decimals
+        };
+        const addrKey = tokenAddress.toLowerCase();
+        const matches = (t) => t.address?.toLowerCase() === addrKey && (t.network || 'bsc') === tokenNetwork;
+
+        // Add to the base token_trader watchlist (shared reference) and defensively to every
+        // active instance in case any reference diverged. Dedupe; never duplicate.
+        const baseTrader = strategyRegistry.get('token_trader');
+        const targets = [];
+        if (baseTrader) targets.push(baseTrader);
+        for (const [, inst] of strategyRegistry.getAllTokenTraders()) targets.push(inst);
+
+        let alreadyPresent = false;
+        for (const strat of targets) {
+            if (!strat.config) continue;
+            if (!Array.isArray(strat.config.tokenWatchlist)) strat.config.tokenWatchlist = [];
+            const existing = strat.config.tokenWatchlist.find(matches);
+            if (existing) { alreadyPresent = true; continue; }
+            strat.config.tokenWatchlist.push({ ...entry });
+        }
+
+        if (handler?.persistRegistryState) await handler.persistRegistryState();
+
+        const watchlist = baseTrader?.config?.tokenWatchlist || [];
+        logger.info(`TokenTrader watchlist: ${alreadyPresent ? 'ensured' : 'added'} ${metadata.symbol} (${tokenAddress}) on ${tokenNetwork} [${watchlist.length} entries]`);
+        res.json({ success: true, added: !alreadyPresent, alreadyPresent, entry, watchlist });
+    } catch (error) {
+        logger.error('Failed to add token to watchlist:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Remove a token from the token-trader watchlist (system tokens like SKYNET cannot be removed).
+router.delete('/strategy/token-trader/watchlist', async (req, res) => {
+    try {
+        const { tokenAddress, tokenNetwork } = req.body;
+        if (!tokenAddress) {
+            return res.status(400).json({ error: 'tokenAddress is required' });
+        }
+        const { strategyRegistry } = await import('../services/crypto/strategies/StrategyRegistry.js');
+        const { isSystemToken } = await import('../services/subagents/CryptoStrategyAgent.js');
+        const handler = await getCryptoHandler();
+        const addrKey = tokenAddress.toLowerCase();
+        const matches = (t) => t.address?.toLowerCase() === addrKey && (!tokenNetwork || (t.network || 'bsc') === tokenNetwork);
+
+        const baseTrader = strategyRegistry.get('token_trader');
+        const targets = [];
+        if (baseTrader) targets.push(baseTrader);
+        for (const [, inst] of strategyRegistry.getAllTokenTraders()) targets.push(inst);
+
+        let removed = false, blockedSystem = false;
+        for (const strat of targets) {
+            if (!Array.isArray(strat.config?.tokenWatchlist)) continue;
+            const target = strat.config.tokenWatchlist.find(matches);
+            // Only protect GENUINELY-allowlisted system tokens (the live hardcoded SKYNET).
+            // A stale `system: true` flag on a non-allowlisted entry (e.g. a deprecated/redeployed
+            // token) is removable — consistent with TokenTraderStrategy.preserveSystemTokens, which
+            // only re-protects hardcoded system addresses.
+            if (target?.system && isSystemToken(target.network || tokenNetwork || 'bsc', target.address)) { blockedSystem = true; continue; }
+            const before = strat.config.tokenWatchlist.length;
+            strat.config.tokenWatchlist = strat.config.tokenWatchlist.filter((t) => !matches(t));
+            if (strat.config.tokenWatchlist.length < before) removed = true;
+        }
+        if (blockedSystem && !removed) {
+            return res.status(400).json({ error: 'Cannot remove a system token from the watchlist' });
+        }
+        if (handler?.persistRegistryState) await handler.persistRegistryState();
+
+        const watchlist = baseTrader?.config?.tokenWatchlist || [];
+        res.json({ success: true, removed, watchlist });
+    } catch (error) {
+        logger.error('Failed to remove token from watchlist:', error);
         res.status(500).json({ error: error.message });
     }
 });

@@ -2,6 +2,99 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.138] - 2026-06-30
+
+Framework sync from the development line: scraping reliability, download management, and
+network/monitoring improvements. (Version aligned to the development line; the intervening
+numbers were instance-specific work not shipped in the framework.)
+
+### Added — automatic retention for the yt-dlp downloads directory
+
+Video/audio downloads accumulated in the downloads directory with no cleanup, so the folder could
+grow without bound and fill the disk. The downloads directory is now trimmed automatically:
+
+- **Size cap as a percentage of the drive** (`YTDLP_MAX_DOWNLOAD_PCT`, default 15%) so the limit
+  ports across installs with different disk sizes; the cap is resolved live from the filesystem
+  size. An optional absolute override (`YTDLP_MAX_DOWNLOAD_GB`) takes precedence when set.
+- **Oldest-first trimming** down to a low-water mark (hysteresis, so it doesn't re-trim on every
+  download), with a 15-minute grace window that protects in-progress downloads (and their `.part`
+  files) and a skip for the yt-dlp `archive.txt` de-dup ledger.
+- **Optional age cap** (`YTDLP_DOWNLOAD_RETENTION_DAYS`, default off) to also drop files older than
+  N days.
+- Runs as a background sweep (`YTDLP_PRUNE_INTERVAL_HOURS`, default 6h, deferred so it never blocks
+  startup) and opportunistically right after each video/audio/playlist download.
+- New `storage` command on the ytdlp plugin reports usage vs. the cap and can trigger a trim.
+
+### Fixed — scraping robustness (error-page detection, http reachability, browser self-heal)
+
+Several compounding scrape failures on browser tiers, fixed together:
+
+- **Browser error pages no longer leak as `success`.** When a browser (Puppeteer or FlareSolverr's
+  Chrome) can't reach a site, Chromium renders its own "This site can't be reached" interstitial;
+  `goto` doesn't always throw on it, and the "extract anyway" fallback then shipped that error page
+  as `success:true`. A Chromium net-error detector now fails with the specific `net::ERR_*` code
+  instead, which flows into the normal error classifier. The detector requires a structural marker,
+  so a real article that merely mentions an `ERR_` code in prose is never misclassified.
+- **Browser tiers fall back to a direct fetch for unreachable `http://` targets.** Puppeteer-only
+  tiers hard-failed on plain-http targets the browser flapped on even though a direct fetch
+  succeeds; `executeScrape` now retries with a direct (cheerio) fetch on a "couldn't reach" net
+  error. cheerio can't defeat a real bot-wall, so a genuinely-blocked site still fails as intended —
+  this only rescues *reachability*.
+- **http fast-path.** Browser tiers now do the first attempt on a plain-`http://` target as a direct
+  fetch (~1s) instead of a browser navigation (~20s of flap), and still escalate to the real browser
+  if the cheap probe comes back thin.
+- **Browser launch self-heals a stale profile lock.** A crashed Chromium leaves a `SingletonLock`
+  pointing at a dead PID; every later launch then fails with "Failed to launch the browser
+  process! undefined". `launchBrowser` now removes the lock when its owning PID is not alive.
+- **Xvfb display is validated, not assumed.** The non-headless path now validates the specific
+  display's socket, starts a dedicated display when missing, and falls back to true headless if it
+  can't be brought up — so a missing/broken virtual display degrades to working-headless instead of
+  breaking all browser scrapes.
+- **VPN exit rotation no longer thrashes DNS.** On an auto-connect-pinned host the rotation is
+  refused; the plugin now bails instantly instead of firing repeated failing connects (each of which
+  cycled the box's DNS), and any connect-retry stays within the same country as the requested exit.
+
+### Fixed — YouTube downloads (PO-token 403; cookie host + short-link alias)
+
+- YouTube media downloads began 403ing on the data fetch (PO-token enforcement) even when extraction
+  succeeded. yt-dlp now pins the **`web_safari`** player client for YouTube URLs, which returns
+  non-token-gated media URLs. The arg is namespaced to the youtube extractor, so it affects no other
+  site.
+- `youtube.com` is now a stored-cookie host, and `youtu.be` normalizes to `youtube.com` so
+  short-links resolve to the same cookie jar (an uncredentialed `youtu.be` request otherwise 403s on
+  the media URLs).
+
+### Changed — richer "new device on network" alerts (MAC, vendor, hostname)
+
+Network-plugin new-device notifications now identify the device: per new device they list the **IP**,
+**MAC address** (`unknown` if unresolved), **vendor/manufacturer** (when the OUI resolves), and
+**hostname** (when reverse-DNS resolves) — instead of just the subnet IP. All fields were already
+captured; only the message formatting changed.
+
+### Fixed — `/social/download` returns 4xx for no-video URLs (was 5xx)
+
+A graceful extraction failure — a URL with no downloadable video (a non-video article, a
+removed/deleted video, an unsupported or private link) — returned HTTP 500. It now returns **422**
+(the request was understood but the URL has no downloadable content), with the real reason in the
+`error` field; genuine processing exceptions still return 500.
+
+### Added / Fixed — email auto-reply: scam screen + empty-response fall-through
+
+- The incoming-email auto-reply prompt now instructs the model to emit a `[SKIP]` sentinel for
+  scam / phishing / advance-fee / crypto-solicitation / romance-scam / account-verification-phishing
+  / mass-marketing mail; the handler honors it — marks the message read and does **not** reply. A
+  normal message from a real person is explicitly not treated as spam.
+- Fixed an empty-response bug where the handler logged an undefined variable, threw a
+  `ReferenceError`, and aborted the whole reply (sender got silence instead of the fallback).
+
+### Added — crypto API: watchlist management endpoints + shared-wallet allocation guard
+
+`POST`/`DELETE /api/crypto/strategy/token-trader/watchlist` manage the rotation watchlist (resolve
+metadata on-chain, dedupe, persist; genuinely-allowlisted system tokens are protected from removal).
+`POST .../configure` now rejects a capital allocation that would push the combined allocation of all
+instances sharing one wallet over 100% (reconfiguring the same token replaces its share rather than
+adding to it).
+
 ## [2.25.108] - 2026-06-26
 
 ### Added — six framework capability additions
