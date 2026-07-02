@@ -2,7 +2,7 @@
   "info": {
     "_postman_id": "9b5edc66-ea34-4329-a9d5-baca5366e76d",
     "name": "LANAgent API Collection",
-    "description": "LANAgent API v2.25.107 — no API-surface changes; reliability/hardening release. Render-tier /scrape screenshots made reliable under concurrent load (they had been absent ~87% of the time): capture the VIEWPORT sized to RENDER_SCREENSHOT_MAX_HEIGHT (default 3000) instead of {fullPage:true}/clip, which avoids Chromium captureBeyondViewport full-document raster (~14.6s -> ~0.2s on a 34k-px page); render screenshots on a dedicated HEADLESS software-raster browser isolated from the live scrape page pool (launchBrowser honors an explicit headless option + uses headless-safe GPU args); on the setContent path block script/xhr/font/media subresources (the DOM is already rendered) and guard every page.evaluate with a Node-side timeout; serialized (RENDER_SCREENSHOT_CONCURRENCY default 1) with a blank-render guard that skips shipping a white PNG. Boot hardening: initial vector intent indexing (embeds plugin intents via an external embedding API) now runs in the BACKGROUND instead of being awaited before the web server binds, so a slow or hung embedding request can no longer wedge boot. See CHANGELOG.md for full version history.",
+    "description": "LANAgent API v2.25.139 — Instance self-update (every fork keeps itself current with the official repo via an hourly systemd timer: merge-or-skip default that never clobbers local edits, mirror opt-in, auto-rollback). Token-trader watchlist management endpoints (add/remove rotation candidates; entries persist through rotations, removed only on death/rug). no API-surface changes; reliability/hardening release. Render-tier /scrape screenshots made reliable under concurrent load (they had been absent ~87% of the time): capture the VIEWPORT sized to RENDER_SCREENSHOT_MAX_HEIGHT (default 3000) instead of {fullPage:true}/clip, which avoids Chromium captureBeyondViewport full-document raster (~14.6s -> ~0.2s on a 34k-px page); render screenshots on a dedicated HEADLESS software-raster browser isolated from the live scrape page pool (launchBrowser honors an explicit headless option + uses headless-safe GPU args); on the setContent path block script/xhr/font/media subresources (the DOM is already rendered) and guard every page.evaluate with a Node-side timeout; serialized (RENDER_SCREENSHOT_CONCURRENCY default 1) with a blank-render guard that skips shipping a white PNG. Boot hardening: initial vector intent indexing (embeds plugin intents via an external embedding API) now runs in the BACKGROUND instead of being awaited before the web server binds, so a slow or hung embedding request can no longer wedge boot. See CHANGELOG.md for full version history.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
     "version": "2.25.107"
   },
@@ -11295,6 +11295,96 @@
               ]
             },
             "description": "Exit specific token position (?token=ADDRESS) or all positions. Sells tokens, removes instance from registry, cleans up state."
+          }
+        },
+        {
+          "name": "Token Trader - Add to Watchlist",
+          "request": {
+            "auth": {
+              "type": "apikey",
+              "apikey": [
+                {
+                  "key": "value",
+                  "value": "{{api_key}}",
+                  "type": "string"
+                },
+                {
+                  "key": "key",
+                  "value": "X-API-Key",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"tokenAddress\": \"0xTokenContractAddress\",\n  \"tokenNetwork\": \"bsc\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/crypto/strategy/token-trader/watchlist",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "crypto",
+                "strategy",
+                "token-trader",
+                "watchlist"
+              ]
+            },
+            "description": "Adds a token to the token-trader rotation watchlist (a fallback candidate the trader can rotate into when the active token is abandoned/underperforms — NOT an active position). Metadata is resolved on-chain (undeployed/garbage addresses are rejected), the entry is deduped, added to the base token_trader and every active instance, and persisted so it survives restarts. Watchlist entries persist through rotations and are only auto-removed after 3 consecutive cycles with no price data (dead) or no liquidity (rug); transient RPC/API errors never count, and system tokens (e.g. SKYNET) are never auto-removed."
+          }
+        },
+        {
+          "name": "Token Trader - Remove from Watchlist",
+          "request": {
+            "auth": {
+              "type": "apikey",
+              "apikey": [
+                {
+                  "key": "value",
+                  "value": "{{api_key}}",
+                  "type": "string"
+                },
+                {
+                  "key": "key",
+                  "value": "X-API-Key",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "DELETE",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"tokenAddress\": \"0xTokenContractAddress\",\n  \"tokenNetwork\": \"bsc\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/crypto/strategy/token-trader/watchlist",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "crypto",
+                "strategy",
+                "token-trader",
+                "watchlist"
+              ]
+            },
+            "description": "Removes a token from the token-trader watchlist. Genuinely-allowlisted system tokens (the live hardcoded SKYNET) are protected and cannot be removed; stale system-flagged entries can be."
           }
         },
         {

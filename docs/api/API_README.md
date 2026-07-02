@@ -502,6 +502,34 @@ The wallet identity for credit-purchase records is in `callerAgentId` (existing 
 
 ---
 
+## Recent Updates (July 1, 2026)
+
+### v2.25.139 — Instance self-update + token-trader watchlist management
+
+**Self-update (deployment feature, not an endpoint).** Every instance keeps itself current with the
+official repo — even when deployed from your own fork. `scripts/setup/install.sh` installs an hourly
+systemd timer (`scripts/ops/self-update/lanagent-self-update.sh`) that fetches `upstream/main` and
+applies it with safety rails: npm install on dependency change, `node --check`, restart (pm2 or
+systemd), adaptive `/health` poll, and **auto-rollback** to the previous commit on failure. `origin`
+stays your fork (self-modification PRs go there); updates always come from `upstream`. Strategy via
+`LANAGENT_AUTO_UPDATE_STRATEGY`: `merge` (default — fast-forward or clean merge, and **skips without
+clobbering** if your local edits don't merge cleanly) or `mirror` (hard-reset for appliance instances
+that customize only via `.env`). Master switch `LANAGENT_AUTO_UPDATE=false`.
+
+**Token-trader watchlist management** (rotation candidates the trader can switch into when the active
+token is abandoned/underperforms — not active positions):
+
+- `POST /api/crypto/strategy/token-trader/watchlist` — body `{ tokenAddress, tokenNetwork }`. Resolves
+  metadata on-chain (rejects undeployed/garbage addresses), dedupes, adds to the base trader and every
+  active instance, and persists to DB. Returns `{ success, added, alreadyPresent, entry, watchlist }`.
+- `DELETE /api/crypto/strategy/token-trader/watchlist` — body `{ tokenAddress, tokenNetwork }`.
+  Genuinely-allowlisted system tokens are protected; stale system-flagged entries can be removed.
+
+**Retention semantics:** watchlist entries persist **through rotations** (a selected candidate is not
+removed; the outgoing active token is re-added) and are auto-removed **only** after 3 consecutive
+evaluation cycles returning no price (dead) or no liquidity (liquidity-rugged). Transient RPC/API
+errors never count toward removal, and system tokens are never auto-removed.
+
 ## Recent Updates (May 23, 2026)
 
 ### v2.25.53 — Gateway raster-logo endpoints for ad-platform embedding

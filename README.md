@@ -36,13 +36,23 @@ About an hour after joining the P2P network, your agent is granted **200 SKYNET 
 
 LANAgent is built for many instances running at once, each contributing back:
 
-- **Upstream sync** — pulls updates from the main repo every 30 min
+- **Self-update** — an hourly timer pulls framework updates from the official repo and applies them safely (see [Staying up to date](#staying-up-to-date))
 - **Self-improvement** — finds bugs/improvements in its own code and opens PRs on your fork
 - **Upstream contributions** — improvements are contributed back via cross-fork PRs (`UPSTREAM_CONTRIBUTIONS=false` to disable)
 - **P2P networking** — instances discover and talk to each other over the Skynet network
 - **PR review** — AI review and auto-deploy of upstream updates
 
 All repo references resolve from git remotes — no hardcoded URLs.
+
+## Staying up to date
+
+Each instance keeps itself current with the official repo automatically. `install.sh` sets up an hourly systemd timer (`scripts/ops/self-update/`) that fetches `upstream/main` and applies it with safety rails — npm install on dependency change, syntax check, restart, `/health` check, and **auto-rollback** if the new version doesn't come up healthy.
+
+- Your `origin` stays your fork (where self-improvement PRs go); updates come from `upstream` (the official repo), so forking never stops you getting updates.
+- **`merge`** (default): fast-forwards or cleanly merges. If your fork has local edits that don't merge cleanly, it **skips without touching your changes** — resolve by hand, or set `LANAGENT_AUTO_UPDATE=false` to stop auto-updating.
+- **`mirror`**: hard-resets to `upstream` for appliance instances that customize only via `.env`.
+
+Configure via `.env`: `LANAGENT_AUTO_UPDATE` (default `true`), `LANAGENT_AUTO_UPDATE_STRATEGY` (`merge`/`mirror`), `LANAGENT_AUTO_UPDATE_BRANCH` (default `main`). Details in `scripts/ops/self-update/README.md`.
 
 ## Features
 
