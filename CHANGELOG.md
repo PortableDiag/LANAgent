@@ -2,6 +2,23 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.141] - 2026-07-04
+
+### Fixed — X / Twitter tweet scraping (login-wall bypass)
+
+- **Tweet URLs now return real content instead of failing.** `x.com` / `twitter.com`
+  tweet pages are a client-side app behind a login wall: a logged-out fetch (Cheerio,
+  Puppeteer, or FlareSolverr) only ever receives the ~110 KB JS shell with ~130 bytes of
+  text, so every bypass layer classified the page as a block and the whole cascade spent
+  ~30 s before returning an unprocessable (422) result.
+- Added an **X/Twitter fast-path** to the external scrape service: `/status/<id>` URLs are
+  detected and the tweet is pulled directly as JSON from Twitter's own syndication endpoint
+  (`cdn.syndication.twimg.com`, the one the official embed widget uses — no auth required),
+  with a public-JSON mirror as a fallback. Real tweet text, author, media, and links are
+  returned in a single call instead of a doomed browser cascade. Profile, search, and
+  non-tweet URLs are untouched; requests using custom selectors or structured extraction
+  skip the fast-path and use the normal DOM path.
+
 ## [2.25.140] - 2026-07-03
 
 ### Added — eight plugin/model features (from the self-modification PR queue, re-implemented correctly)
