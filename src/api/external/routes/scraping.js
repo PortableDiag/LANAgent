@@ -300,6 +300,101 @@ async function flareSolverrWithRetry(scraper, { action, url, options }, label = 
   throw lastErr;
 }
 
+// ── X / Twitter syndication fast-path ──────────────────────────────────────
+// x.com / twitter.com tweet pages are a client-side React SPA behind a login
+// wall: a logged-out fetch (cheerio, Puppeteer, or FlareSolverr) gets the
+// ~110KB JS shell with only ~130 bytes of text, so every bypass layer marks it
+// "stub-shaped → block", the VPN can't rotate (auto-connect pinned), and the
+// whole cascade burns ~30s before returning a 422. Twitter's own syndication
+// endpoint (cdn.syndication.twimg.com — the one the official embed widget uses)
+// returns the tweet as JSON with no auth. Detect /status/<id> URLs, pull the
+// id, and fetch that directly: real content in one call instead of a doomed
+// 30s browser cascade. fxtwitter is a public-JSON fallback.
+const TWEET_URL_RE = /^https?:\/\/(?:www\.|mobile\.)?(?:x|twitter|fixupx|fxtwitter|vxtwitter|nitter)\.com\/(?:[^/]+)\/status(?:es)?\/(\d+)/i;
+
+function tweetIdFromUrl(url) {
+  const m = typeof url === 'string' ? url.match(TWEET_URL_RE) : null;
+  return m ? m[1] : null;
+}
+
+// react-tweet's token derivation for the syndication endpoint.
+function syndicationToken(id) {
+  return ((Number(id) / 1e15) * Math.PI).toString(36).replace(/(0+|\.)/g, '');
+}
+
+function normalizeSyndicationTweet(d) {
+  const user = d.user || {};
+  const images = [];
+  for (const m of (Array.isArray(d.mediaDetails) ? d.mediaDetails : [])) {
+    const src = m.media_url_https || m.media_url;
+    if (src) images.push({ src: String(src), alt: String(m.ext_alt_text || '') });
+  }
+  if (images.length === 0) {
+    for (const p of (Array.isArray(d.photos) ? d.photos : [])) {
+      if (p.url) images.push({ src: String(p.url), alt: '' });
+    }
+  }
+  let text = String(d.text || '');
+  if (d.quoted_tweet && typeof d.quoted_tweet.text === 'string') {
+    text += `\n\n↳ Quoting @${d.quoted_tweet.user?.screen_name || ''}: ${d.quoted_tweet.text}`;
+  }
+  const links = (d.entities?.urls || [])
+    .map(u => ({ href: String(u.expanded_url || u.url || ''), text: String(u.display_url || '') }))
+    .filter(l => l.href);
+  const ogImage = images[0]?.src || String(d.video?.poster || user.profile_image_url_https || '');
+  return {
+    title: `${user.name || user.screen_name || 'Tweet'} (@${user.screen_name || ''}) on X`,
+    description: text.slice(0, 200),
+    ogImage, text, links, images,
+    method: 'twitter-syndication'
+  };
+}
+
+function normalizeFxTweet(t) {
+  const author = t.author || {};
+  const images = [];
+  for (const p of (t.media?.photos || [])) if (p.url) images.push({ src: String(p.url), alt: String(p.altText || '') });
+  for (const v of (t.media?.videos || [])) if (v.thumbnail_url) images.push({ src: String(v.thumbnail_url), alt: 'video' });
+  let text = String(t.text || '');
+  if (t.quote && typeof t.quote.text === 'string') {
+    text += `\n\n↳ Quoting @${t.quote.author?.screen_name || ''}: ${t.quote.text}`;
+  }
+  const ogImage = images[0]?.src || String(author.avatar_url || '');
+  return {
+    title: `${author.name || author.screen_name || 'Tweet'} (@${author.screen_name || ''}) on X`,
+    description: text.slice(0, 200),
+    ogImage, text, links: [], images,
+    method: 'twitter-fxtwitter'
+  };
+}
+
+async function fetchTweetJson(id) {
+  const axios = (await import('axios')).default;
+  const headers = { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36', 'Accept': 'application/json' };
+  // 1) Twitter's own syndication endpoint (authoritative, no third party).
+  try {
+    const token = syndicationToken(id);
+    const r = await axios.get(`https://cdn.syndication.twimg.com/tweet-result?id=${id}&token=${token}&lang=en`, { timeout: 12000, headers });
+    const d = r.data;
+    if (d && typeof d === 'object' && typeof d.text === 'string' && (d.__typename === 'Tweet' || d.user)) {
+      return normalizeSyndicationTweet(d);
+    }
+  } catch (e) {
+    logger.warn(`[ExternalScrape] Twitter syndication failed for tweet ${id}: ${String(e.message).slice(0, 80)}`);
+  }
+  // 2) fxtwitter public-JSON mirror as a fallback.
+  try {
+    const r = await axios.get(`https://api.fxtwitter.com/status/${id}`, { timeout: 12000, headers });
+    const t = r.data?.tweet;
+    if (r.data?.code === 200 && t && typeof t.text === 'string') {
+      return normalizeFxTweet(t);
+    }
+  } catch (e) {
+    logger.warn(`[ExternalScrape] fxtwitter failed for tweet ${id}: ${String(e.message).slice(0, 80)}`);
+  }
+  return null;
+}
+
 async function executeScrape(req, { url, selectors, extractType = 'text', userAgent, usePuppeteer = false, renderTier = false, fsOnBlock = false, fullPage = false, viewport = null, _deadline = 0 }) {
   // Best-effort budget: once spent, stop reaching for slower fallback layers and
   // return whatever we have. _deadline is an absolute epoch-ms set once by the
@@ -327,6 +422,37 @@ async function executeScrape(req, { url, selectors, extractType = 'text', userAg
   const cacheKey = `${action}:${url}:${JSON.stringify(selectors || '')}:render=${renderTier}:fp=${!!fullPage}`;
   const cached = scrapeCache.get(cacheKey);
   if (cached) return cached;
+
+  // X/Twitter tweet fast-path (see fetchTweetJson): pull /status/<id> URLs as
+  // JSON instead of running the browser cascade that only ever gets the login
+  // wall. Skipped when custom selectors or structured extraction are requested
+  // (those need the real DOM). No screenshot is produced — a logged-out tweet
+  // page is just a login wall, so real text beats a useless render.
+  const tweetId = (!selectors && extractType !== 'structured') ? tweetIdFromUrl(url) : null;
+  if (tweetId) {
+    const tw = await fetchTweetJson(tweetId);
+    if (tw) {
+      logger.info(`[ExternalScrape] ${tw.method} served tweet ${tweetId} for ${url} (text=${tw.text.length}B)`);
+      const response = {
+        success: true,
+        url,
+        data: {
+          title: tw.title,
+          description: tw.description,
+          ogImage: tw.ogImage,
+          text: tw.text,
+          links: tw.links,
+          images: tw.images,
+          structuredData: [],
+          microdata: []
+        },
+        method: tw.method
+      };
+      scrapeCache.set(cacheKey, response);
+      return response;
+    }
+    logger.info(`[ExternalScrape] Tweet JSON path returned nothing for ${url} — falling through to normal scrape`);
+  }
 
   let result;
   try {
