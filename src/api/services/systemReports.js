@@ -296,6 +296,42 @@ router.get('/reports/trends', authenticateToken, async (req, res) => {
 });
 
 /**
+ * Compare averaged performance metrics between two date ranges.
+ * Query: period1Start, period1End, period2Start, period2End (ISO dates),
+ *        metrics (optional CSV allowlist of metric keys)
+ */
+router.get('/reports/comparison', authenticateToken, async (req, res) => {
+  try {
+    const { period1Start, period1End, period2Start, period2End, metrics } = req.query;
+    if (!period1Start || !period1End || !period2Start || !period2End) {
+      return res.status(400).json({
+        success: false,
+        error: 'period1Start, period1End, period2Start and period2End are required (ISO dates)'
+      });
+    }
+
+    const dates = [period1Start, period1End, period2Start, period2End].map(d => new Date(d));
+    if (dates.some(d => isNaN(d))) {
+      return res.status(400).json({ success: false, error: 'All period dates must be valid ISO dates' });
+    }
+    const metricList = metrics ? String(metrics).split(',').map(m => m.trim()).filter(Boolean) : [];
+
+    const comparison = await retryOperation(
+      () => SystemReport.getPerformanceComparison(dates[0], dates[1], dates[2], dates[3], metricList),
+      { retries: 3, context: 'SystemReport.getPerformanceComparison' }
+    );
+
+    res.json({ success: true, comparison });
+  } catch (error) {
+    logger.error('Failed to get performance comparison:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to retrieve performance comparison'
+    });
+  }
+});
+
+/**
  * Delete old reports
  * DELETE /api/system/reports/cleanup
  * 

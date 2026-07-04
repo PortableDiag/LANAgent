@@ -80,6 +80,26 @@ router.post('/propose', async (req, res) => {
 });
 
 /**
+ * POST /api/coordination/validate
+ * Validate a coordination intent without creating it on-chain (dry run)
+ */
+router.post('/validate', async (req, res) => {
+    try {
+        const { type, participants, payload, expiryHours } = req.body;
+        if (!type || !participants?.length) {
+            return res.status(400).json({ success: false, error: 'type and participants are required' });
+        }
+        const validation = await agentCoordinationService.validateCoordination(
+            type, participants, payload || {}, expiryHours
+        );
+        res.json({ success: true, ...validation });
+    } catch (err) {
+        logger.error('Validate coordination error:', err);
+        res.status(500).json({ success: false, error: err.message });
+    }
+});
+
+/**
  * POST /api/coordination/:intentHash/accept
  * Accept a coordination intent
  */

@@ -5,6 +5,7 @@ import { creditAuth } from '../middleware/creditAuth.js';
 import { creditDebit } from '../middleware/creditDebit.js';
 import { generateDownloadToken } from '../services/downloadTokenService.js';
 import { logger } from '../../../utils/logger.js';
+import YoutubeDownload from '../../../models/YoutubeDownload.js';
 
 const router = Router();
 
@@ -13,6 +14,14 @@ const CREDIT_COSTS = { mp4: 10, mp3: 8 };
 // Determine service ID based on format
 function getServiceId(format) {
   return format === 'mp3' ? 'youtube-audio' : 'youtube-download';
+}
+
+// Best-effort history recording — fire-and-forget so it can never add latency
+// to, or fail, a download response.
+function recordDownload(fields) {
+  YoutubeDownload.create(fields).catch(err =>
+    logger.warn(`YouTube history: failed to record download: ${err.message}`)
+  );
 }
 
 router.post('/download',
@@ -68,6 +77,10 @@ router.post('/download',
       });
 
       if (!result.success || !result.file?.path) {
+        recordDownload({
+          agentId: req.externalAgentId, url, format, quality,
+          status: 'failed', error: result.error || 'Download failed'
+        });
         return res.status(500).json({
           success: false,
           error: result.error || 'Download failed'
@@ -82,6 +95,14 @@ router.post('/download',
         expiresInMinutes: 60
       });
 
+      recordDownload({
+        agentId: req.externalAgentId, url, format, quality,
+        title: result.title || result.info?.title || '',
+        filename: result.file.filename || '',
+        fileSize: result.file.size || 0,
+        status: 'completed'
+      });
+
       res.json({
         success: true,
         downloadUrl: `/api/external/download/${token}`,
@@ -92,9 +113,26 @@ router.post('/download',
       });
     } catch (error) {
       logger.error('YouTube download failed:', error);
+      recordDownload({
+        agentId: req.externalAgentId, url, format, quality,
+        status: 'failed', error: error.message || 'Download processing failed'
+      });
       res.status(500).json({ success: false, error: 'Download processing failed' });
     }
   }
 );
+
+// Paginated download history for the authenticated agent.
+router.get('/history', externalAuthMiddleware, async (req, res) => {
+  try {
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 20;
+    const history = await YoutubeDownload.getHistory(req.externalAgentId, page, limit);
+    res.json({ success: true, ...history });
+  } catch (error) {
+    logger.error('YouTube history failed:', error);
+    res.status(500).json({ success: false, error: 'Failed to retrieve download history' });
+  }
+});
 
 export default router;

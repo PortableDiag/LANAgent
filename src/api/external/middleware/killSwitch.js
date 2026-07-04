@@ -60,6 +60,25 @@ export function isKillSwitchActive() {
   return killSwitchActive;
 }
 
+/**
+ * Report current kill-switch status for the admin dashboard. Refreshes from
+ * PluginSettings first so the reported state reflects DB truth, not a stale
+ * in-memory snapshot. Before the first check, lastCheck/nextCheck are null
+ * (rather than a 1970 epoch).
+ * @returns {Promise<Object>}
+ */
+export async function getKillSwitchStatus() {
+  await refreshKillSwitch();
+  return {
+    active: killSwitchActive,
+    scheduledActive: isScheduledKillSwitchActive(),
+    schedule: [...killSwitchSchedule],
+    lastCheck: lastCheck ? new Date(lastCheck).toISOString() : null,
+    nextCheck: lastCheck ? new Date(lastCheck + CHECK_INTERVAL).toISOString() : null,
+    checkInterval: CHECK_INTERVAL
+  };
+}
+
 export async function killSwitchMiddleware(req, res, next) {
   // Admin routes bypass kill switch (needed to toggle it off)
   if (req.path.startsWith('/admin')) {

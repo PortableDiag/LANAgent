@@ -192,4 +192,49 @@ router.get('/api/status', authenticateToken, async (req, res) => {
   }
 });
 
+// Bulk-create SSH connections (one save-connection call per item)
+router.post('/api/connections/bulk', authenticateToken, async (req, res) => {
+  try {
+    const agent = req.app.locals.agent;
+    const { connections } = req.body;
+
+    if (!Array.isArray(connections) || connections.length === 0) {
+      return res.status(400).json({ success: false, error: 'connections must be a non-empty array' });
+    }
+    if (connections.length > 50) {
+      return res.status(400).json({ success: false, error: 'Too many connections (max 50 per request)' });
+    }
+
+    const results = [];
+    for (const connection of connections) {
+      try {
+        // Whitelist fields and force the action LAST so a caller-supplied
+        // `action` in the item body cannot override it and invoke an arbitrary
+        // plugin action (connect/execute/disconnect).
+        const { name, host, port, username, password, privateKey, description, tags } = connection || {};
+        const result = await agent.apiManager.executeAPI('ssh', 'execute', {
+          name, host, username, password, privateKey, description, tags,
+          port: parseInt(port) || 22,
+          action: 'save-connection'
+        });
+        results.push(result);
+      } catch (error) {
+        results.push({
+          success: false,
+          error: error.message || 'Failed to create connection',
+          connection: connection?.name || connection?.host
+        });
+      }
+    }
+
+    res.json({ success: true, results });
+  } catch (error) {
+    logger.error('SSH bulk create connections failed:', { error: error.message, stack: error.stack });
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to create SSH connections in bulk'
+    });
+  }
+});
+
 export default router;
