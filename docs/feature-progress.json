@@ -1,9 +1,33 @@
 {
-  "lastUpdated": "2026-07-01T18:30:00.000Z",
+  "lastUpdated": "2026-07-03T21:15:00.000Z",
   "overallProgress": "100%",
-  "status": "PRODUCTION READY — v2.25.139",
-  "milestone": "273 features tracked; see CHANGELOG.md for history.",
+  "status": "PRODUCTION READY — v2.25.140",
+  "milestone": "274 features tracked; see CHANGELOG.md for history.",
   "features": {
+    "v2_25_140_2026_07_03": {
+      "status": "deployed",
+      "progress": "100%",
+      "addedDate": "2026-07-03",
+      "version": "2.25.140",
+      "description": "Cleared the AI-authored capability-upgrade PR queue (10 PRs): each reviewed against the actual codebase and the salvageable ones re-implemented correctly rather than merged as-is — fixing hallucinated method calls, wrong API endpoints, dead code, a standalone-Mongo transaction misuse, a double-slice pagination bug, and an action-injection hole. Reused node-cache; no new deps. Eight features shipped: ThousandEyes monitoring plugin (v7 REST, cached); EmailLease.bulkManage + POST /api/email-leases/bulk (batch revoke/extend, partial-result reporting, no transaction because mongod is standalone); off-chain validateCoordination + POST /api/coordination/validate dry-run; getKillSwitchStatus + GET /admin/kill-switch/status; YoutubeDownload model + GET /api/external/youtube/history (paginated); SystemReport.getPerformanceComparison + GET /reports/comparison; Journal entry pagination fixed (true count, cache invalidation) and wired into the plugin list; SSH bulk create POST /api/connections/bulk (whitelisted fields, action fixed, 50-item cap). One PR closed as redundant (ContractABI model cache — already cached at the service layer); one PR's risky save-blocking device-group rule rejected while keeping its read-only detectConflicts diagnostic.",
+      "files": [
+        "src/api/plugins/thousandeyes.js",
+        "src/models/YoutubeDownload.js",
+        "src/models/EmailLease.js",
+        "src/interfaces/web/p2p.js",
+        "src/services/crypto/agentCoordinationService.js",
+        "src/api/coordination.js",
+        "src/api/external/middleware/killSwitch.js",
+        "src/api/external/externalGateway.js",
+        "src/api/external/routes/youtube.js",
+        "src/models/SystemReport.js",
+        "src/api/services/systemReports.js",
+        "src/models/Journal.js",
+        "src/api/plugins/journal.js",
+        "src/interfaces/web/ssh.js",
+        "src/models/DeviceGroup.js"
+      ]
+    },
     "v2_25_139_2026_07_01": {
       "status": "deployed",
       "progress": "100%",
