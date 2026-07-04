@@ -1461,6 +1461,18 @@ router.post('/api/email-leases/:leaseId/reset-password', authenticateToken, asyn
   }
 });
 
+// Admin bulk-manage leases (revoke/extend many at once)
+router.post('/api/email-leases/bulk', authenticateToken, async (req, res) => {
+  try {
+    const EmailLease = (await import('../../models/EmailLease.js')).default;
+    const result = await EmailLease.bulkManage(req.body.operations || []);
+    res.json(result);
+  } catch (error) {
+    logger.error('Email lease bulk API error:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
 // ==================== Economy Stats ====================
 
 router.get('/api/skynet/economy', authenticateToken, async (req, res) => {

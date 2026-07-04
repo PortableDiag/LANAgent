@@ -43,6 +43,31 @@ deviceGroupSchema.pre('save', function(next) {
   next();
 });
 
+/**
+ * Read-only diagnostic: find devices that belong to more than one group within
+ * a plugin. Reporting ONLY — deliberately NOT wired into save validation, since
+ * a device legitimately belonging to multiple groups (e.g. "LivingRoom" and
+ * "AllLights") is a supported configuration; blocking it would break existing
+ * groups. Lets an admin surface overlaps without changing write behaviour.
+ * @param {string} pluginName
+ * @returns {Promise<Array<{deviceId:string, count:number, groups:string[]}>>}
+ */
+deviceGroupSchema.statics.detectConflicts = async function(pluginName) {
+  try {
+    const pipeline = [
+      { $match: { pluginName } },
+      { $unwind: '$devices' },
+      { $group: { _id: '$devices.deviceId', count: { $sum: 1 }, groups: { $push: '$name' } } },
+      { $match: { count: { $gt: 1 } } }
+    ];
+    const result = await retryOperation(() => this.aggregate(pipeline));
+    return result.map(item => ({ deviceId: item._id, count: item.count, groups: item.groups }));
+  } catch (error) {
+    logger.error('Device group conflict detection failed', { pluginName, error: error.message });
+    throw error;
+  }
+};
+
 // Static method to find group by name (case-insensitive) with caching
 deviceGroupSchema.statics.findByName = async function(name, pluginName = 'govee') {
   const cacheKey = `findByName:${name}:${pluginName}`;

@@ -14,7 +14,7 @@ const ipBucket = (ip) => {
 import { killSwitchMiddleware } from './middleware/killSwitch.js';
 import { auditLogMiddleware } from './middleware/auditLog.js';
 import { responseSanitizer } from './middleware/responseSanitizer.js';
-import { setKillSwitch, isKillSwitchActive } from './middleware/killSwitch.js';
+import { setKillSwitch, isKillSwitchActive, getKillSwitchStatus } from './middleware/killSwitch.js';
 import ExternalServiceConfig from '../../models/ExternalServiceConfig.js';
 import { logger } from '../../utils/logger.js';
 import { authenticateToken } from '../../interfaces/web/auth.js';
@@ -214,6 +214,18 @@ router.post('/admin/kill-switch', authenticateToken, async (req, res) => {
 
   logger.warn(`External gateway kill switch ${active ? 'ACTIVATED' : 'deactivated'} by admin`);
   res.json({ success: true, killSwitchActive: !!active });
+});
+
+// Detailed kill-switch status (active state, schedule, next check). Under
+// /admin so it bypasses the kill switch itself and stays reachable while active.
+router.get('/admin/kill-switch/status', authenticateToken, async (req, res) => {
+  try {
+    const status = await getKillSwitchStatus();
+    res.json({ success: true, ...status });
+  } catch (error) {
+    logger.error('Kill switch status error:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
 });
 
 router.get('/admin/payments', authenticateToken, async (req, res) => {

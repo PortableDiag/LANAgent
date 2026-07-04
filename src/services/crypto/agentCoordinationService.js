@@ -706,6 +706,52 @@ class AgentCoordinationService {
     getCoordinationTypes() {
         return Object.keys(COORDINATION_TYPES);
     }
+
+    /**
+     * Validate a coordination intent WITHOUT creating it on-chain.
+     * Pure/off-chain: no signer, no contract, no gas. Safe to call pre-init
+     * (only checks type-name keys and address/expiry shape). Mirrors the
+     * guards in proposeCoordination so callers can dry-run before committing.
+     *
+     * @param {string} typeName - one of getCoordinationTypes()
+     * @param {string[]} participantAddresses - participant wallet addresses
+     * @param {object} [payloadData] - coordination payload (optional)
+     * @param {number} [expiryHours] - hours until expiry (default 1)
+     * @returns {Promise<{valid: boolean, issues: string[]}>}
+     */
+    async validateCoordination(typeName, participantAddresses, payloadData = {}, expiryHours = 1) {
+        const ethers = await import('ethers');
+        const issues = [];
+
+        if (!typeName || !(typeName in COORDINATION_TYPES)) {
+            issues.push(`Unknown coordination type: ${typeName}. Valid types: ${Object.keys(COORDINATION_TYPES).join(', ')}`);
+        }
+
+        if (!Array.isArray(participantAddresses) || participantAddresses.length === 0) {
+            issues.push('participants must be a non-empty array of addresses');
+        } else {
+            for (const addr of participantAddresses) {
+                if (!ethers.isAddress(addr)) {
+                    issues.push(`Invalid participant address: ${addr}`);
+                }
+            }
+        }
+
+        const hours = Number(expiryHours);
+        if (!Number.isFinite(hours) || hours <= 0) {
+            issues.push('expiryHours must be a positive number');
+        }
+
+        if (payloadData && payloadData.totalBudget !== undefined) {
+            try {
+                ethers.parseEther(payloadData.totalBudget.toString());
+            } catch {
+                issues.push(`Invalid totalBudget: ${payloadData.totalBudget}`);
+            }
+        }
+
+        return { valid: issues.length === 0, issues };
+    }
 }
 
 export default new AgentCoordinationService();

@@ -291,7 +291,18 @@ export default class JournalPlugin extends BasePlugin {
     const userId = data.userId || data.query || 'default';
     const limit = data.limit || 10;
 
-    const journals = await Journal.findRecent(userId, limit);
+    // Paginated path (when a page is requested) uses the cached paginateEntries
+    // static; otherwise keep the original recent-list behaviour unchanged.
+    let journals;
+    let pagination = null;
+    if (data.page !== undefined) {
+      const page = Math.max(0, parseInt(data.page) || 0);
+      const result = await Journal.paginateEntries(userId, page, limit);
+      journals = result.journals;
+      pagination = result.pagination;
+    } else {
+      journals = await Journal.findRecent(userId, limit);
+    }
 
     if (journals.length === 0) {
       return { success: true, result: 'No journal entries found.' };
@@ -301,14 +312,19 @@ export default class JournalPlugin extends BasePlugin {
     for (const j of journals) {
       const date = j.createdAt.toLocaleDateString();
       const status = j.status === 'active' ? ' [ACTIVE]' : '';
-      const entryCount = j.metadata?.entryCount || j.entries.length;
+      const entryCount = j.metadata?.entryCount ?? j.entries?.length ?? 0;
       const words = j.metadata?.totalWordCount || 0;
       text += `- ${date}: ${j.title || 'Untitled'}${status} (${entryCount} entries, ${words} words)`;
       if (j.mood) text += ` [${j.mood}]`;
       text += '\n';
     }
 
-    return { success: true, result: text.trim() };
+    if (pagination) {
+      text += `\nPage ${pagination.page + 1} (${pagination.total} total`;
+      text += pagination.hasNext ? ', more available)' : ')';
+    }
+
+    return { success: true, result: text.trim(), ...(pagination ? { pagination } : {}) };
   }
 
   async viewJournal(data) {

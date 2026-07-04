@@ -167,5 +167,65 @@ emailLeaseSchema.statics.sendExpirationNotifications = async function(daysAhead 
   return { sent, skipped };
 };
 
+/**
+ * Bulk-manage email leases — revoke or extend many leases in one call.
+ *
+ * Each operation is `{ action: 'revoke', leaseIds: [...], reason }` or
+ * `{ action: 'extend', leaseIds: [...], days }`. Operations are applied
+ * independently and partial success is returned: a bad operation is recorded
+ * in `errors` without discarding the ones that succeeded.
+ *
+ * NOTE: deliberately no multi-document transaction — production runs a
+ * standalone mongod (no replica set), where `session.withTransaction()` throws.
+ * Each `updateMany` is already atomic on its own, which is all this needs.
+ * Bulk revoke updates the model directly and does NOT emit the per-peer P2P
+ * `email_lease_revoke` notification the single-lease admin route sends; it is an
+ * administrative batch op.
+ *
+ * @param {Array<{action:string, leaseIds:string[], reason?:string, days?:number}>} operations
+ * @returns {Promise<{success: boolean, processed: number, errors: Array}>}
+ */
+emailLeaseSchema.statics.bulkManage = async function(operations) {
+  let processed = 0;
+  const errors = [];
+
+  if (!Array.isArray(operations) || operations.length === 0) {
+    return { success: false, processed: 0, errors: [{ error: 'operations must be a non-empty array' }] };
+  }
+
+  for (const op of operations) {
+    try {
+      if (!op || !Array.isArray(op.leaseIds) || op.leaseIds.length === 0) {
+        errors.push({ operation: op, error: 'leaseIds must be a non-empty array' });
+        continue;
+      }
+
+      if (op.action === 'revoke') {
+        const result = await this.updateMany(
+          { leaseId: { $in: op.leaseIds }, status: { $in: ['active', 'pending'] } },
+          { $set: { status: 'revoked', revokedAt: new Date(), revokeReason: op.reason || 'Bulk operation' } }
+        );
+        processed += result.modifiedCount;
+      } else if (op.action === 'extend') {
+        const days = Number(op.days) || 30;
+        const extensionDate = new Date();
+        extensionDate.setDate(extensionDate.getDate() + days);
+
+        const result = await this.updateMany(
+          { leaseId: { $in: op.leaseIds }, status: 'active' },
+          { $set: { expiresAt: extensionDate, renewedAt: new Date() } }
+        );
+        processed += result.modifiedCount;
+      } else {
+        errors.push({ operation: op, error: `Invalid action specified: ${op.action}` });
+      }
+    } catch (err) {
+      errors.push({ operation: op, error: err.message });
+    }
+  }
+
+  return { success: errors.length === 0, processed, errors };
+};
+
 export const EmailLease = mongoose.model('EmailLease', emailLeaseSchema);
 export default EmailLease;
