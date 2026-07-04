@@ -2,6 +2,36 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.140] - 2026-07-03
+
+### Added — eight plugin/model features (from the self-modification PR queue, re-implemented correctly)
+
+Cleared the AI-authored capability-upgrade PR queue: each PR was reviewed against the actual
+codebase and the salvageable ones re-implemented correctly (fixing hallucinated calls, wrong
+endpoints, dead code, and logic bugs) rather than merged as-is. Reused existing dependencies
+(`node-cache`) — no new ones.
+
+- **ThousandEyes monitoring plugin** (`thousandeyes`) — list agents, agent status, list tests via
+  the ThousandEyes v7 REST API, with `node-cache`-backed responses (5-min TTL).
+- **Bulk email-lease management** — `EmailLease.bulkManage()` + authenticated
+  `POST /api/email-leases/bulk` for batch revoke/extend. Partial-result reporting
+  (`{success, processed, errors}`); no multi-document transaction (standalone Mongo).
+- **Coordination dry-run** — off-chain `validateCoordination()` +
+  `POST /api/coordination/validate` to validate a coordination intent (type / participants /
+  expiry / budget) without creating it on-chain.
+- **Kill-switch status** — `GET /admin/kill-switch/status` (authenticated) reporting active state,
+  schedule, and next check time.
+- **YouTube download history** — new `YoutubeDownload` model, best-effort recording in the download
+  handler (never blocks a download), and `GET /api/external/youtube/history` (paginated, per agent).
+- **System-report period comparison** — `SystemReport.getPerformanceComparison()` +
+  `GET /reports/comparison` to diff averaged metrics between two date ranges.
+- **Journal entry pagination** — correct per-journal entry pagination (true count via `$size`),
+  cache invalidation on write, and a paginated `list` path in the journal plugin (backward compatible).
+- **SSH bulk connection create** — `POST /api/connections/bulk` (fields whitelisted, action fixed to
+  prevent injection, capped at 50 items per request).
+- **Device-group conflict diagnostic** — read-only `DeviceGroup.detectConflicts()` reporting devices
+  that belong to more than one group (reporting only; no change to write behaviour).
+
 ## [2.25.139] - 2026-07-01
 
 ### Added — instance self-update (keep your fork current with the official repo)

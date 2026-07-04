@@ -2,9 +2,9 @@
   "info": {
     "_postman_id": "9b5edc66-ea34-4329-a9d5-baca5366e76d",
     "name": "LANAgent API Collection",
-    "description": "LANAgent API v2.25.139 — Instance self-update (every fork keeps itself current with the official repo via an hourly systemd timer: merge-or-skip default that never clobbers local edits, mirror opt-in, auto-rollback). Token-trader watchlist management endpoints (add/remove rotation candidates; entries persist through rotations, removed only on death/rug). no API-surface changes; reliability/hardening release. Render-tier /scrape screenshots made reliable under concurrent load (they had been absent ~87% of the time): capture the VIEWPORT sized to RENDER_SCREENSHOT_MAX_HEIGHT (default 3000) instead of {fullPage:true}/clip, which avoids Chromium captureBeyondViewport full-document raster (~14.6s -> ~0.2s on a 34k-px page); render screenshots on a dedicated HEADLESS software-raster browser isolated from the live scrape page pool (launchBrowser honors an explicit headless option + uses headless-safe GPU args); on the setContent path block script/xhr/font/media subresources (the DOM is already rendered) and guard every page.evaluate with a Node-side timeout; serialized (RENDER_SCREENSHOT_CONCURRENCY default 1) with a blank-render guard that skips shipping a white PNG. Boot hardening: initial vector intent indexing (embeds plugin intents via an external embedding API) now runs in the BACKGROUND instead of being awaited before the web server binds, so a slow or hung embedding request can no longer wedge boot. See CHANGELOG.md for full version history.",
+    "description": "LANAgent API v2.25.140 — Self-mod PR-queue features: bulk email-lease management, coordination dry-run validate, kill-switch status, YouTube download history, system-report period comparison, SSH bulk connection create, and a ThousandEyes monitoring plugin. Instance self-update (every fork keeps itself current with the official repo via an hourly systemd timer: merge-or-skip default that never clobbers local edits, mirror opt-in, auto-rollback). Token-trader watchlist management endpoints (add/remove rotation candidates; entries persist through rotations, removed only on death/rug). no API-surface changes; reliability/hardening release. Render-tier /scrape screenshots made reliable under concurrent load (they had been absent ~87% of the time): capture the VIEWPORT sized to RENDER_SCREENSHOT_MAX_HEIGHT (default 3000) instead of {fullPage:true}/clip, which avoids Chromium captureBeyondViewport full-document raster (~14.6s -> ~0.2s on a 34k-px page); render screenshots on a dedicated HEADLESS software-raster browser isolated from the live scrape page pool (launchBrowser honors an explicit headless option + uses headless-safe GPU args); on the setContent path block script/xhr/font/media subresources (the DOM is already rendered) and guard every page.evaluate with a Node-side timeout; serialized (RENDER_SCREENSHOT_CONCURRENCY default 1) with a blank-render guard that skips shipping a white PNG. Boot hardening: initial vector intent indexing (embeds plugin intents via an external embedding API) now runs in the BACKGROUND instead of being awaited before the web server binds, so a slow or hung embedding request can no longer wedge boot. See CHANGELOG.md for full version history.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
-    "version": "2.25.107"
+    "version": "2.25.140"
   },
   "auth": {
     "type": "bearer",
@@ -20325,6 +20325,168 @@
         "description": "Stateless image transcode with oversize-passthrough. 2 credits, refunded on failure."
       },
       "response": []
+    },
+    {
+      "name": "v2.25.140 New Endpoints",
+      "description": "Endpoints added in v2.25.140. Collection bearer auth unless noted; the two /api/external/* endpoints run on the external gateway.",
+      "item": [
+        {
+          "name": "Email Leases — Bulk Manage",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/email-leases/bulk",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "email-leases",
+                "bulk"
+              ]
+            },
+            "description": "Batch revoke/extend; returns {success, processed, errors} (partial success).",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"operations\": [\n    {\n      \"action\": \"revoke\",\n      \"leaseIds\": [\n        \"<leaseId>\"\n      ],\n      \"reason\": \"admin cleanup\"\n    },\n    {\n      \"action\": \"extend\",\n      \"leaseIds\": [\n        \"<leaseId>\"\n      ],\n      \"days\": 30\n    }\n  ]\n}"
+            }
+          }
+        },
+        {
+          "name": "Coordination — Validate (dry run)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/coordination/validate",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "coordination",
+                "validate"
+              ]
+            },
+            "description": "Off-chain validation; no signer/gas. Returns {success, valid, issues}.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"type\": \"JOINT_MONITORING\",\n  \"participants\": [\n    \"0x0000000000000000000000000000000000000000\"\n  ],\n  \"payload\": {},\n  \"expiryHours\": 1\n}"
+            }
+          }
+        },
+        {
+          "name": "Kill Switch — Status",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/admin/kill-switch/status",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "admin",
+                "kill-switch",
+                "status"
+              ]
+            },
+            "description": "External gateway (auth). {active, scheduledActive, schedule, lastCheck, nextCheck, checkInterval}."
+          }
+        },
+        {
+          "name": "YouTube — Download History",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/external/youtube/history?page=1&limit=20",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "external",
+                "youtube",
+                "history?page=1&limit=20"
+              ]
+            },
+            "description": "External gateway (auth). Paginated per-agent download history."
+          }
+        },
+        {
+          "name": "System Reports — Comparison",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/reports/comparison?period1Start=2026-06-01&period1End=2026-06-15&period2Start=2026-06-16&period2End=2026-06-30&metrics=avgResponseTime,errorsLogged",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "reports",
+                "comparison?period1Start=2026-06-01&period1End=2026-06-15&period2Start=2026-06-16&period2End=2026-06-30&metrics=avgResponseTime,errorsLogged"
+              ]
+            },
+            "description": "Compare averaged metrics between two ISO date ranges."
+          }
+        },
+        {
+          "name": "SSH — Bulk Create Connections",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/connections/bulk",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "connections",
+                "bulk"
+              ]
+            },
+            "description": "Bulk-create (max 50); fields whitelisted; action fixed to save-connection.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"connections\": [\n    {\n      \"name\": \"host-a\",\n      \"host\": \"10.0.0.10\",\n      \"port\": 22,\n      \"username\": \"root\"\n    },\n    {\n      \"name\": \"host-b\",\n      \"host\": \"10.0.0.11\",\n      \"port\": 22,\n      \"username\": \"root\"\n    }\n  ]\n}"
+            }
+          }
+        }
+      ]
     }
   ]
 }

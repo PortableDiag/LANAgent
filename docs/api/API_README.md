@@ -502,7 +502,29 @@ The wallet identity for credit-purchase records is in `callerAgentId` (existing 
 
 ---
 
-## Recent Updates (July 1, 2026)
+## Recent Updates (July 3, 2026)
+
+### v2.25.140 — Eight plugin/model features from the self-mod PR queue
+
+Cleared the AI-authored capability-upgrade PR queue — each reviewed against the codebase and the
+salvageable ones re-implemented correctly (no new dependencies; reused `node-cache`). New API surface:
+
+- **`POST /api/email-leases/bulk`** (auth) — batch revoke/extend leases. Body:
+  `{ operations: [{ action: 'revoke', leaseIds: [...], reason }, { action: 'extend', leaseIds: [...], days }] }`.
+  Returns `{ success, processed, errors }` (partial success; a bad op does not roll back the rest).
+- **`POST /api/coordination/validate`** (auth) — dry-run validate a coordination intent without
+  creating it on-chain. Body: `{ type, participants, payload, expiryHours }` → `{ success, valid, issues }`.
+- **`GET /admin/kill-switch/status`** (external gateway, auth) — `{ active, scheduledActive, schedule,
+  lastCheck, nextCheck, checkInterval }`.
+- **`GET /api/external/youtube/history`** (external, auth) — paginated download history for the
+  requesting agent. Query: `page`, `limit`. Returns `{ items, total, page, limit, totalPages }`.
+- **`GET /reports/comparison`** (auth) — compare averaged system-report metrics between two periods.
+  Query: `period1Start`, `period1End`, `period2Start`, `period2End` (ISO), optional `metrics` (CSV).
+- **`POST /api/connections/bulk`** (auth) — bulk-create SSH connections. Body: `{ connections: [...] }`
+  (max 50). Each item's fields are whitelisted; the plugin action is fixed to `save-connection`.
+- **ThousandEyes plugin** (`thousandeyes`) — `listAgents`, `getAgentStatus`, `listTests` (v7 REST,
+  cached). Requires `THOUSANDEYES_API_KEY`.
+- **Journal `list`** now accepts an optional `page` param for entry pagination (backward compatible).
 
 ### v2.25.139 — Instance self-update + token-trader watchlist management
 
