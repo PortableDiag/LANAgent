@@ -1,9 +1,31 @@
 {
-  "lastUpdated": "2026-07-03T21:15:00.000Z",
+  "lastUpdated": "2026-07-12T17:40:00.000Z",
   "overallProgress": "100%",
-  "status": "PRODUCTION READY — v2.25.140",
-  "milestone": "274 features tracked; see CHANGELOG.md for history.",
+  "status": "PRODUCTION READY — v2.25.145",
+  "milestone": "Download safety and self-healing correctness. The single-video download path accepted any URL, so a channel, feed, or bare-domain URL (e.g. https://youtube.com) made the extractor enumerate the entire collection behind it and download every item until the disk filled. Downloads now reject collection URLs — pointing the caller at the playlist command — and are hard-bounded to one item as a backstop; the playlist command no longer treats an unspecified maxItems as unlimited (cap 50). Separately, self-healing fed every mounted filesystem into its disk-cleanup rule, including network shares and pseudo-filesystems: a network share above the threshold tripped the rule on every cycle while the cleanup action (which prunes only logs and /tmp) could never resolve it, so the rule retried indefinitely and consumed its hourly attempt budget on a phantom condition — leaving disk self-healing unavailable for the actual root disk. Self-healing now considers local writable filesystems only.",
   "features": {
+    "v2_25_145_2026_07_12": {
+      "status": "deployed",
+      "progress": "100%",
+      "addedDate": "2026-07-12",
+      "version": "2.25.145",
+      "description": "Bounded media downloads + self-healing disk-rule correctness. (1) The ytdlp plugin single-video path (downloadMedia) validated only that a URL was present, never that it pointed at one media item. A collection URL — a bare domain, a channel root, a user/handle root, a feed, or a channel tab — makes yt-dlp enumerate everything behind it, so https://youtube.com downloaded the entire homepage recommendation feed and would run until the disk filled. downloadMedia now rejects collection URLs via isBulkUrl() with an error directing the caller to the playlist command, and the generated command carries --no-playlist --playlist-items 1 as a hard backstop for any shape the guard misses. --max-downloads 1 was deliberately not used: yt-dlp exits 101 on MaxDownloadsReached, which would report every successful single download as a failure. Genuine video URLs are unaffected, including handle-scoped ones such as /@user/video/<id> and a video that merely belongs to a playlist (watch?v=<id>&list=<id>). (2) downloadPlaylist defaulted maxItems to 0 and applied the limit only when maxItems > 0, so the default call was unbounded; an unspecified call is now capped at 50 items. (3) selfHealingService.collectSystemState() passed every filesystem from si.fsSize() into the diskCleanup rule, including network shares and pseudo-filesystems. A mounted network share above the 90% threshold tripped the rule every cycle while the cleanup action (which prunes only the logs directory and /tmp) was structurally incapable of freeing space on it, so the rule fired continuously and exhausted its 2-attempts-per-hour budget on an unresolvable condition — meaning disk self-healing was effectively disabled for the real root disk. Self-healing now filters to local writable filesystems (excluding cifs, smbfs, nfs, nfs4, sshfs, iso9660, squashfs, overlay, tmpfs, devtmpfs, efivarfs, vfat, and any //host/share or host:/export device). Verified: the URL guard was exercised against 9 collection URL shapes (all rejected) and 5 real video URL shapes (all allowed, no false positives); the disk filter was run against a live mount table and reduced it to the single real root disk with the phantom trigger eliminated; the recurring disk_cleanup rate-limit warnings dropped to zero.",
+      "files": [
+        "src/api/plugins/ytdlp.js (isBulkUrl/BULK_URL_PATTERNS guard in downloadMedia, --no-playlist --playlist-items 1 backstop, DEFAULT_PLAYLIST_MAX_ITEMS cap in downloadPlaylist)",
+        "src/services/selfHealingService.js (isLocalDisk/NON_LOCAL_FS_TYPES filter in collectSystemState)"
+      ]
+    },
+    "v2_25_144_2026_07_11": {
+      "status": "deployed",
+      "progress": "100%",
+      "addedDate": "2026-07-11",
+      "version": "2.25.144",
+      "description": "AI provider quota cooldown + honest retry logging. ProviderManager detects quota/billing failures (HTTP 402, depleted credits, insufficient credits, exceeded quota) via isQuotaError() and puts the offending provider on a 30-minute cooldown (PROVIDER_QUOTA_COOLDOWN_MS): generateResponse skips it entirely and serves from tryFallbackProviders instead of making a request that cannot succeed, and tryFallbackProviders skips cooling providers too. Deliberately distinct from a transient 429 rate-limit, which stays retryable. Cooldowns expire and re-probe automatically, so an account top-up is picked up with no restart. The persisted provider selection and the provider lock are never modified — the cooldown only changes which provider serves an individual request. Two safety rails prevent the cooldown from starving the agent: hasUsableAlternative() means a provider with no healthy alternative (single-provider install) is still called, and if every registered provider is cooling down the cooldowns are cleared and all are retried for real rather than hard-failing. Separately, retryUtils.retryOperation logged \"failed after N retries\" even for errors it had correctly classified as non-retryable and not retried (attempts: 1) — it now logs \"failed on attempt N (non-retryable error, not retried)\" with a retryable flag, so log triage is not misled into chasing a retry storm that never occurred. Verified with a 6-scenario harness covering fallback service, skip-while-cooling, cooldown expiry/re-probe, single-provider install, all-providers-exhausted, and non-quota (transient) errors not triggering a cooldown.",
+      "files": [
+        "src/core/providerManager.js (isQuotaError/isCoolingDown/markQuotaExhausted/hasUsableAlternative + cooldown wiring in generateResponse and tryFallbackProviders)",
+        "src/utils/retryUtils.js (retryable flag + honest non-retryable log message)"
+      ]
+    },
     "v2_25_140_2026_07_03": {
       "status": "deployed",
       "progress": "100%",
@@ -7638,5 +7660,6 @@
       }
     ],
     "rationale": "Focusing on other priorities. These can be implemented when there's a specific use case or demand."
-  }
+  },
+  "previousMilestone": "274 features tracked; see CHANGELOG.md for history."
 }

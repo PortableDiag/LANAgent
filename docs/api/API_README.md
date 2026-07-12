@@ -49,7 +49,7 @@ Both methods give you the same `gsk_*` API key and access the same services.
 | Web Scrape (full) | `POST /scrape` | 3 | + raw HTML; auto-rotates VPN on block |
 | Web Scrape (render) | `POST /scrape` | 3 | + HTML + a bounded full-page screenshot (`fullPage:true`; headless-rendered, capped at `RENDER_SCREENSHOT_MAX_HEIGHT` ≈ 3000px), FlareSolverr-backed for Cloudflare-protected sites (Rumble, Bitchute, etc.); auto-rotates VPN on block |
 | Batch Scrape | `POST /scrape/batch` | 1-3 each | Up to 100 URLs |
-| YouTube Download | `POST /youtube/download` | 10 | MP4 video |
+| YouTube Download | `POST /youtube/download` | 10 | MP4 video. **Single video only** — see *Download URLs must point at one item* below. |
 | YouTube Audio | `POST /youtube/audio` | 8 | MP3 audio |
 | Social Media Download | `POST /social/download` | 10 | MP4 video — TikTok, Rumble, BitChute, Dailymotion, Streamable, Bilibili, Twitch, x.com, SoundCloud, plus the long tail of yt-dlp's ~1800 extractors. x.com goes through the bespoke twitter plugin. Cloudflare-protected sites (Rumble, BitChute) are routed through a FlareSolverr session for cf_clearance + matching TLS fingerprint. Cookie-required sites (Instagram, Facebook) work when the operator has uploaded session cookies via the agent's `POST /api/admin/cookies/:host` endpoint. |
 | Social Media Audio | `POST /social/audio` | 8 | MP3 audio from any of the above. |
@@ -70,6 +70,29 @@ Both methods give you the same `gsk_*` API key and access the same services.
 | Price History | `GET /price/:pair/history?roundId=...` | 1 | Historical price by Chainlink round ID |
 
 All services accept `X-API-Key: gsk_your_key` header. Failed requests (target 4xx/5xx, timeout) are auto-refunded.
+
+**Download URLs must point at one item.** The download endpoints take a **single media URL**, not
+a collection. A channel, feed, or bare-domain URL is rejected with a `400` rather than being
+expanded — passing `https://youtube.com` would otherwise make the underlying extractor enumerate
+the entire homepage feed and download every item in it.
+
+Rejected (use a specific video URL instead):
+
+| Shape | Example |
+|---|---|
+| bare domain | `https://youtube.com` |
+| channel / handle root | `https://youtube.com/@handle`, `/channel/<id>`, `/c/<name>`, `/user/<name>` |
+| feed | `https://youtube.com/feed/trending` |
+| channel tab | `https://youtube.com/@handle/videos` (also `/streams`, `/shorts`, `/playlists`) |
+
+Accepted as normal: any single-item URL, including handle-scoped ones such as
+`https://www.tiktok.com/@user/video/<id>` and a video that merely *belongs* to a playlist
+(`watch?v=<id>&list=<playlist>` downloads the video, not the list). Requests are additionally
+bounded server-side to one item, so a collection URL can never expand even if it isn't matched
+above.
+
+To fetch a collection deliberately, use the agent's `ytdlp` `playlist` action, which is capped
+(50 items unless `maxItems` says otherwise).
 
 ---
 

@@ -10,6 +10,10 @@ import { UncensoredProvider } from "../providers/uncensored.js";
 import { retryOperation } from '../utils/retryUtils.js';
 import NodeCache from 'node-cache';
 
+// How long to skip a provider that reported depleted credits before probing it again.
+// Short enough that a mid-cycle top-up is picked up quickly without a restart.
+const PROVIDER_QUOTA_COOLDOWN_MS = 30 * 60 * 1000;
+
 export class ProviderManager extends EventEmitter {
   constructor() {
     super();
@@ -17,9 +21,53 @@ export class ProviderManager extends EventEmitter {
     this.activeProvider = null;
     this.fallbackProviders = [];
     this.providerMetricsCache = new NodeCache({ stdTTL: 300 });
+    // Providers that reported exhausted quota/credits, mapped to the epoch ms at which
+    // they may be probed again. Skipped (not called) while cooling down.
+    this.quotaCooldowns = new Map();
     this.commands = [
       { command: 'adjustProviderPriority', description: 'Adjust provider priority based on performance metrics', usage: 'adjustProviderPriority()' }
     ];
+  }
+
+  /**
+   * A quota/billing failure (depleted credits, exceeded quota) will keep failing until the
+   * account is topped up or the billing period rolls over — unlike a transient 429 rate limit.
+   */
+  isQuotaError(error) {
+    const message = String(error?.message || '');
+    return error?.status === 402 ||
+      error?.response?.status === 402 ||
+      /\b402\b|payment required|depleted|insufficient (credits|funds|quota|balance)|exceeded your (current )?quota|billing/i.test(message);
+  }
+
+  isCoolingDown(name) {
+    const until = this.quotaCooldowns.get(name);
+    if (!until) return false;
+    if (Date.now() >= until) {
+      this.quotaCooldowns.delete(name);
+      logger.info(`[provider-quota] ${name} cooldown expired — will be probed again`);
+      return false;
+    }
+    return true;
+  }
+
+  markQuotaExhausted(name, error) {
+    if (this.quotaCooldowns.has(name)) return;
+    this.quotaCooldowns.set(name, Date.now() + PROVIDER_QUOTA_COOLDOWN_MS);
+    logger.warn(
+      `[provider-quota] ${name} reports exhausted credits — skipping it for ` +
+      `${Math.round(PROVIDER_QUOTA_COOLDOWN_MS / 60000)}m and using fallbacks | ${error.message}`
+    );
+  }
+
+  providerNameOf(provider) {
+    return Array.from(this.providers.entries()).find(([, p]) => p === provider)?.[0] || 'unknown';
+  }
+
+  /** Is there another registered provider, not itself cooling down, that could serve a request? */
+  hasUsableAlternative(provider) {
+    return Array.from(this.providers.entries())
+      .some(([name, p]) => p !== provider && !this.isCoolingDown(name));
   }
 
   async initialize() {
@@ -317,16 +365,30 @@ export class ProviderManager extends EventEmitter {
 
   async generateResponse(prompt, options = {}) {
     const provider = await this.getCurrentProvider();
-    
-    const providerName = Array.from(this.providers.entries()).find(([key, prov]) => prov === provider)?.[0] || 'unknown';
+
+    const providerName = this.providerNameOf(provider);
     const model = provider.models?.chat || provider.model || 'unknown';
+
+    // A provider with exhausted credits fails every call until it is topped up. Skip the
+    // doomed round-trip (and its error spam) and serve from a fallback until the cooldown
+    // lapses. The configured provider is left in place — this never switches the selection.
+    // Only worth skipping if something else can actually serve the request; with no usable
+    // alternative, still call it (a failed attempt beats no attempt).
+    if (this.isCoolingDown(providerName) && this.hasUsableAlternative(provider)) {
+      return await this.tryFallbackProviders(prompt, options);
+    }
+
     logger.info(`🤖 Generating response using provider: ${providerName}, model: ${model}`);
     logger.info(`Active provider check: ${this.activeProvider?.name || 'none'}, Provider count: ${this.providers.size}`);
-    
+
     try {
       return await retryOperation(() => provider.generateResponse(prompt, options), { retries: 3 });
     } catch (error) {
-      logger.error("Primary provider failed, trying fallback...", error);
+      if (this.isQuotaError(error)) {
+        this.markQuotaExhausted(providerName, error);
+      } else {
+        logger.error("Primary provider failed, trying fallback...", error);
+      }
       return await this.tryFallbackProviders(prompt, options);
     }
   }
@@ -417,17 +479,28 @@ export class ProviderManager extends EventEmitter {
   }
 
   async tryFallbackProviders(prompt, options) {
+    // A cooldown must never be the sole reason we have no AI at all: if every provider is
+    // cooling down, drop the cooldowns and let them be tried for real rather than hard-failing.
+    if (Array.from(this.providers.keys()).every(name => this.isCoolingDown(name))) {
+      logger.warn('[provider-quota] every provider is quota-cooled — clearing cooldowns and retrying for real');
+      this.quotaCooldowns.clear();
+    }
+
     for (const [name, provider] of this.providers) {
-      if (provider !== this.activeProvider) {
+      if (provider !== this.activeProvider && !this.isCoolingDown(name)) {
         try {
           logger.info(`Trying fallback provider: ${name}`);
           return await retryOperation(() => provider.generateResponse(prompt, options), { retries: 3 });
         } catch (error) {
-          logger.warn(`Fallback provider ${name} also failed:`, error);
+          if (this.isQuotaError(error)) {
+            this.markQuotaExhausted(name, error);
+          } else {
+            logger.warn(`Fallback provider ${name} also failed:`, error);
+          }
         }
       }
     }
-    
+
     throw new Error("All AI providers failed");
   }
 

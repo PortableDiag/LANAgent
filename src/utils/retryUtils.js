@@ -185,10 +185,16 @@ export async function retryOperation(operation, options = {}) {
       const shouldRetry = customErrorClassifier ? customErrorClassifier(error) : isRetryableError(error);
 
       if (!shouldRetry || attempt > finalRetries) {
-        logger.error(`${context} failed after ${finalRetries} retries`, {
-          error: error.message,
-          attempts: attempt
-        });
+        logger.error(
+          shouldRetry
+            ? `${context} failed after ${finalRetries} retries`
+            : `${context} failed on attempt ${attempt} (non-retryable error, not retried)`,
+          {
+            error: error.message,
+            attempts: attempt,
+            retryable: shouldRetry
+          }
+        );
         break;
       }
 
