@@ -1,6 +1,7 @@
 import { GitHostingProvider } from './GitHostingProvider.js';
 import { exec } from 'child_process';
 import { promisify } from 'util';
+import { resolveGitRemote } from '../../utils/gitRemote.js';
 
 const execAsync = promisify(exec);
 
@@ -48,7 +49,7 @@ export class GitLabProvider extends GitHostingProvider {
    */
   async detectProject() {
     try {
-      const { stdout } = await execAsync('git remote get-url origin');
+      const { stdout } = await execAsync(`git remote get-url ${resolveGitRemote(process.cwd())}`);
       const remoteUrl = stdout.trim();
 
       // Parse GitLab URL formats:

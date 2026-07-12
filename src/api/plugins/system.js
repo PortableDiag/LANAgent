@@ -4,6 +4,7 @@ import { promisify } from 'util';
 import { logger } from '../../utils/logger.js';
 import fs from 'fs/promises';
 import path from 'path';
+import { resolveGitRemote } from '../../utils/gitRemote.js';
 
 const execAsync = promisify(exec);
 
@@ -208,6 +209,10 @@ export default class SystemPlugin extends BasePlugin {
       }
       
       logger.info(`Using git repository at: ${gitRepoPath}`);
+
+      // Whichever remote this install actually uses — an agent that mirror-pulls a
+      // fork may have no "origin", and hardcoding it strands it on old code.
+      const gitRemote = resolveGitRemote(gitRepoPath);
       
       // Save current version for rollback
       const currentVersion = await this.getCurrentVersion();
@@ -231,10 +236,10 @@ export default class SystemPlugin extends BasePlugin {
       // For automatic deployments, analyze changes to determine if deployment is needed
       if (!isManual) {
         // Fetch latest changes without merging yet
-        await execAsync('git fetch origin main', { cwd: gitRepoPath });
+        await execAsync(`git fetch ${gitRemote} main`, { cwd: gitRepoPath });
         
         // Check what would change
-        const diffResult = await execAsync('git diff HEAD origin/main --name-only', { cwd: gitRepoPath });
+        const diffResult = await execAsync(`git diff HEAD ${gitRemote}/main --name-only`, { cwd: gitRepoPath });
         const changedFiles = diffResult.stdout.trim().split('\n').filter(f => f);
         
         logger.info(`Changed files: ${changedFiles.length}`);
@@ -265,8 +270,8 @@ export default class SystemPlugin extends BasePlugin {
       
       if (isManual) {
         try {
-          await execAsync('git fetch origin main', { cwd: gitRepoPath });
-          const diffResult = await execAsync('git diff HEAD origin/main --name-only', { cwd: gitRepoPath });
+          await execAsync(`git fetch ${gitRemote} main`, { cwd: gitRepoPath });
+          const diffResult = await execAsync(`git diff HEAD ${gitRemote}/main --name-only`, { cwd: gitRepoPath });
           changedFiles = diffResult.stdout.trim().split('\n').filter(f => f);
           
           // Get version info for manual deployments too (just for the summary)
@@ -281,7 +286,7 @@ export default class SystemPlugin extends BasePlugin {
       }
       
       // Pull latest changes
-      const pullResult = await execAsync('git pull origin main', { cwd: gitRepoPath });
+      const pullResult = await execAsync(`git pull ${gitRemote} main`, { cwd: gitRepoPath });
       logger.info('Git pull result:', pullResult.stdout);
       
       // Check if actually up to date (for manual deployments)

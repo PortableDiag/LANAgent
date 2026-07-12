@@ -8,6 +8,7 @@ import { FeatureRequest } from '../models/FeatureRequest.js';
 import { DiscoveredFeature } from '../models/DiscoveredFeature.js';
 import { PluginDevelopment } from '../models/PluginDevelopment.js';
 import { selfModLock } from './selfModLock.js';
+import { resolveGitRemote } from '../utils/gitRemote.js';
 import { exec } from 'child_process';
 import { promisify } from 'util';
 
@@ -77,6 +78,8 @@ export class PluginDevelopmentService extends EventEmitter {
         block: 30000  // 30 second timeout for blocking operations
       }
     });
+    // Whichever remote this install actually uses — not every agent has "origin".
+    this.gitRemote = resolveGitRemote(this.developmentPath);
     
     logger.info(`Plugin development service initialized (ENABLED by default) - Git path: ${this.developmentPath}`);
     
@@ -395,8 +398,8 @@ export class PluginDevelopmentService extends EventEmitter {
         });
         logger.info('Successfully switched to main branch');
         
-        logger.info('Pulling latest changes from origin/main...');
-        await execPromise(`cd ${this.developmentPath} && git pull origin main`, {
+        logger.info(`Pulling latest changes from ${this.gitRemote}/main...`);
+        await execPromise(`cd ${this.developmentPath} && git pull ${this.gitRemote} main`, {
           timeout: 30000 // 30 seconds for pull
         });
         logger.info('Successfully pulled latest changes');
@@ -3102,8 +3105,8 @@ describe('${cleanApiName} Plugin', () => {
       logger.info('Switched to main branch');
       
       // Pull latest changes
-      await this.git.pull('origin', 'main');
-      logger.info('Pulled latest changes from origin/main');
+      await this.git.pull(this.gitRemote, 'main');
+      logger.info(`Pulled latest changes from ${this.gitRemote}/main`);
       
       // Check if branch already exists locally or remotely
       const branches = await this.git.branch(['-a']); // Include remote branches
@@ -3114,7 +3117,7 @@ describe('${cleanApiName} Plugin', () => {
         logger.info(`Remote branch ${branchName} already exists, will fetch and checkout`);
         
         // Fetch the latest state of the remote branch
-        await this.git.fetch('origin', branchName);
+        await this.git.fetch(this.gitRemote, branchName);
         
         // Delete local branch if it exists
         if (branches.all.includes(branchName)) {
@@ -3420,11 +3423,11 @@ Co-Authored-By: Claude <noreply@anthropic.com>`;
         if (!status.tracking) {
           // First push - set upstream
           logger.info('Setting upstream and pushing new branch');
-          await this.git.push(['--set-upstream', 'origin', branchName]);
+          await this.git.push(['--set-upstream', this.gitRemote, branchName]);
         } else {
           // Regular push
           logger.info('Pushing to existing upstream branch');
-          await this.git.push('origin', branchName);
+          await this.git.push(this.gitRemote, branchName);
         }
         
         logger.info(`Successfully pushed branch ${branchName} to origin`);
@@ -3437,11 +3440,11 @@ Co-Authored-By: Claude <noreply@anthropic.com>`;
           
           try {
             // Pull with rebase to get remote changes
-            await this.git.pull('origin', branchName, { '--rebase': 'true' });
+            await this.git.pull(this.gitRemote, branchName, { '--rebase': 'true' });
             logger.info('Successfully pulled and rebased remote changes');
             
             // Try pushing again
-            await this.git.push('origin', branchName);
+            await this.git.push(this.gitRemote, branchName);
             logger.info('Successfully pushed after rebase');
           } catch (rebaseError) {
             logger.error('Failed to pull and rebase:', rebaseError);
@@ -3449,7 +3452,7 @@ Co-Authored-By: Claude <noreply@anthropic.com>`;
             // As a last resort, force push with lease for safety
             logger.warn('Attempting force push with lease...');
             try {
-              await this.git.push(['--force-with-lease', 'origin', branchName]);
+              await this.git.push(['--force-with-lease', this.gitRemote, branchName]);
               logger.info('Successfully force pushed with lease');
             } catch (forceError) {
               throw new Error(`All push attempts failed: ${forceError.message}`);

@@ -48,6 +48,7 @@ import { PluginSettings } from '../../models/PluginSettings.js';
 import { encrypt, decrypt } from '../../utils/encryption.js';
 import NodeCache from 'node-cache';
 import agentIdentityService from '../../services/crypto/agentIdentityService.js';
+import { resolveGitRemote } from '../../utils/gitRemote.js';
 
 const __filename = fileURLToPath(import.meta.url);
 
@@ -715,8 +716,8 @@ export class WebInterface {
           `cd ${repoPath} && git checkout main`,
           `cd ${repoPath} && git checkout -- .`,
           `cd ${repoPath} && git clean -fd`,
-          `cd ${repoPath} && git fetch origin`,
-          `cd ${repoPath} && git reset --hard origin/main`
+          `cd ${repoPath} && git fetch ${resolveGitRemote(repoPath)}`,
+          `cd ${repoPath} && git reset --hard ${resolveGitRemote(repoPath)}/main`
         ];
 
         const results = [];

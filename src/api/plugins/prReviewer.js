@@ -8,6 +8,7 @@ import { fileURLToPath } from 'url';
 import { PRReviewSettings, PRReviewHistory } from '../../models/PRReview.js';
 import { getProvider } from '../../services/gitHosting/index.js';
 import { GitHostingSettings } from '../../models/GitHostingSettings.js';
+import { resolveGitRemote } from '../../utils/gitRemote.js';
 
 const execAsync = promisify(exec);
 const __filename = fileURLToPath(import.meta.url);
@@ -877,7 +878,7 @@ ${reason}
       
       // Pull latest changes
       logger.info('[PRReviewer] Pulling latest changes');
-      await execInRepo('git pull origin main');
+      await execInRepo(`git pull ${resolveGitRemote(this.repoPath || process.env.AGENT_REPO_PATH || process.cwd())} main`);
       
       // Install dependencies if package.json changed
       const { stdout: gitStatus } = await execInRepo('git diff HEAD~1 --name-only');

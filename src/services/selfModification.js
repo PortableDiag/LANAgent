@@ -5,6 +5,7 @@ import path from 'path';
 import fs from 'fs/promises';
 import { existsSync } from 'fs';
 import { execSync } from 'child_process';
+import { resolveGitRemote } from '../utils/gitRemote.js';
 import crypto from 'crypto';
 import { TestFramework } from './testFramework.js';
 import { FeatureRequest } from '../models/FeatureRequest.js';
@@ -101,9 +102,11 @@ export class SelfModificationService extends EventEmitter {
       productionPath: this.productionPath
     });
     this.git = simpleGit(this.developmentPath);
+    // Whichever remote this install actually uses — not every agent has "origin".
+    this.gitRemote = resolveGitRemote(this.developmentPath);
     // Resolve repo URL dynamically from git remote or env vars (not hardcoded)
     try {
-      const remoteUrl = execSync('git remote get-url origin', { cwd: this.developmentPath, encoding: 'utf8', timeout: 5000 }).trim();
+      const remoteUrl = execSync(`git remote get-url ${this.gitRemote}`, { cwd: this.developmentPath, encoding: 'utf8', timeout: 5000 }).trim();
       this.repoUrl = remoteUrl.endsWith('.git') ? remoteUrl : remoteUrl + '.git';
     } catch {
       this.repoUrl = process.env.GITHUB_REPO || 'https://github.com/PortableDiag/LANAgent.git';
@@ -463,12 +466,12 @@ export class SelfModificationService extends EventEmitter {
         logger.info('Ensuring we start from main branch...');
         await this.git.checkout('main');
         try {
-          await this.git.pull('origin', 'main');
+          await this.git.pull(this.gitRemote, 'main');
         } catch (pullError) {
           // Handle divergent branches (e.g. after history rewrite) by force-resetting
-          logger.warn(`Git pull failed (${pullError.message}), attempting fetch + reset to origin/main`);
-          await this.git.fetch('origin');
-          await this.git.reset(['--hard', 'origin/main']);
+          logger.warn(`Git pull failed (${pullError.message}), attempting fetch + reset to ${this.gitRemote}/main`);
+          await this.git.fetch(this.gitRemote);
+          await this.git.reset(['--hard', `${this.gitRemote}/main`]);
         }
         logger.info('Successfully switched to main branch and pulled latest changes');
       } catch (gitError) {
@@ -1474,7 +1477,7 @@ Only suggest realistic enhancements. Return empty array if no good opportunities
     
     // Ensure we're on main branch
     await this.git.checkout('main');
-    await this.git.pull('origin', 'main');
+    await this.git.pull(this.gitRemote, 'main');
     
     // Create new branch
     await this.git.checkoutLocalBranch(branchName);
@@ -1521,7 +1524,7 @@ Only suggest realistic enhancements. Return empty array if no good opportunities
       // Step 1: Switch to main branch and pull latest changes
       logger.info(`🔄 Switching to main branch and pulling latest changes`);
       await this.git.checkout('main');
-      await this.git.pull('origin', 'main');
+      await this.git.pull(this.gitRemote, 'main');
       
       // Step 2: Create new branch for this improvement
       const branchName = await this.createImprovementBranch(improvement);
@@ -3847,7 +3850,7 @@ Provide only the corrected code line(s).`;
    */
   async createPullRequest(branchName, improvement) {
     // Push branch to remote
-    await this.git.push('origin', branchName, ['--set-upstream']);
+    await this.git.push(this.gitRemote, branchName, ['--set-upstream']);
 
     // Create PR using git hosting provider or gh CLI fallback
     const prTitle = `[Auto] ${improvement.type}: ${improvement.description}`;
@@ -3936,7 +3939,7 @@ Provide only the corrected code line(s).`;
 
     try {
       // Ensure branch is pushed to fork
-      await this.git.push('origin', branchName, ['--set-upstream']);
+      await this.git.push(this.gitRemote, branchName, ['--set-upstream']);
 
       const prTitle = `[${agentName}] ${improvement.type}: ${improvement.description}`;
       const prBody = `**Why:** ${improvement.description}
@@ -3986,7 +3989,7 @@ Provide only the corrected code line(s).`;
     selfModLogger.info(`Found ${commitCount} commit(s) on branch ${branchName}`);
     
     // Push branch to remote
-    await this.git.push('origin', branchName, ['--set-upstream']);
+    await this.git.push(this.gitRemote, branchName, ['--set-upstream']);
     
     // Create PR for capability upgrade (include agent name for multi-instance repos)
     const agentLabel = process.env.AGENT_NAME || 'LANAgent';
@@ -4356,7 +4359,7 @@ ${newCapsBlock}
       
       // Pull latest approved changes in development repo
       await this.git.checkout('main');
-      await this.git.pull('origin', 'main');
+      await this.git.pull(this.gitRemote, 'main');
       
       // Copy to production directory
       await this.copyDirectory(this.developmentPath, this.productionPath);
