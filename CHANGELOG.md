@@ -2,6 +2,61 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.145] - 2026-07-12
+
+### Fixed — media downloads could expand into an unbounded collection
+
+- The single-video download path accepted **any** URL. A channel, feed, or bare-domain URL
+  (e.g. `https://youtube.com`) made yt-dlp enumerate the entire collection behind it and
+  download every item — in practice, the whole site homepage feed, until the disk filled.
+- `download` now **rejects collection URLs** (bare domains, `/@handle`, `/channel/…`, `/c/…`,
+  `/user/…`, `/feed/…`, and channel tabs) with a message pointing at the `playlist` command.
+  Single-item URLs are unaffected, including handle-scoped ones such as `/@user/video/<id>` and
+  a video that merely belongs to a playlist (`watch?v=<id>&list=<id>` downloads the video).
+- The command is additionally hard-bounded with `--no-playlist --playlist-items 1` as a backstop
+  for any shape the URL guard doesn't match. (`--max-downloads 1` is deliberately **not** used:
+  yt-dlp exits 101 on `MaxDownloadsReached`, which would report every successful single download
+  as a failure.)
+- `playlist` no longer treats its `maxItems` default of `0` as *unlimited* — an unspecified call
+  is capped at 50 items.
+
+### Fixed — self-healing evaluated disks its remediations could never act on
+
+- `collectSystemState()` fed **every** mount into the `diskCleanup` rule, including network
+  shares and pseudo-filesystems. A mounted network share above the threshold tripped the rule on
+  every cycle, but the cleanup action (which prunes only the logs directory and `/tmp`) could
+  never bring it down — so it retried indefinitely and consumed its hourly attempt budget on a
+  condition it was structurally incapable of resolving, leaving disk self-healing unavailable for
+  the real root disk.
+- Self-healing now considers **local, writable filesystems only** (`cifs`, `nfs`, `sshfs`,
+  `squashfs`, `overlay`, `tmpfs`, `devtmpfs`, `efivarfs`, `vfat`, and any `//host/share` or
+  `host:/export` device are excluded). A rule that can detect a condition it cannot fix is worse
+  than no rule.
+
+## [2.25.144] - 2026-07-11
+
+### Fixed — an AI provider with exhausted credits is no longer called on every request
+
+- A quota/billing failure (HTTP 402, "depleted credits", "insufficient credits", "exceeded
+  quota") now puts that provider on a **30-minute cooldown**: `generateResponse` skips it and
+  serves from a fallback instead of making a request that cannot succeed. Previously every AI
+  call hit the exhausted provider, failed, and only then fell back — burying real errors in the
+  log while the agent silently ran on a fallback.
+- Deliberately distinct from a transient **429 rate-limit**, which stays retryable.
+- Cooldowns **expire and re-probe automatically**, so topping the account up is picked up without
+  a restart. The persisted provider selection and the provider lock are **never** modified — the
+  cooldown only changes which provider serves an individual request.
+- Two safety rails ensure a cooldown can never be the sole reason the agent has no AI: a provider
+  with no usable alternative (single-provider install) is **still called**, and if *every*
+  provider is cooling down the cooldowns are cleared and all are retried for real.
+
+### Fixed — retry logging reported retries that never happened
+
+- `retryOperation()` logged `failed after N retries` even for errors it had correctly classified
+  as **non-retryable** and never retried (`attempts: 1`), which misdirects log triage.
+  Non-retryable failures now log `failed on attempt N (non-retryable error, not retried)` and
+  carry a `retryable` flag. No behaviour change.
+
 ## [2.25.141] - 2026-07-04
 
 ### Fixed — X / Twitter tweet scraping (login-wall bypass)

@@ -11,6 +11,27 @@ import { logger } from '../utils/logger.js';
 
 const execAsync = promisify(exec);
 
+// si.fsSize() lists every mount, including network shares and pseudo-filesystems.
+// Self-healing must only consider disks its remediations can actually free space on.
+// A mounted network share above the threshold is not this host's to clean, but it
+// trips the diskCleanup rule on every cycle and burns the hourly attempt budget on a
+// condition no local cleanup can resolve — leaving nothing in the tank when the real
+// root disk fills. A rule that detects what it cannot fix is worse than no rule.
+const NON_LOCAL_FS_TYPES = new Set([
+  // remote
+  'cifs', 'smbfs', 'nfs', 'nfs4', 'fuse.sshfs', 'afs',
+  // read-only / pseudo / virtual — no cleanup can ever free space on these
+  'iso9660', 'squashfs', 'overlay', 'tmpfs', 'devtmpfs', 'efivarfs', 'vfat'
+]);
+
+function isLocalDisk(d) {
+  const type = (d.type || '').toLowerCase();
+  if (NON_LOCAL_FS_TYPES.has(type)) return false;
+  // Network shares (//host/share, host:/export) regardless of reported type.
+  const dev = d.fs || '';
+  return !dev.startsWith('//') && !/^[^/]+:\//.test(dev);
+}
+
 /**
  * Self-Healing Service
  * Automatically detects and remediates runtime/operational issues
@@ -383,8 +404,10 @@ class SelfHealingService extends EventEmitter {
           free: mem.free,
           percentage: (memActuallyUsed / mem.total) * 100
         },
-        disks: disks.map(d => ({
+        disks: disks.filter(isLocalDisk).map(d => ({
           mount: d.mount,
+          fs: d.fs,
+          type: d.type,
           size: d.size,
           used: d.used,
           available: d.available,

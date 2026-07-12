@@ -89,8 +89,11 @@ Configure via `.env`: `LANAGENT_AUTO_UPDATE` (default `true`), `LANAGENT_AUTO_UP
 
 **Web & Security**
 - Web scraping (content/screenshots/PDF) with a cheerio → Puppeteer-stealth → FlareSolverr fallback chain, plus a dedicated headless render-tier screenshot pipeline (viewport-bounded capture, isolated browser)
+- Media downloads (yt-dlp, ~1800 extractors) bounded to a single item: a channel, feed, or bare-domain URL is refused rather than silently expanded into the whole collection, and the download is hard-capped to one item regardless; fetching a collection is an explicit `playlist` call with an item cap. Downloads are also size-bounded by a percentage-of-disk retention sweep
 - Image analysis, real-time web search, software management, Git integration, task management
 - User authorization, command approval, audit logging
+- Self-healing (disk, memory, DB reconnect) evaluates only the resources its remediations can actually act on — network shares and pseudo-filesystems are excluded from disk rules, so an unfixable condition can't consume the retry budget the real one needs
+- AI-provider resilience: a provider whose credits are exhausted (HTTP 402) is put on a cooldown and requests are served from a fallback instead of repeatedly calling a provider that cannot succeed; it re-probes automatically on top-up, and never changes the configured provider selection
 
 See **[Cryptocurrency & Web3](#cryptocurrency--web3)** below and the [full changelog](CHANGELOG.md) for details.
 

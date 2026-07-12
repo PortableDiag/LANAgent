@@ -17,6 +17,35 @@ import crypto from 'crypto';
 
 const execAsync = promisify(exec);
 
+// A channel/feed/playlist URL handed to the single-video path makes yt-dlp
+// enumerate every item behind it — a bare "https://youtube.com" expands to the
+// entire homepage feed and will download until the disk is full.
+const BULK_URL_PATTERNS = [
+  /^\/?$/,                                  // bare domain — the homepage feed
+  /^\/@[^/]+\/?$/,                          // /@handle (channel root, not /@handle/video/123)
+  /^\/(channel|c|user)\/[^/]+\/?$/,         // /channel/ID, /c/name, /user/name
+  /^\/feed\//,                              // /feed/subscriptions, /feed/trending
+  /^\/playlist\/?$/,                        // /playlist?list=...
+  /^\/results\/?$/,                         // search results page
+  /\/(videos|streams|shorts|playlists)\/?$/ // channel tab listings
+];
+
+// Cap for `playlist` when the caller doesn't specify one. maxItems used to
+// default to 0, and the limit was only applied when maxItems > 0 — so the
+// default call was unbounded and a channel URL would download indefinitely.
+const DEFAULT_PLAYLIST_MAX_ITEMS = 50;
+
+// True when the URL points at a collection rather than one media item.
+function isBulkUrl(url) {
+  let pathname;
+  try {
+    pathname = new URL(url).pathname;
+  } catch {
+    return false; // not parseable — let yt-dlp reject it
+  }
+  return BULK_URL_PATTERNS.some((re) => re.test(pathname));
+}
+
 export default class YtDlpPlugin extends BasePlugin {
   constructor(agent) {
     super(agent);
@@ -182,7 +211,7 @@ export default class YtDlpPlugin extends BasePlugin {
 
   /**
    * Plugin lifecycle: schedule the periodic downloads-dir trim. The first sweep
-   * is deferred (not run at construction/boot) so it never blocks ALICE's boot
+   * is deferred (not run at construction/boot) so it never blocks the agent's boot
    * chain, and the interval is unref'd so it can't keep the process alive.
    */
   async initialize() {
@@ -529,6 +558,15 @@ export default class YtDlpPlugin extends BasePlugin {
       return { success: false, error: 'URL or search query required' };
     }
 
+    if (isBulkUrl(url)) {
+      logger.warn(`[ytdlp] Refusing bulk URL on single-video download: ${url}`);
+      return {
+        success: false,
+        error: `"${url}" points at a channel or feed, not a single video. ` +
+               `Use the "playlist" command (with maxItems) to download a collection.`
+      };
+    }
+
     const dedupKey = `video|${url}|${format}|${quality}|${subtitles ? 1 : 0}|${output || ''}`;
     if (this._inflight.has(dedupKey)) {
       logger.info(`[ytdlp] Joining in-flight video download for: ${url}`);
@@ -579,12 +617,17 @@ export default class YtDlpPlugin extends BasePlugin {
       command += ` --write-subs --sub-langs "en.*,es.*"`;
     }
     
+    // Backstop for anything isBulkUrl() misses: never let the single-video path
+    // expand into a playlist. --playlist-items caps the item count without the
+    // non-zero exit --max-downloads would give us on every successful download.
+    command += ` --no-playlist --playlist-items 1`;
+
     // Add URL
     command += ` "${url}"`;
-    
+
     // Progress output
     command += ` --newline`;
-    
+
     try {
       logger.info(`Downloading media: ${command}`);
 
@@ -784,11 +827,15 @@ export default class YtDlpPlugin extends BasePlugin {
 
   async downloadPlaylist(data) {
     const { url, format = 'best', maxItems = 0, reverse = false } = data;
-    
+
     if (!url) {
       return { success: false, error: 'Playlist URL required' };
     }
-    
+
+    // 0/negative used to mean "unlimited" and was the default — clamp to a real
+    // cap. An unbounded channel download is never what an unspecified call meant.
+    const itemCap = maxItems > 0 ? maxItems : DEFAULT_PLAYLIST_MAX_ITEMS;
+
     await this._ensureVpn();
 
     let command = `${this._buildBaseCommand(data)} -f ${format}`;
@@ -797,10 +844,8 @@ export default class YtDlpPlugin extends BasePlugin {
     command += ` -o "${path.join(this.downloadDir, '%(playlist)s/%(playlist_index)s - %(title)s.%(ext)s')}"`;
     
     // Limit number of items
-    if (maxItems > 0) {
-      command += ` --playlist-items 1-${maxItems}`;
-    }
-    
+    command += ` --playlist-items 1-${itemCap}`;
+
     // Reverse playlist order
     if (reverse) {
       command += ` --playlist-reverse`;
