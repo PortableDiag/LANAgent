@@ -5,6 +5,7 @@ import path from 'path';
 import fs from 'fs/promises';
 import { execSync } from 'child_process';
 import { selfModLock } from './selfModLock.js';
+import { resolveGitRemote } from '../utils/gitRemote.js';
 
 export class BugFixingService extends EventEmitter {
   constructor(agent) {
@@ -18,11 +19,13 @@ export class BugFixingService extends EventEmitter {
     
     // Use same git setup as other services
     this.developmentPath = process.env.AGENT_REPO_PATH || process.cwd();
+    // Whichever remote this install actually uses — not every agent has "origin".
+    this.gitRemote = resolveGitRemote(this.developmentPath);
 
     // Resolve owner/repo dynamically from git remote (not hardcoded)
     let githubOwner = 'PortableDiag', githubRepo = 'LANAgent';
     try {
-      const remoteUrl = execSync('git remote get-url origin', { cwd: this.developmentPath, encoding: 'utf8', timeout: 5000 }).trim();
+      const remoteUrl = execSync(`git remote get-url ${this.gitRemote}`, { cwd: this.developmentPath, encoding: 'utf8', timeout: 5000 }).trim();
       const match = remoteUrl.match(/github\.com[/:]([^/]+)\/([^/.]+)/);
       if (match) { githubOwner = match[1]; githubRepo = match[2]; }
     } catch {}
@@ -169,7 +172,7 @@ export class BugFixingService extends EventEmitter {
       try {
         logger.info('Ensuring we start from main branch...');
         await this.git.checkout('main');
-        await this.git.pull('origin', 'main');
+        await this.git.pull(this.gitRemote, 'main');
         logger.info('Successfully switched to main branch and pulled latest changes');
       } catch (gitError) {
         logger.error('Failed to switch to main branch at start:', gitError);
@@ -809,7 +812,7 @@ RESPOND ONLY WITH THIS JSON STRUCTURE - NO OTHER TEXT:
     try {
       // Ensure we're on main branch
       await this.git.checkout('main');
-      await this.git.pull('origin', 'main');
+      await this.git.pull(this.gitRemote, 'main');
       
       // Check if branch already exists and delete it
       try {
@@ -874,7 +877,7 @@ Fixes #${issue.number}
       await this.git.commit(commitMessage);
       
       // Push to remote
-      await this.git.push('origin', branchName);
+      await this.git.push(this.gitRemote, branchName);
       
       logger.info(`Committed and pushed bug fix for issue #${issue.number}`);
     } catch (error) {

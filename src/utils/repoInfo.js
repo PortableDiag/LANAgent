@@ -8,6 +8,7 @@
  */
 import { execSync } from 'child_process';
 import { logger } from './logger.js';
+import { resolveGitRemote } from './gitRemote.js';
 
 let _cachedOrigin = null;
 let _cachedUpstream = null;
@@ -67,7 +68,7 @@ export function getOriginRepo(repoPath) {
   // Try git remote
   try {
     const cwd = repoPath || process.env.AGENT_REPO_PATH || process.cwd();
-    const url = execSync('git remote get-url origin', { cwd, encoding: 'utf8', timeout: 5000 }).trim();
+    const url = execSync(`git remote get-url ${resolveGitRemote(cwd)}`, { cwd, encoding: 'utf8', timeout: 5000 }).trim();
     const parsed = parseGitHubUrl(url);
     if (parsed) {
       _cachedOrigin = parsed;

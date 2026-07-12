@@ -1,9 +1,27 @@
 {
-  "lastUpdated": "2026-07-12T17:40:00.000Z",
+  "lastUpdated": "2026-07-12T18:10:00.000Z",
   "overallProgress": "100%",
-  "status": "PRODUCTION READY — v2.25.145",
-  "milestone": "Download safety and self-healing correctness. The single-video download path accepted any URL, so a channel, feed, or bare-domain URL (e.g. https://youtube.com) made the extractor enumerate the entire collection behind it and download every item until the disk filled. Downloads now reject collection URLs — pointing the caller at the playlist command — and are hard-bounded to one item as a backstop; the playlist command no longer treats an unspecified maxItems as unlimited (cap 50). Separately, self-healing fed every mounted filesystem into its disk-cleanup rule, including network shares and pseudo-filesystems: a network share above the threshold tripped the rule on every cycle while the cleanup action (which prunes only logs and /tmp) could never resolve it, so the rule retried indefinitely and consumed its hourly attempt budget on a phantom condition — leaving disk self-healing unavailable for the actual root disk. Self-healing now considers local writable filesystems only.",
+  "status": "PRODUCTION READY — v2.25.146",
+  "milestone": "Git remote resolution. Every git path hardcoded a remote named \"origin\". An agent that mirror-pulls a fork may not have one — a deliberate removal during an auto-update repair left one instance with only \"upstream\", so every pull failed with \"No such remote 'origin'\" and that agent silently stopped updating while continuing to serve old code. resolveGitRemote() now resolves the real remote (GIT_REMOTE_NAME -> branch upstream -> origin -> first remote) and is used at every call site. Behaviour is unchanged wherever origin exists.",
   "features": {
+    "v2_25_146_2026_07_12": {
+      "status": "deployed",
+      "progress": "100%",
+      "addedDate": "2026-07-12",
+      "version": "2.25.146",
+      "description": "Git operations no longer assume a remote named \"origin\". New src/utils/gitRemote.js exports resolveGitRemote(cwd), which resolves the remote in order: GIT_REMOTE_NAME env override, the current branch's configured upstream (e.g. upstream/main -> upstream), \"origin\" when it exists, the only/first remote defined, then \"origin\" as a last resort so git still surfaces its own error. Result is memoised per repo. Applied to every git call site that previously hardcoded the remote: selfModification (constructor repo-URL probe and the self-update pull/fetch/reset), api/plugins/system.js (the update+deploy path: fetch, diff HEAD <remote>/main, pull), bugFixing (owner/repo detection, pull, push), pluginDevelopment (pull, fetch, push, set-upstream, rebase, force-with-lease), prReviewer, webInterface (repo reset via fetch + reset --hard <remote>/main), repoInfo (getOriginRepo), and gitHosting/GitLabProvider (project detection). The failure this fixes is silent: an agent whose remote is not named \"origin\" kept serving on old code and never updated, logging only \"No such remote 'origin'\" on each cycle. Behaviour is unchanged on any install that has an \"origin\" remote. Verified against real and simulated repo shapes: origin-only resolves origin; a multi-remote repo resolves origin rather than the first-listed remote; an upstream-only repo with a tracking branch resolves upstream; a repo with no remotes falls back so git reports its own error; and GIT_REMOTE_NAME overrides all. Each touched module was additionally load-tested and the three services that call the resolver in their constructor were instantiated, because a syntax check cannot catch an unresolved import identifier.",
+      "files": [
+        "src/utils/gitRemote.js (new — resolveGitRemote/clearGitRemoteCache)",
+        "src/services/selfModification.js",
+        "src/api/plugins/system.js",
+        "src/services/bugFixing.js",
+        "src/services/pluginDevelopment.js",
+        "src/api/plugins/prReviewer.js",
+        "src/interfaces/web/webInterface.js",
+        "src/utils/repoInfo.js",
+        "src/services/gitHosting/GitLabProvider.js"
+      ]
+    },
     "v2_25_145_2026_07_12": {
       "status": "deployed",
       "progress": "100%",
@@ -7661,5 +7679,5 @@
     ],
     "rationale": "Focusing on other priorities. These can be implemented when there's a specific use case or demand."
   },
-  "previousMilestone": "274 features tracked; see CHANGELOG.md for history."
+  "previousMilestone": "Download safety and self-healing correctness. The single-video download path accepted any URL, so a channel, feed, or bare-domain URL (e.g. https://youtube.com) made the extractor enumerate the entire collection behind it and download every item until the disk filled. Downloads now reject collection URLs — pointing the caller at the playlist command — and are hard-bounded to one item as a backstop; the playlist command no longer treats an unspecified maxItems as unlimited (cap 50). Separately, self-healing fed every mounted filesystem into its disk-cleanup rule, including network shares and pseudo-filesystems: a network share above the threshold tripped the rule on every cycle while the cleanup action (which prunes only logs and /tmp) could never resolve it, so the rule retried indefinitely and consumed its hourly attempt budget on a phantom condition — leaving disk self-healing unavailable for the actual root disk. Self-healing now considers local writable filesystems only."
 }

@@ -2,6 +2,24 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.146] - 2026-07-12
+
+### Fixed — git operations assumed a remote named "origin"
+
+- Every git path hardcoded `origin`. An agent that mirror-pulls a fork may not have a remote by
+  that name, in which case each `git pull origin main` failed with **"No such remote 'origin'"** —
+  and the failure mode is the dangerous kind: the agent keeps serving happily on old code and
+  simply **never updates again**.
+- New `src/utils/gitRemote.js` — `resolveGitRemote(cwd)` resolves the remote in order:
+  `GIT_REMOTE_NAME` → the current branch's configured upstream → `origin` if it exists → the
+  only/first remote defined → `origin` as a last resort (so git still reports its own error).
+  Memoised per repo.
+- Applied to every git call site: `selfModification` (including the self-update
+  pull/fetch/reset), `system.js` (the update/deploy path), `bugFixing`, `pluginDevelopment`,
+  `prReviewer`, `webInterface` (repo reset), `repoInfo`, `GitLabProvider`.
+- **Behaviour is unchanged wherever `origin` exists.** Only installs without it are affected, and
+  they go from silently-never-updating to working.
+
 ## [2.25.145] - 2026-07-12
 
 ### Fixed — media downloads could expand into an unbounded collection

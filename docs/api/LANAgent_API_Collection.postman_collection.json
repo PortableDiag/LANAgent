@@ -2,9 +2,9 @@
   "info": {
     "_postman_id": "9b5edc66-ea34-4329-a9d5-baca5366e76d",
     "name": "LANAgent API Collection",
-    "description": "LANAgent API v2.25.145 — Media downloads are bounded to a single item. The download actions/endpoints now reject collection URLs (bare domain, channel/handle root, /feed/, channel tabs) with an error pointing at the playlist action, instead of letting the extractor enumerate and download the entire collection behind them; a bare https://youtube.com previously pulled the whole homepage feed. The command is additionally hard-capped to one item as a backstop, and the playlist action no longer treats an unspecified maxItems as unlimited (cap 50). Single-item URLs are unaffected, including handle-scoped ones (/@user/video/<id>) and a video that merely belongs to a playlist (watch?v=<id>&list=<id>). Also in this release (v2.25.144): an AI provider whose credits are exhausted (HTTP 402) is put on a 30-minute cooldown and requests are served from a fallback instead of repeatedly calling a provider that cannot succeed; it re-probes automatically on top-up and never changes the configured provider selection. No HTTP surface change from the provider or self-healing fixes.",
+    "description": "LANAgent API v2.25.146 — Git operations no longer assume a remote named \"origin\". An agent that mirror-pulls a fork may have no such remote, in which case every update pull failed with \"No such remote 'origin'\" and the agent silently stopped updating while still serving old code. resolveGitRemote() now resolves the real remote (GIT_REMOTE_NAME -> branch upstream -> origin -> first remote) at every call site. No HTTP surface change; behaviour is unchanged wherever \"origin\" exists.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
-    "version": "2.25.145"
+    "version": "2.25.146"
   },
   "auth": {
     "type": "bearer",
