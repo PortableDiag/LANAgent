@@ -2,9 +2,9 @@
   "info": {
     "_postman_id": "9b5edc66-ea34-4329-a9d5-baca5366e76d",
     "name": "LANAgent API Collection",
-    "description": "LANAgent API v2.25.148 — The on-chain scam-report queue now survives restarts: it was in-memory only, so a restart between detection and flush silently dropped pending reports. Persisted via system settings and restored on boot. No HTTP surface change.",
+    "description": "LANAgent API v2.25.149 — Stale Chromium singleton locks are now actually cleared before browser launches: the cleaner used existsSync, which follows symlinks, so the always-dangling SingletonLock symlink was reported absent and browser-tier scraping stayed wedged after any unclean shutdown. Detection now uses lstat; a running browser is never evicted. No HTTP surface change.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
-    "version": "2.25.148"
+    "version": "2.25.149"
   },
   "auth": {
     "type": "bearer",

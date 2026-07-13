@@ -2,6 +2,19 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.149] - 2026-07-13
+
+### Fixed — the stale-Chromium-lock cleaner never actually ran
+
+- `clearStaleSingletonLock` guarded its work with `existsSync(lockPath)` — but Chromium's
+  `SingletonLock` is a **symlink whose target (`<hostname>-<pid>`) never exists as a file**,
+  and `existsSync` follows symlinks, so it returned `false` for every stale lock and the
+  cleaner was a silent no-op in exactly the case it was built for. After an unclean shutdown
+  the profile stayed wedged and every browser-tier scrape failed with "Failed to launch the
+  browser process" until the lock was removed by hand.
+- Now uses `lstat` (does not follow the link), keeping the owner-PID-alive check so a
+  legitimately running browser is never evicted.
+
 ## [2.25.148] - 2026-07-13
 
 ### Fixed — scam-report queue survives restarts

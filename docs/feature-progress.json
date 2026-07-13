@@ -1,9 +1,16 @@
 {
   "lastUpdated": "2026-07-13",
   "overallProgress": "100%",
-  "status": "PRODUCTION READY — v2.25.148",
-  "milestone": "Scam-report queue persistence: pending on-chain reports are no longer lost to restarts.",
+  "status": "PRODUCTION READY — v2.25.149",
+  "milestone": "Browser self-healing actually works now: stale Chromium singleton locks (crash/reboot leftovers) are detected via lstat and cleared before launch instead of silently ignored.",
   "features": {
+    "v2_25_149_2026_07_13": {
+      "status": "deployed",
+      "progress": "100%",
+      "addedDate": "2026-07-13",
+      "version": "2.25.149",
+      "description": "The stale-Chromium-lock cleaner (clearStaleSingletonLock) was a silent no-op: it guarded with existsSync, which follows symlinks, but Chromium's SingletonLock is a symlink whose target (<hostname>-<pid>) never exists as a file — so every stale lock was reported absent and browser-tier scraping stayed wedged after any unclean shutdown until the lock was removed by hand. Now uses lstat to detect the lock while keeping the owner-PID-alive check so a running browser is never evicted."
+    },
     "v2_25_148_2026_07_13": {
       "status": "deployed",
       "progress": "100%",
@@ -7693,5 +7700,5 @@
     ],
     "rationale": "Focusing on other priorities. These can be implemented when there's a specific use case or demand."
   },
-  "previousMilestone": "Scam-registry batch reporting fixed. The batch report path had never successfully written to the on-chain registry (4-args-vs-5 ABI mismatch); detected honeypots now actually land in the registry, filed under the correct category."
+  "previousMilestone": "Scam-report queue persistence: pending on-chain reports are no longer lost to restarts."
 }
