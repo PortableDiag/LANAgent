@@ -2,6 +2,14 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.148] - 2026-07-13
+
+### Fixed — scam-report queue survives restarts
+
+- The on-chain scam-report queue was in-memory only, so a restart between detection and
+  flush silently dropped pending reports. The queue is now persisted (system settings)
+  and restored on boot.
+
 ## [2.25.147] - 2026-07-13
 
 ### Fixed — batch scam reports never reached the on-chain registry
