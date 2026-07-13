@@ -46,9 +46,26 @@ nss_ok() {
   return 1
 }
 
+# Is the FIRST nameserver in resolv.conf actually answering? nss_ok alone is
+# blind to a dead primary: glibc times out on it (options timeout:2 attempts:2)
+# and then succeeds via a fallback, so resolution "works" while every uncached
+# lookup silently pays 2-4s. Seen on a box whose pinned resolver (a tunnel DNS
+# from a previous network) went away after a network change: healthy by nss_ok,
+# degraded for weeks. A stale pin is a heal trigger, not a healthy state.
+primary_ok() {
+  local first
+  first=$(awk '/^nameserver /{print $2; exit}' /etc/resolv.conf 2>/dev/null)
+  [ -z "$first" ] && return 1
+  [ -n "$(query "$first" "${PROBE_HOSTS[0]}")" ]
+}
+
 # --- 1. already healthy? leave everything alone ---
-if nss_ok; then exit 0; fi
-log "external DNS resolution FAILED — starting self-heal"
+if nss_ok && primary_ok; then exit 0; fi
+if nss_ok; then
+  log "resolution works but the primary nameserver is dead (slow lookups) — re-pinning"
+else
+  log "external DNS resolution FAILED — starting self-heal"
+fi
 
 # --- 2. NSS must not route through a dead systemd-resolved stub ---
 if ! grep -qE '^hosts:[[:space:]]+files dns' /etc/nsswitch.conf 2>/dev/null; then
