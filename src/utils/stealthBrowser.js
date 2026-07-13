@@ -96,10 +96,13 @@ async function getPuppeteer() {
  */
 async function clearStaleSingletonLock(profileDir) {
   try {
-    const { readlinkSync, unlinkSync, existsSync } = await import('fs');
+    const { readlinkSync, unlinkSync, lstatSync } = await import('fs');
     const path = (await import('path')).default;
     const lockPath = path.join(profileDir, 'SingletonLock');
-    if (!existsSync(lockPath)) return;
+    // lstat, NOT existsSync: the lock is a symlink whose target ("<host>-<pid>")
+    // never exists as a file, so existsSync — which follows symlinks — reports
+    // false for every stale lock and made this whole check a silent no-op.
+    try { lstatSync(lockPath); } catch { return; } // no lock present
     let ownerPid = null;
     try {
       const target = readlinkSync(lockPath); // e.g. "squid-1395727"
