@@ -2,9 +2,9 @@
   "info": {
     "_postman_id": "9b5edc66-ea34-4329-a9d5-baca5366e76d",
     "name": "LANAgent API Collection",
-    "description": "LANAgent API v2.25.147 — Batch scam reports now reach the on-chain scammer registry: batchReportScammer was calling the contract with 4 arguments against a 5-argument ABI (targetTypes missing), so every batch flush failed with \"no matching fragment\" and re-queued forever; a restart silently dropped the queue. Target type is now resolved per report (explicit -> bytecode detection -> category fallback), and category slugs like honeypot map to their real category instead of collapsing to Other. No HTTP surface change.",
+    "description": "LANAgent API v2.25.148 — The on-chain scam-report queue now survives restarts: it was in-memory only, so a restart between detection and flush silently dropped pending reports. Persisted via system settings and restored on boot. No HTTP surface change.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
-    "version": "2.25.147"
+    "version": "2.25.148"
   },
   "auth": {
     "type": "bearer",

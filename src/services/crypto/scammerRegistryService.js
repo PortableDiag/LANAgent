@@ -104,9 +104,31 @@ class ScammerRegistryService {
       if (this.registryAddress) {
         logger.info(`Scammer registry service initialized: ${this.registryAddress.slice(0, 10)}...`);
       }
+      // Restore any reports queued before the last restart — the queue is
+      // otherwise in-memory only and a restart between detection and flush
+      // silently drops the reports.
+      const persisted = await SystemSettings.getSetting('scammer_report_queue', []);
+      if (Array.isArray(persisted) && persisted.length > 0) {
+        for (const r of persisted) {
+          if (r?.address && !this._reportQueue.has(r.address.toLowerCase())) {
+            this._reportQueue.set(r.address.toLowerCase(), r);
+          }
+        }
+        logger.info(`Scam report queue restored: ${this._reportQueue.size} pending report(s)`);
+      }
     } catch (err) {
       logger.debug(`Scammer registry init: ${err.message}`);
     }
+  }
+
+  /**
+   * Persist the report queue so it survives restarts. Fire-and-forget, non-fatal.
+   */
+  _persistQueue() {
+    import('../../models/SystemSettings.js').then(({ SystemSettings }) =>
+      SystemSettings.setSetting('scammer_report_queue', Array.from(this._reportQueue.values()),
+        'Pending scam reports awaiting on-chain flush', 'crypto')
+    ).catch(err => logger.debug(`Scam report queue persist failed: ${err.message}`));
   }
 
   isAvailable() {
@@ -729,6 +751,7 @@ class ScammerRegistryService {
       confidence: opts.confidence || 0
     });
     logger.info(`Scam report queued: ${opts.symbol || address} (cat=${category}, confidence=${opts.confidence})`);
+    this._persistQueue();
   }
 
   /**
@@ -749,12 +772,14 @@ class ScammerRegistryService {
       if (!enabled) {
         logger.debug(`Scam report flush skipped: auto-reporting disabled (${this._reportQueue.size} queued)`);
         this._reportQueue.clear();
+        this._persistQueue();
         return { reported: 0, reason: 'disabled' };
       }
     } catch { /* default to enabled */ }
 
     const queued = Array.from(this._reportQueue.values());
     this._reportQueue.clear();
+    this._persistQueue();
 
     logger.info(`Flushing scam report queue: ${queued.length} token(s) to report`);
 
@@ -785,6 +810,7 @@ class ScammerRegistryService {
       logger.warn(`Scam report flush failed: ${err.message}`);
       // Re-queue failed reports for next cycle
       for (const r of queued) this._reportQueue.set(r.address.toLowerCase(), r);
+      this._persistQueue();
       return { reported: 0, error: err.message, requeued: queued.length };
     }
   }

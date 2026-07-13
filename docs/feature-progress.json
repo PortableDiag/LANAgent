@@ -1,9 +1,16 @@
 {
   "lastUpdated": "2026-07-13",
   "overallProgress": "100%",
-  "status": "PRODUCTION READY — v2.25.147",
-  "milestone": "Scam-registry batch reporting fixed. The batch report path had never successfully written to the on-chain registry (4-args-vs-5 ABI mismatch); detected honeypots now actually land in the registry, filed under the correct category.",
+  "status": "PRODUCTION READY — v2.25.148",
+  "milestone": "Scam-report queue persistence: pending on-chain reports are no longer lost to restarts.",
   "features": {
+    "v2_25_148_2026_07_13": {
+      "status": "deployed",
+      "progress": "100%",
+      "addedDate": "2026-07-13",
+      "version": "2.25.148",
+      "description": "The on-chain scam-report queue now survives restarts. It was in-memory only, so a restart between detection and flush silently dropped pending reports; the queue is persisted via system settings and restored on boot."
+    },
     "v2_25_147_2026_07_13": {
       "status": "deployed",
       "progress": "100%",
@@ -7686,5 +7693,5 @@
     ],
     "rationale": "Focusing on other priorities. These can be implemented when there's a specific use case or demand."
   },
-  "previousMilestone": "Git remote resolution. Every git path hardcoded a remote named \"origin\". An agent that mirror-pulls a fork may not have one — a deliberate removal during an auto-update repair left one instance with only \"upstream\", so every pull failed with \"No such remote 'origin'\" and that agent silently stopped updating while continuing to serve old code. resolveGitRemote() now resolves the real remote (GIT_REMOTE_NAME -> branch upstream -> origin -> first remote) and is used at every call site. Behaviour is unchanged wherever origin exists."
+  "previousMilestone": "Scam-registry batch reporting fixed. The batch report path had never successfully written to the on-chain registry (4-args-vs-5 ABI mismatch); detected honeypots now actually land in the registry, filed under the correct category."
 }
