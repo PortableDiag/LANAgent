@@ -2,6 +2,22 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.147] - 2026-07-13
+
+### Fixed — batch scam reports never reached the on-chain registry
+
+- `batchReportScammer` called the registry contract with 4 arguments against a 5-argument ABI
+  (`targetTypes` was never passed), so **every batch flush failed with "no matching fragment"**,
+  re-queued itself, and retried every heartbeat forever. Because the queue is in-memory, a
+  restart silently dropped the pending reports. Single-token reports were unaffected (the batch
+  path only engages with 2+ queued reports).
+- The batch path now resolves each report's target type the same way the single-report path
+  does: explicit `targetType` if provided, else on-chain bytecode detection
+  (contract vs wallet), with a category-based fallback.
+- Scam categories passed as slugs (`'honeypot'`, `'airdrop_scam'`) were silently coerced to
+  category 7 "Other" via `parseInt(...) || 7`. A slug→ID map (`categoryToId`) now files
+  honeypots under category 3 "Honeypot" as intended; numeric categories are unchanged.
+
 ## [2.25.146] - 2026-07-12
 
 ### Fixed — git operations assumed a remote named "origin"

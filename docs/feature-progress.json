@@ -1,9 +1,16 @@
 {
-  "lastUpdated": "2026-07-12T18:10:00.000Z",
+  "lastUpdated": "2026-07-13",
   "overallProgress": "100%",
-  "status": "PRODUCTION READY — v2.25.146",
-  "milestone": "Git remote resolution. Every git path hardcoded a remote named \"origin\". An agent that mirror-pulls a fork may not have one — a deliberate removal during an auto-update repair left one instance with only \"upstream\", so every pull failed with \"No such remote 'origin'\" and that agent silently stopped updating while continuing to serve old code. resolveGitRemote() now resolves the real remote (GIT_REMOTE_NAME -> branch upstream -> origin -> first remote) and is used at every call site. Behaviour is unchanged wherever origin exists.",
+  "status": "PRODUCTION READY — v2.25.147",
+  "milestone": "Scam-registry batch reporting fixed. The batch report path had never successfully written to the on-chain registry (4-args-vs-5 ABI mismatch); detected honeypots now actually land in the registry, filed under the correct category.",
   "features": {
+    "v2_25_147_2026_07_13": {
+      "status": "deployed",
+      "progress": "100%",
+      "addedDate": "2026-07-13",
+      "version": "2.25.147",
+      "description": "Batch scam reporting to the on-chain scammer registry never worked: batchReportScammer called the contract with 4 arguments against a 5-argument ABI (targetTypes missing), so every batch flush failed with 'no matching fragment', re-queued itself, and retried every heartbeat until a restart silently dropped the queue. Fixed by resolving each report's target type (explicit > on-chain bytecode detection > category fallback) and passing it through. Also fixed category slugs ('honeypot', 'airdrop_scam') being coerced to 'Other' via parseInt — a slug-to-ID map now files honeypots under the Honeypot category. Single-token reports were unaffected."
+    },
     "v2_25_146_2026_07_12": {
       "status": "deployed",
       "progress": "100%",
@@ -7679,5 +7686,5 @@
     ],
     "rationale": "Focusing on other priorities. These can be implemented when there's a specific use case or demand."
   },
-  "previousMilestone": "Download safety and self-healing correctness. The single-video download path accepted any URL, so a channel, feed, or bare-domain URL (e.g. https://youtube.com) made the extractor enumerate the entire collection behind it and download every item until the disk filled. Downloads now reject collection URLs — pointing the caller at the playlist command — and are hard-bounded to one item as a backstop; the playlist command no longer treats an unspecified maxItems as unlimited (cap 50). Separately, self-healing fed every mounted filesystem into its disk-cleanup rule, including network shares and pseudo-filesystems: a network share above the threshold tripped the rule on every cycle while the cleanup action (which prunes only logs and /tmp) could never resolve it, so the rule retried indefinitely and consumed its hourly attempt budget on a phantom condition — leaving disk self-healing unavailable for the actual root disk. Self-healing now considers local writable filesystems only."
+  "previousMilestone": "Git remote resolution. Every git path hardcoded a remote named \"origin\". An agent that mirror-pulls a fork may not have one — a deliberate removal during an auto-update repair left one instance with only \"upstream\", so every pull failed with \"No such remote 'origin'\" and that agent silently stopped updating while continuing to serve old code. resolveGitRemote() now resolves the real remote (GIT_REMOTE_NAME -> branch upstream -> origin -> first remote) and is used at every call site. Behaviour is unchanged wherever origin exists."
 }

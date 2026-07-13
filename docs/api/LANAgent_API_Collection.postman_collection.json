@@ -2,9 +2,9 @@
   "info": {
     "_postman_id": "9b5edc66-ea34-4329-a9d5-baca5366e76d",
     "name": "LANAgent API Collection",
-    "description": "LANAgent API v2.25.146 — Git operations no longer assume a remote named \"origin\". An agent that mirror-pulls a fork may have no such remote, in which case every update pull failed with \"No such remote 'origin'\" and the agent silently stopped updating while still serving old code. resolveGitRemote() now resolves the real remote (GIT_REMOTE_NAME -> branch upstream -> origin -> first remote) at every call site. No HTTP surface change; behaviour is unchanged wherever \"origin\" exists.",
+    "description": "LANAgent API v2.25.147 — Batch scam reports now reach the on-chain scammer registry: batchReportScammer was calling the contract with 4 arguments against a 5-argument ABI (targetTypes missing), so every batch flush failed with \"no matching fragment\" and re-queued forever; a restart silently dropped the queue. Target type is now resolved per report (explicit -> bytecode detection -> category fallback), and category slugs like honeypot map to their real category instead of collapsing to Other. No HTTP surface change.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
-    "version": "2.25.146"
+    "version": "2.25.147"
   },
   "auth": {
     "type": "bearer",

@@ -53,6 +53,26 @@ const CATEGORIES = {
   7: 'Other'
 };
 
+// Callers pass category as either an ID (1-7) or a slug ('honeypot', 'airdrop_scam').
+const CATEGORY_IDS = {
+  addresspoisoning: 1,
+  phishing: 2,
+  honeypot: 3,
+  rugpull: 4,
+  fakecontract: 5,
+  dustattack: 6,
+  airdropscam: 7,
+  scamtoken: 7,
+  other: 7
+};
+
+function categoryToId(category) {
+  const n = parseInt(category);
+  if (n >= 1 && n <= 7) return n;
+  const slug = String(category || '').toLowerCase().replace(/[\s_-]+/g, '');
+  return CATEGORY_IDS[slug] || 7;
+}
+
 const DEFAULT_REGISTRY_ADDRESS = '0xFfA95Ec77d7Ed205d48fea72A888aE1C93e30fF7'; // SkynetDiamond (RegistryFacet)
 const DEFAULT_SKYNET_ADDRESS = '0x8b77CC5c6cB3d846608d9d5Dd03fA406BA03b8F1';
 
@@ -187,13 +207,28 @@ class ScammerRegistryService {
 
     const addresses = [];
     const categories = [];
+    const targetTypes = [];
     const evidences = [];
     const reasons = [];
 
     for (const r of reports) {
       if (!ethers.isAddress(r.address)) continue;
       addresses.push(r.address);
-      categories.push(r.category || 7);
+      const cat = categoryToId(r.category);
+      categories.push(cat);
+      // Same wallet-vs-contract detection as the single-report path
+      let tt = parseInt(r.targetType) || 0;
+      if (!tt) {
+        try {
+          const provider = await contractServiceWrapper.getProvider(this.network);
+          const code = await provider.getCode(r.address);
+          tt = (code && code !== '0x' && code.length > 2) ? TARGET_CONTRACT : TARGET_WALLET;
+        } catch {
+          tt = (cat === 3 || cat === 5 || cat === 6) ? TARGET_CONTRACT : TARGET_WALLET;
+        }
+      }
+      if (tt !== TARGET_WALLET && tt !== TARGET_CONTRACT) tt = TARGET_WALLET;
+      targetTypes.push(tt);
       evidences.push(r.evidenceTxHash
         ? (r.evidenceTxHash.startsWith('0x') && r.evidenceTxHash.length === 66
           ? r.evidenceTxHash
@@ -202,7 +237,7 @@ class ScammerRegistryService {
       reasons.push(ethers.encodeBytes32String((r.reason || '').slice(0, 31)));
     }
 
-    const tx = await contract.batchReportScammer(addresses, categories, evidences, reasons);
+    const tx = await contract.batchReportScammer(addresses, categories, targetTypes, evidences, reasons);
     const receipt = await tx.wait();
 
     logger.info(`Batch scammer report: ${addresses.length} addresses, tx=${tx.hash}`);
@@ -686,7 +721,7 @@ class ScammerRegistryService {
 
     this._reportQueue.set(addrLower, {
       address,
-      category: parseInt(category) || 7,
+      category: categoryToId(category),
       evidenceTxHash: opts.evidenceTxHash || null,
       reason: (opts.reason || opts.symbol || 'scam token').slice(0, 31),
       symbol: opts.symbol || 'UNKNOWN',
