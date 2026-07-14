@@ -3820,8 +3820,15 @@ Plugin includes inline documentation and usage examples.
         if (savedConfig.lastCheckTime) {
           this.lastCheckTime = new Date(savedConfig.lastCheckTime);
         }
-        
-        logger.info('Plugin development configuration loaded from database');
+
+        // Sync the runtime gate with the persisted state. Without this, a
+        // persisted disable resurrected on every restart: the constructor
+        // hardcodes enabled=true and only config.enabled was restored — the
+        // scheduling checks read this.enabled. (Burned $7.90 of gpt-5 on a
+        // fallback node in one day, 2026-07-14.)
+        this.enabled = this.config.enabled !== false;
+
+        logger.info(`Plugin development configuration loaded from database (enabled=${this.enabled})`);
       } else {
         logger.info('No saved plugin development configuration found, using defaults');
       }

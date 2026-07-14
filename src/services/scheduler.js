@@ -1097,17 +1097,27 @@ Respond with ONLY the rephrased message, no explanation:`;
     });
 
     // Daily crypto P&L report
+    // NOTE: this job had never fired since it was added — `this.mainAgent` is
+    // undefined on TaskScheduler (the agent lives at `this.agent`), so it
+    // silently returned every day; and SubAgent is a default export, so the
+    // named destructure yielded undefined. Both fixed 2026-07-14 (v2.25.150).
     this.agenda.define('crypto-daily-report', async (job) => {
       try {
-        const orchestrator = this.mainAgent?.subAgentOrchestrator;
-        if (!orchestrator) return;
+        const orchestrator = this.agent?.subAgentOrchestrator;
+        if (!orchestrator) {
+          logger.warn('Crypto daily report: subAgentOrchestrator not available');
+          return;
+        }
 
-        const { SubAgent } = await import('../models/SubAgent.js');
+        const { default: SubAgent } = await import('../models/SubAgent.js');
         const agents = await SubAgent.find({ domain: 'crypto' });
         if (!agents.length) return;
 
         const handler = orchestrator.agentHandlers.get(agents[0]._id.toString());
-        if (!handler?.sendDailyPnLReport) return;
+        if (!handler?.sendDailyPnLReport) {
+          logger.warn('Crypto daily report: crypto agent handler not initialized');
+          return;
+        }
 
         await handler.sendDailyPnLReport();
       } catch (error) {
@@ -2326,6 +2336,31 @@ Respond with ONLY the rephrased message, no explanation:`;
     };
   }
 
+  /**
+   * (Re)schedule the crypto daily P&L report at the agent-configured
+   * dailyReportTime (HH:MM, server-local, default 09:00). Called at startup
+   * and again by CryptoStrategyAgent.updateConfig when the time changes —
+   * agenda.every() upserts by job name, so re-calling re-pins the cron.
+   */
+  async scheduleCryptoDailyReport() {
+    let reportTime = '09:00';
+    try {
+      const { default: SubAgent } = await import('../models/SubAgent.js');
+      const cryptoAgent = await SubAgent.findOne({ domain: 'crypto' }).lean();
+      const configured = cryptoAgent?.config?.domainConfig?.dailyReportTime;
+      if (typeof configured === 'string' && /^([01]?\d|2[0-3]):[0-5]\d$/.test(configured.trim())) {
+        reportTime = configured.trim();
+      } else if (configured) {
+        logger.warn(`Invalid crypto dailyReportTime "${configured}" — defaulting to 09:00`);
+      }
+    } catch (err) {
+      logger.warn(`Could not read crypto dailyReportTime (defaulting to 09:00): ${err.message}`);
+    }
+    const [hh, mm] = reportTime.split(':').map(Number);
+    await this.agenda.every(`${mm} ${hh} * * *`, 'crypto-daily-report');
+    logger.info(`Crypto daily report scheduled for ${reportTime} (server local time)`);
+  }
+
   // Schedule recurring jobs
   async scheduleRecurringJobs() {
     // Email check every 3 minutes
@@ -2390,8 +2425,10 @@ Respond with ONLY the rephrased message, no explanation:`;
     // Crypto heartbeat - periodic trigger for time-based strategies (DCA)
     await this.agenda.every('10 minutes', 'crypto-heartbeat');
 
-    // Crypto daily P&L report - runs daily (time configured in agent config)
-    await this.agenda.every('24 hours', 'crypto-daily-report');
+    // Crypto daily P&L report — pinned to the agent-configured dailyReportTime
+    // (was every('24 hours'), which free-ran from whenever the job was first
+    // created and ignored the configured time entirely)
+    await this.scheduleCryptoDailyReport();
 
     // MindSwarm engagement - process notifications, auto-reply, daily post.
     // 15 min (was 5) — at 5 min we were generating ~288 /notifications hits/
