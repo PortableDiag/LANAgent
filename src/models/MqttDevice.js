@@ -2,6 +2,7 @@ import mongoose from 'mongoose';
 import { logger } from '../utils/logger.js';
 import { safeJsonStringify } from '../utils/jsonUtils.js';
 import { withErrorHandler } from '../utils/errorHandlers.js';
+import { safePromiseAll } from '../utils/errorHandlers.js';
 
 /**
  * MQTT Device Registry
@@ -199,5 +200,125 @@ mqttDeviceSchema.methods.notifyStatusChange = withErrorHandler(async function(st
   // Here you would integrate with an actual notification service
   // For example, sending an email or a message to a messaging platform
 });
+
+/**
+ * Bulk update devices with new properties
+ * @param {Array<String>} deviceIds - Array of device IDs to update
+ * @param {Object} updates - Properties to update on the devices
+ * @returns {Object} Result of the bulk update operation
+ */
+mqttDeviceSchema.statics.bulkUpdateDevices = async function(deviceIds, updates) {
+  try {
+    const result = await this.updateMany(
+      { deviceId: { $in: deviceIds } },
+      { $set: updates },
+      { multi: true }
+    );
+    
+    logger.info(`Bulk updated ${result.modifiedCount} devices out of ${deviceIds.length} requested`);
+    
+    return {
+      success: true,
+      matchedCount: result.matchedCount,
+      modifiedCount: result.modifiedCount,
+      unmatchedIds: deviceIds.length - result.matchedCount
+    };
+  } catch (error) {
+    logger.error(`Failed to bulk update devices: ${error.message}`);
+    throw error;
+  }
+};
+
+/**
+ * Bulk transition lifecycle states for multiple devices
+ * @param {Array<String>} deviceIds - Array of device IDs to update
+ * @param {String} newState - The new lifecycle state for all devices
+ * @returns {Object} Result of the bulk transition operation
+ */
+mqttDeviceSchema.statics.bulkTransitionLifecycleStates = async function(deviceIds, newState) {
+  try {
+    if (!['active', 'inactive', 'decommissioned'].includes(newState)) {
+      throw new Error(`Invalid lifecycle state: ${newState}`);
+    }
+
+    // Process in batches to avoid memory issues with large datasets
+    const batchSize = 100;
+    let totalModified = 0;
+    let totalMatched = 0;
+
+    for (let i = 0; i < deviceIds.length; i += batchSize) {
+      const batch = deviceIds.slice(i, i + batchSize);
+      
+      // Find devices in batch
+      const devices = await this.find({ deviceId: { $in: batch } });
+      
+      // Update each device individually to trigger lifecycle state transition logic
+      const updatePromises = devices.map(device => 
+        device.transitionLifecycleState(newState)
+      );
+      
+      await safePromiseAll(updatePromises);
+      
+      totalMatched += devices.length;
+      totalModified += devices.length;
+    }
+
+    logger.info(`Bulk transitioned lifecycle state to ${newState} for ${totalModified} devices`);
+    
+    return {
+      success: true,
+      matchedCount: totalMatched,
+      modifiedCount: totalModified,
+      unmatchedIds: deviceIds.length - totalMatched
+    };
+  } catch (error) {
+    logger.error(`Failed to bulk transition lifecycle states: ${error.message}`);
+    throw error;
+  }
+};
+
+/**
+ * Bulk tag management for devices
+ * @param {Array<String>} deviceIds - Array of device IDs to manage tags for
+ * @param {Array<String>} tagsToAdd - Tags to add to the devices
+ * @param {Array<String>} tagsToRemove - Tags to remove from the devices
+ * @returns {Object} Result of the bulk tag management operation
+ */
+mqttDeviceSchema.statics.bulkTagManagement = async function(deviceIds, tagsToAdd = [], tagsToRemove = []) {
+  try {
+    const updates = {};
+    
+    if (tagsToAdd.length > 0) {
+      updates.$addToSet = { tags: { $each: tagsToAdd } };
+    }
+    
+    if (tagsToRemove.length > 0) {
+      updates.$pullAll = { tags: tagsToRemove };
+    }
+
+    // Mongo rejects an empty update document — nothing to do
+    if (Object.keys(updates).length === 0) {
+      return { success: true, matchedCount: 0, modifiedCount: 0, unmatchedIds: 0 };
+    }
+
+    const result = await this.updateMany(
+      { deviceId: { $in: deviceIds } },
+      updates,
+      { multi: true }
+    );
+    
+    logger.info(`Bulk tag management completed: added ${tagsToAdd.length}, removed ${tagsToRemove.length} tags from ${result.modifiedCount} devices`);
+    
+    return {
+      success: true,
+      matchedCount: result.matchedCount,
+      modifiedCount: result.modifiedCount,
+      unmatchedIds: deviceIds.length - result.matchedCount
+    };
+  } catch (error) {
+    logger.error(`Failed to bulk manage tags: ${error.message}`);
+    throw error;
+  }
+};
 
 export default mongoose.model('MqttDevice', mqttDeviceSchema);

@@ -68,6 +68,67 @@ class ApiKeyService {
   }
 
   /**
+   * Rotate an API key: issue a replacement with the same metadata and give
+   * the old key a bounded grace window by setting its expiresAt. Enforcement
+   * needs no new code path — validateApiKey → isValid() already rejects keys
+   * past expiresAt, so the old key dies automatically when the grace ends.
+   * @param {string} keyId - _id of the key to rotate
+   * @param {number} gracePeriodHours - How long the old key stays valid (default 24)
+   * @returns {Object} New key info (raw key returned only once) + old-key grace deadline
+   */
+  async rotateApiKey(keyId, gracePeriodHours = 24) {
+    try {
+      const currentKey = await ApiKey.findById(keyId);
+      if (!currentKey || currentKey.status !== 'active') {
+        throw new Error('Active key not found for rotation');
+      }
+
+      const rawKey = ApiKey.generateKey();
+      const keyHash = ApiKey.hashKey(rawKey);
+      const keyPrefix = ApiKey.getKeyPrefix(rawKey);
+
+      const newKeyDoc = new ApiKey({
+        keyHash,
+        keyPrefix,
+        name: currentKey.name,
+        description: currentKey.description,
+        createdBy: currentKey.createdBy,
+        isSystemKey: currentKey.isSystemKey,
+        rateLimit: currentKey.rateLimit,
+        scopes: currentKey.scopes,
+        alertConfig: currentKey.alertConfig,
+        metadata: currentKey.metadata,
+        expiresAt: null,
+        status: 'active',
+        previousKeyId: currentKey._id
+      });
+      await newKeyDoc.save();
+
+      // Bound the old key's life: keep any earlier expiry if it's sooner
+      const graceDeadline = new Date(Date.now() + gracePeriodHours * 60 * 60 * 1000);
+      if (!currentKey.expiresAt || currentKey.expiresAt > graceDeadline) {
+        currentKey.expiresAt = graceDeadline;
+      }
+      await currentKey.save();
+
+      logger.info(`API key rotated: ${currentKey.name} (${currentKey.keyPrefix}… → ${keyPrefix}…), old key expires ${currentKey.expiresAt.toISOString()}`);
+
+      return {
+        id: newKeyDoc._id,
+        key: rawKey,
+        keyPrefix,
+        name: newKeyDoc.name,
+        createdAt: newKeyDoc.createdAt,
+        previousKeyId: currentKey._id,
+        previousKeyExpiresAt: currentKey.expiresAt
+      };
+    } catch (error) {
+      logger.error('Failed to rotate API key:', error);
+      throw error;
+    }
+  }
+
+  /**
    * Validate an API key and return its info
    * @param {string} key - The raw API key
    * @returns {Object|null} The key info if valid, null otherwise

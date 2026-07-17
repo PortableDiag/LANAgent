@@ -1625,6 +1625,14 @@ Respond with ONLY the rephrased message, no explanation:`;
           logger.error('Expired alias cleanup error:', aliasErr);
         }
 
+        // Clean up expired oracle participations past the 30-day retention
+        try {
+          const { default: OracleParticipation } = await import('../models/OracleParticipation.js');
+          await OracleParticipation.cleanupExpired();
+        } catch (oracleErr) {
+          logger.error('Oracle participation cleanup error:', oracleErr);
+        }
+
       } catch (error) {
         logger.error('System maintenance error:', error);
       }

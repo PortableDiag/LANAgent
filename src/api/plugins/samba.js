@@ -365,6 +365,15 @@ export default class SambaPlugin extends BasePlugin {
 
   async createMount({ name, server, share, mountPoint, username, password, domain, options = [] }) {
     try {
+      // Reject duplicate mount points — two configs mounting onto the same
+      // directory shadow each other at mount time
+      const conflict = [...this.mountConfigs.values()].find(c => c.mountPoint === mountPoint);
+      if (conflict) {
+        return {
+          success: false,
+          error: `Mount point '${mountPoint}' is already used by '${conflict.name}' (${conflict.server}/${conflict.share}). Delete that mount first or choose a different mount point, e.g. /mnt/samba/${String(server).replace(/\./g, '_')}_${share}`
+        };
+      }
       const mountId = `mount_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
       const config = {
         id: mountId,
@@ -424,7 +433,16 @@ export default class SambaPlugin extends BasePlugin {
         }
       }
       // Don't encrypt the password here - keep it plain in memory
-      
+
+      // Reject moving this mount onto a mount point another config already uses
+      if (updates.mountPoint) {
+        const conflict = [...this.mountConfigs.entries()]
+          .find(([cid, c]) => cid !== id && c.mountPoint === updates.mountPoint);
+        if (conflict) {
+          throw new Error(`Mount point '${updates.mountPoint}' is already used by '${conflict[1].name}' (${conflict[1].server}/${conflict[1].share})`);
+        }
+      }
+
       const config = { ...existingConfig, ...updates };
       this.mountConfigs.set(id, config);
       

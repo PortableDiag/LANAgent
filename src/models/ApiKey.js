@@ -113,6 +113,14 @@ const apiKeySchema = new mongoose.Schema({
       type: Date,
       default: null
     }
+  },
+
+  // Audit link set on keys created by rotateApiKey — points at the key this
+  // one replaced (the old key's grace window lives in its own expiresAt)
+  previousKeyId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'ApiKey',
+    default: null
   }
 }, {
   timestamps: true

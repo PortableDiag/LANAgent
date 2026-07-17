@@ -176,4 +176,58 @@ contractEventSchema.statics.fetchEventsWithCache = async function(query) {
   });
 };
 
+/**
+ * Get event counts grouped by event name
+ * @param {Object} filter - Mongo filter for events
+ * @returns {Promise<Array<{eventName, count}>>} sorted by count desc
+ */
+contractEventSchema.statics.getEventCountsByType = async function(filter = {}) {
+  return this.aggregate([
+    { $match: filter },
+    { $group: { _id: '$eventName', count: { $sum: 1 } } },
+    { $project: { _id: 0, eventName: '$_id', count: 1 } },
+    { $sort: { count: -1 } }
+  ]).exec();
+};
+
+/**
+ * Get event volume bucketed over time. The bucket key format carries the
+ * full precision of the requested unit (an hour bucket keeps the hour —
+ * don't collapse to the day).
+ * @param {Object} filter - Mongo filter for events
+ * @param {String} timeUnit - hour | day | week | month
+ * @returns {Promise<Array<{period, count}>>} sorted chronologically
+ */
+contractEventSchema.statics.getEventVolumeOverTime = async function(filter = {}, timeUnit = 'day') {
+  const formats = {
+    hour: '%Y-%m-%d %H:00',
+    day: '%Y-%m-%d',
+    week: '%G-W%V',
+    month: '%Y-%m'
+  };
+  const format = formats[timeUnit] || formats.day;
+  return this.aggregate([
+    { $match: { ...filter, timestamp: { $type: 'date' } } },
+    { $group: { _id: { $dateToString: { format, date: '$timestamp' } }, count: { $sum: 1 } } },
+    { $project: { _id: 0, period: '$_id', count: 1 } },
+    { $sort: { period: 1 } }
+  ]).exec();
+};
+
+/**
+ * Get the most active contracts by event count
+ * @param {Object} filter - Mongo filter for events
+ * @param {Number} limit - max contracts returned (default 10)
+ * @returns {Promise<Array<{contractAddress, count, networks}>>}
+ */
+contractEventSchema.statics.getTopContractsByActivity = async function(filter = {}, limit = 10) {
+  return this.aggregate([
+    { $match: filter },
+    { $group: { _id: '$contractAddress', count: { $sum: 1 }, networks: { $addToSet: '$network' } } },
+    { $project: { _id: 0, contractAddress: '$_id', count: 1, networks: 1 } },
+    { $sort: { count: -1 } },
+    { $limit: Math.max(1, Math.min(limit, 100)) }
+  ]).exec();
+};
+
 export const ContractEvent = mongoose.model('ContractEvent', contractEventSchema);

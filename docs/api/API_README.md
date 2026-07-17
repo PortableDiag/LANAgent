@@ -523,6 +523,34 @@ X-Admin-Key: <AGENT_ADMIN_KEY>
 
 The wallet identity for credit-purchase records is in `callerAgentId` (existing field — kept for backwards compatibility); `currency` / `creditsIssued` / `usdValue` are populated from v2.25.35 onwards. Pre-v2.25.35 records will show those three as `null`.
 
+```
+GET /api/external/admin/wallets/:wallet/purchases?since=&until=&page=1&limit=20   (v2.25.150+)
+X-Admin-Key: <AGENT_ADMIN_KEY>
+→ {
+    "success": true,
+    "wallet": "0x...",
+    "balance": { "credits": ..., "totalPurchased": ..., "totalSpent": ..., "totalRefunded": ..., "lastPurchase": ..., "lastUsed": ... },
+    "pagination": { "page": 1, "limit": 20, "total": 4, "hasNext": false, "hasPrev": false },
+    "purchases": [ { "txHash", "chain", "amount", "currency", "creditsIssued", "bonusCredits", "promotion", "usdValue", "createdAt" }, ... ]
+  }
+```
+
+Purchase history for one wallet (default window: last 30 days). Purchases are the only per-transaction ledger; spends decrement lifetime counters only, so spend totals live in the `balance` snapshot. 404 if the wallet has no balance document.
+
+```
+GET /api/external/admin/download-tokens/analytics   (v2.25.150+)
+X-Admin-Key: <AGENT_ADMIN_KEY>
+→ {
+    "success": true,
+    "totals": { "generated": 3, "consumed": 2, "revoked": 1, "active": 1 },
+    "byAgent": { "<agentId>": { "generated", "consumed", "revoked", "active" } },
+    "timeBased": { "generatedLastHour": 3, "generatedLast24Hours": 3 },
+    "timestamp": "..."
+  }
+```
+
+Live in-memory snapshot of download-token usage (tokens within their TTL window); resets on agent restart.
+
 ---
 
 ## Recent Updates (July 3, 2026)

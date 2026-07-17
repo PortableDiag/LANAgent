@@ -2,6 +2,32 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.150] - 2026-07-16
+
+### Added — feature batch
+
+- **Moon phase intensity + peak-window indicators** for the crypto indicator registry.
+- **MCP tool metadata** (category/permissions/execution hints) + filtered tool listing.
+- **Skynet service tags** with AND/OR catalog filtering + tag-grouped usage stats.
+- **Samba mount-point conflict rejection** on create/update, with a friendly error naming
+  the conflicting mount.
+- **Admin wallet purchase history** `GET /api/external/admin/wallets/:wallet/purchases`
+  (date range + pagination + balance snapshot).
+- **ContractEvent aggregations**: counts by event type, volume over time with
+  unit-correct bucketing (hour/day/week/month), top contracts by activity.
+- **Download-token usage analytics** `GET /api/external/admin/download-tokens/analytics`;
+  also fixes a latent node-cache `getTtl()` misuse (ms-epoch passed as TTL seconds) that
+  made consumed download counters effectively immortal.
+- **Gab provider structured output**: opt-in JSON-schema-validated responses with code-fence
+  stripping and concrete validation errors; parsed object returned as `structured`.
+- **Markdown table alignments + per-column cell formatters** (backward-compatible).
+- **API key rotation** `apiKeyService.rotateApiKey(keyId, gracePeriodHours)`: clones key
+  metadata into a new key and bounds the old key's life via `expiresAt`, so the existing
+  `isValid()` validation path enforces the grace window with no new auth code.
+- **Oracle participation retention cleanup** (30-day), wired into the daily maintenance job.
+- **MQTT bulk device operations**: bulk update, lifecycle transitions (through the instance
+  method so status history/notifications still fire), and tag add/remove.
+
 ## [2.25.149] - 2026-07-13
 
 ### Fixed — the stale-Chromium-lock cleaner never actually ran
