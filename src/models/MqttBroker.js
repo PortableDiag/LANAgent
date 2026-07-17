@@ -89,6 +89,26 @@ const mqttBrokerSchema = new mongoose.Schema({
     messagesSent: { type: Number, default: 0 }
   },
 
+  // Rolling performance history, one sample per minute, capped at the last
+  // 100 samples (~1.5h) via $slice in recordMetricsSample. Written by
+  // mqttService's metrics sampler — never by per-message writes.
+  metrics: {
+    connectionHistory: [{
+      timestamp: Date,
+      count: Number
+    }],
+    messageRateHistory: [{
+      timestamp: Date,
+      received: Number,   // messages in the sample interval
+      sent: Number
+    }],
+    errorHistory: [{
+      timestamp: Date,
+      type: String,
+      count: Number
+    }]
+  },
+
   // Metadata
   description: String,
   tags: [String],
@@ -155,6 +175,106 @@ mqttBrokerSchema.methods.updateSubscription = async function(topic, updates) {
     logger.error(`Failed to update subscription: ${error.message}`);
     throw error;
   }
+};
+
+const METRICS_HISTORY_CAP = 100;
+
+/**
+ * Summarize a broker's stored metrics history for dashboard consumption.
+ * Pure function, exported for tests.
+ */
+export function summarizeBrokerMetrics(metrics = {}) {
+  const connections = metrics.connectionHistory || [];
+  const rates = metrics.messageRateHistory || [];
+  const errors = metrics.errorHistory || [];
+
+  const peakConnections = connections.length
+    ? Math.max(...connections.map(c => c.count || 0))
+    : 0;
+  const currentConnections = connections.length
+    ? (connections[connections.length - 1].count || 0)
+    : 0;
+
+  let messageRate = { received: 0, sent: 0 };
+  if (rates.length) {
+    messageRate = {
+      received: Number((rates.reduce((s, r) => s + (r.received || 0), 0) / rates.length).toFixed(2)),
+      sent: Number((rates.reduce((s, r) => s + (r.sent || 0), 0) / rates.length).toFixed(2))
+    };
+  }
+
+  const errorDistribution = {};
+  for (const e of errors) {
+    errorDistribution[e.type] = (errorDistribution[e.type] || 0) + (e.count || 0);
+  }
+
+  return {
+    sampleCount: rates.length,
+    windowStart: rates[0]?.timestamp || connections[0]?.timestamp || null,
+    windowEnd: rates[rates.length - 1]?.timestamp || connections[connections.length - 1]?.timestamp || null,
+    currentConnections,
+    peakConnections,
+    messageRate,   // average messages per sample interval (1 min)
+    errorDistribution,
+    totalErrors: Object.values(errorDistribution).reduce((s, n) => s + n, 0)
+  };
+}
+
+/**
+ * Record one metrics sample atomically ($push + $slice — matches the
+ * service's updateOne write pattern; no doc load, no save() races).
+ * @param {String} brokerId
+ * @param {Object} sample - { connections, received, sent, errors: [{type, count}] }
+ */
+mqttBrokerSchema.statics.recordMetricsSample = async function(brokerId, { connections, received, sent, errors = [] } = {}) {
+  const now = new Date();
+  const push = {
+    'metrics.connectionHistory': { $each: [{ timestamp: now, count: connections || 0 }], $slice: -METRICS_HISTORY_CAP },
+    'metrics.messageRateHistory': { $each: [{ timestamp: now, received: received || 0, sent: sent || 0 }], $slice: -METRICS_HISTORY_CAP }
+  };
+  if (errors.length > 0) {
+    push['metrics.errorHistory'] = {
+      $each: errors.map(e => ({ timestamp: now, type: e.type, count: e.count })),
+      $slice: -METRICS_HISTORY_CAP
+    };
+  }
+  await this.updateOne({ brokerId }, { $push: push });
+};
+
+/**
+ * Raw metrics history for a broker
+ */
+mqttBrokerSchema.statics.getBrokerMetrics = async function(brokerId) {
+  const broker = await this.findOne({ brokerId }).lean();
+  if (!broker) {
+    throw new Error(`Broker not found: ${brokerId}`);
+  }
+  return {
+    brokerId: broker.brokerId,
+    name: broker.name,
+    type: broker.type,
+    status: broker.status,
+    metrics: broker.metrics || {}
+  };
+};
+
+/**
+ * Formatted metrics summary (averages, peaks, error distribution) suitable
+ * for dashboard consumption
+ */
+mqttBrokerSchema.statics.getMetricsSummary = async function(brokerId) {
+  const broker = await this.findOne({ brokerId }).lean();
+  if (!broker) {
+    throw new Error(`Broker not found: ${brokerId}`);
+  }
+  return {
+    brokerId: broker.brokerId,
+    name: broker.name,
+    type: broker.type,
+    connected: broker.status?.connected || false,
+    timestamp: new Date(),
+    ...summarizeBrokerMetrics(broker.metrics)
+  };
 };
 
 export default mongoose.model('MqttBroker', mqttBrokerSchema);

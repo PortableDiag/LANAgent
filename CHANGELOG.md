@@ -2,6 +2,24 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.152] - 2026-07-17
+
+### Added
+
+- **Transcode presets**: `POST /transcode` accepts `preset` (`social-media`, `podcast`,
+  `archive`) as a one-word alternative to `customProfile` (mutually exclusive, 400 on
+  conflict). `podcast` deliberately sets no video codec so audio-only targets (mp3/wav/…)
+  work; `archive` copies the source audio instead of re-encoding it.
+- **PnL risk metrics**: `GET /api/revenue/report/risk-metrics?startDate=&endDate=` (JWT) —
+  dollar-based Sharpe (+√365-annualized), MAR-0 Sortino, dollar max drawdown, win rate,
+  profit factor over the daily PnL series. Computed by a pure `computeRiskMetrics` helper
+  with unit tests; cached 5 minutes via the model's existing node-cache.
+- **MQTT broker metrics**: the MQTT service samples per-broker performance once a minute
+  (connections, message rates, error counts by type — aedes clientError/connectionError
+  now observed) into a capped rolling history (atomic `$push`/`$slice`, last 100 samples).
+  New mqtt plugin command `get-broker-metrics` returns a dashboard summary or the raw
+  history.
+
 ## [2.25.151] - 2026-07-17
 
 ### Changed
