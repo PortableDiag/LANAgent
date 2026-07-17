@@ -94,7 +94,12 @@ export default class CryptoMonitorPlugin extends BasePlugin {
             priceAlerts: [],
             balanceAlerts: [],
             watchedAddresses: [],
-            enableNotifications: true
+            enableNotifications: true,
+            // Don't Telegram every balance change caused by our own trading —
+            // strategy trades move the wallet all day and the daily report
+            // already covers them. Unexpected changes still alert.
+            suppressOwnTradeNotifications: true,
+            ownTradeWindowMs: 30 * 60 * 1000
         };
 
         this.initialized = false;
@@ -398,6 +403,10 @@ export default class CryptoMonitorPlugin extends BasePlugin {
             );
 
             if (this.config.enableNotifications && this.agent.notify) {
+                if (await this.isOwnTradeChange(network, change, oldBalance)) {
+                    this.logger.info(`Balance-change notification suppressed on ${network}: own trade within the last ${Math.round((this.config.ownTradeWindowMs || 1800000) / 60000)}min`);
+                    return;
+                }
                 await this.agent.notify(
                     `💰 Balance changed on ${network}\n` +
                     `Address: ${address.substring(0, 10)}...\n` +
@@ -405,6 +414,35 @@ export default class CryptoMonitorPlugin extends BasePlugin {
                     `Change: ${change > 0 ? '+' : ''}${change.toFixed(6)}`
                 );
             }
+        }
+    }
+
+    /**
+     * True when a balance change is explained by the agent's own recent trading
+     * on that network — those don't need a Telegram ping (the daily report covers
+     * trading activity). A large outflow (>50% of the previous balance) is never
+     * suppressed: no single strategy trade moves half the wallet, so that shape
+     * looks like a drain and should always alert.
+     */
+    async isOwnTradeChange(network, change, oldBalance) {
+        if (!this.config.suppressOwnTradeNotifications) return false;
+
+        try {
+            const largeOutflow = change < 0
+                && Math.abs(change) > parseFloat(oldBalance) * 0.5
+                && Math.abs(change) > 0.01;
+            if (largeOutflow) return false;
+
+            const cutoff = Date.now() - (this.config.ownTradeWindowMs || 30 * 60 * 1000);
+            const txs = await walletService.getTransactions();
+            return txs.some(tx => {
+                const chain = tx.chain === 'eth' ? 'ethereum' : tx.chain;
+                return chain === network && tx.timestamp && new Date(tx.timestamp).getTime() >= cutoff;
+            });
+        } catch (error) {
+            // On any doubt, alert as before
+            this.logger.debug(`Own-trade check failed, alerting: ${error.message}`);
+            return false;
         }
     }
 

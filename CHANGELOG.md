@@ -2,6 +2,17 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.151] - 2026-07-17
+
+### Changed
+
+- **cryptoMonitor**: wallet balance-change notifications caused by the agent's own recent
+  trades are no longer sent — trading strategies move the wallet all day and the daily
+  P&L report already lists each trade. Changes with no recent own-trade on that network
+  still alert, and a large outflow (>50% of the previous balance) always alerts regardless
+  (drain shape). Configurable via `suppressOwnTradeNotifications` (default true) and
+  `ownTradeWindowMs` (default 30 min).
+
 ## [2.25.150] - 2026-07-16
 
 ### Added — feature batch
