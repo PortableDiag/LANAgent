@@ -18,7 +18,7 @@ const dailyPnLSchema = new mongoose.Schema({
     source: { type: String, enum: ['live', 'backfill'], default: 'live' }
 }, { timestamps: true });
 
-dailyPnLSchema.index({ date: 1 });
+// date: unique on the field-level decl already creates the {date:1} index
 
 /**
  * Aggregate PnL across days, weeks, months, or quarters in a date range.
@@ -131,6 +131,110 @@ dailyPnLSchema.statics.analyzeTrends = async function({ windowSize = 7, metric =
 
     pnlAggregationCache.set(cacheKey, results);
     return results;
+};
+
+/**
+ * Risk metrics over a series of daily net PnL values (DOLLARS, not rates).
+ * Pure function, exported for tests.
+ *
+ * Semantics for a dollar-PnL series (there is no capital base to express
+ * returns as percentages against):
+ *  - sharpeRatio: mean daily $PnL / sample stdDev of daily $PnL. The
+ *    conventional risk-free term is omitted — subtracting a rate from a
+ *    dollar amount mixes units. This is the standard "PnL Sharpe" used for
+ *    trading bots.
+ *  - sharpeAnnualized: sharpeRatio * sqrt(365) (crypto trades every day).
+ *  - sortinoRatio: mean daily $PnL / downside deviation vs a 0-dollar
+ *    target (MAR=0): sqrt(mean(min(0, r)^2)).
+ *  - maxDrawdown: largest peak-to-trough fall of the cumulative $PnL curve,
+ *    in dollars (a percentage against a curve that starts at $0 and can go
+ *    negative is undefined).
+ *  - profitFactor: gross profit / gross loss; null when there are no losing
+ *    days (Infinity does not survive JSON).
+ */
+export function computeRiskMetrics(dailyNets) {
+    const returns = (dailyNets || []).map(Number).filter(n => Number.isFinite(n));
+    const count = returns.length;
+    const zero = {
+        sharpeRatio: 0, sharpeAnnualized: 0, sortinoRatio: 0,
+        meanDaily: 0, stdDev: 0, downsideDeviation: 0,
+        totalNet: 0, maxDrawdown: 0, winRate: 0, profitFactor: null, count
+    };
+    if (count === 0) return zero;
+
+    const totalNet = returns.reduce((s, r) => s + r, 0);
+    const meanDaily = totalNet / count;
+
+    const stdDev = count > 1
+        ? Math.sqrt(returns.reduce((s, r) => s + (r - meanDaily) ** 2, 0) / (count - 1))
+        : 0;
+
+    const downsideDeviation = Math.sqrt(
+        returns.reduce((s, r) => s + Math.min(0, r) ** 2, 0) / count
+    );
+
+    const sharpeRatio = stdDev === 0 ? 0 : meanDaily / stdDev;
+    const sortinoRatio = downsideDeviation === 0 ? 0 : meanDaily / downsideDeviation;
+
+    let cumulative = 0;
+    let peak = 0;
+    let maxDrawdown = 0;
+    for (const r of returns) {
+        cumulative += r;
+        if (cumulative > peak) peak = cumulative;
+        maxDrawdown = Math.max(maxDrawdown, peak - cumulative);
+    }
+
+    const wins = returns.filter(r => r > 0);
+    const losses = returns.filter(r => r < 0);
+    const grossProfit = wins.reduce((s, r) => s + r, 0);
+    const grossLoss = Math.abs(losses.reduce((s, r) => s + r, 0));
+
+    const round = n => Number(n.toFixed(4));
+    return {
+        sharpeRatio: round(sharpeRatio),
+        sharpeAnnualized: round(sharpeRatio * Math.sqrt(365)),
+        sortinoRatio: round(sortinoRatio),
+        meanDaily: round(meanDaily),
+        stdDev: round(stdDev),
+        downsideDeviation: round(downsideDeviation),
+        totalNet: round(totalNet),
+        maxDrawdown: round(maxDrawdown),
+        winRate: round(wins.length / count),
+        profitFactor: grossLoss === 0 ? null : round(grossProfit / grossLoss),
+        count
+    };
+}
+
+/**
+ * Risk-adjusted performance over a date range (cached 5 min like the other
+ * aggregations). Dates are YYYY-MM-DD strings — lexicographic compare is
+ * chronological for this schema.
+ * @param {Object} opts
+ * @param {string} [opts.startDate] - YYYY-MM-DD inclusive
+ * @param {string} [opts.endDate]   - YYYY-MM-DD inclusive
+ */
+dailyPnLSchema.statics.getRiskAdjustedPerformance = async function({ startDate, endDate } = {}) {
+    const cacheKey = `risk:${startDate || ''}:${endDate || ''}`;
+    const cached = pnlAggregationCache.get(cacheKey);
+    if (cached) return cached;
+
+    const match = {};
+    if (startDate || endDate) {
+        match.date = {};
+        if (startDate) match.date.$gte = startDate;
+        if (endDate) match.date.$lte = endDate;
+    }
+
+    const data = await this.find(match, { date: 1, dailyNet: 1 }).sort({ date: 1 }).lean();
+    const result = {
+        startDate: data[0]?.date || null,
+        endDate: data[data.length - 1]?.date || null,
+        ...computeRiskMetrics(data.map(d => d.dailyNet))
+    };
+
+    pnlAggregationCache.set(cacheKey, result);
+    return result;
 };
 
 export default mongoose.model('DailyPnL', dailyPnLSchema);

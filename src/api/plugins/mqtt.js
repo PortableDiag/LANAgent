@@ -80,6 +80,11 @@ export default class MqttPlugin extends BasePlugin {
         command: 'get-status',
         description: 'Get MQTT service and Event Engine status',
         usage: 'get-status()'
+      },
+      {
+        command: 'get-broker-metrics',
+        description: 'Get per-broker performance metrics (connections, message rates, errors)',
+        usage: 'get-broker-metrics({ brokerId: "internal_default", raw: false })'
       }
     ];
 
@@ -123,6 +128,8 @@ export default class MqttPlugin extends BasePlugin {
         return this.getBrokers(params);
       case 'get-status':
         return this.getStatus(params);
+      case 'get-broker-metrics':
+        return this.getBrokerMetrics(params);
       default:
         return { success: false, error: `Unknown command: ${command}` };
     }
@@ -463,6 +470,26 @@ export default class MqttPlugin extends BasePlugin {
       };
     } catch (error) {
       logger.error('Error getting brokers:', error);
+      return { success: false, error: error.message };
+    }
+  }
+
+  /**
+   * Per-broker performance metrics (sampled once a minute by mqttService).
+   * summary: averages/peaks/error distribution; raw: full sample history.
+   */
+  async getBrokerMetrics(params = {}) {
+    try {
+      const { brokerId, raw } = params;
+      if (!brokerId) {
+        return { success: false, error: 'brokerId is required' };
+      }
+      const data = raw
+        ? await MqttBroker.getBrokerMetrics(brokerId)
+        : await MqttBroker.getMetricsSummary(brokerId);
+      return { success: true, ...data };
+    } catch (error) {
+      logger.error('Error getting broker metrics:', error);
       return { success: false, error: error.message };
     }
   }

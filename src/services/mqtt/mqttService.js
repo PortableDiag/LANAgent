@@ -39,6 +39,70 @@ class MqttService extends EventEmitter {
       clientsConnected: 0,
       externalConnections: 0
     };
+
+    // Per-broker counters for the current metrics sample window, flushed to
+    // MqttBroker.metrics once a minute by the sampler
+    this.metricsWindow = new Map();  // brokerId -> { received, sent, errors: Map(type -> count) }
+    this.metricsInterval = null;
+    this.internalBrokerId = null;
+  }
+
+  bumpMetric(brokerId, field, amount = 1) {
+    if (!brokerId) return;
+    let win = this.metricsWindow.get(brokerId);
+    if (!win) {
+      win = { received: 0, sent: 0, errors: new Map() };
+      this.metricsWindow.set(brokerId, win);
+    }
+    win[field] += amount;
+  }
+
+  bumpError(brokerId, type) {
+    if (!brokerId) return;
+    let win = this.metricsWindow.get(brokerId);
+    if (!win) {
+      win = { received: 0, sent: 0, errors: new Map() };
+      this.metricsWindow.set(brokerId, win);
+    }
+    win.errors.set(type, (win.errors.get(type) || 0) + 1);
+  }
+
+  startMetricsSampler() {
+    if (this.metricsInterval) return;
+    this.metricsInterval = setInterval(() => {
+      this.flushMetricsSample().catch(err =>
+        logger.debug(`MQTT metrics flush failed: ${err.message}`));
+    }, 60000);
+    this.metricsInterval.unref();
+  }
+
+  /**
+   * Flush one metrics sample per active broker to MqttBroker.metrics
+   * (atomic $push/$slice — see recordMetricsSample)
+   */
+  async flushMetricsSample() {
+    const brokerIds = new Set(this.externalClients.keys());
+    if (this.aedes && this.internalBrokerId) brokerIds.add(this.internalBrokerId);
+
+    for (const brokerId of brokerIds) {
+      const win = this.metricsWindow.get(brokerId) || { received: 0, sent: 0, errors: new Map() };
+      this.metricsWindow.delete(brokerId);
+
+      const connections = brokerId === this.internalBrokerId
+        ? this.stats.clientsConnected
+        : (this.externalClients.get(brokerId)?.client?.connected ? 1 : 0);
+
+      try {
+        await MqttBroker.recordMetricsSample(brokerId, {
+          connections,
+          received: win.received,
+          sent: win.sent,
+          errors: [...win.errors].map(([type, count]) => ({ type, count }))
+        });
+      } catch (err) {
+        logger.debug(`Failed to record metrics sample for ${brokerId}: ${err.message}`);
+      }
+    }
   }
 
   /**
@@ -112,6 +176,7 @@ class MqttService extends EventEmitter {
       }
 
       this.enabled = true;
+      this.startMetricsSampler();
       logger.info('MQTT service initialized successfully');
 
       return { success: true, stats: this.getStats() };
@@ -164,6 +229,8 @@ class MqttService extends EventEmitter {
         };
       }
 
+      this.internalBrokerId = config.brokerId;
+
       // Event handlers
       this.aedes.on('client', (client) => {
         this.stats.clientsConnected++;
@@ -192,6 +259,16 @@ class MqttService extends EventEmitter {
 
       this.aedes.on('subscribe', (subscriptions, client) => {
         logger.debug(`Client ${client.id} subscribed to:`, subscriptions.map(s => s.topic));
+      });
+
+      this.aedes.on('clientError', (client, error) => {
+        logger.debug(`MQTT client error (${client?.id}): ${error.message}`);
+        this.bumpError(config.brokerId, 'client_error');
+      });
+
+      this.aedes.on('connectionError', (client, error) => {
+        logger.debug(`MQTT connection error: ${error.message}`);
+        this.bumpError(config.brokerId, 'connection_error');
       });
 
       // Start TCP server
@@ -350,6 +427,7 @@ class MqttService extends EventEmitter {
 
       client.on('error', async (error) => {
         logger.error(`External broker error (${config.name}):`, error);
+        this.bumpError(config.brokerId, error.code || 'connection_error');
         await this.updateBrokerStatus(config.brokerId, {
           lastError: error.message
         });
@@ -447,6 +525,7 @@ class MqttService extends EventEmitter {
       }
 
       // Update broker stats
+      this.bumpMetric(brokerId, 'received');
       await MqttBroker.updateOne(
         { brokerId },
         { $inc: { 'status.messagesReceived': 1 } }
@@ -582,6 +661,7 @@ class MqttService extends EventEmitter {
       }
 
       this.stats.messagesSent++;
+      this.bumpMetric(brokerId || this.internalBrokerId, 'sent');
 
       // Update broker stats
       if (brokerId) {
@@ -779,6 +859,11 @@ class MqttService extends EventEmitter {
    */
   async shutdown() {
     logger.info('Shutting down MQTT service...');
+
+    if (this.metricsInterval) {
+      clearInterval(this.metricsInterval);
+      this.metricsInterval = null;
+    }
 
     // Disconnect external clients
     for (const [brokerId] of this.externalClients) {

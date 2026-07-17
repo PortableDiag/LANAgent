@@ -8,6 +8,7 @@ import { upload, validateMagicBytes, scanWithVirusTotal } from '../middleware/fi
 import { generateDownloadToken } from '../services/downloadTokenService.js';
 import { logger } from '../../../utils/logger.js';
 import { safeJsonParse, validateJsonSchema } from '../../../utils/jsonUtils.js';
+import { TRANSCODE_PRESETS } from './transcodePresets.js';
 
 const router = Router();
 
@@ -33,12 +34,26 @@ router.post('/convert',
   validateMagicBytes,
   scanWithVirusTotal,
   async (req, res) => {
-    const { targetFormat, quality, customProfile, extractMetadata } = req.body;
+    const { targetFormat, quality, customProfile, extractMetadata, preset } = req.body;
 
     if (!targetFormat || !ALLOWED_OUTPUT_FORMATS.includes(targetFormat)) {
       return res.status(400).json({
         success: false,
         error: `targetFormat required. Allowed: ${ALLOWED_OUTPUT_FORMATS.join(', ')}`
+      });
+    }
+
+    if (preset && customProfile) {
+      return res.status(400).json({
+        success: false,
+        error: 'preset and customProfile are mutually exclusive — send one or the other'
+      });
+    }
+
+    if (preset && !TRANSCODE_PRESETS[preset]) {
+      return res.status(400).json({
+        success: false,
+        error: `Invalid preset. Allowed: ${Object.keys(TRANSCODE_PRESETS).join(', ')}`
       });
     }
 
@@ -69,7 +84,9 @@ router.post('/convert',
         }
       }
 
-      if (customProfile) {
+      if (preset) {
+        Object.assign(options, TRANSCODE_PRESETS[preset]);
+      } else if (customProfile) {
         // Parse custom profile (may arrive as JSON string from multipart form)
         const profile = typeof customProfile === 'string' ? safeJsonParse(customProfile) : customProfile;
         if (!profile) {

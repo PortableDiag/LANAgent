@@ -1,6 +1,7 @@
 import express from 'express';
 import { authenticateToken } from '../interfaces/web/auth.js';
 import revenueService from '../services/crypto/revenueService.js';
+import DailyPnL from '../models/DailyPnL.js';
 import { logger } from '../utils/logger.js';
 import NodeCache from 'node-cache';
 import { retryOperation } from '../utils/retryUtils.js';
@@ -222,6 +223,24 @@ router.get('/report/daily-pnl', authenticateToken, async (req, res) => {
         res.json({ success: true, data });
     } catch (error) {
         logger.error('Failed to get daily P&L:', error);
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+// Risk-adjusted performance over the daily PnL series (dollar-based Sharpe/
+// Sortino/drawdown — see computeRiskMetrics in models/DailyPnL.js for the
+// exact semantics). Dates are YYYY-MM-DD; both optional (default: all history).
+router.get('/report/risk-metrics', authenticateToken, async (req, res) => {
+    try {
+        const { startDate, endDate } = req.query;
+        const dateRe = /^\d{4}-\d{2}-\d{2}$/;
+        if ((startDate && !dateRe.test(startDate)) || (endDate && !dateRe.test(endDate))) {
+            return res.status(400).json({ success: false, error: 'startDate/endDate must be YYYY-MM-DD' });
+        }
+        const data = await retryOperation(() => DailyPnL.getRiskAdjustedPerformance({ startDate, endDate }));
+        res.json({ success: true, data });
+    } catch (error) {
+        logger.error('Failed to get risk metrics:', error);
         res.status(500).json({ success: false, error: error.message });
     }
 });

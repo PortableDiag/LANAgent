@@ -553,6 +553,34 @@ Live in-memory snapshot of download-token usage (tokens within their TTL window)
 
 ---
 
+## Recent Updates (July 17, 2026)
+
+### v2.25.152 — Transcode presets, PnL risk metrics, MQTT broker metrics
+
+**`POST /transcode` — new `preset` parameter.** One-word alternative to `customProfile`:
+
+| Preset | Effect |
+|--------|--------|
+| `social-media` | libx264/aac, 1080x1920 portrait, 4000k/192k |
+| `podcast` | libmp3lame 128k audio; no video codec so audio-only targets (mp3/wav/…) work |
+| `archive` | libx265 8000k video, source audio copied (no lossy re-encode) |
+
+`preset` and `customProfile` together return 400. Invalid preset names return 400 with the
+allowed list.
+
+**`GET /api/revenue/report/risk-metrics?startDate=&endDate=`** (JWT) — risk-adjusted
+performance over the daily PnL series. Dollar-based semantics: `sharpeRatio` (mean daily
+net / stdev), `sharpeAnnualized` (×√365), `sortinoRatio` (MAR=0 downside deviation),
+`maxDrawdown` in dollars, `winRate`, `profitFactor` (null when no losing days),
+`meanDaily`, `stdDev`, `totalNet`, `count`. Dates are YYYY-MM-DD; both optional
+(default: all history). Cached 5 minutes.
+
+**MQTT plugin — new `get-broker-metrics` command** (`{ brokerId, raw? }`). The MQTT
+service samples per-broker performance once a minute (atomic `$push`/`$slice`, last 100
+samples ≈ 1.5h): connection counts, messages received/sent per interval, and error counts
+by type. Summary form returns `currentConnections`, `peakConnections`, average
+`messageRate`, `errorDistribution`, `totalErrors`; `raw: true` returns the full history.
+
 ## Recent Updates (July 3, 2026)
 
 ### v2.25.140 — Eight plugin/model features from the self-mod PR queue
