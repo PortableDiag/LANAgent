@@ -3,6 +3,7 @@ import { BaseProvider } from "./BaseProvider.js";
 import { logger } from "../utils/logger.js";
 import { retryOperation } from '../utils/retryUtils.js';
 import NodeCache from 'node-cache';
+import { validateJsonSchema } from '../utils/jsonUtils.js';
 
 export class GabProvider extends BaseProvider {
   constructor(config = {}) {
@@ -77,13 +78,37 @@ export class GabProvider extends BaseProvider {
     }
   }
 
+  /**
+   * Parse a response against a JSON schema. validateJsonSchema returns an
+   * ARRAY of error objects (empty = valid). Models often wrap JSON in a
+   * ```json fence — strip it before parsing.
+   * @returns {{parsed: Object|null, errors: Array}}
+   */
+  validateStructuredOutput(response, schema) {
+    const stripped = String(response).trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
+    try {
+      const parsed = JSON.parse(stripped);
+      const errors = validateJsonSchema(parsed, schema);
+      return { parsed: errors.length === 0 ? parsed : null, errors };
+    } catch (parseErr) {
+      return { parsed: null, errors: [{ message: `Response is not valid JSON: ${parseErr.message}`, field: null, severity: 'error' }] };
+    }
+  }
+
   async generateResponse(prompt, options = {}) {
     const startTime = Date.now();
-    
+
     try {
+      // Structured output: append schema instructions to the prompt and
+      // validate the reply below. Opt-in via options.structuredOutput.schema.
+      let finalPrompt = prompt;
+      if (options.structuredOutput?.schema) {
+        finalPrompt = `${prompt}\n\nRespond ONLY with valid JSON conforming to this schema (no prose, no code fences):\n${JSON.stringify(options.structuredOutput.schema)}`;
+      }
+
       const messages = options.messages || [
         { role: "system", content: options.systemPrompt || "You are a helpful AI assistant." },
-        { role: "user", content: prompt }
+        { role: "user", content: finalPrompt }
       ];
 
       const completion = await retryOperation(() => 
@@ -100,14 +125,25 @@ export class GabProvider extends BaseProvider {
       const responseTime = Date.now() - startTime;
       const response = completion.choices[0].message.content;
 
+      let structured = null;
+      if (options.structuredOutput?.schema) {
+        const { parsed, errors } = this.validateStructuredOutput(response, options.structuredOutput.schema);
+        if (!parsed) {
+          logger.warn('Gab structured output failed schema validation:', errors.map(e => e.message).join('; '));
+          throw new Error(`Structured output does not match the required JSON schema: ${errors.map(e => e.message).join('; ')}`);
+        }
+        structured = parsed;
+      }
+
       // Pass full usage object with model info
-      await this.updateMetrics(responseTime, { 
+      await this.updateMetrics(responseTime, {
         ...completion.usage,
-        model: completion.model 
+        model: completion.model
       });
 
       return {
         content: response,
+        ...(structured !== null && { structured }),
         model: completion.model,
         usage: completion.usage,
         provider: this.name

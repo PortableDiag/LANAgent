@@ -78,6 +78,33 @@ export class MoonIndicators {
   }
 
   /**
+   * Calculate moon phase intensity based on illumination and proximity to exact phase dates
+   * @param {Date} date - The date for which to calculate the moon phase intensity
+   * @returns {Object} - Phase intensity information including strength level and peak window status
+   */
+  calculatePhaseIntensity(date = new Date()) {
+    const phaseData = this.calculateMoonPhase(date);
+    
+    // Define intensity thresholds based on illumination percentage
+    let intensityLevel = 'weak';
+    if (phaseData.illumination >= 75) {
+      intensityLevel = 'strong';
+    } else if (phaseData.illumination >= 25) {
+      intensityLevel = 'moderate';
+    }
+    
+    // Check if we're in a peak phase window (within 1 day of new or full moon)
+    const isPeakWindow = phaseData.daysUntilNew <= 1 || phaseData.daysSinceNew <= 1 || 
+                         phaseData.daysUntilFull <= 1 || phaseData.daysSinceFull <= 1;
+    
+    return {
+      ...phaseData,
+      intensity: intensityLevel,
+      isPeakWindow
+    };
+  }
+
+  /**
    * Get moon phase for a specific date
    * @param {Date} date - The date for which to calculate the moon phase
    * @returns {Object} - Moon phase data
@@ -176,6 +203,24 @@ export class MoonIndicators {
     }, {
       type: 'boolean',
       description: 'True if within 1 day of new moon',
+      category: 'moon'
+    });
+
+    // Moon phase intensity
+    this.register('phase_intensity', async () => {
+      return this.calculatePhaseIntensity().intensity;
+    }, {
+      type: 'string',
+      description: 'Moon phase intensity level (weak, moderate, strong)',
+      category: 'moon'
+    });
+
+    // Peak phase window
+    this.register('peak_phase_window', async () => {
+      return this.calculatePhaseIntensity().isPeakWindow;
+    }, {
+      type: 'boolean',
+      description: 'True if currently in a peak phase window (within 1 day of new or full moon)',
       category: 'moon'
     });
   }

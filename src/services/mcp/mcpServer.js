@@ -78,8 +78,14 @@ export class MCPServerService {
           name: `${pluginName}_${command.command}`,
           description: command.description,
           plugin: pluginName,
+          category: plugin.category || 'general',
           action: command.command,
-          inputSchema: this.generateInputSchema(command)
+          inputSchema: this.generateInputSchema(command),
+          permissions: command.permissions || ['user'],
+          executionMetadata: {
+            timeout: command.timeout || 30000,
+            retryAttempts: command.retryAttempts || 0
+          }
         });
       }
     }
@@ -171,6 +177,34 @@ export class MCPServerService {
       exposedToolCount: this.getExposedTools().length,
       implementation: 'framework_stub'
     };
+  }
+
+  /**
+   * Get tools with filtering capabilities
+   * @param {Object} filters - Filter criteria
+   * @param {string} [filters.category] - Filter by category
+   * @param {string} [filters.plugin] - Filter by plugin name
+   * @param {string} [filters.permission] - Filter by permission level
+   * @returns {Array} Filtered tools
+   */
+  getToolsWithFilters(filters = {}) {
+    let tools = this.getExposedTools();
+
+    if (filters.category) {
+      tools = tools.filter(tool => tool.category === filters.category);
+    }
+
+    if (filters.plugin) {
+      tools = tools.filter(tool => tool.plugin === filters.plugin);
+    }
+
+    if (filters.permission) {
+      tools = tools.filter(tool => 
+        tool.permissions && tool.permissions.includes(filters.permission)
+      );
+    }
+
+    return tools;
   }
 }
 

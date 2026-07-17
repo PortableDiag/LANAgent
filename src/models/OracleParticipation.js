@@ -1,4 +1,6 @@
 import mongoose from 'mongoose';
+import { logger } from '../utils/logger.js';
+import { retryOperation } from '../utils/retryUtils.js';
 
 const oracleParticipationSchema = new mongoose.Schema({
     requestId: { type: Number, required: true },
@@ -33,6 +35,8 @@ oracleParticipationSchema.index({ requestId: 1 }, { unique: true });
 oracleParticipationSchema.index({ status: 1 });
 oracleParticipationSchema.index({ role: 1 });
 oracleParticipationSchema.index({ createdAt: -1 });
+// Add index to optimize cleanup queries
+oracleParticipationSchema.index({ status: 1, updatedAt: 1 });
 
 oracleParticipationSchema.statics.getActive = function () {
     return this.find({ status: { $in: ['monitoring', 'committed', 'revealed'] } })
@@ -65,6 +69,48 @@ oracleParticipationSchema.statics.getEarningsStats = function (since) {
             totalEarned: { $sum: { $toDouble: '$rewardEarned' } }
         }}
     ]);
+};
+
+/**
+ * Cleanup expired oracle participations older than the retention period
+ * @param {number} retentionDays - Number of days to retain expired documents (default: 30)
+ * @returns {Promise<Object>} Result of the cleanup operation
+ */
+oracleParticipationSchema.statics.cleanupExpired = async function (retentionDays = 30) {
+    try {
+        const cutoffDate = new Date();
+        cutoffDate.setDate(cutoffDate.getDate() - retentionDays);
+        
+        logger.info(`Starting cleanup of expired oracle participations older than ${retentionDays} days`, {
+            cutoffDate,
+            retentionDays
+        });
+
+        const result = await retryOperation(async () => {
+            return await this.deleteMany({
+                status: 'expired',
+                updatedAt: { $lt: cutoffDate }
+            });
+        }, { retries: 3 });
+
+        logger.info(`Cleanup completed successfully`, {
+            deletedCount: result.deletedCount,
+            retentionDays
+        });
+
+        return {
+            success: true,
+            deletedCount: result.deletedCount,
+            retentionDays
+        };
+    } catch (error) {
+        logger.error('Failed to cleanup expired oracle participations', {
+            error: error.message,
+            stack: error.stack
+        });
+        
+        throw error;
+    }
 };
 
 const OracleParticipation = mongoose.model('OracleParticipation', oracleParticipationSchema);

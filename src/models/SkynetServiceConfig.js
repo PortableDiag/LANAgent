@@ -38,6 +38,10 @@ const skynetServiceConfigSchema = new mongoose.Schema({
     type: String,
     default: 'general'
   },
+  tags: {
+    type: [String],
+    default: []
+  },
   skynetEnabled: {
     type: Boolean,
     default: false
@@ -68,14 +72,29 @@ const skynetServiceConfigSchema = new mongoose.Schema({
 
 /**
  * Get all enabled Skynet services as a catalog
+ * @param {Object} options - Options object
+ * @param {string[]} options.tags - Array of tags to filter by
+ * @param {string} options.tagOperator - Operator for tag filtering ('AND' or 'OR')
  */
-skynetServiceConfigSchema.statics.getCatalog = async function() {
-  const services = await this.find({ skynetEnabled: true });
+skynetServiceConfigSchema.statics.getCatalog = async function(options = {}) {
+  const { tags, tagOperator = 'OR' } = options;
+  let query = { skynetEnabled: true };
+  
+  if (tags && Array.isArray(tags) && tags.length > 0) {
+    if (tagOperator === 'AND') {
+      query.tags = { $all: tags };
+    } else {
+      query.tags = { $in: tags };
+    }
+  }
+  
+  const services = await this.find(query);
   return services.map(s => ({
     serviceId: s.serviceId,
     name: s.name,
     description: s.description,
     category: s.category,
+    tags: s.tags,
     price: s.skynetPrice,
     rateLimit: s.rateLimit
   }));
@@ -103,6 +122,27 @@ skynetServiceConfigSchema.statics.recordExecution = async function(serviceId, sk
 };
 
 /**
+ * Find services by tags with AND/OR matching
+ * @param {string[]} tags - Array of tags to search for
+ * @param {string} operator - Matching operator ('AND' or 'OR')
+ * @returns {Array} Array of matching service configurations
+ */
+skynetServiceConfigSchema.statics.findServicesByTags = async function(tags, operator = 'OR') {
+  if (!tags || !Array.isArray(tags) || tags.length === 0) {
+    return [];
+  }
+
+  let query = {};
+  if (operator === 'AND') {
+    query.tags = { $all: tags };
+  } else {
+    query.tags = { $in: tags };
+  }
+
+  return this.find(query);
+};
+
+/**
  * Get service usage statistics grouped by category
  */
 skynetServiceConfigSchema.statics.getServiceUsageStats = async function() {
@@ -114,6 +154,7 @@ skynetServiceConfigSchema.statics.getServiceUsageStats = async function() {
           serviceId: "$serviceId",
           name: "$name"
         },
+        tags: { $first: "$tags" },
         totalRequests: { $sum: "$totalRequests" },
         totalRevenue: { $sum: "$totalRevenue" },
         lastUsed: { $max: "$lastUsed" }
@@ -126,6 +167,7 @@ skynetServiceConfigSchema.statics.getServiceUsageStats = async function() {
           $push: {
             serviceId: "$_id.serviceId",
             name: "$_id.name",
+            tags: "$tags",
             totalRequests: "$totalRequests",
             totalRevenue: "$totalRevenue",
             lastUsed: "$lastUsed"
@@ -146,7 +188,35 @@ skynetServiceConfigSchema.statics.getServiceUsageStats = async function() {
     }
   ]);
 
-  return stats;
+  // Group services by tags within each category
+  const result = stats.map(categoryStat => {
+    const tagGroups = {};
+    
+    categoryStat.services.forEach(service => {
+      if (service.tags && service.tags.length > 0) {
+        service.tags.forEach(tag => {
+          if (!tagGroups[tag]) {
+            tagGroups[tag] = {
+              tagName: tag,
+              services: [],
+              tagTotalRequests: 0,
+              tagTotalRevenue: 0
+            };
+          }
+          tagGroups[tag].services.push(service);
+          tagGroups[tag].tagTotalRequests += service.totalRequests;
+          tagGroups[tag].tagTotalRevenue += service.totalRevenue;
+        });
+      }
+    });
+    
+    return {
+      ...categoryStat,
+      tagGroups: Object.values(tagGroups)
+    };
+  });
+
+  return result;
 };
 
 /**
@@ -163,6 +233,7 @@ skynetServiceConfigSchema.statics.getTopServicesByRevenue = async function({ lim
       name: 1,
       description: 1,
       category: 1,
+      tags: 1,
       totalRequests: 1,
       totalRevenue: 1,
       lastUsed: 1

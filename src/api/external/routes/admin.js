@@ -42,6 +42,80 @@ router.get('/wallets', async (req, res) => {
   }
 });
 
+/**
+ * GET /wallets/:wallet/purchases — credit purchase history for one wallet.
+ * Purchases are the only per-transaction ledger (ExternalPayment rows with
+ * serviceId 'credit-purchase', keyed by callerAgentId = wallet); spends only
+ * decrement lifetime counters, so the balance snapshot carries those totals.
+ * Query: since/until (ISO, default last 30 days), page, limit (max 100)
+ */
+router.get('/wallets/:wallet/purchases', async (req, res) => {
+  try {
+    const wallet = String(req.params.wallet || '').toLowerCase();
+    const balance = await ExternalCreditBalance
+      .findOne({ wallet }, { wallet: 1, credits: 1, totalPurchased: 1, totalSpent: 1, totalRefunded: 1, lastPurchase: 1, lastUsed: 1, _id: 0 })
+      .lean();
+    if (!balance) {
+      return res.status(404).json({ success: false, error: 'Wallet not found' });
+    }
+
+    const now = new Date();
+    const since = req.query.since ? new Date(req.query.since) : new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
+    const until = req.query.until ? new Date(req.query.until) : now;
+    if (isNaN(since.getTime()) || isNaN(until.getTime())) {
+      return res.status(400).json({ success: false, error: 'Invalid since/until date. Use ISO date format.' });
+    }
+    if (since > until) {
+      return res.status(400).json({ success: false, error: 'since must be before until' });
+    }
+
+    const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
+    const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 20, 1), 100);
+
+    // callerAgentId casing follows whatever the x402 middleware set at purchase
+    // time — match case-insensitively (payment volume is small; regex is fine)
+    const walletPattern = new RegExp(`^${wallet.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i');
+    const query = {
+      serviceId: 'credit-purchase',
+      callerAgentId: walletPattern,
+      createdAt: { $gte: since, $lte: until }
+    };
+
+    const total = await ExternalPayment.countDocuments(query);
+    const purchases = await ExternalPayment
+      .find(query, { txHash: 1, chain: 1, amount: 1, currency: 1, creditsIssued: 1, bonusCredits: 1, promotion: 1, usdValue: 1, createdAt: 1, _id: 0 })
+      .sort({ createdAt: -1 })
+      .skip((page - 1) * limit)
+      .limit(limit)
+      .lean();
+
+    res.json({
+      success: true,
+      wallet,
+      balance,
+      pagination: { page, limit, total, hasNext: page * limit < total, hasPrev: page > 1 },
+      purchases
+    });
+  } catch (err) {
+    logger.error('admin/wallets/:wallet/purchases failed:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+/**
+ * GET /download-tokens/analytics — live snapshot of download-token usage
+ * (totals, per-agent breakdown, generation rate). In-memory, resets on restart.
+ */
+router.get('/download-tokens/analytics', async (req, res) => {
+  try {
+    const { getTokenAnalytics } = await import('../services/downloadTokenService.js');
+    res.json({ success: true, ...getTokenAnalytics() });
+  } catch (err) {
+    logger.error('admin/download-tokens/analytics failed:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 router.get('/payments/recent', async (req, res) => {
   const limit = Math.min(parseInt(req.query.limit, 10) || 20, 100);
   try {

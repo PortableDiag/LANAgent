@@ -65,23 +65,70 @@ export function applyCustomMarkdownExtensions(text, extensions = []) {
 }
 
 /**
- * Format a 2D array of strings into a Markdown table
+ * Format a 2D array of strings into a Markdown table with advanced features
  * @param {string[][]} tableData - The 2D array of strings representing the table
+ * @param {Object} options - Formatting options
+ * @param {string[]} options.alignments - Array of column alignments ('left', 'center', 'right')
+ * @param {Function[]} options.cellFormatters - Array of functions to format cells by column
  * @returns {string} - The formatted Markdown table
  */
-export function formatTable(tableData) {
+export function formatTable(tableData, options = {}) {
   if (!Array.isArray(tableData) || tableData.length === 0) return '';
 
-  const columnWidths = tableData[0].map((_, colIndex) => 
-    Math.max(...tableData.map(row => row[colIndex].length))
+  const { alignments = [], cellFormatters = [] } = options;
+
+  // Apply cell formatters if provided
+  const formattedData = tableData.map((row, rowIndex) => 
+    row.map((cell, colIndex) => {
+      if (cellFormatters[colIndex]) {
+        return cellFormatters[colIndex](cell, rowIndex, colIndex);
+      }
+      return String(cell);
+    })
   );
 
+  // Calculate column widths based on formatted data
+  const columnWidths = formattedData[0].map((_, colIndex) => 
+    Math.max(...formattedData.map(row => row[colIndex].length))
+  );
+
+  // Create alignment markers
+  const getAlignmentMarker = (alignment, width) => {
+    switch (alignment) {
+      case 'center':
+        return ':' + '-'.repeat(Math.max(0, width - 2)) + ':';
+      case 'right':
+        return '-'.repeat(Math.max(0, width - 1)) + ':';
+      case 'left':
+      default:
+        return '-'.repeat(width);
+    }
+  };
+
   const formatRow = (row) => 
-    '| ' + row.map((cell, colIndex) => cell.padEnd(columnWidths[colIndex])).join(' | ') + ' |';
+    '| ' + row.map((cell, colIndex) => {
+      const width = columnWidths[colIndex];
+      const alignment = alignments[colIndex] || 'left';
+      
+      switch (alignment) {
+        case 'center':
+          const padTotal = width - cell.length;
+          const padLeft = Math.floor(padTotal / 2);
+          const padRight = padTotal - padLeft;
+          return ' '.repeat(padLeft) + cell + ' '.repeat(padRight);
+        case 'right':
+          return cell.padStart(width);
+        case 'left':
+        default:
+          return cell.padEnd(width);
+      }
+    }).join(' | ') + ' |';
 
-  const headerSeparator = '| ' + columnWidths.map(width => '-'.repeat(width)).join(' | ') + ' |';
+  const headerSeparator = '| ' + columnWidths.map((width, index) => 
+    getAlignmentMarker(alignments[index] || 'left', width)
+  ).join(' | ') + ' |';
 
-  const [header, ...rows] = tableData;
+  const [header, ...rows] = formattedData;
   return [
     formatRow(header),
     headerSeparator,
