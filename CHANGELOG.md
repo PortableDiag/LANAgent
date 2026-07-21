@@ -2,6 +2,26 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.153] - 2026-07-21
+
+### Fixed — AI provider chain hardening
+
+- **Disabled providers are no longer registered.** A provider whose saved config has
+  `enabled: false` is skipped entirely at registration — it can't become the active
+  provider and never appears in the per-request fallback chain. Previously the flag was
+  ignored: any provider with an API key in `.env` joined the fallback rotation, so a
+  transient primary-provider blip could route requests (and spend) to providers the
+  operator had deliberately parked.
+- **Daily model refresh no longer corrupts the configured chat model.** The categorized
+  model catalog (`{chat: [...], vision: [...]}`) was merged into the provider's model
+  *configuration*, replacing the configured model string with an array — after which
+  every request failed with `400 expected string, received array` until the next
+  restart. The catalog is now stored as an availability list only.
+- **OpenAI fallback clamps `max_tokens` to the model's completion cap.** Callers tuned
+  for big-context providers overshoot smaller models' caps and the request 400s before
+  generating a token; the cap is now parsed from the API error and the request retried
+  once, clamped.
+
 ## [2.25.152] - 2026-07-17
 
 ### Added

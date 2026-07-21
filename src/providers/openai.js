@@ -169,7 +169,23 @@ export class OpenAIProvider extends BaseProvider {
         delete completionParams.reasoning_effort;
       }
 
-      const completion = await this.client.chat.completions.create(completionParams);
+      let completion;
+      try {
+        completion = await this.client.chat.completions.create(completionParams);
+      } catch (err) {
+        // Callers tuned for big-context providers (self-mod passes 32k for
+        // Qwen) can overshoot this model's completion cap and 400 before a
+        // single token — making OpenAI useless as a fallback for exactly
+        // those calls. Parse the cap out of the error and retry once.
+        const capMatch = err?.status === 400 && err?.param === 'max_tokens'
+          ? String(err?.message || '').match(/supports at most (\d+)/)
+          : null;
+        if (!capMatch) throw err;
+        const cap = parseInt(capMatch[1], 10);
+        logger.warn(`OpenAI max_tokens ${completionParams.max_tokens} exceeds model cap ${cap} — retrying clamped`);
+        completionParams.max_tokens = cap;
+        completion = await this.client.chat.completions.create(completionParams);
+      }
 
       const responseTime = Date.now() - startTime;
       const response = completion.choices[0].message.content;

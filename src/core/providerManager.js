@@ -99,7 +99,19 @@ export class ProviderManager extends EventEmitter {
       logger.debug("Could not load saved AI provider configurations:", error.message);
     }
     
-    if (process.env.OPENAI_API_KEY) {
+    // A provider whose saved config carries enabled:false is not registered at
+    // all — not in the active slot, not in the fallback chain. Having an API
+    // key in .env is availability, not consent (2026-07-21: a fallback chain
+    // hit the credit-less Anthropic account and alerted the operator twice).
+    const providerDisabled = (key) => {
+      if (savedConfigs[key]?.enabled === false) {
+        logger.info(`Provider ${key} disabled in saved config — not registering`);
+        return true;
+      }
+      return false;
+    };
+
+    if (process.env.OPENAI_API_KEY && !providerDisabled('openai')) {
       const config = {
         apiKey: process.env.OPENAI_API_KEY,
         ...savedConfigs.openai
@@ -108,7 +120,7 @@ export class ProviderManager extends EventEmitter {
       await this.registerProvider("openai", openai);
     }
 
-    if (process.env.ANTHROPIC_API_KEY) {
+    if (process.env.ANTHROPIC_API_KEY && !providerDisabled('anthropic')) {
       const config = {
         apiKey: process.env.ANTHROPIC_API_KEY,
         ...savedConfigs.anthropic
@@ -117,7 +129,7 @@ export class ProviderManager extends EventEmitter {
       await this.registerProvider("anthropic", anthropic);
     }
 
-    if (process.env.GAB_AI_API_KEY) {
+    if (process.env.GAB_AI_API_KEY && !providerDisabled('gab')) {
       const config = {
         apiKey: process.env.GAB_AI_API_KEY,
         ...savedConfigs.gab
@@ -126,7 +138,7 @@ export class ProviderManager extends EventEmitter {
       await this.registerProvider("gab", gab);
     }
 
-    if (process.env.HUGGINGFACE_TOKEN) {
+    if (process.env.HUGGINGFACE_TOKEN && !providerDisabled('huggingface')) {
       const config = {
         apiKey: process.env.HUGGINGFACE_TOKEN,
         ...savedConfigs.huggingface
@@ -136,7 +148,7 @@ export class ProviderManager extends EventEmitter {
     }
 
     // Ollama - Local LLM provider (no API key required)
-    if (process.env.OLLAMA_BASE_URL || process.env.ENABLE_OLLAMA === 'true') {
+    if ((process.env.OLLAMA_BASE_URL || process.env.ENABLE_OLLAMA === 'true') && !providerDisabled('ollama')) {
       try {
         const config = {
           ...savedConfigs.ollama,
@@ -155,7 +167,7 @@ export class ProviderManager extends EventEmitter {
     }
 
     // BitNet - Local CPU-optimized 1-bit LLM inference (no API key required)
-    if (process.env.BITNET_BASE_URL || process.env.ENABLE_BITNET === 'true') {
+    if ((process.env.BITNET_BASE_URL || process.env.ENABLE_BITNET === 'true') && !providerDisabled('bitnet')) {
       try {
         const config = {
           baseUrl: process.env.BITNET_BASE_URL || 'http://localhost:8080',
@@ -171,7 +183,7 @@ export class ProviderManager extends EventEmitter {
     }
 
     // Uncensored AI - OpenAI-compatible uncensored LLM
-    if (process.env.UNCENSORED_API_KEY) {
+    if (process.env.UNCENSORED_API_KEY && !providerDisabled('uncensored')) {
       try {
         const config = {
           apiKey: process.env.UNCENSORED_API_KEY,
