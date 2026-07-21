@@ -204,17 +204,20 @@ export class BaseProvider extends EventEmitter {
   }
 
   updateAvailableModels(models) {
-    logger.info(`Updating available models for ${this.name}:`, 
+    logger.info(`Updating available models for ${this.name}:`,
       Array.isArray(models) ? `${models.length} models` : 'model categories');
-    
-    if (this.models) {
-      if (typeof this.models === 'object' && !Array.isArray(models)) {
-        Object.assign(this.models, models);
-      } else if (Array.isArray(models)) {
-        this.availableModels = models;
-      }
+
+    if (Array.isArray(models)) {
+      this.availableModels = models;
+    } else if (models && typeof models === 'object') {
+      // Categorized catalog ({chat:[...], vision:[...]}) is an AVAILABILITY
+      // list, not configuration. Object.assign-ing it into this.models used
+      // to clobber models.chat with an array, and every subsequent request
+      // 400'd ("expected string, received array" — HF, daily at 03:00).
+      this.availableModelsByCategory = models;
+      if (Array.isArray(models.chat)) this.availableModels = models.chat;
     }
-    
+
     this.emit('models-updated', models);
   }
 
