@@ -34,7 +34,11 @@ const agentCoordinationSchema = new mongoose.Schema({
     autoAccepted: { type: Boolean, default: false },
     proposeTxHash: { type: String, default: '' },
     executeTxHash: { type: String, default: '' },
-    executionResult: { type: Object, default: null }
+    executionResult: { type: Object, default: null },
+    multisigRequirements: {
+        threshold: { type: Number, default: 1 },
+        authorizedSigners: [{ type: String }]
+    }
 }, { timestamps: true });
 
 agentCoordinationSchema.index({ status: 1 });
@@ -119,6 +123,72 @@ agentCoordinationSchema.statics.batchUpdateExecutionResults = async function (in
         logger.error('batchUpdateExecutionResults failed:', error);
         throw error;
     }
+};
+
+/**
+ * Validate if multisig requirements are met for a coordination
+ * @param {string} intentHash - Coordination identifier
+ * @returns {Promise<boolean>}
+ */
+agentCoordinationSchema.statics.validateMultisigCompletion = async function (intentHash) {
+    if (!intentHash) throw new Error('intentHash is required');
+
+    const coordination = await this.findOne({ intentHash });
+    if (!coordination) throw new Error('Coordination not found');
+
+    // If no multisig requirements, consider it valid
+    if (!coordination.multisigRequirements || !coordination.multisigRequirements.threshold) {
+        return true;
+    }
+
+    const { threshold, authorizedSigners } = coordination.multisigRequirements;
+    
+    // Count accepted participants who are authorized signers
+    const acceptedAuthorizedParticipants = coordination.participants.filter(participant => 
+        participant.accepted && authorizedSigners.includes(participant.address)
+    );
+
+    return acceptedAuthorizedParticipants.length >= threshold;
+};
+
+/**
+ * Get detailed status including multisig progress
+ * @param {string} intentHash - Coordination identifier
+ * @returns {Promise<object>}
+ */
+agentCoordinationSchema.statics.getStatus = async function (intentHash) {
+    if (!intentHash) throw new Error('intentHash is required');
+
+    const coordination = await this.findOne({ intentHash });
+    if (!coordination) throw new Error('Coordination not found');
+
+    const baseStatus = {
+        intentHash: coordination.intentHash,
+        status: coordination.status,
+        coordinationType: coordination.coordinationType,
+        proposer: coordination.proposer,
+        participants: coordination.participants,
+        createdAt: coordination.createdAt,
+        updatedAt: coordination.updatedAt
+    };
+
+    // Add multisig information if applicable
+    if (coordination.multisigRequirements) {
+        const { threshold, authorizedSigners } = coordination.multisigRequirements;
+        const acceptedAuthorizedParticipants = coordination.participants.filter(participant => 
+            participant.accepted && authorizedSigners.includes(participant.address)
+        );
+        
+        baseStatus.multisigProgress = {
+            threshold,
+            authorizedSigners,
+            acceptedCount: acceptedAuthorizedParticipants.length,
+            requiredSigners: acceptedAuthorizedParticipants.map(p => p.address),
+            isCompleted: acceptedAuthorizedParticipants.length >= threshold
+        };
+    }
+
+    return baseStatus;
 };
 
 const AgentCoordination = mongoose.model('AgentCoordination', agentCoordinationSchema);

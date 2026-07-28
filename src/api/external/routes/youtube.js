@@ -135,4 +135,37 @@ router.get('/history', externalAuthMiddleware, async (req, res) => {
   }
 });
 
+/**
+ * Get download quota information for the authenticated agent
+ */
+router.get('/quota', creditAuth(true), (req, res) => {
+  try {
+    // creditAuth populates req.creditBalance (the account's remaining credits).
+    // Billing here is per-download credit spend, not a daily quota — so report
+    // the credit balance and how many downloads of each format it affords.
+    const creditsRemaining = req.creditBalance || 0;
+    const formatLimits = Object.fromEntries(
+      Object.entries(CREDIT_COSTS).map(([format, cost]) => [
+        format,
+        { cost, remaining: Math.floor(creditsRemaining / cost) }
+      ])
+    );
+    const quotaInfo = {
+      creditsRemaining,
+      formatLimits
+    };
+
+    res.json({
+      success: true,
+      quota: quotaInfo
+    });
+  } catch (error) {
+    logger.error('YouTube quota check failed:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: 'Failed to retrieve quota information' 
+    });
+  }
+});
+
 export default router;

@@ -1,8 +1,8 @@
 {
-  "lastUpdated": "2026-07-13",
+  "lastUpdated": "2026-07-28",
   "overallProgress": "100%",
-  "status": "PRODUCTION READY — v2.25.149",
-  "milestone": "Browser self-healing actually works now: stale Chromium singleton locks (crash/reboot leftovers) are detected via lstat and cleared before launch instead of silently ignored.",
+  "status": "PRODUCTION READY — v2.25.168",
+  "milestone": "Feature sweep: LP position analytics (ROI/IL/TWRR/fees), external-service config export/import, indicator metadata, device-group membership validation, agent-coordination multisig, governance + oracle analytics, YouTube credit-quota endpoint, response-sanitizer redaction stats on an admin route, and two new plugins (loop-readiness project audit + cron-expression explainer).",
   "features": {
     "v2_25_149_2026_07_13": {
       "status": "deployed",

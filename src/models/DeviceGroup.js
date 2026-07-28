@@ -176,4 +176,25 @@ deviceGroupSchema.statics.bulkDelete = async function(groupIds) {
   }
 };
 
+/**
+ * Validate if a device belongs to a specific group
+ * @param {string} groupId - The ID of the group to check
+ * @param {string} deviceId - The ID of the device to validate
+ * @param {string} pluginName - The name of the plugin
+ * @returns {Promise<boolean>} - Whether the device belongs to the group
+ */
+deviceGroupSchema.statics.validateDeviceMembership = async function(groupId, deviceId, pluginName = 'govee') {
+  try {
+    const group = await retryOperation(() => this.findOne({
+      _id: groupId,
+      pluginName,
+      'devices.deviceId': deviceId
+    }));
+    return !!group;
+  } catch (error) {
+    logger.error('Device group membership validation failed', { groupId, deviceId, pluginName, error: error.message });
+    throw error;
+  }
+};
+
 export const DeviceGroup = mongoose.model('DeviceGroup', deviceGroupSchema);
