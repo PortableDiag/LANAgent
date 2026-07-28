@@ -180,18 +180,36 @@ export class ErrorLogScanner extends EventEmitter {
       path.join(process.env.HOME || '/root', '.pm2/logs')
     ].filter(Boolean);
 
+    // Resolve to absolute paths and dedupe: in production the relative 'logs'
+    // dir and LOGS_PATH are the SAME directory, so every file was scanned
+    // twice per cycle (and listed twice in the scan log).
+    const seen = new Set();
     const logFiles = [];
+
+    // Rotated copies are historical content that was already scanned under the
+    // live file's name. A rotation creates a NEW filename with scan position 0,
+    // so the whole old file gets rescanned and months-old lines resurface as
+    // "new" errors (issue #2315 came from a pm2-logrotate copy). Skip:
+    //  - pm2-logrotate style:  name__2026-07-28_00-00-00.log
+    //  - app-rotation style:   errors1.log, all-activity2.log (digit glued to
+    //    the name; live pm2 process indexes like pm2-errors-0.log keep their
+    //    dash and still get scanned)
+    const isRotated = (file) =>
+      /__\d{4}-\d{2}-\d{2}/.test(file) ||                       // pm2-logrotate copies
+      /-\d{4}-\d{2}-\d{2}T[\d-]+Z?\.log$/.test(file) ||         // pm2 reloadLogs copies
+      /[a-z]\d+\.log$/i.test(file);                             // app-numbered copies
 
     for (const dir of logDirs) {
       try {
         if (fs.existsSync(dir)) {
           const files = fs.readdirSync(dir);
           for (const file of files) {
-            if (file.endsWith('.log')) {
-              logFiles.push(path.join(dir, file));
-            }
+            if (!file.endsWith('.log') || isRotated(file)) continue;
+            const abs = path.resolve(dir, file);
+            if (seen.has(abs)) continue;
+            seen.add(abs);
+            logFiles.push(abs);
           }
-          logger.debug(`[ErrorLogScanner] Found ${files.filter(f => f.endsWith('.log')).length} log files in ${dir}`);
         } else {
           logger.debug(`[ErrorLogScanner] Directory does not exist: ${dir}`);
         }
@@ -243,7 +261,7 @@ export class ErrorLogScanner extends EventEmitter {
       }
     }
 
-    return new Date(); // Default to current time if no timestamp found
+    return null; // No timestamp on this line — caller must resolve from context
   }
 
   /**
@@ -353,8 +371,19 @@ export class ErrorLogScanner extends EventEmitter {
               continue;
             }
             
-            const timestamp = this.parseTimestamp(line);
-            
+            // Timestampless lines (stack traces, git/tool stderr) inherit the
+            // nearest preceding timestamp instead of "now" — a bare line deep
+            // in an old file used to default to the current time and sail past
+            // the startupTime filter (the #2315 false positive).
+            let timestamp = this.parseTimestamp(line);
+            if (!timestamp) {
+              for (let back = i - 1; back >= 0 && back >= i - 20; back--) {
+                timestamp = this.parseTimestamp(lines[back]);
+                if (timestamp) break;
+              }
+            }
+            if (!timestamp) timestamp = new Date();
+
             // Only include errors since startup
             if (timestamp >= this.startupTime) {
               const errorData = {

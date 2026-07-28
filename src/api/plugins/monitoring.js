@@ -53,8 +53,12 @@ export default class MonitoringPlugin extends BasePlugin {
       }
     ];
     this.temperatureThresholds = {
-      warning: 70, // Celsius
-      critical: 85  // Celsius
+      // Ryzen mobile (Tctl) routinely sits in the 70s under working load and
+      // only throttles near ~95°C — a 70° warning fired on every periodic job
+      // spike (network scan + token-scanner sweep, ~every 3h) and became pure
+      // notification spam. Warn only on sustained-high territory.
+      warning: 80, // Celsius
+      critical: 90  // Celsius
     };
     this.cpuThresholds = {
       warning: 80, // Percentage

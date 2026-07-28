@@ -891,6 +891,44 @@ export class SelfModificationService extends EventEmitter {
    * Returns the enriched improvement object, or null if dropped.
    */
   async enrichDiscoveredFeature(feature) {
+    // ── Guard 1: one target file, one attempt ─────────────────────────────
+    // README mining creates MANY sibling records all targeting the same new
+    // plugin file (26 docs for nanobot.js alone). Implementing one marks only
+    // THAT record implemented; every later scan picked the next sibling and
+    // re-generated the same plugin — including re-creating PRs a human had
+    // already reviewed and closed (#2310 closed → #2316 recreated it 7h
+    // later). If ANY record for this target file was already implemented,
+    // the decision now belongs to the humans on that PR — never regenerate.
+    const targetFile = feature.implementation?.targetFile;
+    if (targetFile) {
+      const prior = await DiscoveredFeature.findOne({
+        _id: { $ne: feature._id },
+        'implementation.targetFile': targetFile,
+        status: { $in: ['implemented', 'implementing'] }
+      }).select('_id status').lean();
+      if (prior) {
+        await this._skipDiscoveredFeature(feature._id, `target_already_attempted:${prior.status}`);
+        return null;
+      }
+    }
+
+    // ── Guard 2: README prose is not an implementable feature ─────────────
+    // readme_feature records carry only markdown snippets (often literal HTML
+    // table fragments — one PR's source "feature" was a <td><img> tag). With
+    // no real code to port, the AI invents a plugin that just describes the
+    // source repo (the #2310/#2311/#2316 zero-value pattern). Require actual
+    // code snippets; commit_feature records instead go through the diff
+    // enrichment + quality gates below.
+    if (feature.type === 'readme_feature') {
+      const hasRealCode = (feature.codeSnippets || []).some(s =>
+        s.code && s.language && !/^(markdown|md|text|html)$/i.test(s.language)
+      );
+      if (!hasRealCode) {
+        await this._skipDiscoveredFeature(feature._id, 'readme_prose_no_code');
+        return null;
+      }
+    }
+
     const baseImprovement = {
       id: `discovered-${feature._id}`,
       type: 'github_discovered_feature',

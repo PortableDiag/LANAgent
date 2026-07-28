@@ -88,6 +88,11 @@ export class VPNPlugin extends BasePlugin {
       provider: 'expressvpn', // Currently supports ExpressVPN
       autoConnect: false,  // Agent-level setting: true = maintain connection, false = agent can toggle
       preferredLocations: ['usa', 'canada', 'uk'],
+      // Hard country pin for the VPN exit (e.g. 'usa'). When set, smartConnect
+      // never selects an exit outside this country. Env-only on purpose: it is
+      // an instance/deployment property, not a user preference, and must not be
+      // overridable by the persisted-settings merge.
+      exitCountry: (process.env.VPN_EXIT_COUNTRY || '').toLowerCase() || null,
       retryAttempts: 3,
       retryDelay: 5000,
       connectionTimeout: 30000,
@@ -309,6 +314,9 @@ export class VPNPlugin extends BasePlugin {
       if (settings && settings.settingsValue) {
         // Merge persisted settings with defaults
         this.config = { ...this.config, ...settings.settingsValue };
+        // exitCountry is deployment-pinned via env (saveSettings persists the
+        // whole config, so a stale persisted copy must never win over env)
+        this.config.exitCountry = (process.env.VPN_EXIT_COUNTRY || '').toLowerCase() || null;
         logger.info('Loaded persisted VPN settings:', {
           autoConnect: this.config.autoConnect,
           preferredLocations: this.config.preferredLocations
@@ -756,6 +764,26 @@ export class VPNPlugin extends BasePlugin {
           preferredLocations = this.config.preferredLocations;
       }
 
+      // Exit-country pin (VPN_EXIT_COUNTRY): the scrape pipeline requires this
+      // box's exit to stay in one country (non-US exits serve harder CDN/gov
+      // challenges FlareSolverr can't clear, and region-gated APIs 403). The
+      // same-country policy in getAlternativeLocation doesn't cover THIS path —
+      // the health-monitor reconnect walks preferredLocations, and on 2026-07-27
+      // a mid-daemon-restart reconnect fell through usa → canada → uk-docklands
+      // and stranded the box on a GB exit overnight. Filter every candidate
+      // list, whatever the purpose, and never fall back outside the pin.
+      const exitPin = (this.config.exitCountry || '').toLowerCase();
+      if (exitPin) {
+        const pinned = preferredLocations.filter(loc => {
+          const c = this._countryOf(loc) || String(loc).toLowerCase();
+          return c === exitPin;
+        });
+        if (pinned.length !== preferredLocations.length) {
+          logger.info(`VPN exit pin (${exitPin}) filtered smartConnect candidates: [${preferredLocations}] → [${pinned.length ? pinned : [exitPin]}]`);
+        }
+        preferredLocations = pinned.length ? pinned : [exitPin];
+      }
+
       // Try each preferred location until one works
       for (const location of preferredLocations) {
         const result = await this.connect({ location, retry: false });
@@ -767,8 +795,9 @@ export class VPNPlugin extends BasePlugin {
         }
       }
 
-      // If all preferred locations fail, try any available location
-      return await this.connect({ retry: true });
+      // If all preferred locations fail, try any available location —
+      // constrained to the pinned country when an exit pin is set.
+      return await this.connect({ location: exitPin || null, retry: true });
       
     } catch (error) {
       logger.error('Smart connect failed:', error);

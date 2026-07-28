@@ -2588,12 +2588,33 @@ Respond with ONLY the rephrased message, no explanation:`;
     }
   }
 
+  // Persist a skip decision. Every skip path MUST call this: an email left
+  // processed:false is re-fetched by the 3-min email-check query forever
+  // (observed: GitHub PR notification emails reprocessed every cycle for 11h+,
+  // occupying the 10-doc query window and spamming the log). The scam-skip
+  // path already marked processed inline; the other skip paths never did.
+  async _markEmailProcessed(email, processedBy = 'auto-reply-skip') {
+    if (!email._id && !email.messageId) return;
+    try {
+      const { Email } = await import('../models/Email.js');
+      const query = email._id ? { _id: email._id } : { messageId: email.messageId };
+      await Email.updateOne(query, {
+        $set: { processed: true, processedAt: new Date(), processedBy, read: true }
+      });
+    } catch (error) {
+      logger.error(`Failed to mark email processed (${processedBy}): ${error.message}`);
+    }
+  }
+
   // Process email for auto-reply
   async processEmailForAutoReply(email) {
     logger.info(`Processing email from: ${email.from}, subject: ${email.subject}`);
-    
-    // Create unique identifier for this email to prevent duplicates
-    const emailId = email.messageId || `${email.from}-${email.subject}-${email.date || Date.now()}`;
+
+    // Create unique identifier for this email to prevent duplicates.
+    // NOTE: the no-messageId fallback must be STABLE across cycles — a
+    // Date.now() component made the key unique every time, so duplicates
+    // were never detected for DB-sourced emails lacking messageId.
+    const emailId = email.messageId || `${email.from}-${email.subject}-${email.date || email.sentDate || 'nodate'}`;
     const emailKey = `${emailId}`.substring(0, 100); // Limit length for memory efficiency
     
     // Check if we've already processed this exact email recently
@@ -2606,6 +2627,18 @@ Respond with ONLY the rephrased message, no explanation:`;
     
     // Mark this email as being processed
     this.processedEmailsCache.set(emailKey, Date.now());
+
+    // Never auto-reply to old mail. Now that skip decisions are persisted, the
+    // newest-10 unprocessed window ADVANCES each cycle and will eventually
+    // reach the months-deep backlog (~900 docs at the time of this fix) —
+    // replying to those would send stale answers to long-dead threads. Anything
+    // older than 48h is drained as processed without reply consideration.
+    const emailDate = new Date(email.sentDate || email.date || 0);
+    if (Date.now() - emailDate.getTime() > 48 * 60 * 60 * 1000) {
+      logger.info(`Skipping stale email (${emailDate.toISOString?.() || 'no date'}): ${email.subject}`);
+      await this._markEmailProcessed(email, 'skip-stale-backlog');
+      return;
+    }
     
     // Extract email address from "Name <email@domain.com>" format, handling extra quotes
     const fromEmailRaw = email.from?.toLowerCase();
@@ -2644,6 +2677,7 @@ Respond with ONLY the rephrased message, no explanation:`;
     ];
     if (fromEmail && noReplyPatterns.some(pattern => fromEmail.includes(pattern))) {
       logger.info(`Skipping system/automated email address: ${fromEmail}`);
+      await this._markEmailProcessed(email, 'skip-system-address');
       return;
     }
 
@@ -2651,6 +2685,7 @@ Respond with ONLY the rephrased message, no explanation:`;
     const noReplyRegex = /\b(no[-_.]?reply|do[-_.]?not[-_.]?reply|unsubscribe)\b/i;
     if (fromEmail && noReplyRegex.test(fromEmail)) {
       logger.info(`Skipping no-reply pattern in email address: ${fromEmail}`);
+      await this._markEmailProcessed(email, 'skip-noreply-pattern');
       return;
     }
 
@@ -2661,12 +2696,14 @@ Respond with ONLY the rephrased message, no explanation:`;
       // Check exact address match
       if (contactManager.isBlocked(fromEmail)) {
         logger.info(`Skipping blocked contact email: ${fromEmail}`);
+        await this._markEmailProcessed(email, 'skip-blocked-contact');
         return;
       }
       // Check domain-level blocks (e.g. blocking *@moralis.com blocks all moralis.com senders)
       const domain = fromEmail.split('@')[1]?.toLowerCase();
       if (domain && contactManager.isBlocked(`*@${domain}`)) {
         logger.info(`Skipping blocked domain email: ${fromEmail} (domain: ${domain})`);
+        await this._markEmailProcessed(email, 'skip-blocked-domain');
         return;
       }
     }
@@ -2676,12 +2713,14 @@ Respond with ONLY the rephrased message, no explanation:`;
     const subject = (email.subject || '').toLowerCase();
     if (autoReplyIndicators.some(indicator => subject.includes(indicator))) {
       logger.info(`Skipping auto-reply email: ${email.subject}`);
+      await this._markEmailProcessed(email, 'skip-autoreply-indicator');
       return;
     }
     
     // Check if this is a reply to our own message (prevent loops)
     if (subject.startsWith('re: re:')) {
       logger.info(`Skipping multiple reply thread: ${email.subject}`);
+      await this._markEmailProcessed(email, 'skip-reply-thread');
       return;
     }
     
@@ -2696,6 +2735,7 @@ Respond with ONLY the rephrased message, no explanation:`;
     
     if (currentCount >= dailyLimit) {
       logger.info(`Daily auto-reply limit reached for ${fromEmail} (${currentCount}/${dailyLimit})`);
+      await this._markEmailProcessed(email, 'skip-daily-limit');
       return;
     }
     
