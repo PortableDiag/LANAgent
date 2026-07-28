@@ -1612,7 +1612,7 @@ Description: ${improvement.description}
 Type: ${improvement.type}
 ${improvement.implementation?.suggestion ? `Suggestion: ${improvement.implementation.suggestion}` : ''}
 
-The codebase is a Node.js agent framework at /root/lanagent-repo/src/ with this structure:
+The codebase is a Node.js agent framework with this structure:
 - src/api/plugins/ — Plugin implementations
 - src/services/ — Core services
 - src/core/ — Core agent logic
