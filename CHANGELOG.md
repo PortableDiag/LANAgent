@@ -2,6 +2,52 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.170] - 2026-07-28
+
+### Fixed — VPN reconnect could leave the pinned exit country
+
+- The health-monitor reconnect path (`smartConnect`) walked the generic
+  `preferredLocations` list, so a reconnect racing a VPN daemon restart could land on a
+  non-pinned-country exit and stay there. New `VPN_EXIT_COUNTRY` env pin: when set,
+  `smartConnect` filters every candidate list to that country and the final fallback
+  connects to the pinned country instead of "anywhere". Env-only by design — persisted
+  settings can never override it.
+
+### Fixed — emails skipped by auto-reply rules were reprocessed forever
+
+- Skip paths in `processEmailForAutoReply` (system/no-reply addresses, blocked
+  contacts/domains, auto-reply loops, reply threads, daily limit) returned without
+  marking the email `processed`, so the 3-minute email check re-fetched the same emails
+  indefinitely. All skip decisions are now persisted with a `processedBy` reason.
+- Duplicate-detection cache key used a `Date.now()` fallback (unique every cycle) for
+  emails without a `messageId`; now a stable date fallback.
+- Stale-backlog guard: emails older than 48h are drained as processed without
+  auto-reply consideration, so old threads never receive late replies.
+
+### Fixed — error-log scanner false positives (rotated logs, duplicate list)
+
+- Deduped the scan file list (the same directory was listed relative + absolute).
+- Log-rotation copies (`name__date.log`, `name-dateT...Z.log`, `name1.log`) are new
+  filenames with scan position 0, so rotation resurfaced months-old content as "new"
+  critical errors. Rotated files are now skipped.
+- Timestampless lines (stack traces, tool stderr) defaulted to the current time and
+  bypassed the since-startup filter; they now inherit the nearest preceding timestamp.
+
+### Fixed — GitHub feature discovery re-created rejected plugins
+
+- README mining stores many sibling `DiscoveredFeature` records targeting the same new
+  plugin file; implementing one marked only that record, so later scans selected the
+  next sibling and re-generated the same plugin — including re-creating a PR a reviewer
+  had already closed. Guards in `enrichDiscoveredFeature`: a target file with any
+  implemented sibling is never regenerated, and `readme_feature` records with no real
+  code snippets (README prose/HTML fragments) are skipped as unimplementable.
+
+### Changed — CPU temperature alert thresholds
+
+- Warning 70→80°C, critical 85→90°C: mobile CPUs routinely sit in the 70s under
+  periodic scheduled load, which made the 70° warning fire several times a day with no
+  actionable signal.
+
 ## [2.25.168] - 2026-07-28
 
 ### Added / Fixed — feature sweep
