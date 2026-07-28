@@ -14,25 +14,56 @@ const HOSTNAME_PATTERN = /\b(veracrypt\d*|lanagent-deploy)\b/gi;
 
 const REDACTED = '[redacted]';
 
+// Store sanitization statistics
+let sanitizationStats = {
+  totalRedactions: 0,
+  patternCounts: {},
+  logEntries: []
+};
+
+/**
+ * Record a sanitization event for statistics tracking
+ */
+function recordSanitizationEvent(patternName) {
+  sanitizationStats.totalRedactions++;
+  
+  if (!sanitizationStats.patternCounts[patternName]) {
+    sanitizationStats.patternCounts[patternName] = 0;
+  }
+  
+  sanitizationStats.patternCounts[patternName]++;
+  
+  // Keep only the last 100 log entries
+  if (sanitizationStats.logEntries.length >= 100) {
+    sanitizationStats.logEntries.shift();
+  }
+  
+  sanitizationStats.logEntries.push({
+    timestamp: new Date().toISOString(),
+    pattern: patternName
+  });
+}
+
 function sanitizeString(str) {
   let sanitized = str;
   let hadRedactions = false;
 
   const patterns = [
-    INTERNAL_IP_PATTERN,
-    INTERNAL_PATH_PATTERN,
-    HOME_PATH_PATTERN,
-    MEDIA_PATH_PATTERN,
-    NODE_MODULES_PATTERN,
-    DEPLOY_PATH_PATTERN,
-    STACK_TRACE_PATTERN,
-    HOSTNAME_PATTERN
+    { pattern: INTERNAL_IP_PATTERN, name: 'INTERNAL_IP' },
+    { pattern: INTERNAL_PATH_PATTERN, name: 'INTERNAL_PATH' },
+    { pattern: HOME_PATH_PATTERN, name: 'HOME_PATH' },
+    { pattern: MEDIA_PATH_PATTERN, name: 'MEDIA_PATH' },
+    { pattern: NODE_MODULES_PATTERN, name: 'NODE_MODULES' },
+    { pattern: DEPLOY_PATH_PATTERN, name: 'DEPLOY_PATH' },
+    { pattern: STACK_TRACE_PATTERN, name: 'STACK_TRACE' },
+    { pattern: HOSTNAME_PATTERN, name: 'HOSTNAME' }
   ];
 
-  for (const pattern of patterns) {
+  for (const { pattern, name } of patterns) {
     pattern.lastIndex = 0;
     if (pattern.test(sanitized)) {
       hadRedactions = true;
+      recordSanitizationEvent(name);
       pattern.lastIndex = 0;
       sanitized = sanitized.replace(pattern, REDACTED);
     }
@@ -63,6 +94,19 @@ function sanitizeValue(val) {
   return val;
 }
 
+/**
+ * Get current sanitization statistics
+ */
+function getSanitizationStats() {
+  return {
+    totalRedactions: sanitizationStats.totalRedactions,
+    patternCounts: { ...sanitizationStats.patternCounts },
+    logEntries: [...sanitizationStats.logEntries],
+    mostCommonPattern: Object.keys(sanitizationStats.patternCounts)
+      .sort((a, b) => sanitizationStats.patternCounts[b] - sanitizationStats.patternCounts[a])[0] || null
+  };
+}
+
 export function responseSanitizer(req, res, next) {
   const originalJson = res.json.bind(res);
 
@@ -77,4 +121,17 @@ export function responseSanitizer(req, res, next) {
   };
 
   next();
+}
+
+/**
+ * Handle request for sanitization statistics
+ */
+export async function handleStatsRequest(req, res) {
+  try {
+    const stats = getSanitizationStats();
+    res.json(stats);
+  } catch (error) {
+    log.error('Error retrieving sanitization stats:', error);
+    res.status(500).json({ error: 'Failed to retrieve sanitization statistics' });
+  }
 }

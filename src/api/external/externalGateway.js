@@ -13,7 +13,7 @@ const ipBucket = (ip) => {
 };
 import { killSwitchMiddleware } from './middleware/killSwitch.js';
 import { auditLogMiddleware } from './middleware/auditLog.js';
-import { responseSanitizer } from './middleware/responseSanitizer.js';
+import { responseSanitizer, handleStatsRequest } from './middleware/responseSanitizer.js';
 import { setKillSwitch, isKillSwitchActive, getKillSwitchStatus } from './middleware/killSwitch.js';
 import ExternalServiceConfig from '../../models/ExternalServiceConfig.js';
 import { logger } from '../../utils/logger.js';
@@ -93,6 +93,10 @@ router.use('/service/imageTools/transcode', imageTranscodeRoutes); // dedicated 
 router.use('/service', pluginRoutes); // Generic plugin service proxy
 
 // Admin routes (standard JWT auth)
+// Redaction stats from the response sanitizer (pattern hit counts + recent
+// events — names/timestamps only, never redacted content). Admin-only.
+router.get('/admin/sanitization-stats', authenticateToken, handleStatsRequest);
+
 router.get('/admin/dashboard', authenticateToken, async (req, res) => {
   try {
     const ExternalPayment = (await import('../../models/ExternalPayment.js')).default;

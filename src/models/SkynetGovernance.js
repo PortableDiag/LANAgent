@@ -151,6 +151,68 @@ skynetGovernanceSchema.methods.finalize = async function() {
 };
 
 /**
+ * Get voting trends and analytics for governance proposals.
+ */
+skynetGovernanceSchema.statics.getVotingTrends = async function() {
+  try {
+    const proposals = await this.find({}, {
+      proposalId: 1,
+      category: 1,
+      status: 1,
+      votesFor: 1,
+      votesAgainst: 1,
+      votesAbstain: 1,
+      isQuadratic: 1,
+      createdAt: 1,
+      votingEndsAt: 1
+    }).lean();
+
+    // Calculate participation metrics
+    const totalProposals = proposals.length;
+    const categoryDistribution = {};
+    const statusDistribution = {};
+    const participationRates = [];
+    const votingPatterns = {
+      standard: { for: 0, against: 0, abstain: 0 },
+      quadratic: { for: 0, against: 0, abstain: 0 }
+    };
+
+    proposals.forEach(proposal => {
+      // Category distribution
+      categoryDistribution[proposal.category] = (categoryDistribution[proposal.category] || 0) + 1;
+      
+      // Status distribution
+      statusDistribution[proposal.status] = (statusDistribution[proposal.status] || 0) + 1;
+      
+      // Participation rate (total votes / proposals)
+      const totalVotes = proposal.votesFor + proposal.votesAgainst + proposal.votesAbstain;
+      participationRates.push(totalVotes);
+      
+      // Voting patterns by type
+      const voteType = proposal.isQuadratic ? 'quadratic' : 'standard';
+      votingPatterns[voteType].for += proposal.votesFor;
+      votingPatterns[voteType].against += proposal.votesAgainst;
+      votingPatterns[voteType].abstain += proposal.votesAbstain;
+    });
+
+    const avgParticipationRate = participationRates.length > 0 
+      ? participationRates.reduce((a, b) => a + b, 0) / participationRates.length 
+      : 0;
+
+    return {
+      totalProposals,
+      categoryDistribution,
+      statusDistribution,
+      averageParticipationRate: avgParticipationRate,
+      votingPatterns
+    };
+  } catch (error) {
+    logger.error(`Error getting voting trends: ${error.message}`);
+    throw error;
+  }
+};
+
+/**
  * Health check for governance model.
  */
 skynetGovernanceSchema.statics.healthCheck = async function() {

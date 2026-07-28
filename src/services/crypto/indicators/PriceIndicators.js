@@ -149,6 +149,22 @@ export class PriceIndicators {
   getMetadata(name) {
     return this.metadataMap.get(name);
   }
+
+  /**
+   * Get metadata for all registered indicators
+   * @param {Object} params - Parameters (unused)
+   * @returns {Object} Structured metadata for all indicators
+   */
+  async getIndicatorMetadata(params) {
+    const result = {};
+    for (const [name, metadata] of this.metadataMap.entries()) {
+      result[name] = {
+        name,
+        ...metadata
+      };
+    }
+    return result;
+  }
 }
 
 export default PriceIndicators;

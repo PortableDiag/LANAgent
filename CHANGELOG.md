@@ -2,6 +2,29 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.168] - 2026-07-28
+
+### Added / Fixed — feature sweep
+
+- **LP position analytics** (`LPPosition`): ROI, impermanent loss (standard 50/50 formula),
+  time-weighted return, and per-token fee accounting. `getPerformanceMetrics` takes an optional
+  price ratio and reports `null` impermanent loss when it isn't supplied (rather than a misleading 0).
+- **External service config export/import** (`ExternalServiceConfig`): `exportConfiguration`,
+  `validateImportPayload`, and `importConfiguration` statics for config portability, with a proper
+  `{ valid, errors }` validation contract.
+- **Indicator metadata** (`PriceIndicators.getIndicatorMetadata`): structured metadata for all
+  registered indicators.
+- **Device-group membership validation** (`DeviceGroup.validateDeviceMembership`).
+- **Agent-coordination multisig** (`AgentCoordination`): `multisigRequirements` plus
+  `validateMultisigCompletion` / `getStatus`.
+- **Governance & oracle analytics**: `SkynetGovernance.getVotingTrends`,
+  `OracleParticipation.getParticipationTrends` / `getStatistics`.
+- **YouTube `/quota` endpoint**: reports remaining credits and per-format download counts.
+- **Response-sanitizer redaction stats**: pattern hit counts + recent events (names/timestamps
+  only, never redacted content), exposed at `GET /admin/sanitization-stats` (admin-authed).
+- **New plugins**: `loopAudit` (Loop Readiness L0–L3 project audit via `@cobusgreyling/loop-audit`)
+  and `scheduler` (cron-expression explainer via `cron-parser`).
+
 ## [2.25.153] - 2026-07-21
 
 ### Fixed — AI provider chain hardening

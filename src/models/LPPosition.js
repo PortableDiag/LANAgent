@@ -122,5 +122,116 @@ lpPositionSchema.methods.recordTransaction = function(type, txHash, lpAmount, am
   return this.save();
 };
 
+/**
+ * Calculate ROI (Return on Investment) for the position
+ * @returns {number} ROI as a percentage
+ */
+lpPositionSchema.methods.calculateROI = function() {
+  if (this.initialValueBNB <= 0) return 0;
+  return ((this.currentValueBNB - this.initialValueBNB) / this.initialValueBNB) * 100;
+};
+
+/**
+ * Calculate impermanent loss for the position
+ * @param {number} priceRatioChange - Ratio of current price to initial price
+ * @returns {number} Impermanent loss as a percentage
+ */
+lpPositionSchema.methods.calculateImpermanentLoss = function(priceRatioChange) {
+  if (priceRatioChange <= 0) return 0;
+  
+  // For simplicity, assuming equal initial value in both tokens
+  const sqrtPriceRatio = Math.sqrt(priceRatioChange);
+  const impermanentLoss = 2 * (sqrtPriceRatio / (1 + priceRatioChange)) - 1;
+  return impermanentLoss * 100;
+};
+
+/**
+ * Collected fees, per token. collectedFees0 and collectedFees1 are amounts of
+ * two DIFFERENT tokens (with independent decimals), so they can't be summed into
+ * a single figure without a price oracle for each — which the position doesn't
+ * store. Return them separately rather than fabricating a meaningless total.
+ * @returns {{collectedFees0: number, collectedFees1: number}}
+ */
+lpPositionSchema.methods.calculateFeeYield = function() {
+  return {
+    collectedFees0: parseFloat(this.v3?.collectedFees0) || 0,
+    collectedFees1: parseFloat(this.v3?.collectedFees1) || 0
+  };
+};
+
+/**
+ * Calculate time-weighted performance metrics
+ * @returns {object} Performance metrics including TWRR (Time-Weighted Rate of Return)
+ */
+lpPositionSchema.methods.calculateTimeWeightedPerformance = function() {
+  if (!this.initialValueBNB || this.initialValueBNB <= 0) {
+    return {
+      twrr: 0,
+      holdingPeriodReturn: 0,
+      durationDays: 0
+    };
+  }
+
+  // Get all transaction timestamps and sort them
+  const sortedTransactions = [...this.transactions]
+    .filter(tx => tx.timestamp)
+    .sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+  
+  let startDate = this.createdAt ? new Date(this.createdAt) : new Date();
+  if (sortedTransactions.length > 0) {
+    startDate = new Date(sortedTransactions[0].timestamp);
+  }
+  
+  const endDate = new Date();
+  const durationMs = endDate - startDate;
+  const durationDays = durationMs / (1000 * 60 * 60 * 24);
+  
+  // Calculate holding period return
+  const holdingPeriodReturn = ((this.currentValueBNB - this.initialValueBNB) / this.initialValueBNB) * 100;
+  
+  // Calculate time-weighted rate of return (simplified version)
+  // In a more complex implementation, we would calculate sub-period returns between cash flows
+  let twrr = 0;
+  if (durationDays > 0) {
+    // Compound annual growth rate approach for time-weighted return
+    const years = durationDays / 365;
+    twrr = (Math.pow(this.currentValueBNB / this.initialValueBNB, 1 / years) - 1) * 100;
+  }
+  
+  return {
+    twrr,
+    holdingPeriodReturn,
+    durationDays
+  };
+};
+
+/**
+ * Get comprehensive performance metrics for the position.
+ * Impermanent loss requires the pooled pair's price ratio (current price /
+ * initial price), which the position doesn't store — pass it in when a caller
+ * has it (e.g. from a price oracle). When omitted, impermanentLoss is null
+ * rather than a misleading 0.
+ * @param {number} [priceRatioChange] - current/initial price ratio of the pair
+ * @returns {object} ROI, impermanent loss, per-token fee yield, and time-weighted returns
+ */
+lpPositionSchema.methods.getPerformanceMetrics = function(priceRatioChange = null) {
+  const roi = this.calculateROI();
+  const feeYield = this.calculateFeeYield();
+  const timeWeightedMetrics = this.calculateTimeWeightedPerformance();
+
+  const impermanentLoss = (typeof priceRatioChange === 'number' && priceRatioChange > 0)
+    ? this.calculateImpermanentLoss(priceRatioChange)
+    : null;
+
+  return {
+    roi,
+    impermanentLoss,
+    feeYield,
+    currentValue: this.currentValueBNB,
+    initialValue: this.initialValueBNB,
+    ...timeWeightedMetrics
+  };
+};
+
 const LPPosition = mongoose.model('LPPosition', lpPositionSchema);
 export default LPPosition;

@@ -72,6 +72,89 @@ oracleParticipationSchema.statics.getEarningsStats = function (since) {
 };
 
 /**
+ * Get participation statistics grouped by time periods
+ * @param {string} period - Time period grouping ('day', 'week', 'month')
+ * @param {Date} since - Start date for statistics
+ * @returns {Promise<Array>} Aggregated participation statistics over time
+ */
+oracleParticipationSchema.statics.getParticipationTrends = function (period = 'day', since) {
+    const match = {};
+    if (since) match.createdAt = { $gte: since };
+    
+    // Define date grouping based on period
+    let dateFormat;
+    switch (period) {
+        case 'week':
+            dateFormat = { $dateToString: { format: '%Y-%U', date: '$createdAt' } };
+            break;
+        case 'month':
+            dateFormat = { $dateToString: { format: '%Y-%m', date: '$createdAt' } };
+            break;
+        case 'day':
+        default:
+            dateFormat = { $dateToString: { format: '%Y-%m-%d', date: '$createdAt' } };
+            break;
+    }
+
+    return this.aggregate([
+        { $match: match },
+        { $group: {
+            _id: {
+                period: dateFormat,
+                role: '$role'
+            },
+            count: { $sum: 1 },
+            totalReward: { $sum: { $toDouble: '$rewardEarned' } }
+        }},
+        { $sort: { '_id.period': 1 } }
+    ]);
+};
+
+/**
+ * Get comprehensive oracle participation statistics
+ * @param {Object} options - Query options
+ * @param {string} options.period - Time period for trend analysis ('day', 'week', 'month')
+ * @param {Date} options.since - Start date for statistics
+ * @returns {Promise<Object>} Combined statistics including win rates, earnings, and participation trends
+ */
+oracleParticipationSchema.statics.getStatistics = async function (options = {}) {
+    try {
+        const [winRateResults, earningsResults, trendResults] = await Promise.all([
+            this.getWinRate(),
+            this.getEarningsStats(options.since),
+            this.getParticipationTrends(options.period, options.since)
+        ]);
+
+        const winRate = winRateResults.length > 0 ? winRateResults[0] : { total: 0, wins: 0, winRate: 0 };
+        const earnings = earningsResults.reduce((acc, item) => {
+            acc[item._id] = { count: item.count, totalEarned: item.totalEarned };
+            return acc;
+        }, {});
+        
+        const trends = trendResults.reduce((acc, item) => {
+            const period = item._id.period;
+            if (!acc[period]) {
+                acc[period] = { info: { count: 0, totalReward: 0 }, judge: { count: 0, totalReward: 0 } };
+            }
+            acc[period][item._id.role] = { count: item.count, totalReward: item.totalReward };
+            return acc;
+        }, {});
+
+        return {
+            winRate,
+            earnings,
+            trends
+        };
+    } catch (error) {
+        logger.error('Failed to get oracle participation statistics', {
+            error: error.message,
+            stack: error.stack
+        });
+        throw error;
+    }
+};
+
+/**
  * Cleanup expired oracle participations older than the retention period
  * @param {number} retentionDays - Number of days to retain expired documents (default: 30)
  * @returns {Promise<Object>} Result of the cleanup operation
