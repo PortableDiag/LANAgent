@@ -60,6 +60,21 @@ router.get('/stats', async (req, res) => {
 });
 
 /**
+ * GET /api/coordination/participants/:participantId/reputation
+ * Get reputation score and reliability metrics for a coordination participant
+ */
+router.get('/participants/:participantId/reputation', async (req, res) => {
+    try {
+        const { participantId } = req.params;
+        const reputation = await agentCoordinationService.calculateParticipantReputation(participantId);
+        res.json({ success: true, reputation });
+    } catch (err) {
+        logger.error('Get participant reputation error:', err);
+        res.status(err.statusCode || 500).json({ success: false, error: err.message });
+    }
+});
+
+/**
  * POST /api/coordination/propose
  * Propose a new coordination intent
  */

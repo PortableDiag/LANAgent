@@ -393,6 +393,27 @@ router.post('/api/transfers/:transferId/reject', authenticateToken, async (req, 
   }
 });
 
+// Retry a failed incoming transfer by re-requesting the plugin from the peer
+router.post('/api/transfers/:transferId/retry', authenticateToken, async (req, res) => {
+  try {
+    const p2p = getP2PService(req);
+    if (!p2p) return res.status(503).json({ success: false, error: 'P2P not enabled' });
+
+    const result = await p2p.retryTransfer(req.params.transferId);
+
+    res.json({
+      success: result.sent,
+      message: result.sent
+        ? `Re-requested ${result.pluginName} from peer`
+        : 'Peer unreachable — request not sent',
+      ...result
+    });
+  } catch (error) {
+    logger.error('P2P retry transfer API error:', error);
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
 // Realtime progress for a single transfer (chunks, %, bytes/sec, ETA)
 router.get('/api/transfers/:transferId/progress', authenticateToken, async (req, res) => {
   try {
@@ -862,7 +883,9 @@ router.post('/api/skynet/services/bulk', authenticateToken, async (req, res) => 
 router.get('/api/skynet/token-price', authenticateToken, async (req, res) => {
   try {
     const { ethers } = await import('ethers');
-    const provider = new ethers.JsonRpcProvider('https://bsc-dataseed.binance.org', undefined, { batchMaxCount: 1 });
+    // Pin staticNetwork so a dead RPC fails fast instead of spawning ethers'
+    // eternal network-detection retry loop (which floods stdout every 1s).
+    const provider = new ethers.JsonRpcProvider('https://bsc-dataseed.binance.org', ethers.Network.from(56), { staticNetwork: true, batchMaxCount: 1 });
     const LP_PAIR = '0x2AC21524188988025E54429a40B83460098eB601';
     const WBNB = '0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c';
     const pair = new ethers.Contract(LP_PAIR, [
@@ -871,6 +894,7 @@ router.get('/api/skynet/token-price', authenticateToken, async (req, res) => {
     ], provider);
 
     const [reserves, token0Addr] = await Promise.all([pair.getReserves(), pair.token0()]);
+    try { provider.destroy(); } catch { /* ignore */ }
     const r0 = Number(ethers.formatEther(reserves[0]));
     const r1 = Number(ethers.formatEther(reserves[1]));
 

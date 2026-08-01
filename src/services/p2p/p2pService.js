@@ -380,6 +380,35 @@ class P2PService extends EventEmitter {
   }
 
   /**
+   * Retry a failed incoming plugin transfer by re-requesting the plugin
+   * from the same peer. The failed transfer record is left untouched as
+   * the audit trail — the peer's fresh offer creates a new transfer doc
+   * through the normal flow.
+   * @param {string} transferId
+   * @returns {Promise<{sent: boolean, peerFingerprint: string, pluginName: string}>}
+   */
+  async retryTransfer(transferId) {
+    const { P2PTransfer } = await import('../../models/P2PTransfer.js');
+    const transfer = await P2PTransfer.findById(transferId);
+    if (!transfer) {
+      const err = new Error(`Transfer not found: ${transferId}`);
+      err.statusCode = 404;
+      throw err;
+    }
+    if (!transfer.isRetryable()) {
+      const err = new Error(
+        `Transfer is not retryable (status: ${transfer.status}, direction: ${transfer.direction}) — only failed incoming transfers can be re-requested`
+      );
+      err.statusCode = 400;
+      throw err;
+    }
+
+    const sent = await this.requestPlugin(transfer.peerFingerprint, transfer.pluginName);
+    logger.info(`P2P transfer retry: re-requested ${transfer.pluginName} from ${transfer.peerFingerprint} (${sent ? 'sent' : 'peer unreachable'})`);
+    return { sent, peerFingerprint: transfer.peerFingerprint, pluginName: transfer.pluginName };
+  }
+
+  /**
    * Set trust level for a peer
    * @param {string} fingerprint
    * @param {'untrusted'|'trusted'} level

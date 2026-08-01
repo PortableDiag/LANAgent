@@ -116,6 +116,26 @@ router.get('/download-tokens/analytics', async (req, res) => {
   }
 });
 
+/**
+ * POST /download-tokens/inspect — decode a download token's metadata without
+ * consuming a download. Token travels in the body (never the URL — access
+ * logs must not capture live bearer tokens). Admin-only: the response
+ * includes server file paths.
+ */
+router.post('/download-tokens/inspect', async (req, res) => {
+  try {
+    const { token } = req.body || {};
+    if (!token || typeof token !== 'string') {
+      return res.status(400).json({ success: false, error: 'token (string) is required in the request body' });
+    }
+    const { inspectDownloadToken } = await import('../services/downloadTokenService.js');
+    res.json({ success: true, token: inspectDownloadToken(token) });
+  } catch (err) {
+    logger.error('admin/download-tokens/inspect failed:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 router.get('/payments/recent', async (req, res) => {
   const limit = Math.min(parseInt(req.query.limit, 10) || 20, 100);
   try {

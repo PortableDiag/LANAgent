@@ -555,6 +555,26 @@ Live in-memory snapshot of download-token usage (tokens within their TTL window)
 
 ## Recent Updates (July 17, 2026)
 
+### v2.25.175 — Four endpoints + a plugin from the self-mod PR queue
+
+- **`GET /api/coordination/participants/:participantId/reputation`** (JWT) — reputation and
+  reliability metrics for a coordination participant from recorded coordination history:
+  `acceptanceRate`, `completionRate` (settled coordinations only), execution failures,
+  expiry count, `avgAcceptLatencyMs`, and a 0-100 `score`. Rates are `null` (unknown) with
+  no history; `sampleSize` included for confidence. 400 on a non-address participantId.
+- **`POST /p2p/api/transfers/:transferId/retry`** (JWT) — retry a **failed incoming** plugin
+  transfer by re-requesting it from the original peer. The failed record stays as audit;
+  the peer's fresh offer creates a new transfer doc. 400 for non-retryable states, 404
+  unknown id, 503 when P2P is disabled.
+- **`GET /api/crypto/strategy/indicators`** (JWT) — metadata for every registered
+  rule-building indicator across all families; optional `?category=` filter.
+- **`POST /api/external/admin/download-tokens/inspect`** (x-admin-key; body `{token}`) —
+  decode a download token without consuming a download; includes `usable` (valid AND not
+  revoked AND downloads remaining). The token travels in the body so access logs never
+  capture it.
+- **Spoonacular plugin** — recipe/nutrition lookups via the plugin API; requires
+  `SPOONACULAR_API_KEY`.
+
 ### v2.25.152 — Transcode presets, PnL risk metrics, MQTT broker metrics
 
 **`POST /transcode` — new `preset` parameter.** One-word alternative to `customProfile`:

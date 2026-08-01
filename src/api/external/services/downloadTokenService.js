@@ -131,3 +131,52 @@ export function getTokenAnalytics() {
 
   return { totals, byAgent, timeBased, timestamp: new Date(now).toISOString() };
 }
+
+/**
+ * Inspect a download token to retrieve its metadata without consuming it.
+ * @param {string} token - The token to inspect.
+ * @returns {Object|null} Token metadata including validation status and remaining downloads.
+ */
+export function inspectDownloadToken(token) {
+  try {
+    // Verify the token first
+    const decoded = jwt.verify(token, getSecret());
+    if (decoded.type !== 'download') {
+      return { isValid: false, error: 'Not a download token' };
+    }
+
+    // Get current metadata
+    const meta = tokenMetadata.get(token);
+    const remainingDownloads = downloadCounters.get(token);
+
+    // Revocation deletes the counter entry, so fall back to the metadata
+    // cache's TTL to still report when a revoked token would have expired
+    const expiry = downloadCounters.getTtl(token) || tokenMetadata.getTtl(token);
+    const expiration = expiry ? new Date(expiry).toISOString() : null;
+
+    const isRevoked = !!meta?.revoked;
+    const remaining = typeof remainingDownloads === 'number' ? remainingDownloads : 0;
+
+    return {
+      filePath: decoded.filePath,
+      filename: decoded.filename,
+      agentId: decoded.agentId,
+      maxDownloads: decoded.maxDownloads,
+      remainingDownloads: remaining,
+      expiration,
+      // isValid = signature + expiry only; usable also requires not revoked
+      // and downloads remaining — check `usable` before promising a download
+      isValid: true,
+      usable: !isRevoked && remaining > 0,
+      isRevoked,
+      consumedCount: meta?.consumedCount || 0
+    };
+  } catch (error) {
+    // Token is invalid/expired
+    return {
+      isValid: false,
+      usable: false,
+      error: error.message
+    };
+  }
+}

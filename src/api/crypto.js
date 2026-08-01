@@ -1115,6 +1115,22 @@ router.get('/strategy/list', async (req, res) => {
     }
 });
 
+// List all available rule-building indicators (metadata only — name, type,
+// description, category — across every indicator family)
+router.get('/strategy/indicators', async (req, res) => {
+    try {
+        const { indicatorProvider } = await import('../services/crypto/indicators/index.js');
+        const { category } = req.query;
+        const indicators = category
+            ? indicatorProvider.getIndicatorsByCategory(category)
+            : indicatorProvider.listIndicators();
+        res.json({ success: true, count: indicators.length, indicators });
+    } catch (error) {
+        logger.error('Failed to list indicators:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
 // Get active strategy
 router.get('/strategy/active', async (req, res) => {
     try {
@@ -1367,7 +1383,8 @@ router.post('/strategy/token-trader/configure', async (req, res) => {
             return res.status(503).json({ error: 'Crypto strategy agent not initialized' });
         }
 
-        const { tokenAddress, tokenNetwork, capitalAllocationPercent, dumpThreshold, maxSlippage, tokenTaxPercent } = req.body;
+        const { tokenAddress, tokenNetwork, capitalAllocationPercent, dumpThreshold, maxSlippage, tokenTaxPercent,
+                trancheSellEnabled, trancheSellPercent, trancheSellCooldownMs } = req.body;
         if (!tokenAddress || !tokenNetwork) {
             return res.status(400).json({ error: 'tokenAddress and tokenNetwork are required' });
         }
@@ -1402,15 +1419,25 @@ router.post('/strategy/token-trader/configure', async (req, res) => {
         // Get strategy registry and add/update token trader instance
         const { strategyRegistry } = await import('../services/crypto/strategies/StrategyRegistry.js');
 
+        // Reconfiguring an existing token must not silently reset omitted fields:
+        // preserve the instance's current allocation when the caller doesn't send one
+        // (the old `|| 20` default clobbered a 65% allocation on any partial update).
+        const existingInstance = strategyRegistry.getTokenTrader(tokenAddress);
+        const effectiveAlloc = capitalAllocationPercent
+            ?? existingInstance?.config?.capitalAllocationPercent ?? 20;
+
         const instanceConfig = {
             tokenAddress,
             tokenNetwork,
             tokenSymbol: metadata.symbol,
             tokenDecimals: metadata.decimals,
             tokenTaxPercent: tokenTaxPercent !== undefined ? tokenTaxPercent : metadata.tax,
-            capitalAllocationPercent: capitalAllocationPercent || 20,
+            capitalAllocationPercent: effectiveAlloc,
             dumpThreshold,
             maxSlippage,
+            trancheSellEnabled,
+            trancheSellPercent,
+            trancheSellCooldownMs,
             userConfigured: true  // Prevents watchlist rotation — user explicitly added this token
         };
 
@@ -1419,7 +1446,7 @@ router.post('/strategy/token-trader/configure', async (req, res) => {
         // than adding to it. Without this, N instances each budget against the full shared pool
         // and collectively try to deploy >100% of the wallet.
         {
-            const newAlloc = capitalAllocationPercent || 20;
+            const newAlloc = effectiveAlloc;
             const existingTraders = strategyRegistry.getAllTokenTraders();
             let othersAlloc = 0;
             for (const [addr, inst] of existingTraders) {
