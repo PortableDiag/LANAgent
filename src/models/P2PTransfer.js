@@ -194,4 +194,16 @@ p2pTransferSchema.statics.getTransferProgress = function(transferId) {
     .select('peerFingerprint pluginName direction status totalChunks receivedChunks totalSize startedAt completedAt');
 };
 
+/**
+ * Whether this transfer can be retried. Only failed INCOMING transfers
+ * qualify: a retry re-requests the plugin from the peer, and outgoing
+ * transfers are peer-initiated (the peer must re-request, we can't force
+ * it). In-flight/pending transfers are not retryable — they haven't failed.
+ * Retrying creates a fresh transfer via the normal request flow; the
+ * failed record is left untouched as the audit trail.
+ */
+p2pTransferSchema.methods.isRetryable = function() {
+  return this.status === 'failed' && this.direction === 'incoming';
+};
+
 export const P2PTransfer = mongoose.model('P2PTransfer', p2pTransferSchema);

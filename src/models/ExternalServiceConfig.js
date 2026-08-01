@@ -65,6 +65,12 @@ const externalServiceConfigSchema = new mongoose.Schema({
   lastUsed: {
     type: Date,
     default: null
+  },
+  // serviceIds of other services this one requires (not a mongoose ref —
+  // services are keyed by serviceId, not _id, so populate can't resolve them)
+  dependencies: {
+    type: [String],
+    default: []
   }
 }, {
   timestamps: true
@@ -98,6 +104,7 @@ externalServiceConfigSchema.statics.exportConfiguration = async function(service
       totalRequests: config.totalRequests,
       totalRevenue: config.totalRevenue,
       lastUsed: config.lastUsed,
+      dependencies: config.dependencies,
       createdAt: config.createdAt,
       updatedAt: config.updatedAt
     };
@@ -138,7 +145,11 @@ externalServiceConfigSchema.statics.validateImportPayload = function(payload) {
       outputFormat: { type: 'string' },
       totalRequests: { type: 'number' },
       totalRevenue: { type: 'string' },
-      lastUsed: { type: 'string', format: 'date-time' }
+      lastUsed: { type: 'string', format: 'date-time' },
+      dependencies: {
+        type: 'array',
+        items: { type: 'string' }
+      }
     },
     required: ['serviceId', 'name', 'price'],
     additionalProperties: false
@@ -203,6 +214,114 @@ externalServiceConfigSchema.statics.importConfiguration = async function(payload
   } catch (error) {
     logger.error('Error importing service configuration:', error);
     throw error;
+  }
+};
+
+/**
+ * Validate service dependencies
+ * @param {Array<string>} dependencies - Array of service IDs to validate
+ * @returns {object} Validation result with valid flag and errors if any
+ */
+externalServiceConfigSchema.statics.validateDependencies = async function(dependencies) {
+  try {
+    if (!Array.isArray(dependencies) || dependencies.length === 0) {
+      return { valid: true, errors: [] };
+    }
+
+    // Find all dependent services
+    const services = await this.find({ 
+      serviceId: { $in: dependencies } 
+    }).select('serviceId enabled');
+
+    const foundServices = services.map(s => s.serviceId);
+    const missingServices = dependencies.filter(id => !foundServices.includes(id));
+    const disabledServices = services
+      .filter(s => !s.enabled)
+      .map(s => s.serviceId);
+
+    const errors = [];
+    if (missingServices.length > 0) {
+      errors.push(`Missing services: ${missingServices.join(', ')}`);
+    }
+    if (disabledServices.length > 0) {
+      errors.push(`Disabled services: ${disabledServices.join(', ')}`);
+    }
+
+    return {
+      valid: errors.length === 0,
+      errors,
+      details: {
+        found: foundServices,
+        missing: missingServices,
+        disabled: disabledServices
+      }
+    };
+  } catch (error) {
+    logger.error('Error validating dependencies:', error);
+    throw error;
+  }
+};
+
+/**
+ * Check service dependency chain for a given service
+ * @param {string} serviceId - The ID of the service to check
+ * @returns {object} Check result with valid flag and dependency chain
+ */
+externalServiceConfigSchema.statics.checkDependencies = async function(serviceId) {
+  try {
+    const service = await this.findOne({ serviceId });
+    if (!service) {
+      throw new Error(`Service with ID ${serviceId} not found`);
+    }
+
+    const onPath = new Set();   // current DFS path — membership here means a cycle
+    const verified = new Set(); // fully-checked nodes — skip on diamond re-visits
+    const chain = [];
+
+    const traverseDependencies = async (svcId) => {
+      if (verified.has(svcId)) return;
+      if (onPath.has(svcId)) {
+        throw new Error(`Circular dependency detected at service ${svcId}`);
+      }
+
+      onPath.add(svcId);
+      chain.push(svcId);
+
+      const svc = await this.findOne({ serviceId: svcId });
+      if (!svc) {
+        throw new Error(`Dependency service ${svcId} not found`);
+      }
+
+      if (!svc.enabled) {
+        throw new Error(`Dependency service ${svcId} is disabled`);
+      }
+
+      // Recursively check dependencies
+      if (svc.dependencies && svc.dependencies.length > 0) {
+        for (const depId of svc.dependencies) {
+          await traverseDependencies(depId);
+        }
+      }
+
+      onPath.delete(svcId);
+      verified.add(svcId);
+    };
+
+    await traverseDependencies(serviceId);
+
+    return {
+      valid: true,
+      serviceId,
+      chain
+    };
+  } catch (error) {
+    logger.error('Error checking dependencies:', error);
+    return {
+      valid: false,
+      serviceId,
+      error: error.message,
+      chain: []
+    };
   }
 };
 

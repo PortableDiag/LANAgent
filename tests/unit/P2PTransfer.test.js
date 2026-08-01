@@ -77,3 +77,45 @@ test('getProgressInfo: composite shape contains all fields', () => {
   assert.ok(typeof info.etaSeconds === 'number');
   assert.ok(info.startedAt instanceof Date);
 });
+
+test('isRetryable: true only for failed incoming transfers', () => {
+  assert.equal(makeTransfer({ status: 'failed', direction: 'incoming' }).isRetryable(), true);
+  // outgoing transfers are peer-initiated — we can't force a re-request
+  assert.equal(makeTransfer({ status: 'failed', direction: 'outgoing' }).isRetryable(), false);
+  // in-flight/settled states are not retryable
+  for (const status of ['pending', 'transferring', 'awaiting_approval', 'approved', 'rejected', 'installed']) {
+    assert.equal(makeTransfer({ status }).isRetryable(), false, `status ${status} must not be retryable`);
+  }
+});
+
+test('retryTransfer: re-requests plugin for failed incoming, rejects others', async () => {
+  const { default: P2PService } = await import('../../src/services/p2p/p2pService.js');
+
+  // Minimal harness: stub findById + requestPlugin, no live mongo/network
+  const failedDoc = makeTransfer({ status: 'failed', direction: 'incoming', error: 'Connection timeout' });
+  const origFindById = P2PTransfer.findById;
+  P2PTransfer.findById = async () => failedDoc;
+
+  const svc = Object.create(P2PService.prototype);
+  const requested = [];
+  svc.requestPlugin = async (fp, name) => { requested.push([fp, name]); return true; };
+
+  try {
+    const result = await svc.retryTransfer(String(failedDoc._id));
+    assert.equal(result.sent, true);
+    assert.deepEqual(requested, [['fp-test', 'test-plugin']]);
+    // the failed record is untouched — audit trail preserved
+    assert.equal(failedDoc.status, 'failed');
+    assert.equal(failedDoc.error, 'Connection timeout');
+
+    // non-retryable → statusCode 400
+    P2PTransfer.findById = async () => makeTransfer({ status: 'transferring' });
+    await assert.rejects(() => svc.retryTransfer('any'), (err) => err.statusCode === 400);
+
+    // missing → statusCode 404
+    P2PTransfer.findById = async () => null;
+    await assert.rejects(() => svc.retryTransfer('any'), (err) => err.statusCode === 404);
+  } finally {
+    P2PTransfer.findById = origFindById;
+  }
+});

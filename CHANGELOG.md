@@ -2,6 +2,43 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.175] - 2026-08-01
+
+### Added — self-mod PR queue sweep (7 merged after repair, 2 closed)
+
+- **Coordination participant reputation** — `GET /api/coordination/participants/:participantId/reputation`:
+  acceptance rate, completion rate over settled coordinations, execution failures, expiry
+  count, average acceptance latency, and a 0-100 blended score, derived from recorded
+  `AgentCoordination` history. Rates are null (unknown) when there is no history.
+- **P2P transfer retry** — `POST /p2p/api/transfers/:transferId/retry` re-requests the plugin
+  from the original peer for failed *incoming* transfers. The failed record is preserved as
+  audit; the peer's fresh offer creates a new transfer through the normal flow.
+- **Strategy indicator discovery** — `GET /api/crypto/strategy/indicators` (optional
+  `?category=`) exposes cross-family indicator metadata (name/type/description/category)
+  for rule-based strategy building.
+- **External service dependencies** — `ExternalServiceConfig` gains a `dependencies`
+  (serviceId array) field with `validateDependencies` (missing/disabled detection) and
+  `checkDependencies` (chain walk, diamond-safe, circular-dependency rejection).
+- **Adaptive provider rate limiting** — the Uncensored provider parses `x-ratelimit-*`
+  response headers (success and error responses), throttles proportionally near quota,
+  rides out short reset windows in-band, and fails fast on long windows so the provider
+  manager can fall back. `healthCheck()` reports rate-limit state on top of the base shape.
+- **Spoonacular plugin** — recipe/nutrition data plugin (`searchRecipes`,
+  `getRecipeInformation`, `autocompleteRecipeSearch`, `getRandomRecipes`) with response
+  caching and retry; dormant until `SPOONACULAR_API_KEY` is configured.
+- **Download-token introspection** — `POST /api/external/admin/download-tokens/inspect`
+  (admin-key gated, token in body so access logs never see it) returns token metadata,
+  remaining downloads, revocation state, and a `usable` flag without consuming a download.
+
+### Fixed
+
+- Token-trader configure endpoint accepts `trancheSellEnabled`/`trancheSellPercent`/
+  `trancheSellCooldownMs` and no longer resets `capitalAllocationPercent` to the default on
+  partial reconfigures (omitted fields preserve current values).
+- Uncensored provider: `remaining: 0` rate-limit headers no longer parse as unlimited.
+- `inspectDownloadToken`: revoked tokens report expiration and a non-usable state.
+- P2P Skynet RPC provider pins staticNetwork so a dead RPC fails fast.
+
 ## [2.25.170] - 2026-07-28
 
 ### Fixed — VPN reconnect could leave the pinned exit country

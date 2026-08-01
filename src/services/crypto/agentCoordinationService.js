@@ -708,6 +708,95 @@ class AgentCoordinationService {
     }
 
     /**
+     * Reputation and reliability metrics for a coordination participant,
+     * derived entirely from recorded coordination history (no synthetic data).
+     * Off-chain and read-only: safe to call pre-init.
+     *
+     * Rates are null when there is no history to compute them from — callers
+     * should treat null as "unknown", not zero. `score` (0-100) blends
+     * acceptance and completion equally and is null with no history;
+     * `sampleSize` is included so consumers can judge confidence.
+     *
+     * @param {string} participantAddress - participant wallet address
+     * @returns {Promise<object>} reputation metrics
+     */
+    async calculateParticipantReputation(participantAddress) {
+        const ethers = await import('ethers');
+        if (!participantAddress || !ethers.isAddress(participantAddress)) {
+            const err = new Error(`Invalid participant address: ${participantAddress}`);
+            err.statusCode = 400;
+            throw err;
+        }
+
+        // isAddress guarantees hex chars only, so the address is regex-safe.
+        const addrRe = new RegExp(`^${participantAddress}$`, 'i');
+        const coordinations = await AgentCoordination.find({
+            $or: [{ 'participants.address': addrRe }, { proposer: addrRe }]
+        }).lean();
+
+        const addr = participantAddress.toLowerCase();
+        let invited = 0, accepted = 0, completed = 0, executionFailed = 0;
+        let expiredUnaccepted = 0, cancelled = 0, proposedByThem = 0;
+        let acceptLatencyMsTotal = 0, acceptLatencyCount = 0;
+
+        for (const coord of coordinations) {
+            if ((coord.proposer || '').toLowerCase() === addr) proposedByThem++;
+
+            const p = (coord.participants || []).find(
+                x => (x.address || '').toLowerCase() === addr
+            );
+            if (!p) continue;
+
+            invited++;
+            if (p.accepted) {
+                accepted++;
+                if (p.acceptedAt && coord.createdAt) {
+                    acceptLatencyMsTotal += Math.max(0, new Date(p.acceptedAt) - new Date(coord.createdAt));
+                    acceptLatencyCount++;
+                }
+                if (coord.status === 'Executed') {
+                    if (p.executionResult?.status === 'failed') executionFailed++;
+                    else completed++;
+                }
+            } else if (coord.status === 'Expired') {
+                expiredUnaccepted++;
+            }
+            if (coord.status === 'Cancelled') cancelled++;
+        }
+
+        // Only settled coordinations count against completion; accepted intents
+        // still Proposed/Ready are pending, not failures.
+        const settled = completed + executionFailed;
+        const acceptanceRate = invited > 0 ? accepted / invited : null;
+        const completionRate = settled > 0 ? completed / settled : null;
+
+        let score = null;
+        if (invited > 0) {
+            const completionComponent = completionRate === null ? acceptanceRate : completionRate;
+            score = Math.round(100 * (0.5 * acceptanceRate + 0.5 * completionComponent));
+        }
+
+        return {
+            participant: participantAddress,
+            sampleSize: {
+                invited,
+                accepted,
+                completed,
+                executionFailed,
+                expiredUnaccepted,
+                cancelled,
+                proposedByThem
+            },
+            acceptanceRate,
+            completionRate,
+            avgAcceptLatencyMs: acceptLatencyCount > 0
+                ? Math.round(acceptLatencyMsTotal / acceptLatencyCount)
+                : null,
+            score
+        };
+    }
+
+    /**
      * Validate a coordination intent WITHOUT creating it on-chain.
      * Pure/off-chain: no signer, no contract, no gas. Safe to call pre-init
      * (only checks type-name keys and address/expiry shape). Mirrors the
