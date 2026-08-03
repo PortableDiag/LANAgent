@@ -4,7 +4,7 @@
     "name": "LANAgent API Collection",
     "description": "LANAgent API v2.25.149 — Stale Chromium singleton locks are now actually cleared before browser launches: the cleaner used existsSync, which follows symlinks, so the always-dangling SingletonLock symlink was reported absent and browser-tier scraping stayed wedged after any unclean shutdown. Detection now uses lstat; a running browser is never evicted. No HTTP surface change.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
-    "version": "2.25.152"
+    "version": "2.25.177"
   },
   "auth": {
     "type": "bearer",
@@ -16874,6 +16874,90 @@
               ]
             },
             "description": "List recent SKYNET token payments received for services."
+          }
+        },
+        {
+          "name": "Arb Signals - Recent",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/p2p/api/skynet/arb-signals?limit=20",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "p2p",
+                "api",
+                "skynet",
+                "arb-signals"
+              ],
+              "query": [
+                {
+                  "key": "limit",
+                  "value": "20",
+                  "description": "Max signals to return (default 20)"
+                }
+              ]
+            },
+            "description": "Recent (non-expired) arbitrage signals broadcast across the Skynet federation."
+          }
+        },
+        {
+          "name": "Arb Signals - Correlations (v2.25.177)",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/p2p/api/skynet/arb-signals/correlations?symbol=BTC&network=bsc&timeWindow=60&lookbackHours=24&minOverlap=3&limit=25",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "p2p",
+                "api",
+                "skynet",
+                "arb-signals",
+                "correlations"
+              ],
+              "query": [
+                {
+                  "key": "symbol",
+                  "value": "BTC",
+                  "description": "REQUIRED. Symbol to analyse correlations for; 400 if missing."
+                },
+                {
+                  "key": "network",
+                  "value": "bsc",
+                  "description": "Optional. Restrict to one network; omit for all networks."
+                },
+                {
+                  "key": "timeWindow",
+                  "value": "60",
+                  "description": "Optional. Bucket width in minutes (default 60); 400 if not a positive number."
+                },
+                {
+                  "key": "lookbackHours",
+                  "value": "24",
+                  "description": "Optional. How far back to read signals (default 24)."
+                },
+                {
+                  "key": "minOverlap",
+                  "value": "3",
+                  "description": "Optional. Minimum shared buckets before a symbol is reported (default 3)."
+                },
+                {
+                  "key": "limit",
+                  "value": "25",
+                  "description": "Optional. Maximum symbols returned (default 25)."
+                },
+                {
+                  "key": "includeExpired",
+                  "value": "false",
+                  "description": "Optional. Set true to include expired signals.",
+                  "disabled": true
+                }
+              ]
+            },
+            "description": "Which other symbols produce arbitrage signals alongside this one, and whether their spreads co-move. Signals are binned into timeWindow-minute buckets; a bucket where both symbols fired counts as a co-occurrence. correlationCoefficient is the Pearson correlation of the two symbols' mean spread across the shared buckets (spread co-movement, not clock proximity) and is null when a series has no variance. Sorted strongest positive correlation first, nulls last. Results cached 60s per parameter set."
           }
         },
         {

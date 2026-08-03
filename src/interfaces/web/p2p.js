@@ -1341,6 +1341,41 @@ router.get('/api/skynet/arb-signals', authenticateToken, async (req, res) => {
   }
 });
 
+// Correlated arbitrage signals — which other symbols move with this one
+router.get('/api/skynet/arb-signals/correlations', authenticateToken, async (req, res) => {
+  try {
+    const symbol = (req.query.symbol || '').trim();
+    if (!symbol) {
+      return res.status(400).json({ success: false, error: 'symbol query parameter is required' });
+    }
+
+    const network = (req.query.network || '').trim() || undefined;
+    const timeWindow = req.query.timeWindow !== undefined ? parseInt(req.query.timeWindow, 10) : 60;
+    if (req.query.timeWindow !== undefined && (!Number.isFinite(timeWindow) || timeWindow <= 0)) {
+      return res.status(400).json({ success: false, error: 'timeWindow must be a positive number of minutes' });
+    }
+
+    const options = {};
+    if (req.query.lookbackHours !== undefined) options.lookbackHours = parseInt(req.query.lookbackHours, 10);
+    if (req.query.minOverlap !== undefined) options.minOverlap = parseInt(req.query.minOverlap, 10);
+    if (req.query.limit !== undefined) options.limit = parseInt(req.query.limit, 10);
+    if (req.query.includeExpired === 'true') options.includeExpired = true;
+
+    const correlations = await ArbSignal.findCorrelatedSignals(symbol, network, timeWindow, options);
+    res.json({
+      success: true,
+      symbol,
+      network: network || 'all',
+      timeWindow,
+      count: correlations.length,
+      correlations
+    });
+  } catch (error) {
+    logger.error('Arb signal correlations API error:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
 // ==================== Referral Stats ====================
 
 router.get('/api/skynet/referrals', authenticateToken, async (req, res) => {

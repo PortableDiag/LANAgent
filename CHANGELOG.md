@@ -2,6 +2,40 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.177] - 2026-08-02
+
+### Added
+
+- **Arbitrage signal correlation analysis** — `GET /p2p/api/skynet/arb-signals/correlations`
+  reports which other symbols produce arbitrage signals alongside a given symbol and
+  whether their spreads actually move together. Signals are binned into
+  `timeWindow`-minute buckets; a bucket in which both symbols fired counts as a
+  co-occurrence, and the coefficient is the Pearson correlation of the two symbols' mean
+  spread across the shared buckets. Tunable via `network`, `timeWindow`, `lookbackHours`,
+  `minOverlap`, `limit`, `includeExpired`; results cached 60s with the existing
+  `node-cache` dependency.
+
+### Fixed
+
+- **Correlation coefficients could never be computed** — the original implementation of
+  `ArbSignal.findCorrelatedSignals` derived its means with `$avg` over an array of `Date`
+  values. MongoDB's `$avg` ignores non-numeric input, so both means resolved to `null` and
+  every dependent `$subtract`/`$multiply`/`$reduce`/`$divide` propagated `null`: the
+  coefficient was `null` for every group of more than one pair and a hardcoded `1`
+  otherwise. The statistic was also measuring the wrong thing — it correlated the
+  timestamps of pairs that had been selected for being close together in time, which is
+  ~1 by construction and says nothing about market co-movement. Rewritten to correlate
+  mean spread across shared time buckets.
+- **Unbounded aggregation in correlation lookup** — the pipelined `$lookup` ran a
+  collection-wide `$expr` range scan (unable to use the `createdAt` index) for every
+  matched signal and `$push`ed every resulting pair into one group document. Replaced with
+  a single `$group` returning one row per symbol per bucket, with the correlation computed
+  in application code.
+- **Constant series produced correlation from rounding noise** — a `denom === 0` guard is
+  insufficient because subtracting a floating-point mean from a genuinely constant series
+  leaves ~1e-18 residue, yielding a spurious coefficient. Zero-variance series are now
+  detected with a relative tolerance and reported as `null`.
+
 ## [2.25.175] - 2026-08-01
 
 ### Added — self-mod PR queue sweep (7 merged after repair, 2 closed)
