@@ -1,9 +1,21 @@
 {
   "lastUpdated": "2026-08-02",
   "overallProgress": "100%",
-  "status": "PRODUCTION READY \u2014 v2.25.177",
+  "status": "PRODUCTION READY \u2014 v2.25.178",
   "milestone": "Feature sweep: LP position analytics (ROI/IL/TWRR/fees), external-service config export/import, indicator metadata, device-group membership validation, agent-coordination multisig, governance + oracle analytics, YouTube credit-quota endpoint, response-sanitizer redaction stats on an admin route, and two new plugins (loop-readiness project audit + cron-expression explainer).",
   "features": {
+    "v2_25_178_2026_08_02": {
+      "status": "deployed",
+      "progress": "100%",
+      "addedDate": "2026-08-02",
+      "version": "2.25.178",
+      "description": "Two structural follow-ups to 2.25.177. (1) Arbitrage signals were never stored by the agent that detected them: ArbSignal documents were written only inside the RECEIVE side of a P2P arb_signal message, so an agent broadcast its own opportunities to peers and kept nothing, while no peer instance runs an arbitrage scanner able to originate one. The collection was structurally guaranteed to stay empty, so 2.25.177's correlation endpoint could never return a non-empty result no matter how long it ran. ArbSignal.recordLocalSignal(signal, fingerprint) now persists locally detected signals BEFORE the broadcast and independently of whether P2P is initialised, so the analysis also works with federation disabled; documents carry origin:'local' (schema default 'peer' preserves correct provenance for pre-existing docs) and senderTrustScore 100, and the write is best-effort so a storage failure can never disturb the scanner. (2) No retention: nothing ever set expired=true and nothing pruned the collection, so it grew without bound - invisible only because it was always empty, and made real by (1). Added a 30-day TTL index on createdAt, well beyond the correlation lookback window. (3) Self-mod PRs now flag unwired endpoints: the pipeline edits exactly one file per PR, so an HTTP endpoint named in the PR description that adds no route registration in that file cannot exist - this had shipped three times. checkAdvertisedEndpoints() extracts METHOD /path mentions from the description and warns when the diff adds no new route registration, skipping paths already present in the file being edited. Emitted as a WARNING rather than an error and rendered in the PR body under 'Automated review flags' - blocking would discard capabilities that are usually worth merging once the route is added. Counts new route registrations rather than matching path strings, because routers mount under a prefix so literal path matching would false-alarm constantly. Verified: node --check plus real ESM load of every changed module; 7 new tests including a verbatim real-world PR description (flagged) and four no-false-alarm cases; TTL index confirmed live in mongod; recordLocalSignal exercised end-to-end against a live database and the resulting documents fed through findCorrelatedSignals to a correct +1 coefficient.",
+      "files": [
+        "src/models/ArbSignal.js",
+        "src/services/selfModification.js",
+        "tests/unit/selfModEndpointCheck.test.js"
+      ]
+    },
     "v2_25_177_2026_08_02": {
       "status": "deployed",
       "progress": "100%",
