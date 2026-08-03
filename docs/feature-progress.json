@@ -1,9 +1,21 @@
 {
-  "lastUpdated": "2026-08-01",
+  "lastUpdated": "2026-08-02",
   "overallProgress": "100%",
-  "status": "PRODUCTION READY \u2014 v2.25.175",
+  "status": "PRODUCTION READY \u2014 v2.25.177",
   "milestone": "Feature sweep: LP position analytics (ROI/IL/TWRR/fees), external-service config export/import, indicator metadata, device-group membership validation, agent-coordination multisig, governance + oracle analytics, YouTube credit-quota endpoint, response-sanitizer redaction stats on an admin route, and two new plugins (loop-readiness project audit + cron-expression explainer).",
   "features": {
+    "v2_25_177_2026_08_02": {
+      "status": "deployed",
+      "progress": "100%",
+      "addedDate": "2026-08-02",
+      "version": "2.25.177",
+      "description": "Arbitrage signal correlation analysis (GET /p2p/api/skynet/arb-signals/correlations). The original findCorrelatedSignals static could never return a usable coefficient: it derived its means with $avg over an array of Date values, and MongoDB's $avg ignores non-numeric input, so both means resolved to null and every dependent $subtract/$multiply/$reduce/$divide propagated null - the coefficient was null for every group of more than one pair and a hardcoded 1 otherwise, with $sort then ordering on nulls. The statistic was also meaningless by construction: it correlated the timestamps of pairs SELECTED for being close together in time, which is ~1 regardless of market behaviour. The pipeline additionally ran a collection-wide $expr $lookup per matched document (unable to use the createdAt index) with an unbounded $push of every pair into one group doc. Reimplemented with the same public shape: signals are binned into timeWindow-minute buckets, a bucket where both symbols fired counts as a co-occurrence, and the coefficient is the Pearson correlation of the two symbols' MEAN SPREAD across shared buckets - real co-movement rather than clock proximity. One compact $group returns a row per symbol per bucket; the correlation runs in JS where it is exact and testable. Zero-variance series return null via a relative tolerance rather than a coefficient manufactured from ~1e-18 floating-point residue (a naive denom===0 guard scored a constant series as 0 - caught by a test). Added coOccurrenceRate and signalCount; lookbackHours/minOverlap/limit/includeExpired tunable; results cached 60s with the existing node-cache dependency (no new packages). Verified: node --check, real ESM load of model + router with the route confirmed registered, 8 behavioural tests passing (+1/-1/null correlation, overlap floor, sort order, empty base symbol, match construction, cache keying), and the aggregation executed against a live mongod on seeded data since the tests stub the DB.",
+      "files": [
+        "src/models/ArbSignal.js",
+        "src/interfaces/web/p2p.js",
+        "tests/unit/ArbSignal.test.js"
+      ]
+    },
     "v2_25_175_2026_08_01": {
       "status": "deployed",
       "progress": "100%",

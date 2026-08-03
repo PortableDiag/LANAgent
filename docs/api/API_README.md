@@ -553,6 +553,49 @@ Live in-memory snapshot of download-token usage (tokens within their TTL window)
 
 ---
 
+## Recent Updates (August 2, 2026)
+
+### v2.25.177 — Arbitrage signal correlation analysis
+
+- **`GET /p2p/api/skynet/arb-signals/correlations`** (JWT) — which other symbols produce
+  arbitrage signals alongside a given symbol, and whether their spreads actually move
+  together.
+
+  | Query param | Default | Meaning |
+  |---|---|---|
+  | `symbol` | *(required)* | Symbol to analyse; 400 if missing |
+  | `network` | all networks | Restrict to one network |
+  | `timeWindow` | `60` | Bucket width in minutes; 400 if not a positive number |
+  | `lookbackHours` | `24` | How far back to read signals |
+  | `minOverlap` | `3` | Minimum shared buckets before a symbol is reported |
+  | `limit` | `25` | Maximum symbols returned |
+  | `includeExpired` | `false` | Set `true` to include expired signals |
+
+  Signals are binned into `timeWindow`-minute buckets; a bucket in which both symbols
+  produced at least one signal counts as a co-occurrence. `correlationCoefficient` is the
+  Pearson correlation of the two symbols' **mean spread** across those shared buckets — so
+  it measures spread co-movement, not clock proximity — and is `null` when a series has no
+  variance (correlation undefined). Results sort strongest positive correlation first, with
+  `null` coefficients last. Cached 60s per parameter set.
+
+  ```jsonc
+  // GET /p2p/api/skynet/arb-signals/correlations?symbol=BTC&network=bsc&timeWindow=60
+  {
+    "success": true,
+    "symbol": "BTC", "network": "bsc", "timeWindow": 60, "count": 2,
+    "correlations": [
+      { "symbol": "ETH", "coOccurrences": 12, "coOccurrenceRate": 0.8,
+        "signalCount": 31, "avgSpread": 0.0412, "avgProfit": 18.4,
+        "correlationCoefficient": 0.8731 },
+      { "symbol": "SOL", "coOccurrences": 5, "coOccurrenceRate": 0.3333,
+        "signalCount": 9, "avgSpread": 0.0288, "avgProfit": 6.1,
+        "correlationCoefficient": -0.4102 }
+    ]
+  }
+  ```
+
+---
+
 ## Recent Updates (July 17, 2026)
 
 ### v2.25.175 — Four endpoints + a plugin from the self-mod PR queue
@@ -3451,6 +3494,7 @@ Complete 5-phase SKYNET token economy deployed to production. BEP-20 token on BS
 | GET | `/p2p/api/skynet/data-listings` | Data marketplace listings |
 | POST | `/p2p/api/skynet/data-listings` | Create data listing |
 | GET | `/p2p/api/skynet/arb-signals` | Recent arbitrage signals |
+| GET | `/p2p/api/skynet/arb-signals/correlations` | Symbols whose arbitrage signals co-occur and co-move |
 | GET | `/p2p/api/skynet/referrals` | Referral reward stats |
 | GET | `/p2p/api/skynet/compute-jobs` | Compute job history |
 | GET | `/api/settings/skynet-token-address` | Get SKYNET token address |

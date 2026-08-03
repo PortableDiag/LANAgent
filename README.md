@@ -106,6 +106,7 @@ See **[Cryptocurrency & Web3](#cryptocurrency--web3)** below and the [full chang
 - **Token scanner & scam protection** — auto-detect/auto-sell unknown deposits, honeypot detection, on-chain scammer registry with soulbound tokens
 - **DeFi** — SIWE auth, EIP-712 signing, ENS name/subname management, multi-sig, revenue/tax tracking
 - **Skynet P2P federation** — end-to-end encrypted (Ed25519 + X25519 + AES-256-GCM) peer messaging via `registry.lanagent.net`; capability/plugin sharing, signed knowledge packs, reputation staking
+- **Federated arbitrage signals** — peers broadcast arbitrage opportunities across the network; correlation analysis bins signals into time buckets and reports which symbols co-occur and whose spreads actually co-move (Pearson over mean spread across shared buckets)
 - **SKYNET token economy** — BEP-20 marketplace: paid peer services, on-chain staking, bounties, governance, V2/V3 liquidity management
 - **On-chain protocols** (consolidated in SkynetDiamond, ERC-2535): ERC-8004 agent identity, ERC-8183 commerce, ERC-8107 trust registry, ERC-8033 council oracles, ERC-8001 coordination
 - **Unified API gateway** ([api.lanagent.net](https://api.lanagent.net)) — 25+ paid services via Stripe / BNB / SKYNET, credit system, agent directory, auto-refund, admin dashboard
