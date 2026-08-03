@@ -555,6 +555,21 @@ Live in-memory snapshot of download-token usage (tokens within their TTL window)
 
 ## Recent Updates (August 2, 2026)
 
+### v2.25.178 — Arbitrage signals are recorded locally
+
+No endpoint was added or changed. One **additive response field**: documents returned by
+`GET /p2p/api/skynet/arb-signals` now carry `origin` — `"local"` for opportunities this
+agent's own scanner detected, `"peer"` for signals received over P2P. Pre-existing
+documents read as `"peer"`, which is the only thing they could have been.
+
+Signals used to be persisted **only** by the receiver of a P2P `arb_signal` message, so an
+agent broadcast its own opportunities and then discarded them, leaving the store empty and
+`/arb-signals/correlations` unable to return a result. Locally detected signals are now
+recorded before broadcast, and independently of whether P2P is enabled. The collection also
+gained a 30-day TTL; it previously had no retention at all.
+
+---
+
 ### v2.25.177 — Arbitrage signal correlation analysis
 
 - **`GET /p2p/api/skynet/arb-signals/correlations`** (JWT) — which other symbols produce

@@ -1726,7 +1726,7 @@ Pick the single most relevant existing file that should be enhanced.`;
         logger.info(`Code changes: +${changeStats.linesAdded} -${changeStats.linesRemoved} (~${changeStats.percentChanged}% modified)`);
 
         // Validate for common issues - errors block, warnings are logged
-        const validation = this.validateGeneratedCode(content, modifiedCode, repoFile);
+        const validation = this.validateGeneratedCode(content, modifiedCode, repoFile, improvement);
 
         // BLOCK if there are critical errors
         if (validation.errors && validation.errors.length > 0) {
@@ -1736,6 +1736,10 @@ Pick the single most relevant existing file that should be enhanced.`;
 
         if (validation.warnings && validation.warnings.length > 0) {
           logger.warn(`Generated code has ${validation.warnings.length} warnings - review PR carefully`);
+          // Carry the warnings onto the improvement so the PR body can show the
+          // reviewer what the automated checks flagged, instead of leaving them
+          // buried in a log nobody reads at review time.
+          improvement.reviewWarnings = validation.warnings;
         }
 
         // Auto-fix: Ensure trailing newline (POSIX compliance)
@@ -2679,9 +2683,73 @@ COMMON MISTAKES TO AVOID:
    * Returns { warnings: [], errors: [] }
    * Warnings are logged but don't block; Errors block the PR from being created
    */
-  validateGeneratedCode(originalCode, modifiedCode, targetFile) {
+  /**
+   * Cross-check HTTP endpoints promised in an improvement's description against
+   * the code actually generated.
+   *
+   * The pipeline edits exactly ONE file per PR, so an endpoint named in the
+   * description that adds no route registration anywhere in that file cannot
+   * exist — the capability ships unreachable while the PR advertises it as
+   * available. This has now happened three times; the most recent case named
+   * `GET /api/arbitrage/signals/correlations` against a router prefix that does
+   * not exist in the project at all.
+   *
+   * Deliberately counts NEW route registrations rather than matching paths:
+   * routers are mounted under a prefix (`/p2p`, `/api/...`), so the path in a
+   * description rarely matches the literal string in `router.get(...)`, and
+   * path matching would produce constant false alarms.
+   *
+   * @param {Object} improvement - The improvement/upgrade being applied
+   * @param {string} originalCode
+   * @param {string} modifiedCode
+   * @returns {string[]} Warning strings; empty when nothing is advertised or a route was added
+   */
+  checkAdvertisedEndpoints(improvement, originalCode, modifiedCode) {
+    const warnings = [];
+    if (!improvement) return warnings;
+
+    const text = [improvement.description, improvement.implementation, improvement.title]
+      .filter(Boolean)
+      .join('\n');
+    if (!text) return warnings;
+
+    const endpointRegex = /\b(GET|POST|PUT|PATCH|DELETE)\s+(\/[A-Za-z0-9_\-/:{}.]+)/g;
+    const advertised = [];
+    let match;
+    while ((match = endpointRegex.exec(text)) !== null) {
+      const entry = `${match[1]} ${match[2]}`;
+      if (!advertised.includes(entry)) advertised.push(entry);
+    }
+    if (advertised.length === 0) return warnings;
+
+    const routeRegex = /\b(?:router|app)\s*\.\s*(?:get|post|put|patch|delete|all|use|route)\s*\(/g;
+    const originalRoutes = (originalCode.match(routeRegex) || []).length;
+    const modifiedRoutes = (modifiedCode.match(routeRegex) || []).length;
+
+    // A route was registered — the endpoint is plausibly wired.
+    if (modifiedRoutes > originalRoutes) return warnings;
+
+    // No new route. If the path's distinctive segment is already in the file,
+    // the change may legitimately be editing an existing handler.
+    for (const endpoint of advertised) {
+      const path = endpoint.split(' ')[1] || '';
+      const tail = path.split('/').filter(seg => seg && !seg.startsWith(':')).pop();
+      if (tail && originalCode.includes(tail)) continue;
+      warnings.push(
+        `UNWIRED_ENDPOINT: the description advertises \`${endpoint}\` but this change registers no route — ` +
+        `the capability ships unreachable unless the route is added separately`
+      );
+    }
+
+    return warnings;
+  }
+
+  validateGeneratedCode(originalCode, modifiedCode, targetFile, improvement = null) {
     const warnings = [];
     const errors = [];
+
+    // Endpoints named in the description but never wired to a route
+    warnings.push(...this.checkAdvertisedEndpoints(improvement, originalCode, modifiedCode));
 
     // BLOCKING CHECK 1: Placeholder implementations with Math.random()
     if (modifiedCode.includes('Math.random()') && !originalCode.includes('Math.random()')) {
@@ -4049,10 +4117,14 @@ Provide only the corrected code line(s).`;
       upgrade.value ? `value: ${upgrade.value}` : null
     ].filter(Boolean).join(' · ');
 
+    const reviewFlagsBlock = Array.isArray(upgrade.reviewWarnings) && upgrade.reviewWarnings.length > 0
+      ? `\n**⚠️ Automated review flags:**\n${upgrade.reviewWarnings.map(w => `- ${w}`).join('\n')}\n`
+      : '';
+
     const prBody = `**Why:** ${upgrade.description || '(no description provided)'}
 
 **Change:** ${implementationText}
-${newCapsBlock}
+${newCapsBlock}${reviewFlagsBlock}
 **Tests:** the agent's test suite runs after this PR is opened. If it fails, the branch is reverted and this PR will be closed automatically. Manual review still required before merge.
 
 <sub>${meta} · generated by ${agentLabel} self-mod</sub>`;

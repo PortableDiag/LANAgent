@@ -17,6 +17,10 @@ const arbSignalSchema = new mongoose.Schema({
   netProfit: { type: Number, default: 0 },
   gasCostUsd: { type: Number, default: 0 },
   senderTrustScore: { type: Number, default: 0 },
+  // 'peer' = received over P2P from another agent; 'local' = detected by this
+  // agent's own scanner. Defaults to 'peer' so pre-existing documents, which
+  // could only ever have come from a peer, keep their correct provenance.
+  origin: { type: String, enum: ['peer', 'local'], default: 'peer' },
   expired: { type: Boolean, default: false }
 }, { timestamps: true });
 
@@ -24,6 +28,48 @@ arbSignalSchema.index({ createdAt: -1 });
 arbSignalSchema.index({ symbol: 1, createdAt: -1 });
 arbSignalSchema.index({ network: 1, createdAt: -1 });
 arbSignalSchema.index({ netProfit: 1 });
+// Nothing ever flipped `expired` or pruned this collection, so it grew without
+// bound. That was invisible while only peer signals were stored (there were
+// none); recording this agent's own signals makes it a real growth path.
+// 30 days comfortably covers the correlation lookback window.
+arbSignalSchema.index({ createdAt: 1 }, { expireAfterSeconds: 30 * 24 * 60 * 60 });
+
+/**
+ * Persist an arbitrage signal detected by this agent's own scanner.
+ *
+ * Signals used to be written only on the RECEIVING side of a P2P message, so an
+ * agent broadcast its own opportunities to peers but never kept them. With no
+ * peer running an arbitrage scanner there was nothing to receive either, which
+ * left the collection permanently empty and every derived statistic blank.
+ * Recording locally also means the analysis works with P2P disabled entirely.
+ *
+ * Best-effort by design: a storage failure must never disturb the scanner.
+ *
+ * @param {Object} signal - { token, symbol, network, spread, buyProtocol, sellProtocol, netProfit, gasCostUsd }
+ * @param {string} [senderFingerprint='local'] - This agent's own P2P fingerprint when available
+ * @returns {Promise<Object|null>} The created document, or null if it was rejected/failed
+ */
+arbSignalSchema.statics.recordLocalSignal = async function (signal, senderFingerprint = 'local') {
+  if (!signal || !signal.token || !signal.symbol) return null;
+  try {
+    return await this.create({
+      senderFingerprint: senderFingerprint || 'local',
+      token: signal.token,
+      symbol: signal.symbol,
+      network: signal.network || 'bsc',
+      spread: signal.spread || 0,
+      buyProtocol: signal.buyProtocol || '',
+      sellProtocol: signal.sellProtocol || '',
+      netProfit: signal.netProfit || 0,
+      gasCostUsd: signal.gasCostUsd || 0,
+      // Our own scanner is the most trusted source we have.
+      senderTrustScore: 100,
+      origin: 'local'
+    });
+  } catch {
+    return null;
+  }
+};
 
 arbSignalSchema.statics.getRecentSignals = function (limit = 20) {
   return this.find({ expired: false, createdAt: { $gte: new Date(Date.now() - 30 * 60 * 1000) } })

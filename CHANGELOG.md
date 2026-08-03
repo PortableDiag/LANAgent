@@ -2,6 +2,41 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.178] - 2026-08-02
+
+### Fixed
+
+- **Arbitrage signals were never stored by the agent that detected them** —
+  `ArbSignal` documents were only ever written by the *receiver* of a P2P
+  `arb_signal` message, so an agent broadcast its own opportunities to peers and
+  then discarded them. With no peer running an arbitrage scanner able to
+  originate a signal either, the collection stayed permanently empty and every
+  statistic derived from it was blank — the correlation analysis added in
+  2.25.177 could never return a result no matter how long it ran. Locally
+  detected signals are now persisted via `ArbSignal.recordLocalSignal()` before
+  broadcast, independently of whether P2P is initialised at all, and are tagged
+  `origin: 'local'` (existing documents default to `'peer'`, which is the only
+  thing they could have been). The write is best-effort and can never disturb the
+  scanner.
+- **`arbsignals` had no retention** — nothing ever set `expired` and nothing
+  pruned the collection, so it grew without bound. Invisible while it was always
+  empty; recording local signals makes it a real growth path. Added a 30-day TTL
+  index, comfortably beyond the correlation lookback window.
+
+### Added
+
+- **Self-mod PRs now flag endpoints they advertise but never wire** — the
+  pipeline edits exactly one file per PR, so an HTTP endpoint named in a PR
+  description that adds no route registration in that file cannot exist. This had
+  shipped three times. `checkAdvertisedEndpoints()` compares endpoints named in
+  the description against new route registrations in the generated diff and
+  raises an `UNWIRED_ENDPOINT` **warning**, now rendered in the PR body under
+  *Automated review flags* rather than buried in a log. Deliberately
+  non-blocking: the underlying capability is usually still worth merging once the
+  route is added, so blocking would discard useful work. Counts new route
+  registrations rather than matching paths, because routers are mounted under a
+  prefix and path matching would false-alarm constantly.
+
 ## [2.25.177] - 2026-08-02
 
 ### Added
