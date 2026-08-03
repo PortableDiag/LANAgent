@@ -2,6 +2,16 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.179] - 2026-08-02
+
+### Changed
+
+- **`SYSTEM_TOKEN_ALLOWLIST` / `isSystemToken` extracted** to
+  `src/services/crypto/systemTokens.js`. `CryptoStrategyAgent` imports the trading
+  strategies via `StrategyRegistry`, so a strategy importing the agent back to
+  reach this list would create a cycle. The agent now re-exports from the shared
+  module, leaving every existing importer unchanged. No behaviour change.
+
 ## [2.25.178] - 2026-08-02
 
 ### Fixed
