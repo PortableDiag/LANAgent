@@ -24,11 +24,10 @@ import TokenTraderHeartbeatManager from '../crypto/TokenTraderHeartbeatManager.j
 // by the residual sweep / unknown-token processor — user-owned tokens with thin
 // liquidity that would otherwise trip the "Output sanity check failed" / "no
 // viable swap path" instant-blacklist branches.
-const SYSTEM_TOKEN_ALLOWLIST = new Set([
-  'bsc:0x8b77cc5c6cb3d846608d9d5dd03fa406ba03b8f1' // SKYNET
-]);
-const isSystemToken = (network, tokenAddress) =>
-  !!tokenAddress && SYSTEM_TOKEN_ALLOWLIST.has(`${network}:${tokenAddress.toLowerCase()}`);
+// The list itself lives in ../crypto/systemTokens.js so strategies can consult
+// it without importing this module back (that edge would be circular — this
+// module already pulls the strategies in via StrategyRegistry).
+import { SYSTEM_TOKEN_ALLOWLIST, isSystemToken } from '../crypto/systemTokens.js';
 
 // CoinGecko ID mapping for tokens
 const COINGECKO_IDS = {

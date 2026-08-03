@@ -1,9 +1,20 @@
 {
   "lastUpdated": "2026-08-02",
   "overallProgress": "100%",
-  "status": "PRODUCTION READY \u2014 v2.25.178",
+  "status": "PRODUCTION READY \u2014 v2.25.179",
   "milestone": "Feature sweep: LP position analytics (ROI/IL/TWRR/fees), external-service config export/import, indicator metadata, device-group membership validation, agent-coordination multisig, governance + oracle analytics, YouTube credit-quota endpoint, response-sanitizer redaction stats on an admin route, and two new plugins (loop-readiness project audit + cron-expression explainer).",
   "features": {
+    "v2_25_179_2026_08_02": {
+      "status": "deployed",
+      "progress": "100%",
+      "addedDate": "2026-08-02",
+      "version": "2.25.179",
+      "description": "SYSTEM_TOKEN_ALLOWLIST and isSystemToken extracted from CryptoStrategyAgent into src/services/crypto/systemTokens.js. CryptoStrategyAgent imports the trading strategies via StrategyRegistry, so a strategy importing the agent back to consult the allowlist would form an import cycle; the shared module has no imports of its own and the agent re-exports from it, so every existing importer is unchanged. Pure refactor, no behaviour change. Verified: node --check plus a real ESM load of the module graph.",
+      "files": [
+        "src/services/crypto/systemTokens.js",
+        "src/services/subagents/CryptoStrategyAgent.js"
+      ]
+    },
     "v2_25_178_2026_08_02": {
       "status": "deployed",
       "progress": "100%",
