@@ -2,20 +2,9 @@ import { Router } from 'express';
 import ExternalCreditBalance from '../../../models/ExternalCreditBalance.js';
 import ExternalPayment from '../../../models/ExternalPayment.js';
 import { logger } from '../../../utils/logger.js';
+import { adminKeyAuth } from '../middleware/adminKeyAuth.js';
 
 const router = Router();
-
-function adminKeyAuth(req, res, next) {
-  const expected = process.env.AGENT_ADMIN_KEY;
-  if (!expected) {
-    return res.status(503).json({ success: false, error: 'AGENT_ADMIN_KEY not configured on this agent' });
-  }
-  const provided = req.headers['x-admin-key'];
-  if (!provided || provided !== expected) {
-    return res.status(401).json({ success: false, error: 'Invalid admin key' });
-  }
-  next();
-}
 
 router.use(adminKeyAuth);
 

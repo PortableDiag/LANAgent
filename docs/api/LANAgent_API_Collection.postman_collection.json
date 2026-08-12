@@ -4,7 +4,7 @@
     "name": "LANAgent API Collection",
     "description": "LANAgent API v2.25.149 — Stale Chromium singleton locks are now actually cleared before browser launches: the cleaner used existsSync, which follows symlinks, so the always-dangling SingletonLock symlink was reported absent and browser-tier scraping stayed wedged after any unclean shutdown. Detection now uses lstat; a running browser is never evicted. No HTTP surface change.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
-    "version": "2.25.179"
+    "version": "2.25.203"
   },
   "auth": {
     "type": "bearer",

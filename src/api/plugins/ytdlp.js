@@ -54,6 +54,16 @@ export default class YtDlpPlugin extends BasePlugin {
     this.description = 'Download videos and audio from YouTube and other platforms using yt-dlp';
     // Base yt-dlp command with JS runtime for YouTube extraction
     this.ytdlpBase = 'yt-dlp --js-runtimes node';
+    // YouTube player clients, tried in order. YouTube periodically breaks
+    // whichever client serves non-token-gated media: `web_safari` worked
+    // mid-2026, then began returning storyboard-only responses ("Only images
+    // are available"); as of 2026-07 the plain `default` client returns the
+    // full high-res formats and downloads cleanly (verified with a real 629 MB
+    // pull on ALICE). We try them in order and fall back to the next on a
+    // format/extraction failure, so a future YouTube flip self-heals without a
+    // code change. Override via YTDLP_YOUTUBE_CLIENTS (comma-separated).
+    this.youtubeClients = (process.env.YTDLP_YOUTUBE_CLIENTS || 'default,tv,web_safari,mweb')
+      .split(',').map(s => s.trim()).filter(Boolean);
     this.commands = [
       {
         command: 'download',
@@ -593,128 +603,160 @@ export default class YtDlpPlugin extends BasePlugin {
       data._cookieUserAgent = cookieCtx.userAgent;
     }
 
-    // Build yt-dlp command
-    let command = this._buildBaseCommand({ ...data, url });
+    // Build the yt-dlp command for a given attempt. The base command carries
+    // the per-attempt YouTube client (data._ytClient); everything after it is
+    // client-independent.
+    const buildCommand = () => {
+      let command = this._buildBaseCommand({ ...data, url });
 
-    // Format selection
-    if (quality === 'best') {
-      command += ` -f "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best"`;
-    } else if (quality === 'worst') {
-      command += ` -f worst`;
-    } else if (quality.includes('p')) {
-      // Specific resolution like 720p, 1080p
-      command += ` -f "bestvideo[height<=${quality.replace('p', '')}]+bestaudio/best[height<=${quality.replace('p', '')}]"`;
-    } else if (format) {
-      command += ` -f ${format}`;
-    }
-    
-    // Output template
-    const outputTemplate = output || '%(title)s.%(ext)s';
-    command += ` -o "${path.join(this.downloadDir, outputTemplate)}"`;
-    
-    // Add subtitles if requested
-    if (subtitles) {
-      command += ` --write-subs --sub-langs "en.*,es.*"`;
-    }
-    
-    // Backstop for anything isBulkUrl() misses: never let the single-video path
-    // expand into a playlist. --playlist-items caps the item count without the
-    // non-zero exit --max-downloads would give us on every successful download.
-    command += ` --no-playlist --playlist-items 1`;
+      // Format selection
+      if (quality === 'best') {
+        command += ` -f "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best"`;
+      } else if (quality === 'worst') {
+        command += ` -f worst`;
+      } else if (quality.includes('p')) {
+        // Specific resolution like 720p, 1080p
+        command += ` -f "bestvideo[height<=${quality.replace('p', '')}]+bestaudio/best[height<=${quality.replace('p', '')}]"`;
+      } else if (format) {
+        command += ` -f ${format}`;
+      }
 
-    // Add URL
-    command += ` "${url}"`;
+      // Output template
+      const outputTemplate = output || '%(title)s.%(ext)s';
+      command += ` -o "${path.join(this.downloadDir, outputTemplate)}"`;
 
-    // Progress output
-    command += ` --newline`;
+      // Add subtitles if requested
+      if (subtitles) {
+        command += ` --write-subs --sub-langs "en.*,es.*"`;
+      }
+
+      // Backstop for anything isBulkUrl() misses: never let the single-video path
+      // expand into a playlist. --playlist-items caps the item count without the
+      // non-zero exit --max-downloads would give us on every successful download.
+      command += ` --no-playlist --playlist-items 1`;
+
+      // Add URL
+      command += ` "${url}"`;
+
+      // Progress output
+      command += ` --newline`;
+      return command;
+    };
+
+    // On YouTube, rotate through the configured player clients on a
+    // format/extraction failure (YouTube breaks whichever client currently
+    // serves clean media). Other sites make a single attempt.
+    const isYouTube = /(?:youtube\.com|youtu\.be)\//i.test(url);
+    const clients = isYouTube && this.youtubeClients.length ? this.youtubeClients : [null];
 
     try {
-      logger.info(`Downloading media: ${command}`);
+      for (let i = 0; i < clients.length; i++) {
+        if (clients[i]) data._ytClient = clients[i];
+        const command = buildCommand();
 
-      // Use execAsync to capture all output
-      const { stdout, stderr } = await execAsync(command, { maxBuffer: 50 * 1024 * 1024 });
-      const output = stdout + '\n' + stderr;
-
-      // Extract filename from output - check multiple patterns:
-      // 1. Merged file: [Merger] Merging formats into "path/file.mp4"
-      // 2. Direct download: [download] Destination: path/file.mp4
-      // 3. Already exists: [download] path/file.mp4 has already been downloaded
-      let downloadedFile = null;
-
-      // Check for merged file (most common for video+audio)
-      const mergerMatch = output.match(/\[Merger\] Merging formats into "?([^"\n]+)"?/);
-      if (mergerMatch) {
-        downloadedFile = mergerMatch[1].trim();
-      }
-
-      // Check for direct download destination
-      if (!downloadedFile) {
-        const destMatch = output.match(/\[download\] Destination: (.+)/);
-        if (destMatch) {
-          downloadedFile = destMatch[1].trim();
-        }
-      }
-
-      // Check for already downloaded file
-      if (!downloadedFile) {
-        const alreadyMatch = output.match(/\[download\] (.+\.(?:mp4|mkv|webm|avi|mov)) has already been downloaded/);
-        if (alreadyMatch) {
-          downloadedFile = alreadyMatch[1].trim();
-        }
-      }
-
-      // Extract progress
-      let lastProgress = '100%';
-      const progressMatch = output.match(/(\d+\.?\d*)%/g);
-      if (progressMatch && progressMatch.length > 0) {
-        lastProgress = progressMatch[progressMatch.length - 1];
-      }
-
-      logger.info(`Video download - extracted file path: ${downloadedFile || 'none'}`);
-
-      // Sanitize filename (replace spaces/special chars with underscores)
-      downloadedFile = await this.sanitizeDownloadedFile(downloadedFile);
-
-      // Get file info
-      let fileInfo = null;
-      if (downloadedFile) {
         try {
-          const stats = await fs.stat(downloadedFile);
-          fileInfo = {
-            path: downloadedFile,
-            size: this.formatFileSize(stats.size),
-            filename: path.basename(downloadedFile)
+          logger.info(`Downloading media: ${command}`);
+
+          // Use execAsync to capture all output
+          const { stdout, stderr } = await execAsync(command, { maxBuffer: 50 * 1024 * 1024 });
+          const outText = stdout + '\n' + stderr;
+
+          // Extract filename from output - check multiple patterns:
+          // 1. Merged file: [Merger] Merging formats into "path/file.mp4"
+          // 2. Direct download: [download] Destination: path/file.mp4
+          // 3. Already exists: [download] path/file.mp4 has already been downloaded
+          let downloadedFile = null;
+
+          // Check for merged file (most common for video+audio)
+          const mergerMatch = outText.match(/\[Merger\] Merging formats into "?([^"\n]+)"?/);
+          if (mergerMatch) {
+            downloadedFile = mergerMatch[1].trim();
+          }
+
+          // Check for direct download destination
+          if (!downloadedFile) {
+            const destMatch = outText.match(/\[download\] Destination: (.+)/);
+            if (destMatch) {
+              downloadedFile = destMatch[1].trim();
+            }
+          }
+
+          // Check for already downloaded file
+          if (!downloadedFile) {
+            const alreadyMatch = outText.match(/\[download\] (.+\.(?:mp4|mkv|webm|avi|mov)) has already been downloaded/);
+            if (alreadyMatch) {
+              downloadedFile = alreadyMatch[1].trim();
+            }
+          }
+
+          // Extract progress
+          let lastProgress = '100%';
+          const progressMatch = outText.match(/(\d+\.?\d*)%/g);
+          if (progressMatch && progressMatch.length > 0) {
+            lastProgress = progressMatch[progressMatch.length - 1];
+          }
+
+          logger.info(`Video download - extracted file path: ${downloadedFile || 'none'}`);
+
+          // Sanitize filename (replace spaces/special chars with underscores)
+          downloadedFile = await this.sanitizeDownloadedFile(downloadedFile);
+
+          // Get file info
+          let fileInfo = null;
+          if (downloadedFile) {
+            try {
+              const stats = await fs.stat(downloadedFile);
+              fileInfo = {
+                path: downloadedFile,
+                size: this.formatFileSize(stats.size),
+                filename: path.basename(downloadedFile)
+              };
+            } catch (e) {
+              logger.warn('Could not get file stats:', e);
+            }
+          }
+
+          // Use the filename (without extension) as the title for caption
+          const title = fileInfo ? path.basename(fileInfo.filename, path.extname(fileInfo.filename)) : null;
+
+          if (isYouTube && clients[i] && clients[i] !== this.youtubeClients[0]) {
+            logger.info(`[ytdlp] YouTube download succeeded on fallback client "${clients[i]}" for ${url}`);
+          }
+
+          return {
+            success: true,
+            result: title || `Video downloaded successfully`,
+            file: fileInfo,
+            progress: lastProgress,
+            command: command
           };
-        } catch (e) {
-          logger.warn('Could not get file stats:', e);
+
+        } catch (error) {
+          const detail = `${error.stderr || ''}\n${error.message || ''}`;
+          const recoverable = /Requested format is not available|Only images are available|player.?client|Failed to extract|nsig|unable to download video data|HTTP Error 403/i.test(detail);
+
+          // Try the next client before giving up on YouTube.
+          if (isYouTube && recoverable && i < clients.length - 1) {
+            logger.warn(`[ytdlp] YouTube client "${clients[i]}" failed for ${url} (${(error.message || '').slice(0, 120)}); falling back to "${clients[i + 1]}"`);
+            continue;
+          }
+
+          // Log full stderr so future failures aren't invisible — the route's
+          // responseSanitizer strips internal paths from the API response, and
+          // the previous version of this catch never wrote anything to disk.
+          logger.error(`[ytdlp] Video download failed for ${url}: ${error.message}`, {
+            stderr: (error.stderr || '').toString().slice(-2000),
+            stdout: (error.stdout || '').toString().slice(-500),
+            code: error.code,
+            client: clients[i] || 'n/a'
+          });
+          return {
+            success: false,
+            error: `Download failed: ${error.message}`,
+            stderr: error.stderr || error.message
+          };
         }
       }
-
-      // Use the filename (without extension) as the title for caption
-      const title = fileInfo ? path.basename(fileInfo.filename, path.extname(fileInfo.filename)) : null;
-
-      return {
-        success: true,
-        result: title || `Video downloaded successfully`,
-        file: fileInfo,
-        progress: lastProgress,
-        command: command
-      };
-
-    } catch (error) {
-      // Log full stderr so future failures aren't invisible — the route's
-      // responseSanitizer strips internal paths from the API response, and
-      // the previous version of this catch never wrote anything to disk.
-      logger.error(`[ytdlp] Video download failed for ${url}: ${error.message}`, {
-        stderr: (error.stderr || '').toString().slice(-2000),
-        stdout: (error.stdout || '').toString().slice(-500),
-        code: error.code
-      });
-      return {
-        success: false,
-        error: `Download failed: ${error.message}`,
-        stderr: error.stderr || error.message
-      };
     } finally {
       if (cookieCtx?.cleanup) await cookieCtx.cleanup();
       // Keep the downloads dir under its cap right after a new (big) file lands,
@@ -1296,15 +1338,14 @@ export default class YtDlpPlugin extends BasePlugin {
     } else if (this._needsImpersonate(data.url)) {
       cmd += ' --impersonate chrome-131';
     }
-    // YouTube media downloads now 403 ("unable to download video data") under the
-    // default/tv player clients due to PO-token (Proof-of-Origin) enforcement — even
-    // with valid cookies and the JS runtime solving challenges. The web_safari client
-    // returns non-token-gated media URLs and downloads cleanly (verified). NOTE: pin to
-    // web_safari ALONE — adding mweb/default to the list re-introduces the 403 because
-    // the format selector merges their PO-token-gated formats. Namespaced to the youtube
-    // extractor, so it is a no-op for every other site.
+    // Pin the YouTube player client (see this.youtubeClients). A single client
+    // is used per attempt — the format selector must not merge multiple clients
+    // or a PO-token-gated format from one can 403 at media-fetch time. The
+    // download path (_runVideoDownload) rotates through the client list on
+    // failure via data._ytClient. Namespaced to youtube, so a no-op elsewhere.
     if (/(?:youtube\.com|youtu\.be)\//i.test(data.url || '')) {
-      cmd += ' --extractor-args "youtube:player_client=web_safari"';
+      const ytClient = data._ytClient || this.youtubeClients[0] || 'default';
+      cmd += ` --extractor-args "youtube:player_client=${ytClient}"`;
     }
     // Per-request proxy overrides config
     const proxy = data.proxy || this.config.proxy;

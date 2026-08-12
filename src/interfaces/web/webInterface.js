@@ -565,6 +565,35 @@ export class WebInterface {
       }
     });
     
+    // Export all system settings grouped by category
+    this.app.get('/api/settings/export', authenticateToken, async (req, res) => {
+      try {
+        const { SystemSettings } = await import('../../models/SystemSettings.js');
+        const settings = await SystemSettings.exportSettings();
+        res.json({ success: true, settings });
+      } catch (error) {
+        logger.error('Export settings error:', error);
+        res.status(500).json({ success: false, error: error.message });
+      }
+    });
+
+    // Import system settings (strategy: merge | replace)
+    this.app.post('/api/settings/import', authenticateToken, async (req, res) => {
+      try {
+        const { settings, strategy } = req.body;
+        const { SystemSettings } = await import('../../models/SystemSettings.js');
+        const result = await SystemSettings.importSettings(settings, strategy || 'merge');
+        logger.info(`Settings import (${strategy || 'merge'}): ${result.processed} processed, ${result.skipped} skipped`);
+        res.json(result);
+      } catch (error) {
+        if (/must be an object|Unknown import strategy/.test(error.message)) {
+          return res.status(400).json({ success: false, error: error.message });
+        }
+        logger.error('Import settings error:', error);
+        res.status(500).json({ success: false, error: error.message });
+      }
+    });
+
     // SKYNET token address setting
     this.app.get('/api/settings/skynet-token-address', authenticateToken, async (req, res) => {
       try {
@@ -1647,6 +1676,50 @@ export class WebInterface {
         });
       } catch (error) {
         logger.error('Batch delete memory error:', error);
+        res.status(500).json({ success: false, error: error.message });
+      }
+    });
+
+    // Link two memories (metadata.relatedMemories)
+    this.app.post('/api/memory/:id/relate', authenticateToken, async (req, res) => {
+      try {
+        const { id } = req.params;
+        const { targetId } = req.body;
+
+        if (!id || !id.match(/^[0-9a-fA-F]{24}$/) || !targetId || !String(targetId).match(/^[0-9a-fA-F]{24}$/)) {
+          return res.status(400).json({ success: false, error: 'Invalid memory ID format' });
+        }
+
+        const memory = await Memory.createRelationship(id, targetId);
+        res.json({ success: true, data: memory });
+      } catch (error) {
+        if (/not found/i.test(error.message)) {
+          return res.status(404).json({ success: false, error: error.message });
+        }
+        if (/relationship to self/i.test(error.message)) {
+          return res.status(400).json({ success: false, error: error.message });
+        }
+        logger.error('Relate memory error:', error);
+        res.status(500).json({ success: false, error: error.message });
+      }
+    });
+
+    // Graph of related memories from a starting point
+    this.app.get('/api/memory/:id/graph', authenticateToken, async (req, res) => {
+      try {
+        const { id } = req.params;
+
+        if (!id || !id.match(/^[0-9a-fA-F]{24}$/)) {
+          return res.status(400).json({ success: false, error: 'Invalid memory ID format' });
+        }
+
+        const parsedHops = parseInt(req.query.maxHops, 10);
+        const maxHops = Number.isFinite(parsedHops) ? Math.min(Math.max(parsedHops, 1), 6) : 3;
+
+        const graph = await Memory.traverseRelationships(id, maxHops);
+        res.json({ success: true, data: graph });
+      } catch (error) {
+        logger.error('Memory graph error:', error);
         res.status(500).json({ success: false, error: error.message });
       }
     });

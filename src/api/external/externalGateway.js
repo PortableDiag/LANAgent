@@ -274,6 +274,20 @@ router.get('/admin/audit', authenticateToken, async (req, res) => {
   }
 });
 
+// Top client IPs by request volume over a lookback window. Admin-only.
+router.get('/admin/audit/top-ips', authenticateToken, async (req, res) => {
+  try {
+    const ExternalAuditLog = (await import('../../models/ExternalAuditLog.js')).default;
+    const days = Math.min(Math.max(parseInt(req.query.days) || 30, 1), 90);
+    const limit = Math.min(Math.max(parseInt(req.query.limit) || 10, 1), 100);
+
+    const topIPs = await ExternalAuditLog.getTopIPAddresses({ days, limit });
+    res.json({ success: true, days, topIPs });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
 // Seed default service configs
 async function seedServiceConfigs() {
   const defaults = [

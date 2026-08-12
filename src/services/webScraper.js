@@ -37,20 +37,45 @@ export class WebScraperService {
     logger.info('Web Scraper Service initialized');
   }
 
+  /**
+   * Detect the VPN and record its current exit.
+   *
+   * This reported "ExpressVPN not available or not installed" for ~8 months while the
+   * tunnel was up the entire time: ExpressVPN renamed its CLI `expressvpn` →
+   * `expressvpnctl` on 2025-12-18, and this method (last touched the same day) kept
+   * shelling out to the old name, which now ENOENTs straight into the catch.
+   *
+   * Prefer the VPN plugin, which was migrated and already owns the new CLI, the connect
+   * serialization and the circuit breaker. Fall back to the raw new CLI so dev boxes
+   * without a registered plugin still detect correctly; the pre-rename binary is gone
+   * everywhere, so it is not worth a third branch.
+   *
+   * Detection only — nothing here changes the tunnel.
+   */
   async checkExpressVPN() {
+    const vpn = this._vpnPlugin();
+    if (vpn?.status) {
+      try {
+        const st = await vpn.status({});
+        const ex = st?.expressvpn || st || {};
+        this.expressVPN.enabled = true;
+        this.expressVPN.currentLocation = ex.location || null;
+        logger.info(`ExpressVPN detected via plugin — ${ex.connected ? `Connected (${ex.location || 'unknown exit'})` : 'Disconnected'}`);
+        return;
+      } catch (err) {
+        logger.warn(`VPN plugin status failed, falling back to CLI: ${err.message}`);
+      }
+    }
+
     try {
-      const { stdout } = await execAsync('expressvpn status');
+      const { stdout } = await execAsync('expressvpnctl status');
       this.expressVPN.enabled = true;
       this.expressVPN.currentLocation = this.parseVPNLocation(stdout);
-      
-      // Get available locations
-      const { stdout: locations } = await execAsync('expressvpn list');
-      this.expressVPN.locations = this.parseVPNLocations(locations);
-      
       logger.info(`ExpressVPN detected - Status: ${stdout.includes('Connected') ? 'Connected' : 'Disconnected'}`);
     } catch (error) {
       logger.info('ExpressVPN not available or not installed');
       this.expressVPN.enabled = false;
+      this.expressVPN.currentLocation = null;
     }
   }
 
@@ -84,69 +109,40 @@ export class WebScraperService {
     return entry?.instance || entry || null;
   }
 
-  async connectVPN(location = null) {
-    if (!this.expressVPN.enabled) {
-      logger.warn('ExpressVPN is not available');
-      return false;
-    }
+  // connectVPN() / disconnectVPN() REMOVED (2026-08-11) along with rotateVPNLocation().
+  //
+  // Both were provably uncalled — the only call site in the codebase was the dead
+  // `handle403` branch below — and both mutated the tunnel through an explicit-location
+  // connect, the branch VPN_EXIT_COUNTRY does not filter. connectVPN() with no argument
+  // resolved to connect({location:'smart'}), which can land on a non-US exit. They also
+  // still shelled out to the pre-rename `expressvpn` binary in their fallback path, so
+  // the fallback could not have worked since 2025-12-18 either.
+  //
+  // This service now READS VPN state and never changes it. Deliberate: ALICE's egress is
+  // shared, Network Lock is enabled, and a tunnel flap takes crypto RPC and every
+  // in-flight scrape with it. Exit changes belong to the VPN plugin, driven by the
+  // external scrape route's US-only pool.
 
-    const vpn = this._vpnPlugin();
-    try {
-      if (vpn?.connect) {
-        await vpn.connect({ location: location || 'smart' });
-      } else {
-        // Plugin not registered (shouldn't happen in production) — fall back
-        // to raw command so dev environments still work.
-        if (location) {
-          logger.info(`Connecting to ExpressVPN location: ${location}`);
-          await execAsync(`expressvpn connect ${location}`);
-        } else {
-          logger.info('Connecting to ExpressVPN (auto location)');
-          await execAsync('expressvpn connect');
-        }
-      }
-
-      await this.checkExpressVPN();
-      return true;
-    } catch (error) {
-      logger.error('Failed to connect VPN:', error);
-      return false;
-    }
-  }
-
-  async disconnectVPN() {
-    if (!this.expressVPN.enabled) {
-      return false;
-    }
-
-    const vpn = this._vpnPlugin();
-    try {
-      if (vpn?.disconnect) {
-        await vpn.disconnect();
-      } else {
-        logger.info('Disconnecting ExpressVPN');
-        await execAsync('expressvpn disconnect');
-      }
-      await this.checkExpressVPN();
-      return true;
-    } catch (error) {
-      logger.error('Failed to disconnect VPN:', error);
-      return false;
-    }
-  }
-
-  async rotateVPNLocation() {
-    if (!this.expressVPN.enabled || this.expressVPN.locations.length === 0) {
-      return false;
-    }
-
-    // Pick a random location
-    const randomLocation = this.expressVPN.locations[
-      Math.floor(Math.random() * this.expressVPN.locations.length)
-    ];
-    
-    return await this.connectVPN(randomLocation.alias);
-  }
+  // rotateVPNLocation() REMOVED (2026-08-11).
+  //
+  // It picked a UNIFORMLY RANDOM region from the full ExpressVPN list and connected to
+  // it on any scrape 403. Three reasons it is gone rather than repaired:
+  //
+  //   1. It never ran. `rotating VPN location` appears ZERO times in ALICE's logs. It
+  //      was dead the whole time because checkExpressVPN() above had been failing since
+  //      the 2025-12-18 CLI rename — restoring detection would have ARMED it for the
+  //      first time, eight months after it was last looked at.
+  //   2. The region list is unfiltered, so it breaks the US exit pin — and the pin does
+  //      not catch it, because VPN_EXIT_COUNTRY is enforced only inside smartConnect(),
+  //      never on the explicit connect({location}) this took. vpn.js:375 records a live
+  //      incident of exactly this (overlapping rotations to canada-vancouver).
+  //   3. A rotation is a host-wide disconnect/reconnect under an enabled Network Lock,
+  //      so it takes crypto RPC and in-flight scrapes with it.
+  //
+  // The anti-block rotation that actually does the work lives in
+  // api/external/routes/scraping.js: US-only VPN_ROTATION_POOL, MAX_VPN_ROTATIONS cap,
+  // budget-aware. 25 rotations on record, zero non-US destinations ever. That one is the
+  // product feature and is deliberately untouched — this was a stale duplicate of it.
 
   getRandomUserAgent() {
     this.currentUserAgent = this.userAgents[
@@ -182,10 +178,12 @@ export class WebScraperService {
     let browser = null;
     
     try {
-      // Handle 403 errors by rotating VPN if available
-      if (options.handle403 && this.expressVPN.enabled) {
-        await this.connectVPN();
-      }
+      // The `handle403` pre-emptive reconnect was removed with the rotation above. No
+      // caller anywhere in the codebase ever set the option, and it resolved to
+      // connect({location:'smart'}) — an explicit-location connect, which is the branch
+      // the VPN_EXIT_COUNTRY pin does NOT filter, so "smart" could legitimately land on
+      // a non-US exit. Dead for eight months behind the same broken detection flag;
+      // restoring detection would have armed it.
 
       const browserOptions = {
         headless: options.headless !== false ? 'new' : false,
@@ -239,11 +237,13 @@ export class WebScraperService {
         }
         if (!response) return;
 
-        if (response.status() === 403 && this.expressVPN.enabled) {
-          logger.warn(`Got 403, rotating VPN location...`);
-          await this.rotateVPNLocation();
-          throw new Error('403 Forbidden');
-        }
+        // A 403 used to trigger the random-region rotation removed above. Deleting the
+        // branch outright preserves TODAY's behaviour exactly: expressVPN.enabled has
+        // been false since the 2025-12-18 CLI rename, so this never fired — it did not
+        // rotate and it did not throw. Restoring detection without deleting it would
+        // have silently introduced a host-wide VPN flap on every blocked page.
+        // Anti-block rotation for paid scrapes is handled in the external scrape route,
+        // which rotates within a US-only pool.
 
         if (response.status() === 429) {
           logger.warn('Received 429 Too Many Requests, applying exponential backoff...');

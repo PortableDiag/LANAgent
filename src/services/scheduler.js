@@ -1050,6 +1050,98 @@ Respond with ONLY the rephrased message, no explanation:`;
       }
     });
 
+    // Scan-only arbitrage — records cross-DEX signals WITHOUT ever trading.
+    //
+    // The dedicated-executor path resolves a SINGLE active strategy, so making
+    // `arbitrage` active would suspend whatever else is running (dollar_maximizer
+    // here). This job exists so arbitrage signal history can accumulate alongside
+    // the real strategy instead of replacing it.
+    //
+    // Scan-only is structural, not a flag: it calls ONLY the strategy's analyze(),
+    // which reads quotes and records/broadcasts profitable spreads. decide() —
+    // which is what turns an opportunity into an executable trade — is never
+    // called, so this job cannot place a trade no matter what it finds.
+    this.agenda.define('arb-signal-scan', async (job) => {
+      try {
+        const { strategyRegistry } = await import('./crypto/strategies/StrategyRegistry.js');
+        const strategy = strategyRegistry.get('arbitrage');
+        if (!strategy) {
+          logger.debug('Arb signal scan: arbitrage strategy not registered, skipping');
+          return;
+        }
+
+        // If arbitrage is the ACTIVE strategy, the normal executor path is
+        // already scanning (and trading). Scanning again here would double the
+        // RPC load and duplicate every signal.
+        const active = strategyRegistry.getActive?.();
+        if (active?.name === 'arbitrage') {
+          logger.debug('Arb signal scan: arbitrage is the active strategy, executor already scans — skipping');
+          return;
+        }
+
+        // Handlers are keyed by agentId, so the crypto handler has to be looked
+        // up through its SubAgent document — same resolution the crypto API uses.
+        let cryptoConfig = {};
+        try {
+          const orchestrator = this.agent?.subAgentOrchestrator;
+          if (orchestrator) {
+            const { default: SubAgent } = await import('../models/SubAgent.js');
+            const agents = await SubAgent.find({ domain: 'crypto', type: 'domain' });
+            const handler = agents?.[0] && orchestrator.agentHandlers?.get(agents[0]._id.toString());
+            cryptoConfig = handler?.getConfig?.() || {};
+          }
+        } catch (err) {
+          // Config is only used for the emergency-stop check and network mode;
+          // a lookup failure must not stop a read-only scan.
+          logger.debug(`Arb signal scan: could not read crypto config (${err.message})`);
+        }
+
+        if (cryptoConfig.emergencyStop === true) {
+          logger.debug('Arb signal scan: emergency stop set, skipping');
+          return;
+        }
+
+        // Same price shape the crypto heartbeat builds — analyze() uses it only
+        // to price gas, falling back to a constant when absent.
+        const prices = {};
+        if (this.cryptoPriceState) {
+          for (const [network, data] of this.cryptoPriceState) {
+            prices[network] = { price: data.price, symbol: data.symbol || network, network };
+          }
+        }
+
+        const networkMode = cryptoConfig.networkMode || 'mainnet';
+        const networks = strategy.config?.scanNetworks?.length ? strategy.config.scanNetworks : ['bsc'];
+
+        let totalFound = 0;
+        for (const network of networks) {
+          try {
+            // Evaluate at the strategy's hard ceiling rather than the live
+            // maxTradeUsd trade-safety cap. Gas is fixed per round-trip while
+            // profit scales with notional, so inheriting a small cap would set
+            // the signal bar absurdly high (~8.3% spread at $10 vs ~1.7% at $50)
+            // and this scanner would record nothing. Safe precisely because this
+            // path never calls decide() — no trade is ever sized from it.
+            const result = await strategy.analyze({ prices }, {}, network, networkMode, {
+              tradeAmountUsd: 50
+            });
+            const found = result?.opportunities?.length || 0;
+            totalFound += found;
+            logger.info(`Arb signal scan [${network}]: ${result?.reason || `${found} opportunity(s)`} (scan-only, no trades)`);
+          } catch (err) {
+            // One network failing must not stop the others.
+            logger.warn(`Arb signal scan [${network}] failed: ${err.message}`);
+          }
+        }
+
+        if (totalFound > 0) {
+          logger.info(`Arb signal scan: recorded ${totalFound} signal(s) — analysis only, no trade decisions produced`);
+        }
+      } catch (error) {
+        logger.error('Arb signal scan error:', error);
+      }
+    });
+
     // MindSwarm engagement cycle — process notifications, auto-reply, daily post
     this.agenda.define('mindswarm-engagement', async (job) => {
       try {
@@ -1155,7 +1247,27 @@ Respond with ONLY the rephrased message, no explanation:`;
 
           // Fund 0.1% of remaining pool for next epoch
           const weeklyYieldRate = 0.001;
-          const fundAmount = Math.max(1, stakingEntry.amount * weeklyYieldRate);
+          let fundAmount = Math.max(1, stakingEntry.amount * weeklyYieldRate);
+
+          // Never fund below what the pending scam-report queue needs liquid —
+          // the 2026-08-02 boot-time epoch fund emptied the wallet under one
+          // report fee and stalled the flush. Cap to the spendable surplus.
+          try {
+            const scammerRegistry = (await import('../services/crypto/scammerRegistryService.js')).default;
+            const queueReserve = await scammerRegistry.getQueueReserveRequirement();
+            if (Number.isFinite(queueReserve)) {
+              const info = await stakingService.getFullStakeInfo();
+              const spendable = (info?.walletBalance ?? 0) - queueReserve;
+              if (spendable < 1) {
+                logger.warn(`Epoch funding deferred: wallet SKYNET (${(info?.walletBalance ?? 0).toFixed(0)}) is below the scam-report queue reserve (${queueReserve.toFixed(0)})`);
+                return;
+              }
+              if (fundAmount > spendable) {
+                logger.info(`Epoch funding capped ${fundAmount.toFixed(0)} → ${Math.floor(spendable)} SKYNET to preserve the scam-report queue reserve (${queueReserve.toFixed(0)})`);
+                fundAmount = Math.floor(spendable);
+              }
+            }
+          } catch { /* fund uncapped if reserve unreadable */ }
 
           try {
             const result = await stakingService.fundRewards(fundAmount);
@@ -1333,8 +1445,15 @@ Respond with ONLY the rephrased message, no explanation:`;
           );
           const balance = Number(ethers.formatEther(await skynetToken.balanceOf(walletAddr)));
 
-          // Keep a reserve liquid for operations (configurable per instance)
-          const SKYNET_RESERVE = skynetReserve;
+          // Keep a reserve liquid for operations (configurable per instance),
+          // raised to the scam-report queue requirement when that is higher so
+          // compounding can't starve the flush.
+          let SKYNET_RESERVE = skynetReserve;
+          try {
+            const scammerRegistry = (await import('../services/crypto/scammerRegistryService.js')).default;
+            const queueReserve = await scammerRegistry.getQueueReserveRequirement();
+            if (Number.isFinite(queueReserve) && queueReserve > SKYNET_RESERVE) SKYNET_RESERVE = queueReserve;
+          } catch { /* keep configured reserve */ }
           const stakeableAmount = balance - SKYNET_RESERVE;
 
           if (stakeableAmount >= SKYNET_STAKE_THRESHOLD) {
@@ -1658,11 +1777,17 @@ Respond with ONLY the rephrased message, no explanation:`;
       
       try {
         logger.info('📊 Generating system status report data...');
-        const { report, reportData } = await this.generateWeeklyReport();
+        const { report, reportData, cryptoCommit } = await this.generateWeeklyReport();
         logger.info('💾 Saving report to database...');
         await this.saveReportToDatabase(reportData, 'scheduled');
         logger.info('📤 Sending system status report notification...');
         await this.agent.notify(report);
+        // Advance the crypto P&L window baselines now that the unified daily
+        // report (which embeds the crypto detail) has been sent.
+        if (cryptoCommit) {
+          try { await cryptoCommit(); }
+          catch (e) { logger.warn('Crypto snapshot commit after report failed:', e.message); }
+        }
         logger.info('✅ System status report completed successfully');
       } catch (error) {
         logger.error('❌ Weekly report error:', error);
@@ -2345,12 +2470,32 @@ Respond with ONLY the rephrased message, no explanation:`;
   }
 
   /**
-   * (Re)schedule the crypto daily P&L report at the agent-configured
-   * dailyReportTime (HH:MM, server-local, default 09:00). Called at startup
-   * and again by CryptoStrategyAgent.updateConfig when the time changes —
-   * agenda.every() upserts by job name, so re-calling re-pins the cron.
+   * (Re)schedule the crypto daily P&L report. When the unified system status
+   * report runs daily (frequency === 1) the crypto detail is folded into it
+   * (generateWeeklyReport embeds buildDailyPnLReport and commits the P&L window
+   * baselines after sending), so the standalone report is retired to avoid a
+   * duplicate 9am Telegram message. Otherwise (weekly/monthly/no settings — e.g.
+   * other instances) the standalone crypto report is kept at the agent-configured
+   * dailyReportTime so crypto P&L is still delivered daily and its 24h/7d/30d
+   * windows keep advancing. Called at startup and by CryptoStrategyAgent.updateConfig.
    */
   async scheduleCryptoDailyReport() {
+    let systemReportIsDaily = false;
+    try {
+      const settings = await this.getReportSettings();
+      systemReportIsDaily = settings?.frequency === 1;
+    } catch { /* fall through to standalone scheduling */ }
+
+    if (systemReportIsDaily) {
+      try {
+        const cancelled = await this.agenda.cancel({ name: 'crypto-daily-report' });
+        logger.info(`Crypto daily report folded into unified daily status report${cancelled ? ` (retired ${cancelled} standalone job)` : ''}`);
+      } catch (err) {
+        logger.warn(`Could not retire standalone crypto-daily-report: ${err.message}`);
+      }
+      return;
+    }
+
     let reportTime = '09:00';
     try {
       const { default: SubAgent } = await import('../models/SubAgent.js');
@@ -2432,6 +2577,13 @@ Respond with ONLY the rephrased message, no explanation:`;
 
     // Crypto heartbeat - periodic trigger for time-based strategies (DCA)
     await this.agenda.every('10 minutes', 'crypto-heartbeat');
+
+    // Scan-only arbitrage signal collection. 30 min, not 10: a full scan makes
+    // several quote calls per token across V2/V3/V4 plus fee tiers and takes
+    // ~60-90s with the built-in inter-token delay, so a tighter cadence would
+    // compete with the real strategy and TokenTrader for the same RPC budget.
+    // This job never trades — it only calls analyze(), never decide().
+    await this.agenda.every('30 minutes', 'arb-signal-scan');
 
     // Crypto daily P&L report — pinned to the agent-configured dailyReportTime
     // (was every('24 hours'), which free-ran from whenever the job was first
@@ -3040,6 +3192,28 @@ Your response:`;
         reportTitle = `${frequency}-Day System Report`;
       }
 
+      // Rich crypto P&L detail — folds the (now-retired) standalone daily crypto
+      // report into this unified report. Falls back to the compact cryptoStats
+      // summary below if unavailable, so the report never loses crypto info.
+      // commitSnapshot advances the 24h/7d/30d window baselines and must run
+      // only after this report is actually sent (handled by the daily job).
+      let cryptoDetail = null;
+      try {
+        const orchestrator = this.agent?.subAgentOrchestrator;
+        if (orchestrator) {
+          const { default: SubAgent } = await import('../models/SubAgent.js');
+          const cryptoAgents = await SubAgent.find({ domain: 'crypto' });
+          const handler = cryptoAgents.length
+            ? orchestrator.agentHandlers.get(cryptoAgents[0]._id.toString())
+            : null;
+          if (handler?.buildDailyPnLReport) {
+            cryptoDetail = await handler.buildDailyPnLReport({ header: false });
+          }
+        }
+      } catch (err) {
+        logger.warn('Could not build embedded crypto detail, using compact summary:', err.message);
+      }
+
       // Build report sections
       const sections = [];
 
@@ -3071,8 +3245,12 @@ Your response:`;
 • New memories stored: ${memoryStats.newMemories || 0}
 • Most active: ${memoryStats.mostActiveInterface || 'None'}${memoryStats.interfaceBreakdown ? '\n' + memoryStats.interfaceBreakdown : ''}`);
 
-      // Crypto Stats — separate primary strategy and token trader
-      if (cryptoStats.available) {
+      // Crypto — prefer the full embedded P&L detail; fall back to the compact
+      // summary if the detail builder was unavailable.
+      if (cryptoDetail?.text) {
+        // Strip the body's leading 💰 so it doesn't stack under the section emoji.
+        sections.push(`💰 **Crypto**\n${cryptoDetail.text.trim().replace(/^💰\s*/, '')}`);
+      } else if (cryptoStats.available) {
         const pnlEmoji = cryptoStats.totalPnL > 0 ? '🟢' : cryptoStats.totalPnL < 0 ? '🔴' : '⚪';
         const ttPnlEmoji = cryptoStats.tokenTraderPnL > 0 ? '🟢' : cryptoStats.tokenTraderPnL < 0 ? '🔴' : '⚪';
         const ttUrEmoji = cryptoStats.tokenTraderUnrealizedPnL > 0 ? '📈' : cryptoStats.tokenTraderUnrealizedPnL < 0 ? '📉' : '➡️';
@@ -3207,7 +3385,10 @@ ${ttUrEmoji} Unrealized: $${cryptoStats.tokenTraderUnrealizedPnL.toFixed(2)}
         }
       };
 
-      return { report, reportData };
+      // Only the daily unified report should advance the crypto P&L window
+      // baselines — a weekly/on-demand run must not reset the 24h window.
+      const cryptoCommit = frequency === 1 ? cryptoDetail?.commitSnapshot : undefined;
+      return { report, reportData, cryptoCommit };
 
     } catch (error) {
       logger.error('Error generating detailed weekly report:', error);
@@ -3291,6 +3472,32 @@ ${ttUrEmoji} Unrealized: $${cryptoStats.tokenTraderUnrealizedPnL.toFixed(2)}
     }
   }
 
+  // Count agent restarts within [startDate, endDate] by tallying boot banners in
+  // the app log (each successful boot logs one). Returns 0 on any failure so the
+  // report never breaks over a missing log or grep.
+  async getRestartCount(startDate, endDate) {
+    try {
+      const { exec } = await import('child_process');
+      const { promisify } = await import('util');
+      const execAsync = promisify(exec);
+      const { stdout } = await execAsync(
+        'grep -h "Web Interface successfully running on port" logs/all-activity*.log 2>/dev/null || true',
+        { cwd: process.cwd(), maxBuffer: 16 * 1024 * 1024 }
+      );
+      let count = 0;
+      for (const line of stdout.split('\n')) {
+        const m = line.match(/^(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2})/);
+        if (!m) continue;
+        const t = new Date(`${m[1]}T${m[2]}`); // server-local, matches start/endDate
+        if (t >= startDate && t <= endDate) count++;
+      }
+      return count;
+    } catch (error) {
+      logger.warn('Could not count restarts from logs:', error.message);
+      return 0;
+    }
+  }
+
   // Get system activity statistics with accurate job run counts
   async getSystemActivity(startDate, endDate) {
     try {
@@ -3370,15 +3577,11 @@ ${ttUrEmoji} Unrealized: $${cryptoStats.tokenTraderUnrealizedPnL.toFixed(2)}
 
       const jobDetails = sortedJobs.map(([name, count]) => ({ name, count }));
 
-      // Get restart count from agent stats
-      let restarts = 0;
-      try {
-        const { Agent } = await import('../models/Agent.js');
-        const agentRecord = await Agent.findOne({ name: process.env.AGENT_NAME || "LANAgent" });
-        restarts = agentRecord?.stats?.restartCount || 0;
-      } catch (error) {
-        logger.warn('Could not get restart count:', error);
-      }
+      // Count actual restarts within the window. stats.restartCount was never
+      // written (always 0), so count boot banners in the app log instead — each
+      // successful boot emits exactly one "Web Interface successfully running on
+      // port" line, timestamped in server-local time (same basis as start/endDate).
+      const restarts = await this.getRestartCount(startDate, endDate);
 
       // Get average response time from TokenUsage
       let avgResponseTime = 0;

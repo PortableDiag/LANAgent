@@ -8,9 +8,14 @@ import { upload, validateMagicBytes, scanWithVirusTotal } from '../middleware/fi
 import { generateDownloadToken } from '../services/downloadTokenService.js';
 import { logger } from '../../../utils/logger.js';
 import { safeJsonParse, validateJsonSchema } from '../../../utils/jsonUtils.js';
-import { TRANSCODE_PRESETS } from './transcodePresets.js';
+import { TRANSCODE_PRESETS, getPresetMetadata } from './transcodePresets.js';
 
 const router = Router();
+
+// Free discovery endpoint: preset ids, display info and technical config
+router.get('/presets', (req, res) => {
+  res.json({ success: true, presets: getPresetMetadata() });
+});
 
 const ALLOWED_OUTPUT_FORMATS = ['mp4', 'mp3', 'wav', 'webm', 'mkv', 'avi', 'flac', 'ogg', 'aac'];
 

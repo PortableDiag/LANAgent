@@ -5,6 +5,8 @@ import { logger } from '../../../utils/logger.js';
 import { retryOperation, isRetryableError } from '../../../utils/retryUtils.js';
 import { isFlareSolverrAvailable } from '../../../utils/flareSolverr.js';
 import ExternalCreditBalance from '../../../models/ExternalCreditBalance.js';
+import ScrapeBlockStats, { recordBlockEvent } from '../../../models/ScrapeBlockStats.js';
+import { adminKeyAuth } from '../middleware/adminKeyAuth.js';
 import NodeCache from 'node-cache';
 
 const router = Router();
@@ -252,10 +254,96 @@ function isLikelyBlocked(result) {
 }
 
 /**
+ * Which tiers escalate to FlareSolverr when a scrape comes back hard-blocked.
+ *
+ * `render` is excluded here only because it runs FlareSolverr *first* — it does
+ * not need the on-block escalation.
+ *
+ * `stealth` was excluded until v2.25.202 on the theory that render/full pay for
+ * FS-grade recovery and stealth does not. In practice a blocked stealth scrape
+ * returns a 502 and the customer is refunded, so the exclusion never protected
+ * the price — it turned revenue into a failure. Measured on 2026-08-03
+ * (nssf.org): stealth exhausted every bypass layer and 502'd at 09:44:49; the
+ * identical URL returned 268 KB of real content through FlareSolverr three
+ * seconds later. FS costs ~$0.001/call and only fires when we are already
+ * failing, so the downside is a tenth of a cent against a delivered scrape.
+ *
+ * `basic` stays out: it is the cheap cheerio path, and escalating it would put
+ * an FS call behind the highest-volume, lowest-priced tier.
+ */
+export function fsOnBlockForTier(tier) {
+  return tier === 'full' || tier === 'stealth';
+}
+
+/**
  * Health check endpoint to verify service availability.
  */
 router.get('/health', (req, res) => {
   res.json({ success: true, message: 'Service is healthy' });
+});
+
+/**
+ * Block/rotation counters, so the cost of the auto-connect exit pin can be read
+ * as a rate instead of grepped out of logs with incomparable retention spans.
+ *
+ * GET /block-stats?days=30
+ */
+// adminKeyAuth, not hybridAuth/creditAuth. Those authenticate *customers*, so
+// gating on them would both lock the operator out (the agent key is not a
+// portal `lsk_` key) and let any paying customer read our block and recovery
+// rates. Note hybridAuth is additionally a factory returning a middleware
+// array — passing it bare hangs the request forever, since Express receives an
+// array instead of a next() call.
+router.get('/block-stats', adminKeyAuth, async (req, res) => {
+  try {
+    const days = Math.min(Math.max(parseInt(req.query.days, 10) || 30, 1), 365);
+    const since = new Date(Date.now() - days * 86400000).toISOString().slice(0, 10);
+    const rows = await ScrapeBlockStats.find({ day: { $gte: since } }).sort({ day: 1 }).lean();
+
+    const totals = rows.reduce((acc, r) => {
+      for (const k of ['blocksDetected', 'rotationRefusedAutoConnect', 'rotationAttempted',
+        'rotationRecovered', 'vpnUnavailable', 'rotationBudgetExhausted', 'rotationPoolExhausted']) {
+        acc[k] = (acc[k] || 0) + (r[k] || 0);
+      }
+      return acc;
+    }, {});
+
+    // Guard the divisions — an empty window must report null, not NaN or a
+    // fabricated 0%, which would read as "the pin costs nothing".
+    const pct = (n, d) => (d > 0 ? Number(((n / d) * 100).toFixed(1)) : null);
+
+    res.json({
+      success: true,
+      windowDays: days,
+      since,
+      // Only counts days that actually recorded something — dividing by `days`
+      // would understate the rate whenever the window predates this counter.
+      daysWithData: new Set(rows.map(r => r.day)).size,
+      totals,
+      rates: {
+        blocksRefusedByAutoConnectPct: pct(totals.rotationRefusedAutoConnect, totals.blocksDetected),
+        rotationRecoveryPct: pct(totals.rotationRecovered, totals.rotationAttempted)
+      },
+      byTier: rows.reduce((acc, r) => {
+        acc[r.tier] = acc[r.tier] || {};
+        for (const k of ['blocksDetected', 'rotationRefusedAutoConnect', 'rotationAttempted', 'rotationRecovered']) {
+          acc[r.tier][k] = (acc[r.tier][k] || 0) + (r[k] || 0);
+        }
+        return acc;
+      }, {}),
+      daily: rows.map(r => ({
+        day: r.day,
+        tier: r.tier,
+        blocksDetected: r.blocksDetected,
+        rotationRefusedAutoConnect: r.rotationRefusedAutoConnect,
+        rotationAttempted: r.rotationAttempted,
+        rotationRecovered: r.rotationRecovered
+      }))
+    });
+  } catch (error) {
+    logger.error(`[ExternalScrape] block-stats failed: ${error.message}`);
+    res.status(500).json({ success: false, error: 'Failed to read block stats' });
+  }
 });
 
 /**
@@ -1070,10 +1158,14 @@ async function executeScrapeWithVpnRotation(req, params, tier) {
   // concurrent render scrape; the budget + hard cap bound the total time.
   if (tier === 'basic' || result.success || !isLikelyBlocked(result)) return result;
 
+  // Denominator for every rotation-outcome counter below.
+  recordBlockEvent('blocksDetected', tier);
+
   const vpnEntry = req.app.locals.agent?.apiManager?.apis?.get('vpn');
   const vpn = vpnEntry?.instance || vpnEntry;
   if (!vpn?.connect || !vpn?.getVPNStatus) {
     logger.warn('[ExternalScrape] Block detected but VPN plugin not available — cannot rotate');
+    recordBlockEvent('vpnUnavailable', tier);
     return result;
   }
 
@@ -1092,6 +1184,7 @@ async function executeScrapeWithVpnRotation(req, params, tier) {
     // deadline (where the caller has already given up).
     if (params._deadline && Date.now() >= params._deadline) {
       logger.info(`[ExternalScrape] Budget spent (${SCRAPE_BUDGET_MS}ms) — stopping VPN rotation for ${params.url}, returning best result`);
+      recordBlockEvent('rotationBudgetExhausted', tier);
       break;
     }
     // Random pick from the unused pool. `.find()` always picked the FIRST
@@ -1100,7 +1193,10 @@ async function executeScrapeWithVpnRotation(req, params, tier) {
     // those, recovery dropped to zero even with a 30-region pool. Random
     // selection per request spreads load evenly across all entries.
     const candidates = VPN_ROTATION_POOL.filter(loc => loc !== currentLocation && !tried.has(loc));
-    if (candidates.length === 0) break;
+    if (candidates.length === 0) {
+      recordBlockEvent('rotationPoolExhausted', tier);
+      break;
+    }
     const next = candidates[Math.floor(Math.random() * candidates.length)];
     tried.add(next);
 
@@ -1111,12 +1207,30 @@ async function executeScrapeWithVpnRotation(req, params, tier) {
       // common case on the production box). Don't burn the remaining rotations
       // re-scraping the same exit — stop and return the block honestly.
       if (sw && sw.success === false && sw.autoConnect) {
-        logger.info(`[ExternalScrape] VPN exit pinned by auto-connect — cannot rotate for ${params.url}; returning block`);
+        // WARN, not INFO: this is a caller-visible block that the product had a
+        // recovery path for and declined to use. Counted so the standing cost of
+        // the auto-connect hardening is measurable rather than argued about.
+        // Since v2.25.203 the switch no longer needs a disconnect, so this
+        // branch should be unreachable — if it fires, the guard has come back.
+        logger.warn(`[ExternalScrape] VPN exit pinned by auto-connect — cannot rotate for ${params.url} (tier=${tier}); returning block`);
+        recordBlockEvent('rotationRefusedAutoConnect', tier);
         break;
       }
-      // Brief stabilization
-      await new Promise(r => setTimeout(r, 2500));
-      currentLocation = next;
+      if (!sw || sw.success === false) {
+        // The switch genuinely failed. Don't re-scrape — we are still on the
+        // previous exit, so the result would be identical to the block we
+        // already have. Try the next candidate instead.
+        logger.warn(`[ExternalScrape] VPN exit switch to ${next} failed (${sw?.error || 'unknown'}) — trying next candidate`);
+        continue;
+      }
+      // connect() already polled until the daemon reported the requested exit,
+      // so the tunnel is up. The measured switch has a ~6-10s window with no
+      // connectivity; a short settle here covers DNS re-establishing behind it.
+      // (The old 2500ms predated that measurement and could re-scrape while the
+      // box still had no route.)
+      await new Promise(r => setTimeout(r, 4000));
+      currentLocation = sw.location || next;
+      recordBlockEvent('rotationAttempted', tier);
     } catch (e) {
       logger.warn(`[ExternalScrape] VPN switch to ${next} failed: ${e.message}`);
       continue;
@@ -1132,6 +1246,7 @@ async function executeScrapeWithVpnRotation(req, params, tier) {
 
     if (result.success) {
       logger.info(`[ExternalScrape] Recovery via VPN ${next} succeeded for ${params.url} after ${i + 1} rotation(s)`);
+      recordBlockEvent('rotationRecovered', tier);
       result._vpnRotated = true;
       result._vpnLocation = next;
       result._vpnRotations = i + 1;
@@ -1170,10 +1285,7 @@ router.post('/',
       try {
         const usePuppeteer = tier === 'stealth';
         const renderTier = tier === 'render';
-        // `full` tier auto-escalates to FlareSolverr when Puppeteer hits a hard
-        // CF/Akamai block (managed challenges Puppeteer can't clear) so bot-blocked
-        // gov sources still produce a real frozen copy. render already does FS-first.
-        const fsOnBlock = tier === 'full';
+        const fsOnBlock = fsOnBlockForTier(tier);
         // Hard wall-clock cap. The internal SCRAPE_BUDGET_MS guards make the
         // orchestrator return best-effort between escalations, but a single
         // in-flight op (a slow FS call, a VPN reconnect, a Puppeteer nav) can
