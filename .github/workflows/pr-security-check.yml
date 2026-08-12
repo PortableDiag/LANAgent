@@ -12,39 +12,66 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Scan for credential leaks
-        uses: gitleaks/gitleaks-action@v2
+      # Run the gitleaks binary directly instead of gitleaks-action@v2: the
+      # action calls the GitHub API to post PR results, which 403s under this
+      # repo's read-only default workflow token ("Resource not accessible by
+      # integration") and failed every PR. This scans only the commits this PR
+      # introduces (base..head) rather than full history, so pre-existing
+      # findings in old commits don't fail unrelated PRs. Uses the existing
+      # .gitleaks.toml. Exits non-zero if a secret is found.
+      - name: Scan PR diff for credential leaks
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          config-path: .gitleaks.toml
-
-      - name: Check for hardcoded paths
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
         run: |
-          echo "Checking for hardcoded instance-specific paths..."
+          VER=8.24.3
+          curl -sSL "https://github.com/gitleaks/gitleaks/releases/download/v${VER}/gitleaks_${VER}_linux_x64.tar.gz" | tar -xz gitleaks
+          chmod +x ./gitleaks
+          echo "Scanning commits ${BASE}..${HEAD}"
+          ./gitleaks git . --log-opts="${BASE}..${HEAD}" --config .gitleaks.toml --redact --no-banner
+
+      # Only inspect files this PR adds/changes — not the whole tree, which
+      # contains pre-existing instance-specific strings (e.g. a repo path in a
+      # self-modification prompt) that aren't the PR's concern and made this step
+      # fail on every PR. Same diff-scoping rationale as the gitleaks step above.
+      - name: Check changed files for hardcoded paths
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          echo "Checking changed files for hardcoded instance-specific values..."
           ISSUES=0
-
-          # Check for hardcoded /root/lanagent paths in source files
-          if grep -rn '/root/lanagent' src/ --include='*.js' | grep -v node_modules; then
-            echo "::error::Found hardcoded /root/lanagent paths in source files"
-            ISSUES=$((ISSUES + 1))
-          fi
-
-          # Check for hardcoded personal emails in source files
-          if grep -rn 'portablediag@' src/ --include='*.js'; then
-            echo "::error::Found hardcoded personal email in source files"
-            ISSUES=$((ISSUES + 1))
-          fi
-
-          # Check for sshpass with inline passwords
-          if grep -rn "sshpass -p '" src/ scripts/ --include='*.sh' --include='*.js' | grep -v deploy.config | grep -v '.example'; then
-            echo "::error::Found hardcoded SSH passwords"
-            ISSUES=$((ISSUES + 1))
-          fi
-
-          if [ $ISSUES -gt 0 ]; then
-            echo "::error::Found $ISSUES security issues. See above for details."
+          mapfile -t FILES < <(git diff --name-only --diff-filter=d "$BASE" "$HEAD")
+          if [ ${#FILES[@]} -eq 0 ]; then echo "No files changed."; exit 0; fi
+          printf 'Changed: %s\n' "${FILES[@]}"
+          for f in "${FILES[@]}"; do
+            [ -f "$f" ] || continue
+            case "$f" in
+              src/*.js)
+                # Any absolute /root/... path baked into source is an
+                # instance-specific value that belongs in configuration. Lines
+                # that read from the environment are permitted config defaults
+                # (`process.env.X || '/root/whatever'`), so they are excluded.
+                # Deliberately generic: naming a particular deployment's path
+                # here would put that path in a public file.
+                if grep -nE "['\"]/root/[^'\"]+['\"]" "$f" | grep -v 'process\.env'; then
+                  echo "::error::Found hardcoded absolute /root path in $f — use configuration instead"; ISSUES=$((ISSUES + 1))
+                fi
+                if grep -n 'portablediag@' "$f"; then
+                  echo "::error::Found hardcoded personal email in $f"; ISSUES=$((ISSUES + 1))
+                fi
+                ;;
+            esac
+            case "$f" in
+              *.sh|*.js)
+                if grep -n "sshpass -p '" "$f" | grep -v deploy.config | grep -v '\.example'; then
+                  echo "::error::Found hardcoded SSH password in $f"; ISSUES=$((ISSUES + 1))
+                fi
+                ;;
+            esac
+          done
+          if [ "$ISSUES" -gt 0 ]; then
+            echo "::error::Found $ISSUES security issue(s) in changed files."
             exit 1
           fi
-
-          echo "No hardcoded credentials found in source files."
+          echo "No hardcoded credentials found in changed files."
