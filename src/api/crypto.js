@@ -1671,8 +1671,28 @@ router.get('/strategy/token-trader/status', async (req, res) => {
             const ttStatus = instance.getTokenTraderStatus();
             const addrKey = address.toLowerCase();
             const instanceState = state?.tokenTraderStatus?.[addrKey] || {};
+            // Operator toggles, surfaced explicitly. These are switches a human sets
+            // (not tuning constants), and nothing else in this payload reveals them —
+            // which is how a config-version migration that silently reset
+            // `trancheSellEnabled` on 2026-08-04 stayed invisible for six hours while
+            // both the tranche sells and the guard-scalp allowance sat dead. A switch
+            // you cannot read is a switch you cannot trust.
+            const cfg = instance.config || {};
+            const toggles = {
+                trancheSellEnabled: cfg.trancheSellEnabled === true,
+                trancheSellPercent: cfg.trancheSellPercent ?? null,
+                trancheSellCooldownMs: cfg.trancheSellCooldownMs ?? null,
+                costBasisRangeGuardEnabled: cfg.costBasisRangeGuardEnabled !== false,
+                guardScalpBuysEnabled: cfg.guardScalpBuysEnabled !== false,
+                guardScalpMaxOpenLots: cfg.guardScalpMaxOpenLots ?? null,
+                guardScalpMaxReservePercent: cfg.guardScalpMaxReservePercent ?? null,
+                guardScalpBuysThisEpisode: instance.state?.guardScalpBuysThisEpisode || 0,
+                openScalpLots: (instance.state?.lots || []).filter(l => l?.scalp === true && l?.tokens > 0).length,
+                configVersion: cfg._configVersion ?? null
+            };
             return {
                 ...ttStatus,
+                toggles,
                 currentPrice: instanceState.lastPrice || null,
                 tokenSymbol: ttStatus.token?.symbol || null,
                 tokenNetwork: ttStatus.token?.network || null,

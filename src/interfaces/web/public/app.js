@@ -4809,20 +4809,21 @@ class LANAgentDashboard {
                 modelSelector += `
                     <label>Chat Model:</label>
                     <select class="model-select" id="${providerName}-model" onchange="dashboard.updateProviderModel('${providerName}', this.value)">
-                        <option value="meta-llama/Llama-3.3-70B-Instruct" ${provider.currentModel?.includes('Llama-3.3-70B') ? 'selected' : ''}>Llama 3.3 70B Instruct</option>
-                        <option value="meta-llama/Llama-3.2-11B-Vision-Instruct" ${provider.currentModel?.includes('11B-Vision') ? 'selected' : ''}>Llama 3.2 11B Vision</option>
-                        <option value="meta-llama/Llama-3.2-3B-Instruct" ${provider.currentModel?.includes('3B-Instruct') ? 'selected' : ''}>Llama 3.2 3B Instruct</option>
-                        <option value="meta-llama/Llama-3.2-1B-Instruct" ${provider.currentModel?.includes('1B-Instruct') ? 'selected' : ''}>Llama 3.2 1B Instruct</option>
-                        <option value="deepseek-ai/DeepSeek-V3" ${provider.currentModel?.includes('DeepSeek-V3') ? 'selected' : ''}>DeepSeek V3</option>
-                        <option value="Qwen/QwQ-32B-Preview" ${provider.currentModel?.includes('QwQ') ? 'selected' : ''}>QwQ 32B (Reasoning)</option>
-                        <option value="Qwen/Qwen2.5-72B-Instruct" ${provider.currentModel?.includes('72B-Instruct') ? 'selected' : ''}>Qwen 2.5 72B</option>
-                        <option value="google/gemma-2-27b-it" ${provider.currentModel?.includes('gemma-2') ? 'selected' : ''}>Gemma 2 27B</option>
-                        <option value="mistralai/Mistral-7B-Instruct-v0.3" ${provider.currentModel?.includes('Mistral') ? 'selected' : ''}>Mistral 7B v0.3</option>
-                        <option value="microsoft/Phi-3.5-mini-instruct" ${provider.currentModel?.includes('Phi-3.5') ? 'selected' : ''}>Phi 3.5 Mini</option>
-                        <option value="HuggingFaceH4/zephyr-7b-beta" ${provider.currentModel?.includes('zephyr') ? 'selected' : ''}>Zephyr 7B Beta</option>
-                        <option value="openchat/openchat-3.5-0106" ${provider.currentModel?.includes('openchat') ? 'selected' : ''}>OpenChat 3.5</option>
-                        <option value="NousResearch/Nous-Hermes-2-Mixtral-8x7B-DPO" ${provider.currentModel?.includes('Nous-Hermes') ? 'selected' : ''}>Nous Hermes 2 Mixtral</option>
-                        <option value="cognitivecomputations/dolphin-2.9.4-llama3.2-3b" ${provider.currentModel?.includes('dolphin') ? 'selected' : ''}>Dolphin 2.9.4 Llama 3B</option>
+                        <option value="Qwen/Qwen3-Coder-480B-A35B-Instruct" ${provider.currentModel?.includes('Qwen3-Coder-480B') ? 'selected' : ''}>Qwen3 Coder 480B (default)</option>
+                        <option value="moonshotai/Kimi-K3" ${provider.currentModel?.includes('Kimi-K3') ? 'selected' : ''}>Kimi K3</option>
+                        <option value="zai-org/GLM-5.2" ${provider.currentModel?.includes('GLM-5.2') ? 'selected' : ''}>GLM 5.2</option>
+                        <option value="deepseek-ai/DeepSeek-V4-Pro" ${provider.currentModel?.includes('DeepSeek-V4-Pro') ? 'selected' : ''}>DeepSeek V4 Pro</option>
+                        <option value="deepseek-ai/DeepSeek-V4-Flash" ${provider.currentModel?.includes('DeepSeek-V4-Flash') ? 'selected' : ''}>DeepSeek V4 Flash</option>
+                        <option value="Qwen/Qwen3.5-397B-A17B" ${provider.currentModel?.includes('Qwen3.5-397B') ? 'selected' : ''}>Qwen 3.5 397B</option>
+                        <option value="MiniMaxAI/MiniMax-M3" ${provider.currentModel?.includes('MiniMax-M3') ? 'selected' : ''}>MiniMax M3</option>
+                        <option value="deepcogito/cogito-671b-v2.1" ${provider.currentModel?.includes('cogito-671b') ? 'selected' : ''}>Cogito 671B v2.1</option>
+                        <option value="meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8" ${provider.currentModel?.includes('Maverick') ? 'selected' : ''}>Llama 4 Maverick</option>
+                        <option value="openai/gpt-oss-120b" ${provider.currentModel?.includes('gpt-oss-120b') ? 'selected' : ''}>GPT-OSS 120B</option>
+                        <option value="moonshotai/Kimi-K2.7-Code" ${provider.currentModel?.includes('Kimi-K2.7') ? 'selected' : ''}>Kimi K2.7 Code</option>
+                        <option value="zai-org/GLM-4.7-Flash" ${provider.currentModel?.includes('GLM-4.7-Flash') ? 'selected' : ''}>GLM 4.7 Flash (fast)</option>
+                        <option value="Qwen/Qwen3.6-27B" ${provider.currentModel?.includes('Qwen3.6-27B') ? 'selected' : ''}>Qwen 3.6 27B (light)</option>
+                        <option value="google/gemma-4-31B-it" ${provider.currentModel?.includes('gemma-4-31B') ? 'selected' : ''}>Gemma 4 31B</option>
+                        <option value="meta-llama/Llama-3.3-70B-Instruct" ${provider.currentModel?.includes('Llama-3.3-70B') ? 'selected' : ''}>Llama 3.3 70B (legacy)</option>
                     </select>
                     <div class="model-info">Free tier • Add :fastest or :cheapest suffix for provider routing</div>
                 `;
@@ -18297,17 +18298,21 @@ class LANAgentDashboard {
                 `;
             case 'huggingface':
                 return `
-                    <option value="meta-llama/Llama-3.3-70B-Instruct" ${currentModel?.includes('Llama-3.3-70B') ? 'selected' : ''}>Llama 3.3 70B Instruct</option>
-                    <option value="meta-llama/Llama-3.2-11B-Vision-Instruct" ${currentModel?.includes('11B-Vision') ? 'selected' : ''}>Llama 3.2 11B Vision</option>
-                    <option value="meta-llama/Llama-3.2-3B-Instruct" ${currentModel?.includes('3B-Instruct') ? 'selected' : ''}>Llama 3.2 3B Instruct</option>
-                    <option value="meta-llama/Llama-3.2-1B-Instruct" ${currentModel?.includes('1B-Instruct') ? 'selected' : ''}>Llama 3.2 1B Instruct</option>
-                    <option value="deepseek-ai/DeepSeek-V3" ${currentModel?.includes('DeepSeek-V3') ? 'selected' : ''}>DeepSeek V3</option>
-                    <option value="Qwen/QwQ-32B-Preview" ${currentModel?.includes('QwQ') ? 'selected' : ''}>QwQ 32B (Reasoning)</option>
-                    <option value="Qwen/Qwen2.5-72B-Instruct" ${currentModel?.includes('72B-Instruct') ? 'selected' : ''}>Qwen 2.5 72B</option>
-                    <option value="google/gemma-2-27b-it" ${currentModel?.includes('gemma-2') ? 'selected' : ''}>Gemma 2 27B</option>
-                    <option value="mistralai/Mistral-7B-Instruct-v0.3" ${currentModel?.includes('Mistral') ? 'selected' : ''}>Mistral 7B v0.3</option>
-                    <option value="microsoft/Phi-3.5-mini-instruct" ${currentModel?.includes('Phi-3.5') ? 'selected' : ''}>Phi 3.5 Mini</option>
-                    <option value="HuggingFaceH4/zephyr-7b-beta" ${currentModel?.includes('zephyr') ? 'selected' : ''}>Zephyr 7B Beta</option>
+                    <option value="Qwen/Qwen3-Coder-480B-A35B-Instruct" ${currentModel?.includes('Qwen3-Coder-480B') ? 'selected' : ''}>Qwen3 Coder 480B (default)</option>
+                    <option value="moonshotai/Kimi-K3" ${currentModel?.includes('Kimi-K3') ? 'selected' : ''}>Kimi K3</option>
+                    <option value="zai-org/GLM-5.2" ${currentModel?.includes('GLM-5.2') ? 'selected' : ''}>GLM 5.2</option>
+                    <option value="deepseek-ai/DeepSeek-V4-Pro" ${currentModel?.includes('DeepSeek-V4-Pro') ? 'selected' : ''}>DeepSeek V4 Pro</option>
+                    <option value="deepseek-ai/DeepSeek-V4-Flash" ${currentModel?.includes('DeepSeek-V4-Flash') ? 'selected' : ''}>DeepSeek V4 Flash</option>
+                    <option value="Qwen/Qwen3.5-397B-A17B" ${currentModel?.includes('Qwen3.5-397B') ? 'selected' : ''}>Qwen 3.5 397B</option>
+                    <option value="MiniMaxAI/MiniMax-M3" ${currentModel?.includes('MiniMax-M3') ? 'selected' : ''}>MiniMax M3</option>
+                    <option value="deepcogito/cogito-671b-v2.1" ${currentModel?.includes('cogito-671b') ? 'selected' : ''}>Cogito 671B v2.1</option>
+                    <option value="meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8" ${currentModel?.includes('Maverick') ? 'selected' : ''}>Llama 4 Maverick</option>
+                    <option value="openai/gpt-oss-120b" ${currentModel?.includes('gpt-oss-120b') ? 'selected' : ''}>GPT-OSS 120B</option>
+                    <option value="moonshotai/Kimi-K2.7-Code" ${currentModel?.includes('Kimi-K2.7') ? 'selected' : ''}>Kimi K2.7 Code</option>
+                    <option value="zai-org/GLM-4.7-Flash" ${currentModel?.includes('GLM-4.7-Flash') ? 'selected' : ''}>GLM 4.7 Flash (fast)</option>
+                    <option value="Qwen/Qwen3.6-27B" ${currentModel?.includes('Qwen3.6-27B') ? 'selected' : ''}>Qwen 3.6 27B (light)</option>
+                    <option value="google/gemma-4-31B-it" ${currentModel?.includes('gemma-4-31B') ? 'selected' : ''}>Gemma 4 31B</option>
+                    <option value="meta-llama/Llama-3.3-70B-Instruct" ${currentModel?.includes('Llama-3.3-70B') ? 'selected' : ''}>Llama 3.3 70B (legacy)</option>
                 `;
             default:
                 return '<option value="">No models available</option>';

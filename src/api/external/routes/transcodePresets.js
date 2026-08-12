@@ -25,3 +25,52 @@ export const TRANSCODE_PRESETS = {
     videoBitrate: '8000k'
   }
 };
+
+// Display metadata for the presets above. Kept OUT of TRANSCODE_PRESETS:
+// the preset branch Object.assigns those objects straight into ffmpeg convert
+// options, so they must stay purely technical. supportedFormats must be a
+// subset of the convert route's ALLOWED_OUTPUT_FORMATS.
+export const PRESET_INFO = {
+  'social-media': {
+    displayName: 'Social Media Optimized',
+    description: 'Optimized for social media platforms with high quality video and audio',
+    useCases: ['Instagram', 'TikTok', 'Facebook', 'Twitter'],
+    supportedFormats: ['mp4', 'webm']
+  },
+  'podcast': {
+    displayName: 'Podcast Audio',
+    description: 'High quality audio optimized for podcast distribution',
+    useCases: ['Apple Podcasts', 'Spotify', 'Google Podcasts'],
+    supportedFormats: ['mp3', 'wav']
+  },
+  'archive': {
+    displayName: 'Archive Quality',
+    description: 'Maximum quality preservation for long-term storage',
+    useCases: ['Digital preservation', 'Master copies', 'Professional archiving'],
+    supportedFormats: ['mp4', 'mkv']
+  }
+};
+
+/**
+ * Get structured metadata for all available transcoding presets
+ * @returns {Array} Array of preset metadata objects
+ */
+export function getPresetMetadata() {
+  return Object.entries(TRANSCODE_PRESETS).map(([key, preset]) => {
+    const info = PRESET_INFO[key] || {};
+    return {
+      id: key,
+      displayName: info.displayName || key,
+      description: info.description || '',
+      useCases: info.useCases || [],
+      supportedFormats: info.supportedFormats || [],
+      config: {
+        videoCodec: preset.videoCodec,
+        audioCodec: preset.audioCodec,
+        resolution: preset.resolution,
+        videoBitrate: preset.videoBitrate,
+        audioBitrate: preset.audioBitrate
+      }
+    };
+  });
+}

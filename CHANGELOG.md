@@ -2,6 +2,64 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.203] - 2026-08-12
+
+### Fixed
+
+- **Network exit rotation for blocked requests works again.** It had been refused since
+  2026-06-27 on the belief that switching exits requires tearing the tunnel down first — a step
+  deliberately blocked after forcing it caused three outages. Measured against the live client:
+  the switch command performs its own teardown and reconnect, so the extra teardown was never
+  needed, and it was the only part the safety guard blocked.
+- **A false failure from the vendor CLI no longer triggers a retry storm.** The command has its
+  own short internal ceiling and reports a timeout while the switch is still completing. Treating
+  that as real triggered a retry against a *different* region, interrupting the connection
+  already in flight — a cascade that also walked the exit outside its pinned country. Success is
+  now decided by polling the daemon's reported exit; the CLI's exit code is ignored.
+- **An explicitly requested exit is never silently substituted** with another.
+- **A switch is no longer reported successful while still on the old exit.** The previous check
+  waited for "connected", which stays true for the previous exit during a transition.
+
+### Known cost
+
+- A switch leaves roughly 6-10 seconds without connectivity and name resolution takes a few
+  minutes to settle. This is inherent to changing exits; rotation runs only as a last resort.
+
+## [2.25.202] - 2026-08-12
+
+### Fixed
+
+- **The stealth tier now recovers from a hard block instead of failing.** It was the only
+  mid-tier with no escalation path: when every bypass layer was exhausted the request returned a
+  gateway error and the caller was refunded. It now escalates to the challenge solver like the
+  full tier. The escalation only runs once the request has already failed, so the exclusion never
+  protected the tier's price — it turned a delivered result into a refund.
+
+### Changed
+
+- **Tier capability docs now match the implementation.** The service table advertised automatic
+  exit rotation for three tiers while that rotation was being refused. The rows now describe the
+  escalation each tier actually performs.
+- The tier→escalation mapping moved into an exported, tested function.
+
+## [2.25.201] - 2026-08-12
+
+### Added
+
+- **Block and exit-rotation counters.** Daily per-tier counts of blocks detected, rotations
+  refused / attempted / recovered, so the standing cost of pinning the host's exit can be read as
+  a rate instead of counted out of logs whose retention spans differ by orders of magnitude.
+  Counters survive log rotation and restarts.
+- **`GET /api/external/scrape/block-stats`** returns those counters with derived rates.
+  Operator-only, because the numbers describe how often the service fails. An empty window
+  reports `null` rather than `0%`.
+
+### Changed
+
+- A refused exit rotation now logs at WARN instead of INFO and names the tier.
+- The operator-key guard is now shared middleware rather than a private function in the admin
+  routes. Behaviour unchanged: no key configured returns 503, a wrong key returns 401.
+
 ## [2.25.179] - 2026-08-02
 
 ### Changed

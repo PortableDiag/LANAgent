@@ -245,6 +245,38 @@ router.get('/balance', creditAuth(true), async (req, res) => {
 });
 
 /**
+ * GET /api/external/credits/analytics
+ * Utilization/refund analytics for the authenticated wallet (free, read-only)
+ */
+router.get('/analytics', creditAuth(true), async (req, res) => {
+  try {
+    const analytics = await ExternalCreditBalance.getCreditAnalytics(req.wallet);
+    res.json({ success: true, analytics });
+  } catch (error) {
+    if (error.message === 'Wallet not found') {
+      // Match /balance: unknown wallet reads as an empty account, not an error
+      return res.json({
+        success: true,
+        analytics: {
+          wallet: req.wallet,
+          currentBalance: 0,
+          totalPurchased: 0,
+          totalSpent: 0,
+          totalRefunded: 0,
+          creditUtilizationRatio: 0,
+          remainingCreditsPercentage: 0,
+          refundRatio: 0,
+          lastPurchase: null,
+          lastUsed: null
+        }
+      });
+    }
+    logger.error('Credit analytics endpoint error:', error);
+    res.status(500).json({ success: false, error: 'Failed to fetch credit analytics' });
+  }
+});
+
+/**
  * Get recipient wallet address for receiving payments
  */
 async function getRecipientAddress() {

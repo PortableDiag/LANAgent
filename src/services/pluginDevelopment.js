@@ -1069,22 +1069,12 @@ NO NUMBERING, NO BULLETS, JUST PIPE-SEPARATED VALUES.`;
             [, name, description, url] = match;
           } else {
             // Pattern 3: "API_NAME - Description (URL)"
+            // Lines matching none of the delimited patterns are skipped —
+            // never fabricate a documentation URL for them (fabricated
+            // example.com URLs produced guaranteed-404 scrapes downstream)
             match = line.match(/^([^-]+)\s*-\s*([^(]+)\s*\((.+)\)$/);
             if (match) {
               [, name, description, url] = match;
-            } else {
-              // Pattern 4: Just look for recognizable API names in the content
-              const apiKeywords = ['API', 'api', 'REST', 'HTTP', 'endpoint', 'service'];
-              if (apiKeywords.some(keyword => line.includes(keyword))) {
-                // Extract first word as potential API name
-                const words = line.trim().split(/\s+/);
-                const potentialName = words[0].replace(/[^a-zA-Z0-9]/g, '');
-                if (potentialName.length > 2 && potentialName.length < 20) {
-                  name = potentialName;
-                  description = line.substring(0, 100).trim();
-                  url = `https://example.com/${potentialName.toLowerCase()}-api-docs`;
-                }
-              }
             }
           }
         }
@@ -1292,8 +1282,9 @@ Be concise and specific.`;
         const details = this.parseEvaluationResponse(responseText);
         
         if (details) {
-          // Calculate score based on various factors
-          let score = candidate.searchScore;
+          // Calculate score based on various factors (default 1.0 — some
+          // candidate sources, e.g. GitHub discoveries, don't set searchScore)
+          let score = Number(candidate.searchScore) || 1.0;
           
           // Prefer APIs with good documentation
           if (details.documentation === 'good') score += 0.3;
@@ -3334,7 +3325,12 @@ describe('${cleanApiName} Plugin', () => {
       }
       
       // Add specific files that we know exist
-      const pluginFileName = api.name.toLowerCase().replace(/\s+/g, '');
+      // Must match the sanitization used when the files were written (see developPlugin)
+      const pluginFileName = api.name
+        .toLowerCase()
+        .replace(/^\d+\.\s*/, '') // Remove leading numbers and dots
+        .replace(/[^a-z0-9]+/g, '') // Keep only alphanumeric characters
+        .replace(/api$/i, ''); // Remove trailing "api" if present
       const pluginFilePath = `src/api/plugins/${pluginFileName}.js`;
       const testFilePath = `tests/plugins/${pluginFileName}.test.js`;
       
@@ -4486,7 +4482,14 @@ Plugin includes inline documentation and usage examples.
           .replace(/api.*$/i, '')
           .replace(/\(.*\)/, '')
           .trim();
-        
+
+        // Skip junk titles (markdown/HTML fragments from README scans) that
+        // can't be a plugin name
+        if (!/^[a-zA-Z0-9][a-zA-Z0-9 ._-]{1,29}$/.test(pluginName)) {
+          logger.info(`Skipping GitHub discovery with unusable title: "${feature.title}"`);
+          continue;
+        }
+
         // Skip if we already have this plugin
         if (this.config.excludeAPIs.some(api => pluginName.toLowerCase().includes(api))) {
           continue;
@@ -4504,6 +4507,7 @@ Plugin includes inline documentation and usage examples.
           documentation: feature.source?.url || '',
           features: [feature.title],
           source: 'github_discovery',
+          searchScore: 1.0,
           confidence: feature.implementation?.confidence || 'medium',
           discoveredFeatureId: feature._id,
           hasCodeSnippets: feature.codeSnippets && feature.codeSnippets.length > 0,

@@ -120,11 +120,24 @@ const _1inchMinRequestInterval = 1500; // 1.5s between requests (free tier rate 
 // CoW Protocol (CoW Swap) — intent-based DEX aggregator, MEV-protected
 // No API key needed. Supports Ethereum mainnet only currently.
 const COW_API_BASE = 'https://api.cow.fi';
-const COW_NETWORKS = { ethereum: 'mainnet', base: 'base', arbitrum: 'arbitrum_one' };
+// CoW API network slugs. BNB Chain's slug is 'bnb' (NOT 'bsc' — that 404s), added
+// 2026-08-03 after CoW shipped BNB Chain support. Our internal network key stays 'bsc'.
+const COW_NETWORKS = { ethereum: 'mainnet', base: 'base', arbitrum: 'arbitrum_one', bsc: 'bnb' };
+// chainId for the EIP-712 order signature. MUST have an entry for every COW_NETWORKS key:
+// a missing entry silently fell back to 1 (Ethereum), which would sign a BNB order with the
+// wrong domain and get it rejected by the orderbook.
+const COW_CHAIN_IDS = { ethereum: 1, base: 8453, arbitrum: 42161, bsc: 56 };
+// How long a submitted order stays valid, and how long we wait for a solver to fill it.
+// Kept deliberately short and slightly BELOW the poll budget: when we stop waiting the order
+// must already be expired, so it cannot fill later behind a caller that was told it failed.
+const COW_ORDER_TTL_SEC = 180;
+const COW_FILL_POLL_MS = 5000;
 const COW_VAULT_RELAYER = '0xC92E8bdf79f0507f65a392b0ab4667716BFE0110';
 const COW_APP_DATA = '{"version":"1.1.0","metadata":{}}';
 const COW_APP_DATA_HASH = '0x33d8bdb854556de69f089b345fb7cdc28c2472ce6ffee7c799306a711d3684e6';
 const COW_MIN_ORDER_USD = 10; // Minimum order value — solvers won't fill tiny orders (gas > profit)
+// Orderbooks (one per network) that have confirmed our appData pre-image this process.
+const _cowAppDataRegistered = new Set();
 let _cowLastRequestTime = 0;
 const _cowMinRequestInterval = 1000;
 
@@ -174,6 +187,11 @@ const V4_POOL_CONFIGS = {
 // Networks using PancakeSwap Infinity (different quoter ABI + PoolKey struct)
 const PANCAKESWAP_V4_NETWORKS = new Set(['bsc']);
 
+// Absolute upper bound for a plausible raw V4 amountOut. Reverting hooks decode to a
+// sentinel around 8.22e58; the largest realistic real amount (extreme supply x 18 decimals)
+// is ~1e39. Anything above this is a decode artifact, not a quote.
+const V4_ABSURD_RAW_OUTPUT = 10n ** 50n;
+
 // PancakeSwap Infinity hooked pool configs — pools with custom hook contracts
 // Static fallback: known hooks for pools created before RPC pruning window (~50k blocks)
 // Each entry: { hooks, fee, tickSpacing, hookFlags } where parameters = (tickSpacing << 16) | hookFlags
@@ -209,8 +227,25 @@ const _v4PoolKeyCacheTimestamps = new Map();
 // succeeds for the same pair (proof a pool exists now).
 const _v4NoPoolCache = new Map();
 const _V4_NO_POOL_TTL_MS = 24 * 60 * 60 * 1000;
-const _v4NoPoolKey = (network, tokenIn, tokenOut) =>
-  `${network}:${String(tokenIn || '').toLowerCase()}:${String(tokenOut || '').toLowerCase()}`;
+// Negative-cache key. The amount MAGNITUDE is part of the key, not just the pair.
+//
+// `bestResult === null` conflates two very different findings: "this pair has no V4
+// pool at all" and "no pool could quote THIS size". Keying on the pair alone let the
+// second poison the first — the residual sweep probes dust amounts across every
+// airdrop in the wallet, and a dust probe that no pool would quote marked the pair
+// pool-less for a full 24h. The next real swap on that pair then took the silent
+// fast-path and V4 was never attempted. Bucketing by power-of-ten keeps the cheap
+// dust-sweep win (repeat dust probes still hit the cache) while ensuring a real
+// trade is judged on its own size.
+const _v4AmountBucket = (amountInWei) => {
+  try {
+    const v = BigInt(amountInWei || 0);
+    if (v <= 0n) return 'z';
+    return String(v.toString().length); // decimal digit count ≈ log10 bucket
+  } catch { return 'x'; }
+};
+const _v4NoPoolKey = (network, tokenIn, tokenOut, amountInWei) =>
+  `${network}:${String(tokenIn || '').toLowerCase()}:${String(tokenOut || '').toLowerCase()}:${_v4AmountBucket(amountInWei)}`;
 
 // Get the combined list of hooked pool configs for a network + cached discoveries for a pair
 function _getV4HookedPools(network, tokenA, tokenB) {
@@ -281,6 +316,11 @@ const INFI_ACTIONS = {
     TAKE: 0x0e,
     TAKE_ALL: 0x0f,
 };
+
+// v4-periphery ActionConstants — sentinels the router's action decoder maps at execution time.
+// ADDRESS_THIS makes the router itself the recipient; OPEN_DELTA means "the whole open delta".
+const V4_ADDRESS_THIS = '0x0000000000000000000000000000000000000002';
+const V4_OPEN_DELTA = 0n;
 
 // Uniswap V4 on BSC (separate deployment from PancakeSwap Infinity — different contracts, same action encoding)
 const UNISWAP_V4_BSC = {
@@ -979,6 +1019,28 @@ class SwapService {
     }
 
     /**
+     * Ensure the appData pre-image is registered with this network's CoW orderbook.
+     * Orders reference appData by bytes32 hash only; the orderbook rejects submission
+     * with InvalidAppData ("Unknown pre-image") until the full JSON document has been
+     * uploaded once. The PUT is idempotent (200 if present, 201 if created), so the
+     * per-process cache is just to skip a round-trip, not for correctness.
+     */
+    async ensureCowAppData(cowNetwork) {
+        if (_cowAppDataRegistered.has(cowNetwork)) return;
+        const response = await fetch(`${COW_API_BASE}/${cowNetwork}/api/v1/app_data/${COW_APP_DATA_HASH}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ fullAppData: COW_APP_DATA })
+        });
+        if (!response.ok) {
+            const text = await response.text().catch(() => '');
+            throw new Error(`CoW appData registration failed (${response.status}): ${text.slice(0, 200)}`);
+        }
+        _cowAppDataRegistered.add(cowNetwork);
+        logger.info(`CoW appData pre-image registered on ${cowNetwork} (${COW_APP_DATA_HASH.slice(0, 10)}…)`);
+    }
+
+    /**
      * Execute a swap via CoW Protocol.
      * Creates a signed order and submits it to CoW's order book.
      * The order is filled by solvers asynchronously (typically within 30s-2min).
@@ -988,6 +1050,10 @@ class SwapService {
         const ethers = await getEthers();
         const cowNetwork = COW_NETWORKS[network];
         if (!cowNetwork) throw new Error(`CoW Protocol not supported on ${network}`);
+        // Fail loudly rather than signing with the wrong EIP-712 domain: an order signed for
+        // the wrong chain is rejected by the orderbook, and a silent default would make that
+        // look like a CoW outage instead of a config gap.
+        if (!COW_CHAIN_IDS[network]) throw new Error(`CoW chainId not configured for ${network} — refusing to sign an order with an unknown domain`);
 
         const wallet = await walletService.getWallet();
         if (!wallet) throw new Error('Wallet not initialized');
@@ -1009,19 +1075,23 @@ class SwapService {
 
         // Minimum order check — solvers won't fill orders below gas cost threshold
         const buyAmount = BigInt(quote.buyAmount);
-        const decimalsOut = options.decimalsOut || 18;
+        // Resolve the real output decimals instead of assuming 18. The old code defaulted to
+        // 18 and then re-guessed 6 for the USD estimate, which is wrong in both directions:
+        // Ethereum USDC is 6 decimals, BNB Chain USDT is 18. Getting this wrong mis-sizes the
+        // minimum-order gate by up to 1e12.
+        const decimalsOut = options.decimalsOut || await this._resolveDecimals(dstToken, wrappedNative, network);
         const stables = this.getStablecoins(network);
         const isStableOut = Object.values(stables).some(a => a.toLowerCase() === dstToken.toLowerCase());
         const estimatedUsd = isStableOut
-            ? parseFloat(ethers.formatUnits(buyAmount, decimalsOut <= 8 ? decimalsOut : 6))
+            ? parseFloat(ethers.formatUnits(buyAmount, decimalsOut))
             : 0;
         if (isStableOut && estimatedUsd < COW_MIN_ORDER_USD) {
             throw new Error(`CoW order too small ($${estimatedUsd.toFixed(2)} < $${COW_MIN_ORDER_USD} minimum) — solvers unlikely to fill`);
         }
         const minBuyAmount = buyAmount - (buyAmount * BigInt(Math.floor(slippage * 100)) / 10000n);
 
-        // Build order
-        const validTo = Math.floor(Date.now() / 1000) + 1200; // 20 min
+        // Build order. Short TTL on purpose — see COW_ORDER_TTL_SEC.
+        const validTo = Math.floor(Date.now() / 1000) + COW_ORDER_TTL_SEC;
         const order = {
             sellToken: srcToken,
             buyToken: dstToken,
@@ -1041,7 +1111,7 @@ class SwapService {
         const domain = {
             name: 'Gnosis Protocol',
             version: 'v2',
-            chainId: { ethereum: 1, base: 8453, arbitrum: 42161 }[network] || 1,
+            chainId: COW_CHAIN_IDS[network],
             verifyingContract: '0x9008D19f58AAbD9eD0D60971565AA8510560ab41' // GPv2Settlement (same on all chains)
         };
 
@@ -1065,6 +1135,10 @@ class SwapService {
         // Sign the order
         const signature = await signer.signTypedData(domain, types, order);
 
+        // Register the appData pre-image before submitting. Failing here is safe for the
+        // DEX fallback: the order has not been submitted, so the outcome is determinate.
+        await this.ensureCowAppData(cowNetwork);
+
         // Submit to CoW orderbook
         const submitResponse = await fetch(`${COW_API_BASE}/${cowNetwork}/api/v1/orders`, {
             method: 'POST',
@@ -1083,7 +1157,65 @@ class SwapService {
         }
 
         const orderUid = await submitResponse.json();
-        logger.info(`CoW order submitted: ${orderUid} (${srcToken.slice(0, 10)}→${dstToken.slice(0, 10)}, sell=${amountIn})`);
+        logger.info(`CoW order submitted: ${orderUid} (${srcToken.slice(0, 10)}→${dstToken.slice(0, 10)}, sell=${amountIn}) — awaiting fill`);
+
+        // ---- Wait for the fill before returning ----------------------------------------
+        // Every caller of swap() treats the result synchronously: it checks `success` and
+        // reads `expectedOut` as a human-readable number to book the trade. The old code
+        // returned {orderUid, status:'submitted'} the moment the order was accepted — no
+        // `success` field at all — so a CoW trade would be read as a FAILURE while the
+        // tokens really moved on-chain, desynchronising the strategy's position ledger from
+        // the wallet. CoW had never actually executed in production, so that landmine was
+        // never stepped on; enabling BNB Chain would have armed it on the busiest leg.
+        // We block until the order fills, or until it has provably expired.
+        // Poll past validTo (+20s grace) so a fill landing in the final seconds is still
+        // observed. `lastStatusOk` tracks whether we ever got an authoritative answer: if the
+        // status endpoint was unreachable for the whole wait we do NOT know the outcome, and
+        // must not let the caller retry on a DEX — that would sell twice.
+        const deadline = Date.now() + (COW_ORDER_TTL_SEC + 20) * 1000;
+        let filled = null;
+        let sawAuthoritativeUnfilled = false;
+        while (Date.now() < deadline) {
+            await new Promise(r => setTimeout(r, COW_FILL_POLL_MS));
+            try {
+                const statusRes = await fetch(`${COW_API_BASE}/${cowNetwork}/api/v1/orders/${orderUid}`);
+                if (!statusRes.ok) continue;
+                const od = await statusRes.json();
+                const executedBuy = BigInt(od.executedBuyAmount || '0');
+                if (od.status === 'fulfilled' || executedBuy > 0n) {
+                    filled = { executedBuy, executedSell: BigInt(od.executedSellAmount || quote.sellAmount) };
+                    break;
+                }
+                sawAuthoritativeUnfilled = true;
+                if (od.status === 'cancelled' || od.status === 'expired') break;
+            } catch (pollErr) {
+                sawAuthoritativeUnfilled = false;
+                logger.debug(`CoW status poll error: ${pollErr.message?.slice(0, 120)}`);
+            }
+        }
+
+        if (!filled && !sawAuthoritativeUnfilled) {
+            // Ambiguous: the order is live on the orderbook and we could not confirm its fate.
+            // Falling back to a DEX here risks executing the same trade twice, so refuse.
+            logger.error(`CoW order ${orderUid?.toString().slice(0, 20)} outcome UNKNOWN — status endpoint unreachable. NOT falling back to DEX (double-spend risk); reconcile from wallet balances.`);
+            const err = new Error(`CoW order outcome indeterminate for ${orderUid?.toString().slice(0, 20)} — refusing DEX fallback to avoid double-execution`);
+            err.cowIndeterminate = true;
+            throw err;
+        }
+
+        if (!filled) {
+            // The order's validTo has passed, so it can no longer be settled. Reporting a
+            // clean failure is safe: the caller falls back to a DEX route and no funds moved.
+            await walletService.addTransaction({
+                type: 'swap', chain: network, hash: typeof orderUid === 'string' ? orderUid.slice(0, 66) : 'cow-expired',
+                from: signer.address, tokenIn: srcToken, tokenOut: dstToken,
+                amountIn: amountIn.toString(), status: 'failed', source: 'cow'
+            }).catch(() => {});
+            throw new Error(`CoW order ${typeof orderUid === 'string' ? orderUid.slice(0, 20) : ''} not filled within ${COW_ORDER_TTL_SEC}s — order expired unfilled, no funds moved`);
+        }
+
+        const actualOut = ethers.formatUnits(filled.executedBuy, decimalsOut);
+        logger.info(`CoW order FILLED: ${orderUid?.toString().slice(0, 20)} → ${actualOut} out (${srcToken.slice(0, 10)}→${dstToken.slice(0, 10)})`);
 
         // Track in wallet history
         const networkStables = STABLECOINS[network] || {};
@@ -1094,25 +1226,33 @@ class SwapService {
         await walletService.addTransaction({
             type: isBuy ? 'buy' : isSell ? 'sell' : 'swap',
             chain: network,
-            hash: typeof orderUid === 'string' ? orderUid.slice(0, 66) : 'cow-pending',
+            hash: typeof orderUid === 'string' ? orderUid.slice(0, 66) : 'cow-filled',
             from: signer.address,
             tokenIn: srcToken,
             tokenOut: dstToken,
             amountIn: amountIn.toString(),
-            expectedOut: ethers.formatUnits(minBuyAmount, options.decimalsOut || 18),
-            status: 'pending',
+            expectedOut: actualOut,
+            status: 'confirmed',
             source: 'cow'
         });
 
+        // Same shape a V2/V3/V4 swap returns — callers gate on `success` and parse
+        // `expectedOut` as a decimal number, so both must be present and correctly scaled.
+        // gasCostNative is 0 because the solver pays settlement gas, not us.
         return {
+            success: true,
+            confirmed: true,
+            hash: typeof orderUid === 'string' ? orderUid.slice(0, 66) : 'cow-filled',
             orderUid,
-            status: 'submitted',
             source: 'cow',
             tokenIn: srcToken,
             tokenOut: dstToken,
             amountIn: amountIn.toString(),
-            expectedOut: quote.buyAmount,
-            minOut: minBuyAmount.toString()
+            expectedOut: actualOut,
+            minOut: ethers.formatUnits(minBuyAmount, decimalsOut),
+            network,
+            protocolVersion: 'cow',
+            gasCostNative: 0
         };
     }
 
@@ -1511,7 +1651,7 @@ class SwapService {
      * their different quoter ABIs and PoolKey structures.
      * Returns null if no V4 liquidity or V4 not configured for network.
      */
-    async _getV4Quote(tokenIn, tokenOut, amountInWei, network) {
+    async _getV4Quote(tokenIn, tokenOut, amountInWei, network, decimalsOut = null, decimalsIn = null, _nativeVariant = false) {
         const quoterAddr = V4_QUOTERS[network];
         const poolConfigs = V4_POOL_CONFIGS[network];
         if (!quoterAddr || !poolConfigs) return null;
@@ -1519,9 +1659,18 @@ class SwapService {
         // Negative-cache fast-path: if this pair was confirmed pool-less
         // within the TTL, skip the ~109-RPC probe and return null. Massive
         // win for residual-sweep over a wallet full of unsellable airdrops.
-        const _noPoolCacheKey = _v4NoPoolKey(network, tokenIn, tokenOut);
+        const _noPoolCacheKey = _v4NoPoolKey(network, tokenIn, tokenOut, amountInWei);
         const _noPoolCachedAt = _v4NoPoolCache.get(_noPoolCacheKey);
         if (_noPoolCachedAt && (Date.now() - _noPoolCachedAt) < _V4_NO_POOL_TTL_MS) {
+            // Say so. This used to `return null` silently, which made a skipped V4
+            // indistinguishable in the logs from a V4 that quoted and lost — the reason
+            // "552 quotes found, 0 selected" sat unexplained: the swaps that mattered
+            // never reached the quoter at all.
+            const ageMin = ((Date.now() - _noPoolCachedAt) / 60000).toFixed(0);
+            logger.info(
+                `V4 skipped (negative cache): ${String(tokenIn).slice(0, 10)}…→${String(tokenOut).slice(0, 10)}… ` +
+                `on ${network} marked pool-less ${ageMin}min ago for this size bucket`
+            );
             return null;
         } else if (_noPoolCachedAt) {
             // TTL expired — drop the stale entry before the actual probe runs
@@ -1541,6 +1690,23 @@ class SwapService {
             provider = await contractServiceWrapper.getProvider(network);
         }
         const checksumAddr = (a) => ethers.getAddress(a.toLowerCase());
+
+        // Sanity gate for V4 quotes. Its ONLY job is to drop the sentinel a reverting hook
+        // returns (~8.22e58 raw) — economics are judged later by the USD-based
+        // expectedOutputUsd check, which is decimals- and price-aware.
+        //
+        // Two earlier forms were both wrong because they compared amounts to each other:
+        //   raw    `amountOut > amountInWei * 1000n` — decimals-blind. USDC(6) -> WETH(18) is
+        //          a 5.35e8 ratio from scale alone, so EVERY stablecoin->native V4 quote on
+        //          Ethereum was silently dropped and V4 could only ever win SELLS.
+        //   scaled `outNorm > inNorm * 1000` — price-blind. WETH -> USDC is legitimately a
+        //          ~1870x ratio in normalised units (that ratio just IS the ETH price), so it
+        //          would have killed the sell side instead.
+        // A ratio can't distinguish a bad quote from an ordinary price difference. Use an
+        // absolute magnitude bound: real token amounts top out around 1e39 raw (huge supply x
+        // 18 decimals) while the sentinel is 8.22e58, so 1e50 separates them with orders of
+        // magnitude to spare and can never reject a genuine quote.
+        const failsSanity = (amountOut) => amountOut > V4_ABSURD_RAW_OUTPUT;
 
         tokenIn = checksumAddr(tokenIn);
         tokenOut = checksumAddr(tokenOut);
@@ -1635,8 +1801,8 @@ class SwapService {
             // Sanity check: reject obviously wrong quotes (> 1000x input or zero)
             // Reverting V4 hooks return bytes that decode to a sentinel ~8.22e58 — known artifact, not actionable. Demoted to debug.
             if (!amountOut || amountOut <= 0n) return null;
-            if (amountOut > amountInWei * 1000n) {
-                logger.debug(`V4 quote rejected (sanity): ${ethers.formatUnits(amountOut, 18)} >1000x input — likely reverting hook`);
+            if (failsSanity(amountOut)) {
+                logger.debug(`V4 quote rejected (sanity): ${amountOut.toString()} raw — reverting-hook sentinel`);
                 return null;
             }
 
@@ -1667,7 +1833,7 @@ class SwapService {
                     });
                     const amountOut = result[0];
                     if (!amountOut || amountOut <= 0n) return null;
-                    if (amountOut > amountInWei * 1000n) return null;
+                    if (failsSanity(amountOut)) return null;
                     return {
                         amountOut, fee, tickSpacing,
                         path: [tokenIn, tokenOut],
@@ -1803,7 +1969,7 @@ class SwapService {
                         });
                         const amountOut = result[0];
                         if (!amountOut || amountOut <= 0n) return null;
-                        if (amountOut > amountInWei * 1000n) return null;
+                        if (failsSanity(amountOut)) return null;
                         logger.debug(`Uniswap V4 BSC quote: fee=${fee} amountOut=${ethers.formatUnits(amountOut, 18)}`);
                         return {
                             amountOut, fee, tickSpacing,
@@ -1831,7 +1997,10 @@ class SwapService {
             const hookCount = hookedQuotePromises.length;
             const multiCount = multiHopPromises.length;
             const uniV4Count = uniV4BscPromises.length;
-            logger.info(`V4 quote: no viable pool found on ${network} (${stdCount} standard, ${hookCount} hooked, ${multiCount} multi-hop${uniV4Count ? `, ${uniV4Count} uniswap-v4` : ''} attempts)`);
+            // Name the PAIR and SIZE. Without them this line was unactionable: 22,018
+            // of them in the logs and no way to tell which pair, or whether the pool is
+            // genuinely absent versus merely unable to quote this size.
+            logger.info(`V4 quote: no viable pool found on ${network} for ${String(tokenIn).slice(0, 10)}…→${String(tokenOut).slice(0, 10)}… size ${amountInWei?.toString?.() || amountInWei} (${stdCount} standard, ${hookCount} hooked, ${multiCount} multi-hop${uniV4Count ? `, ${uniV4Count} uniswap-v4` : ''} attempts)`);
             // Cache the negative result so the next probe for this pair
             // within the TTL skips the 109-RPC scan.
             _v4NoPoolCache.set(_noPoolCacheKey, Date.now());
@@ -1846,8 +2015,55 @@ class SwapService {
         const feeStr = bestResult.fees ? bestResult.fees.join('/') : `${bestResult.fee}`;
         const hookStr = bestResult.poolKey?.hooks && bestResult.poolKey.hooks !== ethers.ZeroAddress
             ? ` [hooked: ${bestResult.poolKey.hooks.slice(0, 10)}...]` : '';
+        // V4 (both Uniswap V4 and PCS Infinity) represents native ETH/BNB as the ZERO ADDRESS,
+        // not the wrapped token — they are DIFFERENT pools with different liquidity. Callers
+        // resolve native to WRAPPED before quoting, so we only ever saw the wrapped-side pools.
+        // Measured 2026-08-03 on 1000 USDC -> ETH: the address(0) pool returns 0.534198 ETH vs
+        // 0.531583 through WETH — 0.49% better, enough to flip V4 from clearly-losing to level
+        // with V3. Probe the native-currency variant too and keep whichever is genuinely better;
+        // `usesNativeCurrency` tells the executor to settle/take native directly instead of
+        // wrapping. Guarded by _nativeVariant so the recursive call can't recurse again.
+        if (!_nativeVariant) {
+            const wrapped = WRAPPED_NATIVE[network];
+            if (wrapped) {
+                const w = wrapped.toLowerCase();
+                const inIsWrapped = tokenIn.toLowerCase() === w;
+                const outIsWrapped = tokenOut.toLowerCase() === w;
+                if (inIsWrapped || outIsWrapped) {
+                    try {
+                        const nIn = inIsWrapped ? ethers.ZeroAddress : tokenIn;
+                        const nOut = outIsWrapped ? ethers.ZeroAddress : tokenOut;
+                        const nativeQuote = await this._getV4Quote(nIn, nOut, amountInWei, network, decimalsOut, decimalsIn, true);
+                        if (nativeQuote?.amountOut > bestOut) {
+                            nativeQuote.usesNativeCurrency = true;
+                            const fmt = (v) => typeof decimalsOut === 'number' ? ethers.formatUnits(v, decimalsOut) : v.toString();
+                            logger.info(`V4 native-currency pool beats wrapped: ${fmt(nativeQuote.amountOut)} vs ${fmt(bestOut)} (${network}) — settling native, no wrap`);
+                            return nativeQuote;
+                        }
+                    } catch (nativeErr) {
+                        // A ReferenceError/TypeError here is OUR bug, not a missing pool — an
+                        // earlier version swallowed exactly that and silently kept the worse
+                        // wrapped quote. Surface those loudly; only tolerate real probe failures.
+                        if (nativeErr instanceof ReferenceError || nativeErr instanceof TypeError) {
+                            logger.error(`V4 native-currency probe has a CODE DEFECT: ${nativeErr.message}`);
+                        } else {
+                            logger.debug(`V4 native-currency probe failed: ${nativeErr.message?.slice(0, 120)}`);
+                        }
+                    }
+                }
+            }
+        }
+
         const protoStr = bestResult.v4Protocol ? ` [${bestResult.v4Protocol}]` : '';
-        logger.info(`V4 quote found: ${ethers.formatUnits(bestOut, 18)} output via ${hopType} (fee: ${feeStr}, tickSpacing: ${bestResult.tickSpacing || 'multi'}, network: ${network})${hookStr}${protoStr}`);
+        // Format with the OUTPUT token's real decimals. This used to hardcode 18, which
+        // silently under-reported every 6-decimal output (USDC/USDT on Ethereum) by 1e12 —
+        // a real $60 quote logged as "0.00000000006" and read like a broken quoter. Routing
+        // was never affected (it compares raw BigInt amountOut), but the log was misleading
+        // enough to cause a 2026-08-03 misdiagnosis that V4 was dead on Ethereum.
+        const outUnits = typeof decimalsOut === 'number'
+            ? `${ethers.formatUnits(bestOut, decimalsOut)}`
+            : `${bestOut.toString()} (raw; decimals unknown)`;
+        logger.info(`V4 quote found: ${outUnits} output for ${String(tokenIn).slice(0, 10)}…→${String(tokenOut).slice(0, 10)}… via ${hopType} (fee: ${feeStr}, tickSpacing: ${bestResult.tickSpacing || 'multi'}, network: ${network})${hookStr}${protoStr}`);
         bestResult.amountOut = bestOut;
         bestResult.protocolVersion = 'v4';
         return bestResult;
@@ -1939,42 +2155,70 @@ class SwapService {
             ]]
         );
 
-        // Determine settle/take currencies based on swap direction
-        const settleCurrency = isNativeIn ? ethers.ZeroAddress : tokenIn;
-        const takeCurrency = isNativeOut ? ethers.ZeroAddress : tokenOut;
+        // PCS Infinity uses address(0) for native BNB too; a native-currency pool takes BNB
+        // directly, so wrapping first would settle the wrong asset.
+        const poolIsNative = v4Data.usesNativeCurrency === true;
 
-        // Action 2: SETTLE_ALL — pay the input debt to the vault
-        // params: (currency, maxAmount) — maxAmount = type(uint256).max
-        const settleParamsEncoded = abiCoder.encode(
-            ['address', 'uint256'],
-            [settleCurrency, ethers.MaxUint256]
-        );
+        // Settle/take name the POOL's currency. address(0) is correct only when the pool itself
+        // is native — on a WBNB-denominated pool we WRAP first, so the debt is in WBNB. Naming
+        // address(0) there resolves a zero delta and leaves the real one open (CurrencyNotSettled).
+        const settleCurrency = (isNativeIn && poolIsNative) ? ethers.ZeroAddress : tokenIn;
+        const takeCurrency = (isNativeOut && poolIsNative) ? ethers.ZeroAddress : tokenOut;
 
-        // Action 3: TAKE_ALL — receive the output tokens from the vault
-        // params: (currency, minAmount) — minAmount = 0 (slippage already handled by amountOutMinimum in swap params)
-        const takeParamsEncoded = abiCoder.encode(
-            ['address', 'uint256'],
-            [takeCurrency, 0n]
-        );
+        // WRAP deposits into the router, so the router holds the input. SETTLE_ALL always pays
+        // via Permit2 from msgSender(), so it cannot settle router-held funds.
+        const routerHoldsInput = isNativeIn && !poolIsNative;
+        // Mirror case: the pool credits WBNB, which must reach the router for UNWRAP to convert.
+        const routerTakesOutput = isNativeOut && !poolIsNative;
 
-        // Pack actions: [CL_SWAP_EXACT_IN_SINGLE, SETTLE_ALL, TAKE_ALL]
-        const actionsBytes = ethers.hexlify(Uint8Array.from([
-            INFI_ACTIONS.CL_SWAP_EXACT_IN_SINGLE,  // 0x06
-            INFI_ACTIONS.SETTLE_ALL,                 // 0x0c
-            INFI_ACTIONS.TAKE_ALL                    // 0x0f
-        ]));
+        // Action 1: CL_SWAP_EXACT_IN_SINGLE, then settle the input debt and take the output.
+        const actions = [INFI_ACTIONS.CL_SWAP_EXACT_IN_SINGLE];
+        const actionParams = [swapParamsEncoded];
+
+        if (routerHoldsInput) {
+            // SETTLE — params: (currency, amount, payerIsUser); false → the router pays
+            actions.push(INFI_ACTIONS.SETTLE);
+            actionParams.push(abiCoder.encode(
+                ['address', 'uint256', 'bool'],
+                [settleCurrency, amountInWei, false]
+            ));
+        } else {
+            // SETTLE_ALL — params: (currency, maxAmount)
+            actions.push(INFI_ACTIONS.SETTLE_ALL);
+            actionParams.push(abiCoder.encode(
+                ['address', 'uint256'],
+                [settleCurrency, ethers.MaxUint256]
+            ));
+        }
+
+        if (routerTakesOutput) {
+            // TAKE — params: (currency, recipient, amount); OPEN_DELTA = the whole credit
+            actions.push(INFI_ACTIONS.TAKE);
+            actionParams.push(abiCoder.encode(
+                ['address', 'address', 'uint256'],
+                [takeCurrency, V4_ADDRESS_THIS, V4_OPEN_DELTA]
+            ));
+        } else {
+            // TAKE_ALL — params: (currency, minAmount); slippage already enforced by amountOutMinimum
+            actions.push(INFI_ACTIONS.TAKE_ALL);
+            actionParams.push(abiCoder.encode(
+                ['address', 'uint256'],
+                [takeCurrency, 0n]
+            ));
+        }
 
         // Encode the plan: abi.encode(bytes actions, bytes[] params)
+        const actionsBytes = ethers.hexlify(Uint8Array.from(actions));
         const planEncoded = abiCoder.encode(
             ['bytes', 'bytes[]'],
-            [actionsBytes, [swapParamsEncoded, settleParamsEncoded, takeParamsEncoded]]
+            [actionsBytes, actionParams]
         );
 
         // --- Build Universal Router command sequence ---
         const commands = [];
         const inputs = [];
 
-        if (isNativeIn) {
+        if (isNativeIn && !poolIsNative) {
             // Wrap native BNB first
             commands.push(UR_COMMANDS.WRAP_ETH);
             inputs.push(abiCoder.encode(['address', 'uint256'], [routerAddr, amountInWei]));
@@ -1984,7 +2228,7 @@ class SwapService {
         commands.push(UR_COMMANDS.INFI_SWAP);
         inputs.push(planEncoded);
 
-        if (isNativeOut) {
+        if (isNativeOut && !poolIsNative) {
             // Unwrap to native at the end
             commands.push(UR_COMMANDS.UNWRAP_WETH);
             inputs.push(abiCoder.encode(['address', 'uint256'], [signer.address, amountOutMin]));
@@ -1994,11 +2238,17 @@ class SwapService {
         const commandBytes = ethers.hexlify(Uint8Array.from(commands));
 
         const baseOverrides = isNativeIn ? { value: amountInWei } : {};
-        let gasLimit = 500000n;
+
+        // A failed estimateGas means the router would revert on-chain; sending anyway with a
+        // hardcoded limit only converts a free pre-flight failure into a paid one. Throw so the
+        // caller's V3/V2 fallback takes the trade instead.
+        let gasLimit;
         try {
             const estimated = await router.execute.estimateGas(commandBytes, inputs, deadline, baseOverrides);
             gasLimit = estimated * 125n / 100n;
-        } catch { /* fallback to 500k */ }
+        } catch (err) {
+            throw new Error(`V4 pre-flight failed (not submitted): ${err.shortMessage || err.message}`);
+        }
         const txOverrides = { ...baseOverrides, gasLimit };
 
         const hookLabel = poolKey.hooks !== ethers.ZeroAddress ? ` hook:${poolKey.hooks.slice(0,10)}` : '';
@@ -2033,33 +2283,69 @@ class SwapService {
             ]]
         );
 
-        const settleCurrency = isNativeIn ? ethers.ZeroAddress : tokenIn;
-        const takeCurrency = isNativeOut ? ethers.ZeroAddress : tokenOut;
+        // A native-currency pool (currency == address(0)) takes ETH directly, so wrapping would
+        // send the wrong asset into the pool. Only wrap/unwrap for the WETH-denominated pools.
+        const poolIsNative = v4Data.usesNativeCurrency === true;
 
-        // Action 2: SETTLE_ALL (0x0c)
-        const settleParamsEncoded = abiCoder.encode(
-            ['address', 'uint256'],
-            [settleCurrency, ethers.MaxUint256]
-        );
+        // SETTLE/TAKE must name the POOL's currency, not the user's. address(0) is correct only
+        // when the pool itself is native — on a WETH-denominated pool we WRAP_ETH first, so the
+        // debt the swap opens is in WETH. Naming address(0) there settles a zero delta and leaves
+        // the real one open, which the PoolManager rejects with CurrencyNotSettled().
+        const settleCurrency = (isNativeIn && poolIsNative) ? ethers.ZeroAddress : tokenIn;
+        const takeCurrency = (isNativeOut && poolIsNative) ? ethers.ZeroAddress : tokenOut;
 
-        // Action 3: TAKE_ALL (0x0f)
-        const takeParamsEncoded = abiCoder.encode(
-            ['address', 'uint256'],
-            [takeCurrency, 0n]
-        );
+        // WRAP_ETH deposits into the router, so the router — not the user — holds the input.
+        // SETTLE_ALL always pays via Permit2 from msgSender(), so it cannot be used here; SETTLE
+        // with payerIsUser=false makes the router pay from the WETH it just wrapped.
+        const routerHoldsInput = isNativeIn && !poolIsNative;
+        // Mirror case: the pool credits WETH, which must land in the router for UNWRAP_WETH to
+        // convert it. TAKE_ALL pays out to msgSender(), so use TAKE with an explicit recipient.
+        const routerTakesOutput = isNativeOut && !poolIsNative;
+
+        // Action 1: SWAP_EXACT_IN_SINGLE (0x06), then settle the input debt and take the output.
+        const actions = [0x06];
+        const actionParams = [swapParamsEncoded];
+
+        if (routerHoldsInput) {
+            actions.push(0x0b); // SETTLE
+            actionParams.push(abiCoder.encode(
+                ['address', 'uint256', 'bool'],
+                [settleCurrency, amountInWei, false] // payerIsUser = false → router pays
+            ));
+        } else {
+            actions.push(0x0c); // SETTLE_ALL
+            actionParams.push(abiCoder.encode(
+                ['address', 'uint256'],
+                [settleCurrency, ethers.MaxUint256]
+            ));
+        }
+
+        if (routerTakesOutput) {
+            actions.push(0x0e); // TAKE
+            actionParams.push(abiCoder.encode(
+                ['address', 'address', 'uint256'],
+                [takeCurrency, V4_ADDRESS_THIS, V4_OPEN_DELTA]
+            ));
+        } else {
+            actions.push(0x0f); // TAKE_ALL
+            actionParams.push(abiCoder.encode(
+                ['address', 'uint256'],
+                [takeCurrency, 0n]
+            ));
+        }
 
         // Pack actions and encode plan
-        const actionsBytes = ethers.hexlify(Uint8Array.from([0x06, 0x0c, 0x0f]));
+        const actionsBytes = ethers.hexlify(Uint8Array.from(actions));
         const planEncoded = abiCoder.encode(
             ['bytes', 'bytes[]'],
-            [actionsBytes, [swapParamsEncoded, settleParamsEncoded, takeParamsEncoded]]
+            [actionsBytes, actionParams]
         );
 
         // Build Universal Router command sequence
         const commands = [];
         const inputs = [];
 
-        if (isNativeIn) {
+        if (isNativeIn && !poolIsNative) {
             commands.push(UR_COMMANDS.WRAP_ETH);
             inputs.push(abiCoder.encode(['address', 'uint256'], [routerAddr, amountInWei]));
         }
@@ -2068,18 +2354,25 @@ class SwapService {
         commands.push(0x10);
         inputs.push(planEncoded);
 
-        if (isNativeOut) {
+        if (isNativeOut && !poolIsNative) {
             commands.push(UR_COMMANDS.UNWRAP_WETH);
             inputs.push(abiCoder.encode(['address', 'uint256'], [signer.address, amountOutMin]));
         }
 
         const commandBytes = ethers.hexlify(Uint8Array.from(commands));
         const baseOverrides = isNativeIn ? { value: amountInWei } : {};
-        let gasLimit = 500000n;
+
+        // A failed estimateGas here means the router would revert on-chain. Swallowing it and
+        // sending with a hardcoded 500k limit is how four V4 reverts reached the chain on
+        // 2026-08-05 — each one burned gas and lost the trade. Throwing instead hands control to
+        // the caller's V3/V2 fallback, so a bad V4 route costs a reroute rather than a revert.
+        let gasLimit;
         try {
             const estimated = await router.execute.estimateGas(commandBytes, inputs, deadline, baseOverrides);
             gasLimit = estimated * 125n / 100n;
-        } catch { /* fallback to 500k */ }
+        } catch (err) {
+            throw new Error(`V4 pre-flight failed (not submitted): ${err.shortMessage || err.message}`);
+        }
         const txOverrides = { ...baseOverrides, gasLimit };
 
         logger.info(`V4 Uniswap swap: ${commandBytes} (fee:${v4Data.fee}, zeroForOne:${zeroForOne}, network:${network}, gas:${gasLimit})`);
@@ -2297,7 +2590,7 @@ class SwapService {
             // ---- V4 Quote (PancakeSwap Infinity / Uniswap V4) ----
             let v4Result = null;
             try {
-                v4Result = await this._getV4Quote(tokenIn, tokenOut, amountInWei, network);
+                v4Result = await this._getV4Quote(tokenIn, tokenOut, amountInWei, network, decimalsOut, decimalsIn);
             } catch (err) {
                 logger.debug(`V4 quote failed for ${network}: ${err.message?.slice(0, 150)}`);
             }
@@ -2555,7 +2848,7 @@ class SwapService {
         // V4 quote (Uniswap V4 on ETH, PancakeSwap Infinity on BSC) — run after V2/V3 to reduce RPC burst
         let v4 = null;
         try {
-            const v4Result = await this._getV4Quote(tokenIn, tokenOut, amountInWei, network);
+            const v4Result = await this._getV4Quote(tokenIn, tokenOut, amountInWei, network, decimalsOut, decimalsIn);
             if (v4Result) {
                 v4 = {
                     tokenIn, tokenOut,
@@ -2753,7 +3046,7 @@ class SwapService {
             const useFeeOnTransfer = tokenTaxPercent > 0;
             let v4QuoteData = null;
             try {
-                v4QuoteData = await this._getV4Quote(inAddr, outAddr, amountInWei, network);
+                v4QuoteData = await this._getV4Quote(inAddr, outAddr, amountInWei, network, decimalsOut, decimals);
             } catch (err) {
                 logger.debug(`V4 quote failed: ${err.message}`);
             }
@@ -2800,8 +3093,15 @@ class SwapService {
             // CoW aggregates all DEXes + private market makers + MEV protection.
             // Skipped for urgent sells (stop-loss, trailing stop, emergency) since CoW
             // orders take 30s-2min to fill — too slow when capital preservation is critical.
+            // CoW settles in ERC-20s only. A native leg was quoted with the WRAPPED address
+            // but then handed to executeCowSwap as the literal string 'native', which the
+            // orderbook rejects — so CoW could win the comparison and never execute, silently
+            // costing a quote round-trip on every native swap. Selling real native through CoW
+            // needs an explicit wrap (or their ETH-flow contract), which we don't do, so skip
+            // CoW entirely when either side is native rather than pretend it can fill.
+            const cowEligible = !isNativeIn && !isNativeOut;
             let cowQuoteData = null;
-            if (COW_NETWORKS[network] && !urgent) {
+            if (COW_NETWORKS[network] && !urgent && cowEligible) {
                 try {
                     const cowResult = await this.getCowQuote(network, inAddr, outAddr, amountInWei, signer.address);
                     if (cowResult?.buyAmount) {
@@ -2828,6 +3128,23 @@ class SwapService {
                 useV4 = true;
                 useV3 = false;
                 logger.info(`V4 wins: ${ethers.formatUnits(v4Out, decimalsOut)} vs V3 ${v3Out > 0n ? ethers.formatUnits(v3Out, decimalsOut) : 'none'} vs V2 ${bestQuoteOut > 0n ? ethers.formatUnits(bestQuoteOut, decimalsOut) : 'none'}${cowOut > 0n ? ` vs CoW ${ethers.formatUnits(cowOut, decimalsOut)}` : ''}`);
+            } else if (cowOut > 0n || v4Out > 0n) {
+                // Neither CoW nor V4 won. Previously only the WINNER logged, so a
+                // protocol that quoted and lost left no trace at all — which is how
+                // "CoW quoted 429 times today and has never filled" and "552 V4 quotes,
+                // 0 selected" both looked like mysteries rather than margin calls.
+                // Log the losing margin so "never wins" becomes a number.
+                const fmt = (x) => x > 0n ? ethers.formatUnits(x, decimalsOut) : 'none';
+                const winner = v3Out >= bestQuoteOut ? v3Out : bestQuoteOut;
+                const margin = (x) => {
+                    if (!(x > 0n) || !(winner > 0n)) return 'n/a';
+                    const diff = Number(ethers.formatUnits(x, decimalsOut)) / Number(ethers.formatUnits(winner, decimalsOut)) - 1;
+                    return `${(diff * 100).toFixed(3)}%`;
+                };
+                logger.info(
+                    `Route comparison on ${network}: winner ${v3Out >= bestQuoteOut ? 'V3' : 'V2'} ${fmt(winner)} | ` +
+                    `CoW ${fmt(cowOut)} (${margin(cowOut)}) | V4 ${fmt(v4Out)} (${margin(v4Out)})`
+                );
             }
 
             // forceV3: block V2 fallback — require V3, V4, or CoW
@@ -2845,9 +3162,12 @@ class SwapService {
             // Execute via CoW Protocol if it won
             if (useCow) {
                 try {
-                    const result = await this.executeCowSwap(network, isNativeIn ? 'native' : tokenIn, isNativeOut ? 'native' : tokenOut, amountIn, slippageTolerance, { decimalsIn: decimals, decimalsOut });
+                    const result = await this.executeCowSwap(network, tokenIn, tokenOut, amountIn, slippageTolerance, { decimalsIn: decimals, decimalsOut });
                     return result;
                 } catch (cowErr) {
+                    // An indeterminate CoW outcome must abort the whole swap: the order may
+                    // still settle, and a DEX fallback would execute the same trade twice.
+                    if (cowErr.cowIndeterminate) throw cowErr;
                     logger.warn(`CoW swap execution failed, falling back to DEX: ${cowErr.message?.slice(0, 150)}`);
                     useCow = false;
                     // Fall through to DEX execution below
@@ -2857,12 +3177,13 @@ class SwapService {
             if (!path && !useV3 && !useV4 && !useCow) {
                 logger.info(`No DEX path found (V2=${bestQuoteOut > 0n}, V3=${v3Out > 0n}, V4=${v4Out > 0n}, CoW=${cowOut > 0n}) — trying aggregator fallbacks`);
                 // Last resort: try CoW Protocol if not already tried
-                if (COW_NETWORKS[network]) {
+                if (COW_NETWORKS[network] && cowEligible) {
                     try {
                         logger.info(`No direct DEX path — attempting CoW Protocol for ${tokenIn} → ${tokenOut}`);
-                        const result = await this.executeCowSwap(network, isNativeIn ? 'native' : tokenIn, isNativeOut ? 'native' : tokenOut, amountIn, slippageTolerance);
+                        const result = await this.executeCowSwap(network, tokenIn, tokenOut, amountIn, slippageTolerance, { decimalsIn: decimals, decimalsOut });
                         return result;
                     } catch (cowErr) {
+                        if (cowErr.cowIndeterminate) throw cowErr;
                         logger.warn(`CoW Protocol fallback failed: ${cowErr.message}`);
                     }
                 }
@@ -2960,7 +3281,7 @@ class SwapService {
                     if (useV4) {
                         // Re-quote V4 on retry
                         if (attempt > 0) {
-                            const freshV4 = await this._getV4Quote(inAddr, outAddr, amountInWei, network);
+                            const freshV4 = await this._getV4Quote(inAddr, outAddr, amountInWei, network, decimalsOut, decimals);
                             if (freshV4) v4QuoteData = freshV4;
                         }
                         expectedOut = v4QuoteData.amountOut;
@@ -3853,3 +4174,8 @@ class SwapService {
 }
 
 export default new SwapService();
+
+// Exported for unit tests. The negative-cache key is pure and its bucketing decides
+// whether a dust probe can suppress V4 for a real-size trade — worth pinning directly
+// rather than only through an RPC-dependent path.
+export const __testables = { _v4NoPoolKey, _v4AmountBucket };

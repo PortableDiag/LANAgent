@@ -2746,6 +2746,31 @@ Return ONLY a valid JSON object with the extracted parameters, nothing else.`;
             finalParams._context.attachedFile = context.attachedFile;
           }
 
+          // Interrogative guard for destructive system actions. The vector/AI
+          // intent detectors match on the keyword ("restart"), so an
+          // informational QUESTION about a destructive action gets classified
+          // as the action itself — asking Telegram "Alice why are you
+          // restarting" literally restarted ALICE (2026-07-22). A question must
+          // never trigger the thing it asks about. Polite imperatives
+          // (can/could/would/please you restart) are NOT treated as questions
+          // and still execute.
+          const DESTRUCTIVE_SYSTEM_ACTIONS = ['restart', 'redeploy', 'update'];
+          if (intentResult.plugin === 'system' && DESTRUCTIVE_SYSTEM_ACTIONS.includes(intentResult.action)) {
+            const q = (input || '').trim().toLowerCase();
+            const interrogative =
+              /^(why|whys|what|whats|when|how|are|aren'?t|is|isn'?t|was|were|did|didn'?t|do|does|has|have|had|who)\b/.test(q) ||
+              /\b(why|whether|when|how\s+come)\s+(are|is|did|do|does|would|will)\s+you\b/.test(q) ||
+              (q.endsWith('?') && !/^(can|could|would|will|please|pls|go\s+ahead)\b/.test(q));
+            if (interrogative) {
+              logger.warn(`[intent-guard] Blocked destructive system.${intentResult.action} from interrogative input: "${input}"`);
+              return {
+                type: 'text',
+                content: `I read "${input}" as a question, not a command, so I did NOT ${intentResult.action} myself. ` +
+                  `If you actually want me to ${intentResult.action}, phrase it as an instruction — e.g. "${intentResult.action} now" or "${intentResult.action} yourself".`
+              };
+            }
+          }
+
           // Log what we're about to execute for debugging
           logger.info('Executing plugin from intent:', {
             plugin: intentResult.plugin,

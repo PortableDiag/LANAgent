@@ -20,6 +20,24 @@ import { GitHostingSettings } from '../models/GitHostingSettings.js';
 
 const AUTO_APPROVE_SETTING_KEY = 'featureRequests.autoApprove';
 
+// Whole-file-rewrite budget. generateAICodeUpgrade asks the model to return the
+// COMPLETE modified file and sizes the request as
+// file_tokens x MULTIPLIER + REASONING_HEADROOM, clamped at OUTPUT_CAP. Past a
+// certain file size that clamp silently wins and the request asks for an output
+// the call can never produce: the model emits a truncated stub and validation
+// rejects it as CODE_REMOVED. Keep these three in one place so the preflight in
+// applyAICapabilityUpgrade and the sizing in generateAICodeUpgrade cannot drift.
+const UPGRADE_OUTPUT_CAP = 32000;
+const UPGRADE_REASONING_HEADROOM = 6000;
+const UPGRADE_SIZE_MULTIPLIER = 1.5;
+const UPGRADE_TOKENS_PER_CHAR = 1 / 3.5;
+
+// The largest file (in estimated tokens) a whole-file rewrite can actually
+// return within the cap above.
+const MAX_REWRITABLE_TOKENS = Math.floor(
+  (UPGRADE_OUTPUT_CAP - UPGRADE_REASONING_HEADROOM) / UPGRADE_SIZE_MULTIPLIER
+);
+
 export class SelfModificationService extends EventEmitter {
   constructor(agent) {
     super();
@@ -1716,7 +1734,36 @@ Pick the single most relevant existing file that should be enhanced.`;
       }
 
       const content = await fs.readFile(repoFile, 'utf8');
-      
+
+      // PREFLIGHT: refuse targets too large to be rewritten whole.
+      // This path asks the model for the COMPLETE modified file, so a file
+      // bigger than the output cap can only come back truncated — which
+      // validation then rejects as CODE_REMOVED, after up to 3 paid retries.
+      // src/core/agent.js (~318 KB, ~93K tokens against a 32K cap) failed this
+      // way 28 times between 2026-07-21 and 2026-08-05, always with the same
+      // "shrank by 75%" because the shrink is the cap, not the model's choice.
+      // Fail before spending anything; a partial-edit path is the real fix for
+      // large files.
+      const targetTokens = Math.ceil(content.length * UPGRADE_TOKENS_PER_CHAR);
+      if (targetTokens > MAX_REWRITABLE_TOKENS) {
+        if (improvement.discoveredFeatureId) {
+          try {
+            const { default: DiscoveredFeature } = await import('../models/DiscoveredFeature.js');
+            await DiscoveredFeature.findByIdAndUpdate(improvement.discoveredFeatureId, {
+              status: 'rejected',
+              rejectionReason: `Target file too large for whole-file rewrite: ${targetFile} (~${targetTokens} tokens > ${MAX_REWRITABLE_TOKENS})`
+            });
+          } catch (dbErr) {
+            logger.warn(`Failed to mark oversized discovered feature: ${dbErr.message}`);
+          }
+        }
+        throw new Error(
+          `Target file too large for whole-file rewrite: ${targetFile} is ~${targetTokens} tokens, ` +
+          `above the ~${MAX_REWRITABLE_TOKENS} a ${UPGRADE_OUTPUT_CAP}-token response can return — ` +
+          `skipping "${improvement.title}" instead of generating a truncated file`
+        );
+      }
+
       // Use AI to generate the specific code changes with retry logic
       let modifiedCode = await this.generateAICodeUpgradeWithRetry(improvement, content);
 
@@ -2086,9 +2133,14 @@ OUTPUT REQUIREMENTS:
       // with maxTokens=5348 returned content="" with reasoning_tokens=5348.
       // Formula: max(8K floor, file_tokens × 1.5 + 6K reasoning headroom),
       // capped at 32K.
-      const fileTokens = Math.ceil(originalCode.length / 3.5);
-      const reasoningHeadroom = 6000;
-      const maxTokens = Math.min(32000, Math.max(8000, Math.ceil(fileTokens * 1.5) + reasoningHeadroom));
+      // Sized from the shared constants above; applyAICapabilityUpgrade
+      // preflights against the same numbers so an oversized file never gets
+      // this far.
+      const fileTokens = Math.ceil(originalCode.length * UPGRADE_TOKENS_PER_CHAR);
+      const maxTokens = Math.min(
+        UPGRADE_OUTPUT_CAP,
+        Math.max(8000, Math.ceil(fileTokens * UPGRADE_SIZE_MULTIPLIER) + UPGRADE_REASONING_HEADROOM)
+      );
 
       const response = await this.agent.providerManager.generateResponse(basePrompt, {
         maxTokens,

@@ -368,7 +368,45 @@ export class VPNPlugin extends BasePlugin {
   /**
    * Connect to VPN
    */
+  /**
+   * Enforce the VPN_EXIT_COUNTRY pin on an explicit target location.
+   *
+   * The pin was previously applied in exactly ONE place — smartConnect()'s candidate
+   * filter — even though its own comment says "filter every candidate list, whatever the
+   * purpose, and never fall back outside the pin". connect({location}) took an explicit
+   * region with no filter at all, and that is the branch every real caller uses:
+   * the external scrape route's rotation, and the AI agent, which is told in its system
+   * prompt that it can call `vpn.connect({location})` to change exits. vpn.js:375 records
+   * a live incident of overlapping rotations to canada-vancouver through this path.
+   *
+   * Refuses rather than silently rewriting: a caller that asked for a specific exit and
+   * quietly got a different one is harder to debug than one that got told no.
+   *
+   * Returns null when the target is acceptable, or a failure result to return as-is.
+   */
+  _enforceExitPin(location) {
+    const exitPin = (this.config.exitCountry || '').toLowerCase();
+    if (!exitPin || !location) return null;               // no pin, or daemon auto-pick
+    const target = String(location).toLowerCase();
+    if (target === exitPin) return null;                  // the bare pin itself ("usa")
+    if (this._countryOf(target) === exitPin) return null; // "usa-dallas" under pin "usa"
+    logger.warn(
+      `VPN exit pin (${exitPin}) REFUSED an explicit connect to "${location}" — ` +
+      `the scrape pipeline requires this box to stay in one country`
+    );
+    return {
+      success: false,
+      error: 'exit_blocked_by_pin',
+      message: `Refusing to connect to "${location}": VPN_EXIT_COUNTRY is pinned to ${exitPin}`,
+      exitPin,
+      location: this.connectionState.currentLocation
+    };
+  }
+
   async connect({ location = null, protocol = null, retry = true }) {
+    const pinRefusal = this._enforceExitPin(location);
+    if (pinRefusal) return pinRefusal;
+
     // Serialize concurrent connect() calls. ExpressVPN can only switch the
     // tunnel one place at a time — when two callers (e.g. two concurrent
     // scrape-rotations) both fire connect() in the same tick, they collide
@@ -424,8 +462,11 @@ export class VPNPlugin extends BasePlugin {
   }
 
   async _doConnect({ location = null, protocol = null, retry = true }) {
+    // Declared outside the try: the catch block needs it to decide whether an
+    // alternative exit may be substituted, and a `const` inside the try is not
+    // in scope there.
+    const originalLocation = location;
     try {
-      const originalLocation = location;
       if (location && location !== 'smart') {
         const resolved = await this.resolveRegion(location);
         if (resolved && resolved !== location) {
@@ -435,39 +476,18 @@ export class VPNPlugin extends BasePlugin {
       }
       logger.info(`Connecting to VPN${location ? ` (location: ${location})` : ''}`);
 
-      // Disconnect first if already connected — WITHOUT force, deliberately.
-      // A forced disconnect here lets rotation actually switch exits, BUT it also
-      // tears the tunnel down: when ExpressVPN's daemon then fails to reconnect to
-      // the new exit (observed repeatedly — connect times out, the lightway process
-      // dies, internet stays down until a daemon service-restart), the box is left
-      // with NO VPN and NO internet, which crash-loops the whole agent (BSC RPC at
-      // boot can't be reached). The autoConnect guard blocking this disconnect is a
-      // SAFETY feature: the tunnel never drops, so a failed rotation degrades to "no
-      // exit change" instead of "ALICE offline". Render relies on FlareSolverr (not
-      // rotation) and the box is pinned to a US exit, so this is acceptable; bounded
-      // by the scrape budget + hard cap. (2026-06-16: forcing this caused 3 outages.)
-      if (this.connectionState.connected) {
-        const disc = await this.disconnect();
-        // If auto-connect pinned the tunnel, the disconnect was refused — and we
-        // CANNOT switch exits without it. Attempting `expressvpnctl connect` while
-        // still connected just times out (5s) and cycles the box's DNS; on a burst
-        // of scrape rotations that becomes a storm of failing connects (observed:
-        // 288 in a day to uk-docklands/canada-vancouver) that destabilizes the
-        // tunnel for every other request. Bail cleanly instead: the caller degrades
-        // to "no exit change" (staying on the current US exit) with NO DNS thrash
-        // and NO alternative-location retry cascade. Switching exits requires
-        // disabling auto-connect first. (Returns early — never reaches the connect.)
-        if (disc && disc.success === false && disc.autoConnect) {
-          logger.info(`VPN exit switch${location ? ` to ${location}` : ''} skipped — auto-connect pinned; staying on current exit (no thrash)`);
-          return {
-            success: false,
-            error: 'exit_switch_blocked_autoconnect',
-            message: 'Cannot switch VPN exit while auto-connect is enabled — staying on current exit',
-            autoConnect: true,
-            location: this.connectionState.currentLocation
-          };
-        }
-      }
+      // NO explicit disconnect. Measured on 2026-08-12 against the live daemon:
+      // `expressvpnctl connect <region>` while already connected performs the
+      // teardown and reconnect itself. Issuing our own disconnect first only
+      // widens the window in which the box has no tunnel, and it is the step the
+      // autoConnect guard refuses — which is why exit rotation had been dead
+      // since 2026-06-27.
+      //
+      // The switch is NOT seamless: the same measurement showed ~6-10s with no
+      // connectivity mid-transition. That is inherent to changing exits and is
+      // why rotation sits behind the challenge solver as a last resort rather
+      // than being tried first.
+      const switchingExit = this.connectionState.connected && !!location;
 
       // Set protocol if specified
       if (protocol) {
@@ -479,14 +499,36 @@ export class VPNPlugin extends BasePlugin {
         connectCommand += ` "${location}"`;
       }
 
-      const result = await this.executeWithTimeout(connectCommand, this.config.connectionTimeout);
-      
-      // Wait for connection to establish
-      await this.waitForConnection();
-      
-      // Update connection state
+      // The CLI's exit code is NOT a result. Measured 2026-08-12: the same
+      // command returned rc=0 in 570ms on one call and rc=2 "Timed out after
+      // 5.001 sec" on the next — and the rc=2 call CONNECTED SUCCESSFULLY nine
+      // seconds later. `expressvpnctl connect` has its own ~5s internal ceiling
+      // and reports a timeout while the switch is still completing.
+      //
+      // Treating that false failure as real is what produced the 2026-06-16
+      // incident: the error triggered a retry against a DIFFERENT region, which
+      // interrupted the connection already in progress, which "failed" too — a
+      // cascade of 288 connects that drifted outside the pinned country and
+      // destabilized the tunnel. So: swallow the exit code and let the state
+      // poll below decide.
+      try {
+        await this.executeWithTimeout(connectCommand, this.config.connectionTimeout);
+      } catch (cliErr) {
+        logger.debug(`VPN connect CLI returned an error (ignored, polling state instead): ${cliErr.message}`);
+      }
+
+      // Poll until the daemon reports the exit we actually asked for. When
+      // switching, "connected" alone is not enough — it is briefly still true
+      // for the OLD exit, so waitForConnection() would return instantly and we
+      // would report success while sitting on the wrong region.
+      if (switchingExit) {
+        await this.waitForLocation(location, this.config.connectionTimeout);
+      } else {
+        await this.waitForConnection();
+      }
+
       await this.updateConnectionState();
-      
+
       if (this.connectionState.connected) {
         logger.info(`VPN connected successfully to ${this.connectionState.currentLocation}`);
         this.startHealthMonitoring();
@@ -507,7 +549,19 @@ export class VPNPlugin extends BasePlugin {
     } catch (error) {
       this.connectionState.failures++;
       
-      if (retry && this.config.smartRetry && this.connectionState.failures < this.config.retryAttempts) {
+      // NEVER retry an explicitly-requested exit against a DIFFERENT one. The
+      // caller asked for a specific region; silently substituting another is how
+      // the 2026-06-16 cascade left the pinned country (uk-docklands,
+      // canada-vancouver, canada-toronto) while each substitution interrupted
+      // the connection already in flight. A caller that wants a different exit —
+      // the scrape rotation — picks the next one from its own country-restricted
+      // pool and calls again. Substitution stays available only for a
+      // location-less connect, where no specific exit was requested.
+      const mayTryAlternative = retry && this.config.smartRetry
+        && !originalLocation
+        && this.connectionState.failures < this.config.retryAttempts;
+
+      if (mayTryAlternative) {
         logger.warn(`VPN connection failed (attempt ${this.connectionState.failures}), retrying with different location...`);
 
         // Try different location on retry
@@ -525,10 +579,15 @@ export class VPNPlugin extends BasePlugin {
       }
 
       logger.error('VPN connection failed:', error);
+      // Report the exit we are actually on. A rotation caller needs to know
+      // whether it is still sitting on the previous region so it can decide
+      // between trying the next pool entry and giving up.
       return {
         success: false,
         error: error.message,
-        attempts: this.connectionState.failures
+        attempts: this.connectionState.failures,
+        location: this.connectionState.currentLocation,
+        requestedLocation: originalLocation || null
       };
     }
   }
@@ -1166,6 +1225,35 @@ export class VPNPlugin extends BasePlugin {
       this.connectionState.connectionTime = null;
       this.connectionState.publicIP = null;
     }
+  }
+
+  /**
+   * Wait until the daemon reports it is connected to `wanted`.
+   *
+   * Distinct from waitForConnection() because during an exit switch the daemon
+   * reports "connected" for the OLD region for the first moments, so a
+   * connected-only check returns immediately and the caller concludes it
+   * switched when it has not. Matching is prefix-based: asking for `usa-atlanta`
+   * accepts `usa-atlanta-2`, since the daemon may resolve a region to a numbered
+   * sibling.
+   *
+   * @returns {Promise<boolean>} true once the exit matches
+   * @throws if the exit has not changed within `timeout`
+   */
+  async waitForLocation(wanted, timeout = 30000) {
+    const target = String(wanted).toLowerCase();
+    const start = Date.now();
+    let last = '';
+    while (Date.now() - start < timeout) {
+      await this.updateConnectionState();
+      last = String(this.connectionState.currentLocation || '').toLowerCase();
+      if (this.connectionState.connected && (last === target || last.startsWith(target))) {
+        logger.info(`VPN exit switched to ${this.connectionState.currentLocation} in ${Date.now() - start}ms`);
+        return true;
+      }
+      await new Promise(resolve => setTimeout(resolve, 1000));
+    }
+    throw new Error(`Exit switch to ${wanted} did not complete within ${timeout}ms (still on "${last || 'unknown'}")`);
   }
 
   async waitForConnection(timeout = 30000) {

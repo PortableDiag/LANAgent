@@ -135,6 +135,29 @@ router.get('/history', externalAuthMiddleware, async (req, res) => {
   }
 });
 
+// Aggregated download stats (format × quality × status) for the authenticated agent.
+router.get('/stats', externalAuthMiddleware, async (req, res) => {
+  try {
+    const stats = await YoutubeDownload.getDownloadStats(req.externalAgentId);
+    res.json({ success: true, stats });
+  } catch (error) {
+    logger.error('YouTube stats failed:', error);
+    res.status(500).json({ success: false, error: 'Failed to retrieve download stats' });
+  }
+});
+
+// The agent's most-repeated completed downloads.
+router.get('/popular', externalAuthMiddleware, async (req, res) => {
+  try {
+    const limit = Math.min(50, parseInt(req.query.limit) || 10);
+    const popular = await YoutubeDownload.getPopularDownloads(req.externalAgentId, limit);
+    res.json({ success: true, popular });
+  } catch (error) {
+    logger.error('YouTube popular downloads failed:', error);
+    res.status(500).json({ success: false, error: 'Failed to retrieve popular downloads' });
+  }
+});
+
 /**
  * Get download quota information for the authenticated agent
  */

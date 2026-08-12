@@ -74,7 +74,19 @@ class SelfHealingService extends EventEmitter {
           threshold: 90, // percentage
           cooldownMinutes: 15,
           maxAttemptsPerHour: 3,
-          action: 'gc_and_cache_clear'
+          action: 'gc_and_cache_clear',
+          // Same phantom-condition trap the diskCleanup rule was fixed for (see the
+          // NON_LOCAL_FS_TYPES note at the top of this file), and with a wider blast
+          // radius. The rule DETECTS system-wide memory but can only REMEDIATE this
+          // process's own heap: global.gc() plus a provider-cache clear. When the
+          // pressure belongs to another process — mongod, chromium, the detector —
+          // the agent's GC frees a rounding error, the condition survives, and the
+          // rule re-fires every cycle. Because maxActionsPerHour is a GLOBAL budget,
+          // that burns the same tank diskCleanup and dbReconnect draw from, so a
+          // phantom memory condition disarms the rules that could still have worked.
+          // Gate: only claim this condition when the agent's own RSS is a large
+          // enough share of total memory for its own cleanup to plausibly matter.
+          minProcessSharePercent: 25
         },
 
         // Disk cleanup when space is low
@@ -334,11 +346,31 @@ class SelfHealingService extends EventEmitter {
       // Check memory
       if (this.config.rules.memoryCleanup.enabled) {
         if (systemState.memory.percentage > this.config.rules.memoryCleanup.threshold) {
-          issues.push({
-            type: 'memory_cleanup',
-            condition: `memory ${systemState.memory.percentage.toFixed(1)}% > ${this.config.rules.memoryCleanup.threshold}%`,
-            value: systemState.memory.percentage
-          });
+          // Only claim a condition this rule's remediation can actually move. Our
+          // remedy is local (GC + provider cache), so it is only plausible when this
+          // process holds a meaningful share of memory. Otherwise the pressure is
+          // someone else's and firing would burn the shared hourly budget for nothing.
+          const rss = systemState.processMemory?.rss || 0;
+          const total = systemState.memory.total || 0;
+          const sharePct = total > 0 ? (rss / total) * 100 : 0;
+          const minShare = this.config.rules.memoryCleanup.minProcessSharePercent ?? 25;
+
+          if (sharePct >= minShare) {
+            issues.push({
+              type: 'memory_cleanup',
+              condition: `memory ${systemState.memory.percentage.toFixed(1)}% > ${this.config.rules.memoryCleanup.threshold}% (this process holds ${sharePct.toFixed(1)}%)`,
+              value: systemState.memory.percentage
+            });
+          } else {
+            // Rate-limited so a long external memory event doesn't flood the log,
+            // but never silent: an operator must be able to see that the rule looked
+            // and deliberately stood down rather than that it never noticed.
+            const now = Date.now();
+            if (!this._lastForeignMemoryLogAt || now - this._lastForeignMemoryLogAt > 30 * 60 * 1000) {
+              this._lastForeignMemoryLogAt = now;
+              logger.warn(`[SelfHealing] Memory at ${systemState.memory.percentage.toFixed(1)}% but this process holds only ${sharePct.toFixed(1)}% (< ${minShare}%) — the pressure is not ours to free, standing down instead of burning the hourly budget`);
+            }
+          }
         }
       }
 
@@ -562,23 +594,39 @@ class SelfHealingService extends EventEmitter {
     try {
       const before = process.memoryUsage();
 
-      // Force garbage collection if available
-      if (global.gc) {
-        global.gc();
-      }
+      // Force garbage collection if available. NOTE: node must be started with
+      // --expose-gc for this to exist, and the production ecosystem config does not
+      // pass it — so in practice this branch is skipped and the cache clear below is
+      // the entire remedy. That is reported honestly rather than papered over.
+      const gcAvailable = typeof global.gc === 'function';
+      if (gcAvailable) global.gc();
 
       // Clear any agent caches
-      if (this.agent?.providerManager?.clearCache) {
-        this.agent.providerManager.clearCache();
-      }
+      const cacheCleared = typeof this.agent?.providerManager?.clearCache === 'function';
+      if (cacheCleared) this.agent.providerManager.clearCache();
 
       const after = process.memoryUsage();
-      const freedMB = ((before.heapUsed - after.heapUsed) / 1024 / 1024).toFixed(2);
+      const freedBytes = before.heapUsed - after.heapUsed;
+      const freedMB = freedBytes / 1024 / 1024;
+
+      // A remediation that freed nothing must not report success. The old version
+      // returned success unconditionally, so the healing log recorded "Freed 0.00MB"
+      // as a completed heal — which is how a rule that cannot fix its own condition
+      // stays invisible while it drains the shared hourly budget.
+      if (freedBytes <= 0 && !cacheCleared) {
+        return {
+          success: false,
+          message: gcAvailable
+            ? 'Nothing to free: GC ran and released no heap, and no provider cache was available'
+            : 'No remedy available: node was not started with --expose-gc and no provider cache was available',
+          output: JSON.stringify({ before, after, gcAvailable, cacheCleared })
+        };
+      }
 
       return {
         success: true,
-        message: `Freed ${freedMB}MB of heap memory`,
-        output: JSON.stringify({ before, after })
+        message: `Freed ${freedMB.toFixed(2)}MB of heap memory${gcAvailable ? '' : ' (cache clear only — GC unavailable without --expose-gc)'}`,
+        output: JSON.stringify({ before, after, gcAvailable, cacheCleared })
       };
     } catch (error) {
       return { success: false, message: error.message };

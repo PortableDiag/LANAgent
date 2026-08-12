@@ -755,7 +755,32 @@ class ScammerRegistryService {
   }
 
   /**
-   * Flush the report queue — batch-report all queued scam tokens to the on-chain registry.
+   * SKYNET the wallet must keep liquid to cover every queued scam report plus a
+   * 2-report headroom. All wallet auto-spenders (auto-staker, staking-epoch
+   * funder, LP compound) consult this so none of them can starve the flush —
+   * the 2026-07/08 deadlock was three spenders each keeping their own floor
+   * while the 16-deep queue needed 16× the fee. Returns whole tokens, or null
+   * when the fee is unreadable (callers then fall back to their own floors).
+   */
+  async getQueueReserveRequirement() {
+    if (!this.isAvailable()) return null;
+    try {
+      const { ethers } = await import('ethers');
+      const contract = await this._getContract(false);
+      const feeWei = await contract.reportFee();
+      const fee = parseFloat(ethers.formatUnits(feeWei, 18));
+      if (!Number.isFinite(fee) || fee <= 0) return null;
+      return (this._reportQueue.size + 2) * fee;
+    } catch (err) {
+      logger.debug(`Queue reserve requirement unavailable: ${err.message}`);
+      return null;
+    }
+  }
+
+  /**
+   * Flush the report queue — batch-report queued scam tokens to the on-chain registry.
+   * Submits only as many reports as the wallet's SKYNET can pay for this cycle
+   * (the contract charges fee × reports in one pull); the rest stay queued.
    * Returns results summary. Should be called after sweep/deposit scan cycles.
    */
   async flushReportQueue() {
@@ -777,11 +802,50 @@ class ScammerRegistryService {
       }
     } catch { /* default to enabled */ }
 
-    const queued = Array.from(this._reportQueue.values());
-    this._reportQueue.clear();
+    const queuedAll = Array.from(this._reportQueue.values());
+
+    // Affordability: fee × count is pulled in ONE transferFrom, so an
+    // underfunded batch reverts whole. Take only the affordable prefix and
+    // leave the rest queued instead of retrying a doomed full batch forever.
+    let affordable = queuedAll.length;
+    let feeTokens = 0;
+    try {
+      const { ethers } = await import('ethers');
+      const contract = await this._getContract(false);
+      const feeWei = await contract.reportFee();
+      if (feeWei > 0n) {
+        feeTokens = parseFloat(ethers.formatUnits(feeWei, 18));
+        const signer = await contractServiceWrapper.getSigner(this.network);
+        const token = new ethers.Contract(this.tokenAddress, ERC20_ABI, signer);
+        const bal = await token.balanceOf(signer.address);
+        affordable = Number(bal / feeWei);
+      }
+    } catch (err) {
+      logger.debug(`Scam flush affordability check failed (proceeding unchunked): ${err.message}`);
+    }
+
+    if (affordable === 0) {
+      // Nothing affordable — back off to an hourly warning instead of a
+      // doomed estimateGas revert every sweep cycle.
+      const now = Date.now();
+      if (!this._lastInsufficientWarnAt || now - this._lastInsufficientWarnAt > 60 * 60 * 1000) {
+        this._lastInsufficientWarnAt = now;
+        logger.warn(`Scam report flush deferred: wallet SKYNET below one report fee (${feeTokens.toFixed(0)}); ${queuedAll.length} report(s) stay queued`);
+      } else {
+        logger.debug(`Scam report flush deferred: insufficient SKYNET (${queuedAll.length} queued)`);
+      }
+      return { reported: 0, reason: 'insufficient_balance', queued: queuedAll.length };
+    }
+
+    const queued = queuedAll.slice(0, Math.min(affordable, 50));
+    for (const r of queued) this._reportQueue.delete(r.address.toLowerCase());
     this._persistQueue();
 
-    logger.info(`Flushing scam report queue: ${queued.length} token(s) to report`);
+    if (queued.length < queuedAll.length) {
+      logger.info(`Flushing scam report queue: ${queued.length} of ${queuedAll.length} token(s) (affordable chunk)`);
+    } else {
+      logger.info(`Flushing scam report queue: ${queued.length} token(s) to report`);
+    }
 
     // Use batch if > 1, single report otherwise
     try {
