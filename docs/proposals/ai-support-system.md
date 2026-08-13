@@ -7,7 +7,7 @@
 ## Recap: what already exists (v1 + v2)
 
 - `support@lanagent.net` mailbox provisioned on `mail.lanagent.net` (docker-mailserver).
-- `support-poller` PM2 service on the gateway VPS (`/opt/api-gateway/support-poller.mjs`) polls IMAPS every 60s for `UNSEEN` messages.
+- `support-poller` PM2 service on the gateway VPS (`<gateway-deploy-path>/support-poller.mjs`) polls IMAPS every 60s for `UNSEEN` messages.
 - For each new message, the poller:
   - Skips bouncebacks, vacation auto-replies, `Auto-Submitted` headers, and `noreply`-pattern senders.
   - Looks up the `From:` address in the gateway's `PortalUser` collection.
