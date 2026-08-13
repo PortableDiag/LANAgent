@@ -3,7 +3,7 @@
 # Development helper script for LAN Agent
 # This script can be edited and rerun without additional approvals
 
-DEV_DIR="/media/veracrypt1/NodeJS/LANAgent"  # Development directory
+DEV_DIR="/path/to/lanagent"  # Development directory
 TEST_DIR="/home/null/LANAgent"                # Test/run directory
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
@@ -45,7 +45,7 @@ update_progress() {
 case "${1:-help}" in
     "init")
         print_task "Running initial setup"
-        bash /media/veracrypt1/NodeJS/Brainstormer/setup-lanagent.sh
+        bash /path/to/lanagent
         ;;
     
     "sync")

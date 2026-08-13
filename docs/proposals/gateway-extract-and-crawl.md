@@ -1,7 +1,7 @@
 # Gateway: Structured Extract + Recursive Crawl Services
 
 **Status:** Proposed (2026-05-05) · not on roadmap yet
-**Source:** Surfaced from competitive review of ScrapeGraphAI vs LANAgent's scraping gateway — see `/media/veracrypt2/AICodeLogs/2026-05-03-lanagent-vs-scraperapi-comparison.md`
+**Source:** Surfaced from competitive review of ScrapeGraphAI vs LANAgent's scraping gateway — see `<local-workspace-path>`
 **Owner:** TBD
 
 ## Motivation

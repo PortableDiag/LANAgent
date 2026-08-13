@@ -1154,7 +1154,7 @@ Gateway raster-logo endpoints for ad-platform embedding. The api.lanagent.net la
 - **`GET /logo-1024.png`** — explicit 1024 variant.
 - All three send `Cross-Origin-Resource-Policy: cross-origin` + `Access-Control-Allow-Origin: *` so ad-network renderers, search-result pages, and any other third-party context can embed them. Cached `public, max-age=86400`.
 - Same robot-icon branding as the existing favicon (dark `#1a1a1a` background, blue robot head with cyan accents, green + amber network lights). Rendered via ImageMagick from the existing inline SVG; **8-bit/color RGB sRGB** profile specifically (`-depth 8 -colorspace sRGB -alpha off`) since ImageMagick's default 16-bit RGBA was silently rejected by some ad-ingest pipelines.
-- Assets live at `/opt/api-gateway/assets/logo-{512,1024}.png`, loaded once at startup via `readFileSync` into module-level buffers (no per-request disk I/O).
+- Assets live at `<gateway-deploy-path>/assets/logo-{512,1024}.png`, loaded once at startup via `readFileSync` into module-level buffers (no per-request disk I/O).
 
 No genesis-side changes — this is a gateway-only feature. LANAgent core code, plugins, scheduler, scraping pipeline all unchanged. Version bumped on the genesis repo for documentation continuity.
 
@@ -1204,14 +1204,14 @@ Four coupled fixes, two addressing day-of feedback from the MindSwarm-side dev.
 
 ### Added — tooling
 
-- **`scripts/deployment/backup-alice.sh`** (genesis-only — has dev-phase password as the default `ALICE_PASS`) — mirrors `backup-beta.sh` but for the bare-metal PM2 production instance. Streams `mongodump --gzip --archive --db=lanagent` over SSH (no temp files on ALICE), rsyncs `.env` + `CLAUDE.local.md` + `ecosystem.config.cjs` + irreplaceable `data/` subdirs (`lancedb`, `agent`, `avatars`, `eufy`, `projects`, `ssh_host_key`, `external-uploads`), writes a manifest with git head + mongo db sizes + wallet addresses + api-key names for restore-time verification, packages into `/media/veracrypt1/NodeJS/_BackUps_/alice-backup-<stamp>.tar.gz`. 30-day retention. Deliberately skips `data/model-cache` (~2 GB, regenerable), `glb-models`/`vrm-models` (~1.1 GB, regenerable), `logs/`, `node_modules/`, `workspace/`, `quarantine/`. First archive: 2.8 GB compressed, 4.2 GB of mongo state + 32 MB of repo config/data, ~5 min wall time.
+- **`scripts/deployment/backup-alice.sh`** (genesis-only — has dev-phase password as the default `ALICE_PASS`) — mirrors `backup-beta.sh` but for the bare-metal PM2 production instance. Streams `mongodump --gzip --archive --db=lanagent` over SSH (no temp files on ALICE), rsyncs `.env` + `CLAUDE.local.md` + `ecosystem.config.cjs` + irreplaceable `data/` subdirs (`lancedb`, `agent`, `avatars`, `eufy`, `projects`, `ssh_host_key`, `external-uploads`), writes a manifest with git head + mongo db sizes + wallet addresses + api-key names for restore-time verification, packages into `<local-workspace-path>`. 30-day retention. Deliberately skips `data/model-cache` (~2 GB, regenerable), `glb-models`/`vrm-models` (~1.1 GB, regenerable), `logs/`, `node_modules/`, `workspace/`, `quarantine/`. First archive: 2.8 GB compressed, 4.2 GB of mongo state + 32 MB of repo config/data, ~5 min wall time.
 
 ### Operational
 
 - **Delta** (`192.168.x.x`, hostname `squid`, PM2 + port 3000, public-repo fork) was discovered and onboarded mid-session: pulled from v2.25.45 → v2.25.51 (clean merge after a `numbersapi.js` conflict was resolved in favor of the canonical upstream version — a fork-local stub had been hiding the real plugin), pushed to the `beta-lanagent/LANAgent-delta` fork, `npm install --legacy-peer-deps`, ai-detector torch issue identified and fixed by adding the venv path described above, gateway client confirmed registered (`agentId=10001, mode=tunnel, allocatedIp=10.8.0.x, fp=1fe07ae9013afed4ee54c6a7ebe40783`). Memory note saved to dev-machine memory.
 - **ALICE** bundled deploy at the end of the session: 7 files via `deploy-files.sh`, venv created (CPU torch, transformers loaded — 58 s install), `pm2 delete ai-detector && pm2 restart lan-agent && pm2 start ecosystem.config.cjs --only ai-detector` to re-read the interpreter. New PIDs `1091980`/`1092000`, then `1134614`/`1134675` on the second deploy of the day (mindswarm changes). `/api/health` healthy, `/api/crypto/lp/mm/health` responding (idempotency wrapper loaded), freshping plugin lists `searchchecks` alongside the original five, viz-dashboard new methods (`_parseHashForViz`, `_updateHash`, `_getStoredActiveViz`) present in served JS, scheduled-job `mindswarm-engagement` confirmed `repeatInterval: '15 minutes'` in `db.scheduled_jobs`.
 - **BETA** also pulled up to current public main mid-session (numbersapi conflict resolved the same way, fork-local AI-generated stub overwritten with upstream).
-- **ALICE backup taken** at the end of session — `alice-backup-2026-05-23T18-27-21Z.tar.gz` (2.8 GB) at `/media/veracrypt1/NodeJS/_BackUps_/`. Captures wallet addresses and API-key inventory in the manifest for restore-time verification.
+- **ALICE backup taken** at the end of session — `alice-backup-2026-05-23T18-27-21Z.tar.gz` (2.8 GB) at `<local-workspace-path>`. Captures wallet addresses and API-key inventory in the manifest for restore-time verification.
 
 ## [2.25.51] - 2026-05-22
 
@@ -1818,7 +1818,7 @@ Gateway repo workflow established + today's gateway-side fixes pulled into sourc
 
 ### What this is
 
-The gateway code (the Node.js source that serves `api.lanagent.net` — landing page, customer portal, admin console, Stripe webhook, scrape proxies) is a separate repo from `LANAgent` and `LANAgent-genesis`. It lives at `/media/veracrypt3/Websites/LANAgent_Website/api-lanagent-net/` (remote `PortableDiag/api-lanagent-net`, private) and deploys to `/opt/api-gateway/` on `<vps-ip>`. Multiple sessions had been editing files directly on the production host with `ssh root@gateway "sed -i …"` patches; the local repo had fallen six commits behind. This release consolidates: rsynced prod → local, committed all the drift, added a proper deploy script, and persisted memory notes so it doesn't recur.
+The gateway code (the Node.js source that serves `api.lanagent.net` — landing page, customer portal, admin console, Stripe webhook, scrape proxies) is a separate repo from `LANAgent` and `LANAgent-genesis`. It lives at `<local-workspace-path>` (remote `PortableDiag/api-lanagent-net`, private) and deploys to `<gateway-deploy-path>/` on `<vps-ip>`. Multiple sessions had been editing files directly on the production host with `ssh root@gateway "sed -i …"` patches; the local repo had fallen six commits behind. This release consolidates: rsynced prod → local, committed all the drift, added a proper deploy script, and persisted memory notes so it doesn't recur.
 
 ### Gateway commits (`PortableDiag/api-lanagent-net`)
 
@@ -1908,9 +1908,9 @@ Cutting render to 3cr eliminates the per-call price gap with `full` while keepin
 - `docs/api/LANAgent_API_Collection.postman_collection.json` — version `2.25.24` → `2.25.25`, top-level description rewritten with render-cut summary, `/scrape` endpoint description updated
 - `docs/feature-progress.json` — new `renderTierPriceCut_2026_05_05` entry, `lastUpdated` bumped, status preamble rewritten
 - `package.json` version → `2.25.25`
-- Gateway portal at `api.lanagent.net` — render demo card label updated (5 cr → 3 cr) + service catalog price (`/opt/api-gateway/portal.mjs` on the gateway VPS, untracked)
+- Gateway portal at `api.lanagent.net` — render demo card label updated (5 cr → 3 cr) + service catalog price (`<gateway-deploy-path>/portal.mjs` on the gateway VPS, untracked)
 - `docs/proposals/gateway-extract-and-crawl.md` — render-tier pricing references in `/extract` and `/crawl` cost models updated
-- `/media/veracrypt2/AICodeLogs/2026-05-03-lanagent-vs-scraperapi-comparison.md` — pricing addendum table updated with new render rate
+- `<local-workspace-path>` — pricing addendum table updated with new render rate
 
 ### Unchanged
 
@@ -1922,7 +1922,7 @@ Cutting render to 3cr eliminates the per-call price gap with `full` while keepin
 - Direct `/scrape` POST with `tier: 'render'` returned `creditsCharged: 3` post-deploy.
 - Live work-scraper fallback that fired earlier today logged `[LANAGENT] PASS https://www.foxnews.com/politics/rfk-jr-... (tier=full, credits, charged=3)` — that path uses the `full → render` escalation introduced in the same session, so the new render price will hit the existing happy path and the escalated path identically.
 
-### Companion work (work scraper repo at `/media/veracrypt2/NodeJS/ScraperService`)
+### Companion work (work scraper repo at `<local-workspace-path>`)
 
 Not in this repo, but landed the same day:
 
@@ -1934,7 +1934,7 @@ Not in this repo, but landed the same day:
 
 Per-page audit of every admin body for the same class of inline-style mobile-overflow issues fixed in v2.25.22 / v2.25.23. One remaining offender found and fixed.
 
-### Fixed (gateway — `/opt/api-gateway/admin.mjs`, untracked)
+### Fixed (gateway — `<gateway-deploy-path>/admin.mjs`, untracked)
 - **User-detail and Wallet-detail "Grant credits" row overflowed on mobile.** The admin-actions card uses `<div class="row-flex">` with hardcoded inline widths on its inputs (`<input style="width:160px;">`, `<input style="flex:1;">`). `.row-flex` is `display: flex` with no wrap, and the inline widths sit on the same elements at higher specificity than any responsive override, so the row spilled outside its card on phone widths. Added a `@media (max-width: 880px)` block that makes `.row-flex` wrap, gives `<label>` its own row, and forces `<input>` / `<select>` / `<textarea>` children to `flex: 1 1 100% !important; width: auto !important;` (the `!important` is the only way to override the inline declarations without rewriting markup).
 
 ### Audit results (no further fixes needed)
@@ -1958,7 +1958,7 @@ No remaining inline `grid-template-columns` declarations exist anywhere in `admi
 
 Admin dashboard mobile follow-up — Promotions and Scrapes pages were still rendering as wide multi-column layouts on phone screens.
 
-### Fixed (gateway — `/opt/api-gateway/admin.mjs`, untracked)
+### Fixed (gateway — `<gateway-deploy-path>/admin.mjs`, untracked)
 - **Promotions page (`/admin/promotions`) scrolled horizontally on mobile.** The page used inline `style="grid-template-columns: 1fr 360px"` which doesn't collapse — the 360px sidebar form forced the page wider than any phone viewport, so the whole page (including the sticky header) had to scroll horizontally. Replaced the inline rule with a new `.grid-aside` class that's `1fr 360px` on desktop and `1fr` (form drops below the table) on screens ≤880px.
 - **Scrapes page (`/admin/scrapes`) had Top Services and Top Agents side-by-side on mobile.** Same root cause: inline `style="grid-template-columns: 1fr 1fr"` overrode the responsive grid rules. Replaced with a new `.grid-2` class that's `1fr 1fr` on desktop and stacked on screens ≤880px.
 
@@ -1969,7 +1969,7 @@ Admin dashboard mobile follow-up — Promotions and Scrapes pages were still ren
 
 Gateway admin dashboard responsive overhaul. Same-day follow-up to v2.25.21 after operator reported the Recent Payments table was crammed even on desktop and the top nav was unusable on mobile.
 
-### Fixed (gateway — `/opt/api-gateway/admin.mjs`, untracked)
+### Fixed (gateway — `<gateway-deploy-path>/admin.mjs`, untracked)
 - **Recent Payments table was crammed.** The dashboard used `grid-3` (three equal columns), so the four-column payments table (When / Email / Amount / Credits) had to fit in ~33% of the page width — long emails like `portablediag@protonmail.com` shoved the numeric columns into a sliver. Replaced with a new `dash-grid` template that gives Payments `2fr` and Agents/Tickets `1fr` each on desktop. On tablet (≤980px) Payments spans both columns. On phone (≤600px) all three stack. Email cell now has `email-cell` class with `text-overflow: ellipsis` and a `title=` tooltip showing the full address on hover, so even the longest emails render cleanly.
 - **Top nav was unusable on mobile.** Nine `topnav` links wrapped onto multiple lines and shoved the user/sign-out block off the visible header. Added a hamburger toggle (`☰` button, hidden on desktop) that collapses the nav into a vertical drawer below the header on screens ≤880px. Click outside or any link auto-closes via the same toggle.
 - **Tables on narrow screens** now `overflow-x: auto` instead of overflowing the card, so any wide table (Wallets, Payments page, Audit log) scrolls horizontally inside its container with momentum on touch devices instead of forcing the whole page to scroll.
@@ -1981,12 +1981,12 @@ No markup changes outside `layout()` and `dashboardBody()`; the fix is almost en
 
 Gateway and BETA agent recovery: fixed silently-broken admin login, reconnected gateway↔BETA after a 24-day stale-key outage, made BETA a real fallback in routing, and stood up backup tooling for BETA. Full incident analysis in `docs/sessions/SESSION-SUMMARY-2026-05-05.md`.
 
-### Fixed (gateway — `/opt/api-gateway/index.mjs`, untracked)
+### Fixed (gateway — `<gateway-deploy-path>/index.mjs`, untracked)
 - **Admin login form silently dropped the email field.** `app.use(express.json())` was registered without `express.urlencoded()`, so the HTML form's `application/x-www-form-urlencoded` POST to `/admin/auth/request` arrived with `req.body = {}`. The handler fell into the anti-enumeration tarpit branch and logged `magic link refused (non-admin) email=` — operator received `?sent=1` in the URL but no email. Added `app.use(express.urlencoded({ extended: true, limit: '1mb' }))` after the JSON parser. Confirmed end-to-end: form POST → 302 → `magic link issued` → `[email] sent to=…`.
 - **Gateway↔BETA paired with a never-valid API key.** BETA's `externalcreditbalances` collection was empty (0 docs) since the April 11 ransomware incident; the gateway's stored key (`lsk_af05eb64…`) had nothing to authenticate against. 6,917 calls to `/credits/balance` failed 401 over 24 days, BETA was excluded from the funded pool, and `Agent BETA refresh failed: 401` filled the gateway error log. Inserted the missing `externalcreditbalances` doc on BETA pairing the existing wallet (`0x40b03c8b…`) with the gateway's existing key. 401 spam stopped, BETA enters refresh cycle normally.
 - **PM2 restart counter reset** on `api-gateway` (was 50, now 0 plus 2 from today's deploys). Process state preserved.
 
-### Changed (gateway routing — `/opt/api-gateway/index.mjs`, untracked)
+### Changed (gateway routing — `<gateway-deploy-path>/index.mjs`, untracked)
 - **`pickBestAgent` is now strict primary/fallback by reputation.** Was weighted-random across funded agents; with ALICE at rep=187 and BETA at rep=0, BETA still had ~0.5% probability of selection — enough to surface failures since BETA lacks several services (web-scraping with tiers, media-transcode, image-generation, etc.). New behavior: among funded agents, prefer online (`lastSeen < 10min`), sort by `successCount - failCount` descending, return the top. ALICE always wins when online and funded; BETA only sees traffic when ALICE is offline or out of credits. Capability gating untouched (`getAvailableAgents` filters by `services: service` at the DB query level), so render-tier scrapes still cannot route to BETA — there's no fallback for render tier when ALICE is down, which is correct since BETA has no FlareSolverr.
 
 ### Operations
@@ -1996,7 +1996,7 @@ Gateway and BETA agent recovery: fixed silently-broken admin login, reconnected 
 - **`/root/backup-beta.sh`** + cron `15 3 * * *` — daily `mongodump --gzip --archive` to `/root/lanagent-backups/beta-YYYY-MM-DD.archive.gz`, 14-day retention. Restore: `docker exec -i BETA-mongodb mongorestore --gzip --archive --drop < beta-YYYY-MM-DD.archive.gz`.
 
 ### Added (genesis repo)
-- **`scripts/deployment/backup-beta.sh`** — local pull script run from the dev machine. Streams a fresh `mongodump` over SSH, rsyncs config + data dirs (excludes `logs/`, `node_modules/`), writes a manifest with git rev / container statuses / wallet addresses, and seals everything into `/media/veracrypt1/NodeJS/_BackUps_/beta-backup-<UTC-stamp>.tar.gz`. 30-day local retention. First run: 14M archive. Safe to run while BETA is live.
+- **`scripts/deployment/backup-beta.sh`** — local pull script run from the dev machine. Streams a fresh `mongodump` over SSH, rsyncs config + data dirs (excludes `logs/`, `node_modules/`), writes a manifest with git rev / container statuses / wallet addresses, and seals everything into `<local-workspace-path>`. 30-day local retention. First run: 14M archive. Safe to run while BETA is live.
 
 ### Notes
 - **Pre-April-11 wallet seed is unrecoverable.** The ransomware wipe destroyed `cryptowallets`. Whatever address the original BETA wallet had, we no longer know it and can't sign for it. The current wallet `0x40b03c8b…` was auto-generated 18 minutes after the wipe; it has 200 SKYNET on-chain (negligible) plus the [redacted] SKYNET we just sent. Future-proofing: backups now in place.
@@ -2122,7 +2122,7 @@ Gateway-side release. Agent code unchanged. All work lives in the `api-lanagent-
 ### Improved
 - **Wallet accounts visible** — Mindswarm and other crypto-bootstrapped accounts (separate `creditbalances` collection, no email) had no admin view at all before. They now have parallel coverage to portal users, including an "is this a real on-chain wallet vs. a `portal_*` bridge stub vs. a test record" type classifier.
 - **On-chain payment display fixed** — `GatewayPayment.amount` is the USD value at time of transaction (not raw BNB); previous admin display showed e.g. "2.2 BNB" which read as [redacted] instead of the correct $2.20. Payments page and wallet detail page now render `$2.20` with "paid in BNB" shown as a subtitle. Stripe + crypto totals roll up to a single Total revenue figure on the dashboard ([redacted] lifetime as of this release).
-- **`ecosystem.config.cjs`** — fixed stale `cwd: /opt/scrape-gateway` → `/opt/api-gateway`, app name `scrape-gateway` → `api-gateway` to match production. Added `ADMIN_EMAIL`, `ADMIN_JWT_SECRET`, `ADMIN_SESSION_HOURS` env vars.
+- **`ecosystem.config.cjs`** — fixed stale `cwd: /opt/scrape-gateway` → `<gateway-deploy-path>`, app name `scrape-gateway` → `api-gateway` to match production. Added `ADMIN_EMAIL`, `ADMIN_JWT_SECRET`, `ADMIN_SESSION_HOURS` env vars.
 
 ### Removed
 - **Redundant `/admin/agents` (GET), `/admin/wallet`, `/admin/promotions` (GET/POST/DELETE) endpoints** in `index.mjs` — replaced by `/admin/api/*` equivalents in `admin.mjs` which accept both cookie auth and the existing `X-Admin-Key` header. `POST /admin/agents` (agent registration with reachability + price negotiation) is preserved unchanged.
@@ -2154,10 +2154,10 @@ Gateway-side release. Agent code unchanged. All work lives in the `api-lanagent-
 ### Added
 - **Gateway: usage-threshold notification emails** — `email.mjs` module on the gateway with `nodemailer` SMTP transport over `mail.lanagent.net:587` via a dedicated `noreply@lanagent.net` mailbox (provisioned with a 100MB quota). Three transactional templates fire automatically as users cross 80% / 90% / 100% of their subscription bucket (basic + render, separately) or their credit-pool balance (relative to the most recent top-up — each top-up resets the alert window). PortalUser schema extended with `creditAlertBaseline` (post-top-up baseline) and `notifications.{credits,subBasic,subRender}{80,90,100}` (per-threshold timestamps). Fire-once-per-cycle enforced via atomic `findOneAndUpdate` so concurrent debits can't double-send. Send is fire-and-forget — `/scrape` request handlers never block on SMTP. Sub thresholds reset on `invoice.paid` `billing_reason: subscription_cycle`; credit thresholds reset on each completed `checkout.session.completed`. End-to-end verified: 6 emails fired correctly through the production code path; idempotency verified by replaying with the flag already set (no resend).
 - **Gateway: password reset + email verification + transactional emails** — full account-management email suite. New routes: `POST /portal/forgot-password` (always returns 200 to avoid leaking registered addresses), `POST /portal/reset-password` (consumes single-use token + sets new password), `GET /portal/reset?token=…` (HTML form), `GET /portal/verify?token=…` (one-shot verification page that flips `emailVerified=true`), `POST /portal/resend-verification` (JWT-gated). Hooks into existing routes: `/portal/signup` now fires welcome + email-verification on completion; `/portal/api-keys` POST/DELETE/regenerate fires create/revoke notifications with name/prefix/source-IP/timestamp; `/portal/cancel-subscription` fires cancellation confirmation with the period-end date. New `PortalToken` collection with TTL index — Mongo auto-removes expired tokens. Tokens are SHA-256 hashed in DB; raw value only ever leaves in the email URL. Minting a fresh token invalidates prior unused tokens of the same purpose so stale links can't be replayed. Polished HTML wrapper template with brand-color top stripe, monospace code blocks for keys/curl examples, two-column footer, and preheader text for inbox preview. Sender displays as `LANAgent API <noreply@lanagent.net>` (was `LANAgent` — risked reading as the agent itself running out of credits).
-- **Gateway: support inbox v1 + v2** — `support@lanagent.net` mailbox provisioned (500MB quota) and monitored by a new `support-poller` PM2 service on the gateway VPS (`/opt/api-gateway/support-poller.mjs`). Polls IMAPS every 60s for `UNSEEN` messages. v1 (notification-only): for each new message, sends a Telegram alert to the operator with from / subject / body snippet; skips bouncebacks (`Auto-Submitted` header), `Precedence: bulk/junk/list`, and noreply-pattern senders. v2 (context-enriched): same flow + looks up the `From:` address in `PortalUser`, builds a 7-day usage context (sub state with bucket %, credits, recent request totals, top failing routes, most recent failure with error message + age, last payment), and includes that in the Telegram message. So instead of "new email from jane@x.com" the operator sees "Pro plan, 4,200 credits, 47 calls last 24h, 3 failures all on `reddit.com/r/aliens/.rss`" — enough context to answer from a phone without opening the dashboard. Marks messages `\Seen` after notify so each ticket pings once. Both matched-sender and unmatched-sender paths verified end-to-end.
+- **Gateway: support inbox v1 + v2** — `support@lanagent.net` mailbox provisioned (500MB quota) and monitored by a new `support-poller` PM2 service on the gateway VPS (`<gateway-deploy-path>/support-poller.mjs`). Polls IMAPS every 60s for `UNSEEN` messages. v1 (notification-only): for each new message, sends a Telegram alert to the operator with from / subject / body snippet; skips bouncebacks (`Auto-Submitted` header), `Precedence: bulk/junk/list`, and noreply-pattern senders. v2 (context-enriched): same flow + looks up the `From:` address in `PortalUser`, builds a 7-day usage context (sub state with bucket %, credits, recent request totals, top failing routes, most recent failure with error message + age, last payment), and includes that in the Telegram message. So instead of "new email from jane@x.com" the operator sees "Pro plan, 4,200 credits, 47 calls last 24h, 3 failures all on `reddit.com/r/aliens/.rss`" — enough context to answer from a phone without opening the dashboard. Marks messages `\Seen` after notify so each ticket pings once. Both matched-sender and unmatched-sender paths verified end-to-end.
 
 ### Documentation
-- **Comparison doc updated** at `/media/veracrypt2/AICodeLogs/2026-05-03-lanagent-vs-scraperapi-comparison.md` — clarifies that FlareSolverr was *not* invoked in any of the 16/16 shootout wins (those were all decided at `basic`/`stealth` tier). Adds an "Anticipated questions" section addressing why FlareSolverr wasn't ported to the work scraper (3 reasons: it's not what's failing, FS without IP rotation doesn't help, it's a Docker dep we don't currently run). Reorders priority: VPN/IP rotation is the real differentiator; FlareSolverr is the long-tail tool.
+- **Comparison doc updated** at `<local-workspace-path>` — clarifies that FlareSolverr was *not* invoked in any of the 16/16 shootout wins (those were all decided at `basic`/`stealth` tier). Adds an "Anticipated questions" section addressing why FlareSolverr wasn't ported to the work scraper (3 reasons: it's not what's failing, FS without IP rotation doesn't help, it's a Docker dep we don't currently run). Reorders priority: VPN/IP rotation is the real differentiator; FlareSolverr is the long-tail tool.
 - **New proposal**: `docs/proposals/ai-support-system.md` documents the v3 → v5 roadmap for AI-driven support — LLM-drafted replies with operator approval (v3), auto-send for trusted categories (v4), proactive outreach on internal events (v5). Covers architecture split (gateway owns customer state, ALICE owns LLM), prompt design with hard escalation rules, failure modes + mitigations, calibration loop, kill-switch env var, recommended sequence (sit on v2 for 2 weeks first).
 
 ## [2.25.12] - 2026-05-03

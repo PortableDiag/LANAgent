@@ -724,7 +724,7 @@ GET https://api.lanagent.net/logo-1024.png        → 1024×1024 PNG
 
 All four send `Cross-Origin-Resource-Policy: cross-origin` + `Access-Control-Allow-Origin: *` (the rest of the site uses helmet's `same-origin` default, which blocked third-party ad-network renderers from embedding the previous SVG favicon). Cached `public, max-age=86400`. 8-bit/color RGB sRGB profile — some ad-ingest pipelines silently reject ImageMagick's default 16-bit RGBA.
 
-Assets live at `/opt/api-gateway/assets/logo-{512,1024}.png`, loaded once at startup via `readFileSync` into module-level buffers (no per-request disk I/O).
+Assets live at `<gateway-deploy-path>/assets/logo-{512,1024}.png`, loaded once at startup via `readFileSync` into module-level buffers (no per-request disk I/O).
 
 Gateway repo: `api-lanagent-net` commits `dc12635` (initial routes) + `4bb0a47` (CORP/CORS + 8-bit fix). No genesis-side code changes.
 
@@ -938,7 +938,7 @@ The endpoint at `src/api/crypto.js:1568-1642` writes restored `position`, `pnl`,
 
 ### v2.25.27 — Gateway repo workflow + today's gateway-side fixes pulled into source control
 
-The gateway code (`api.lanagent.net` portal, admin console, Stripe webhook, scrape proxies) is a **separate repo from `LANAgent` and `LANAgent-genesis`**. It lives at `PortableDiag/api-lanagent-net` (private), local at `/media/veracrypt3/Websites/LANAgent_Website/api-lanagent-net/`, and deploys to `/opt/api-gateway/` on `<vps-ip>`. Multiple sessions had been editing files directly on the production host with `ssh "sed -i …"` patches; the local repo had fallen six commits behind. This release reconciles.
+The gateway code (`api.lanagent.net` portal, admin console, Stripe webhook, scrape proxies) is a **separate repo from `LANAgent` and `LANAgent-genesis`**. It lives at `PortableDiag/api-lanagent-net` (private), local at `<gateway-repo-path>/`, and deploys to `<gateway-deploy-path>/` on `<vps-ip>`. Multiple sessions had been editing files directly on the production host with `ssh "sed -i …"` patches; the local repo had fallen six commits behind. This release reconciles.
 
 **Gateway commits (`PortableDiag/api-lanagent-net`):**
 
@@ -960,7 +960,7 @@ The gateway code (`api.lanagent.net` portal, admin console, Stripe webhook, scra
 
 **Workflow change:**
 
-- `deploy.sh` in the gateway repo: `cd /media/veracrypt3/Websites/LANAgent_Website/api-lanagent-net/ && ./deploy.sh` rsyncs the source files to `/opt/api-gateway/`, restarts the PM2 processes, and health-checks `http://127.0.0.1:3100/health`. Whitelisted (`*.mjs`, `package.json`, `package-lock.json`, `ecosystem.config.cjs`); excludes `.env`, `*.bak*`, `node_modules/`, `.git/`, `CLAUDE.md`, `deploy.sh` itself. Flags: `--dry-run`, `--no-restart`, `--no-poller`.
+- `deploy.sh` in the gateway repo: `cd <gateway-repo-path>/ && ./deploy.sh` rsyncs the source files to `<gateway-deploy-path>/`, restarts the PM2 processes, and health-checks `http://127.0.0.1:3100/health`. Whitelisted (`*.mjs`, `package.json`, `package-lock.json`, `ecosystem.config.cjs`); excludes `.env`, `*.bak*`, `node_modules/`, `.git/`, `CLAUDE.md`, `deploy.sh` itself. Flags: `--dry-run`, `--no-restart`, `--no-poller`.
 - `CLAUDE.md` in the gateway repo documents the local-first workflow + rsync deploy command + what NOT to do.
 - Memory persisted at `~/.claude/projects/-media-veracrypt1-NodeJS-LANAgent-genesis/memory/gateway_repo.md` (reference) and `feedback_gateway_no_prod_edits.md` (rule + reason + how to apply) so this doesn't recur.
 
@@ -1004,7 +1004,7 @@ Cut the `render` tier price from 5 credits ($0.05) to 3 credits ($0.03) — same
 
 **Subscription buckets unchanged.** `render` still draws from the render-bucket on Scraper Pro/Business subs (15K and 50K calls/mo). Only the credit-pool per-call rate changed — subscribers see no difference.
 
-**Companion work** (in the work scraper repo at `/media/veracrypt2/NodeJS/ScraperService`, not this repo): `scrapeWithScraperApi` and `/raw-fetch` migrated from ScraperAPI to LANAgent on 2026-05-05; both now use the same `callLANAgentScrape(url, tier)` helper with `full → render` escalation. End-to-end verified in production after redeploy: `[LANAGENT] PASS https://www.foxnews.com/... (tier=full, credits, charged=3)`.
+**Companion work** (in the work scraper repo at `<local-workspace-path>`, not this repo): `scrapeWithScraperApi` and `/raw-fetch` migrated from ScraperAPI to LANAgent on 2026-05-05; both now use the same `callLANAgentScrape(url, tier)` helper with `full → render` escalation. End-to-end verified in production after redeploy: `[LANAGENT] PASS https://www.foxnews.com/... (tier=full, credits, charged=3)`.
 
 5cr slot now open for a future premium tier (residential proxies, 4G mobile IPs, etc.) without breaking the existing pricing ladder.
 
@@ -1070,11 +1070,11 @@ Same-day follow-up to v2.25.21. Operator reported the Recent Payments table on t
 | Wide tables (Wallets, Audit log) overflowed the page on narrow screens | Tables now `overflow-x: auto` inside their containers with momentum touch scrolling. |
 | Cards / KPIs / toolbars too dense on phone | Reduced card padding, smaller h1 + KPI values, `kv` grid drops to single column at narrow widths, toolbar inputs flex to fill, bar-row labels narrow. |
 
-Changes live in `/opt/api-gateway/admin.mjs` (untracked) — almost entirely additive CSS appended to `SHARED_STYLE`, plus one `<button class="nav-toggle">` injection in `layout()` and the grid-class swap in `dashboardBody()`.
+Changes live in `<gateway-deploy-path>/admin.mjs` (untracked) — almost entirely additive CSS appended to `SHARED_STYLE`, plus one `<button class="nav-toggle">` injection in `layout()` and the grid-class swap in `dashboardBody()`.
 
 ### v2.25.21 — Gateway and BETA agent recovery
 
-Three independent fixes to the gateway/BETA pair. All gateway changes live in `/opt/api-gateway/index.mjs` (untracked); the only repo-side artifact is the new local backup script.
+Three independent fixes to the gateway/BETA pair. All gateway changes live in `<gateway-deploy-path>/index.mjs` (untracked); the only repo-side artifact is the new local backup script.
 
 **Fixed (gateway):**
 
@@ -1089,8 +1089,8 @@ Three independent fixes to the gateway/BETA pair. All gateway changes live in `/
 - Assigned BETA `agentId: 2931` so `POST /agents/2931/:service` direct-route works.
 
 **Backup tooling (new):**
-- **Server-side:** `/root/backup-beta.sh` + cron `15 3 * * *` on BETA. Daily `mongodump --gzip --archive` to `/root/lanagent-backups/beta-YYYY-MM-DD.archive.gz`, 14-day retention. Restore: `docker exec -i BETA-mongodb mongorestore --gzip --archive --drop < <archive>`.
-- **Local pull:** `scripts/deployment/backup-beta.sh` runs from the dev machine. Streams a fresh mongodump over SSH plus rsynced configs (`.env`, `docker-compose.yml`, `CLAUDE.local.md`, `ecosystem.config.cjs`, `package.json`) and data dirs (`data/`, `workspace/`, `quarantine/` — excludes `logs/`, `node_modules/`), seals everything into a single tar.gz at `/media/veracrypt1/NodeJS/_BackUps_/beta-backup-<UTC-stamp>.tar.gz` with a manifest of git rev / container statuses / wallet addresses. 30-day local retention. Safe to run while BETA is live.
+- **Server-side:** `<backup-script>` + cron `15 3 * * *` on BETA. Daily `mongodump --gzip --archive` to `<backup-dir>/beta-YYYY-MM-DD.archive.gz`, 14-day retention. Restore: `docker exec -i BETA-mongodb mongorestore --gzip --archive --drop < <archive>`.
+- **Local pull:** `scripts/deployment/backup-beta.sh` runs from the dev machine. Streams a fresh mongodump over SSH plus rsynced configs (`.env`, `docker-compose.yml`, `CLAUDE.local.md`, `ecosystem.config.cjs`, `package.json`) and data dirs (`data/`, `workspace/`, `quarantine/` — excludes `logs/`, `node_modules/`), seals everything into a single tar.gz at `<local-workspace-path>` with a manifest of git rev / container statuses / wallet addresses. 30-day local retention. Safe to run while BETA is live.
 
 **Capability note:** BETA's `services` array does not include `web-scraping` (or `media-transcode`, `image-generation`, `document-processing`, `code-sandbox`, `pdf-toolkit`, `social-*`). The gateway's `getAvailableAgents` filters by `services: service` at the DB query level, so render-tier scrapes can never route to BETA — there's no fallback for render tier when ALICE is down. Adding FlareSolverr to BETA's compose would close that gap.
 
@@ -9010,8 +9010,8 @@ The AI system automatically categorizes bugs into these types:
 ### Configuration
 
 The system scans the following directories by default:
-- `/root/lanagent-repo/src` - Source code files
-- `/root/lanagent-repo/docs` - Documentation files
+- `<agent-repo-path>/src` - Source code files
+- `<agent-repo-path>/docs` - Documentation files
 
 **Supported File Types:** `.js`, `.ts`, `.jsx`, `.tsx`, `.mjs`
 
@@ -9032,7 +9032,7 @@ Tracks incremental scan progress for each file/chunk:
 {
   scanId: "scan_1766557110880_3f101e7b_file_chunk_1",
   sessionScanId: "scan_1766557110880_3f101e7b",
-  filePath: "/root/lanagent-repo/src/api/core/apiManager.js",
+  filePath: "<agent-repo-path>/src/api/core/apiManager.js",
   relativePath: "../lanagent-repo/src/api/core/apiManager.js",
   isChunked: true,
   chunkIndex: 1,

@@ -8,7 +8,7 @@ set -e  # Exit on error
 echo "🚀 Setting up LAN Agent project..."
 
 # Configuration
-PROJECT_DIR="/media/veracrypt1/NodeJS/LANAgent"
+PROJECT_DIR="/path/to/lanagent"
 NODE_VERSION="20"  # LTS
 ENV_TYPE="development"  # Will be 'production' on server
 

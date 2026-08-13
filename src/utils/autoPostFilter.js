@@ -7,7 +7,38 @@
 // `session` covers docs/sessions/* commits — the pathspec excludes pure-session
 // commits, but a commit touching both src/ AND docs/sessions/ slips through
 // the pathspec since git log still shows it. Defense in depth.
-const SENSITIVE_COMMIT_PATTERNS = /outreach|proposal|business.plan|linkedin|strategy|monetiz|revenue|pricing|release.plan|contact.email|partner|investor|funding|pitch|competitive|roadmap|session.*\d{4}-\d{2}-\d{2}|docs\(session/i;
+//
+// CRYPTO-TRADING terms (2026-06-19): the agent's own trading positions, token picks,
+// and watchlist are PRIVATE — publicly announcing them invites front-running / dumps.
+// A `feat(crypto): … add CAKE fallback` commit subject leaked the operator's token pick
+// to social before this was added (the subject had no `strategy`/`revenue` keyword to
+// catch it). `crypto` matches the conventional-commit scope `feat(crypto)`/`fix(crypto)`
+// used by the trading subsystem; the rest catch trading mechanics by name. Erring toward
+// over-exclusion here is intentional — a missed crypto-service announcement is cheap, a
+// leaked trading pick is not.
+// 2026-08-02: a second class of trading commit was found slipping through — six
+// subjects from two days of work survived the filter, including
+// `enable cross-DEX arbitrage (SKYNET excluded, $10 cap)` and
+// `tranche-scalp profit gate uses lot basis`. Neither the conventional-commit
+// `crypto` scope nor any listed mechanic appeared in them, yet both describe live
+// trading configuration. Arbitrage/tranche/scalp terms and trade-sizing language
+// are now covered explicitly. Same reasoning as above: over-exclusion is cheap.
+// 2026-08-03: the session-report guard only matched `session` followed by a DATE, or
+// the conventional-commit form `docs(session)`. A subject reading `docs: session report
+// part 2 …` matched neither and passed straight through — as did `session summary` and
+// `session handoff`. Session reports are private dev notes that must never reach a
+// public post, so the undated phrasings are now covered. Deliberately NOT a blanket
+// /session/: this product has real user-session and session-timeout commits that must
+// still be postable, so only the report-ish suffixes and `handoff`/`wrap-up` match.
+const SENSITIVE_COMMIT_PATTERNS = /outreach|proposal|business.plan|linkedin|strategy|monetiz|revenue|pricing|release.plan|contact.email|partner|investor|funding|pitch|competitive|roadmap|session.*\d{4}-\d{2}-\d{2}|docs\(session|session.?(report|summary|notes|wrap|handoff|recap|log)|\bhandoff\b|wrap.?up|crypto|token.?trad|watchlist|dollar.?max|native.?max|realized.?pnl|circuit.?break|grid.?buy|scale.?out|trailing.?stop|dump.?threshold|capital.?alloc|arbitrag|arb.?sig|arb.?scan|arbsignal|cross.?dex|max.?trade|trade.?cap|trade.?size|tranche|scalp|lot.?basis|profit.?gate|spread.?percent|min.?profit|take.?profit|stop.?loss|entry.?anchor|sell.?anchor|avg.?entry|average.?entry|cost.?basis|baseline.?reset|idle.?easing|price.?impact|slippage|cow.?swap|cowswap|\bcow\b|\bdex\b|\bswap|\bv[234]\b(?![.\d])|uniswap|pancake|1inch|permit2|order.?book|liquidity|mev|front.?run|quoter|routing|regime|heartbeat.?tick|position.?ledger|\bdm\b|\btt\b/i;
+// NOTE on `\bv[234]\b` above: the negative lookahead `(?![.\d])` is load-bearing.
+// It was added to catch DEX protocol versions ("V3 routing", "uniswap v4"), but a bare
+// \bv[234]\b also matches the leading `v2` of every `v2.25.x` RELEASE version, because
+// `.` ends a word. Every versioned commit subject in this repo — i.e. nearly all of
+// them — was therefore being discarded before the composer ever saw it. That fails
+// safe (it over-blocks rather than leaks) which is exactly why it went unnoticed: the
+// symptom is a composer with no material, not a bad post. Verified 2026-08-04 by
+// running the deployed filter over the day's own subjects.
 
 // Git paths excluded from commit context gathering (pathspecs for git log)
 const EXCLUDED_GIT_PATHS = [':!docs/proposals', ':!docs/sessions'];
@@ -19,6 +50,7 @@ const SENSITIVE_OUTPUT_RULES = [
   'Never discuss investor relations, funding plans, competitive analysis, or internal roadmaps.',
   'Never discuss business plans, outreach campaigns, partnership proposals, monetization strategy, release plans, or any content from internal proposals or documentation.',
   'NEVER mention internal development sessions, session reports, session wrap-ups, debug sessions, or anything about your operator\'s workflow — those are private dev notes, not public-facing content.',
+  'NEVER post about crypto TRADING activity — specific token picks, the active/secondary trading token, watchlist tokens, buy/sell/grid trades, positions, PnL, allocations, or the trading strategies. These are private trading operations; announcing them invites front-running. (Promoting the operator\'s OWN published token or generic paid crypto SERVICES is fine; live trading positions/picks are not.)',
 ];
 
 // Openers that the AI keeps producing despite being told not to.
