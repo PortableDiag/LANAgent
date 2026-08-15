@@ -10,7 +10,7 @@ The Self-Modification Service autonomously analyzes the codebase, generates impr
 Code Analysis → AI Improvement Generation → Code Validation → PR Creation → Manual Review
 ```
 
-All work happens in `/root/lanagent-repo/` (dev repo). Changes are submitted as GitHub PRs, never applied directly to production.
+All work happens in `<agent-repo-path>` (dev repo). Changes are submitted as GitHub PRs, never applied directly to production.
 
 ## Key Files
 
