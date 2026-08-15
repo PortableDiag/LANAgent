@@ -130,11 +130,17 @@ class StrategyRegistry {
         const key = address.toLowerCase();
         let instance = this.tokenTraders.get(key);
         if (!instance) {
-            instance = new TokenTraderStrategy();
-            this.tokenTraders.set(key, instance);
-            logger.info(`Token trader instance created for ${config.tokenSymbol || address}`);
+            // The token-trader strategy is not part of this distribution. This method used to
+            // construct it directly, which was an unbound identifier here and therefore a
+            // guaranteed ReferenceError the first time the route was called — a crash rather
+            // than an answer. Refuse clearly instead.
+            throw new Error(
+                'The token-trader strategy is not included in this distribution. ' +
+                'Register a strategy with registerStrategy() and use it via setActiveStrategy(), ' +
+                'or see docs/guides/CUSTOM-STRATEGIES.md to implement your own.'
+            );
         }
-        // Copy shared watchlist from base token_trader
+        // Copy shared watchlist from the base token_trader, when one is registered
         const baseTrader = this.strategies.get('token_trader');
         if (baseTrader?.config?.tokenWatchlist) {
             instance.config.tokenWatchlist = baseTrader.config.tokenWatchlist;
@@ -306,29 +312,16 @@ class StrategyRegistry {
             }
         }
 
-        // Restore multi-token trader instances
-        if (data.tokenTraders) {
-            for (const [address, state] of Object.entries(data.tokenTraders)) {
-                const instance = new TokenTraderStrategy();
-                instance.importState(state);
-                this.tokenTraders.set(address, instance);
-                logger.debug(`Imported token trader instance: ${instance.config.tokenSymbol || address}`);
-            }
-            if (this.tokenTraders.size > 0) {
-                logger.info(`Restored ${this.tokenTraders.size} token trader instance(s)`);
-            }
-        } else if (data.secondaryStrategy === 'token_trader') {
-            // Backward compat: migrate single token_trader to multi-instance map
-            const tt = this.strategies.get('token_trader');
-            if (tt?.config?.tokenAddress) {
-                const addr = tt.config.tokenAddress.toLowerCase();
-                this.tokenTraders.set(addr, tt);
-                // Replace base instance with fresh one (for shared config like watchlist)
-                const freshBase = new TokenTraderStrategy();
-                freshBase.config.tokenWatchlist = tt.config.tokenWatchlist || [];
-                this.strategies.set('token_trader', freshBase);
-                logger.info(`Migrated single token_trader (${tt.config.tokenSymbol}) to multi-instance map`);
-            }
+        // Multi-token trader instances are not restorable in this distribution: the strategy
+        // they belong to is not included. Both branches here previously constructed it by
+        // name, which is unbound in this build — so importing any saved state that contained
+        // token traders threw, taking the whole restore down with it. Skip that section and
+        // say so, rather than losing every other strategy's state to it.
+        if (data.tokenTraders && Object.keys(data.tokenTraders).length > 0) {
+            logger.warn(
+                `Skipping ${Object.keys(data.tokenTraders).length} saved token-trader instance(s): ` +
+                'that strategy is not included in this distribution. All other strategy state was restored.'
+            );
         }
 
         this.initialized = true;
