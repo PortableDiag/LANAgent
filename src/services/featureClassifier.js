@@ -6,6 +6,38 @@ const DEV_PATH = process.env.AGENT_REPO_PATH || '/root/lanagent-repo';
 const PLUGINS_DIR = 'src/api/plugins';
 
 /**
+ * Files the AUTONOMOUS selection paths (this classifier, and the AI
+ * file-discovery fallback in selfModification) must never pick as a modify
+ * target. An operator naming one of these explicitly is unaffected.
+ *
+ * - src/core/agent.js is the boot chain on a box with no failover: an
+ *   unattended rewrite there turns any later restart into an outage risk,
+ *   and it was the selector's favourite default target.
+ * - Vendored/minified builds (three.js et al) are not our code and were only
+ *   ever candidates because they are large .js files in the tree.
+ */
+const AUTONOMOUS_TARGET_DENYLIST = [
+  { match: p => p === 'src/core/agent.js', reason: 'boot-chain file - never an autonomous modify target' },
+  { match: p => /(^|\/)(vendor|vendored|third[-_]?party)\//i.test(p), reason: 'vendored code - not a modify target' },
+  { match: p => /(^|\/)three(\.min|\.module)?(\.min)?\.js$/i.test(p), reason: 'vendored three.js build - not a modify target' },
+  { match: p => /\.min\.js$/i.test(p), reason: 'minified build artifact - not a modify target' }
+];
+
+/**
+ * Why a repo-relative path may not be autonomously modified, or null if it
+ * is allowed. Exported for the AI file-discovery fallback in
+ * selfModification.js so the two selection paths cannot disagree.
+ */
+export function deniedAutonomousTargetReason(relPath) {
+  if (typeof relPath !== 'string' || !relPath) return null;
+  const normalized = relPath.replace(/^\.?\/+/, '');
+  for (const rule of AUTONOMOUS_TARGET_DENYLIST) {
+    if (rule.match(normalized)) return rule.reason;
+  }
+  return null;
+}
+
+/**
  * Classify a discovered feature into an actionable plan for self-modification.
  *
  * Three outcomes:
@@ -59,6 +91,10 @@ export async function classifyDiscoveredFeature(agent, feature) {
   if (kind === 'modify') {
     if (!targetFile) {
       return { kind: 'skip', targetFile: null, rationale: 'classifier: modify but no targetFile' };
+    }
+    const denied = deniedAutonomousTargetReason(targetFile);
+    if (denied) {
+      return { kind: 'skip', targetFile: null, rationale: `classifier: ${denied} (${targetFile})` };
     }
     const abs = path.isAbsolute(targetFile) ? targetFile : path.join(DEV_PATH, targetFile);
     try {
@@ -156,7 +192,7 @@ Description: ${feature.description || '(none)'}
 ${feature.implementation?.suggestion ? `Suggestion:  ${feature.implementation.suggestion}` : ''}${snippetSummary}
 
 DECIDE ONE OF:
-1. "modify" — feature is a clean enhancement to ONE specific existing file. Return the repo-relative path of that file (must exist).
+1. "modify" — feature is a clean enhancement to ONE specific existing file. Return the repo-relative path of that file (must exist). NEVER pick src/core/agent.js (boot-critical) or any vendored/minified file — those are rejected.
 2. "new-plugin" — feature is a self-contained capability that fits the plugin pattern. Return a fresh repo-relative path under src/api/plugins/<name>.js where <name> is lowercase, no spaces, doesn't collide with the list above, and doesn't start with _, "template", "helper", "advanced", "enhancements", or "providers".
 3. "skip" — feature is not implementable as a clean plugin or single-file modify. Examples: requires new core service (multi-file edit to agent.js), too vague, depends on missing infra, would need a UI overhaul, duplicates an existing plugin, is an idea not a feature.
 
