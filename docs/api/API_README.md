@@ -1065,7 +1065,7 @@ Same-day follow-up to v2.25.21. Operator reported the Recent Payments table on t
 | Issue | Fix |
 |-------|-----|
 | Recent Payments table crammed even on desktop | Dashboard grid switched from `grid-3` (three equal columns) to a new `dash-grid` template — Payments 2fr, Agents 1fr, Tickets 1fr on desktop; Payments spans both columns on tablet (≤980px); all three stacked on phone (≤600px). |
-| Long emails (e.g. `portablediag@protonmail.com`) pushed numeric columns into a sliver | Email cells get the new `email-cell` class with `text-overflow: ellipsis` and a `title=` tooltip showing the full address on hover. |
+| Long emails (e.g. `<ADMIN_EMAIL>`) pushed numeric columns into a sliver | Email cells get the new `email-cell` class with `text-overflow: ellipsis` and a `title=` tooltip showing the full address on hover. |
 | Top nav unusable on mobile (9 links wrapped onto multiple lines, shoved sign-out off-screen) | Hamburger toggle button (☰) appears on screens ≤880px and collapses the topnav into a vertical drawer below the header. |
 | Wide tables (Wallets, Audit log) overflowed the page on narrow screens | Tables now `overflow-x: auto` inside their containers with momentum touch scrolling. |
 | Cards / KPIs / toolbars too dense on phone | Reduced card padding, smaller h1 + KPI values, `kv` grid drops to single column at narrow widths, toolbar inputs flex to fill, bar-row labels narrow. |
@@ -6656,6 +6656,8 @@ curl -H "X-API-Key: your_key" http://localhost/api/media/image/stats
   - `POST /api/crypto/swap/execute` - Execute token swap (supports `forceV3`, `preferV3`, `expectedOutputUsd` options)
   - `GET /api/crypto/swap/networks` - List supported networks
   - `GET /api/crypto/swap/pending` - View pending swaps
+  - `GET /api/crypto/swap/cow-stats` - CoW quote outcome tally (failures, 429s, backoff state)
+  - `GET /api/crypto/strategy/exit-analysis` - Position exit records aggregated by trigger
 
 - **Network Settings** - Per-network trading controls (persisted in MongoDB)
   - `GET /api/crypto/settings/disabled-networks` - Get list of disabled networks

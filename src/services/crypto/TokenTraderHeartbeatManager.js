@@ -264,6 +264,32 @@ class TokenTraderHeartbeatManager {
         }
       }
 
+      // Exit forensics: stamp any elapsed outcome horizons using the price this tick
+      // already resolved. Costs no extra RPC and never blocks the tick.
+      //
+      // Read the price from tokenPriceHistory — the strategy pushes {price, timestamp}
+      // there on every analysis, and it is what revenueService trusts for the same job.
+      // This first shipped reading state.lastPrice/state.currentPrice, which DO NOT EXIST
+      // on the strategy: they are assembled by getTokenTraderStatus() for the API payload.
+      // tickPrice was therefore always undefined, the guard below always failed, and the
+      // backfill never ran once — the instrumentation was inert while looking healthy.
+      const priceHist = updatedTrader?.state?.tokenPriceHistory;
+      const tickPrice = (Array.isArray(priceHist) && priceHist.length
+        ? priceHist[priceHist.length - 1]?.price
+        : null) ?? updatedTrader?.state?.currentTokenPrice;
+
+      if (tickPrice > 0 && typeof this.cryptoAgent?.backfillExitHorizons === 'function') {
+        this.cryptoAgent.backfillExitHorizons(state.symbol, tickPrice)
+          .catch(err => logger.debug(`Exit horizon backfill skipped: ${err.message}`));
+      } else if (typeof this.cryptoAgent?.backfillExitHorizons === 'function') {
+        // Never fail silently again: an unresolvable price means the outcome columns
+        // quietly stay null forever, which reads as "no data yet" rather than "broken".
+        state._exitPriceMisses = (state._exitPriceMisses || 0) + 1;
+        if (state._exitPriceMisses === 1 || state._exitPriceMisses % 20 === 0) {
+          logger.warn(`Exit forensics: no usable ${state.symbol} price on this tick (miss #${state._exitPriceMisses}) — outcome horizons are NOT being stamped`);
+        }
+      }
+
       const elapsed = Date.now() - startTime;
       const action = result?.action || 'hold';
       if (action !== 'hold') {

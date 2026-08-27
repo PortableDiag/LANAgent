@@ -3,7 +3,7 @@ import { EventEmitter } from 'events';
 import simpleGit from 'simple-git';
 import path from 'path';
 import fs from 'fs/promises';
-import { existsSync } from 'fs';
+import { existsSync, readdirSync } from 'fs';
 import { execSync } from 'child_process';
 import { resolveGitRemote } from '../utils/gitRemote.js';
 import crypto from 'crypto';
@@ -17,6 +17,23 @@ import { GitHubFeatureDiscovery } from './githubFeatureDiscovery.js';
 import { escapeMarkdown } from '../utils/markdown.js';
 import { getProvider, PROVIDER_TYPES } from './gitHosting/index.js';
 import { GitHostingSettings } from '../models/GitHostingSettings.js';
+import { deniedAutonomousTargetReason } from './featureClassifier.js';
+import {
+  buildFileOutline,
+  renderOutline,
+  extractRegions,
+  headRegion,
+  parseSearchReplaceBlocks,
+  applySearchReplaceBlocks,
+  SEARCH_MARKER,
+  DIVIDER_MARKER,
+  REPLACE_MARKER
+} from './selfModPartialEdit.js';
+
+// Escape a string for literal use inside a RegExp. Import specifiers are
+// identifiers so this is belt-and-braces, but the import *path* is arbitrary
+// text and does reach a pattern.
+const escapeRegex = (str) => str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 const AUTO_APPROVE_SETTING_KEY = 'featureRequests.autoApprove';
 
@@ -1686,14 +1703,22 @@ Pick the single most relevant existing file that should be enhanced.`;
           if (jsonMatch) {
             const parsed = JSON.parse(jsonMatch[0]);
             const candidateFile = parsed.file;
-            // Verify AI-suggested file actually exists before accepting it
-            const candidatePath = path.isAbsolute(candidateFile) ? candidateFile : path.join(this.developmentPath, candidateFile);
-            try {
-              await fs.access(candidatePath);
-              targetFile = candidateFile;
-              logger.info(`🎯 AI selected target file: ${targetFile} (reason: ${parsed.reason})`);
-            } catch {
-              logger.warn(`🚫 AI suggested non-existent file: ${candidateFile} — rejecting`);
+            // Autonomous selection must respect the same deny-list as the
+            // classifier: the boot chain and vendored builds are never
+            // default targets, no matter how relevant they look.
+            const denied = deniedAutonomousTargetReason(candidateFile);
+            if (denied) {
+              logger.warn(`🚫 AI suggested denied target ${candidateFile} (${denied}) — rejecting`);
+            } else {
+              // Verify AI-suggested file actually exists before accepting it
+              const candidatePath = path.isAbsolute(candidateFile) ? candidateFile : path.join(this.developmentPath, candidateFile);
+              try {
+                await fs.access(candidatePath);
+                targetFile = candidateFile;
+                logger.info(`🎯 AI selected target file: ${targetFile} (reason: ${parsed.reason})`);
+              } catch {
+                logger.warn(`🚫 AI suggested non-existent file: ${candidateFile} — rejecting`);
+              }
             }
           }
         } catch (aiError) {
@@ -1735,39 +1760,69 @@ Pick the single most relevant existing file that should be enhanced.`;
 
       const content = await fs.readFile(repoFile, 'utf8');
 
-      // PREFLIGHT: refuse targets too large to be rewritten whole.
-      // This path asks the model for the COMPLETE modified file, so a file
-      // bigger than the output cap can only come back truncated — which
-      // validation then rejects as CODE_REMOVED, after up to 3 paid retries.
-      // src/core/agent.js (~318 KB, ~93K tokens against a 32K cap) failed this
-      // way 28 times between 2026-07-21 and 2026-08-05, always with the same
-      // "shrank by 75%" because the shrink is the cap, not the model's choice.
-      // Fail before spending anything; a partial-edit path is the real fix for
-      // large files.
+      // PREFLIGHT: a whole-file rewrite asks the model for the COMPLETE
+      // modified file, so a file bigger than the output cap can only come
+      // back truncated — src/core/agent.js failed this way 28 times before
+      // the v2.25.190 refusal. Refusing then made ~34 files permanently
+      // unimprovable (133 recorded refusals). Oversized targets now route to
+      // the partial-edit path instead: locate the relevant regions, edit only
+      // those via SEARCH/REPLACE blocks, splice locally — output scales with
+      // the change, not the file. The spliced result flows into the SAME
+      // remediation/validation/PR pipeline below.
       const targetTokens = Math.ceil(content.length * UPGRADE_TOKENS_PER_CHAR);
-      if (targetTokens > MAX_REWRITABLE_TOKENS) {
-        if (improvement.discoveredFeatureId) {
-          try {
-            const { default: DiscoveredFeature } = await import('../models/DiscoveredFeature.js');
-            await DiscoveredFeature.findByIdAndUpdate(improvement.discoveredFeatureId, {
-              status: 'rejected',
-              rejectionReason: `Target file too large for whole-file rewrite: ${targetFile} (~${targetTokens} tokens > ${MAX_REWRITABLE_TOKENS})`
-            });
-          } catch (dbErr) {
-            logger.warn(`Failed to mark oversized discovered feature: ${dbErr.message}`);
-          }
-        }
-        throw new Error(
-          `Target file too large for whole-file rewrite: ${targetFile} is ~${targetTokens} tokens, ` +
-          `above the ~${MAX_REWRITABLE_TOKENS} a ${UPGRADE_OUTPUT_CAP}-token response can return — ` +
-          `skipping "${improvement.title}" instead of generating a truncated file`
+      const usePartialEdit = targetTokens > MAX_REWRITABLE_TOKENS;
+
+      let modifiedCode;
+      if (usePartialEdit) {
+        logger.info(
+          `Partial-edit path: ${targetFile} is ~${targetTokens} tokens ` +
+          `(> ${MAX_REWRITABLE_TOKENS} whole-file limit) — editing by region instead of rewriting`
         );
+        try {
+          modifiedCode = await this.generatePartialEditUpgrade(improvement, content, targetFile);
+        } catch (partialErr) {
+          if (improvement.discoveredFeatureId) {
+            try {
+              const { default: DiscoveredFeature } = await import('../models/DiscoveredFeature.js');
+              await DiscoveredFeature.findByIdAndUpdate(improvement.discoveredFeatureId, {
+                status: 'rejected',
+                rejectionReason: `Partial edit of oversized file failed: ${targetFile} (~${targetTokens} tokens): ${partialErr.message}`
+              });
+            } catch (dbErr) {
+              logger.warn(`Failed to mark oversized discovered feature: ${dbErr.message}`);
+            }
+          }
+          throw new Error(
+            `Partial edit failed for oversized file ${targetFile} (~${targetTokens} tokens): ${partialErr.message}`
+          );
+        }
+      } else {
+        // Use AI to generate the specific code changes with retry logic
+        modifiedCode = await this.generateAICodeUpgradeWithRetry(improvement, content);
       }
 
-      // Use AI to generate the specific code changes with retry logic
-      let modifiedCode = await this.generateAICodeUpgradeWithRetry(improvement, content);
-
       if (modifiedCode && modifiedCode !== content) {
+        // Repair the mechanical import faults before judging the generation.
+        // An unused specifier or a mis-counted '../' is not a reason to throw a
+        // whole upgrade away, and half of all blocked generations died on one.
+        const remediation = this.remediateGeneratedImports(content, modifiedCode, repoFile);
+        if (remediation.fixes.length > 0) {
+          modifiedCode = remediation.code;
+          logger.info(
+            `Auto-repaired ${remediation.fixes.length} import issue(s) before validation: ` +
+            remediation.fixes.join('; ')
+          );
+        }
+
+        // If stripping the dead imports left nothing, the generation really was
+        // only imports - which is the TRIVIAL_CHANGE the validator would catch
+        // if there were still an import line for it to see.
+        if (modifiedCode === content) {
+          throw new Error(
+            'Code validation failed: TRIVIAL_CHANGE: the generation added nothing but unused imports'
+          );
+        }
+
         // Verify the changes are meaningful
         const changeStats = this.analyzeCodeChanges(content, modifiedCode);
         logger.info(`Code changes: +${changeStats.linesAdded} -${changeStats.linesRemoved} (~${changeStats.percentChanged}% modified)`);
@@ -2181,22 +2236,19 @@ OUTPUT REQUIREMENTS:
   }
 
   /**
-   * Create detailed upgrade prompt based on improvement type and attempt number
+   * GitHub/discovered-feature reference context for a generation prompt.
+   * Shared by the whole-file and partial-edit paths. Returns '' when the
+   * improvement carries no references or the lookups fail.
    */
-  async createUpgradePrompt(improvement, originalCode, attempt) {
-    const specificInstructions = this.getSpecificInstructions(improvement.type, attempt);
-    const exampleChanges = this.getExampleChanges(improvement.type);
-    const antiPatterns = this.getAntiPatterns();
-    
-    // Check for GitHub references from feature request or discovered feature
+  async buildGithubContext(improvement) {
     let githubContext = '';
-    
+
     if (improvement.featureRequestId) {
       try {
         const featureRequest = await FeatureRequest.findById(improvement.featureRequestId);
         if (featureRequest && featureRequest.githubReferences && featureRequest.githubReferences.length > 0) {
           githubContext = '\n\nGITHUB IMPLEMENTATION REFERENCES:\n';
-          
+
           for (const ref of featureRequest.githubReferences.slice(0, 3)) { // Limit to 3 references
             githubContext += `\nFrom ${ref.repository} (${ref.filePath}):\n`;
             if (ref.contextNotes) {
@@ -2206,7 +2258,7 @@ OUTPUT REQUIREMENTS:
               githubContext += `Reference code:\n\`\`\`${ref.language || 'javascript'}\n${ref.codeSnippet}\n\`\`\`\n`;
             }
           }
-          
+
           if (featureRequest.implementationExamples && featureRequest.implementationExamples.length > 0) {
             githubContext += '\n\nIMPLEMENTATION EXAMPLES:\n';
             for (const example of featureRequest.implementationExamples.slice(0, 2)) {
@@ -2227,7 +2279,7 @@ OUTPUT REQUIREMENTS:
           githubContext = '\n\nDISCOVERED FEATURE IMPLEMENTATION REFERENCES:\n';
           githubContext += `\nFeature: ${discoveredFeature.title}\n`;
           githubContext += `From repository: ${discoveredFeature.source.repository}\n`;
-          
+
           for (const snippet of discoveredFeature.codeSnippets.slice(0, 3)) {
             githubContext += `\nCode from ${snippet.filePath || 'unknown file'}:\n`;
             if (snippet.contextNotes) {
@@ -2235,12 +2287,12 @@ OUTPUT REQUIREMENTS:
             }
             githubContext += `\`\`\`${snippet.language || 'javascript'}\n${snippet.code}\n\`\`\`\n`;
           }
-          
+
           if (discoveredFeature.implementation && discoveredFeature.implementation.suggestion) {
             githubContext += `\nImplementation suggestion: ${discoveredFeature.implementation.suggestion}\n`;
           }
         }
-        
+
         // Also search for similar discovered features for more examples
         const keywords = discoveredFeature.title.toLowerCase().split(' ').filter(w => w.length > 3);
         const similarFeatures = await this.searchDiscoveredFeaturesForExamples(keywords.slice(0, 3));
@@ -2256,7 +2308,211 @@ OUTPUT REQUIREMENTS:
         logger.debug(`Could not fetch discovered feature references: ${error.message}`);
       }
     }
-    
+
+    return githubContext;
+  }
+
+  /**
+   * Partial-edit upgrade for files too large to rewrite whole.
+   *
+   * Two model calls instead of one oversized one:
+   *   1. selectEditRegions — the model sees a structural OUTLINE (a few KB)
+   *      and names the regions the change touches.
+   *   2. createPartialEditPrompt — the model sees only those regions
+   *      verbatim and returns SEARCH/REPLACE blocks, which are applied
+   *      locally. Output scales with the change, not the file.
+   *
+   * Returns the full modified file content, so the caller's remediation /
+   * validation / PR pipeline runs exactly as it does for whole-file
+   * rewrites. Throws on any failure; the caller records the rejection.
+   */
+  async generatePartialEditUpgrade(improvement, content, targetFile) {
+    const { entries, balanced } = buildFileOutline(content);
+    if (!balanced) {
+      throw new Error(`cannot outline ${targetFile}: brace scan desynced - file content defeats the scanner`);
+    }
+    if (entries.length < 3) {
+      throw new Error(`cannot outline ${targetFile}: only ${entries.length} construct(s) found`);
+    }
+
+    const regions = await this.selectEditRegions(improvement, content, entries, targetFile);
+    // The import/prologue head is always shown - nearly every change needs
+    // to add or verify an import, and import edits need an excerpt to anchor
+    // their SEARCH text in.
+    const excerpts = extractRegions(content, [headRegion(content), ...regions], {
+      contextLines: 6,
+      maxTotalLines: 700
+    });
+    if (excerpts.length === 0) {
+      throw new Error('region selection produced no extractable excerpts');
+    }
+    logger.info(
+      `Partial-edit path: ${excerpts.length} excerpt(s), ` +
+      `${excerpts.reduce((n, e) => n + (e.endLine - e.startLine + 1), 0)} lines of ${targetFile} shown to the editor`
+    );
+
+    const maxRetries = 3;
+    let lastError = null;
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      const prompt = await this.createPartialEditPrompt(improvement, targetFile, excerpts, attempt, lastError);
+      const response = await this.agent.providerManager.generateResponse(prompt, {
+        // Blocks scale with the change; 10K visible tokens is roomy for any
+        // sane edit, and the headroom exists for reasoning models exactly as
+        // in the whole-file path.
+        maxTokens: Math.min(UPGRADE_OUTPUT_CAP, 10000 + UPGRADE_REASONING_HEADROOM),
+        temperature: attempt === 1 ? 0.1 : 0.2,
+        additionalParams: { reasoning_effort: 'minimal' }
+      });
+
+      try {
+        const blocks = parseSearchReplaceBlocks(response?.content || '');
+        const { code, applied } = applySearchReplaceBlocks(content, blocks);
+        logger.info(`Partial-edit path: applied ${applied}/${blocks.length} block(s) to ${targetFile} on attempt ${attempt}`);
+        return code;
+      } catch (err) {
+        // Only the coded, model-correctable failures earn a retry with
+        // feedback; anything else (provider failure, our own bug) surfaces.
+        if (!err.code) throw err;
+        lastError = err;
+        logger.warn(`Partial-edit attempt ${attempt}/${maxRetries} rejected: ${err.message}`);
+      }
+    }
+    throw new Error(`no applicable SEARCH/REPLACE blocks after ${maxRetries} attempts (last: ${lastError?.message})`);
+  }
+
+  /**
+   * Stage 1 of the partial-edit path: show the model the file OUTLINE and
+   * the improvement, get back which regions the edit needs to see.
+   */
+  async selectEditRegions(improvement, content, entries, targetFile) {
+    const MAX_OUTLINE_ENTRIES = 600;
+    const shown = entries.slice(0, MAX_OUTLINE_ENTRIES);
+    const outlineText = renderOutline(shown) +
+      (entries.length > shown.length ? `\n... (${entries.length - shown.length} more constructs not shown)` : '');
+    const totalLines = content.split('\n').length;
+
+    const prompt = `You are planning a code change to ONE large file. You cannot see the file body - only this structural outline (startLine-endLine, kind, name, first line). Pick the few regions the change must edit or must see for context.
+
+FILE: ${targetFile} (${totalLines} lines)
+
+CHANGE TO IMPLEMENT:
+- Title: ${improvement.title || '(untitled)'}
+- Type: ${improvement.type}
+- Description: ${improvement.description}
+${improvement.implementation ? `- Implementation notes: ${typeof improvement.implementation === 'string' ? improvement.implementation : improvement.implementation.suggestion || ''}` : ''}
+
+OUTLINE:
+${outlineText}
+
+Respond with ONLY a JSON object, no prose, no markdown fences:
+{"regions":[{"name":"<construct name from the outline>"} or {"startLine":N,"endLine":M}, ...]}
+
+Rules:
+- At most 4 regions. Prefer naming constructs from the outline over raw line numbers.
+- Choose the SMALLEST set of regions that lets the change be written - the place new code goes, plus anything it must call or mirror.
+- The file's import header is included automatically - do not select it.`;
+
+    const response = await this.agent.providerManager.generateResponse(prompt, {
+      maxTokens: 600,
+      temperature: 0.2,
+      additionalParams: { reasoning_effort: 'minimal' }
+    });
+
+    const match = (response?.content || '').match(/\{[\s\S]*\}/);
+    if (!match) {
+      throw new Error('region selection returned no JSON');
+    }
+    let parsed;
+    try {
+      parsed = JSON.parse(match[0]);
+    } catch {
+      throw new Error('region selection returned unparseable JSON');
+    }
+
+    const byName = new Map(entries.map(e => [e.name, e]));
+    const regions = [];
+    for (const r of (Array.isArray(parsed.regions) ? parsed.regions : []).slice(0, 5)) {
+      const named = typeof r.name === 'string' ? byName.get(r.name.trim()) : null;
+      if (named) {
+        regions.push({ startLine: named.startLine, endLine: named.endLine });
+        continue;
+      }
+      const s = Number(r.startLine);
+      const e = Number(r.endLine);
+      if (Number.isFinite(s) && Number.isFinite(e) && e >= s) {
+        regions.push({ startLine: Math.max(1, s), endLine: Math.min(totalLines, e) });
+      }
+    }
+    if (regions.length === 0) {
+      throw new Error('region selection returned no usable regions');
+    }
+    logger.info(`Partial-edit path: model selected ${regions.length} region(s): ` +
+      regions.map(r => `${r.startLine}-${r.endLine}`).join(', '));
+    return regions;
+  }
+
+  /**
+   * Stage 2 prompt: the selected excerpts verbatim, the change, and the
+   * SEARCH/REPLACE contract. lastError, when present, is the coded failure
+   * from the previous attempt, quoted back so the model can correct it.
+   */
+  async createPartialEditPrompt(improvement, targetFile, excerpts, attempt, lastError) {
+    const specificInstructions = this.getSpecificInstructions(improvement.type, attempt);
+    const githubContext = await this.buildGithubContext(improvement);
+
+    const excerptText = excerpts
+      .map(e => `=== EXCERPT: lines ${e.startLine}-${e.endLine} of ${targetFile} ===\n${e.text}\n=== END EXCERPT ===`)
+      .join('\n\n');
+
+    return `You are an expert software engineer implementing a capability upgrade for LANAgent by editing a LARGE file you can only see excerpts of.
+
+UPGRADE DETAILS:
+- Type: ${improvement.type}
+- Description: ${improvement.description}
+- Implementation: ${improvement.implementation || 'AI-determined implementation'}
+- File: ${targetFile}
+- Attempt: ${attempt}/3${lastError ? ' (RETRY)' : ''}
+${lastError ? `\nPREVIOUS ATTEMPT FAILED WITH:\n${lastError.message}\nFix that problem and resend ALL blocks.\n` : ''}
+${specificInstructions}
+${githubContext}
+
+FILE EXCERPTS (the ONLY parts of the file you may edit):
+${excerptText}
+
+OUTPUT FORMAT - respond with ONLY SEARCH/REPLACE blocks, nothing else:
+${SEARCH_MARKER}
+(existing lines, copied EXACTLY from an excerpt above)
+${DIVIDER_MARKER}
+(the replacement lines)
+${REPLACE_MARKER}
+
+BLOCK RULES (violations make the edit unappliable):
+1. SEARCH text must be copied character-for-character from the excerpts - same indentation, same blank lines. Never invent or paraphrase lines.
+2. Each SEARCH must be unique in the whole file: include enough surrounding lines (typically 3-8) to pin one location.
+3. Keep SEARCH sections under 30 lines. Use several small blocks rather than one big one.
+4. To ADD code, SEARCH for the exact lines it goes next to and REPLACE with those same lines plus the new code.
+5. To add an import, anchor a block on the existing import lines shown in the first excerpt.
+6. Only edit within the excerpts. If the change cannot be made there, output a single block whose REPLACE equals its SEARCH.
+7. Whole lines only - never start or end a SEARCH mid-line.
+
+CODE RULES:
+- Every import you add MUST be used; never remove existing imports, comments, or methods.
+- No stub implementations, no TODO placeholders, no Math.random() fake data, no invented SDK methods or endpoints.
+- Follow the existing code style around the edit point. Do not change function signatures existing callers rely on.
+- This project uses ES modules; count directory depth for relative import paths (src/services/*.js uses ../utils/, src/api/plugins/*.js uses ../../utils/).
+
+Respond with the blocks only - no explanations, no markdown fences.`;
+  }
+
+  /**
+   * Create detailed upgrade prompt based on improvement type and attempt number
+   */
+  async createUpgradePrompt(improvement, originalCode, attempt) {
+    const specificInstructions = this.getSpecificInstructions(improvement.type, attempt);
+    const exampleChanges = this.getExampleChanges(improvement.type);
+    const antiPatterns = this.getAntiPatterns();
+    const githubContext = await this.buildGithubContext(improvement);
+
     return `You are an expert software engineer implementing a capability upgrade for LANAgent.
 
 UPGRADE DETAILS:
@@ -2794,6 +3050,132 @@ COMMON MISTAKES TO AVOID:
     }
 
     return warnings;
+  }
+
+  /**
+   * Repair the two mechanical import faults that block roughly half of all
+   * generated upgrades (259 DEAD_IMPORT + 197 INVALID_IMPORT_PATH out of 933
+   * recorded validation failures). Neither is a reasoning error: an unused
+   * specifier is lint, and a mis-depthed relative path is arithmetic. Throwing
+   * the whole generation away over either wastes the work, so fix them here and
+   * let validateGeneratedCode judge what is actually left.
+   *
+   * Only NEWLY ADDED imports are touched. A dead import that was already in the
+   * file is the file's own business, and the validator deliberately downgrades
+   * that case to a warning.
+   *
+   * @returns {{ code: string, fixes: string[] }}
+   */
+  remediateGeneratedImports(originalCode, modifiedCode, targetFile) {
+    const fixes = [];
+    let code = modifiedCode;
+
+    // --- Dead imports: drop the unused specifier, or the whole statement ---
+    // Deliberately the same matcher validateGeneratedCode uses, so remediation
+    // and validation always agree on what counts as an import.
+    const importRe = /import\s+(?:{[^}]+}|\w+)\s+from\s+['"][^'"]+['"]/g;
+    for (const importLine of code.match(importRe) || []) {
+      if (originalCode.includes(importLine.trim())) continue; // pre-existing
+      const nameMatch = importLine.match(/import\s+(?:{([^}]+)}|(\w+))/);
+      if (!nameMatch) continue;
+
+      const specifiers = nameMatch[1]
+        ? nameMatch[1].split(',').map(spec => spec.trim()).filter(Boolean)
+        : [nameMatch[2]];
+
+      const body = code.replace(/import[\s\S]*?from\s+['"][^'"]+['"];?\n?/g, '');
+      const live = specifiers.filter(spec => {
+        const local = spec.split(' as ').pop().trim();
+        if (!local || local === 'default') return true;
+        return new RegExp(`\\b${escapeRegex(local)}\\b`).test(body);
+      });
+      if (live.length === specifiers.length) continue;
+
+      const dead = specifiers.filter(spec => !live.includes(spec));
+      if (live.length === 0) {
+        // Nothing left worth importing - take the statement out with its line.
+        code = code.replace(
+          new RegExp(`^[ \\t]*${escapeRegex(importLine)};?[ \\t]*\\r?\\n?`, 'm'),
+          ''
+        );
+        fixes.push(`removed unused import of ${dead.join(', ')}`);
+      } else {
+        code = code.replace(importLine, importLine.replace(/{[^}]+}/, `{ ${live.join(', ')} }`));
+        fixes.push(`dropped unused specifier(s) ${dead.join(', ')}`);
+      }
+    }
+
+    // --- Unresolvable new relative imports: repair only when unambiguous ---
+    const origPaths = new Set(
+      [...originalCode.matchAll(/from\s+['"](\.[^'"]+)['"]/g)].map(m => m[1])
+    );
+    const fileDir = path.dirname(targetFile);
+    const seen = new Set();
+    for (const match of [...code.matchAll(/from\s+['"](\.[^'"]+)['"]/g)]) {
+      const importPath = match[1];
+      if (origPaths.has(importPath) || seen.has(importPath)) continue;
+      seen.add(importPath);
+
+      let resolved;
+      try {
+        resolved = path.resolve(fileDir, importPath);
+      } catch {
+        continue;
+      }
+      if ([resolved, `${resolved}.js`, `${resolved}/index.js`].some(c => existsSync(c))) continue;
+
+      const repaired = this.findImportTarget(importPath, fileDir);
+      if (!repaired) continue; // ambiguous or unknown - let the validator block it
+
+      code = code
+        .split(`'${importPath}'`).join(`'${repaired}'`)
+        .split(`"${importPath}"`).join(`"${repaired}"`);
+      fixes.push(`repaired import path '${importPath}' -> '${repaired}'`);
+    }
+
+    return { code, fixes };
+  }
+
+  /**
+   * Resolve a broken relative import to a real file, but only when the answer
+   * is unambiguous. The dominant failure is the wrong number of '../' hops to a
+   * file whose NAME is correct, so search the repo's src tree for that basename
+   * and accept exactly one match. Zero or several means guessing, and a wrong
+   * guess is worse than the rejection it replaces.
+   *
+   * @returns {string|null} a POSIX relative path, or null to leave it alone
+   */
+  findImportTarget(importPath, fromDir) {
+    const wanted = path.basename(importPath).replace(/\.js$/, '');
+    // 'index' names a directory entry point, not a unique file - too generic.
+    if (!wanted || wanted === 'index' || wanted === '.' || wanted === '..') return null;
+
+    const searchRoot = path.join(this.developmentPath, 'src');
+    if (!existsSync(searchRoot)) return null;
+
+    const matches = [];
+    const walk = (dir, depth) => {
+      if (depth > 8 || matches.length > 1) return;
+      let entries;
+      try {
+        entries = readdirSync(dir, { withFileTypes: true });
+      } catch {
+        return;
+      }
+      for (const entry of entries) {
+        if (entry.name.startsWith('.') || entry.name === 'node_modules') continue;
+        const full = path.join(dir, entry.name);
+        if (entry.isDirectory()) walk(full, depth + 1);
+        else if (entry.isFile() && entry.name === `${wanted}.js`) matches.push(full);
+        if (matches.length > 1) return;
+      }
+    };
+    walk(searchRoot, 0);
+
+    if (matches.length !== 1) return null;
+    let rel = path.relative(fromDir, matches[0]);
+    if (!rel.startsWith('.')) rel = `./${rel}`;
+    return rel.split(path.sep).join('/');
   }
 
   validateGeneratedCode(originalCode, modifiedCode, targetFile, improvement = null) {

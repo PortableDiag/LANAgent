@@ -1,5 +1,6 @@
 import { logger } from '../../utils/logger.js';
 import { MCPToken } from '../../models/MCPToken.js';
+import { validateJsonSchema } from '../../utils/jsonUtils.js';
 
 /**
  * MCP Server Service (Framework)
@@ -59,6 +60,11 @@ export class MCPServerService {
    * Get list of tools that would be exposed
    * Based on enabled plugins
    */
+  // Deliberately uncached. The submitted version memoised this list for five
+  // minutes, which means a plugin the operator just DISABLED keeps appearing as
+  // an exposed tool until the entry expires. Building the list is a walk over
+  // already-loaded plugin objects — there is no cost here worth trading a stale
+  // permission surface for.
   getExposedTools() {
     if (!this.agent?.apiManager) {
       return [];
@@ -97,12 +103,72 @@ export class MCPServerService {
    * Generate JSON Schema for a command's parameters
    */
   generateInputSchema(command) {
-    // Basic schema - would be enhanced with actual parameter definitions
-    return {
+    // Enhanced schema generation with actual parameter definitions
+    const schema = {
       type: 'object',
       properties: {},
       required: []
     };
+
+    if (command.parameters && Array.isArray(command.parameters)) {
+      for (const param of command.parameters) {
+        schema.properties[param.name] = {
+          type: param.type || 'string',
+          description: param.description || ''
+        };
+
+        if (param.required) {
+          schema.required.push(param.name);
+        }
+
+        // Add additional constraints if defined
+        if (param.enum) {
+          schema.properties[param.name].enum = param.enum;
+        }
+
+        if (param.pattern) {
+          schema.properties[param.name].pattern = param.pattern;
+        }
+
+        if (param.minimum !== undefined) {
+          schema.properties[param.name].minimum = param.minimum;
+        }
+
+        if (param.maximum !== undefined) {
+          schema.properties[param.name].maximum = param.maximum;
+        }
+      }
+    }
+
+    return schema;
+  }
+
+  /**
+   * Validate parameters against command schema
+   * @param {object} args - Arguments to validate
+   * @param {object} schema - JSON Schema to validate against
+   * @returns {object} Validation result
+   */
+  validateParameters(args, schema) {
+    try {
+      // validateJsonSchema returns an ARRAY OF ERRORS, not { valid, errors }.
+      // Reading `result.valid` off an array yields undefined, which is falsy, so
+      // the caller's `if (!validation.valid)` fired on every single call and
+      // every MCP tool invocation came back "Invalid parameters" — including the
+      // valid ones. An empty array is the success case.
+      const errors = validateJsonSchema(args ?? {}, schema ?? {});
+      const list = Array.isArray(errors) ? errors : [];
+      return {
+        valid: list.length === 0,
+        errors: list.map(e => (typeof e === 'string' ? e : e?.message ?? String(e)))
+      };
+    } catch (error) {
+      logger.error('Parameter validation error:', error);
+      return {
+        valid: false,
+        errors: [error.message]
+      };
+    }
   }
 
   /**
@@ -144,13 +210,44 @@ export class MCPServerService {
       };
     }
 
-    // Execute via API manager
+    // Get tool definition for schema validation
+    const tools = this.getExposedTools();
+    const toolDef = tools.find(t => t.name === toolName);
+    
+    if (!toolDef) {
+      return {
+        success: false,
+        error: 'Tool not found'
+      };
+    }
+
+    // Validate parameters
+    const validation = this.validateParameters(args, toolDef.inputSchema);
+    if (!validation.valid) {
+      return {
+        success: false,
+        error: 'Invalid parameters',
+        details: validation.errors
+      };
+    }
+
+    // Executed directly, NOT through retryOperation.
+    //
+    // An MCP tool is whatever a plugin exposes — sending mail, running a command,
+    // moving funds. Replaying one after a failure can repeat the side effect, and
+    // nothing here knows which tools are idempotent. The submitted version passed
+    // `retries: retryAttempts || 0` believing that made it opt-in, but
+    // retryUtils.js:158 resolves `dynamicParams.retries || retries`, so a caller
+    // asking for zero does not reliably get zero. Opt-in retry belongs to the
+    // plugin that knows whether its own operation is safe to repeat.
     try {
       const startTime = Date.now();
+
       const result = await this.agent.apiManager.execute(pluginName, {
         action,
         ...args
       });
+
       const executionTime = Date.now() - startTime;
       logger.debug(`MCP tool executed: ${toolName} (${executionTime}ms)`);
 
@@ -205,6 +302,27 @@ export class MCPServerService {
     }
 
     return tools;
+  }
+
+  /**
+   * Health check endpoint
+   * @returns {object} Health status
+   */
+  getHealthStatus() {
+    return {
+      status: 'ok',
+      timestamp: new Date().toISOString(),
+      components: {
+        server: {
+          status: this.running ? 'up' : 'down',
+          port: this.port
+        },
+        tools: {
+          status: 'up',
+          count: this.getExposedTools().length
+        }
+      }
+    };
   }
 }
 

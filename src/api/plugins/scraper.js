@@ -33,7 +33,19 @@ async function primePageWithSavedCookies(page, url) {
     }));
     if (safe.length === 0) return 0;
     await page.setCookie(...safe);
-    logger.info(`[CookieJar] Primed ${safe.length} saved cookie(s) for ${hostname} (incl. ${safe.map(c => c.name).join(', ')})`);
+    // Freshness is reported, not acted on. The half-life behind it is an
+    // estimate (see ScrapeCookieJar), and the only way to calibrate it is to
+    // pair a jar's score with whether the page that used it actually cleared the
+    // challenge. Folding the number into the line that already fires on every
+    // prime starts that record without adding a log line or a decision.
+    let freshness = null;
+    try {
+      freshness = await ScrapeCookieJar.getCookieFreshnessScore(hostname);
+    } catch (scoreErr) {
+      logger.debug(`[CookieJar] Freshness score unavailable for ${hostname}: ${scoreErr.message}`);
+    }
+    const freshnessNote = Number.isFinite(freshness) ? `, freshness ${freshness}/100` : '';
+    logger.info(`[CookieJar] Primed ${safe.length} saved cookie(s) for ${hostname} (incl. ${safe.map(c => c.name).join(', ')}${freshnessNote})`);
     return safe.length;
   } catch (err) {
     logger.debug(`[CookieJar] Prime failed for ${url}: ${err.message}`);
@@ -260,6 +272,9 @@ export default class ScraperPlugin extends BasePlugin {
     this.cache = new Map();
     this.cacheTimeout = 3600000; // 1 hour (60 * 60 * 1000 milliseconds)
     this.cacheCleanupInterval = null;
+    // Upper bound on a page body held for conditional-request revalidation. Bodies
+    // above this are not cached, and their validators are dropped with them.
+    this.maxCachedBodyChars = 2000000;
     
     // Default user agents
     this.defaultUserAgents = {
@@ -586,12 +601,23 @@ export default class ScraperPlugin extends BasePlugin {
     });
 
     content.text = content.text.replace(/\s+/g, ' ').trim();
-    if (content.text.length > 5000) {
-      content.text = content.text.substring(0, 5000) + '...';
-    }
 
     return { content, $ };
   }
+
+  // NOTE ON LENGTH: extracted text is returned WHOLE and is never truncated here.
+  //
+  // Three sites used to clip it to 5000 characters and append an ellipsis. That
+  // limit arrived with the original plugin in Dec 2025, when this existed only to
+  // pull a pasted URL's text into the assistant's prompt, and 5000 characters was
+  // a reasonable prompt budget. The paid scrape API was built later on top of the
+  // same plugin and silently inherited it — customers paid for a page and got the
+  // first 5000 characters of it, with no flag and no original length to tell them
+  // so. How much of a page a caller wants is the caller's decision.
+  //
+  // The prompt budget that motivated the cap still exists, but it now lives at the
+  // consumer that needs it (agent.interpretCommandOutput), which is the only place
+  // that knows a payload is about to become an LLM prompt.
 
   /**
    * Scrape via FlareSolverr — bypasses Cloudflare Turnstile / managed challenges.
@@ -641,10 +667,14 @@ export default class ScraperPlugin extends BasePlugin {
   }
 
   async scrapeWithCheerio(url, options) {
-    const { selector, userAgent } = options;
-    
+    const { selector, userAgent, bypassCache = false } = options;
+
     const cacheKey = `headers_${url}`;
-    const cachedHeaders = this.getCachedData(cacheKey) || {};
+    const bodyCacheKey = `content_${url}`;
+    // bypassCache callers are asking for a fresh body, and a 304 cannot give them
+    // one — so send no validators at all in that case rather than inviting a
+    // revalidation we would have to answer from cache.
+    const cachedHeaders = bypassCache ? {} : (this.getCachedData(cacheKey) || {});
     
     // Select user agent
     let agent;
@@ -667,20 +697,9 @@ export default class ScraperPlugin extends BasePlugin {
     }
     
     try {
-      const response = await this.axiosInstance.get(url, { headers });
-      
-      const newHeaders = {};
-      if (response.headers.etag) {
-        newHeaders.etag = response.headers.etag;
-      }
-      if (response.headers['last-modified']) {
-        newHeaders.lastModified = response.headers['last-modified'];
-      }
-      if (Object.keys(newHeaders).length > 0) {
-        this.setCachedData(cacheKey, newHeaders);
-      }
-      
-      const $ = cheerio.load(response.data);
+      const html = await this._fetchHtml(url, headers, cacheKey, bodyCacheKey);
+
+      const $ = cheerio.load(html);
       
       let content = {
         title: $('meta[property="og:title"]').first().attr('content') || $('title').text() || $('h1').first().text(),
@@ -730,10 +749,6 @@ export default class ScraperPlugin extends BasePlugin {
       
       content.text = content.text.replace(/\s+/g, ' ').trim();
       
-      if (content.text.length > 5000) {
-        content.text = content.text.substring(0, 5000) + '...';
-      }
-      
       content.jsonld = await this.extractJsonLd($);
       content.microdata = this.extractMicrodata($);
       
@@ -741,17 +756,17 @@ export default class ScraperPlugin extends BasePlugin {
         success: true,
         url,
         content,
-        method: 'cheerio'
+        method: 'cheerio',
+        // The HTML this result was actually parsed from. Previously only
+        // FlareSolverr surfaced _rawHtml, so the paid API's `html` field fell
+        // through to an independent re-fetch — a second request with no cookies,
+        // no VPN exit and no bypass, which on a protected page could return a
+        // challenge or paywall stub while `text` held the real content. This is
+        // the same bytes cheerio parsed, so `text` and `html` now describe one
+        // fetch of one page.
+        _rawHtml: typeof html === 'string' ? html : undefined
       };
     } catch (error) {
-      if (error.response && error.response.status === 304) {
-        const contentCacheKey = `content_${url}`;
-        const cachedContent = this.getCachedData(contentCacheKey);
-        if (cachedContent) {
-          return cachedContent;
-        }
-        throw new Error('Content not modified but no cached content available');
-      }
       // Sanitize axios errors — they contain circular refs (TLSSocket)
       const status = error.response?.status;
       const statusText = error.response?.statusText || '';
@@ -759,6 +774,53 @@ export default class ScraperPlugin extends BasePlugin {
         ? `HTTP ${status} ${statusText} from ${url}`
         : `${error.code || error.message || 'Request failed'} for ${url}`;
       throw new Error(msg);
+    }
+  }
+
+  // Fetch a page body, honouring conditional requests: returns HTML from the
+  // response, or on 304 the cached body those validators refer to.
+  //
+  // The body and its ETag/Last-Modified must be stored together. Caching a validator
+  // without the body it describes turns every later revalidation into a hard failure —
+  // the server answers 304 and there is nothing to serve. That was the live bug: the
+  // validators were cached, the body never was, and `content_<url>` had no writer at
+  // all, so any re-scrape of an ETag-serving site threw outright.
+  async _fetchHtml(url, headers, headerCacheKey, bodyCacheKey) {
+    try {
+      const response = await this.axiosInstance.get(url, { headers });
+      const html = response.data;
+
+      const newHeaders = {};
+      if (response.headers.etag) {
+        newHeaders.etag = response.headers.etag;
+      }
+      if (response.headers['last-modified']) {
+        newHeaders.lastModified = response.headers['last-modified'];
+      }
+
+      // Only remember validators for a body we can actually replay.
+      const cacheable = typeof html === 'string' && html.length <= this.maxCachedBodyChars;
+      if (cacheable && Object.keys(newHeaders).length > 0) {
+        this.setCachedData(bodyCacheKey, html);
+        this.setCachedData(headerCacheKey, newHeaders);
+      } else {
+        this.cache.delete(headerCacheKey);
+        this.cache.delete(bodyCacheKey);
+      }
+
+      return html;
+    } catch (error) {
+      if (error.response && error.response.status === 304) {
+        const cachedBody = this.getCachedData(bodyCacheKey);
+        if (cachedBody) {
+          return cachedBody;
+        }
+        // Validators outlived their body — drop them so the next attempt is
+        // unconditional instead of failing the same way again.
+        this.cache.delete(headerCacheKey);
+        throw new Error('Content not modified but no cached content available');
+      }
+      throw error;
     }
   }
 
@@ -958,18 +1020,26 @@ export default class ScraperPlugin extends BasePlugin {
       
       content.text = content.text.replace(/\s+/g, ' ').trim();
       
-      if (content.text.length > 5000) {
-        content.text = content.text.substring(0, 5000) + '...';
-      }
-      
       content.jsonld = await this.extractJsonLdFromPage(page);
       content.microdata = await this.extractMicrodataFromPage(page);
-      
+
+      // The rendered DOM, which for a JS page is the only HTML that matches the
+      // extracted text — the server's original response would not contain it.
+      // Captured here so the paid API's `html` field stops falling back to a
+      // plain re-fetch that cannot execute the page's scripts.
+      let renderedHtml;
+      try {
+        renderedHtml = await page.content();
+      } catch (htmlErr) {
+        logger.debug(`Could not capture rendered HTML for ${url}: ${htmlErr.message}`);
+      }
+
       return {
         success: true,
         url,
         content,
-        method: 'puppeteer'
+        method: 'puppeteer',
+        _rawHtml: typeof renderedHtml === 'string' ? renderedHtml : undefined
       };
       
     } finally {

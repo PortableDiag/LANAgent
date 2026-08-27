@@ -101,9 +101,15 @@ function isRemovepaywallsWrapper(result) {
 // exists after a client-side render. This is the federalregister.gov failure mode:
 // a 10.5KB shell that the old length gate (htmlLen < 8000) let through as a
 // "successful full" snapshot. Signature: substantial _rawHtml but tiny extracted
-// text, or explicit app-shell / "enable JavaScript" markers. (_rawHtml is only
-// populated by the cheerio path; Puppeteer/FlareSolverr execute the JS, so their
-// output is real content, not a shell — hence the html-present guard.)
+// text, or explicit app-shell / "enable JavaScript" markers.
+//
+// This guard used to be unreachable. It requires _rawHtml, and the note here said
+// the cheerio path populated it — it did not: only FlareSolverr ever set it, so
+// `if (!html) return false` bailed on every cheerio result and the SPA case this
+// was written for could not be detected by the check meant to catch it. Cheerio
+// now returns the bytes it parsed and Puppeteer returns its rendered DOM, so the
+// check finally does what it says. Puppeteer output reaching here is a rendered
+// DOM rather than a shell, which fails the markers on its own merits.
 const APP_SHELL_MARKERS = /<div id=["'](root|app|__next|__nuxt|svelte|gatsby-focus-wrapper)["'][^>]*>\s*<\/div>|you (need to )?enable javascript|please enable javascript|enable js to|<noscript>[^<]*(javascript|enable)/i;
 function looksLikeJsShell(result) {
   const html = typeof result?._rawHtml === 'string' ? result._rawHtml : '';
@@ -122,8 +128,10 @@ function isUnusableResult(result) {
   if (!result?.success) return true;
   const htmlLen = typeof result._rawHtml === 'string' ? result._rawHtml.length : 0;
   const textLen = typeof result.content?.text === 'string' ? result.content.text.length : 0;
-  // textLen is primary (Puppeteer doesn't surface _rawHtml). htmlLen is a
-  // belt-and-suspenders gate when raw HTML IS available.
+  // textLen is primary. htmlLen is a belt-and-suspenders gate; every tier now
+  // surfaces raw HTML, so it is no longer permanently zero outside FlareSolverr.
+  // htmlLen === 0 still counts as stub-shaped, so a tier that genuinely returns
+  // no HTML is not given a free pass just because the second half cannot measure.
   const lengthLooksStub = textLen < 500 && (htmlLen === 0 || htmlLen < 8000);
   return lengthLooksStub || looksLikeChallengePage(result) || looksLikeJsShell(result);
 }
@@ -716,10 +724,12 @@ async function executeScrape(req, { url, selectors, extractType = 'text', userAg
       if (hostname && CRAWLER_FRIENDLY_PAYWALL_HOSTS.has(hostname)) {
         const htmlLen = typeof rawResult._rawHtml === 'string' ? rawResult._rawHtml.length : 0;
         const textLen = typeof rawResult.content?.text === 'string' ? rawResult.content.text.length : 0;
-        // v2.25.86: Mirror the v2.25.84 Wayback-gate fix here — Puppeteer
-        // never populates _rawHtml (it surfaces extracted content only), so
-        // the old `htmlLen > 0` requirement made this gate impossible to
-        // satisfy after v2.25.83 routed Twitterbot retry through Puppeteer.
+        // v2.25.86: Mirror the v2.25.84 Wayback-gate fix here — at the time,
+        // Puppeteer did not populate _rawHtml (it surfaced extracted content
+        // only), so the old `htmlLen > 0` requirement made this gate impossible
+        // to satisfy after v2.25.83 routed Twitterbot retry through Puppeteer.
+        // Puppeteer now returns its rendered DOM, so htmlLen is real here; the
+        // `htmlLen === 0` branch is kept for tiers that still surface none.
         // textLen is the primary signal; htmlLen is a belt-and-suspenders
         // gate when raw HTML IS available. Also short-circuits on captcha
         // pages even when they're longer than 500B of inert JS.
@@ -1034,17 +1044,31 @@ async function executeScrape(req, { url, selectors, extractType = 'text', userAg
     response.removepaywallUrl = result._removepaywallUrl;
   }
 
-  // Use raw HTML from FlareSolverr if available; otherwise do a direct fetch.
+  // Prefer the HTML the scrape itself produced. Every tier surfaces it now —
+  // FlareSolverr's response, cheerio's parsed bytes, Puppeteer's rendered DOM —
+  // so `html` and `text` describe the same fetch of the same page.
+  //
+  // The re-fetch below is a genuine last resort and carries a real caveat: it is a
+  // separate plain request with no cookies, no VPN exit and no bypass, so on a
+  // protected page it can return a challenge or paywall stub while `text` holds
+  // the content the scrape worked to get. It used to run on nearly every
+  // non-FlareSolverr result, which is how `html` and `text` could disagree.
   if (typeof result._rawHtml === 'string' && result._rawHtml.length > 0) {
     response._rawHtml = result._rawHtml;
   } else {
+    logger.info(`[ExternalScrape] No HTML from the ${result.method || 'unknown'} path for ${url} — falling back to a direct re-fetch (no cookies/VPN/bypass)`);
     try {
       const axios = (await import('axios')).default;
       const htmlRes = await axios.get(url, { timeout: 15000, maxContentLength: 5 * 1024 * 1024, headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' } });
       if (typeof htmlRes.data === 'string') {
         response._rawHtml = htmlRes.data;
+        response._htmlFromRefetch = true;
       }
-    } catch { /* HTML fetch optional, don't fail */ }
+    } catch (htmlErr) {
+      // Silently omitting `html` after charging for a tier that promises it is
+      // exactly the sort of gap a caller cannot debug from the outside.
+      logger.warn(`[ExternalScrape] HTML re-fetch failed for ${url}: ${htmlErr.message} — the response will carry no html field`);
+    }
   }
 
   // Capture screenshot for render tier via separate screenshot action.
@@ -1314,6 +1338,19 @@ router.post('/',
         // Add HTML for full/render tiers
         if ((tier === 'full' || tier === 'render') && result._rawHtml) {
           result.data.html = result._rawHtml;
+          // True when the html did NOT come from the scrape itself but from a
+          // plain re-fetch with no cookies, VPN exit or bypass. On a protected
+          // page that html can disagree with the text beside it, and a caller
+          // has no way to tell from the outside unless we say so.
+          if (result._htmlFromRefetch) result.data.htmlFromRefetch = true;
+        }
+        // Sizes are reported so a caller never has to measure a field to find out
+        // whether they received all of it. Extracted text is returned whole — the
+        // 5000-character clip that used to apply here is gone — and these make
+        // that verifiable rather than something to take on trust.
+        if (result.data && typeof result.data === 'object') {
+          if (typeof result.data.text === 'string') result.data.textLength = result.data.text.length;
+          if (typeof result.data.html === 'string') result.data.htmlLength = result.data.html.length;
         }
         // Add screenshot for render tier
         if (tier === 'render' && result._screenshot) {

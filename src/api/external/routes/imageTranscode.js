@@ -9,6 +9,10 @@
  * Transport: multipart field "image" (≤100MB, under the CF body cap), or base64
  * in "image", or "url" for sources too large to upload. Encoder is sharp
  * (libvips→libaom); at quality:82/effort:2/4:4:4 output matches a libaom q82 4:4:4.
+ *
+ * Optional "preset" supplies DEFAULTS for target/quality/effort/lossless. Any
+ * field sent explicitly always wins, so adding a preset can never change the
+ * result for a caller that already specifies its own parameters.
  */
 import { Router } from 'express';
 import multer from 'multer';
@@ -34,6 +38,36 @@ const limiter = new ConcurrencyLimiter({ maxConcurrent: MAX_CONCURRENT, maxQueue
 // Bound libvips threads so two parallel encodes don't saturate every core.
 try { sharp.concurrency(4); } catch { /* older sharp */ }
 
+// Named starting points, so a caller that just wants "make it small" doesn't have
+// to know libvips quality/effort scales. `target` is part of the preset because a
+// preset that only moved quality would be misleading — "smallest" has to be allowed
+// to pick the codec that actually gets smallest, not just lower the quality of
+// whatever the caller happened to ask for.
+export const PRESET_CONFIGS = {
+  smallest: { target: 'avif', quality: 55, effort: 4 },
+  balanced: { target: 'webp', quality: 80, effort: 3 },
+  quality:  { target: 'webp', quality: 90, effort: 2 },
+  lossless: { target: 'png',  quality: 100, effort: 1, lossless: true }
+};
+
+export const PRESET_NAMES = Object.keys(PRESET_CONFIGS);
+
+/**
+ * Resolve a preset name to its parameter defaults.
+ * @param {string} preset - The preset name
+ * @returns {Object|null} - The preset's defaults, or null if the name is unknown
+ */
+export function mapPresetToParams(preset) {
+  const config = PRESET_CONFIGS[preset];
+  if (!config) return null;
+  return {
+    target: config.target,
+    quality: config.quality,
+    effort: config.effort,
+    lossless: config.lossless === true
+  };
+}
+
 // Parse multipart up front (before we charge), with graceful oversize handling.
 function uploadImage(req, res, next) {
   imgUpload.single('image')(req, res, (err) => {
@@ -55,15 +89,36 @@ router.post('/',
   async (req, res) => {
     const body = req.body || {};
     const num = (v) => (v != null && v !== '' ? Number(v) : undefined);
+    
+    // Reject an unknown preset before charging rather than silently ignoring it —
+    // a typo'd preset would otherwise bill 2 credits and quietly return defaults.
+    // targetError:true so creditDebit refunds.
+    const preset = body.preset ? mapPresetToParams(body.preset) : null;
+    if (body.preset && !preset) {
+      return res.status(400).json({
+        success: false,
+        targetError: true,
+        error: `Invalid preset: ${body.preset}. Valid presets are: ${PRESET_NAMES.join(', ')}`
+      });
+    }
+
+    // Preset supplies defaults only; anything the caller sent explicitly wins. This
+    // keeps every existing caller byte-identical — they all send target/quality
+    // themselves — and makes "preset plus one override" the obvious usage.
+    // `lossless` and `passthroughBytes` are checked for presence rather than
+    // truthiness so an explicit false is honoured instead of falling back.
+    const has = (k) => body[k] != null && body[k] !== '';
+    const bool = (v) => v === true || v === 'true';
     const params = {
-      target: body.target,
+      target: body.target || preset?.target,
       sourceFormat: body.sourceFormat,
-      quality: num(body.quality),
-      effort: num(body.effort),
+      quality: has('quality') ? num(body.quality) : preset?.quality,
+      effort: has('effort') ? num(body.effort) : preset?.effort,
       maxPixels: num(body.maxPixels),
-      lossless: body.lossless === true || body.lossless === 'true',
+      lossless: has('lossless') ? bool(body.lossless) : (preset?.lossless ?? false),
       passthroughBytes: !(body.passthroughBytes === false || body.passthroughBytes === 'false')
     };
+
     if (req.file?.buffer) params._buffer = req.file.buffer;
     else if (body.image) params.image = body.image;
     else if (body.base64) params.base64 = body.base64;

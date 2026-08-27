@@ -328,7 +328,15 @@ export class WebInterface {
           health,
           reportAgeSeconds: reportAgeMs !== null ? Math.floor(reportAgeMs / 1000) : null,
           timestamp: new Date().toISOString(),
-          uptime: process.uptime()
+          uptime: process.uptime(),
+          // Reported so the gateway can publish a live version instead of a
+          // hardcoded constant. Its /stats fed lanagent.net's release badge from
+          // an anonymous fetch of the public repo's stats.json; that repo went
+          // private, the fetch 404s, and the badge sat on a stale fallback
+          // (v2.24.9) for months. An agent knows its own version — no
+          // credentials and nothing to keep in sync by hand.
+          version: packageVersion,
+          plugins: this.agent?.apiManager?.apis?.size ?? null
         });
       } catch (error) {
         res.status(500).json({

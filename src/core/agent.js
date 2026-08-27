@@ -737,8 +737,21 @@ export class Agent extends EventEmitter {
           )
         ]);
       } catch (error) {
-        logger.error(`Failed to start ${name} interface:`, error.message);
-        
+        // Telegram's long-polling launch routinely overruns the 120s bound and the bot
+        // then reports itself started and functional moments later — the sequence is
+        // right there in the log. Logging that at ERROR put ~104 non-events into
+        // errors.log, which is precisely the noise that kept the real cause unread for
+        // months (the reason string itself was invisible until the logger splat fix in
+        // v2.25.219). A condition this code explicitly treats as survivable belongs at
+        // WARN. Anything that actually aborts startup is still an ERROR below.
+        const nonCritical = name === 'telegram';
+        const logLine = `Failed to start ${name} interface: ${error.message}`;
+        if (nonCritical) {
+          logger.warn(logLine);
+        } else {
+          logger.error(logLine);
+        }
+
         // For non-critical interfaces like Telegram, continue startup
         if (name === 'telegram') {
           logger.warn(`Telegram interface startup timeout - it may still initialize later`);
@@ -7059,14 +7072,34 @@ Respond naturally as if you're telling someone about your recent improvements. D
    */
   async interpretCommandOutput(userInput, plugin, action, result, rawOutput) {
     try {
+      // This is the only place a plugin's raw result becomes an LLM prompt, so
+      // it is the only place that has any business bounding its size.
+      //
+      // It used to inline the whole thing. That was survivable only because the
+      // scraper clipped its own text to 5000 characters — a limit that also
+      // reached the paid API, where it did not belong and has now been removed.
+      // Without a bound here, a single large page would be pasted into a prompt
+      // in full: a cost spike, and past the context window an outright failure.
+      // Every other plugin had the same exposure; the scraper was just the one
+      // carrying a private workaround.
+      //
+      // Trimmed with an explicit marker rather than silently, because a summary
+      // built from a truncated payload should say so.
+      const INTERPRET_PAYLOAD_LIMIT = 12000;
+      const trim = (value, label) => {
+        const str = typeof value === 'string' ? value : safeJsonStringify(value, 2);
+        if (typeof str !== 'string' || str.length <= INTERPRET_PAYLOAD_LIMIT) return str;
+        return `${str.slice(0, INTERPRET_PAYLOAD_LIMIT)}\n\n[${label} truncated for interpretation: showing ${INTERPRET_PAYLOAD_LIMIT} of ${str.length} characters. The full value was returned to the caller and is unaffected.]`;
+      };
+
       // Build context about what was executed
       const commandContext = `The user asked: "${userInput}"
 I executed: ${plugin}.${action}
 
 Raw output:
-${rawOutput}
+${trim(rawOutput, 'Raw output')}
 
-Full result data: ${typeof result === 'string' ? result : safeJsonStringify(result, 2)}`;
+Full result data: ${trim(result, 'Result data')}`;
 
       const interpretPrompt = `As ALICE, provide a friendly, conversational interpretation of this technical output.
 

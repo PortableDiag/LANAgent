@@ -726,15 +726,19 @@ class EnhancedSelfDiagnosticsService {
    */
   async collectSystemInfo() {
     try {
-      const [mem, disks, cpu, network, docker] = await Promise.all([
+      const [mem, disks, cpu, load, network, docker] = await Promise.all([
         si.mem(),
         si.fsSize(),
         si.cpu(),
+        si.currentLoad().catch(() => null),
         si.networkInterfaces(),
         si.dockerInfo().catch(() => null)
       ]);
 
       return {
+        // The report schema has always carried a cpuUsage field and the health-alert template
+        // renders it; nothing ever wrote it, so every alert read "CPU Usage: undefined%".
+        cpuUsage: typeof load?.currentLoad === 'number' ? load.currentLoad : undefined,
         memoryUsage: {
           total: mem.total,
           used: typeof mem.available === 'number' ? mem.total - mem.available : (mem.active ?? mem.used),
@@ -758,10 +762,14 @@ class EnhancedSelfDiagnosticsService {
           ip4: n.ip4,
           mac: n.mac
         })),
-        docker: docker ? {
-          running: docker.containers.running,
-          paused: docker.containers.paused,
-          stopped: docker.containers.stopped
+        // dockerInfo() reports flat counts — containersRunning/Paused/Stopped — and `containers`
+        // is the total, a number. Reading `containers.running` off it therefore yielded undefined
+        // on a Docker host (silently empty, never an error) and threw on a Docker-less one, where
+        // dockerInfo() resolves to {} rather than rejecting so the .catch() above never fired.
+        docker: typeof docker?.containers === 'number' ? {
+          running: docker.containersRunning,
+          paused: docker.containersPaused,
+          stopped: docker.containersStopped
         } : null,
         uptime: os.uptime(),
         loadAverage: os.loadavg(),

@@ -155,10 +155,23 @@ export async function retryOperation(operation, options = {}) {
   } = options;
 
   const dynamicParams = calculateDynamicRetryParams(context);
-  const finalRetries = dynamicParams.retries || retries;
-  const finalFactor = dynamicParams.factor || factor;
-  const finalMinTimeout = dynamicParams.minTimeout || minTimeout;
-  const finalMaxTimeout = dynamicParams.maxTimeout || maxTimeout;
+  // An EXPLICIT argument always wins over an inferred one, and `||` is not how you ask
+  // that question.
+  //
+  // This used to read `dynamicParams.retries || retries`, wrong twice over. First the
+  // precedence: once an operation has three recorded attempts calculateDynamicRetryParams
+  // always returns a retries value, so the caller's number was discarded on every
+  // subsequent call — inferred tuning silently outranked an explicit instruction. Second
+  // the operator: `retries: 0` means "do not retry this, the side effect is not safe to
+  // repeat", and `0 || 3` is 3, so a caller asking for none could get three on an
+  // operation it had marked unsafe to replay.
+  //
+  // `??` against the caller's own options object distinguishes "not supplied" from a
+  // deliberate zero; the dynamic value now only fills a gap the caller left.
+  const finalRetries = options.retries ?? dynamicParams.retries ?? retries;
+  const finalFactor = options.factor ?? dynamicParams.factor ?? factor;
+  const finalMinTimeout = options.minTimeout ?? dynamicParams.minTimeout ?? minTimeout;
+  const finalMaxTimeout = options.maxTimeout ?? dynamicParams.maxTimeout ?? maxTimeout;
 
   let lastError;
   let delay = finalMinTimeout;
@@ -322,12 +335,21 @@ export function isRetryableError(error) {
   }
   
   // MongoDB/Database errors that are retryable
-  if (error.name === 'MongoNetworkError' || 
+  if (error.name === 'MongoNetworkError' ||
       error.name === 'MongoTimeoutError' ||
       (error.code >= 11600 && error.code <= 11699)) { // MongoDB transient transaction errors
     return true;
   }
-  
+
+  // Mongoose buffers operations while the connection is still coming up and then rejects
+  // with a plain MongooseError — no `code`, and a name none of the checks above match — so
+  // this was classified non-retryable and every retry wrapper around a boot-time query
+  // silently gave up after one attempt. It is transient by definition: the only thing wrong
+  // is that the connection was not ready yet.
+  if (/buffering timed out/i.test(error.message || '')) {
+    return true;
+  }
+
   return false;
 }
 

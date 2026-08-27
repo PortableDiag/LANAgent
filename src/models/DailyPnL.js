@@ -7,10 +7,25 @@ const pnlAggregationCache = new NodeCache({ stdTTL: 300 });
 
 const dailyPnLSchema = new mongoose.Schema({
     date: { type: String, required: true, unique: true }, // YYYY-MM-DD
+    // realizedPnL / cumulativePnL cover the TOKEN TRADER only — that is what they
+    // have always meant, and every existing consumer (revenue reports, risk metrics,
+    // the dashboard) reads them that way. Their meaning is deliberately left alone.
     realizedPnL: { type: Number, default: 0 },
     gasCost: { type: Number, default: 0 },
     dailyNet: { type: Number, default: 0 },    // realizedPnL - gasCost
     cumulativePnL: { type: Number, default: 0 },
+    // DollarMaximizer, tracked alongside rather than folded in. Before this it had
+    // no per-day record at all: its P&L existed only as a lifetime running total plus
+    // a `pnlHistory` array that the agent wrote ONLY after a successful Telegram send
+    // and capped at 60 days, so a failed send silently lost a day and no aggregation
+    // could see DM at all. Asking "what did the agent make this month" could only be
+    // answered for one of its two strategies.
+    // NOTE ON MEANING: DM books a round trip on the BUY-BACK — the extra native it
+    // reacquires versus what the proceeds would have bought at the sell price. A sell
+    // with no buy-back yet is an OPEN leg and is deliberately not counted here; adding
+    // the sell side too would double-count the same cycle.
+    dmRealizedPnL: { type: Number, default: 0 },
+    dmCumulativePnL: { type: Number, default: 0 },
     buyCount: { type: Number, default: 0 },
     sellCount: { type: Number, default: 0 },
     buyVolume: { type: Number, default: 0 },
@@ -66,6 +81,7 @@ dailyPnLSchema.statics.getAggregatedPnL = async function({ groupBy = 'daily', st
         { $group: {
             _id: groupId,
             realizedPnL: { $sum: '$realizedPnL' },
+            dmRealizedPnL: { $sum: '$dmRealizedPnL' },
             gasCost: { $sum: '$gasCost' },
             dailyNet: { $sum: '$dailyNet' },
             buyCount: { $sum: '$buyCount' },
@@ -77,7 +93,10 @@ dailyPnLSchema.statics.getAggregatedPnL = async function({ groupBy = 'daily', st
         { $project: {
             _id: 0,
             period: '$_id',
-            realizedPnL: [redacted], gasCost: 1, dailyNet: 1,
+            realizedPnL: [redacted], dmRealizedPnL: 1, gasCost: 1, dailyNet: 1,
+            // Both strategies together — the figure "what did the agent make this
+            // period" actually wants, and which no caller could compute before.
+            combinedRealizedPnL: { $add: ['$realizedPnL', '$dmRealizedPnL'] },
             buyCount: 1, sellCount: 1, buyVolume: 1, sellVolume: 1, count: 1
         }},
         { $sort: { period: 1 } }

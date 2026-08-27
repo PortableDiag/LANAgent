@@ -71,6 +71,16 @@ class SkynetAutoStaker {
         }
       }
 
+      // Never stake below what the pending scam-report queue needs — a floor of
+      // 2× one fee starved a 16-deep queue for weeks (fee × count is pulled in
+      // one transferFrom, so the whole batch reverted every cycle).
+      try {
+        const queueReserve = await scammerRegistry.getQueueReserveRequirement();
+        if (Number.isFinite(queueReserve) && queueReserve > reserveFloor) {
+          reserveFloor = queueReserve;
+        }
+      } catch { /* keep configured floor */ }
+
       const minIncrement = await SystemSettings.getSetting('skynet.autoStake.minIncrement', DEFAULT_MIN_INCREMENT);
       const surplus = info.walletBalance - reserveFloor;
       if (surplus < minIncrement) {

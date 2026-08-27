@@ -72,6 +72,50 @@ router.get('/status', async (req, res) => {
 });
 
 // Portfolio overview for visualization (combines balances + positions + prices)
+// Spot prices for natives the strategy's own cache cannot supply.
+//
+// `handler.priceCache` is populated only for networks the strategy actively prices.
+// MATIC and XNO are never traded, so nothing ever wrote an entry for them and both
+// valued at $0.00 in every portfolio response — real balances reported as worthless.
+// The identical miss happens to EVERY network for roughly nine minutes after a restart,
+// where natives fell through to the rolling baseline (a reference the strategy measures
+// moves against, deliberately not spot) or, worse, a months-old entry price.
+//
+// Memoised for 60s to match the strategy cache's own TTL and to keep a dashboard poll
+// from hammering the upstream.
+const NATIVE_COINGECKO_IDS = {
+    ethereum: 'ethereum',
+    bsc: 'binancecoin',
+    polygon: 'matic-network',
+    nano: 'nano'
+};
+const _nativePriceFallback = new Map();
+const NATIVE_PRICE_FALLBACK_TTL_MS = 60 * 1000;
+
+async function fetchNativePriceFallback(network) {
+    const id = NATIVE_COINGECKO_IDS[network];
+    if (!id) return 0;
+
+    const memo = _nativePriceFallback.get(network);
+    if (memo && Date.now() - memo.ts < NATIVE_PRICE_FALLBACK_TTL_MS) return memo.price;
+
+    try {
+        const { default: axios } = await import('axios');
+        const resp = await axios.get('https://api.coingecko.com/api/v3/simple/price', {
+            params: { ids: id, vs_currencies: 'usd' },
+            timeout: 8000
+        });
+        const price = Number(resp.data?.[id]?.usd);
+        if (Number.isFinite(price) && price > 0) {
+            _nativePriceFallback.set(network, { price, ts: Date.now() });
+            return price;
+        }
+    } catch (err) {
+        logger.debug(`Portfolio: spot-price fallback failed for ${network}: ${err.message}`);
+    }
+    return 0;
+}
+
 router.get('/portfolio', async (req, res) => {
     try {
         if (!walletService.isInitialized()) {
@@ -90,6 +134,22 @@ router.get('/portfolio', async (req, res) => {
             balances = await walletService.getMainnetBalances();
         } catch { /* proceed with empty */ }
 
+        // What a holding is worth needs the CURRENT price, and this route reached for
+        // it in two places that are not one. The baseline lookup below keyed on
+        // `ETH/USD`-style pairs while the real baseline keys are `ethereum`/`bsc`, so
+        // it never matched and every native fell through to the position's ENTRY
+        // price — BNB was being valued at its 2026-07-20 entry, drifting further from
+        // the market every day it went untraded. A baseline would have been wrong too:
+        // it is the rolling reference the strategy measures moves *against*, deliberately
+        // not the spot price. The strategy's own 60s price cache is the figure it
+        // actually trades on, so value the book at that and keep the staler sources
+        // only as fallbacks.
+        const livePrice = (network) => {
+            const cached = handler?.priceCache?.get(`${network}_price`);
+            const price = Number(cached?.data?.price);
+            return Number.isFinite(price) && price > 0 ? price : 0;
+        };
+
         // Native tokens from wallet balances
         const nativeTokens = {
             eth: { symbol: 'ETH', name: 'Ethereum', network: 'ethereum' },
@@ -103,20 +163,30 @@ router.get('/portfolio', async (req, res) => {
             const rawBal = parseFloat(bal?.balance || bal || 0);
             if (rawBal <= 0 && !positions[info.network]) continue;
 
-            // Get price from baselines or positions
-            let price = 0;
-            let change24h = 0;
-            const baselineKey = `${info.symbol}/USD`;
-            if (baselines[baselineKey]?.price) {
-                price = baselines[baselineKey].price;
-            } else if (positions[info.network]?.entryPrice) {
+            // Live price first; baseline and entry price are progressively staler
+            // fallbacks used only when the cache has nothing for this network.
+            let price = livePrice(info.network);
+            let changeSinceEntry = 0;
+            // Live spot before any stale source: covers the untraded natives the cache
+            // never holds, and the post-restart window where it holds nothing at all.
+            if (!price) {
+                price = await fetchNativePriceFallback(info.network);
+            }
+            if (!price && baselines[info.network]?.price) {
+                price = baselines[info.network].price;
+            }
+            if (!price && positions[info.network]?.entryPrice) {
                 price = positions[info.network].entryPrice;
             }
 
-            // Try to get 24h change from position data
+            // This is the move since the strategy's own entry — for an untraded leg that
+            // can be a month of drift, and BNB was publishing a 32-day +20.9% under a field
+            // named `change24h`, which the web and VR views both rendered as "24h". No
+            // 24-hour figure is available on this route, so the number is emitted under a
+            // name that matches what it measures rather than one that overstates its recency.
             const pos = positions[info.network];
             if (pos?.entryPrice && price > 0) {
-                change24h = ((price - pos.entryPrice) / pos.entryPrice) * 100;
+                changeSinceEntry = ((price - pos.entryPrice) / pos.entryPrice) * 100;
             }
 
             const value = rawBal * price;
@@ -126,8 +196,8 @@ router.get('/portfolio', async (req, res) => {
                 balance: rawBal,
                 price,
                 value: Math.round(value * 100) / 100,
-                change24h: Math.round(change24h * 100) / 100,
-                volatility: Math.abs(change24h) / 10 || 0.2,
+                changeSinceEntry: Math.round(changeSinceEntry * 100) / 100,
+                volatility: Math.abs(changeSinceEntry) / 10 || 0.2,
                 network: info.network,
                 type: 'native'
             });
@@ -143,7 +213,7 @@ router.get('/portfolio', async (req, res) => {
                     balance: pos.stablecoinAmount,
                     price: 1,
                     value: Math.round(pos.stablecoinAmount * 100) / 100,
-                    change24h: 0,
+                    changeSinceEntry: 0,
                     volatility: 0.01,
                     network,
                     type: 'stablecoin'
@@ -155,13 +225,25 @@ router.get('/portfolio', async (req, res) => {
         if (handler) {
             try {
                 const strategyState = handler.getState();
+                const ttStatusByAddress = status?.tokenTraderStatus || {};
                 const tokenTraders = strategyState?.strategyRegistry?.tokenTraders;
                 if (tokenTraders) {
                     for (const [address, trader] of Object.entries(tokenTraders)) {
                         const cfg = trader.config || {};
                         const st = trader.state || {};
                         if (st.tokenBalance > 0 && cfg.tokenSymbol) {
-                            const tokenPrice = st.lastPrice || cfg.entryPrice || 0;
+                            // `lastPrice` is written by the executor into
+                            // state.tokenTraderStatus, keyed by address — never onto the
+                            // strategy instance. Reading it off `st` therefore always
+                            // yielded undefined, and with no entryPrice on the config
+                            // either the token priced at 0: a live position reported as
+                            // worth nothing, which is the one error a portfolio must not
+                            // make. This is the same accessor the token-trader status
+                            // endpoint uses, and it is the price the trader acts on.
+                            const ttLastPrice = Number(ttStatusByAddress[address.toLowerCase()]?.lastPrice);
+                            const tokenPrice = (Number.isFinite(ttLastPrice) && ttLastPrice > 0)
+                                ? ttLastPrice
+                                : (st.lastPrice || cfg.entryPrice || 0);
                             const entryPrice = cfg.entryPrice || tokenPrice;
                             const pctChange = entryPrice > 0 ? ((tokenPrice - entryPrice) / entryPrice) * 100 : 0;
                             tokens.push({
@@ -170,12 +252,44 @@ router.get('/portfolio', async (req, res) => {
                                 balance: st.tokenBalance,
                                 price: tokenPrice,
                                 value: Math.round(st.tokenBalance * tokenPrice * 100) / 100,
-                                change24h: Math.round(pctChange * 100) / 100,
+                                changeSinceEntry: Math.round(pctChange * 100) / 100,
                                 volatility: Math.abs(pctChange) / 10 || 0.3,
                                 network: cfg.network || 'bsc',
                                 type: 'token',
                                 address
                             });
+                        }
+
+                        // The trader's un-deployed reserve is stablecoin the wallet really
+                        // holds, and until now no row reported it. That was harmless only
+                        // while the DollarMaximizer position above claimed the whole pot.
+                        // Since v2.25.219 that position stores DM's SHARE — wallet minus
+                        // this reserve — so the reserve stopped being counted by either
+                        // side and the book silently lost it: $803 of $1,791 on bsc, a
+                        // quarter of the portfolio, gone from the total overnight. The two
+                        // figures are complements by construction, so adding this row
+                        // reconstructs the wallet balance exactly and cannot double-count.
+                        const reserve = parseFloat(st.stablecoinReserve) || 0;
+                        if (reserve > 0) {
+                            const net = cfg.tokenNetwork || cfg.network || 'bsc';
+                            const stableName = net === 'ethereum' ? 'USDC' : 'USDT';
+                            const existing = tokens.find(t => t.type === 'stablecoin' && t.network === net);
+                            if (existing) {
+                                existing.balance += reserve;
+                                existing.value = Math.round(existing.balance * 100) / 100;
+                            } else {
+                                tokens.push({
+                                    symbol: stableName,
+                                    name: `${stableName} (${net})`,
+                                    balance: reserve,
+                                    price: 1,
+                                    value: Math.round(reserve * 100) / 100,
+                                    changeSinceEntry: 0,
+                                    volatility: 0.01,
+                                    network: net,
+                                    type: 'stablecoin'
+                                });
+                            }
                         }
                     }
                 }
@@ -764,6 +878,17 @@ router.get('/swap/networks', async (req, res) => {
     }
 });
 
+// CoW quote outcome tally — distinguishes "CoW never wins" from "quotes failing/rate-limited"
+router.get('/swap/cow-stats', async (req, res) => {
+    try {
+        const swapService = (await import('../services/crypto/swapService.js')).default;
+        res.json({ success: true, stats: swapService.getCowQuoteStats() });
+    } catch (error) {
+        logger.error('Failed to get CoW quote stats:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
 // Get pending swaps
 router.get('/swap/pending', async (req, res) => {
     try {
@@ -1045,6 +1170,42 @@ router.post('/strategy/clear-emergency', async (req, res) => {
 });
 
 // Get decision journal
+/**
+ * Exit quality by trigger — the report that answers "is this exit rule earning its keep?"
+ *
+ * vindicatedPct = share of exits where price was LOWER at that horizon (the exit avoided a
+ * further fall). avgEdgePct = mean % better than holding; NEGATIVE means the rule is
+ * systematically selling lows that recover.
+ *
+ *   GET /api/crypto/strategy/exit-analysis?token=LINK&days=30
+ */
+router.get('/strategy/exit-analysis', async (req, res) => {
+    try {
+        const { default: CryptoExitRecord } = await import('../models/CryptoExitRecord.js');
+        const opts = {};
+        if (req.query.token) opts.tokenSymbol = req.query.token;
+        const days = parseInt(req.query.days, 10);
+        if (Number.isFinite(days) && days > 0) {
+            opts.since = new Date(Date.now() - days * 86400000).toISOString();
+        }
+        const byTrigger = await CryptoExitRecord.analyzeByTrigger(opts);
+        const total = byTrigger.reduce((n, b) => n + b.fills, 0);
+        res.json({
+            success: true,
+            window: opts.since ? `since ${opts.since.slice(0, 10)}` : 'all time',
+            token: opts.tokenSymbol || 'all',
+            totalFills: total,
+            note: total < 20
+                ? 'Sample is small — treat as indicative, not decisive. Exit rules need dozens of firings before a retune is evidence-led.'
+                : undefined,
+            byTrigger
+        });
+    } catch (error) {
+        logger.error('Failed to build exit analysis:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
 router.get('/strategy/journal', async (req, res) => {
     try {
         const handler = await getCryptoHandler();

@@ -140,6 +140,16 @@ const COW_MIN_ORDER_USD = 10; // Minimum order value — solvers won't fill tiny
 const _cowAppDataRegistered = new Set();
 let _cowLastRequestTime = 0;
 const _cowMinRequestInterval = 1000;
+// CoW quote failure visibility + 429 backoff. Failures used to be debug-only, which made
+// rate limiting indistinguishable from "CoW never wins" (another bot's boxes are being
+// 429'd by api.cow.fi and only found out after raising the log level). On 429 we honor
+// Retry-After when present, otherwise back off 60s doubling per consecutive 429 (cap 10min);
+// quote attempts during the window are skipped locally so we stop feeding the limiter.
+const COW_429_BASE_BACKOFF_MS = 60_000;
+const COW_429_MAX_BACKOFF_MS = 600_000;
+let _cowBackoffUntil = 0;
+let _cowConsecutive429 = 0;
+const _cowQuoteStats = { attempts: 0, successes: 0, failures: 0, http429: 0, skippedDuringBackoff: 0, lastFailure: null, lastFailureAt: null, last429At: null };
 
 // V3 Quoter addresses (QuoterV2 for getting quotes)
 const V3_QUOTERS = {
@@ -944,12 +954,19 @@ class SwapService {
         const cowNetwork = COW_NETWORKS[network];
         if (!cowNetwork) return null;
 
+        // 429 backoff window: skip locally instead of feeding the limiter
+        if (Date.now() < _cowBackoffUntil) {
+            _cowQuoteStats.skippedDuringBackoff++;
+            return null;
+        }
+
         // Rate limiting
         const now = Date.now();
         if (now - _cowLastRequestTime < _cowMinRequestInterval) {
             await new Promise(r => setTimeout(r, _cowMinRequestInterval - (now - _cowLastRequestTime)));
         }
         _cowLastRequestTime = Date.now();
+        _cowQuoteStats.attempts++;
 
         try {
             const validTo = Math.floor(Date.now() / 1000) + 600; // 10 min validity
@@ -973,9 +990,26 @@ class SwapService {
 
             if (!response.ok) {
                 const text = await response.text().catch(() => '');
-                logger.debug(`CoW quote failed (${response.status}): ${text.slice(0, 200)}`);
+                _cowQuoteStats.failures++;
+                _cowQuoteStats.lastFailure = `HTTP ${response.status}: ${text.slice(0, 120)}`;
+                _cowQuoteStats.lastFailureAt = new Date().toISOString();
+                if (response.status === 429) {
+                    _cowQuoteStats.http429++;
+                    _cowQuoteStats.last429At = _cowQuoteStats.lastFailureAt;
+                    _cowConsecutive429++;
+                    const retryAfterSec = parseInt(response.headers.get('retry-after'), 10);
+                    const backoffMs = Number.isFinite(retryAfterSec) && retryAfterSec > 0
+                        ? retryAfterSec * 1000
+                        : Math.min(COW_429_BASE_BACKOFF_MS * 2 ** (_cowConsecutive429 - 1), COW_429_MAX_BACKOFF_MS);
+                    _cowBackoffUntil = Date.now() + backoffMs;
+                    logger.warn(`CoW quote rate-limited (429, ${_cowQuoteStats.http429} total): backing off ${Math.round(backoffMs / 1000)}s — ${text.slice(0, 120)}`);
+                } else {
+                    logger.info(`CoW quote failed (${response.status}): ${text.slice(0, 200)}`);
+                }
                 return null;
             }
+            _cowConsecutive429 = 0;
+            _cowQuoteStats.successes++;
 
             const data = await response.json();
             if (!data.quote) return null;
@@ -990,9 +1024,24 @@ class SwapService {
                 fullQuote: data.quote
             };
         } catch (err) {
-            logger.debug(`CoW quote error: ${err.message}`);
+            _cowQuoteStats.failures++;
+            _cowQuoteStats.lastFailure = err.message?.slice(0, 160);
+            _cowQuoteStats.lastFailureAt = new Date().toISOString();
+            logger.info(`CoW quote error: ${err.message}`);
             return null;
         }
+    }
+
+    /**
+     * CoW quote outcome tally (process lifetime). Lets ops distinguish "CoW never wins"
+     * from "CoW quotes are failing/rate-limited" without a log-level change.
+     */
+    getCowQuoteStats() {
+        return {
+            ..._cowQuoteStats,
+            backoffActive: Date.now() < _cowBackoffUntil,
+            backoffUntil: _cowBackoffUntil ? new Date(_cowBackoffUntil).toISOString() : null
+        };
     }
 
     /**
@@ -2431,12 +2480,37 @@ class SwapService {
         const v3Router = new ethers.Contract(checksumAddr(v3Data.routerAddress), routerABI, signer);
         const baseOverrides = isNativeIn ? { value: amountInWei } : {};
 
-        // Estimate gas dynamically with 25% buffer, fall back to 500k
+        // Estimate gas dynamically with 25% buffer.
+        //
+        // A failed estimate is NOT all one thing, and swallowing the difference is how a
+        // free refusal becomes a paid revert. estimateGas simulates the call: if it comes
+        // back CALL_EXCEPTION / UNPREDICTABLE_GAS_LIMIT, the chain has already told us this
+        // transaction will fail. Broadcasting anyway on a default limit buys a guaranteed
+        // revert and its gas. That is exactly what happened on 2026-08-21 20:34 — a
+        // USDT->BNB buy estimated as reverting, was sent on the 500k fallback, and reverted
+        // on-chain for nothing.
+        //
+        // A transport failure is different: an RPC timeout or a dropped connection says
+        // nothing about whether the swap is valid, and refusing there would strand a good
+        // trade behind a flaky node. So: revert-shaped errors propagate and abort the swap,
+        // everything else falls back to the default limit as before.
         const estimateGas = async (method, args, overrides) => {
             try {
                 const estimated = await method.estimateGas(...args, overrides);
                 return estimated * 125n / 100n;
-            } catch { return 500000n; }
+            } catch (err) {
+                const code = err?.code || '';
+                const msg = String(err?.shortMessage || err?.message || '');
+                const simulatedRevert = code === 'CALL_EXCEPTION'
+                    || code === 'UNPREDICTABLE_GAS_LIMIT'
+                    || /execution reverted|transaction may fail|insufficient allowance|STF|Too little received/i.test(msg);
+                if (simulatedRevert) {
+                    logger.warn(`Swap aborted before broadcast: gas estimation says this call reverts (${code || 'no code'}: ${msg.slice(0, 160)})`);
+                    throw err;
+                }
+                logger.debug(`Gas estimation unavailable (${code || 'no code'}: ${msg.slice(0, 120)}) — using default limit`);
+                return 500000n;
+            }
         };
 
         if (isNativeOut) {
@@ -3822,16 +3896,14 @@ class SwapService {
                     await this.verifySwapBalances(swap);
                 }
 
-                // Update wallet transaction
-                const wallet = await walletService.getWallet();
-                if (wallet?.transactions) {
-                    const walletTx = wallet.transactions.find(t => t.hash === tx.hash);
-                    if (walletTx) {
-                        walletTx.status = swap.status;
-                        walletTx.blockNumber = receipt.blockNumber;
-                        await wallet.save();
-                    }
-                }
+                // Update wallet transaction. Atomic - the shared wallet document
+                // is saved concurrently by several paths and a load-mutate-save
+                // here lost the status write often enough to strand 13 of the
+                // last 100 rows at 'pending' after they had confirmed on-chain.
+                await walletService.updateTransactionStatus(tx.hash, swap.status, {
+                    blockNumber: receipt.blockNumber,
+                    gasUsed: receipt.gasUsed?.toString()
+                });
 
                 // Remove from pending after 5 minutes
                 setTimeout(() => {
@@ -4178,4 +4250,11 @@ export default new SwapService();
 // Exported for unit tests. The negative-cache key is pure and its bucketing decides
 // whether a dust probe can suppress V4 for a real-size trade — worth pinning directly
 // rather than only through an RPC-dependent path.
-export const __testables = { _v4NoPoolKey, _v4AmountBucket };
+const _cowResetQuoteState = () => {
+    _cowBackoffUntil = 0;
+    _cowConsecutive429 = 0;
+    _cowLastRequestTime = 0;
+    Object.assign(_cowQuoteStats, { attempts: 0, successes: 0, failures: 0, http429: 0, skippedDuringBackoff: 0, lastFailure: null, lastFailureAt: null, last429At: null });
+};
+
+export const __testables = { _v4NoPoolKey, _v4AmountBucket, _cowResetQuoteState };

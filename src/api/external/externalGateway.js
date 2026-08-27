@@ -14,7 +14,7 @@ const ipBucket = (ip) => {
 import { killSwitchMiddleware } from './middleware/killSwitch.js';
 import { auditLogMiddleware } from './middleware/auditLog.js';
 import { responseSanitizer, handleStatsRequest } from './middleware/responseSanitizer.js';
-import { setKillSwitch, isKillSwitchActive, getKillSwitchStatus } from './middleware/killSwitch.js';
+import { setKillSwitch, isKillSwitchActive, getKillSwitchStatus, setKillSwitchNotificationHooks, getKillSwitchNotificationHooks } from './middleware/killSwitch.js';
 import ExternalServiceConfig from '../../models/ExternalServiceConfig.js';
 import { logger } from '../../utils/logger.js';
 import { authenticateToken } from '../../interfaces/web/auth.js';
@@ -218,6 +218,26 @@ router.post('/admin/kill-switch', authenticateToken, async (req, res) => {
 
   logger.warn(`External gateway kill switch ${active ? 'ACTIVATED' : 'deactivated'} by admin`);
   res.json({ success: true, killSwitchActive: !!active });
+});
+
+// Webhook URLs notified when the kill switch flips (manual or scheduled).
+router.get('/admin/kill-switch/hooks', authenticateToken, async (req, res) => {
+  try {
+    const hooks = await getKillSwitchNotificationHooks();
+    res.json({ success: true, hooks });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+router.post('/admin/kill-switch/hooks', authenticateToken, async (req, res) => {
+  try {
+    const { hooks } = req.body;
+    await setKillSwitchNotificationHooks(hooks);
+    res.json({ success: true, hooks });
+  } catch (error) {
+    res.status(400).json({ success: false, error: error.message });
+  }
 });
 
 // Detailed kill-switch status (active state, schedule, next check). Under

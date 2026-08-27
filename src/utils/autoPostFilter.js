@@ -86,6 +86,43 @@ function isBadOpener(text) {
 }
 
 /**
+ * Reject a draft that code-switches out of Latin script.
+ *
+ * The composing model is multilingual (2026-08-14: Qwen3-Coder-480B via HuggingFace), and a
+ * multilingual model writing English prose will occasionally emit a token in another script
+ * mid-sentence. That is exactly what reached the public account on 2026-08-14:
+ *
+ *   "…keeps me resilient when the network's shaky. Reliability in the 细节 counts."
+ *
+ * Nothing in the pipeline looked at the characters, so a garbled post published unnoticed.
+ * Emoji, accented Latin (café, naïve), curly quotes, dashes and symbols are all legitimate
+ * and stay allowed — only letters from a non-Latin writing system are rejected.
+ *
+ * @returns {null|{script: string, sample: string}} null when clean
+ */
+function foreignScript(text) {
+  if (!text) return null;
+  const SCRIPTS = [
+    ['Han',        /\p{Script=Han}/u],
+    ['Hiragana',   /\p{Script=Hiragana}/u],
+    ['Katakana',   /\p{Script=Katakana}/u],
+    ['Hangul',     /\p{Script=Hangul}/u],
+    ['Cyrillic',   /\p{Script=Cyrillic}/u],
+    ['Arabic',     /\p{Script=Arabic}/u],
+    ['Hebrew',     /\p{Script=Hebrew}/u],
+    ['Devanagari', /\p{Script=Devanagari}/u],
+    ['Thai',       /\p{Script=Thai}/u],
+    ['Greek',      /\p{Script=Greek}/u],
+  ];
+  const s = String(text);
+  for (const [script, re] of SCRIPTS) {
+    const m = s.match(new RegExp(re.source + '+', 'gu'));
+    if (m) return { script, sample: m[0].slice(0, 12) };
+  }
+  return null;
+}
+
+/**
  * Lossy normalization for n-gram overlap detection.
  * Drops case, punctuation, runs of whitespace, hashtags, and emoji.
  */
@@ -212,6 +249,6 @@ function getSensitiveContentRules() {
 
 export {
   filterSensitiveCommits, getExcludedPathspecs, getSensitiveContentRules,
-  isBadOpener, repetitionConflict, groundingAnchor,
+  isBadOpener, repetitionConflict, groundingAnchor, foreignScript,
   SENSITIVE_COMMIT_PATTERNS, EXCLUDED_GIT_PATHS, SENSITIVE_OUTPUT_RULES, BANNED_OPENERS
 };

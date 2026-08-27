@@ -2,6 +2,43 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.251] - 2026-08-27
+
+Consolidated sync from upstream development (2.25.204–2.25.251). Highlights, by area:
+
+### Added
+- **Self-modification partial-edit path** (`src/services/selfModPartialEdit.js`): large files
+  are edited by region instead of full-file regeneration, so targets above the output-token
+  ceiling no longer fail generation. Brace-depth scanning keeps edits structurally balanced.
+- **Quote-source outcome telemetry**: `GET /api/crypto/swap/cow-stats` reports a
+  process-lifetime tally (attempts, successes, failures, rate-limit hits, backoff state) for
+  the intent-based aggregator quote source, distinguishing "never wins the comparison" from
+  "quotes are failing".
+- **Exit-record analytics**: `GET /api/crypto/strategy/exit-analysis` aggregates recorded
+  position exits by trigger (new `CryptoExitRecord` model).
+- Auto-staking respects a pending-queue reserve floor so batched registry reports cannot be
+  starved by staking sweeps.
+
+### Fixed
+- **Aggregator quote failures are now visible and rate-limit aware.** Quote failures were
+  logged at debug level only. HTTP failures now log at info; a 429 logs at warn, is tallied,
+  and opens a backoff window honoring `Retry-After` (60s doubling to a 10min cap) during
+  which attempts are skipped locally. A success resets the escalation.
+- **V4 routing fixes**: quote comparison no longer excludes V4 buys through a decimals-blind
+  ratio check, and native-pool routing prefers the deeper pools; a V4 negative-cache entry is
+  keyed by trade-size bucket so a dust probe cannot mask a real-size pool for a day.
+- **Async-aggregator execution correctness**: order app-data pre-image is registered with the
+  orderbook before submission; settlement currency selection fixed; indeterminate outcomes
+  refuse DEX fallback (prevents double execution).
+- **Scrape reliability**: error pages are no longer counted as successes; social-post targets
+  behind a login wall resolve through a public fast-path; DNS flaps are no longer cached as
+  permanent failures; render-tier screenshots are pixel-verified.
+- Numerous smaller fixes across the web interface, markdown rendering, retry utilities,
+  self-diagnostics, MCP server, and gateway routes (see file diffs for details).
+
+### Changed
+- Commit-subject filter for the auto-post composer widened again (defense in depth).
+
 ## [2.25.203] - 2026-08-12
 
 ### Fixed
@@ -1970,7 +2007,7 @@ Admin dashboard mobile follow-up — Promotions and Scrapes pages were still ren
 Gateway admin dashboard responsive overhaul. Same-day follow-up to v2.25.21 after operator reported the Recent Payments table was crammed even on desktop and the top nav was unusable on mobile.
 
 ### Fixed (gateway — `<gateway-deploy-path>/admin.mjs`, untracked)
-- **Recent Payments table was crammed.** The dashboard used `grid-3` (three equal columns), so the four-column payments table (When / Email / Amount / Credits) had to fit in ~33% of the page width — long emails like `portablediag@protonmail.com` shoved the numeric columns into a sliver. Replaced with a new `dash-grid` template that gives Payments `2fr` and Agents/Tickets `1fr` each on desktop. On tablet (≤980px) Payments spans both columns. On phone (≤600px) all three stack. Email cell now has `email-cell` class with `text-overflow: ellipsis` and a `title=` tooltip showing the full address on hover, so even the longest emails render cleanly.
+- **Recent Payments table was crammed.** The dashboard used `grid-3` (three equal columns), so the four-column payments table (When / Email / Amount / Credits) had to fit in ~33% of the page width — long emails like `<ADMIN_EMAIL>` shoved the numeric columns into a sliver. Replaced with a new `dash-grid` template that gives Payments `2fr` and Agents/Tickets `1fr` each on desktop. On tablet (≤980px) Payments spans both columns. On phone (≤600px) all three stack. Email cell now has `email-cell` class with `text-overflow: ellipsis` and a `title=` tooltip showing the full address on hover, so even the longest emails render cleanly.
 - **Top nav was unusable on mobile.** Nine `topnav` links wrapped onto multiple lines and shoved the user/sign-out block off the visible header. Added a hamburger toggle (`☰` button, hidden on desktop) that collapses the nav into a vertical drawer below the header on screens ≤880px. Click outside or any link auto-closes via the same toggle.
 - **Tables on narrow screens** now `overflow-x: auto` instead of overflowing the card, so any wide table (Wallets, Payments page, Audit log) scrolls horizontally inside its container with momentum on touch devices instead of forcing the whole page to scroll.
 - **General mobile polish** — reduced card padding, smaller h1, `kv` grid drops to single-column, KPI value font shrinks at ≤600px, toolbar inputs flex to fill, bar-row labels narrow.
@@ -1993,7 +2030,7 @@ Gateway and BETA agent recovery: fixed silently-broken admin login, reconnected 
 - **BETA bootstrapped with on-chain credits.** Gateway wallet swapped BNB to SKYNET via PancakeSwap V2 then transferred it to BETA's recipient address. BETA's `/credits/purchase` verified the transfer and credited the gateway. `gatewayagents.BETA.credits: [redacted] → 503`, `agentId: null → 2931` (so `POST /agents/2931/:service` direct-route works).
 
 ### Added (BETA — `<vps-ip>`)
-- **`/root/backup-beta.sh`** + cron `15 3 * * *` — daily `mongodump --gzip --archive` to `/root/lanagent-backups/beta-YYYY-MM-DD.archive.gz`, 14-day retention. Restore: `docker exec -i BETA-mongodb mongorestore --gzip --archive --drop < beta-YYYY-MM-DD.archive.gz`.
+- **`/root/backup-beta.sh`** + cron `15 3 * * *` — daily `mongodump --gzip --archive` to `<backup-dir>/beta-YYYY-MM-DD.archive.gz`, 14-day retention. Restore: `docker exec -i BETA-mongodb mongorestore --gzip --archive --drop < beta-YYYY-MM-DD.archive.gz`.
 
 ### Added (genesis repo)
 - **`scripts/deployment/backup-beta.sh`** — local pull script run from the dev machine. Streams a fresh `mongodump` over SSH, rsyncs config + data dirs (excludes `logs/`, `node_modules/`), writes a manifest with git rev / container statuses / wallet addresses, and seals everything into `<local-workspace-path>`. 30-day local retention. First run: 14M archive. Safe to run while BETA is live.
@@ -2113,7 +2150,7 @@ Cloudflare-gated sites (Rumble, BitChute) need FlareSolverr; cookie-required sit
 Gateway-side release. Agent code unchanged. All work lives in the `api-lanagent-net` gateway repo deployed to `api.lanagent.net`; this entry tracks it from the platform-level changelog.
 
 ### Added
-- **Gateway admin console** (`/admin`) — magic-link sign-in for the operator only, allow-list driven by `ADMIN_EMAIL` env var (default `portablediag@protonmail.com`). Sessions are short-lived JWTs in an `HttpOnly; SameSite=Lax; Secure` cookie scoped to `/admin`. Existing `X-Admin-Key` header auth is preserved alongside cookie auth on every `/admin/api/*` endpoint, so curl-driven scripts keep working. Brute-force protection on the login submit endpoint (10/15min per IP). Non-admin email lookups get a 250–450ms tarpit + identical 200 response so timing/output can't enumerate which address is allow-listed. Every admin write action (grant credits, revoke key, mark verified, agent toggle/delete, promotion CRUD, ticket status, sign-in events) is recorded to a new `AdminAudit` collection visible at `/admin/audit`.
+- **Gateway admin console** (`/admin`) — magic-link sign-in for the operator only, allow-list driven by `ADMIN_EMAIL` env var (default `<ADMIN_EMAIL>`). Sessions are short-lived JWTs in an `HttpOnly; SameSite=Lax; Secure` cookie scoped to `/admin`. Existing `X-Admin-Key` header auth is preserved alongside cookie auth on every `/admin/api/*` endpoint, so curl-driven scripts keep working. Brute-force protection on the login submit endpoint (10/15min per IP). Non-admin email lookups get a 250–450ms tarpit + identical 200 response so timing/output can't enumerate which address is allow-listed. Every admin write action (grant credits, revoke key, mark verified, agent toggle/delete, promotion CRUD, ticket status, sign-in events) is recorded to a new `AdminAudit` collection visible at `/admin/audit`.
 - **Admin nav (9 sections)** — Dashboard (KPIs + 14-day request bar chart + recent payments + agents + open tickets), Users (paginated/searchable list of `portalusers`), Wallets (paginated/searchable list of `creditbalances` — crypto-bootstrapped accounts that didn't surface anywhere before), Agents (toggle/delete), Payments (Stripe USD + on-chain BNB/SKYNET merged chronologically with source filter), Subscriptions, Promotions (full CRUD), Tickets, Scrapes (volume/success/top-services/top-agents over 7–90 days), Audit. Per-account detail pages for both portal users and wallets include 30-day request totals, top failing services, payment history, recent requests, threshold-notification state, and admin actions (grant credits, revoke key, mark verified, BscScan tx links).
 - **Public portal: magic-link sign-up and sign-in** — `POST /portal/magic-link` accepts an email and emails a 15-minute single-use link. New email auto-creates a passwordless account with a default `gsk_*` API key + welcome email (stub bcrypt hash so the only way in is via magic links until the user opts to set a password through the standard reset flow). Existing email receives a sign-in link. `GET /portal/magic-verify?t=...` consumes the token, marks `emailVerified=true`, sets the JWT, and redirects to the dashboard. Auth modal updated: toggle link now correctly flips between "Already have an account? Log in" / "Don't have an account? Sign up" depending on mode; magic-link button reads "Email me a sign-up link" or "Email me a sign-in link" depending on mode.
 - **Email templates** — `notifyAdminMagicLink(email, url, ip, ua)` and `notifyPortalMagicLink(email, url, isNewAccount)` matching the existing branded layout (single button, expires-in line, paste-URL fallback, "you can ignore this email" reassurance). Both fire-and-forget through the existing `nodemailer` transport on `mail.lanagent.net:587`.
@@ -3101,14 +3138,14 @@ PR review pass — 8 AI-generated PRs (#2057–#2064), all closed. 4 implemented
 - Successfully ran two instances (ALICE port 80, BETA port 8180) on same server
 - P2P auto-discovery confirmed working — both agents found each other automatically
 - Required: separate DB, `PM2_PROCESS` name, `ENABLE_MQTT=false`, `TELEGRAM_ENABLED=false`, fork mode PM2
-- BETA instance shut down after testing; configuration preserved at `/root/lanagent-instance2/`
+- BETA instance shut down after testing; configuration preserved at `<instance2-dir>/`
 
 ## [2.19.1] - 2026-03-20
 
 ### Added
 - **BitNet LLM Controls** — Start/stop/status on AI Providers page (no SSH needed)
 - **Multi-Instance Support** — Branch naming namespaced by agent name, dynamic repo resolution
-- **BETA Instance** — Second instance configured at /root/lanagent-instance2 (port 8180)
+- **BETA Instance** — Second instance configured at <instance2-dir> (port 8180)
 
 ### Fixed
 - **Plugin Log Dropdown** — Frontend now renders plugin category (41 per-plugin logs visible)

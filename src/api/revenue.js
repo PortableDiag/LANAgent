@@ -227,6 +227,30 @@ router.get('/report/daily-pnl', authenticateToken, async (req, res) => {
     }
 });
 
+// Realized P&L rolled up by period, per strategy and combined. This is the
+// "what did the agent actually make this month" question: the raw daily rows
+// were already reachable, but nothing summed them, and nothing surfaced the
+// DollarMaximizer side at all — so the figure could only be assembled by hand.
+// groupBy: daily | weekly | monthly | quarterly. Dates are YYYY-MM-DD.
+router.get('/report/pnl-summary', authenticateToken, async (req, res) => {
+    try {
+        const { startDate, endDate, groupBy = 'monthly' } = req.query;
+        const dateRe = /^\d{4}-\d{2}-\d{2}$/;
+        if ((startDate && !dateRe.test(startDate)) || (endDate && !dateRe.test(endDate))) {
+            return res.status(400).json({ success: false, error: 'startDate/endDate must be YYYY-MM-DD' });
+        }
+        const allowed = ['daily', 'weekly', 'monthly', 'quarterly'];
+        if (!allowed.includes(groupBy)) {
+            return res.status(400).json({ success: false, error: `groupBy must be one of ${allowed.join(', ')}` });
+        }
+        const data = await retryOperation(() => DailyPnL.getAggregatedPnL({ groupBy, startDate, endDate }));
+        res.json({ success: true, groupBy, data });
+    } catch (error) {
+        logger.error('Failed to get P&L summary:', error);
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
 // Risk-adjusted performance over the daily PnL series (dollar-based Sharpe/
 // Sortino/drawdown — see computeRiskMetrics in models/DailyPnL.js for the
 // exact semantics). Dates are YYYY-MM-DD; both optional (default: all history).

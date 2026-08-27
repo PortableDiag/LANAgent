@@ -131,7 +131,9 @@ export class BaseStrategy {
             timestamp: new Date()
         };
 
-        if (trade.pnl) {
+        // Truthiness would drop a legitimate break-even fill (pnl === 0) and, worse,
+        // silently swallow a NaN into the running totals. Test the number, not its truth.
+        if (Number.isFinite(trade.pnl)) {
             this.state.totalPnL += trade.pnl;
             this.state.dailyPnL += trade.pnl;
         }
