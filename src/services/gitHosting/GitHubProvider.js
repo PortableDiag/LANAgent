@@ -78,10 +78,27 @@ export class GitHubProvider extends GitHostingProvider {
   }
 
   /**
+   * Add `--repo owner/repo` to a gh subcommand that accepts it, unless the caller already
+   * pinned one. Only `pr` and `issue` take --repo; anything else is passed through untouched.
+   */
+  scopeToRepo(args) {
+    if (!this.owner || !this.repo) return args;
+    if (/(^|\s)(--repo|-R)(\s|=)/.test(args)) return args;
+    if (!/^(pr|issue)\s/.test(args)) return args;
+    return `${args} --repo ${this.owner}/${this.repo}`;
+  }
+
+  /**
    * Execute a gh CLI command
    */
   async ghCommand(args, options = {}) {
-    const cmd = `gh ${args}`;
+    // Without an explicit --repo, the gh CLI infers the target repository from the git
+    // remote of whatever directory it runs in. That is a different source of truth from
+    // this.owner/this.repo (parsed from GITHUB_REPO), which every REST call here uses, and
+    // the two disagree on any host whose local checkout tracks a different remote — the
+    // request then goes to a repo the configured token cannot see. Pin the repo explicitly
+    // so the CLI path and the API path always address the same place.
+    const cmd = `gh ${this.scopeToRepo(args)}`;
     try {
       const { stdout, stderr } = await execAsync(cmd, {
         cwd: options.cwd || this.repoPath,

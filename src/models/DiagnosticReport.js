@@ -61,10 +61,26 @@ const diagnosticReportSchema = new mongoose.Schema({
       available: String,
       percentage: Number
     }],
+    cpu: {
+      model: String,
+      cores: Number,
+      speed: Number
+    },
+    network: [{
+      interface: String,
+      ip4: String,
+      mac: String
+    }],
+    docker: {
+      running: Number,
+      paused: Number,
+      stopped: Number
+    },
     uptime: Number,
     loadAverage: [Number],
     nodeVersion: String,
-    platform: String
+    platform: String,
+    hostname: String
   },
   serviceStatus: {
     telegram: {
@@ -389,6 +405,10 @@ async function sendAlertEmail(report) {
     
     const transporter = nodemailer.createTransport(transportConfig);
     
+    // A missing figure must read as missing. `x?.toFixed(1)}%` renders the string
+    // "undefined%", which looks like a measurement of zero-ish rather than no measurement.
+    const pct = (v) => (typeof v === 'number' && Number.isFinite(v) ? `${v.toFixed(1)}%` : 'unavailable');
+
     // Format the report for email
     const issuesList = report.issues
       ?.filter(i => i.severity === 'high' || i.severity === 'critical')
@@ -418,8 +438,8 @@ ${issuesList ? `\\nCritical Issues:\\n${issuesList}` : ''}
 ${failedTests ? `\\nFailed Tests:\\n${failedTests}` : ''}
 
 System Info:
-- CPU Usage: ${report.systemInfo?.cpuUsage?.toFixed(1)}%
-- Memory Usage: ${report.systemInfo?.memoryUsage?.percentage?.toFixed(1)}%
+- CPU Usage: ${pct(report.systemInfo?.cpuUsage)}
+- Memory Usage: ${pct(report.systemInfo?.memoryUsage?.percentage)}
 - Uptime: ${Math.floor((report.systemInfo?.uptime || 0) / 3600)}h
 
 View full report in the LANAgent dashboard.`,
@@ -437,8 +457,8 @@ View full report in the LANAgent dashboard.`,
         
         <h3>System Info</h3>
         <ul>
-          <li>CPU Usage: ${report.systemInfo?.cpuUsage?.toFixed(1)}%</li>
-          <li>Memory Usage: ${report.systemInfo?.memoryUsage?.percentage?.toFixed(1)}%</li>
+          <li>CPU Usage: ${pct(report.systemInfo?.cpuUsage)}</li>
+          <li>Memory Usage: ${pct(report.systemInfo?.memoryUsage?.percentage)}</li>
           <li>Uptime: ${Math.floor((report.systemInfo?.uptime || 0) / 3600)}h</li>
         </ul>
         

@@ -480,6 +480,17 @@ export default class MicrocontrollerPlugin extends BasePlugin {
 
   async initializeArduinoCLI() {
     try {
+      // A host with no arduino-cli installed is not a fault — it is a headless server that
+      // will never flash a board. Without this guard the first command fails, the retry fails,
+      // and the outer catch logs an ERROR on every single boot: 46 of them on one VPS since
+      // 2026-06-27, all of them noise that inflates the error count and hides real faults.
+      try {
+        await execAsync('command -v arduino-cli');
+      } catch {
+        logger.info('arduino-cli is not installed on this host — skipping microcontroller toolchain setup. Install arduino-cli to enable board flashing.');
+        return;
+      }
+
       // Check if config already exists
       try {
         await execAsync('arduino-cli config dump');
