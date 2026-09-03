@@ -2,6 +2,22 @@ import { InferenceClient } from "@huggingface/inference";
 import { BaseProvider } from "./BaseProvider.js";
 import { logger } from "../utils/logger.js";
 
+// HuggingFace's chat-completions router only accepts reasoning_effort in
+// {low, medium, high}; OpenAI also accepts 'minimal' (used by gpt-5 callers).
+// When a request falls back from OpenAI → HuggingFace, the OpenAI-shaped
+// additionalParams reach the HF call and 422. Map 'minimal' → 'low' and
+// drop anything else outside the allowlist.
+function normalizeAdditionalParams(params) {
+  if (!params || typeof params !== 'object') return params;
+  const out = { ...params };
+  if (out.reasoning_effort !== undefined) {
+    const allowed = ['low', 'medium', 'high'];
+    if (out.reasoning_effort === 'minimal') out.reasoning_effort = 'low';
+    else if (!allowed.includes(out.reasoning_effort)) delete out.reasoning_effort;
+  }
+  return out;
+}
+
 export class HuggingFaceProvider extends BaseProvider {
   constructor(config = {}) {
     super("HuggingFace", config);
@@ -37,6 +53,81 @@ export class HuggingFaceProvider extends BaseProvider {
         doSample: config.summarizationDoSample !== false
       }
     };
+
+    // Time-to-first-byte budget for router calls. Without this the bare fetch()
+    // waits indefinitely and only unblocks when HuggingFace's own edge gives up
+    // — measured at a FIXED 120s (6/6 samples on 2026-08-10, zero variance, i.e.
+    // their gateway ceiling rather than a flaky network). Handing over to the
+    // fallback provider afterwards is instant, so the whole cost of an HF outage
+    // was that 120s stall; 36 of them in one day was ~72 minutes of dead time.
+    // A healthy response returns well inside 30s, so this only truncates waits
+    // that were already going to fail.
+    this.requestTimeoutMs = Number(
+      config.requestTimeoutMs ?? process.env.HUGGINGFACE_TIMEOUT_MS ?? 30000
+    );
+
+    // generateResponse() is NON-streaming (stream:false), and the router only
+    // sends headers once the whole completion exists — so for that path the
+    // "time-to-first-byte" budget is really a whole-generation budget. 30s is
+    // right for a 1k-token chat turn and wrong for the self-modification
+    // code-generation calls (4k–16k max_tokens): a 480B coder at ~40 tok/s
+    // needs 30s+ for a 1.2k-token diff, so 3 of 25 hourly scans on 2026-08-27
+    // hit the budget with the exact 30000ms signature, retried into the same
+    // wall, and quietly went to the paid fallback (gpt-4o) — the silent-paid-
+    // fallback pattern the provider lock was built to expose. Scale the
+    // non-streaming budget with max_tokens; cap it below HF's 120s edge
+    // ceiling so a real outage still fails well before the router does.
+    this.assumedTokensPerSecond = Number(
+      config.assumedTokensPerSecond ?? process.env.HUGGINGFACE_ASSUMED_TOKENS_PER_SEC ?? 40
+    );
+    this.generationTimeoutCapMs = Number(
+      config.generationTimeoutCapMs ?? process.env.HUGGINGFACE_GENERATION_TIMEOUT_CAP_MS ?? 90000
+    );
+  }
+
+  /**
+   * Budget for a non-streaming completion of up to `maxTokens` tokens: never
+   * below the base TTFB budget, never above the cap. A disabled base (<= 0)
+   * stays disabled.
+   */
+  _generationTimeoutMs(maxTokens) {
+    const base = this.requestTimeoutMs;
+    if (!Number.isFinite(base) || base <= 0) return base;
+    const tokens = Number(maxTokens);
+    const rate = this.assumedTokensPerSecond;
+    if (!Number.isFinite(tokens) || tokens <= 0 || !Number.isFinite(rate) || rate <= 0) return base;
+    const estimate = Math.ceil((tokens / rate) * 1000);
+    const cap = Number.isFinite(this.generationTimeoutCapMs) && this.generationTimeoutCapMs > 0
+      ? Math.max(base, this.generationTimeoutCapMs)
+      : Infinity;
+    return Math.min(Math.max(base, estimate), cap);
+  }
+
+  /**
+   * fetch() with a time-to-first-byte timeout.
+   *
+   * The timer is cleared as soon as the response headers resolve, NOT when the
+   * body is consumed — aborting after that point would tear down an in-progress
+   * stream, which would break generateStreamingResponse for any generation
+   * legitimately longer than the budget.
+   */
+  async _fetchWithTimeout(url, init = {}, timeoutMs = this.requestTimeoutMs) {
+    if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) return await fetch(url, init);
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      return await fetch(url, { ...init, signal: controller.signal });
+    } catch (err) {
+      if (err?.name === 'AbortError' || controller.signal.aborted) {
+        throw new Error(
+          `HuggingFace request timed out after ${timeoutMs}ms (no response headers)`
+        );
+      }
+      throw err;
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   async initialize() {
@@ -52,6 +143,15 @@ export class HuggingFaceProvider extends BaseProvider {
 
       // Initialize InferenceClient for image/video generation
       this.inferenceClient = new InferenceClient(apiKey);
+      // Every other task method (transcription, TTS, vision, summarisation,
+      // translation, classification) calls `this.client.*`. It was declared
+      // null in the constructor and never assigned, so each of them was a
+      // guaranteed TypeError — masked for as long as another provider was
+      // allowed to answer first. Surfaced 2026-08-29, the morning after the
+      // provider lock (v2.25.253) started routing embeddings here.
+      this.client = this.inferenceClient;
+      // Task-pipeline endpoint used for embeddings (see generateEmbedding).
+      this.inferenceBaseUrl = "https://router.huggingface.co/hf-inference";
       
       // Define cost calculation for HuggingFace
       this.calculateCost = (metrics) => {
@@ -119,17 +219,17 @@ export class HuggingFaceProvider extends BaseProvider {
         max_tokens: options.maxTokens || this.modelParams.chat.maxTokens,
         top_p: options.topP || this.modelParams.chat.topP,
         stream: false,
-        ...options.additionalParams
+        ...normalizeAdditionalParams(options.additionalParams)
       };
 
-      const response = await fetch(`${this.baseUrl}/chat/completions`, {
+      const response = await this._fetchWithTimeout(`${this.baseUrl}/chat/completions`, {
         method: 'POST',
         headers: {
           'Authorization': `Bearer ${this.apiKey}`,
           'Content-Type': 'application/json',
         },
         body: JSON.stringify(requestBody)
-      });
+      }, this._generationTimeoutMs(requestBody.max_tokens));
 
       if (!response.ok) {
         const errorText = await response.text();
@@ -139,6 +239,12 @@ export class HuggingFaceProvider extends BaseProvider {
       const completion = await response.json();
       const responseTime = Date.now() - startTime;
       const content = completion.choices[0].message.content;
+      // Duration is otherwise invisible — the only timing evidence for the
+      // timeout budget above was the failures themselves.
+      logger.info(
+        `HuggingFace response: ${modelWithPolicy} in ${responseTime}ms` +
+        ` (${completion.usage?.completion_tokens ?? '?'} completion tokens, budget ${requestBody.max_tokens})`
+      );
 
       // Update metrics with usage info
       const usage = completion.usage || {
@@ -174,7 +280,7 @@ export class HuggingFaceProvider extends BaseProvider {
       ];
       const model = options.model || this.models.chat;
 
-      const response = await fetch(`${this.baseUrl}/chat/completions`, {
+      const response = await this._fetchWithTimeout(`${this.baseUrl}/chat/completions`, {
         method: 'POST',
         headers: {
           'Authorization': `Bearer ${this.apiKey}`,
@@ -187,7 +293,7 @@ export class HuggingFaceProvider extends BaseProvider {
           max_tokens: options.maxTokens || this.modelParams.chat.maxTokens,
           top_p: options.topP || this.modelParams.chat.topP,
           stream: true,
-          ...options.additionalParams
+          ...normalizeAdditionalParams(options.additionalParams)
         })
       });
 
@@ -241,11 +347,28 @@ export class HuggingFaceProvider extends BaseProvider {
     const startTime = Date.now();
     
     try {
-      // Use feature extraction for embeddings
-      const embeddings = await this.client.featureExtraction({
-        model: this.models.embedding,
-        inputs: text
-      });
+      // Direct call to the router's task pipeline, through the same
+      // time-to-first-byte budget as chat. The InferenceClient's
+      // featureExtraction() fails against the router for this model
+      // ("an HTTP error occurred when requesting the provider"), while this
+      // endpoint answers in ~0.4s — verified live 2026-08-29.
+      const model = this.models.embedding;
+      const response = await this._fetchWithTimeout(
+        `${this.inferenceBaseUrl}/models/${model}/pipeline/feature-extraction`,
+        {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${this.apiKey}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ inputs: text })
+        }
+      );
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`HuggingFace embedding error: ${response.status} ${response.statusText} - ${errorText}`);
+      }
+      const embeddings = await response.json();
 
       // Update metrics for embedding generation
       const responseTime = Date.now() - startTime;
@@ -258,16 +381,21 @@ export class HuggingFaceProvider extends BaseProvider {
         requestType: 'embedding'
       });
 
-      // HuggingFace returns embeddings in different formats depending on model
-      // Handle both array and nested array responses
-      if (Array.isArray(embeddings[0])) {
-        // For sentence transformers, we might get [CLS] token embedding
-        return embeddings[0];
-      } else if (Array.isArray(embeddings)) {
-        return embeddings;
-      } else {
+      // The pipeline returns a flat vector for sentence-transformers models
+      // (pooled), or a nested [tokens][dims] matrix for raw feature-extraction
+      // models. A single-row wrapper is unwrapped; a multi-row matrix is
+      // mean-pooled so callers always get one vector of the model's width.
+      if (!Array.isArray(embeddings) || embeddings.length === 0) {
         throw new Error("Unexpected embedding format");
       }
+      if (!Array.isArray(embeddings[0])) return embeddings;
+      if (embeddings.length === 1) return embeddings[0];
+      const dims = embeddings[0].length;
+      const pooled = new Array(dims).fill(0);
+      for (const row of embeddings) {
+        for (let i = 0; i < dims; i++) pooled[i] += row[i];
+      }
+      return pooled.map(v => v / embeddings.length);
     } catch (error) {
       this.metrics.errors++;
       logger.error("HuggingFace generateEmbedding error:", error);

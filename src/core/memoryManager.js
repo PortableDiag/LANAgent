@@ -27,6 +27,12 @@ export class MemoryManager {
       await memoryVectorStore.initialize();
       this.vectorStoreReady = true;
       logger.info("Memory vector store initialized");
+      // A change of embedding provider changes the vector width; memories
+      // embedded at the old width are invisible to searches at the new one
+      // until re-embedded.
+      memoryVectorStore.onDimensionChange = (dim, previous) =>
+        this.reembedForWidth(dim, previous).catch(err =>
+          logger.warn(`Memory re-embed after width change failed: ${err?.message || err}`));
 
       // Check if we need to rebuild the index
       const stats = await memoryVectorStore.getStats();
@@ -60,6 +66,61 @@ export class MemoryManager {
     });
     logger.info(`Memory vector index rebuilt: ${result.indexed} memories indexed`);
     return result;
+  }
+
+  /**
+   * Re-embed indexable memories whose stored embedding is missing or was made
+   * at a different width, so they become searchable with the current provider.
+   * Runs in the background, one memory at a time, and stops early if the
+   * provider's width changes again mid-run.
+   */
+  async reembedForWidth(dim, previous = null) {
+    if (this._reembedRunning) {
+      logger.info(`Memory re-embed already running; skipping trigger for width ${dim}`);
+      return { reembedded: 0, skipped: true };
+    }
+    this._reembedRunning = true;
+    const startedAt = Date.now();
+    let reembedded = 0, failed = 0, candidates = 0;
+    try {
+      const indexableTypes = ['knowledge', 'learned', 'preference', 'fact'];
+      const memories = await Memory.find({ type: { $in: indexableTypes } })
+        .select('+embedding')
+        .sort({ createdAt: -1 })
+        .limit(parseInt(process.env.MEMORY_REEMBED_LIMIT || '2000', 10));
+      const todo = memories.filter(m => !Array.isArray(m.embedding) || m.embedding.length !== dim);
+      candidates = todo.length;
+      logger.info(`Memory re-embed: width ${previous ?? '?'} → ${dim}; ${candidates} of ${memories.length} indexable memories need re-embedding`);
+
+      for (const memory of todo) {
+        try {
+          const text = typeof memory.content === 'string' ? memory.content : JSON.stringify(memory.content);
+          const embedding = await this.agent.providerManager.generateEmbedding(text);
+          if (!Array.isArray(embedding) || embedding.length !== dim) {
+            logger.warn(`Memory re-embed: provider now returns width ${embedding?.length}, expected ${dim}; stopping`);
+            break;
+          }
+          memory.embedding = embedding;
+          await memory.save();
+          if (this.vectorStoreReady) await memoryVectorStore.addMemory(memory);
+          reembedded++;
+        } catch (err) {
+          failed++;
+          if (failed >= 5 && reembedded === 0) {
+            logger.warn(`Memory re-embed: ${failed} consecutive failures, stopping (${err?.message || err})`);
+            break;
+          }
+        }
+        await new Promise(r => setTimeout(r, parseInt(process.env.MEMORY_REEMBED_DELAY_MS || '150', 10)));
+      }
+      if (this.vectorStoreReady) {
+        try { await memoryVectorStore.flushBatch(); } catch (e) { /* logged by the store */ }
+      }
+      logger.info(`Memory re-embed complete: ${reembedded}/${candidates} re-embedded, ${failed} failed, ${Math.round((Date.now() - startedAt) / 1000)}s`);
+      return { reembedded, failed, candidates };
+    } finally {
+      this._reembedRunning = false;
+    }
   }
 
   async store(type, content, metadata = {}) {

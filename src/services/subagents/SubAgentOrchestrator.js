@@ -453,6 +453,36 @@ export class SubAgentOrchestrator extends EventEmitter {
   }
 
   /**
+   * Interrupt a running agent mid-task. Unlike stopAgent this does NOT write a
+   * terminal status itself: the handler's execute() loop observes the interrupt
+   * flags, returns an interrupted result, and the session closes through the
+   * normal endSession path (which stopAgent's direct status write bypasses for
+   * metrics). Falls back to stop() for handlers without interrupt support.
+   */
+  async interruptAgent(agentId) {
+    const agentDoc = await SubAgent.findById(agentId);
+    if (!agentDoc) {
+      throw new Error('Agent not found');
+    }
+
+    const handler = this.agentHandlers.get(agentId);
+    if (!handler) {
+      return { success: false, message: `Agent ${agentDoc.name} has no active session to interrupt` };
+    }
+
+    if (typeof handler.interrupt === 'function') {
+      await handler.interrupt();
+    } else if (typeof handler.stop === 'function') {
+      await handler.stop();
+    }
+
+    this.emit('agentInterrupted', { agent: agentDoc.getSummary() });
+    logger.info(`Interrupted agent: ${agentDoc.name}`);
+
+    return { success: true, message: `Agent ${agentDoc.name} interruption requested` };
+  }
+
+  /**
    * Pause an agent
    */
   async pauseAgent(agentId) {

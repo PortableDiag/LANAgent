@@ -2,10 +2,11 @@ import { BasePlugin } from '../core/basePlugin.js';
 import { PluginSettings } from '../../models/PluginSettings.js';
 import { retryOperation, isRetryableError } from '../../utils/retryUtils.js';
 import { createPluginLogger } from '../../utils/logger.js';
-import { filterSensitiveCommits, getExcludedPathspecs, getSensitiveContentRules, isBadOpener, repetitionConflict, groundingAnchor } from '../../utils/autoPostFilter.js';
+import { filterSensitiveCommits, getExcludedPathspecs, getSensitiveContentRules, isBadOpener, repetitionConflict, groundingAnchor, foreignScript, recentTopicSummary } from '../../utils/autoPostFilter.js';
 import axios from 'axios';
 import NodeCache from 'node-cache';
 import crypto from 'crypto';
+import { REPO_PATH } from '../../utils/paths.js';
 
 const DEFAULT_BASE_URL = 'https://mindswarm.net/api';
 
@@ -910,9 +911,19 @@ export default class MindSwarmPlugin extends BasePlugin {
   async _engagementCycle() {
     if (!this.accessToken) return;
 
+    // Notification fetch is the most likely failure point (geo-block 403,
+    // network). Isolate it so an upstream outage there doesn't silence
+    // the daily auto-post (the only piece that matters when MindSwarm's
+    // notifications endpoint is unreachable).
+    let notifications = [];
     try {
       const notifResult = await this._apiRequest('get', '/notifications', { page: 1 });
-      const notifications = notifResult.data?.notifications || [];
+      notifications = notifResult.data?.notifications || [];
+    } catch (err) {
+      this.pluginLogger.warn(`Notification fetch failed (continuing): ${err?.message || err?.code || String(err)}`);
+    }
+
+    try {
       const processedIds = [];
       let repliesSent = 0;
 
@@ -1199,7 +1210,7 @@ export default class MindSwarmPlugin extends BasePlugin {
       }
 
     } catch (err) {
-      this.pluginLogger.error('Engagement cycle failed:', err.message);
+      this.pluginLogger.error(`Engagement cycle failed: ${err?.message || err?.code || String(err)}`);
     }
   }
 
@@ -1280,7 +1291,7 @@ ${getSensitiveContentRules()}
 - CRITICAL: Do NOT repeat topics from your recent posts. If you posted about scammers, post about something else. If you posted about plugins, pick a different topic. Variety is essential.
 - You're an AI agent and that's fine — own it
 
-${context.recentPosts ? 'YOUR RECENT POSTS (you MUST pick a DIFFERENT topic than ALL of these):\n' + context.recentPosts + '\n' : ''}
+${context.recentTopicSummary ? 'TOPICS YOU HAVE ALREADY POSTED ABOUT RECENTLY — you MUST pick a DIFFERENT one:\n' + context.recentTopicSummary + '\nDo NOT reuse any four-word sequence from any post you have made before.\n' : ''}
 Return ONLY the post text, nothing else.`;
 
       // maxTokens budget includes reasoning for GPT-5/o-series models; 120
@@ -1317,6 +1328,14 @@ Return ONLY the post text, nothing else.`;
         if (!draft || draft.length < 15 || draft.length > 1000) {
           validationFailure = `length_${draft?.length || 0}`;
           rejectedDrafts.push({ text: (draft || '').slice(0, 200), reason: validationFailure });
+          continue;
+        }
+
+        // Same multilingual composer as the other poster: check the characters first.
+        const foreign = foreignScript(draft);
+        if (foreign) {
+          validationFailure = `foreign_script:${foreign.script}:"${foreign.sample}"`;
+          rejectedDrafts.push({ text: draft.slice(0, 200), reason: `foreign_script:${foreign.script}` });
           continue;
         }
 
@@ -1383,8 +1402,13 @@ Return ONLY the post text, nothing else.`;
       try {
         const telegram = this.agent?.interfaces?.get('telegram');
         if (telegram?.sendNotification) {
-          const post = postResult.data?.post || postResult.data;
-          const postId = post?.shortId || post?._id;
+          // Resolve the post object across possible response shapes, then its id.
+          // The create response serializes the Mongo _id as `id`, so check both
+          // (mirrors the canonical _id || id derivation used in the web feed) plus
+          // shortId/slug for forward-compat. Without the `id` fallback this resolved
+          // to undefined and the link degraded to the @username profile/homepage.
+          const post = postResult?.data?.post || postResult?.data || postResult;
+          const postId = post?.shortId || post?.slug || post?._id || post?.id;
           const postUrl = postId
             ? `https://mindswarm.net/@${this.username}/${postId}`
             : `https://mindswarm.net/@${this.username}`;
@@ -1401,7 +1425,7 @@ Return ONLY the post text, nothing else.`;
 
   /**
    * Gather real, specific context from agent activity for composing posts.
-   * Returns { hasContent: bool, items: string, recentPosts: string|null }
+   * Returns { hasContent: bool, items: string, recentTopicSummary: string|null }
    */
   async _gatherPostContext() {
     const items = [];
@@ -1450,7 +1474,7 @@ Return ONLY the post text, nothing else.`;
     // New capabilities (from recent git commits)
     try {
       const { execSync } = await import('child_process');
-      const repoPath = process.env.AGENT_REPO_PATH || '/root/lanagent-repo';
+      const repoPath = REPO_PATH;
       const excludedPaths = getExcludedPathspecs();
       const recentCommits = execSync(
         `cd ${repoPath} && git log --oneline --since="3 days ago" --no-merges -- ${excludedPaths} 2>/dev/null | head -5`,
@@ -1521,27 +1545,26 @@ Return ONLY the post text, nothing else.`;
     try {
       const pluginCount = this.agent?.apiManager?.apis?.size || 0;
       if (pluginCount > 0) {
-        items.push(`Operating with ${pluginCount} integrated capabilities — from on-chain analytics to media processing to autonomous code review`);
+        // Phrasing matters: `^operating with` is a BANNED_OPENER, so an item that
+        // opened with it handed the composer a sentence it was forbidden to quote.
+        // The topic pre-filter still matches on 'integrated capabilities'.
+        items.push(`${pluginCount} integrated capabilities are wired in — from on-chain analytics to media processing to autonomous code review`);
       }
     } catch { /* ignore */ }
 
     // Get recent posts to avoid repetition — fetch full content for dedup
-    let recentPosts = null;
+    let recentPostTopicSummary = null;
     const recentPostTopics = new Set();
     try {
       const postsResult = await this._apiRequest('get', `/users/${this.username}/posts`, { page: 1 });
       const posts = postsResult.data?.posts || [];
       if (posts.length > 0) {
-        recentPosts = posts.slice(0, 8)
-          .map(p => `- ${(p.content || '').substring(0, 150)}`)
-          .join('\n');
-
         // Topic-dedup window: only the last 3 posts (≈36h at 2 posts/day).
         // Was 8 — covered ~4 days, and once the 6 active topic generators
         // all landed in the window every raw item filtered out and auto-post
-        // ghosted for 3-5 days. (Repro: 2026-05-07 → 12.) The 8-post
-        // `recentPosts` text above still feeds the AI prompt for broader
-        // context; only the hard pre-filter uses the shorter slice.
+        // ghosted for 3-5 days. (Repro: 2026-05-07 → 12.) `promptTopics`
+        // below reads the wider 8-post window purely to steer the AI; only
+        // the hard pre-filter uses this shorter slice.
         for (const p of posts.slice(0, 3)) {
           const content = (p.content || '').toLowerCase();
           if (content.includes('scammer') || content.includes('flagg') || content.includes('soulbound')) recentPostTopics.add('scammer');
@@ -1557,6 +1580,28 @@ Return ONLY the post text, nothing else.`;
           if (content.includes('shipped') || content.includes('merged')) recentPostTopics.add('shipped');
           if (content.includes('integrated capabilit') || content.includes('operating with')) recentPostTopics.add('capabilities');
         }
+
+        // Prompt-side variety steer over the wider 8-post window. The
+        // composer is told which topics are spent, never the text of the
+        // posts themselves — see TOPIC_LABELS in autoPostFilter.js for why
+        // pasting the text back in produced near-verbatim reruns.
+        const promptTopics = new Set(recentPostTopics);
+        for (const p of posts.slice(0, 8)) {
+          const content = (p.content || '').toLowerCase();
+          if (content.includes('scammer') || content.includes('flagg') || content.includes('soulbound')) promptTopics.add('scammer');
+          if (content.includes('stak')) promptTopics.add('staking');
+          if (content.includes('plugin') || content.includes('service')) promptTopics.add('plugins');
+          if (content.includes('p2p') || content.includes('federation') || content.includes('peer')) promptTopics.add('p2p');
+          if (content.includes('uptime') || content.includes('24/7')) promptTopics.add('uptime');
+          if (content.includes('pull request') || content.includes('self-improv')) promptTopics.add('selfmod');
+          if (content.includes('email') || content.includes('processed')) promptTopics.add('email');
+          if (content.includes('upgrade') || content.includes('commit')) promptTopics.add('upgrades');
+          if (content.includes('auto-heal') || content.includes('self-diagnos')) promptTopics.add('healing');
+          if (content.includes('skynet') || content.includes('marketplace')) promptTopics.add('skynetEcon');
+          if (content.includes('shipped') || content.includes('merged')) promptTopics.add('shipped');
+          if (content.includes('integrated capabilit') || content.includes('operating with')) promptTopics.add('capabilities');
+        }
+        recentPostTopicSummary = recentTopicSummary(promptTopics);
       }
     } catch { /* ignore */ }
 
@@ -1604,7 +1649,7 @@ Return ONLY the post text, nothing else.`;
 
     // Raw text array of last N actual post contents — used by the
     // n-gram repetition check on the candidate output. The
-    // pretty-printed `recentPosts` string is for the AI prompt;
+    // topic summary is what reaches the AI prompt;
     // `recentPostTexts` is for code-level validation.
     let recentPostTexts = [];
     try {
@@ -1624,7 +1669,7 @@ Return ONLY the post text, nothing else.`;
         ? filteredItems.map((item, i) => `${i + 1}. ${item}`).join('\n')
         : 'No specific activity to report',
       itemTexts: filteredItems,
-      recentPosts,
+      recentTopicSummary: recentPostTopicSummary,
       recentPostTexts
     };
   }

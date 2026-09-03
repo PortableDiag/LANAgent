@@ -2,6 +2,69 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.269] - 2026-09-02
+
+Consolidated sync from upstream development (2.25.252–2.25.269). Highlights, by area:
+
+### Added
+- **Automatic deployment of merged changes.** A scheduled hourly task brings the local
+  repository to the tip of the main branch and deploys any merged file the running instance does
+  not yet have. Merging and deploying were previously unconnected steps, so a merged change sat
+  in the repository until someone ran a deploy script by hand. Set `AUTO_DEPLOY_MERGED=false` to
+  opt an instance out, in which case it reports which files are undeployed instead.
+- **Rollback protection for automatic deployment.** Files are backed up before being replaced and
+  verified in place afterwards — each one must both parse and import successfully in a separate
+  process, because a syntax check cannot catch a bad import. If any file fails to load the
+  originals are restored immediately and no restart occurs. A detached watchdog then probes the
+  health endpoint after the restart and restores the backup if the instance does not come back,
+  so a failed deployment ends on the last working code rather than in a restart loop.
+- **Deployment drift detection** in `scripts/deployment/deploy-check.sh`: it compares a checksum
+  of every deployed source file against the working tree and names the files that differ. Deploy
+  scripts report success for the files they are given and say nothing about the files they are
+  not, so a successful deploy never meant the deployment matched the repository.
+- **Scrape failure diagnostics.** Blocked responses carry `blockEvidence` (byte counts, text
+  density, which detector fired, and a confidence level), so a caller can tell a positively
+  identified block from an inference about page shape. Replayed cached failures are now marked
+  `cachedFailureReplay` with the entry's real remaining TTL and whether it is worth retrying — a
+  cached failure previously came back byte-identical to a fresh verdict.
+- **Avatar version history and rollback**, with a capped history so a document cannot outgrow
+  the storage limit, and monotonic version numbering so a restore never reissues an existing
+  version number.
+- **Scan prioritisation** on scan-progress records, with ordering computed by importance.
+- **Statistics export** command on the agent-stats plugin, returning structured JSON.
+- `npm run test:unit` — the unit suite had no invocation of its own in `package.json`.
+
+### Fixed
+- **A complete but short page was classified as blocked.** The stub detector tested raw length
+  only, so a small, valid document satisfied it and ran the entire bypass ladder before returning
+  a blocked verdict — reporting a live URL as dead, which is the one thing a link checker cannot
+  survive. It now spares a result that is small *and* dense; challenge pages and JavaScript
+  application shells have their own detectors and are unaffected.
+- **The capability scanner analysed almost nothing.** Its per-file budget compared a file size in
+  bytes against a context limit in tokens, its model-context lookup required an exact match and
+  silently fell back to a much smaller default, and it aborted the entire scan on the first file
+  that did not fit rather than skipping it. Because the file list is shuffled, most scans examined
+  no files at all. Measured against the real source tree, zero-yield scans went from 90% to none.
+- **A retired scheduled task was discarding the scanner's results.** It was defined in the
+  scheduler but scheduled nowhere in current code, kept alive by a stored job record, and ran a
+  full analysis whose return value was thrown away — consuming results the task that acts on them
+  never saw. It is now removed at startup.
+- **The RAG markdown loader dropped document metadata.** It carried a second hand-rolled
+  frontmatter parser whose pattern required Unix line endings and content after the closing
+  delimiter, so documents with Windows line endings, documents that are metadata only, and
+  documents using TOML delimiters were all indexed as having no metadata. Consolidated onto the
+  shared parser, which gains a non-coercing mode so stored metadata keeps its original types.
+- **Git credentials were written to a temporary directory**, so automated pulls and pushes
+  stopped working after any reboot — and a new credential file was created on every push and
+  never cleaned up. One stable file now, with restrictive permissions.
+- **Deployment paths were hardcoded as fallbacks** in several source files. Replaced with the
+  shared paths module. The tunnel address used for connectivity checks is now configurable.
+- A shared retry helper resolved its attempt count with `||`, so a caller explicitly requesting
+  zero retries could silently get the inferred value instead — on an operation it had marked
+  unsafe to repeat.
+- Housekeeping timers at module scope kept the event loop alive, so processes that had finished
+  their work never exited. They are now unreferenced.
+
 ## [2.25.251] - 2026-08-27
 
 Consolidated sync from upstream development (2.25.204–2.25.251). Highlights, by area:

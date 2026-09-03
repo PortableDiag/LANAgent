@@ -119,6 +119,15 @@ export default class SubAgentsPlugin extends BasePlugin {
         ]
       },
       {
+        command: 'interruptAgent',
+        description: 'Interrupt an agent mid-task (cooperative cancel; the session closes normally with an interrupted result)',
+        usage: 'interrupt agent <agentId>',
+        examples: [
+          'interrupt agent abc123',
+          'cancel the running task agent'
+        ]
+      },
+      {
         command: 'pauseAgent',
         description: 'Pause an agent',
         usage: 'pause agent <agentId>',
@@ -245,6 +254,8 @@ export default class SubAgentsPlugin extends BasePlugin {
         return await this.runAgent(data);
       case 'stopAgent':
         return await this.stopAgent(data);
+      case 'interruptAgent':
+        return await this.interruptAgent(data);
       case 'pauseAgent':
         return await this.pauseAgent(data);
       case 'resumeAgent':
@@ -515,6 +526,15 @@ export default class SubAgentsPlugin extends BasePlugin {
     }
 
     const result = await this.orchestrator.stopAgent(data.agentId);
+    return result;
+  }
+
+  async interruptAgent(data) {
+    if (!data.agentId) {
+      return { success: false, error: 'Please provide an agent ID' };
+    }
+
+    const result = await this.orchestrator.interruptAgent(data.agentId);
     return result;
   }
 

@@ -92,6 +92,19 @@ export default class ApiKeysPlugin extends BasePlugin {
     }
   }
 
+  /**
+   * Best-effort record of a key lifecycle action to agent memory.
+   * The underlying key operation has already succeeded by the time this runs,
+   * so a memory failure must never bubble up and mark the action as failed.
+   */
+  async _rememberKeyAction(summary, metadata) {
+    try {
+      await this.storeMemory(summary, metadata);
+    } catch (error) {
+      logger.warn(`Failed to record key action to memory (non-fatal): ${error.message}`);
+    }
+  }
+
   async createKey(params) {
     const { name, description, expiresIn, rateLimit = 100 } = params;
     
@@ -114,8 +127,8 @@ export default class ApiKeysPlugin extends BasePlugin {
         createdBy: 'agent'
       });
 
-      // Save the key info to agent's memory
-      await this.agent.saveToMemory(
+      // Save the key info to agent's memory (best-effort)
+      await this._rememberKeyAction(
         `Created API key: ${name}`,
         { 
           type: 'api_key_created',
@@ -197,7 +210,7 @@ export default class ApiKeysPlugin extends BasePlugin {
       const success = await apiKeyService.revokeApiKey(keyId);
       
       if (success) {
-        await this.agent.saveToMemory(
+        await this._rememberKeyAction(
           `Revoked API key: ${keyId}`,
           { type: 'api_key_revoked', keyId }
         );
@@ -283,7 +296,7 @@ export default class ApiKeysPlugin extends BasePlugin {
       const success = await apiKeyService.deleteApiKey(keyId);
       
       if (success) {
-        await this.agent.saveToMemory(
+        await this._rememberKeyAction(
           `Deleted API key: ${keyId}`,
           { type: 'api_key_deleted', keyId }
         );

@@ -9,6 +9,10 @@ export class BaseProvider extends EventEmitter {
     this.config = config;
     this.isActive = false;
     this.simulationMode = config.simulationMode || false;
+    // Does generateResponse() honour options.enableWebSearch by calling a real search tool?
+    // Providers that leave this false answer search queries from training data instead —
+    // silently, and slowly. Callers should check before asking one to search.
+    this.supportsWebSearch = false;
     this.metrics = {
       totalRequests: 0,
       totalTokens: 0,
@@ -28,7 +32,15 @@ export class BaseProvider extends EventEmitter {
     this.tokenUsageQueue = [];
     this.queueThreshold = config.queueThreshold || 10;
     this.queueFlushInterval = config.queueFlushInterval || 5000;
+    // unref()'d: this is a batching optimisation, and a ref'd interval per provider
+    // instance means constructing ANY provider is enough to pin the event loop open
+    // for the life of the process. There is a shutdown() that clears it, but a
+    // timer must not be the thing keeping a finished process alive when nobody
+    // calls it — several unit test files hung forever on exactly this. The queue
+    // also flushes on `queueThreshold`, so batching still works; unref only means
+    // the interval cannot by itself hold the loop open.
     this._flushTimer = setInterval(() => this.flushTokenUsageQueue(), this.queueFlushInterval);
+    this._flushTimer.unref?.();
   }
 
   async initialize() {

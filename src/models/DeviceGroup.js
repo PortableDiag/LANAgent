@@ -7,8 +7,7 @@ const deviceGroupSchema = new mongoose.Schema({
   name: {
     type: String,
     required: true,
-    unique: true,
-    index: true
+    unique: true
   },
   pluginName: {
     type: String,
@@ -19,6 +18,10 @@ const deviceGroupSchema = new mongoose.Schema({
     deviceId: String,
     deviceName: String
   }],
+  tags: {
+    type: [String],
+    default: []
+  },
   description: String,
   createdAt: {
     type: Date,
@@ -33,9 +36,14 @@ const deviceGroupSchema = new mongoose.Schema({
 // Add compound index for optimized queries
 deviceGroupSchema.index({ name: 1, pluginName: 1 });
 deviceGroupSchema.index({ 'devices.deviceId': 1, pluginName: 1 });
+deviceGroupSchema.index({ tags: 1 });
 
 // Initialize cache
 const cache = new NodeCache({ stdTTL: 300, checkperiod: 60 });
+
+// Upper bound on a caller-supplied tag regex. Long patterns are the ones that
+// make catastrophic backtracking expensive; no legitimate tag filter needs more.
+const MAX_TAG_PATTERN_LENGTH = 128;
 
 // Update timestamp on save
 deviceGroupSchema.pre('save', function(next) {
@@ -111,6 +119,27 @@ deviceGroupSchema.statics.aggregateDeviceGroups = async function(pipeline) {
 };
 
 /**
+ * Validate if a device belongs to a specific group
+ * @param {string} groupId - The ID of the group to check
+ * @param {string} deviceId - The ID of the device to validate
+ * @param {string} pluginName - The name of the plugin
+ * @returns {Promise<boolean>} - Whether the device belongs to the group
+ */
+deviceGroupSchema.statics.validateDeviceMembership = async function(groupId, deviceId, pluginName = 'govee') {
+  try {
+    const group = await retryOperation(() => this.findOne({
+      _id: groupId,
+      pluginName,
+      'devices.deviceId': deviceId
+    }));
+    return !!group;
+  } catch (error) {
+    logger.error('Device group membership validation failed', { groupId, deviceId, pluginName, error: error.message });
+    throw error;
+  }
+};
+
+/**
  * Bulk create device groups
  * @param {Array} groupsData - Array of device group data
  * @returns {Promise<Array>} - Created device groups
@@ -177,23 +206,197 @@ deviceGroupSchema.statics.bulkDelete = async function(groupIds) {
 };
 
 /**
- * Validate if a device belongs to a specific group
- * @param {string} groupId - The ID of the group to check
- * @param {string} deviceId - The ID of the device to validate
- * @param {string} pluginName - The name of the plugin
- * @returns {Promise<boolean>} - Whether the device belongs to the group
+ * Add a tag to a device group
+ * @param {string} groupId - The ID of the group to tag
+ * @param {string} tag - The tag to add
+ * @returns {Promise<Object>} - The updated group
  */
-deviceGroupSchema.statics.validateDeviceMembership = async function(groupId, deviceId, pluginName = 'govee') {
+deviceGroupSchema.statics.addTagToGroup = async function(groupId, tag) {
   try {
-    const group = await retryOperation(() => this.findOne({
-      _id: groupId,
-      pluginName,
-      'devices.deviceId': deviceId
-    }));
-    return !!group;
+    const group = await retryOperation(() => 
+      this.findByIdAndUpdate(
+        groupId, 
+        { $addToSet: { tags: tag } }, 
+        { new: true }
+      )
+    );
+    
+    if (!group) {
+      throw new Error(`Group with ID ${groupId} not found`);
+    }
+    
+    // Clear relevant cache entries
+    cache.flushAll();
+    
+    return group;
   } catch (error) {
-    logger.error('Device group membership validation failed', { groupId, deviceId, pluginName, error: error.message });
+    logger.error('Failed to add tag to group', { groupId, tag, error: error.message });
     throw error;
+  }
+};
+
+/**
+ * Remove a tag from a device group
+ * @param {string} groupId - The ID of the group to untag
+ * @param {string} tag - The tag to remove
+ * @returns {Promise<Object>} - The updated group
+ */
+deviceGroupSchema.statics.removeTagFromGroup = async function(groupId, tag) {
+  try {
+    const group = await retryOperation(() => 
+      this.findByIdAndUpdate(
+        groupId, 
+        { $pull: { tags: tag } }, 
+        { new: true }
+      )
+    );
+    
+    if (!group) {
+      throw new Error(`Group with ID ${groupId} not found`);
+    }
+    
+    // Clear relevant cache entries
+    cache.flushAll();
+    
+    return group;
+  } catch (error) {
+    logger.error('Failed to remove tag from group', { groupId, tag, error: error.message });
+    throw error;
+  }
+};
+
+/**
+ * Find groups by tags with regex matching capabilities
+ * @param {Array<string>} tags - Array of tags to search for
+ * @param {Object} options - Search options
+ * @param {boolean} options.regex - Whether to use regex matching
+ * @param {string} options.pluginName - Filter by plugin name
+ * @returns {Promise<Array>} - Matching groups
+ */
+deviceGroupSchema.statics.findGroupsByTags = async function(tags, options = {}) {
+  try {
+    const { regex = false, pluginName = 'govee' } = options;
+
+    if (!Array.isArray(tags) || tags.length === 0) {
+      throw new Error('findGroupsByTags requires a non-empty array of tags');
+    }
+
+    let query;
+
+    if (regex) {
+      // Caller-supplied patterns are compiled here, so two things need bounding.
+      // A malformed pattern ('[') throws a cryptic SyntaxError from deep inside
+      // the driver, and a catastrophic one ('(a+)+$') can pin the event loop for
+      // an unbounded time — this is a synchronous compile on a shared process
+      // that is also running trading. Cap the length and report a bad pattern as
+      // a bad pattern.
+      const tagQueries = tags.map(tag => {
+        const pattern = String(tag);
+        if (pattern.length > MAX_TAG_PATTERN_LENGTH) {
+          throw new Error(`Tag pattern exceeds ${MAX_TAG_PATTERN_LENGTH} characters`);
+        }
+        try {
+          return { tags: { $regex: new RegExp(pattern, 'i') } };
+        } catch {
+          throw new Error(`Invalid tag pattern: ${pattern}`);
+        }
+      });
+      query = {
+        $and: [
+          { pluginName },
+          { $or: tagQueries }
+        ]
+      };
+    } else {
+      // Exact matching
+      query = {
+        tags: { $all: tags },
+        pluginName
+      };
+    }
+    
+    const cacheKey = `findGroupsByTags:${JSON.stringify(tags)}:${JSON.stringify(options)}`;
+    const cachedResult = cache.get(cacheKey);
+    if (cachedResult) {
+      return cachedResult;
+    }
+    
+    const result = await retryOperation(() => this.find(query));
+    cache.set(cacheKey, result);
+    return result;
+  } catch (error) {
+    logger.error('Failed to find groups by tags', { tags, options, error: error.message });
+    throw error;
+  }
+};
+
+/**
+ * Bulk add tags to multiple groups
+ * @param {Array<string>} groupIds - Array of group IDs to tag
+ * @param {Array<string>} tags - Array of tags to add
+ * @returns {Promise<Object>} - Operation result
+ */
+deviceGroupSchema.statics.bulkAddTags = async function(groupIds, tags) {
+  const session = await mongoose.startSession();
+  session.startTransaction();
+  try {
+    const result = await this.updateMany(
+      { _id: { $in: groupIds } },
+      { $addToSet: { tags: { $each: tags } } },
+      { session }
+    );
+    
+    await session.commitTransaction();
+    
+    // Clear relevant cache entries
+    cache.flushAll();
+    
+    return {
+      matchedCount: result.matchedCount,
+      modifiedCount: result.modifiedCount,
+      success: true
+    };
+  } catch (error) {
+    await session.abortTransaction();
+    logger.error('Bulk add tags failed', { groupIds, tags, error: error.message });
+    throw error;
+  } finally {
+    session.endSession();
+  }
+};
+
+/**
+ * Bulk remove tags from multiple groups
+ * @param {Array<string>} groupIds - Array of group IDs to untag
+ * @param {Array<string>} tags - Array of tags to remove
+ * @returns {Promise<Object>} - Operation result
+ */
+deviceGroupSchema.statics.bulkRemoveTags = async function(groupIds, tags) {
+  const session = await mongoose.startSession();
+  session.startTransaction();
+  try {
+    const result = await this.updateMany(
+      { _id: { $in: groupIds } },
+      { $pull: { tags: { $in: tags } } },
+      { session }
+    );
+    
+    await session.commitTransaction();
+    
+    // Clear relevant cache entries
+    cache.flushAll();
+    
+    return {
+      matchedCount: result.matchedCount,
+      modifiedCount: result.modifiedCount,
+      success: true
+    };
+  } catch (error) {
+    await session.abortTransaction();
+    logger.error('Bulk remove tags failed', { groupIds, tags, error: error.message });
+    throw error;
+  } finally {
+    session.endSession();
   }
 };
 

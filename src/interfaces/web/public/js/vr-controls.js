@@ -670,7 +670,8 @@ class VRControls {
             if (data.balance !== undefined) lines.push(`Balance: ${Number(data.balance).toFixed(4)}`);
             if (data.value !== undefined) lines.push(`Value: $${Number(data.value).toFixed(2)}`);
             if (data.price !== undefined) lines.push(`Price: $${Number(data.price).toFixed(4)}`);
-            if (data.change24h !== undefined) lines.push(`24h: ${Number(data.change24h).toFixed(2)}%`);
+            if (data.changeSinceEntry !== undefined) lines.push(`Since entry: ${Number(data.changeSinceEntry).toFixed(2)}%`);
+            else if (data.change24h !== undefined) lines.push(`24h: ${Number(data.change24h).toFixed(2)}%`);
             if (data.trustLevel !== undefined) lines.push(`Trust: ${data.trustLevel}`);
             if (data.commandCount) lines.push(`Commands: ${data.commandCount}`);
             if (data.connections !== undefined) lines.push(`Connections: ${data.connections}`);

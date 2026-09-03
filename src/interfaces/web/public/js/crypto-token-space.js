@@ -97,7 +97,7 @@ class CryptoTokenSpaceViz {
 
         // If no real data, show empty state message
         if (tokens.length === 0) {
-            tokens = [{ symbol: 'No Holdings', name: 'Wallet empty or not initialized', value: 1, change24h: 0, volatility: 0.1, type: 'placeholder' }];
+            tokens = [{ symbol: 'No Holdings', name: 'Wallet empty or not initialized', value: 1, changeSinceEntry: 0, volatility: 0.1, type: 'placeholder' }];
         }
 
         const maxVal = Math.max(...tokens.map(t => t.value || 1));
@@ -131,7 +131,7 @@ class CryptoTokenSpaceViz {
         // Create tokens
         tokens.forEach((tk, i) => {
             const val = tk.value || 1;
-            const change = tk.change24h || 0;
+            const change = tk.changeSinceEntry || 0;
             const vol = tk.volatility || Math.abs(change) / 10 || 0.3;
             const size = 0.5 + (val / maxVal) * 2.5;
             const orbitR = 6 + vol * 20;
@@ -244,7 +244,7 @@ class CryptoTokenSpaceViz {
     }
 
     _showInfoCard(tk) {
-        const change = tk.change24h || 0;
+        const change = tk.changeSinceEntry || 0;
         const changeStr = change >= 0 ? `+${change.toFixed(2)}%` : `${change.toFixed(2)}%`;
         const changeColor = change >= 0 ? '#4caf50' : '#f44336';
         const typeColor = tk.type === 'stablecoin' ? '#2196f3' : '#ffd700';
@@ -262,7 +262,7 @@ class CryptoTokenSpaceViz {
         addRow('Value', '$' + (tk.value || 0).toLocaleString());
         if (tk.balance) addRow('Balance', parseFloat(tk.balance).toFixed(6));
         if (tk.price) addRow('Price', '$' + parseFloat(tk.price).toLocaleString());
-        addRow('24h Change', changeStr, changeColor);
+        addRow('Since Entry', changeStr, changeColor);
         if (tk.volatility) addRow('Volatility', (tk.volatility * 100).toFixed(1) + '%');
         if (tk.network) addRow('Network', tk.network);
         if (tk.type) addRow('Type', tk.type, typeColor);
@@ -305,8 +305,8 @@ class CryptoTokenSpaceViz {
                 this.tooltip.style.display = 'none';
                 return;
             }
-            const changeStr = (tk.change24h || 0) >= 0 ? `+${(tk.change24h || 0).toFixed(2)}%` : `${(tk.change24h || 0).toFixed(2)}%`;
-            const changeColor = (tk.change24h || 0) >= 0 ? '#4caf50' : '#f44336';
+            const changeStr = (tk.changeSinceEntry || 0) >= 0 ? `+${(tk.changeSinceEntry || 0).toFixed(2)}%` : `${(tk.changeSinceEntry || 0).toFixed(2)}%`;
+            const changeColor = (tk.changeSinceEntry || 0) >= 0 ? '#4caf50' : '#f44336';
             let html = `<strong>${tk.symbol}</strong> — ${tk.name || ''}`;
             html += `<br>Value: $${(tk.value || 0).toLocaleString()}`;
             if (tk.balance) html += `<br>Balance: ${parseFloat(tk.balance).toFixed(6)}`;

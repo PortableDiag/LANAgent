@@ -26,8 +26,10 @@ import TokenTraderHeartbeatManager from '../crypto/TokenTraderHeartbeatManager.j
 // viable swap path" instant-blacklist branches.
 // The list itself lives in ../crypto/systemTokens.js so strategies can consult
 // it without importing this module back (that edge would be circular — this
-// module already pulls the strategies in via StrategyRegistry).
+// module already pulls the strategies in via StrategyRegistry). Re-exported
+// here so every existing importer of isSystemToken keeps working unchanged.
 import { SYSTEM_TOKEN_ALLOWLIST, isSystemToken } from '../crypto/systemTokens.js';
+export { isSystemToken };
 
 // CoinGecko ID mapping for tokens
 const COINGECKO_IDS = {
@@ -118,6 +120,15 @@ const PRICE_FEED_ABI = [
   }
 ];
 
+// Native symbol per network, for looking up the gas reserve the project already
+// declares (dollar_maximizer's `gasReserves`: BNB 0.05, ETH 0.01, MATIC 1.0).
+const NATIVE_SYMBOL = { ethereum: 'ETH', bsc: 'BNB', polygon: 'MATIC', base: 'ETH', arbitrum: 'ETH' };
+// Last-resort floors, used ONLY when the strategy registry cannot be reached.
+// Deliberately the same numbers the strategy declares, so the fallback can never
+// silently disagree with the live configuration.
+const FALLBACK_NATIVE_GAS_FLOOR = { ETH: 0.01, BNB: 0.05, MATIC: 1.0 };
+const DEFAULT_NATIVE_GAS_FLOOR = 0.01;
+
 export class CryptoStrategyAgent extends BaseAgentHandler {
   constructor(mainAgent, agentDoc) {
     super(mainAgent, agentDoc);
@@ -134,10 +145,26 @@ export class CryptoStrategyAgent extends BaseAgentHandler {
 
     // Reference to scheduler for dynamic interval changes
     this.scheduler = null;
+
+    // Deep-scan lifecycle: 'idle' | 'running' | 'done'. The scan runs detached from
+    // the heartbeat so it can never hold up a trading decision; deposit DETECTION
+    // waits on it instead. See scanForDeposits().
+    this._deepScanState = 'idle';
   }
 
   async initialize() {
     await super.initialize();
+
+    // Prime the displayed P&L before anything can query the status endpoint, so a
+    // restart never serves a stale zero for the day's earnings.
+    //
+    // One attempt is not enough: on 2026-08-20 the first attempt came back empty even
+    // though MongoDB had been connected for 19s, and the figures only appeared on the
+    // first strategy execution ~2min later. Whatever the ordering (revenueService's own
+    // cache still cold, traders not yet registered), a short bounded retry closes it,
+    // and the log line says plainly which attempt won — or that none did, instead of
+    // silently serving zeros again.
+    this._primePnLCaches();
 
     // Register strategy tools
     this.registerStrategies();
@@ -367,6 +394,10 @@ export class CryptoStrategyAgent extends BaseAgentHandler {
     // so the error line surfaces which step was running, instead of just
     // "Crypto Strategy Agent execution failed" with no clue what hung.
     this._currentStage = 'starting';
+    // Session start time for time-budget checks in long-running stages
+    // (residual-sweep, deposit-scan). Orchestrator hard-cap is 20min;
+    // stages bail at ~90s remaining via _remainingSessionMs().
+    this._sessionStartedAt = Date.now();
 
     const config = this.getConfig();
     const state = this.getState();
@@ -384,18 +415,10 @@ export class CryptoStrategyAgent extends BaseAgentHandler {
       const prefetchedPrices = options.eventData?.prices || null;
       const marketData = await this.gatherMarketData(prefetchedPrices);
 
-      // Update cached P&L from revenueService for web UI display
-      if (eventName === 'crypto:heartbeat') {
-        try {
-          const revService = (await import('../crypto/revenueService.js')).default;
-          const todayPnL = revService.getTodayPnLSummary();
-          if (todayPnL && todayPnL.dailyNet !== undefined) {
-            this._cachedDailyPnL = todayPnL.dailyNet;
-            this._cachedTTTotalPnL = todayPnL.cumulativePnL || 0;
-            this._cachedTTUnrealizedPnL = todayPnL.unrealizedPnL || 0;
-          }
-        } catch { /* non-critical */ }
-      }
+      // Refresh the displayed P&L cache on EVERY execution, not only on heartbeats.
+      // Heartbeat-only left the figures unset between a restart and the first heartbeat,
+      // which is exactly when the status endpoint was serving stale values.
+      await this.refreshPnLCaches();
 
       // Step 1.5a: Scan for new deposits on heartbeat (agent-owned, no Agenda job)
       if (eventName === 'crypto:heartbeat' || triggerSource === 'manual') {
@@ -569,7 +592,7 @@ export class CryptoStrategyAgent extends BaseAgentHandler {
           logger.info(`Strategy ${activeStrategy} result: action=${action}, reason=${result?.reason || 'none'}`);
           if (result?.networkAnalysis) {
             for (const [net, analysis] of Object.entries(result.networkAnalysis)) {
-              logger.info(`  ${net}: price=$${analysis.currentPrice}, baseline=$${analysis.baselinePrice}, change=${analysis.priceChange?.toFixed(2)}%, opportunity=${analysis.opportunity ? analysis.opportunity.action : 'none'}, reason=${analysis.reason || 'n/a'}`);
+              logger.info(`  ${net}: price=$${analysis.currentPrice}, baseline=$${analysis.baselinePrice}, change=${analysis.priceChange?.toFixed(2)}%, opportunity=${analysis.opportunity ? analysis.opportunity.action : 'none'}, reason=${analysis.reason || analysis.opportunity?.reason || 'n/a'}`);
             }
           }
           await this.recordTrade(decision, result);
@@ -645,19 +668,7 @@ export class CryptoStrategyAgent extends BaseAgentHandler {
           if (arbStrategy?.enabled) {
             const arbExecutor = this.strategies.get('arbitrage');
             if (arbExecutor) {
-              // Wrap in 45s timeout to prevent blocking the heartbeat (60s for fast mode — more tokens to scan)
-              const arbTimeout = isHighVolatility ? 60000 : 45000;
-              const arbPromise = arbExecutor.execute({ strategy: 'arbitrage', fastMode: isHighVolatility }, marketData);
-              const timeoutPromise = new Promise((_, reject) =>
-                setTimeout(() => reject(new Error(`Arb scan timed out after ${arbTimeout / 1000}s`)), arbTimeout)
-              );
-              arbResult = await Promise.race([arbPromise, timeoutPromise]);
-              if (arbResult?.action && arbResult.action !== 'hold') {
-                logger.info(`Arbitrage result: ${arbResult.action}, profit=$${arbResult.profit?.toFixed(2) || '?'}`);
-                await this.recordTrade({ strategy: 'arbitrage' }, arbResult);
-              } else {
-                logger.info(`Arb scan complete: no profitable opportunities`);
-              }
+              arbResult = this._runArbScanDetached(arbExecutor, { strategy: 'arbitrage', fastMode: isHighVolatility }, marketData);
             }
           }
         } catch (arbErr) {
@@ -969,6 +980,14 @@ export class CryptoStrategyAgent extends BaseAgentHandler {
         for (const [chain, balance] of Object.entries(balances)) {
           const network = chainToNetwork[chain];
           if (network && networks[network]) {
+            // null = the read failed (unknown), not zero. Carry NO balance entry for
+            // the network this tick — every consumer treats a missing entry as
+            // "no data" and holds, whereas a fake 0 triggers real trades (gas
+            // top-ups, position flips) against a wallet that isn't actually empty.
+            if (balance === null || balance === undefined) {
+              logger.warn(`Balance [${network}]: read failed — skipping balance data this tick`);
+              continue;
+            }
             const address = wallet.addresses.find(a => a.chain === chain)?.address;
             data.balances[network] = {
               native: balance,
@@ -996,8 +1015,11 @@ export class CryptoStrategyAgent extends BaseAgentHandler {
           data.balances[network].stablecoinSymbol = netConfig.stablecoin;
           logger.info(`Stablecoin [${network}]: ${stableResult.formatted} ${netConfig.stablecoin}`);
         } catch (err) {
-          data.balances[network].stablecoin = 0;
-          logger.warn(`Could not fetch ${netConfig.stablecoin} balance on ${network}: ${err.message}`);
+          // A failed stablecoin read must not look like an empty wallet: position
+          // reconciliation resets "in stablecoin" positions to native when it sees
+          // stablecoin < 0.01. Drop the network's balance data for this tick instead.
+          delete data.balances[network];
+          logger.warn(`Could not fetch ${netConfig.stablecoin} balance on ${network} — skipping balance data this tick: ${err.message}`);
         }
       }
     } catch (error) {
@@ -1359,10 +1381,29 @@ Respond in JSON format:
         return { success: false, error: 'Trade amount too small' };
       }
 
-      // Minimum $1 USD trade value
+      // Minimum $1 USD trade value.
+      //
+      // `usdValue > 0 && usdValue < 1` was meant as "skip if we can value this and it is
+      // tiny". But a missing price read makes usdValue exactly 0, so the first clause is
+      // false and the guard is SKIPPED — a feed miss silently disabled the very check
+      // meant to catch a worthless trade, and the swap then went out with
+      // expectedOutputUsd: 0. "Unknown" was being treated as "fine".
+      //
+      // Unknown now blocks the trade, with one exception kept deliberately: an urgent
+      // sell (stop-loss) still goes through. Refusing to cut a loss because the price
+      // feed blinked is strictly worse than selling late — the same reasoning the
+      // strategy's own stale-oracle guard already uses.
       const currentPrice = marketData.prices?.[network]?.price || 0;
+      const priceKnown = Number.isFinite(currentPrice) && currentPrice > 0;
       const usdValue = parseFloat(tradeAmount) * currentPrice;
-      if (usdValue > 0 && usdValue < 1) {
+      if (!priceKnown) {
+        if (decision.urgent === true) {
+          logger.warn(`NativeMaximizer: no usable ${network} price, but proceeding — urgent sell must not be blocked by a feed miss`);
+        } else {
+          logger.info(`NativeMaximizer: Sell skipped - no usable ${network} price, cannot confirm the trade clears the $1 minimum`);
+          return { success: false, error: `No usable ${network} price to value the trade` };
+        }
+      } else if (usdValue < 1) {
         logger.info(`NativeMaximizer: Sell skipped - trade value $${usdValue.toFixed(2)} below $1 minimum`);
         return { success: false, error: `Trade value $${usdValue.toFixed(2)} below $1 minimum` };
       }
@@ -1391,6 +1432,10 @@ Respond in JSON format:
       if (swapResult.success) {
         // Use expectedOut from swap service (now correctly formatted with output token decimals)
         let stablecoinReceived = parseFloat(swapResult.expectedOut) || 0;
+        // The swap's own yield — stablecoinReceived below may be bumped to the
+        // full on-chain balance (position/buy-back budget), which is NOT what
+        // this sell produced. Journal and profit stats use the yield.
+        const swapYield = stablecoinReceived;
         logger.info(`Swap expectedOut: ${swapResult.expectedOut} (parsed: ${stablecoinReceived})`);
 
         // Try to verify with on-chain balance, but only use it if > expectedOut
@@ -1416,17 +1461,12 @@ Respond in JSON format:
           logger.warn(`Could not read actual stablecoin balance, using expectedOut: ${balErr.message}`);
         }
 
-        // Update position
-        await this.updateState({
-          positions: {
-            ...(state.positions || {}),
-            [network]: {
-              inStablecoin: true,
-              entryPrice: marketData.prices[network].price,
-              stablecoinAmount: stablecoinReceived,
-              timestamp: new Date()
-            }
-          }
+        // Update position (atomic per-network)
+        await this._persistPosition(network, {
+          inStablecoin: true,
+          entryPrice: marketData.prices[network].price,
+          stablecoinAmount: stablecoinReceived,
+          timestamp: new Date()
         });
 
         // Set new baseline
@@ -1444,7 +1484,7 @@ Respond in JSON format:
           success: true,
           action: 'sold_to_stablecoin',
           amount: tradeAmount,
-          received: stablecoinReceived,
+          received: swapYield || stablecoinReceived,
           txHash: swapResult.hash
         };
 
@@ -1452,7 +1492,7 @@ Respond in JSON format:
           action: 'sold_to_stablecoin',
           network,
           amountIn: tradeAmount,
-          amountOut: stablecoinReceived,
+          amountOut: swapYield || stablecoinReceived,
           symbolIn: networkConfig.symbol,
           symbolOut: networkConfig.stablecoin || 'USDC',
           txHash: swapResult.hash,
@@ -1465,9 +1505,25 @@ Respond in JSON format:
       return { success: false, error: swapResult.error || 'Swap failed' };
 
     } else if (direction === 'buy' && position.inStablecoin && position.stablecoinAmount > 0) {
-      // Buy back native with stablecoin
-      // Verify actual wallet balance before using recorded stablecoinAmount
-      let stableAmount = position.stablecoinAmount;
+      // Buy back native with stablecoin.
+      //
+      // Honour the amount the STRATEGY asked for. This used to read
+      // `position.stablecoinAmount` unconditionally, ignoring decision.amount entirely —
+      // harmless while every buy-back was all-in by design, and wrong the moment one was
+      // not. The stranded-capital re-entry deploys a fraction on purpose, so that a single
+      // entry price cannot commit the whole leg; on 2026-08-21 20:44 the strategy correctly
+      // asked for $341.68 and this line spent $1,004.93 anyway.
+      //
+      // Bounded by the position either way: a decision can ask for LESS than the leg holds,
+      // never more. Absent or unusable, the old behaviour stands.
+      const requested = parseFloat(decision?.amount);
+      let stableAmount = Number.isFinite(requested) && requested > 0
+        ? Math.min(requested, position.stablecoinAmount)
+        : position.stablecoinAmount;
+      if (stableAmount < position.stablecoinAmount) {
+        logger.info(`DollarMaximizer [${network}]: partial buy — deploying $${stableAmount.toFixed(2)} of the leg's $${position.stablecoinAmount.toFixed(2)} as the strategy requested`);
+      }
+      // Verify actual wallet balance before using the amount above
       try {
         const { ethers } = await import('ethers');
         const provider = await contractServiceWrapper.getProvider(network);
@@ -1479,20 +1535,29 @@ Respond in JSON format:
           const decimals = await stableContract.decimals();
           const actualBalance = await stableContract.balanceOf(walletAddress);
           const actualAmount = parseFloat(ethers.formatUnits(actualBalance, decimals));
-          if (actualAmount < stableAmount * 0.01) {
+          // Judged against the POSITION, not the (possibly partial) trade size: a small
+          // tranche must not make a genuinely drained wallet look adequately funded.
+          if (actualAmount < position.stablecoinAmount * 0.01) {
             // Actual balance is less than 1% of expected - position state is stale
             logger.warn(`Buy aborted: recorded ${stableAmount} ${networkConfig.stablecoin} but wallet only has ${actualAmount}. Resetting position.`);
-            await this.updateState({
-              positions: {
-                ...(state.positions || {}),
-                [network]: { inStablecoin: false, entryPrice: null, stablecoinAmount: 0 }
-              }
-            });
+            await this._persistPosition(network, { inStablecoin: false, entryPrice: null, stablecoinAmount: 0 });
             return { success: false, error: `Stablecoin balance mismatch: expected ${stableAmount}, actual ${actualAmount}` };
           }
           if (actualAmount < stableAmount) {
             logger.warn(`Adjusting buy amount from ${stableAmount} to actual balance ${actualAmount}`);
             stableAmount = actualAmount;
+          }
+          // Second line of defence on the shared pot. The position should already carry
+          // DM's own share, but this path reads a LIVE on-chain balance that includes the
+          // token trader's reserve, so re-apply the split here rather than trusting that
+          // reconciliation ran this tick. A buy-back spends the whole figure.
+          const dmCeiling = this.getDmAvailableStable(network, actualAmount);
+          if (dmCeiling < stableAmount) {
+            logger.info(`DollarMaximizer [${network}]: capping buy at $${dmCeiling.toFixed(2)} of $${actualAmount.toFixed(2)} on-chain — the remainder is the token trader's allotment`);
+            stableAmount = dmCeiling;
+          }
+          if (!(stableAmount > 0)) {
+            return { success: false, error: 'No stablecoin available to DollarMaximizer after the token-trader allotment' };
           }
         }
       } catch (balErr) {
@@ -1502,6 +1567,45 @@ Respond in JSON format:
       if (stableAmount > 0 && stableAmount < 1) {
         logger.info(`NativeMaximizer: Buy skipped - trade value $${stableAmount.toFixed(2)} below $1 minimum`);
         return { success: false, error: `Trade value $${stableAmount.toFixed(2)} below $1 minimum` };
+      }
+
+      // INVARIANT — never spend more than the strategy decided.
+      //
+      // On 2026-08-21 a decision asking for $341.68 executed as $1,004.93 (the whole leg),
+      // and NOTHING anywhere compared the two: no log line, no alert, no notification. The
+      // swap confirmed on-chain and the first anyone knew was a -$290.61 line on the next
+      // day's ledger. The specific sizing bug is fixed, but the failure CLASS is "executed
+      // size silently diverged from decided size", and that had no detection at all.
+      //
+      // Checked here because this is the last point before money moves. Capping rather than
+      // only warning: the strategy's own decision is the authority, so clamping to it can
+      // never suppress intended activity — it can only stop an overspend the strategy did
+      // not ask for. Tolerance is 1% or $1, whichever is larger, so ordinary float and
+      // balance-adjustment noise does not cry wolf.
+      if (Number.isFinite(requested) && requested > 0) {
+        const aboutToSpend = parseFloat(stableAmount) || 0;
+        const overBy = aboutToSpend - requested;
+        if (overBy > Math.max(requested * 0.01, 1)) {
+          logger.error(
+            `TRADE SIZE DIVERGENCE [${network}]: strategy decided $${requested.toFixed(2)} but execution was about to spend ` +
+            `$${aboutToSpend.toFixed(2)} (+$${overBy.toFixed(2)}, ${((aboutToSpend / requested - 1) * 100).toFixed(1)}%). ` +
+            `Capping to the decided size. This is the 2026-08-21 full-leg failure class.`
+          );
+          try {
+            await this.notifySwap({
+              action: 'trade_size_divergence_blocked',
+              network,
+              amountIn: aboutToSpend,
+              amountOut: requested,
+              symbolIn: networkConfig.stablecoin,
+              symbolOut: networkConfig.symbol,
+              strategy: 'dollar_maximizer'
+            });
+          } catch (notifyErr) {
+            logger.warn(`Size-divergence alert could not be sent: ${notifyErr.message}`);
+          }
+          stableAmount = requested;
+        }
       }
 
       stableAmount = stableAmount.toString();
@@ -1528,32 +1632,32 @@ Respond in JSON format:
       );
 
       if (swapResult.success) {
-        // Calculate gain (handle null entryPrice from initial/reset positions)
+        // Calculate gain (handle null entryPrice from initial/reset positions).
+        // gainNative = extra native acquired vs. what the dollars would have bought at the sell
+        // price (the buy-low edge). Value it in USD: dmPnL/totalPnL is a DOLLAR figure (this is
+        // dollar_maximizer), so it must NOT carry native token units — that was mixing BNB into
+        // a USD total. `lastGain` stays native for display; `gain` (→ dmPnL via recordTrade) is USD.
         const originalNative = position.entryPrice ? (position.stablecoinAmount / position.entryPrice) : 0;
         const newNative = parseFloat(swapResult.expectedOut) || 0;
-        const gain = originalNative > 0 ? (newNative - originalNative) : 0;
+        const gainNative = originalNative > 0 ? (newNative - originalNative) : 0;
+        const gain = nativePrice > 0 ? gainNative * nativePrice : 0;
 
-        // Update position
-        await this.updateState({
-          positions: {
-            ...(state.positions || {}),
-            [network]: {
-              inStablecoin: false,
-              lastGain: gain,
-              timestamp: new Date()
-            }
-          }
+        // Update position (atomic per-network)
+        await this._persistPosition(network, {
+          inStablecoin: false,
+          lastGain: gainNative,
+          timestamp: new Date()
         });
 
-        // Learn from this trade
-        if (gain > 0) {
+        // Learn from this trade (native-unit edge for the message; symbol-labelled)
+        if (gainNative > 0) {
           await this.addLearning('trade_success',
-            `Profitable trade: gained ${gain.toFixed(6)} ${networkConfig.symbol}`,
+            `Profitable trade: gained ${gainNative.toFixed(6)} ${networkConfig.symbol} (~$${gain.toFixed(2)})`,
             0.8
           );
         } else {
           await this.addLearning('trade_loss',
-            `Unprofitable trade: lost ${Math.abs(gain).toFixed(6)} ${networkConfig.symbol}`,
+            `Unprofitable trade: lost ${Math.abs(gainNative).toFixed(6)} ${networkConfig.symbol} (~$${Math.abs(gain).toFixed(2)})`,
             0.6
           );
         }
@@ -1563,7 +1667,8 @@ Respond in JSON format:
           action: 'bought_native',
           spent: stableAmount,
           received: swapResult.expectedOut,
-          gain,
+          gain,            // USD — flows to dmPnL via recordTrade
+          gainNative,      // native units — for display
           txHash: swapResult.hash
         };
 
@@ -1575,7 +1680,7 @@ Respond in JSON format:
           symbolIn: networkConfig.stablecoin || 'USDC',
           symbolOut: networkConfig.symbol,
           txHash: swapResult.hash,
-          gain,
+          gain: gainNative,
           strategy: decision.strategy || 'native_maximizer'
         });
 
@@ -2323,9 +2428,232 @@ Respond in JSON format:
    * Execute Dollar Maximizer strategy - uses registry strategy analyze/decide
    * Maximizes stablecoin holdings with gas reserve protection
    */
+
+  /**
+   * Native held back for gas on this network. Per-network because the same number
+   * cannot be right for both BSC and Ethereum mainnet.
+   */
+  _getNativeGasFloor(network) {
+    const override = this.getConfig().nativeGasFloor?.[network];
+    if (Number.isFinite(override) && override >= 0) return override;
+
+    const symbol = NATIVE_SYMBOL[network] || 'BNB';
+
+    // The project already has ONE declared gas reserve per asset, which
+    // dollar_maximizer honours on its own sells. The token trader's buy gates were
+    // hardcoding 0.005 instead — 10x BELOW the declared 0.05 BNB — which is how the
+    // native balance came to sit under the floor the config claims to keep.
+    // Read the declared value rather than inventing a second standard.
+    try {
+      const dm = strategyRegistry.get('dollar_maximizer');
+      if (typeof dm?.getGasReserve === 'function') {
+        const declared = parseFloat(dm.getGasReserve(symbol));
+        if (Number.isFinite(declared) && declared >= 0) return declared;
+      }
+    } catch {
+      // fall through to the mirror below
+    }
+
+    const fallback = FALLBACK_NATIVE_GAS_FLOOR[symbol];
+    return Number.isFinite(fallback) ? fallback : DEFAULT_NATIVE_GAS_FLOOR;
+  }
+
+  /**
+   * How much native TokenTrader may actually spend on this network.
+   *
+   * TokenTrader and DollarMaximizer share one wallet. The native-funding gate used
+   * to read the WHOLE wallet balance, so whenever the native pool quoted lower price
+   * impact TokenTrader spent DollarMaximizer's position out from under it: 0.661574
+   * BNB (~$465) became LINK over 2026-08-22/23 with no sell, no PnL and no log line
+   * on DollarMaximizer's side, because its position is reconciled FROM the wallet and
+   * silently wrote itself down to match.
+   *
+   * Attribution is by TRACKED BALANCE, deliberately NOT by the `inStablecoin` flag.
+   * An earlier version of this fix keyed on "DollarMaximizer's leg IS native", which
+   * reads sensibly and would NOT have prevented the incident: through the whole
+   * afternoon that its BNB was being consumed, its own logs said "Holding stablecoin"
+   * while ~0.7 BNB sat in the wallet. A flag that can be wrong is exactly what this
+   * class of bug corrupts, so it must not be the thing standing between one strategy
+   * and another's assets. `nativeAmount` is reconciled from the wallet and is the
+   * durable record of what is attributed elsewhere.
+   *
+   * The practical consequence is that the token trader funds buys from its stablecoin
+   * reserve rather than native, and that is correct: its accounting has no native line
+   * item at all — position is tokens plus stablecoin reserve — and a native-funded buy
+   * was still debited from that stablecoin reserve, so it was spending one asset while
+   * charging itself for another. Only genuine surplus above both the gas floor and the
+   * attributed position is spendable. If the token trader ever tracks native of its
+   * own, subtract it here.
+   *
+   * Pausing a strategy does not transfer ownership: a paused position is still a
+   * position, so this deliberately ignores pausedStrategies.
+   */
+  _getAvailableNativeForTokenTrader(network, walletNative) {
+    const gasFloor = this._getNativeGasFloor(network);
+    const wallet = Number.isFinite(walletNative) ? walletNative : 0;
+
+    const position = this.getState().positions?.[network];
+    const rawDmNative = parseFloat(position?.nativeAmount);
+    const dmOwned = Number.isFinite(rawDmNative) && rawDmNative > 0
+      ? Math.min(rawDmNative, wallet)
+      : 0;
+
+    const available = Math.max(0, wallet - dmOwned - gasFloor);
+    return { available, dmOwned, gasFloor, wallet };
+  }
+
+
+  /**
+   * Swap a little stablecoin into native when gas runs critically low.
+   *
+   * This lived inline in executeDollarMaximizer, AFTER the operator-pause gate — so
+   * pausing that one strategy silently switched off gas maintenance for the whole
+   * agent, including the token trader that was still trading. Nothing said so, and
+   * the coupling is invisible from the pause itself.
+   *
+   * Topping up gas is infrastructure, not a trading decision: it takes no view on
+   * price and opens no position. It therefore runs whether or not any strategy is
+   * paused, and is called on both paths.
+   *
+   * Fires only below 50% of the declared reserve, so it is a floor-restorer, not a
+   * balance-maintainer — a balance between the trigger and the reserve is left alone
+   * by design.
+   */
+  async _autoGasTopUp(networks, marketData, dollarStrategy) {
+    if (!networks || !marketData?.balances || !dollarStrategy) return;
+    try {
+  // === Auto gas top-up: swap small stablecoin amount to native if gas is critically low ===
+  for (const [network, netConfig] of Object.entries(networks)) {
+    const balance = marketData.balances[network];
+    if (!balance) continue;
+
+    const symbol = netConfig.symbol;
+    const gasReserve = dollarStrategy.getGasReserve(symbol);
+    const nativeBalance = parseFloat(balance.native) || 0;
+    const stableBalance = parseFloat(balance.stablecoin) || 0;
+
+    // Trigger when native is below 50% of gas reserve AND we have stablecoins to swap
+    if (nativeBalance < gasReserve * 0.5 && stableBalance > 5) {
+      // This swap spends strategy capital, so never act on the snapshot alone: a
+      // transient RPC failure can make the snapshot read 0 for a funded wallet,
+      // and repeated top-ups against that phantom zero drain the stablecoin
+      // position into native. Confirm with a fresh on-chain read; if the balance
+      // can't be verified, skip — running low on gas for one tick is recoverable,
+      // spent capital is not.
+      let confirmedNative = null;
+      try {
+        const gasWallet = await walletService.getWallet();
+        const gasChainMap = { ethereum: 'eth', bsc: 'bsc', polygon: 'polygon', base: 'base' };
+        const gasAddr = gasWallet?.addresses?.find(a => a.chain === gasChainMap[network])?.address;
+        if (gasAddr) {
+          const fresh = await contractServiceWrapper.getNativeBalance(gasAddr, network);
+          const parsed = parseFloat(fresh.formatted);
+          if (Number.isFinite(parsed)) confirmedNative = parsed;
+        }
+      } catch (verifyErr) {
+        logger.warn(`Auto gas top-up [${network}]: balance verification failed (${verifyErr.message})`);
+      }
+      if (confirmedNative === null) {
+        logger.warn(`Auto gas top-up [${network}]: skipped — native balance could not be verified`);
+        continue;
+      }
+      if (confirmedNative >= gasReserve * 0.5) {
+        logger.warn(`Auto gas top-up [${network}]: skipped — snapshot read ${nativeBalance.toFixed(6)} but wallet actually holds ${confirmedNative.toFixed(6)} ${symbol}`);
+        continue;
+      }
+
+      // Swap enough stablecoins to cover 2x gas reserve (small swap to minimize market impact)
+      const nativePrice = transformedMarketData.prices[`${symbol}/USD`]?.price || 0;
+      if (nativePrice <= 0) continue;
+
+      const targetNative = gasReserve * 2;
+      const deficit = targetNative - confirmedNative;
+      const swapAmountUsd = Math.min(deficit * nativePrice, stableBalance * 0.5, 50); // Cap at $50 or 50% of stablecoins
+
+      if (swapAmountUsd < 2) continue; // Not worth the gas
+
+      logger.info(`Auto gas top-up [${network}]: native ${confirmedNative.toFixed(6)} ${symbol} below 50% of ${gasReserve} reserve. Swapping ~$${swapAmountUsd.toFixed(2)} stablecoin → ${symbol}`);
+
+      try {
+        const swapResult = await swapService.swap(
+          netConfig.stablecoinAddress,
+          'native',
+          swapAmountUsd.toFixed(2),
+          2, // slippage
+          network,
+          { preferV3: true, gasCheck: true, expectedOutputUsd: swapAmountUsd, outputTokenPriceUsd: nativePrice }
+        );
+
+        if (swapResult.success) {
+          const nativeReceived = parseFloat(swapResult.expectedOut) || 0;
+          logger.info(`Auto gas top-up [${network}]: SUCCESS — received ${nativeReceived.toFixed(6)} ${symbol} (tx: ${swapResult.hash})`);
+
+          // Update the balance data so the rest of the cycle sees the new amounts
+          balance.native = (confirmedNative + nativeReceived).toString();
+          balance.stablecoin = Math.max(0, stableBalance - swapAmountUsd);
+
+          // Update position to reflect reduced stablecoins
+          const pos = dollarStrategy.getPosition(network);
+          if (pos.inStablecoin && pos.stablecoinAmount) {
+            pos.stablecoinAmount = Math.max(0, pos.stablecoinAmount - swapAmountUsd);
+            pos.nativeAmount = confirmedNative + nativeReceived;
+            pos.updatedAt = new Date().toISOString();
+            dollarStrategy.setPosition(network, pos);
+            await this._persistPosition(network, pos);
+          }
+        } else {
+          logger.warn(`Auto gas top-up [${network}]: swap failed — ${swapResult.error || 'unknown error'}`);
+        }
+      } catch (err) {
+        logger.warn(`Auto gas top-up [${network}]: error — ${err.message}`);
+      }
+    }
+  }
+    } catch (err) {
+      // Gas maintenance must never take down the caller.
+      logger.warn(`Auto gas top-up: aborted — ${err.message}`);
+    }
+  }
+
   async executeDollarMaximizer(decision, marketData, indicators) {
     const config = this.getConfig();
     const state = this.getState();
+
+    // OPERATOR PAUSE — per-strategy, checked before any analysis or balance read.
+    //
+    // There was no way to stop ONE strategy. Clearing the registry's activeStrategy looks
+    // like it should work and does not: this function is dispatched dynamically, so it kept
+    // running, kept analysing, and would have kept producing trade decisions — it simply
+    // happened to find no opportunity that tick. "It didn't trade" is not "it is stopped".
+    //
+    // The gate lives at the top of the executor, not at a call site, so it cannot be
+    // bypassed by whatever route reaches here. Emergency-stop halts everything including
+    // the token trader's protective exits; this pauses one strategy and leaves the other
+    // guarding its open position.
+    const paused = config.domainConfig?.pausedStrategies || config.pausedStrategies || [];
+    if (Array.isArray(paused) && paused.includes('dollar_maximizer')) {
+      logger.warn('DollarMaximizer: PAUSED by operator — skipping analysis and trading entirely');
+      // Gas maintenance is NOT trading, and the token trader may still be running on
+      // this wallet. Pausing a strategy must not quietly disable the agent's ability
+      // to buy the gas its other strategy needs to execute — or to exit.
+      try {
+        const pausedNetworkMode = config.domainConfig?.networkMode || config.networkMode || 'testnet';
+        await this._autoGasTopUp(
+          NETWORK_CONFIG[pausedNetworkMode],
+          marketData,
+          strategyRegistry.get('dollar_maximizer')
+        );
+      } catch (err) {
+        logger.warn(`Auto gas top-up while paused: ${err.message}`);
+      }
+      return {
+        success: true,
+        action: 'paused',
+        strategy: 'dollar_maximizer',
+        reason: 'Paused by operator (domainConfig.pausedStrategies)'
+      };
+    }
+
     const networkMode = config.domainConfig?.networkMode || config.networkMode || 'testnet';
     const networks = NETWORK_CONFIG[networkMode];
 
@@ -2381,10 +2709,8 @@ Respond in JSON format:
         // Fix null entryPrice: use baseline price if available
         if (!agentPosition.entryPrice && agentBaseline?.price) {
           agentPosition.entryPrice = agentBaseline.price;
-          // Persist the fix
-          const fixPositions = { ...(state.positions || {}) };
-          fixPositions[network] = { ...agentPosition };
-          await this.updateState({ positions: fixPositions });
+          // Persist the fix (atomic per-network)
+          await this._persistPosition(network, { ...agentPosition });
           logger.info(`Fixed null entryPrice for ${network}: set to baseline $${agentBaseline.price}`);
         }
         dollarStrategy.setPosition(network, agentPosition);
@@ -2398,6 +2724,12 @@ Respond in JSON format:
 
       const position = dollarStrategy.getPosition(network);
       const actualStable = balance.stablecoin || 0;
+      // What the WALLET holds vs what DM may SPEND are different numbers whenever a
+      // token trader is running on this network. Branch conditions below stay on the
+      // wallet figure — "is there stablecoin here at all" is an observation about the
+      // chain. The amount STORED on the position is DM's own share, because that field
+      // is what a buy-back spends.
+      const dmStable = this.getDmAvailableStable(network, actualStable);
       const pricePair = `${netConfig.symbol}/USD`;
       const currentPrice = transformedMarketData.prices[pricePair]?.price;
 
@@ -2407,17 +2739,37 @@ Respond in JSON format:
       const excessNative = Math.max(0, actualNativeBalance - gasReserve);
       const excessNativeValueUSD = excessNative * (currentPrice || 0);
 
-      // Determine which asset is dominant by USD value
-      const stableDominant = actualStable > excessNativeValueUSD;
-      const nativeDominant = excessNativeValueUSD > actualStable;
+      // Determine which asset is dominant by USD value.
+      //
+      // With no usable price, excessNativeValueUSD collapses to 0 and `stableDominant`
+      // becomes trivially true for any dust above $1 — enough to flip a position that
+      // genuinely holds native into "in stablecoin" and PERSIST that. A feed miss must
+      // not rewrite what we hold. nativeDominant needs no such guard: its branch also
+      // requires excessNativeValueUSD > 5, which a zero can never satisfy.
+      //
+      // Dominance must compare LIKE WITH LIKE. actualStable is the WHOLE wallet, which on
+      // a network where a token trader runs is mostly the trader's reserve — so comparing
+      // it against DM's own native let the trader's USDT outvote DM's BNB. Live on
+      // 2026-08-21: DM spent its $1,004.93 leg on BNB at 20:54, and reconciliation at
+      // 21:04 saw "1304.62 USDT (dominant over ~$1000.07 native)" — that USDT was the LINK
+      // reserve, not DM's — flipped the position back to stablecoin, and so never cleared
+      // stablecoinHoldingSince. The idle clock kept running (31.5d → 32.8d) while the leg
+      // actually held native, leaving the stranded-capital re-entry permanently armed
+      // against a clock that could never reset. Compare DM's own share on both sides.
+      const reconcilePriceKnown = Number.isFinite(currentPrice) && currentPrice > 0;
+      const stableDominant = reconcilePriceKnown && dmStable > excessNativeValueUSD;
+      const nativeDominant = excessNativeValueUSD > dmStable;
+      if (!reconcilePriceKnown && actualStable > 1) {
+        logger.warn(`Position reconciliation [${network}]: no usable price — holding position state as-is rather than valuing native at $0`);
+      }
 
       // Wallet has stablecoins but position says NOT in stablecoin
       // Only flip if stablecoin is the dominant value (prevents flip-flop when both have value)
-      if (!position.inStablecoin && actualStable > 1 && stableDominant) {
-        logger.info(`Position reconciliation [${network}]: wallet has ${actualStable} ${netConfig.stablecoin} (dominant over ~$${excessNativeValueUSD.toFixed(2)} native) but position says native. Updating to stablecoin position.`);
+      if (!position.inStablecoin && dmStable > 1 && stableDominant) {
+        logger.info(`Position reconciliation [${network}]: $${dmStable.toFixed(2)} of this leg's ${netConfig.stablecoin} (dominant over ~$${excessNativeValueUSD.toFixed(2)} native) but position says native. Updating to stablecoin position. Wallet holds ${actualStable} ${netConfig.stablecoin} in total; the remainder is the token trader's allotment.`);
         const reconciled = {
           inStablecoin: true,
-          stablecoinAmount: actualStable,
+          stablecoinAmount: dmStable,
           entryPrice: position.entryPrice || currentPrice || 0,
           nativeAmount: actualNativeBalance,
           timestamp: new Date().toISOString(),
@@ -2425,10 +2777,7 @@ Respond in JSON format:
           reconciledFromWallet: true
         };
         dollarStrategy.setPosition(network, reconciled);
-        // Persist to agent state
-        const currentPositions = this.getState().positions || {};
-        currentPositions[network] = reconciled;
-        await this.updateState({ positions: currentPositions });
+        await this._persistPosition(network, reconciled);
       }
       // Position says IN stablecoin but wallet has none
       else if (position.inStablecoin && actualStable < 0.01) {
@@ -2443,9 +2792,27 @@ Respond in JSON format:
           reconciledFromWallet: true
         };
         dollarStrategy.setPosition(network, reconciled);
-        const currentPositions = this.getState().positions || {};
-        currentPositions[network] = reconciled;
-        await this.updateState({ positions: currentPositions });
+        await this._persistPosition(network, reconciled);
+      }
+      // Position says IN stablecoin but wallet has significant native above gas reserve
+      // Only flip if native is the dominant value (prevents flip-flop when both have value).
+      // This check MUST come before the stablecoin drift-sync below: that branch matches
+      // any position with ≥ $0.01 of stablecoin, so putting it first made this flip
+      // unreachable — a position whose capital had leaked to native (e.g. runaway gas
+      // top-ups) stayed "in stablecoin" with dust forever instead of resuming native trading.
+      else if (position.inStablecoin && nativeDominant && excessNative > gasReserve && excessNativeValueUSD > 5) {
+        logger.info(`Position reconciliation [${network}]: native ~$${excessNativeValueUSD.toFixed(2)} dominant over this leg's $${dmStable.toFixed(2)} stablecoin. Switching to native position. Wallet holds $${actualStable.toFixed(2)} in total; the remainder is the token trader's allotment.`);
+        const reconciled = {
+          inStablecoin: false,
+          stablecoinAmount: dmStable,
+          entryPrice: currentPrice || position.entryPrice || null,
+          nativeAmount: actualNativeBalance,
+          timestamp: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+          reconciledFromWallet: true
+        };
+        dollarStrategy.setPosition(network, reconciled);
+        await this._persistPosition(network, reconciled);
       }
       // Wallet is the source of truth for stablecoinAmount: always sync to live
       // balance. State stores intent (direction, entry price, history); the
@@ -2453,114 +2820,48 @@ Respond in JSON format:
       // any other strategy that spends from the shared stablecoin pool is
       // automatically reflected here on the next tick.
       else if (position.inStablecoin && actualStable > 0.01) {
-        const drift = Math.abs(actualStable - (position.stablecoinAmount || 0));
+        const drift = Math.abs(dmStable - (position.stablecoinAmount || 0));
         if (drift > 0.01) {
-          const reconciled = { ...position, stablecoinAmount: actualStable, nativeAmount: actualNativeBalance, updatedAt: new Date().toISOString() };
+          const reconciled = { ...position, stablecoinAmount: dmStable, nativeAmount: actualNativeBalance, updatedAt: new Date().toISOString() };
           dollarStrategy.setPosition(network, reconciled);
           // Persist only on meaningful drift to avoid hammering the DB every tick.
           if (drift > 0.5) {
-            logger.debug(`Position sync [${network}]: stablecoin ${position.stablecoinAmount} → ${actualStable} (wallet)`);
-            const currentPositions = this.getState().positions || {};
-            currentPositions[network] = reconciled;
-            await this.updateState({ positions: currentPositions });
+            logger.debug(`Position sync [${network}]: stablecoin ${position.stablecoinAmount} → ${dmStable} (wallet $${actualStable.toFixed(2)} less token-trader allotment)`);
+            await this._persistPosition(network, reconciled);
           }
         }
       }
-      // Position says IN stablecoin but wallet has significant native above gas reserve
-      // Only flip if native is the dominant value (prevents flip-flop when both have value)
-      else if (position.inStablecoin && nativeDominant) {
-        if (excessNative > gasReserve && excessNativeValueUSD > 5) {
-          logger.info(`Position reconciliation [${network}]: native ~$${excessNativeValueUSD.toFixed(2)} dominant over $${actualStable.toFixed(2)} stablecoin. Switching to native position.`);
-          const reconciled = {
-            inStablecoin: false,
-            stablecoinAmount: actualStable,
-            entryPrice: currentPrice || position.entryPrice || null,
-            nativeAmount: actualNativeBalance,
-            timestamp: new Date().toISOString(),
-            updatedAt: new Date().toISOString(),
-            reconciledFromWallet: true
-          };
-          dollarStrategy.setPosition(network, reconciled);
-          const currentPositions = this.getState().positions || {};
-          currentPositions[network] = reconciled;
-          await this.updateState({ positions: currentPositions });
-        }
-      }
 
-      // Always sync nativeAmount to actual wallet balance
+      // Always sync nativeAmount to actual wallet balance.
+      // Read FRESH on-chain, not the heartbeat-start marketData snapshot (`balance.native`):
+      // the token trader runs on its own heartbeat and can spend native (native-funded buys)
+      // between the snapshot and here, so trusting the snapshot would re-clobber DM's native
+      // back to a stale pre-trade value — re-introducing the v2.25.109 double-count. Fall back
+      // to the snapshot only if the fresh read fails.
       const currentPos = dollarStrategy.getPosition(network);
-      const actualNative = parseFloat(balance.native) || 0;
+      let actualNative = parseFloat(balance.native) || 0;
+      try {
+        const reconcileWallet = await walletService.getWallet();
+        const chainMap = { ethereum: 'eth', bsc: 'bsc', polygon: 'polygon', base: 'base' };
+        const evmAddr = reconcileWallet?.addresses?.find(a => a.chain === chainMap[network])?.address;
+        if (evmAddr) {
+          const freshNative = await contractServiceWrapper.getNativeBalance(evmAddr, network);
+          const parsed = parseFloat(freshNative.formatted);
+          if (Number.isFinite(parsed)) actualNative = parsed;
+        }
+      } catch (freshErr) {
+        logger.debug(`DM native sync: fresh read failed for ${network}, using snapshot: ${freshErr.message}`);
+      }
       if (Math.abs(actualNative - (currentPos.nativeAmount || 0)) > 0.0001) {
         currentPos.nativeAmount = actualNative;
         currentPos.updatedAt = new Date().toISOString();
         dollarStrategy.setPosition(network, currentPos);
-        const currentPositions = this.getState().positions || {};
-        currentPositions[network] = currentPos;
-        await this.updateState({ positions: currentPositions });
+        await this._persistPosition(network, currentPos);
       }
     }
 
-    // === Auto gas top-up: swap small stablecoin amount to native if gas is critically low ===
-    for (const [network, netConfig] of Object.entries(networks)) {
-      const balance = marketData.balances[network];
-      if (!balance) continue;
-
-      const symbol = netConfig.symbol;
-      const gasReserve = dollarStrategy.getGasReserve(symbol);
-      const nativeBalance = parseFloat(balance.native) || 0;
-      const stableBalance = parseFloat(balance.stablecoin) || 0;
-
-      // Trigger when native is below 50% of gas reserve AND we have stablecoins to swap
-      if (nativeBalance < gasReserve * 0.5 && stableBalance > 5) {
-        // Swap enough stablecoins to cover 2x gas reserve (small swap to minimize market impact)
-        const nativePrice = transformedMarketData.prices[`${symbol}/USD`]?.price || 0;
-        if (nativePrice <= 0) continue;
-
-        const targetNative = gasReserve * 2;
-        const deficit = targetNative - nativeBalance;
-        const swapAmountUsd = Math.min(deficit * nativePrice, stableBalance * 0.5, 50); // Cap at $50 or 50% of stablecoins
-
-        if (swapAmountUsd < 2) continue; // Not worth the gas
-
-        logger.info(`Auto gas top-up [${network}]: native ${nativeBalance.toFixed(6)} ${symbol} below 50% of ${gasReserve} reserve. Swapping ~$${swapAmountUsd.toFixed(2)} stablecoin → ${symbol}`);
-
-        try {
-          const swapResult = await swapService.swap(
-            netConfig.stablecoinAddress,
-            'native',
-            swapAmountUsd.toFixed(2),
-            2, // slippage
-            network,
-            { preferV3: true, gasCheck: true, expectedOutputUsd: swapAmountUsd, outputTokenPriceUsd: nativePrice }
-          );
-
-          if (swapResult.success) {
-            const nativeReceived = parseFloat(swapResult.expectedOut) || 0;
-            logger.info(`Auto gas top-up [${network}]: SUCCESS — received ${nativeReceived.toFixed(6)} ${symbol} (tx: ${swapResult.hash})`);
-
-            // Update the balance data so the rest of the cycle sees the new amounts
-            balance.native = (nativeBalance + nativeReceived).toString();
-            balance.stablecoin = Math.max(0, stableBalance - swapAmountUsd);
-
-            // Update position to reflect reduced stablecoins
-            const pos = dollarStrategy.getPosition(network);
-            if (pos.inStablecoin && pos.stablecoinAmount) {
-              pos.stablecoinAmount = Math.max(0, pos.stablecoinAmount - swapAmountUsd);
-              pos.nativeAmount = nativeBalance + nativeReceived;
-              pos.updatedAt = new Date().toISOString();
-              dollarStrategy.setPosition(network, pos);
-              const currentPositions = this.getState().positions || {};
-              currentPositions[network] = pos;
-              await this.updateState({ positions: currentPositions });
-            }
-          } else {
-            logger.warn(`Auto gas top-up [${network}]: swap failed — ${swapResult.error || 'unknown error'}`);
-          }
-        } catch (err) {
-          logger.warn(`Auto gas top-up [${network}]: error — ${err.message}`);
-        }
-      }
-    }
+    // Keep gas topped up. This is infrastructure, not trading — see _autoGasTopUp.
+    await this._autoGasTopUp(networks, marketData, dollarStrategy);
 
     const analyses = [];
     let networkOrder = decision.network
@@ -2617,7 +2918,7 @@ Respond in JSON format:
           transformedMarketData, { balances: marketData.balances }, network, networkMode, tokenConfig
         );
         analyses.push(analysis);
-        logger.info(`DollarMaximizer [${network}]: price=$${analysis.currentPrice}, baseline=$${analysis.baselinePrice}, change=${analysis.priceChange?.toFixed(2)}%, opportunity=${analysis.opportunity ? analysis.opportunity.action : 'none'}, reason=${analysis.reason || 'n/a'}`);
+        logger.info(`DollarMaximizer [${network}]: price=$${analysis.currentPrice}, baseline=$${analysis.baselinePrice}, change=${analysis.priceChange?.toFixed(2)}%, opportunity=${analysis.opportunity ? analysis.opportunity.action : 'none'}, reason=${analysis.reason || analysis.opportunity?.reason || 'n/a'}`);
       } catch (err) {
         logger.warn(`DollarMaximizer analysis failed for ${network}: ${err.message}`);
       }
@@ -2667,7 +2968,9 @@ Respond in JSON format:
               const nativePrice = transformedMarketData.prices[`${symbol}/USD`]?.price || 0;
               const sellAmountNative = Math.min(requestedSell, maxSellable);
               const tradeValueUsd = sellAmountNative * nativePrice;
-              const priceChange = Math.abs(tradeDecision.priceChange || 0) / 100;
+              // Fall back to the analysis — a decision without priceChange would
+              // otherwise compute $0 profit and veto every take-profit sell.
+              const priceChange = Math.abs(tradeDecision.priceChange ?? networkAnalysis[network]?.priceChange ?? 0) / 100;
               const expectedProfitUsd = tradeValueUsd * priceChange;
 
               // Estimate gas cost
@@ -2719,7 +3022,7 @@ Respond in JSON format:
             dollarStrategy.recordDollarProfit(network, parseFloat(result.received) || 0);
           }
 
-          results.push({ ...result, network });
+          results.push({ ...result, network, reason: result.reason || tradeDecision.reason });
         } else if (tradeDecision.action === 'buy_native_cheap') {
           direction = 'buy';
 
@@ -2744,10 +3047,17 @@ Respond in JSON format:
           const result = await this.executeNativeMaximizer({
             ...decision,
             network: tradeDecision.network,
+            // The per-network decision carries the size the strategy asked for; the outer
+            // `decision` is the generic strategy-execution envelope and has no amount. This
+            // spread dropped it, so a buy that deliberately requested a fraction was
+            // executed at full size — observed 2026-08-21 20:54, where the strategy asked
+            // for $341.68 and $1,004.94 was swapped. Harmless while every buy-back was
+            // all-in; wrong the moment one was not.
+            amount: tradeDecision.amount,
             tradeParams: { direction: 'buy', percentOfBalance: stratConfig.maxTradePercentage }
           }, marketData);
 
-          results.push({ ...result, network: tradeDecision.network });
+          results.push({ ...result, network: tradeDecision.network, reason: result.reason || tradeDecision.reason });
         } else {
           results.push({ success: true, action: 'hold', network: tradeDecision.network, reason: `Unknown dollar_maximizer action: ${tradeDecision.action}` });
         }
@@ -2760,6 +3070,7 @@ Respond in JSON format:
         success: results.some(r => r.success),
         action: 'trade',
         trades: results,
+        reason: results.map(r => r.reason).filter(Boolean).join('; ') || undefined,
         summary: `Executed ${successful.length}/${results.length} trades across networks`
       };
     }
@@ -2796,6 +3107,33 @@ Respond in JSON format:
    * Execute Token Trader strategy
    * Trades a user-specified ERC20 token using regime-based logic
    */
+  /**
+   * v2.25.249: the majors' market regime for a network, from DollarMaximizer's
+   * composite assessment (72h slope + trend strength + RSI, see assessMarketRegime).
+   * Keys are `${networkMode}:${network}:${pair}`; a network has one major pair in
+   * practice (BNB/USD on bsc, ETH/USD on ethereum) but the freshest entry wins if
+   * several match. Returns { regime, score, confidence, updatedAt } or null — never
+   * throws, because TokenTrader must keep trading when DM is absent or unconfigured.
+   */
+  _getMajorRegimeForNetwork(network, networkMode) {
+    try {
+      const dm = strategyRegistry.get('dollar_maximizer');
+      const regimes = dm?.state?.marketRegime;
+      if (!regimes || !network || !networkMode) return null;
+      const prefix = `${networkMode}:${network}:`;
+      let best = null;
+      for (const [key, value] of Object.entries(regimes)) {
+        if (!key.startsWith(prefix) || !value?.regime || !value?.updatedAt) continue;
+        if (!best || new Date(value.updatedAt) > new Date(best.updatedAt)) best = value;
+      }
+      if (!best) return null;
+      return { regime: best.regime, score: best.score, confidence: best.confidence, updatedAt: best.updatedAt };
+    } catch (e) {
+      logger.debug(`TokenTrader majors-regime lookup failed: ${e.message}`);
+      return null;
+    }
+  }
+
   async executeTokenTrader(decision, marketData) {
     const config = this.getConfig();
     const state = this.getState();
@@ -2918,22 +3256,60 @@ Respond in JSON format:
           const stableBalance = await contractServiceWrapper.getTokenBalance(stablecoinAddr, addrEntry.address, tokenNetwork);
           const totalStable = parseFloat(stableBalance.formatted) || 0;
 
-          // Calculate total portfolio value on this network (native value + stablecoins)
+          // Total capital on this network = liquid (native + stablecoins) + capital ALREADY
+          // deployed into the token position. The position term is essential: buys (especially
+          // native-funded ones) move value out of native/stable and INTO the token. Omitting it
+          // made measured capital shrink as we deployed, so the % budget drifted down and the
+          // deployed capital became invisible to the cap (the old per-cycle reset hack papered
+          // over this). Including it keeps the budget stable regardless of funding source.
           const nativeBalance = parseFloat(marketData.balances?.[tokenNetwork]?.native) || 0;
           const nativePrice = marketData.prices?.[tokenNetwork]?.price || 0;
-          const nativeValue = nativeBalance * nativePrice;
-          const totalPortfolioValue = nativeValue + totalStable;
+          // Exclude a gas reserve from deployable native: buys can be native-funded, so counting
+          // the gas-reserve BNB/ETH as budget would let the trader spend the native it needs to
+          // pay for its own swaps/sells. Mirrors the gas reserve dollar_maximizer keeps.
+          // Deployable native excludes BOTH the gas reserve and any native that is
+          // dollar_maximizer's open position. Counting a co-tenant's holding as this
+          // trader's budget inflates every position size it derives from it, and is
+          // the upstream half of the same shared-wallet confusion that let the buy
+          // gates spend that position outright.
+          const { available: deployableNative, dmOwned: dmOwnedNative, gasFloor: gasReserveNative } =
+            this._getAvailableNativeForTokenTrader(tokenNetwork, nativeBalance);
+          const nativeValue = deployableNative * nativePrice;
+          const tokenPositionValue = (tokenStrategy.state.tokenBalance || 0) * (priceData?.price || 0);
 
-          // Apply per-instance capital allocation to total portfolio value
+          // Shared-pool accounting across ALL token-trader instances on this network. The liquid
+          // (native+stable) pool is shared by every instance, so total capital must include EVERY
+          // instance's deployed position — not just this one — and each instance gets its share of
+          // the SAME base. Without this, each instance budgets against (liquid + only its own
+          // position): N instances each see ~the full liquid pool and can collectively target
+          // >100% of the wallet, racing to over-deploy.
+          let allPositionsValue = 0;
+          let sumAllocOnNet = 0;
+          for (const [, inst] of strategyRegistry.getAllTokenTraders()) {
+            if (inst?.config?.tokenNetwork !== tokenNetwork) continue;
+            const instPrice = (inst === tokenStrategy) ? (priceData?.price || 0) : (parseFloat(inst.state?.lastPrice) || 0);
+            allPositionsValue += (inst.state?.tokenBalance || 0) * instPrice;
+            sumAllocOnNet += (inst.config?.capitalAllocationPercent || 20);
+          }
+          const totalCapital = nativeValue + totalStable + allPositionsValue;
+
+          // budget = this instance's share of total capital; availableToDeploy = budget minus
+          // what THIS instance already deployed. When instances oversubscribe the pool
+          // (sum of allocations > 100%), normalize proportionally so the combined target never
+          // exceeds the wallet (the configure endpoint also rejects sums >100 up front).
           const capitalAlloc = tokenStrategy.config.capitalAllocationPercent || 20;
-          const allocated = totalPortfolioValue * (capitalAlloc / 100);
-          // Update reserve if entering, empty, or allocation changed by >10% (picks up new deposits sooner)
+          const allocFraction = sumAllocOnNet > 100 ? (capitalAlloc / sumAllocOnNet) : (capitalAlloc / 100);
+          const budget = totalCapital * allocFraction;
+          const deployed = tokenPositionValue;
+          const availableToDeploy = Math.max(0, budget - deployed);
+          // Update reserve if entering, empty, or available-to-deploy changed by >10% (picks up new deposits sooner)
           const currentReserve = tokenStrategy.state.stablecoinReserve || 0;
-          const reserveDiff = Math.abs(allocated - currentReserve);
+          const reserveDiff = Math.abs(availableToDeploy - currentReserve);
           const shouldUpdate = tokenStrategy.state.regime === 'ENTERING' || currentReserve <= 0 || reserveDiff > Math.max(1, currentReserve * 0.1);
           if (shouldUpdate) {
-            tokenStrategy.setStablecoinReserve(allocated);
-            logger.info(`TokenTrader: Set stablecoin reserve to $${allocated.toFixed(2)} (${capitalAlloc}% of $${totalPortfolioValue.toFixed(2)} portfolio [${nativeBalance.toFixed(4)} native @ $${nativePrice.toFixed(2)} + $${totalStable.toFixed(2)} stable])`);
+            tokenStrategy.setStablecoinReserve(availableToDeploy);
+            const allocStr = sumAllocOnNet > 100 ? `${capitalAlloc}/${sumAllocOnNet}% (normalized)` : `${capitalAlloc}%`;
+            logger.info(`TokenTrader: Set available-to-deploy to $${availableToDeploy.toFixed(2)} (budget $${budget.toFixed(2)} = ${allocStr} of $${totalCapital.toFixed(2)} total [${deployableNative.toFixed(4)} native (of ${nativeBalance.toFixed(4)}, ${gasReserveNative} gas-reserved, ${dmOwnedNative.toFixed(4)} dollar_maximizer) @ $${nativePrice.toFixed(2)} + $${totalStable.toFixed(2)} stable + $${allPositionsValue.toFixed(2)} all-positions] − $${deployed.toFixed(2)} this-deployed)`);
           }
         }
       } catch (err) {
@@ -2974,6 +3350,18 @@ Respond in JSON format:
             } else {
               logger.warn(`TokenTrader: Large unexpected token increase +${diff.toFixed(4)} (was ${oldBalance.toFixed(4)}) — likely airdrop/transfer, NOT adding to cost basis`);
             }
+          } else if (diff < 0 && oldBalance > 0) {
+            // Wallet has FEWER tokens than tracked with no recorded sell (transfer tax skim,
+            // honeypot, external move). Previously this silently set tokenBalance lower, leaving
+            // the vanished tokens' cost basis embedded in averageEntryPrice over a smaller
+            // position — so the loss was never realized and PnL stayed optimistic. Book the lost
+            // tokens as a realized loss at cost (avg entry). averageEntryPrice (per-token) is
+            // unchanged; only the count and realized PnL move.
+            const lostTokens = -diff;
+            const avgEntry = tokenStrategy.state.averageEntryPrice || 0;
+            const realizedLoss = lostTokens * avgEntry;
+            tokenStrategy.state.realizedPnL = (tokenStrategy.state.realizedPnL || 0) - realizedLoss;
+            logger.warn(`TokenTrader: Token balance DECREASED ${oldBalance.toFixed(4)} → ${actualBalance.toFixed(4)} with no recorded sell (tax/skim/transfer) — booking realized loss $${realizedLoss.toFixed(2)} (${lostTokens.toFixed(4)} @ $${avgEntry.toFixed(6)})`);
           }
 
           tokenStrategy.state.tokenBalance = actualBalance;
@@ -3040,7 +3428,13 @@ Respond in JSON format:
     // Run analysis
     const tokenMarketData = {
       tokenPrice: priceData.price,
-      prices: marketData.prices
+      prices: marketData.prices,
+      // v2.25.249: majors' composite regime for this token's network (BNB for bsc,
+      // ETH for ethereum), read from DollarMaximizer's assessment. TokenTrader only
+      // sees its own token, so without this it grid-bought through a week the whole
+      // market spent in a downtrend. Null when DM has no fresh reading — the
+      // strategy's freshness check disables the widening in that case.
+      majorRegime: this._getMajorRegimeForNetwork(tokenNetwork, networkMode)
     };
 
     const analysis = await tokenStrategy.analyze(
@@ -3231,22 +3625,22 @@ Respond in JSON format:
             if (actualStableBal < buyAmount) {
               const nativePrice = marketData.prices?.[tokenNetwork]?.price || 0;
               if (nativePrice > 0) {
-                // Reserve gas buffer (0.005 BNB ~$3, enough for several swaps)
-                const gasReserve = 0.005;
                 // Native balance lives at marketData.balances[network].native, not on prices.
                 // Reading from .prices was always 0, so this branch never approved a switch
                 // — the price-impact branch below would override regardless without checking.
                 const nativeBalance = parseFloat(marketData.balances?.[tokenNetwork]?.native || 0);
                 const nativeEquivalent = parseFloat((buyAmount / nativePrice).toFixed(6));
-                const maxNativeAvailable = Math.max(0, nativeBalance - gasReserve);
+                // Only what TokenTrader actually owns — never DollarMaximizer's leg.
+                const { available: maxNativeAvailable, dmOwned, gasFloor } =
+                  this._getAvailableNativeForTokenTrader(tokenNetwork, nativeBalance);
 
                 if (nativeEquivalent <= maxNativeAvailable) {
-                  logger.info(`TokenTrader: Insufficient stablecoins ($${actualStableBal.toFixed(2)} < $${buyAmount.toFixed(2)}), using ${nativeEquivalent} native ($${buyAmount.toFixed(2)} worth, reserve ${gasReserve} for gas)`);
+                  logger.info(`TokenTrader: Insufficient stablecoins ($${actualStableBal.toFixed(2)} < $${buyAmount.toFixed(2)}), using ${nativeEquivalent} native ($${buyAmount.toFixed(2)} worth, ${maxNativeAvailable.toFixed(6)} available after ${gasFloor} gas floor and ${dmOwned.toFixed(6)} owned by dollar_maximizer)`);
                   swapFromToken = 'native';
                   swapAmount = nativeEquivalent.toFixed(6);
                   usedNative = true;
                 } else {
-                  logger.warn(`TokenTrader: Insufficient native for buy+gas (need ${nativeEquivalent} + ${gasReserve} reserve, have ${nativeBalance.toFixed(4)})`);
+                  logger.warn(`TokenTrader: Insufficient own native for buy (need ${nativeEquivalent}, available ${maxNativeAvailable.toFixed(6)} of ${nativeBalance.toFixed(6)} wallet — ${gasFloor} gas floor, ${dmOwned.toFixed(6)} owned by dollar_maximizer)`);
                 }
               }
             }
@@ -3298,18 +3692,21 @@ Respond in JSON format:
                 // actually holds enough native for swap + gas. Without this gate,
                 // we'd dispatch a swap for amount X when the wallet has << X
                 // (the chain rejects with INSUFFICIENT_FUNDS — the original bug).
-                const gasReserve = 0.005;
                 const actualNative = parseFloat(marketData.balances?.[tokenNetwork]?.native || 0);
                 const requiredNative = parseFloat(nativeEquivalent) || 0;
-                if (requiredNative > 0 && requiredNative + gasReserve <= actualNative) {
-                  logger.info(`TokenTrader: Native path has lower impact (${nativeImpactPct.toFixed(1)}%) vs stablecoin (${stableImpactPct === Infinity ? 'no path' : stableImpactPct.toFixed(1) + '%'}) — using native`);
+                // Spend only TokenTrader's own native. This gate reading the whole
+                // wallet is what let it consume DollarMaximizer's BNB position.
+                const { available: availableNative, dmOwned, gasFloor } =
+                  this._getAvailableNativeForTokenTrader(tokenNetwork, actualNative);
+                if (requiredNative > 0 && requiredNative <= availableNative) {
+                  logger.info(`TokenTrader: Native path has lower impact (${nativeImpactPct.toFixed(1)}%) vs stablecoin (${stableImpactPct === Infinity ? 'no path' : stableImpactPct.toFixed(1) + '%'}) — using native (${availableNative.toFixed(6)} available)`);
                   swapFromToken = 'native';
                   swapAmount = nativeEquivalent;
                   usedNative = true;
                 } else if (stableImpactPct !== Infinity) {
-                  logger.info(`TokenTrader: Native path lower impact (${nativeImpactPct.toFixed(1)}%) but insufficient native (need ${requiredNative.toFixed(4)} + ${gasReserve} gas, have ${actualNative.toFixed(4)}) — falling back to stablecoin path`);
+                  logger.info(`TokenTrader: Native path lower impact (${nativeImpactPct.toFixed(1)}%) but only ${availableNative.toFixed(6)} native available for it (need ${requiredNative.toFixed(6)}; wallet ${actualNative.toFixed(6)}, ${gasFloor} gas floor, ${dmOwned.toFixed(6)} owned by dollar_maximizer) — falling back to stablecoin path`);
                 } else {
-                  logger.warn(`TokenTrader: Native path lower impact but insufficient native AND no stablecoin path — buy will likely fail`);
+                  logger.warn(`TokenTrader: Native path lower impact but insufficient own native AND no stablecoin path — buy will likely fail`);
                 }
               }
 
@@ -3326,6 +3723,23 @@ Respond in JSON format:
             }
           } catch (quoteErr) {
             logger.warn(`TokenTrader: Could not check buy price impact: ${quoteErr.message}`);
+          }
+        }
+
+        // Size invariant. buyAmount comes straight off the decision, but swapAmount is
+        // re-derived when the native route wins — so the USD actually leaving the wallet can
+        // drift from what was decided. Check the USD equivalent, not the raw units.
+        {
+          const nativePx = marketData.prices?.[tokenNetwork]?.price || 0;
+          const spendUsd = usedNative && nativePx > 0 ? parseFloat(swapAmount) * nativePx : buyAmount;
+          const allowedUsd = await this.enforceTradeSize({
+            label: 'buy', network: tokenNetwork, decided: tradeDecision.amountStablecoin,
+            actual: spendUsd, unit: 'USD'
+          });
+          if (allowedUsd < spendUsd && usedNative && nativePx > 0) {
+            swapAmount = (allowedUsd / nativePx).toFixed(6);
+          } else if (allowedUsd < spendUsd) {
+            swapAmount = allowedUsd.toString();
           }
         }
 
@@ -3354,7 +3768,12 @@ Respond in JSON format:
           const actualGasCostUsd = (swapResult.gasCostNative || 0) * nativePriceForGas;
           // Use actual execution price (amount spent / tokens received), not theoretical quote
           const effectivePrice = tokenReceived > 0 ? buyAmount / tokenReceived : priceData.price;
-          tokenStrategy.recordBuy(buyAmount, tokenReceived, effectivePrice, actualGasCostUsd, tradeDecision);
+          // Record funding source so the ledger tracks native- vs stablecoin-funded buys.
+          // swapAmount is the native (BNB/ETH) amount when usedNative, else the stablecoin path was used.
+          tokenStrategy.recordBuy(buyAmount, tokenReceived, effectivePrice, actualGasCostUsd, tradeDecision, {
+            usedNative,
+            nativeSpent: usedNative ? swapAmount : 0
+          });
 
           // Update grid trade timestamp if applicable
           if (tradeDecision.isGrid) {
@@ -3395,7 +3814,8 @@ Respond in JSON format:
 
       } else if (tradeDecision.action === 'sell_token') {
         // Sell token for stablecoins
-        const sellAmount = tradeDecision.amountToken;
+        // `let`, not `const`: the size invariant below clamps this before the swap.
+        let sellAmount = tradeDecision.amountToken;
         if (sellAmount <= 0) {
           return { success: false, error: 'No tokens to sell' };
         }
@@ -3474,7 +3894,15 @@ Respond in JSON format:
 
         // Gas profitability check for non-emergency sells
         // Emergency/stop-loss sells bypass — capital preservation > gas cost
-        const isEmergencySell = tradeDecision.isEmergency || tradeDecision.sellAll || tradeDecision.isStopLoss;
+        // Belt-and-braces: any loss-cutting exit bypasses the profit floor, whatever
+        // flag the caller happened to set. A stop-loss is unprofitable BY DEFINITION —
+        // gating one on expected profit makes it unfireable exactly when it is needed,
+        // which is how a trailing stop came to veto itself three times in a row on
+        // 2026-08-05. isTrailingStop/isStopLossTranche are listed explicitly so a future
+        // exit path that forgets isEmergency still cannot be talked out of cutting a loss.
+        const isEmergencySell = tradeDecision.isEmergency || tradeDecision.sellAll
+          || tradeDecision.isStopLoss || tradeDecision.isTrailingStop
+          || tradeDecision.isTrailingStopTranche || tradeDecision.isStopLossTranche;
         if (!isEmergencySell) {
           try {
             const { ethers } = await import('ethers');
@@ -3486,12 +3914,39 @@ Respond in JSON format:
             const nativePriceUsd = marketData.prices?.[tokenNetwork]?.price || 0;
             const sellGasCostUsd = gasCostNativeEst * nativePriceUsd;
 
-            const costBasis = sellAmount * tokenStrategy.state.averageEntryPrice;
+            // Tranche scalps sell a specific lot — profit must be judged against that
+            // lot's own basis, not the blended average. In a basis-above-range bag the
+            // average sits above every scalpable lot by construction, so using it here
+            // vetoed 100% of tranche sells (the exact trades the feature exists for).
+            const basisPrice = (tradeDecision.isTrancheSell && tradeDecision.lotPrice > 0)
+              ? tradeDecision.lotPrice
+              : tokenStrategy.state.averageEntryPrice;
+            const costBasis = sellAmount * basisPrice;
             const expectedOutput = swapOptions.expectedOutputUsd || (sellAmount * priceData.price);
             const expectedNetProfit = expectedOutput - costBasis - sellGasCostUsd;
 
-            // Grid sells use lower threshold since they're small incremental trades
-            const minProfit = tradeDecision.isGrid ? 0.25 : 1.0;
+            // Grid sells must clear their own COSTS, not an arbitrary share of notional.
+            //
+            // The previous max($0.10, 1% of output) refused profitable trades at both
+            // ends, because neither term tracked a real cost. Measured on BSC 2026-08:
+            // gas is $0.0076 a sell, so a $3.22 slice returning $0.061 net — eight times
+            // gas — was refused by the flat $0.10 floor, while a $1474 position holding
+            // $7.69 of profit (a thousand times gas) was refused by the 1% rule needing
+            // $14.74. Four days passed with grid buys firing and no grid sell clearing,
+            // which is what drained the reserve into a bag that could only grow.
+            //
+            // The two costs that are actually incurred:
+            //   - gas, which is fixed per transaction and already deducted from
+            //     expectedNetProfit; require a multiple of it so a trade is worth doing.
+            //   - the DEX fee and price impact, which are NOT in expectedOutput: that is
+            //     `usdValue || amount × spot`, a spot estimate rather than a routed quote.
+            //     Observed fee tiers on these pools top out at 0.30%, so 0.4% covers the
+            //     worst tier plus slippage.
+            // Both scale correctly: a tiny slice is refused because gas dominates it, a
+            // large one clears because its costs are genuinely a small share of proceeds.
+            const minProfit = tradeDecision.isGrid
+              ? Math.max(3 * sellGasCostUsd, expectedOutput * 0.004)
+              : 1.0;
             if (expectedNetProfit < minProfit) {
               logger.info(`TokenTrader: Sell skipped — net profit $${expectedNetProfit.toFixed(4)} after gas ($${sellGasCostUsd.toFixed(4)}) below $${minProfit.toFixed(2)} minimum (output: $${expectedOutput.toFixed(2)}, cost: $${costBasis.toFixed(2)})`);
               return { success: false, error: `Net profit $${expectedNetProfit.toFixed(2)} after gas below $${minProfit.toFixed(2)} minimum` };
@@ -3502,16 +3957,92 @@ Respond in JSON format:
           }
         }
 
+        // Size invariant on the sell side. Over-selling is the mirror of the 2026-08-21
+        // overspend and just as unrecoverable: tokens sold cannot be un-sold, and a sell
+        // larger than intended liquidates inventory the strategy meant to keep. Floor is a
+        // token count, not dollars, so it scales with the token's own precision.
+        sellAmount = await this.enforceTradeSize({
+          label: 'sell', network: tokenNetwork, decided: tradeDecision.amountToken,
+          actual: sellAmount, unit: tokenSymbol, floor: 1e-6
+        });
+        // Independently bounded by what we actually hold — a decision can never sell
+        // inventory that is not there, whatever the strategy asked for.
+        const heldNow = tokenStrategy?.state?.tokenBalance;
+        if (Number.isFinite(heldNow) && sellAmount > heldNow) {
+          logger.warn(`TokenTrader: sell of ${sellAmount.toFixed(6)} ${tokenSymbol} exceeds the ${heldNow.toFixed(6)} held — capping to balance`);
+          sellAmount = heldNow;
+        }
+
         logger.info(`TokenTrader: Selling ${sellAmount.toFixed(4)} ${tokenSymbol} (${tradeDecision.reason})`);
 
-        const swapResult = await swapService.swap(
-          tokenAddress,
-          stablecoinAddr,
-          sellAmount.toString(),
-          swapOptions.maxSlippage,
-          tokenNetwork,
-          swapOptions
-        );
+        // Emergency-sell fast-retry: on RPC timeout during a stop-loss / dump,
+        // the default heartbeat cadence (~60s) before the next attempt costs
+        // 1+pp of execution price as the dump continues. Rotate to the next
+        // RPC and retry once within the same tick.
+        // Non-emergency sells keep the original behavior — small grid sells
+        // can safely wait for the next heartbeat.
+        const _isTimeoutErr = (e) => {
+          if (!e) return false;
+          const code = String(e.code || '').toUpperCase();
+          const msg = String(e.message || e.error || e || '').toLowerCase();
+          if (code === 'TIMEOUT' || code === 'ETIMEDOUT') return true;
+          if (msg.includes('etimedout')) return true;
+          if (msg.includes('timed out')) return true;
+          // 'timeout' substring is broad — explicitly exclude swap's own
+          // tx-confirmation timeout (different problem, retrying the RPC
+          // won't help an already-broadcast tx that just hasn't mined yet)
+          if (msg.includes('confirmation_timeout')) return false;
+          if (msg.includes('timeout')) return true;
+          return false;
+        };
+
+        let swapResult;
+        let _swapThrown = null;
+        try {
+          swapResult = await swapService.swap(
+            tokenAddress,
+            stablecoinAddr,
+            sellAmount.toString(),
+            swapOptions.maxSlippage,
+            tokenNetwork,
+            swapOptions
+          );
+        } catch (swapErr) {
+          _swapThrown = swapErr;
+          swapResult = { success: false, error: swapErr.message };
+        }
+
+        if (!swapResult.success && isEmergencySell && _isTimeoutErr(_swapThrown || swapResult)) {
+          const rotated = await contractServiceWrapper.switchToNextRpc(tokenNetwork);
+          if (rotated) {
+            logger.warn(`TokenTrader: Emergency sell timed out on ${tokenNetwork} — rotated RPC, retrying immediately`);
+            _swapThrown = null;
+            try {
+              swapResult = await swapService.swap(
+                tokenAddress,
+                stablecoinAddr,
+                sellAmount.toString(),
+                swapOptions.maxSlippage,
+                tokenNetwork,
+                swapOptions
+              );
+              if (swapResult.success) {
+                logger.info(`TokenTrader: Emergency sell fast-retry succeeded on next RPC`);
+              }
+            } catch (retryErr) {
+              _swapThrown = retryErr;
+              swapResult = { success: false, error: retryErr.message };
+            }
+          } else {
+            logger.warn(`TokenTrader: Emergency sell timed out on ${tokenNetwork} but no fallback RPC available`);
+          }
+        }
+
+        // Preserve original throw semantics so downstream catch (no-swap-path
+        // detection, system-token retry-later, etc.) keeps working.
+        if (!swapResult.success && _swapThrown) {
+          throw _swapThrown;
+        }
 
         if (swapResult.success) {
           const stableReceived = parseFloat(swapResult.expectedOut) || 0;
@@ -3532,7 +4063,30 @@ Respond in JSON format:
 
           // Use actual execution price (stablecoins received / tokens sold), not theoretical quote
           const effectiveSellPrice = sellAmount > 0 ? stableReceived / sellAmount : priceData.price;
-          tokenStrategy.recordSell(sellAmount, stableReceived, effectiveSellPrice, tradeDecision, actualGasCostUsd);
+
+          // Capture position context BEFORE recordSell mutates it — avg entry, peak and the
+          // trailing stop are all rewritten by the sell, and they are exactly the fields
+          // needed to judge the exit after the fact.
+          const exitCtx = {
+            avgEntry: tokenStrategy.state.averageEntryPrice,
+            peak: tokenStrategy.state.peakPrice,
+            trailStop: tokenStrategy.state.trailingStopPrice,
+            regime: tokenStrategy.state.regime
+          };
+          const sellOutcome = tokenStrategy.recordSell(sellAmount, stableReceived, effectiveSellPrice, tradeDecision, actualGasCostUsd);
+
+          // Exit forensics. Never allowed to affect the trade path: fully awaited-free and
+          // swallowed, because a logging failure must not corrupt a settled position.
+          this._recordExitForensics({
+            tokenStrategy, tradeDecision, exitCtx,
+            tokensSold: sellAmount,
+            proceeds: stableReceived,
+            exitPrice: effectiveSellPrice,
+            pnl: sellOutcome?.pnl,
+            gasCostUsd: actualGasCostUsd,
+            network: tokenNetwork,
+            tokenSymbol
+          }).catch(err => logger.debug(`Exit forensics write skipped: ${err.message}`));
 
           const actionLabel = tradeDecision.isEmergency ? 'token_trader_emergency_sell'
             : tradeDecision.isTrailingStop ? 'token_trader_trailing_stop'
@@ -3656,6 +4210,51 @@ Respond in JSON format:
   }
 
   /**
+   * Per-network async mutex. Position writes happen from independent flows (the main
+   * heartbeat reconcile and per-token TokenTrader ticks share this one agent instance),
+   * so read-modify-write of position state must be serialized per network or one flow's
+   * update silently overwrites another's.
+   */
+  async _withPositionLock(network, fn) {
+    if (!this._positionLocks) this._positionLocks = {};
+    const key = network || '_global';
+    const prev = this._positionLocks[key] || Promise.resolve();
+    let release;
+    const gate = new Promise((res) => { release = res; });
+    // Chain this op after any in-flight op for the same network (one resolved
+    // promise per network is retained — bounded by the small network count).
+    const chained = prev.then(() => gate);
+    this._positionLocks[key] = chained;
+    await prev;
+    try {
+      return await fn();
+    } finally {
+      release();
+    }
+  }
+
+  /**
+   * Persist a single network's position ATOMICALLY.
+   *
+   * The previous pattern — read the whole `positions` map, mutate one network, then
+   * `$set` the entire map back — meant two concurrent writers (main heartbeat + a token
+   * trader tick) each based on the same snapshot would clobber each other's network
+   * (last-writer-wins drops one update). This writes only `positions.<network>` via a
+   * dotted `$set`, so sibling networks are never touched, under a per-network lock so
+   * same-network writes apply in order. Replace semantics (not merge) — matches the
+   * prior call sites, which passed complete position objects.
+   */
+  async _persistPosition(network, positionObj, { syncStrategy = false, strategyName = 'dollar_maximizer' } = {}) {
+    return this._withPositionLock(network, async () => {
+      if (syncStrategy) {
+        const strat = strategyRegistry.get(strategyName);
+        if (strat?.setPosition) strat.setPosition(network, positionObj);
+      }
+      await this.updateState({ [`positions.${network}`]: positionObj });
+    });
+  }
+
+  /**
    * Refresh Dollar Maximizer position after Token Trader trade changed wallet balance.
    * Prevents DM stablecoin amount from going stale between its own analysis cycles.
    */
@@ -3681,14 +4280,29 @@ Respond in JSON format:
       const stableResult = await contractServiceWrapper.getTokenBalance(netConfig.stablecoinAddress, addr, tokenNetwork);
       const actualStable = parseFloat(stableResult.formatted) || 0;
 
-      if (Math.abs(actualStable - (position.stablecoinAmount || 0)) > 0.5) {
-        position.stablecoinAmount = actualStable;
+      // Also reconcile the native (BNB/ETH) balance: native-funded token buys draw down the
+      // SAME wallet native that dollar_maximizer tracks as its position. Without this, DM keeps
+      // a stale nativeAmount and the two strategies double-count the same BNB (the "tally is off"
+      // symptom). Read it on-chain and sync.
+      let actualNative = null;
+      try {
+        const nativeResult = await contractServiceWrapper.getNativeBalance(addr, tokenNetwork);
+        actualNative = parseFloat(nativeResult.formatted);
+        if (!Number.isFinite(actualNative)) actualNative = null;
+      } catch (nativeErr) {
+        logger.debug(`DM native reconcile: could not read native balance: ${nativeErr.message}`);
+      }
+
+      const stableDrift = Math.abs(actualStable - (position.stablecoinAmount || 0)) > 0.5;
+      const nativeDrift = actualNative !== null && Math.abs(actualNative - (position.nativeAmount || 0)) > 0.0005;
+
+      if (stableDrift || nativeDrift) {
+        if (stableDrift) position.stablecoinAmount = actualStable;
+        if (nativeDrift) position.nativeAmount = actualNative;
         position.updatedAt = new Date().toISOString();
         dollarStrategy.setPosition(tokenNetwork, position);
-        const currentPositions = this.getState().positions || {};
-        currentPositions[tokenNetwork] = position;
-        await this.updateState({ positions: currentPositions });
-        logger.info(`DM position refreshed after TT trade: ${tokenNetwork} stablecoin=$${actualStable.toFixed(2)}`);
+        await this._persistPosition(tokenNetwork, position);
+        logger.info(`DM position refreshed after TT trade: ${tokenNetwork} stablecoin=$${actualStable.toFixed(2)}${actualNative !== null ? ` native=${actualNative.toFixed(4)}` : ''}`);
       }
     } catch (refreshErr) {
       logger.warn(`DM position refresh after TT trade failed: ${refreshErr.message}`);
@@ -3742,17 +4356,48 @@ Respond in JSON format:
       } catch (err) {
         logger.debug('Could not extract trade history addresses:', err.message);
       }
+    }
 
-      // Run deep scan and WAIT for it before checking deposits.
-      // Without this, detectNewDeposits runs against an empty knownTokens map
-      // and finds 0 deposits on every restart (the old fire-and-forget bug).
-      try {
-        logger.info('Deposit scan: awaiting initial deep scan to populate token map...');
-        await tokenScanner.runDeepScanAll(['bsc', 'ethereum']);
-        logger.info(`Deposit scan: deep scan complete, knownTokens=${tokenScanner.knownTokens.size}`);
-      } catch (err) {
-        logger.warn('Initial deep scan error (non-fatal, will retry next heartbeat):', err.message);
+    // The deep scan must finish before deposits can be DETECTED — running
+    // detectNewDeposits against an empty knownTokens map finds 0 deposits every
+    // time, which is the fire-and-forget bug this used to have. That requirement
+    // is real and is kept below. What was wrong was *where* the waiting happened.
+    //
+    // The wait sat on the heartbeat's critical path, ahead of the strategy
+    // execution in the same cycle, so a cold start bought a full deep scan of
+    // silence: on 2026-08-21 the 07:43:34 heartbeat produced no trading decision
+    // until 07:54:07, ten and a half minutes later, and on 2026-08-17 the same
+    // stage blew the orchestrator's 20-minute session cap outright. Deep-scan
+    // walks ~5M blocks in 501 chunks on BSC and can legitimately take 60-80min on
+    // a slow RPC, so no deadline short enough to protect the trade path is long
+    // enough to be worth waiting for.
+    //
+    // So the scan runs detached and DETECTION waits for it instead of the agent
+    // waiting for either. Nothing about its lifetime changes — tokenScanner is a
+    // singleton and the old code already let the scan outlive its deadline and
+    // keep running in the background; that is now the ordinary path rather than
+    // the timeout path. Deposit detection is delayed by exactly as long as the
+    // scan takes, which is the cost that belongs to deposits, not to trading.
+    //
+    // A failure resets to 'idle' rather than latching, because the old block sat
+    // inside the `!tokenScanner.walletAddress` gate and could therefore never
+    // honour its own "will retry next heartbeat" promise.
+    if (this._deepScanState !== 'done') {
+      if (this._deepScanState !== 'running') {
+        this._deepScanState = 'running';
+        logger.info('Deposit scan: populating the token map in the background — the trade path is not held behind it');
+        tokenScanner.runDeepScanAll(['bsc', 'ethereum'])
+          .then(() => {
+            this._deepScanState = 'done';
+            logger.info(`Deposit scan: deep scan complete, knownTokens=${tokenScanner.knownTokens.size} — detection enabled`);
+          })
+          .catch(err => {
+            this._deepScanState = 'idle';
+            logger.warn(`Deposit scan: deep scan failed (${err.message}) — retrying on a later heartbeat`);
+          });
       }
+      logger.info(`Deposit scan: token map still populating (knownTokens=${tokenScanner.knownTokens.size}) — deferring detection to a later heartbeat`);
+      return;
     }
 
     // Collect managed token addresses from all token trader instances
@@ -3878,6 +4523,8 @@ Respond in JSON format:
       '0xd8f1200650fb2e28b8a068d4bc4d53c4d8984990', // SN3 (ETH) — honeypot, TRANSFER_FROM_FAILED
       '0x3b10d974439b7124c1bf124e1764bb3cc59cf04f', // WAR (ETH) — no liquidity
       '0x7f9acaddfe815921b1228ea3e6eee098ab8e2cb7', // Unknown (ETH) — honeypot, TRANSFER_FROM_FAILED
+      '0xbcc34a88c584e30d1be7c782c6391c439111cdae', // APEXX (BSC) — no liquidity, no swap path (dust airdrop)
+      '0xfec3cf1a1c9288813585984cd6a457f22fcd2cee', // SECA "SecantX AI" (BSC) — honeypot, unsellable (TRANSFER_FROM_FAILED despite real 5.0 balance + max router allowance)
     ];
     for (const addr of SCAM_TOKEN_BLACKLIST) skipAddresses.add(addr);
     // Also skip tokens flagged in the on-chain scammer registry cache
@@ -3910,7 +4557,12 @@ Respond in JSON format:
     }
 
     let swept = 0;
+    let deferredForTime = 0;
     const MAX_SWEEPS_PER_CYCLE = 5; // Limit sells per heartbeat to conserve gas
+    // Bail before the orchestrator's 20-min hard cap fires. 90s gives
+    // enough headroom for the in-flight sweep to finish + scammer-registry
+    // flush + state persist before the cap.
+    const TIME_BUDGET_BAIL_MS = 90 * 1000;
 
     // Build a unified list of token addresses to check from ALL sources:
     // 1. lastKnownBalances (tokens previously detected by deposit scanner)
@@ -3918,6 +4570,10 @@ Respond in JSON format:
     // This ensures pre-existing tokens that were never flagged as "deposits" still get swept.
     for (const network of ['bsc', 'ethereum']) {
       if (swept >= MAX_SWEEPS_PER_CYCLE) break;
+      if (this._remainingSessionMs() < TIME_BUDGET_BAIL_MS) {
+        deferredForTime++;
+        break;
+      }
 
       const tokensToCheck = new Set();
 
@@ -3943,6 +4599,10 @@ Respond in JSON format:
 
       for (const tokenAddr of tokensToCheck) {
         if (swept >= MAX_SWEEPS_PER_CYCLE) break;
+        if (this._remainingSessionMs() < TIME_BUDGET_BAIL_MS) {
+          deferredForTime++;
+          break;
+        }
         if (skipAddresses.has(tokenAddr)) continue;
 
         // Skip if recently failed or permanently gave up
@@ -3963,10 +4623,12 @@ Respond in JSON format:
           const hoursSince = (Date.now() - new Date(existing.timestamp).getTime()) / (1000 * 60 * 60);
           if (hoursSince < 1) continue;
         }
-        // Skip if gas exceeds value — suppress for 24h to avoid log noise every heartbeat
+        // Skip if gas exceeds value — suppress for 7 days. These are worthless dust
+        // tokens whose value almost never recovers; re-checking them every 24h is
+        // what makes the sweep exhaust its session budget daily without finishing.
         if (existing?.action === 'skipped_gas_exceeds_value') {
           const hoursSince = (Date.now() - new Date(existing.timestamp).getTime()) / (1000 * 60 * 60);
-          if (hoursSince < 24) continue;
+          if (hoursSince < 24 * 7) continue;
         }
         // Skip scam/dust tokens — but allow re-check after 24h (classification may have improved)
         if (existing?.action === 'ignored_scam' || existing?.action === 'ignored_dust') {
@@ -3999,6 +4661,16 @@ Respond in JSON format:
             continue;
           }
 
+          // Skip redeployments of already-confirmed honeypots (same symbol,
+          // new contract address) — don't burn sell attempts re-proving them
+          const priorHoneypot = this._findConfirmedHoneypotBySymbol(symbol);
+          if (priorHoneypot) {
+            logger.info(`Residual sweep: skipping ${symbol} (${tokenAddr.slice(0, 10)}...) — same symbol confirmed honeypot at ${priorHoneypot.key}`);
+            await this.recordProcessedDeposit(dedupKey, { action: 'ignored_scam', deposit: { symbol, tokenAddress: tokenAddr, network } });
+            this._reportHoneypotToRegistry(tokenAddr, symbol, network, 0, 'honeypot');
+            continue;
+          }
+
           // NOTE: We don't heuristically flag tokens as scam based on name/balance alone.
           // Scam classification requires evidence: on-chain revert (honeypot), scanner classification,
           // or failed sell attempts. Unsolicited airdrops are common but not proof of scam — some are
@@ -4015,7 +4687,7 @@ Respond in JSON format:
           };
 
           try {
-            const result = await this.autoSellUnknownToken(deposit);
+            const result = await this._autoSellWithTimeout(deposit);
             result.action = result.action === 'auto_sell_attempted' ? 'stablecoin_swept' : result.action;
             // If autoSellUnknownToken returned auto_sell_failed with an unsellable-token error,
             // immediately mark failCount=3 so we never retry this dead token
@@ -4047,7 +4719,10 @@ Respond in JSON format:
             }
             await this.recordProcessedDeposit(dedupKey, { action: 'auto_sell_failed', deposit, error: sellErr.message, failCount });
           }
-          await new Promise(r => setTimeout(r, 5000));
+          // RPC-politeness spacing between processed tokens. 1.5s is enough — the
+          // old 5s pause was a major contributor to the sweep blowing its session
+          // budget and bailing before finishing the token list.
+          await new Promise(r => setTimeout(r, 1500));
         } catch (err) {
           logger.debug(`Residual sweep: could not check ${tokenAddr} on ${network}: ${err.message}`);
         }
@@ -4056,6 +4731,9 @@ Respond in JSON format:
 
     if (swept > 0) {
       logger.info(`Residual sweep: sold ${swept} token(s)`);
+    }
+    if (deferredForTime > 0) {
+      logger.warn(`Residual sweep: bailed early — session budget low (${Math.round(this._remainingSessionMs() / 1000)}s remaining). Tokens will be reprocessed next heartbeat.`);
     }
   }
 
@@ -4068,8 +4746,15 @@ Respond in JSON format:
     const state = this.getState();
     const processedDeposits = state.depositTracking?.processedDeposits || {};
     const results = [];
+    // Same bail threshold as residual sweep — keep the two stages in sync.
+    const TIME_BUDGET_BAIL_MS = 90 * 1000;
+    let deferredForTime = 0;
 
     for (const deposit of deposits) {
+      if (this._remainingSessionMs() < TIME_BUDGET_BAIL_MS) {
+        deferredForTime++;
+        break;
+      }
       // System-allowlisted tokens (user-owned, low-liq): never auto-sell or record
       if (isSystemToken(deposit.network, deposit.tokenAddress)) {
         logger.debug(`Deposit handler: ${deposit.symbol} is system-allowlisted — leaving in wallet`);
@@ -4127,7 +4812,7 @@ Respond in JSON format:
             if (estValue >= 1) {
               logger.info(`Non-primary stablecoin ${deposit.symbol}: $${estValue.toFixed(2)} — sweeping to native`);
               try {
-                result = await this.autoSellUnknownToken(deposit);
+                result = await this._autoSellWithTimeout(deposit);
                 result.action = result.action === 'auto_sell_attempted' ? 'stablecoin_swept' : result.action;
               } catch (sellErr) {
                 logger.error(`Stablecoin sweep failed for ${deposit.symbol}: ${sellErr.message}`);
@@ -4156,10 +4841,21 @@ Respond in JSON format:
           result.action = 'native_received';
           break;
 
-        case 'safe_unknown':
+        case 'safe_unknown': {
+          // Redeployment of an already-confirmed honeypot (same symbol, new
+          // contract address) — skip without burning sell attempts on it
+          const priorHoneypot = this._findConfirmedHoneypotBySymbol(deposit.symbol);
+          if (priorHoneypot) {
+            logger.info(`Deposit handler: skipping ${deposit.symbol} (${deposit.tokenAddress?.slice(0, 10)}...) — same symbol confirmed honeypot at ${priorHoneypot.key}`);
+            result.action = 'ignored_scam';
+            if (deposit.tokenAddress) {
+              this._reportHoneypotToRegistry(deposit.tokenAddress, deposit.symbol, deposit.network, 0, 'honeypot');
+            }
+            break;
+          }
           logger.info(`Unknown safe token: ${deposit.symbol} — attempting auto-sell to stablecoin`);
           try {
-            result = await this.autoSellUnknownToken(deposit);
+            result = await this._autoSellWithTimeout(deposit);
             // If unsellable token, immediately mark as permanently failed
             if (result.action === 'auto_sell_failed' && result.error &&
                 (result.error.includes('No viable swap path') || result.error.includes('no real liquidity') ||
@@ -4179,6 +4875,7 @@ Respond in JSON format:
           // Brief cooldown between token sells to avoid RPC rate limiting
           await new Promise(r => setTimeout(r, 5000));
           break;
+        }
 
         case 'scam':
         case 'dust':
@@ -4213,15 +4910,64 @@ Respond in JSON format:
       results.push(result);
     }
 
+    if (deferredForTime > 0) {
+      const skipped = deposits.length - results.length;
+      logger.warn(`Deposit handler: bailed early — session budget low (${Math.round(this._remainingSessionMs() / 1000)}s remaining). ${skipped} deposit(s) deferred to next heartbeat.`);
+    }
+
     // Update last known balances after processing
     await this.updateLastKnownBalances(deposits);
 
     await this.log('deposits_processed', {
       count: results.length,
-      actions: results.map(r => `${r.deposit?.symbol || '?'}: ${r.action}`)
+      actions: results.map(r => `${r.deposit?.symbol || '?'}: ${r.action}`),
+      deferredForTime
     });
 
     return results;
+  }
+
+  /**
+   * Remaining wall-clock budget in the current session, vs the
+   * SubAgentOrchestrator's 20-min hard cap. Used by long-running stages
+   * (residual-sweep, deposit-scan) to bail gracefully before the cap
+   * fires and the orchestrator logs a [TIMEOUT].
+   *
+   * Returns Infinity if the session start time hasn't been recorded —
+   * never let an unset field cause us to skip work.
+   */
+  _remainingSessionMs() {
+    if (!this._sessionStartedAt) return Infinity;
+    const SESSION_CAP_MS = 20 * 60 * 1000; // mirror SubAgentOrchestrator.SESSION_TIMEOUT_MS
+    return SESSION_CAP_MS - (Date.now() - this._sessionStartedAt);
+  }
+
+  /**
+   * autoSellUnknownToken with a per-token deadline. Hung token sells
+   * (RPC stuck, quoter never returns) used to consume the full 20-min
+   * session and trigger the orchestrator [TIMEOUT]; now they cap at
+   * `ms` (default 60s) and throw a typed AUTOSELL_TIMEOUT that callers'
+   * existing catch blocks record as `auto_sell_failed`. The token
+   * remains eligible for retry after the standard 24h cooldown — a
+   * timeout is treated as transient, not as proof of unsellability.
+   */
+  async _autoSellWithTimeout(deposit, ms = 60000) {
+    const symbol = deposit?.symbol || deposit?.tokenAddress || 'unknown';
+    let timeoutHandle;
+    try {
+      return await Promise.race([
+        this.autoSellUnknownToken(deposit),
+        new Promise((_, reject) => {
+          timeoutHandle = setTimeout(() => {
+            const err = new Error(`auto-sell timeout (>${ms / 1000}s) for ${symbol}`);
+            err.code = 'AUTOSELL_TIMEOUT';
+            reject(err);
+          }, ms);
+        })
+      ]);
+    } finally {
+      clearTimeout(timeoutHandle);
+    }
   }
 
   /**
@@ -4557,6 +5303,30 @@ Respond in JSON format:
   }
 
   /**
+   * Check whether a token symbol matches a previously CONFIRMED honeypot
+   * (an entry with permanent failCount and on-chain revert evidence).
+   * Scam deployers redeploy the same token under new contract addresses
+   * (same symbol/name) and re-airdrop it — each new address used to get a
+   * fresh 2-revert sell attempt before being individually blacklisted.
+   * Symbol match here is NOT a name heuristic: it propagates existing
+   * hard evidence (reverted sells) across redeployments. Returns the
+   * prior entry (with its address key) or null. Never matches the
+   * 'UNKNOWN' placeholder; system-allowlisted tokens are excluded by
+   * the isSystemToken check upstream of every caller.
+   */
+  _findConfirmedHoneypotBySymbol(symbol) {
+    if (!symbol || symbol === 'UNKNOWN') return null;
+    const processed = this.getState().depositTracking?.processedDeposits || {};
+    for (const [key, entry] of Object.entries(processed)) {
+      if (entry.symbol === symbol && (entry.failCount || 0) >= 3 &&
+          /Honeypot|TRANSFER_FROM_FAILED/.test(entry.error || '')) {
+        return { key, entry };
+      }
+    }
+    return null;
+  }
+
+  /**
    * Record a processed deposit for dedup and tracking
    */
   async recordProcessedDeposit(key, result) {
@@ -4623,6 +5393,31 @@ Respond in JSON format:
   }
 
   async notifySwap({ action, network, amountIn, amountOut, symbolIn, symbolOut, txHash, gain, strategy }) {
+    // Always journal the swap — the daily report tallies from this log, so it
+    // must capture every event the per-trade notification used to announce.
+    // Convention: `gain` is denominated in symbolOut units (USD-stable for
+    // token_trader sells, native units for DM buy-backs).
+    try {
+      await this._appendSwapLog({
+        ts: new Date(),
+        action,
+        network,
+        strategy: strategy || 'unknown',
+        amountIn: parseFloat(amountIn) || 0,
+        amountOut: parseFloat(amountOut) || 0,
+        symbolIn,
+        symbolOut,
+        gain: gain !== undefined && gain !== null ? parseFloat(gain) : null,
+        txHash
+      });
+    } catch (err) {
+      logger.warn(`Failed to journal swap event: ${err.message}`);
+    }
+
+    // Per-trade Telegram pings are opt-in (swapNotifications) — the daily
+    // report carries the tally instead.
+    if (this.getConfig().swapNotifications !== true) return;
+
     try {
       const telegram = this.mainAgent?.interfaces?.get('telegram');
       if (!telegram || !telegram.sendNotification) return;
@@ -4676,9 +5471,37 @@ Respond in JSON format:
   }
 
   /**
+   * Atomically append a swap event to the persisted state.swapLog (capped).
+   * $push+$slice avoids the read-modify-write race that updateState() would
+   * have if two swaps landed in the same heartbeat.
+   */
+  async _appendSwapLog(event) {
+    const SubAgent = this.agentDoc.constructor;
+    const updated = await SubAgent.findByIdAndUpdate(
+      this.agentDoc._id,
+      { $push: { 'state.domainState.swapLog': { $each: [event], $slice: -300 } } },
+      { new: true }
+    );
+    if (updated) {
+      this.agentDoc.state.domainState = updated.state.domainState;
+      this.agentDoc.__v = updated.__v;
+    }
+  }
+
+  /**
    * Record trade for learning
    */
   async recordTrade(decision, result) {
+    // A "trade" is a trade. The primary-strategy call site used to invoke this on every
+    // heartbeat, including the ticks that decided to do nothing, and the counter below
+    // incremented on `result.success` — which a hold also reports. That is how
+    // domainState reached 24,748 "executed" against 25,451 "proposed": both were tick
+    // counts wearing trade labels, and the ratio they implied (a 97% fill rate) was
+    // meaningless. TokenTraderHeartbeatManager already gates its own call this way; the
+    // gate lives here now so no future call site can forget it.
+    const isRealTrade = Boolean(result?.action) && result.action !== 'hold';
+    if (!isRealTrade) return;
+
     this.tradeJournal.push({
       timestamp: new Date(),
       strategy: decision.strategy,
@@ -4716,9 +5539,14 @@ Respond in JSON format:
       // Token trader counters (separate namespace)
       updates.tokenTraderTradesExecuted = (state.tokenTraderTradesExecuted || 0) + (result.success ? 1 : 0);
       updates.tokenTraderTradesProposed = (state.tokenTraderTradesProposed || 0) + 1;
-      if (result.success && result.gain) {
-        updates.tokenTraderPnL = (state.tokenTraderPnL || 0) + result.gain;
-      }
+      // NOTE: this branch used to maintain `updates.tokenTraderPnL`, a running total
+      // added up trade by trade. It drifted — by 2026-08-20 it read -$100.76 against a
+      // true +$150.80 — and every consumer has since moved to an authoritative source:
+      // getStatus() sums each trader's own pnl.lifetimeRealized, and the daily report
+      // computes from live instance data. Maintaining a second, independently-drifting
+      // copy of a number we can read exactly is how the $251 discrepancy happened, so
+      // it is no longer written. The stale field is removed from persisted state.
+      // (no write — the stale persisted field is cleared out-of-band, once.)
     } else {
       // Primary strategy counters
       updates.tradesExecuted = (state.tradesExecuted || 0) + (result.success ? 1 : 0);
@@ -4732,6 +5560,30 @@ Respond in JSON format:
       await this.updateState(updates);
     } catch (err) {
       logger.warn('Failed to persist trade counters:', err.message);
+    }
+
+    // Mirror onto the strategy instance's own state. Only DCAStrategy ever called
+    // BaseStrategy.recordTrade(), so every other strategy — dollar_maximizer included —
+    // reported `tradesExecuted: 0` forever while its `tradesProposed` climbed, and
+    // StrategyRegistry published the resulting 0/702 as a "0.0%" success rate. The
+    // execution figure at /api/crypto/strategy/status is the one an audit reads first;
+    // it has to come from the same event that moves the money.
+    try {
+      const strategyInstance = this.strategies?.get(decision.strategy)
+        || strategyRegistry.get(decision.strategy);
+      if (typeof strategyInstance?.recordTrade === 'function') {
+        strategyInstance.recordTrade({
+          strategy: decision.strategy,
+          network: decision.network,
+          action: decision.action || result.action,
+          success: result.success !== false,
+          pnl: Number.isFinite(result.gain) ? result.gain : undefined,
+          ...(result.txHash && { txHash: result.txHash })
+        });
+      }
+    } catch (err) {
+      // Bookkeeping must never be able to break the trade path it is recording.
+      logger.warn('Failed to mirror trade onto strategy state:', err.message);
     }
   }
 
@@ -4802,6 +5654,7 @@ Respond in JSON format:
    */
   async updateConfig(updates) {
     const currentConfig = this.agentDoc.config.domainConfig || {};
+    const prevReportTime = currentConfig.dailyReportTime;
     this.agentDoc.config.domainConfig = {
       ...currentConfig,
       ...updates
@@ -4809,6 +5662,16 @@ Respond in JSON format:
     await this.agentDoc.save();
 
     logger.info('Crypto Strategy Agent config updated:', Object.keys(updates));
+
+    // Re-pin the daily-report agenda job when its time changes
+    if (updates.dailyReportTime !== undefined && updates.dailyReportTime !== prevReportTime) {
+      try {
+        await this.scheduler?.scheduleCryptoDailyReport?.();
+      } catch (err) {
+        logger.warn(`Failed to reschedule crypto daily report: ${err.message}`);
+      }
+    }
+
     return { success: true, config: this.agentDoc.config.domainConfig };
   }
 
@@ -4830,21 +5693,19 @@ Respond in JSON format:
    * Update position state for a network
    */
   async updatePosition(network, positionData) {
-    const state = this.getState();
     const { inStablecoin, entryPrice, stablecoinAmount } = positionData;
 
-    const positions = state.positions || {};
-    positions[network] = {
+    const newPosition = {
       inStablecoin: !!inStablecoin,
       entryPrice: entryPrice || null,
       stablecoinAmount: stablecoinAmount || 0,
       timestamp: new Date()
     };
 
-    await this.updateState({ positions });
+    await this._persistPosition(network, newPosition);
 
-    logger.info(`Position updated for ${network}:`, positions[network]);
-    return { success: true, network, position: positions[network] };
+    logger.info(`Position updated for ${network}:`, newPosition);
+    return { success: true, network, position: newPosition };
   }
 
   /**
@@ -5249,6 +6110,303 @@ Respond in JSON format:
   /**
    * Get comprehensive agent status (matches legacy format)
    */
+
+  /**
+   * Sum lifetime realized P&L across every registered token trader.
+   *
+   * Authoritative counterpart to the drifted state.tokenTraderPnL accumulator; mirrors
+   * how revenueService.updateTodayPnL() reads the same figure so the API and the ledger
+   * cannot disagree.
+   *
+   * @returns {number|null} total lifetime realized, or null when no trader is registered
+   *                        (null, not 0, so callers can tell "nothing registered" apart
+   *                        from "registered and flat")
+   */
+  /**
+   * Stablecoin on `network` that belongs to the token trader(s), not to DollarMaximizer.
+   *
+   * Both strategies spend from ONE wallet. The token trader is allotted
+   * capitalAllocationPercent of that network's capital and parks the undeployed part of
+   * its allotment in `stablecoinReserve`. DM, meanwhile, reconciles its position straight
+   * from the wallet balance, so it counted the trader's reserve as its own dry powder:
+   * on 2026-08-20 DM believed it held $1967 of deployable stablecoin when $1054 of that
+   * was the grid's buy side. Nothing enforced the split — DM simply had silent first
+   * claim, and since a DM buy-back spends its ENTIRE recorded stablecoin position, one
+   * re-entry could have consumed the grid's working capital outright.
+   *
+   * Only the reserve is claimed here. The trader's deployed capital is already held as
+   * tokens, so it is not part of the stablecoin pot being divided.
+   *
+   * @param {string} network
+   * @returns {number} stablecoin claimed by token traders on this network (0 on any error)
+   */
+  getTokenTraderStableClaim(network) {
+    try {
+      let claimed = 0;
+      for (const [, instance] of strategyRegistry.getAllTokenTraders()) {
+        if (instance?.config?.tokenNetwork !== network) continue;
+        const reserve = parseFloat(instance.state?.stablecoinReserve) || 0;
+        if (reserve > 0) claimed += reserve;
+      }
+      return claimed;
+    } catch {
+      return 0;
+    }
+  }
+
+  /**
+   * Stablecoin on `network` that DollarMaximizer may actually deploy.
+   * Never negative: if the traders' allotment covers the whole pot, DM's share is zero
+   * and it must not trade, which is the correct outcome rather than an overdraft.
+   */
+  /**
+   * Classify a sell decision into the bucket the exit-quality report aggregates on.
+   * Order matters: the specific triggers all also carry isEmergency (it bypasses the
+   * min-profit filter), so emergency must be tested LAST or it would swallow them.
+   */
+  _classifyExitTrigger(decision = {}) {
+    if (decision.isTrailingStop || decision.isTrailingStopTranche) return 'trailing_stop';
+    if (decision.isDowntrendExit || decision.isDowntrendExitTranche) return 'downtrend_exit';
+    if (decision.isStopLossTranche) return 'stop_loss';
+    if (decision.isTrancheSell) return 'tranche_scalp';
+    if (decision.isScaleOut) return 'scale_out';
+    const reason = String(decision.reason || '').toLowerCase();
+    if (reason.includes('scale-out')) return 'scale_out';
+    if (reason.includes('dump')) return 'dump';
+    if (decision.isGrid) return 'grid_sell';
+    if (decision.isEmergency) return 'emergency';
+    return 'other';
+  }
+
+  /**
+   * Persist one exit record. Best-effort by design — see the call site.
+   */
+  async _recordExitForensics(args) {
+    const { tokenStrategy, tradeDecision, exitCtx, tokensSold, proceeds,
+            exitPrice, pnl, gasCostUsd, network, tokenSymbol } = args;
+    if (!(exitPrice > 0)) return;
+
+    const { default: CryptoExitRecord } = await import('../../models/CryptoExitRecord.js');
+    const remaining = tokenStrategy?.state?.tokenBalance ?? null;
+    const now = new Date();
+
+    await CryptoExitRecord.create({
+      date: now.toISOString().slice(0, 10),
+      exitedAt: now,
+      tokenSymbol: tokenSymbol || tokenStrategy?.config?.tokenSymbol || 'UNKNOWN',
+      tokenAddress: tokenStrategy?.config?.tokenAddress || null,
+      network: network || tokenStrategy?.config?.tokenNetwork || null,
+      trigger: this._classifyExitTrigger(tradeDecision),
+      reason: tradeDecision?.reason || null,
+      exitPrice,
+      tokensSold: tokensSold ?? null,
+      proceeds: proceeds ?? null,
+      pnl: Number.isFinite(pnl) ? pnl : null,
+      gasCostUsd: gasCostUsd || 0,
+      avgEntryAtExit: exitCtx?.avgEntry ?? null,
+      peakPriceAtExit: exitCtx?.peak ?? null,
+      trailingStopAtExit: exitCtx?.trailStop ?? null,
+      regimeAtExit: exitCtx?.regime ?? null,
+      tokensRemainingAfter: remaining,
+      fullExit: Number.isFinite(remaining) ? remaining * exitPrice < 3 : false
+    });
+  }
+
+  /**
+   * Stamp elapsed outcome horizons on past exits using a price we already have.
+   *
+   * Called from the crypto heartbeat, so it costs no extra RPC: the caller passes the
+   * price it just fetched. An exit is only judged once every horizon it is due for has
+   * been filled; horizonsComplete then takes it out of the query for good.
+   */
+  async backfillExitHorizons(tokenSymbol, currentPrice) {
+    if (!(currentPrice > 0) || !tokenSymbol) return 0;
+    try {
+      const { default: CryptoExitRecord } = await import('../../models/CryptoExitRecord.js');
+      const pending = await CryptoExitRecord.find({ tokenSymbol, horizonsComplete: false }).limit(200);
+      if (!pending.length) return 0;
+
+      const now = Date.now();
+      const HORIZONS = [['priceAfter1h', 3600e3], ['priceAfter4h', 4 * 3600e3], ['priceAfter24h', 24 * 3600e3]];
+      let stamped = 0;
+
+      for (const rec of pending) {
+        const age = now - new Date(rec.exitedAt).getTime();
+        let dirty = false;
+        for (const [field, ms] of HORIZONS) {
+          if (rec[field] == null && age >= ms) {
+            rec[field] = currentPrice;
+            // Stamp WHEN, so the report can tell a prompt sample from one taken hours late.
+            rec[`${field}At`] = new Date();
+            dirty = true;
+          }
+        }
+        // Only complete once the LAST horizon is actually filled, not merely elapsed —
+        // a restart that skips a window must not permanently blind the 24h column.
+        if (rec.priceAfter1h != null && rec.priceAfter4h != null && rec.priceAfter24h != null) {
+          rec.horizonsComplete = true; dirty = true;
+        }
+        if (dirty) { await rec.save(); stamped++; }
+      }
+      if (stamped) logger.debug(`Exit forensics: stamped horizons on ${stamped} ${tokenSymbol} exit(s)`);
+      return stamped;
+    } catch (err) {
+      logger.debug(`Exit horizon backfill skipped: ${err.message}`);
+      return 0;
+    }
+  }
+
+  /**
+   * Refuse to execute a trade larger than the strategy decided.
+   *
+   * The 2026-08-21 loss (-$290.61) happened because a decision for $341.68 executed as
+   * $1,004.93 and nothing compared the two numbers. DollarMaximizer's buy path carries its
+   * own inline version of this check; this is the shared form used by the token trader's
+   * buy and sell paths, which had no such check at all despite a -$461.79 worst day.
+   *
+   * Returns the size to actually use: `actual` when it is within tolerance, otherwise
+   * `decided`. Clamping rather than only warning, because the strategy's own decision is the
+   * authority — the cap can never suppress intended activity, only an overspend nobody asked
+   * for. Tolerance is 1% or `floor` (whichever is larger) so ordinary rounding, balance
+   * adjustment and native-conversion drift do not cry wolf.
+   *
+   * @returns {number} the size to execute with
+   */
+  async enforceTradeSize({ label, network, decided, actual, unit, floor = 1, strategy = 'token_trader' }) {
+    const d = parseFloat(decided);
+    const a = parseFloat(actual);
+    if (!Number.isFinite(d) || d <= 0 || !Number.isFinite(a)) return a;
+
+    const overBy = a - d;
+    if (overBy <= Math.max(d * 0.01, floor)) return a;
+
+    logger.error(
+      `TRADE SIZE DIVERGENCE [${strategy}/${label}] on ${network}: decided ${d.toFixed(6)} ${unit} ` +
+      `but execution was about to use ${a.toFixed(6)} ${unit} (+${overBy.toFixed(6)}, ` +
+      `${((a / d - 1) * 100).toFixed(1)}%). Capping to the decided size.`
+    );
+    try {
+      await this.notifySwap({
+        action: 'trade_size_divergence_blocked',
+        network,
+        amountIn: a,
+        amountOut: d,
+        symbolIn: unit,
+        symbolOut: unit,
+        strategy
+      });
+    } catch (notifyErr) {
+      logger.warn(`Size-divergence alert could not be sent: ${notifyErr.message}`);
+    }
+    return d;
+  }
+
+  getDmAvailableStable(network, walletStable) {
+    const wallet = parseFloat(walletStable) || 0;
+    const claimed = this.getTokenTraderStableClaim(network);
+    if (claimed <= 0) return wallet;
+    const available = Math.max(0, wallet - claimed);
+    if (available <= 0 && wallet > 0) {
+      logger.info(`DollarMaximizer [${network}]: no deployable stablecoin — the full $${wallet.toFixed(2)} is allotted to the token trader (reserve $${claimed.toFixed(2)})`);
+    }
+    return available;
+  }
+
+  /**
+   * Populate the P&L figures the status endpoint displays.
+   *
+   * `dailyPnL` fell back to domainState.dailyPnL — a stale 0 — for the ~15 minutes
+   * between a restart and revenueService's next cycle, so a day's earnings read as
+   * nothing while the ledger held the real figure. Called at init and on every
+   * execution, so the window closes instead of waiting for a heartbeat.
+   *
+   * READ ONLY, deliberately. It must never call revenueService.updateTodayPnL(): at
+   * init the token traders may not be registered yet, so that would compute a lifetime
+   * total of 0 and write a phantom daily loss equal to everything ever earned — the
+   * precise failure the DM accounting was designed around.
+   *
+   * @returns {Promise<boolean>} whether anything was populated
+   */
+  /**
+   * Retry refreshPnLCaches() until it populates, briefly and in the background.
+   *
+   * Deliberately NOT awaited by initialize(): warming a display cache must never hold
+   * up the boot chain. Bounded so a permanently empty ledger cannot leave a timer
+   * running for the life of the process.
+   */
+  _primePnLCaches(attempt = 1) {
+    const MAX_ATTEMPTS = 12;
+    const INTERVAL_MS = 5000;
+    this.refreshPnLCaches()
+      .then((ok) => {
+        if (ok) {
+          logger.info(`Crypto P&L display cache primed on attempt ${attempt} (daily $${Number(this._cachedDailyPnL ?? 0).toFixed(4)}, lifetime $${Number(this._cachedTTTotalPnL ?? 0).toFixed(4)})`);
+          return;
+        }
+        if (attempt >= MAX_ATTEMPTS) {
+          logger.warn(`Crypto P&L display cache still empty after ${MAX_ATTEMPTS} attempts — the status endpoint will show zeros until the first strategy execution`);
+          return;
+        }
+        // An uncaught throw inside a setTimeout callback takes the whole process down,
+        // and this runs on the boot chain. A display-cache warmer must never be able to
+        // kill the agent, so the retry is wrapped rather than trusted.
+        const timer = setTimeout(() => {
+          try {
+            this._primePnLCaches(attempt + 1);
+          } catch (err) {
+            logger.warn(`Crypto P&L display cache retry failed: ${err.message}`);
+          }
+        }, INTERVAL_MS);
+        if (typeof timer.unref === 'function') timer.unref();
+      })
+      .catch(() => { /* non-critical */ });
+  }
+
+  async refreshPnLCaches() {
+    try {
+      const revService = (await import('../crypto/revenueService.js')).default;
+      const todayPnL = revService.getTodayPnLSummary();
+      // `updatedAt`, NOT `dailyNet !== undefined`: the getter hands back a fully-zeroed
+      // object when its cache is cold, so the old check always passed and cached zeros
+      // over a ledger that held the real figures.
+      if (todayPnL && todayPnL.updatedAt) {
+        this._cachedDailyPnL = todayPnL.dailyNet;
+        if (typeof todayPnL.cumulativePnL === 'number') this._cachedTTTotalPnL = todayPnL.cumulativePnL;
+        this._cachedTTUnrealizedPnL = todayPnL.unrealizedPnL || 0;
+        return true;
+      }
+
+      // revenueService's own cache is not warm yet — its init races ours after a
+      // restart. Read today's ledger row straight from the database instead.
+      const { default: DailyPnL } = await import('../../models/DailyPnL.js');
+      const today = new Date().toISOString().slice(0, 10);
+      const row = await DailyPnL.findOne({ date: today }).lean();
+      if (row) {
+        if (typeof row.dailyNet === 'number') this._cachedDailyPnL = row.dailyNet;
+        if (typeof row.cumulativePnL === 'number') this._cachedTTTotalPnL = row.cumulativePnL;
+        return true;
+      }
+    } catch { /* non-critical: the status view falls back as before */ }
+    return false;
+  }
+
+  getTokenTraderLifetimeRealized() {
+    try {
+      let total = 0;
+      let found = false;
+      for (const [, instance] of strategyRegistry.getAllTokenTraders()) {
+        const pnl = (instance.getTokenTraderStatus?.() || {}).pnl || {};
+        const lr = pnl.lifetimeRealized != null ? pnl.lifetimeRealized : pnl.realized;
+        if (typeof lr === 'number' && Number.isFinite(lr)) {
+          total += lr;
+          found = true;
+        }
+      }
+      return found ? total : null;
+    } catch {
+      return null;
+    }
+  }
   getStatus() {
     const baseStatus = super.getStatus();
     const config = this.getConfig();
@@ -5275,6 +6433,25 @@ Respond in JSON format:
       );
       capitalAllocation = { primary: Math.max(0, 100 - secondary), secondary };
     }
+
+    // Lifetime realized P&L for the token traders.
+    //
+    // _cachedTTTotalPnL is refreshed from the DailyPnL ledger on crypto:heartbeat, so
+    // between a restart and the first heartbeat it is unset. The old fallback was
+    // state.tokenTraderPnL — a per-trade accumulator (see the isTokenTrader branch in
+    // recordTradeResult) that has drifted badly: on 2026-08-20 it read -$100.76 against
+    // a true +$150.80, and that $251 error was what the API served for the whole
+    // post-restart window. The ledger and the traders' own books were correct
+    // throughout; only this display path was wrong.
+    //
+    // Sum the traders' own lifetime counters instead — the same source revenueService
+    // reconciles the ledger against, and correct from the first tick after boot. The
+    // drifted accumulator is no longer consulted at all (v2.25.219) — it is not
+    // written any more either. `??` not `||`: a legitimate 0 (no trades yet) must
+    // not fall through.
+    const ttLifetimeRealized = this._cachedTTTotalPnL
+      ?? this.getTokenTraderLifetimeRealized()
+      ?? 0;
 
     return {
       ...baseStatus,
@@ -5316,11 +6493,11 @@ Respond in JSON format:
       // unrealizedPnL is current mark-to-market on open positions, exposed separately so
       // the dashboard can show "Total snapshot = realized + unrealized" without double-counting.
       state: {
-        dailyPnL: this._cachedDailyPnL || state.dailyPnL || 0,
-        totalPnL: (state.totalPnL || 0) + (this._cachedTTTotalPnL || state.tokenTraderPnL || 0),
+        dailyPnL: this._cachedDailyPnL ?? state.dailyPnL ?? 0,
+        totalPnL: (state.totalPnL || 0) + ttLifetimeRealized,
         unrealizedPnL: this._cachedTTUnrealizedPnL || 0,
         dmPnL: state.totalPnL || 0,
-        tokenTraderPnL: this._cachedTTTotalPnL || state.tokenTraderPnL || 0,
+        tokenTraderPnL: ttLifetimeRealized,
         tradesExecuted: (state.tradesExecuted || 0) + (state.tokenTraderTradesExecuted || 0),
         tradesProposed: (state.tradesProposed || 0) + (state.tokenTraderTradesProposed || 0),
         positions: state.positions || {},
@@ -5369,49 +6546,171 @@ Respond in JSON format:
         return;
       }
 
+      const built = await this.buildDailyPnLReport();
+      if (!built) return;
+
+      const sent = await telegram.sendNotification(built.text, { parse_mode: 'Markdown' });
+      if (sent !== true) {
+        logger.warn('Crypto daily report: Telegram send failed — snapshot kept, next report covers this window');
+        return;
+      }
+      logger.info('Daily P&L report sent via Telegram');
+
+      // Snapshot AFTER a successful send — if Telegram fails, the next report
+      // covers the missed window instead of dropping it.
+      await built.commitSnapshot();
+    } catch (err) {
+      logger.error(`Failed to send daily P&L report: ${err.message}`);
+    }
+  }
+
+  /**
+   * Build the daily crypto P&L report text WITHOUT sending it, and return a
+   * `commitSnapshot()` closure that persists the window baselines (lastDailyReport
+   * + pnlHistory). Callers send `text` however they like (standalone Telegram
+   * message, or embedded in the unified daily status report) and MUST call
+   * `commitSnapshot()` only after a successful send — otherwise the next report's
+   * 24h/7d/30d windows would drift. Returns null if unavailable.
+   */
+  async buildDailyPnLReport({ header = true } = {}) {
+    try {
+      const config = this.getConfig();
       const state = this.getState();
       const positions = state.positions || {};
       const baselines = state.priceBaselines || {};
 
-      // Get token trader P&L from DailyPnL collection (same source as web UI)
-      let ttDailyPnL = 0;
+      // ---- Token trader lifetime realized + gas ----
+      // Live instances are ground truth, but right after a restart the
+      // registry can still be empty — fall back to the latest DailyPnL row
+      // (derived from the same instances) rather than reporting $0.
       let ttTotalPnL = 0;
-      let ttGasCost = 0;
+      let ttGasLifetime = 0;
+      let ttUnrealized = 0;
+      let ttLive = false;
       try {
-        const { default: DailyPnL } = await import('../../models/DailyPnL.js');
-        const today = new Date().toISOString().slice(0, 10);
-        const todayRecord = await DailyPnL.findOne({ date: today }).lean();
-        if (todayRecord) {
-          ttTotalPnL = todayRecord.cumulativePnL || 0;
-          ttDailyPnL = todayRecord.dailyNet || 0;
-          ttGasCost = todayRecord.gasCost || 0;
+        const traders = strategyRegistry.getAllTokenTraders();
+        if (traders.size > 0) {
+          ttLive = true;
+          for (const [, instance] of traders) {
+            const pnl = instance.getTokenTraderStatus()?.pnl || {};
+            ttTotalPnL += pnl.lifetimeRealized != null ? pnl.lifetimeRealized : (pnl.realized || 0);
+            ttGasLifetime += pnl.lifetimeGasCost || pnl.totalGasCost || 0;
+            ttUnrealized += pnl.unrealized || 0;
+          }
         }
-      } catch { /* fallback below */ }
+      } catch { /* fall back below */ }
 
-      // Get dollar_maximizer P&L from state
+      let DailyPnL = null;
+      try {
+        DailyPnL = (await import('../../models/DailyPnL.js')).default;
+      } catch { /* windows degrade gracefully */ }
+      if (!ttLive && DailyPnL) {
+        try {
+          const latest = await DailyPnL.findOne({}).sort({ date: -1 }).lean();
+          if (latest) {
+            ttTotalPnL = latest.cumulativePnL || 0;
+            ttGasLifetime = latest.gasCost || 0;
+          }
+        } catch { /* leave zeros */ }
+      }
+
       const dmTotalPnL = state.totalPnL || 0;
-
-      // Combined P&L
       const combinedTotal = ttTotalPnL + dmTotalPnL;
-      const combinedDaily = ttDailyPnL; // DM doesn't track daily separately
 
-      const dmTradesExecuted = state.tradesExecuted || 0;
-      const ttTradesExecuted = state.tokenTraderTradesExecuted || 0;
-      const totalTrades = dmTradesExecuted + ttTradesExecuted;
+      // ---- 24h: exact snapshot delta since the last sent report ----
+      const lastReport = state.lastDailyReport || {};
+      const windowStart = lastReport.at ? new Date(lastReport.at) : new Date(Date.now() - 24 * 3600 * 1000);
+      const windowHours = (Date.now() - windowStart.getTime()) / 3600e3;
+      const ttWindowPnL = typeof lastReport.ttTotalPnL === 'number' ? ttTotalPnL - lastReport.ttTotalPnL : null;
+      const dmWindowPnL = typeof lastReport.dmTotalPnL === 'number' ? dmTotalPnL - lastReport.dmTotalPnL : null;
+      const dayTotal = ttWindowPnL !== null || dmWindowPnL !== null ? (ttWindowPnL || 0) + (dmWindowPnL || 0) : null;
+      const gasWindow = typeof lastReport.ttGasLifetime === 'number' ? ttGasLifetime - lastReport.ttGasLifetime : null;
+
+      // ---- 7d / 30d: cumulative diffs against history at the cutoff ----
+      // TT from DailyPnL rows (full history exists); DM from the pnlHistory
+      // series this report persists each day — until 7/30 days of points
+      // accumulate, the DM part covers only the recorded span.
+      const pnlHistory = Array.isArray(state.pnlHistory) ? state.pnlHistory : [];
+      const windowPnL = async (days) => {
+        const cutoff = new Date(Date.now() - days * 86400e3).toISOString().slice(0, 10);
+        let tt = ttTotalPnL; // no row at/before cutoff → all TT history is inside the window
+        if (DailyPnL) {
+          try {
+            const base = await DailyPnL.findOne({ date: { $lte: cutoff } }).sort({ date: -1 }).lean();
+            if (base) tt = ttTotalPnL - (base.cumulativePnL || 0);
+          } catch { /* keep full-history value */ }
+        }
+        let dm = 0;
+        const dmBase = [...pnlHistory].reverse().find(p => p.date <= cutoff) || pnlHistory[0];
+        if (dmBase && typeof dmBase.dm === 'number') dm = dmTotalPnL - dmBase.dm;
+        return tt + dm;
+      };
+      const pnl7d = await windowPnL(7);
+      const pnl30d = await windowPnL(30);
 
       const networkMode = config.networkMode || 'testnet';
       const networks = NETWORK_CONFIG[networkMode] || {};
 
-      let msg = `*Daily Crypto Report*\n`;
-      msg += `Mode: ${networkMode}\n\n`;
+      const fmtUsd = (v) => `${v >= 0 ? '+' : '-'}$${Math.abs(v).toFixed(2)}`;
+      // Telegram legacy-Markdown: an unpaired _ or * in dynamic text (token
+      // symbols, strategy names) makes the whole sendMessage 400.
+      const esc = (v) => String(v ?? '').replace(/([_*`[])/g, '\\$1');
+      const dayLabel = windowHours > 27 ? `${windowHours.toFixed(0)}h` : '24h';
 
-      // Combined P&L
-      const pnlEmoji = combinedTotal > 0 ? '🟢' : combinedTotal < 0 ? '🔴' : '⚪';
-      msg += `${pnlEmoji} *Total P&L:* $${combinedTotal.toFixed(2)}\n`;
-      const dailyEmoji = combinedDaily > 0 ? '📈' : combinedDaily < 0 ? '📉' : '➡️';
-      msg += `${dailyEmoji} *Today:* $${combinedDaily.toFixed(2)}\n`;
-      msg += `*Trades:* ${totalTrades} (DM: ${dmTradesExecuted}, TT: ${ttTradesExecuted})\n`;
-      if (ttGasCost > 0) msg += `*Gas:* $${ttGasCost.toFixed(2)}\n`;
+      // When embedded in the unified daily status report the caller supplies
+      // its own section heading, so omit the standalone title line.
+      let msg = header ? `*Daily Crypto Report* (${networkMode})\n\n` : '';
+
+      // Profit block — the headline. Realized only; windows are deltas of
+      // lifetime realized, so gas-in/gas-out conventions cancel.
+      msg += `💰 *Profit (realized):*\n`;
+      if (dayTotal !== null) msg += `  ${dayLabel}: ${fmtUsd(dayTotal)}\n`;
+      msg += `  7d: ${fmtUsd(pnl7d)}\n`;
+      msg += `  30d: ${fmtUsd(pnl30d)}\n`;
+      msg += `  all-time: ${fmtUsd(combinedTotal)}\n`;
+      if (ttLive && Math.abs(ttUnrealized) >= 0.01) {
+        msg += `  _open position unrealized: ${fmtUsd(ttUnrealized)}_\n`;
+      }
+      msg += `\n`;
+
+      // Trade tally for the window — replaces the per-trade Telegram pings.
+      const fmtQty = (val) => {
+        const n = parseFloat(val);
+        if (isNaN(n) || n === 0) return '0';
+        if (n >= 1) return n.toFixed(2);
+        if (n >= 0.01) return n.toFixed(4);
+        return n.toFixed(6);
+      };
+      const windowSwaps = (state.swapLog || []).filter(s => s.ts && new Date(s.ts) > windowStart);
+      msg += `🔄 *Trades (${dayLabel}):* ${windowSwaps.length}`;
+      if (windowSwaps.length > 0 && gasWindow !== null && gasWindow > 0) msg += ` | gas $${gasWindow.toFixed(2)}`;
+      msg += `\n`;
+      if (windowSwaps.length > 0) {
+        // Per-strategy counts
+        const byStrategy = {};
+        for (const s of windowSwaps) {
+          const key = (s.strategy || 'other').replace(/_/g, ' ');
+          byStrategy[key] = byStrategy[key] || { buys: 0, sells: 0 };
+          if (/buy|bought/.test(s.action || '')) byStrategy[key].buys++;
+          else byStrategy[key].sells++;
+        }
+        for (const [name, c] of Object.entries(byStrategy)) {
+          msg += `  ${name}: ${c.buys} buys / ${c.sells} sells\n`;
+        }
+        // Individual trades (compact), newest last, capped
+        const maxLines = 10;
+        const shown = windowSwaps.slice(-maxLines);
+        if (windowSwaps.length > maxLines) msg += `  _…${windowSwaps.length - maxLines} earlier trades omitted_\n`;
+        for (const s of shown) {
+          const t = new Date(s.ts).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false });
+          const arrow = /buy|bought/.test(s.action || '') ? '📈' : '📉';
+          let line = `  ${arrow} ${t} ${(s.action || '').replace(/_/g, ' ')}: ${fmtQty(s.amountIn)} ${esc(s.symbolIn)}→${fmtQty(s.amountOut)} ${esc(s.symbolOut)}`;
+          if (s.gain !== null && s.gain !== undefined) {
+            line += ` (${s.gain >= 0 ? '+' : ''}${fmtQty(s.gain)} ${esc(s.symbolOut)})`;
+          }
+          msg += `${line}\n`;
+        }
+      }
       msg += `\n`;
 
       // Token trader per-token breakdown
@@ -5426,7 +6725,7 @@ Respond in JSON format:
           const lifetime = (pnl.lifetimeRealized != null ? pnl.lifetimeRealized : pnl.realized || 0) + (pnl.unrealized || 0);
           const lifetimeEmoji = lifetime >= 0 ? '🟢' : '🔴';
           const balStr = pos.tokenBalance > 0 ? `${pos.tokenBalance.toFixed(2)} ` : 'No pos ';
-          msg += `  ${lifetimeEmoji} ${status.token.symbol}: ${balStr}| P&L $${lifetime.toFixed(2)} | ${status.regime || 'Idle'}\n`;
+          msg += `  ${lifetimeEmoji} ${esc(status.token.symbol)}: ${balStr}| P&L $${lifetime.toFixed(2)} | ${status.regime || 'Idle'}\n`;
         }
         msg += `\n`;
       }
@@ -5445,16 +6744,85 @@ Respond in JSON format:
         msg += `\n`;
       }
 
-      msg += `\n_Strategy: ${config.activeStrategy || 'dollar_maximizer'}_`;
+      msg += `\n_Strategy: ${(config.activeStrategy || 'dollar_maximizer').replace(/_/g, ' ')}_`;
 
-      await telegram.sendNotification(msg, { parse_mode: 'Markdown' });
-      logger.info('Daily P&L report sent via Telegram');
+      // Snapshot closure — pnlHistory is the one-point-per-day series the 7d/30d
+      // DM windows diff against. Caller invokes this only after a successful send.
+      const commitSnapshot = async () => {
+        const todayKey = new Date().toISOString().slice(0, 10);
+        const history = pnlHistory.filter(p => p.date !== todayKey);
+        history.push({ date: todayKey, tt: ttTotalPnL, dm: dmTotalPnL });
+        await this.updateState({
+          lastDailyReport: {
+            at: new Date(),
+            ttTotalPnL,
+            dmTotalPnL,
+            ttGasLifetime
+          },
+          pnlHistory: history.slice(-60)
+        });
+      };
+
+      return { text: msg, commitSnapshot };
     } catch (err) {
-      logger.error(`Failed to send daily P&L report: ${err.message}`);
+      logger.error(`Failed to build daily P&L report: ${err.message}`);
+      return null;
     }
   }
 
   // ==================== CROSS-DEX ARBITRAGE EXECUTION ====================
+
+  /**
+   * Start the arbitrage scan off the heartbeat's critical path.
+   *
+   * The scan (7+ tokens × V2/V3/V4 quotes, sequential with RPC-spacing delays)
+   * takes 80s–12min on production. It used to be awaited behind a 45s
+   * Promise.race: every tick logged "Arb scan timed out after 45s", stalled 45s,
+   * DISCARDED the result — and the abandoned promise kept running anyway, so a
+   * profitable scan could still have traded with nothing recording it. 9+ days
+   * of a fixed 100% timeout rate (~140/day) — a ceiling, not a flake.
+   *
+   * Now: one scan in flight at a time; a tick that finds one running skips.
+   * The result is handled when it lands. A scan older than the hard ceiling is
+   * abandoned as a guard (its own completion still records any trade).
+   * Returns the tick-level summary synchronously.
+   */
+  _runArbScanDetached(arbExecutor, decision, marketData) {
+    const ARB_SCAN_HARD_CEILING_MS = 15 * 60 * 1000;
+    const now = Date.now();
+    if (this._arbScanInFlight) {
+      const ageMs = now - this._arbScanInFlight.startedAt;
+      if (ageMs < ARB_SCAN_HARD_CEILING_MS) {
+        logger.info(`Arb scan still running (${Math.round(ageMs / 1000)}s) — skipping this tick`);
+        return { action: 'hold', reason: 'arb_scan_in_progress', ageMs };
+      }
+      logger.error(`Arb scan exceeded ${ARB_SCAN_HARD_CEILING_MS / 60000}min (${Math.round(ageMs / 1000)}s) — abandoning it and starting a fresh scan`);
+      this._arbScanInFlight = null;
+    }
+
+    const startedAt = now;
+    const run = Promise.resolve()
+      .then(() => arbExecutor.execute(decision, marketData))
+      .then(async (result) => {
+        const secs = Math.round((Date.now() - startedAt) / 1000);
+        if (result?.action && result.action !== 'hold') {
+          logger.info(`Arbitrage result: ${result.action}, profit=$${result.profit?.toFixed(2) || '?'} (${secs}s)`);
+          await this.recordTrade({ strategy: 'arbitrage' }, result);
+        } else {
+          logger.info(`Arb scan complete: no profitable opportunities (${secs}s)`);
+        }
+        return result;
+      })
+      .catch((err) => {
+        logger.warn(`Arbitrage scan error: ${err.message}`);
+        return null;
+      })
+      .finally(() => {
+        if (this._arbScanInFlight?.promise === run) this._arbScanInFlight = null;
+      });
+    this._arbScanInFlight = { promise: run, startedAt };
+    return { action: 'hold', reason: 'arb_scan_started', fastMode: !!decision.fastMode };
+  }
 
   /**
    * Execute the arbitrage strategy: scan for opportunities and execute round-trip trades.

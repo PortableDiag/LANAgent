@@ -53,6 +53,15 @@ export class CapabilityIncrementalScanner {
       'huggingface': {
         'mistral': 32000,
         'llama': 4096,
+        // Qwen3-Coder is the model actually configured on this fleet. The id
+        // arrives normalised with punctuation stripped
+        // ("qwenqwen3-coder-480b-a35b-instruct"), which matched no key exactly,
+        // so the lookup fell through to `default` and budgeted 8,000 tokens for
+        // a 262,144-token model. getContextLimit now falls back to a
+        // longest-prefix match, which these entries rely on.
+        'qwen': 262144,
+        'qwen3': 262144,
+        'qwen3-coder': 262144,
         'default': 8000
       },
       'gab': {
@@ -98,24 +107,52 @@ export class CapabilityIncrementalScanner {
       
       logger.info(`Analyzing ${maxFiles} files (context limit: ${providerInfo.contextLimit} tokens)`);
       
-      // Analyze each target for upgrade opportunities
+      // Analyze each target for upgrade opportunities.
+      //
+      // `target.size` is BYTES from fs.stat; `contextLimit` is TOKENS. Comparing
+      // them directly made the budget roughly 4x tighter than intended, and the
+      // guard below used to `break` on the first file that did not fit rather
+      // than skip it. Because the file list is SHUFFLED, that meant one large
+      // file drawn first aborted the entire scan of 442 files before a single
+      // one was analysed — logged as "approaching context limit (used: 0)".
+      //
+      // Measured on 2026-09-02: 8,728 scans found 0 opportunities against ~4,000
+      // that found some, a near coin-flip that tracked the shuffle rather than
+      // the codebase. A scan that stopped at used=0 produced no PRs at all, which
+      // is why the pipeline appeared to have stopped submitting them.
+      //
+      // Each file is analysed in its OWN provider call, so the accumulated total
+      // is not a context constraint — it is a per-cycle spend cap. The two are
+      // now checked separately: a file too big for one call is skipped, and the
+      // loop stops only when the cycle's budget is genuinely spent.
       const upgrades = [];
+      const budgetTokens = Math.floor(providerInfo.contextLimit * 0.8);
       let totalContextUsed = 0;
-      
+
       for (let i = 0; i < maxFiles; i++) {
         const target = shuffledFiles[i];
         try {
-          // Skip if file would exceed context limit
-          if (totalContextUsed + target.size > providerInfo.contextLimit * 0.8) {
-            logger.info(`Stopping analysis - approaching context limit (used: ${totalContextUsed})`);
+          // ~4 bytes per token is the standard rule of thumb for source text.
+          const estTokens = Math.ceil(target.size / 4);
+
+          // Too large for a single call — skip THIS file, not the whole scan.
+          if (estTokens > budgetTokens) {
+            logger.info(`Skipping ${target.name}: ~${estTokens} tokens exceeds the per-call budget (${budgetTokens})`);
+            continue;
+          }
+
+          // Cycle budget spent. Stopping here is correct; every remaining file
+          // would be work this cycle cannot pay for.
+          if (totalContextUsed + estTokens > budgetTokens) {
+            logger.info(`Stopping analysis - cycle budget spent (used ~${totalContextUsed} of ${budgetTokens} tokens, ${i} of ${maxFiles} files analysed)`);
             break;
           }
-          
+
           logger.info(`Analyzing file ${i + 1}/${maxFiles}: ${target.name}`);
           const targetUpgrades = await this.analyzeTargetForUpgrades(target, providerInfo, existingPRs);
           upgrades.push(...targetUpgrades);
-          
-          totalContextUsed += target.size;
+
+          totalContextUsed += Math.ceil(target.size / 4);
           
           // Small delay to avoid overwhelming AI provider
           await new Promise(resolve => setTimeout(resolve, 2000));
@@ -199,7 +236,23 @@ export class CapabilityIncrementalScanner {
    */
   getContextLimit(provider, model) {
     const providerLimits = this.contextLimits[provider] || this.contextLimits['huggingface'];
-    return providerLimits[model] || providerLimits['default'] || 8000;
+
+    // Exact match first.
+    if (providerLimits[model]) return providerLimits[model];
+
+    // Then longest-prefix match. Model ids carry size/variant/date suffixes that
+    // the table cannot enumerate — the deployed
+    // "qwenqwen3-coder-480b-a35b-instruct" matched nothing and silently took the
+    // 8,000-token `default`, budgeting a 262,144-token model as if it were tiny.
+    // Longest-first so 'gpt-4o-mini' cannot be captured by 'gpt-4'.
+    const prefixes = Object.keys(providerLimits)
+      .filter(k => k !== 'default')
+      .sort((a, b) => b.length - a.length);
+    for (const key of prefixes) {
+      if (model.includes(key)) return providerLimits[key];
+    }
+
+    return providerLimits['default'] || 8000;
   }
 
   /**

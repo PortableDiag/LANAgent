@@ -2,6 +2,7 @@ import { logger, selfModLogger, logDebugSeparator, logStep } from '../utils/logg
 import { EventEmitter } from 'events';
 import simpleGit from 'simple-git';
 import path from 'path';
+import { TEMP_PATH } from '../utils/paths.js';
 import fs from 'fs/promises';
 import { existsSync, readdirSync } from 'fs';
 import { execSync } from 'child_process';
@@ -127,7 +128,7 @@ export class SelfModificationService extends EventEmitter {
     
     // Initialize git with separate development repository
     this.developmentPath = process.env.AGENT_REPO_PATH || process.cwd();
-    this.stagingPath = process.env.AGENT_STAGING_PATH || '/tmp/lanagent-staging';
+    this.stagingPath = process.env.AGENT_STAGING_PATH || path.join(TEMP_PATH, 'staging');
     this.productionPath = process.cwd(); // Current running directory
     
     // Log the paths for debugging
@@ -4704,8 +4705,10 @@ ${newCapsBlock}${reviewFlagsBlock}
         `${upgrade.safeForProduction ? '✅ Safe for production' : '⚠️ Requires review before production'}\n\n` +
         `Pull request created for review.`;
       
-      // Try Telegram notification regardless of timeout issues
-      const telegram = this.agent.interfaces?.get('telegram');
+      // Try Telegram notification regardless of timeout issues.
+      // `this.agent?` — a notification must never be the thing that throws; the
+      // service is constructed against a partial agent in tooling and tests.
+      const telegram = this.agent?.interfaces?.get('telegram');
       if (telegram && telegram.sendNotification) {
         try {
           await telegram.sendNotification(message, {
@@ -4920,6 +4923,248 @@ ${newCapsBlock}${reviewFlagsBlock}
     } catch (error) {
       logger.error('Production deployment failed:', error);
       throw new Error(`Production deployment failed: ${error.message}`);
+    }
+  }
+
+  /**
+   * Deploy merged changes from the development repo to the running deployment.
+   *
+   * This exists because merging and deploying were entirely separate steps with
+   * nothing connecting them. On 2026-09-02 production was found running code up
+   * to three months older than the repository for 10 files — seven of them
+   * merged self-improvement PRs from twelve days earlier — while every health
+   * check reported healthy.
+   *
+   * Deliberately NOT deployToProduction(), which copies the whole repository
+   * tree over the deployment with no verification, no restart and no rollback.
+   * This is file-level and refuses to ship anything it cannot load:
+   *
+   *   1. Bring the development repo to the tip of main.
+   *   2. Hash every source file on both sides; collect the ones that differ.
+   *   3. Verify EVERY drifted file parses and imports in a separate process.
+   *      `node --check` alone cannot catch a bad import, which is what caused a
+   *      six-minute outage on 2026-07-12.
+   *   4. Only if all of them verify, copy them and restart.
+   *
+   * A single unverifiable file aborts the whole batch. Deploying the rest would
+   * leave the deployment in a state no commit describes.
+   *
+   * @param {Object} [options]
+   * @param {boolean} [options.dryRun=false] - Report what would deploy, change nothing.
+   * @returns {Promise<Object>} { success, deployed, skipped, reason }
+   */
+  async deployMergedChanges(options = {}) {
+    const { dryRun = false } = options;
+    const fsp = await import('fs/promises');
+    const path = await import('path');
+    const crypto = await import('crypto');
+    const { promisify } = await import('util');
+    const { exec, spawn } = await import('child_process');
+    const execAsync = promisify(exec);
+
+    if (this.developmentPath === this.productionPath) {
+      return { success: true, deployed: [], skipped: [], reason: 'development and deployment are the same directory' };
+    }
+
+    // Take the SAME lock checkForImprovements() uses. Both drive this.git on the
+    // one development repo, both run hourly, and this method's first act is
+    // `git checkout main`. Without the lock it could land in the middle of a
+    // generation — after a branch is created and before its work is committed —
+    // and discard it. Nothing here is urgent enough to interrupt a generation
+    // for; the next run is an hour away.
+    const lockAcquired = await selfModLock.acquire('deploy-merged-changes');
+    if (!lockAcquired) {
+      logger.info('Deploy: another self-modification process holds the lock, skipping this run');
+      return { success: true, deployed: [], skipped: [], reason: 'lock held by another process' };
+    }
+
+    try {
+      // 1. Development repo to the tip of main.
+      await this.git.checkout('main');
+      try {
+        await this.git.pull(this.gitRemote, 'main');
+      } catch (pullError) {
+        logger.warn(`Deploy: pull failed (${pullError.message}), fetching and resetting`);
+        await this.git.fetch(this.gitRemote);
+        await this.git.reset(['--hard', `${this.gitRemote}/main`]);
+      }
+
+      // 2. Which files differ. Only source the deployment actually runs — never
+      //    .env, logs, data or anything installed on the server rather than
+      //    deployed to it.
+      const hash = async (file) => {
+        try {
+          return crypto.createHash('md5').update(await fsp.readFile(file)).digest('hex');
+        } catch {
+          return null;
+        }
+      };
+
+      const walk = async (dir, base, out = []) => {
+        let entries;
+        try {
+          entries = await fsp.readdir(path.join(base, dir), { withFileTypes: true });
+        } catch {
+          return out;
+        }
+        for (const entry of entries) {
+          const rel = path.join(dir, entry.name);
+          if (/^(node_modules|\.git|\.venv|logs|data)$/.test(entry.name)) continue;
+          if (entry.isDirectory()) await walk(rel, base, out);
+          else if (entry.name.endsWith('.js')) out.push(rel);
+        }
+        return out;
+      };
+
+      const candidates = await walk('src', this.developmentPath);
+      candidates.push('package.json');
+
+      const drifted = [];
+      for (const rel of candidates) {
+        const [repoHash, deployHash] = await Promise.all([
+          hash(path.join(this.developmentPath, rel)),
+          hash(path.join(this.productionPath, rel))
+        ]);
+        if (repoHash && repoHash !== deployHash) drifted.push(rel);
+      }
+
+      if (drifted.length === 0) {
+        logger.info('Deploy: deployment already matches the repository');
+        return { success: true, deployed: [], skipped: [], reason: 'no drift' };
+      }
+
+      logger.info(`Deploy: ${drifted.length} file(s) differ from the repository`);
+
+      // 3. Back up what we are about to replace, THEN copy, THEN verify in place.
+      //
+      // Verification has to happen in the environment the code will actually run
+      // in. Importing the file from the development repo does not work: that repo
+      // has no node_modules of its own, and ESM resolution walks up from the
+      // FILE's directory, not the cwd — so every file that imports a dependency
+      // failed with ERR_MODULE_NOT_FOUND and the deploy aborted every single
+      // time. An auto-update that can never deploy anything is worse than none,
+      // because it reports a reason and looks like it is working.
+      //
+      // So: keep the old copies, put the new ones in place, and import them from
+      // there. If anything fails to load, the originals go straight back and we
+      // return WITHOUT restarting — the running process still holds the old code
+      // in memory, so a failed verification costs nothing at all.
+      const backupDir = path.join(this.productionPath, '.deploy-backup', String(Date.now()));
+      const backedUp = [];
+      for (const rel of drifted) {
+        const current = path.join(this.productionPath, rel);
+        try {
+          await fsp.access(current);
+        } catch {
+          continue;   // new file; nothing to restore it to
+        }
+        const dest = path.join(backupDir, rel);
+        await fsp.mkdir(path.dirname(dest), { recursive: true });
+        await fsp.copyFile(current, dest);
+        backedUp.push(rel);
+      }
+
+      const restoreBackup = async () => {
+        for (const rel of backedUp) {
+          await fsp.copyFile(path.join(backupDir, rel), path.join(this.productionPath, rel)).catch(() => {});
+        }
+      };
+
+      for (const rel of drifted) {
+        const dest = path.join(this.productionPath, rel);
+        await fsp.mkdir(path.dirname(dest), { recursive: true });
+        await fsp.copyFile(path.join(this.developmentPath, rel), dest);
+      }
+
+      const unverifiable = [];
+      for (const rel of drifted.filter(f => f.endsWith('.js'))) {
+        const abs = path.join(this.productionPath, rel);
+        try {
+          await execAsync(`node --check ${JSON.stringify(abs)}`, { timeout: 30000 });
+          await execAsync(
+            `node --input-type=module -e ${JSON.stringify(`await import(${JSON.stringify(abs)})`)}`,
+            { timeout: 60000, cwd: this.productionPath }
+          );
+        } catch (error) {
+          unverifiable.push({ file: rel, error: (error.stderr || error.message || '').slice(0, 300) });
+        }
+      }
+
+      if (unverifiable.length > 0) {
+        await restoreBackup();
+        logger.error(`Deploy ABORTED and rolled back: ${unverifiable.length} of ${drifted.length} file(s) failed to load`);
+        for (const u of unverifiable) logger.error(`  ${u.file}: ${u.error}`);
+        await this.notifyMaster({
+          type: 'deployment_blocked',
+          description: `Deploy rolled back: ${unverifiable.map(u => u.file).join(', ')} failed to load`
+        });
+        return { success: false, deployed: [], skipped: drifted, reason: 'verification failed', unverifiable };
+      }
+
+      if (dryRun) {
+        // A dry run must leave the deployment exactly as it found it.
+        await restoreBackup();
+        logger.info(`Deploy (dry run): would deploy ${drifted.join(', ')}`);
+        return { success: true, deployed: [], skipped: [], wouldDeploy: drifted, reason: 'dry run' };
+      }
+
+      logger.info(`Deploy: ${drifted.length} file(s) deployed — ${drifted.join(', ')} (backup: ${backupDir})`);
+
+      await this.notifyMaster({
+        type: 'deployment',
+        description: `Deployed ${drifted.length} merged file(s): ${drifted.slice(0, 10).join(', ')}${drifted.length > 10 ? '…' : ''}`
+      });
+
+      // Arm a DETACHED watchdog, then restart.
+      //
+      // It has to be detached and outside this process: the restart kills us, so
+      // nothing in here can observe whether the new code actually came back. The
+      // watchdog waits for the app to settle, probes the health endpoint, and if
+      // it cannot get a healthy answer it copies the backup back over the
+      // deployment and restarts again — leaving the instance on the last known
+      // good code instead of in a crash loop.
+      const proc = process.env.PM2_PROCESS_NAME || 'lan-agent';
+      const port = process.env.AGENT_PORT || '80';
+      const settleMs = 180000;   // the web UI takes ~3 minutes to answer
+
+      try {
+        const watchdog = [
+          `sleep ${Math.round(settleMs / 1000)}`,
+          `for i in 1 2 3 4 5; do`,
+          `  code=$(curl -s -o /dev/null -w '%{http_code}' -m 20 http://127.0.0.1:${port}/ 2>/dev/null || echo 000);`,
+          `  if [ "$code" = "200" ]; then echo "deploy-watchdog: healthy ($code)"; exit 0; fi;`,
+          `  sleep 30;`,
+          `done;`,
+          `echo "deploy-watchdog: UNHEALTHY after restart — rolling back to ${backupDir}";`,
+          `cp -a ${JSON.stringify(backupDir)}/. ${JSON.stringify(this.productionPath)}/ 2>/dev/null;`,
+          `pm2 restart ${proc}`
+        ].join(' ');
+
+        const child = spawn('bash', ['-c', watchdog], {
+          detached: true,
+          stdio: ['ignore', 'ignore', 'ignore']
+        });
+        child.unref();
+        logger.info(`Deploy: rollback watchdog armed (probing :${port} after ${settleMs / 1000}s)`);
+      } catch (error) {
+        logger.error(`Deploy: could not arm rollback watchdog: ${error.message}`);
+      }
+
+      try {
+        setTimeout(() => {
+          execAsync(`pm2 restart ${proc}`).catch(err => logger.error(`Deploy: restart failed: ${err.message}`));
+        }, 2000);
+        logger.info(`Deploy: restarting ${proc} in 2s to load the new code`);
+      } catch (error) {
+        logger.error(`Deploy: could not schedule restart: ${error.message}`);
+      }
+
+      return { success: true, deployed: drifted, skipped: [], reason: 'deployed' };
+    } catch (error) {
+      logger.error('Deploy of merged changes failed:', error);
+      return { success: false, deployed: [], skipped: [], reason: error.message };
+    } finally {
+      await selfModLock.release('deploy-merged-changes').catch(() => {});
     }
   }
 

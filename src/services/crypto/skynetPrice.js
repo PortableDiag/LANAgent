@@ -59,7 +59,9 @@ export async function getSkynetUsdPrice({ fresh = false, minPrice, maxPrice, max
 
   try {
     const { ethers } = await import('ethers');
-    const provider = new ethers.JsonRpcProvider(BSC_RPC);
+    // Pin staticNetwork(56) so an unreachable RPC fails fast rather than running
+    // ethers' network-detection retry loop that floods stdout every 1s.
+    const provider = new ethers.JsonRpcProvider(BSC_RPC, ethers.Network.from(56), { staticNetwork: true });
 
     const factory = new ethers.Contract(
       PCS_FACTORY,

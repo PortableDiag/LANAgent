@@ -42,5 +42,99 @@ youtubeDownloadSchema.statics.getHistory = async function(agentId, page = 1, lim
   return { items, total, page: p, limit: l, totalPages: Math.ceil(total / l) };
 };
 
+/**
+ * Get download statistics aggregated by format, quality, and status for an agent.
+ * @param {string} agentId
+ * @returns {Promise<Object>}
+ */
+youtubeDownloadSchema.statics.getDownloadStats = async function(agentId) {
+  const stats = await this.aggregate([
+    { $match: { agentId } },
+    {
+      $group: {
+        _id: {
+          format: '$format',
+          quality: '$quality',
+          status: '$status'
+        },
+        count: { $sum: 1 }
+      }
+    },
+    {
+      $group: {
+        _id: '$_id.format',
+        qualities: {
+          $push: {
+            quality: '$_id.quality',
+            status: '$_id.status',
+            count: '$count'
+          }
+        }
+      }
+    },
+    {
+      $project: {
+        _id: 0,
+        format: '$_id',
+        qualities: 1
+      }
+    }
+  ]);
+
+  // Transform to a more structured format
+  const result = {};
+  stats.forEach(item => {
+    result[item.format] = {};
+    item.qualities.forEach(q => {
+      if (!result[item.format][q.quality]) {
+        result[item.format][q.quality] = {};
+      }
+      result[item.format][q.quality][q.status] = q.count;
+    });
+  });
+
+  return result;
+};
+
+/**
+ * Get an agent's most-repeated completed downloads.
+ * Scoped per agent — a global version would leak other tenants' URLs/titles.
+ * @param {string} agentId
+ * @param {number} limit
+ * @returns {Promise<Array>}
+ */
+youtubeDownloadSchema.statics.getPopularDownloads = async function(agentId, limit = 10) {
+  const popular = await this.aggregate([
+    { $match: { agentId, status: 'completed' } },
+    {
+      $group: {
+        _id: {
+          url: '$url',
+          title: '$title',
+          format: '$format',
+          quality: '$quality'
+        },
+        count: { $sum: 1 },
+        lastDownloadedAt: { $max: '$createdAt' }
+      }
+    },
+    { $sort: { count: -1 } },
+    { $limit: Math.max(1, parseInt(limit) || 10) },
+    {
+      $project: {
+        _id: 0,
+        url: '$_id.url',
+        title: '$_id.title',
+        format: '$_id.format',
+        quality: '$_id.quality',
+        count: 1,
+        lastDownloadedAt: 1
+      }
+    }
+  ]);
+
+  return popular;
+};
+
 export const YoutubeDownload = mongoose.model('YoutubeDownload', youtubeDownloadSchema);
 export default YoutubeDownload;

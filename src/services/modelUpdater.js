@@ -435,22 +435,25 @@ export class ModelUpdaterService extends EventEmitter {
       // Also fetch specialized models for different tasks
       const specializedModels = await this.fetchSpecializedHFModels();
       
-      // Include known good chat models if API doesn't return enough
+      // Include known good chat models if API doesn't return enough.
+      // Every entry must be served by router.huggingface.co/v1 — verify with a
+      // live chat-completion before adding (list refreshed 2026-08-06).
       const knownChatModels = [
-        'meta-llama/Llama-3.3-70B-Instruct',
-        'meta-llama/Llama-3.2-11B-Vision-Instruct', 
-        'meta-llama/Llama-3.2-3B-Instruct',
-        'meta-llama/Llama-3.2-1B-Instruct',
-        'deepseek-ai/DeepSeek-V3',
-        'Qwen/QwQ-32B-Preview',
-        'Qwen/Qwen2.5-72B-Instruct',
-        'google/gemma-2-27b-it',
-        'mistralai/Mistral-7B-Instruct-v0.3',
-        'microsoft/Phi-3.5-mini-instruct',
-        'HuggingFaceH4/zephyr-7b-beta',
-        'openchat/openchat-3.5-0106',
-        'NousResearch/Nous-Hermes-2-Mixtral-8x7B-DPO',
-        'cognitivecomputations/dolphin-2.9.4-llama3.2-3b'
+        'Qwen/Qwen3-Coder-480B-A35B-Instruct',
+        'moonshotai/Kimi-K3',
+        'zai-org/GLM-5.2',
+        'deepseek-ai/DeepSeek-V4-Pro',
+        'deepseek-ai/DeepSeek-V4-Flash',
+        'Qwen/Qwen3.5-397B-A17B',
+        'MiniMaxAI/MiniMax-M3',
+        'deepcogito/cogito-671b-v2.1',
+        'meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8',
+        'openai/gpt-oss-120b',
+        'moonshotai/Kimi-K2.7-Code',
+        'zai-org/GLM-4.7-Flash',
+        'Qwen/Qwen3.6-27B',
+        'google/gemma-4-31B-it',
+        'meta-llama/Llama-3.3-70B-Instruct'
       ];
       
       const chatModels = models.filter(m => m.category === 'chat').slice(0, 20);

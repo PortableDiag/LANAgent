@@ -24,6 +24,13 @@ export class ProviderManager extends EventEmitter {
     // Providers that reported exhausted quota/credits, mapped to the epoch ms at which
     // they may be probed again. Skipped (not called) while cooling down.
     this.quotaCooldowns = new Map();
+    // Provider lock enforcement (2026-08-28). The lock used to gate only switchProvider(),
+    // so a single failed call still went to the fallback chain — 18 self-modification
+    // generations in five days were quietly billed to OpenAI while "locked to huggingface".
+    // The lock means "spend on this provider only": when set, a failed request FAILS.
+    this.lockedFallbackBlocks = 0;
+    this.lastLockedFallbackBlockAt = null;
+    this._lockCache = { value: null, at: 0 };
     this.commands = [
       { command: 'adjustProviderPriority', description: 'Adjust provider priority based on performance metrics', usage: 'adjustProviderPriority()' }
     ];
@@ -58,6 +65,48 @@ export class ProviderManager extends EventEmitter {
       `[provider-quota] ${name} reports exhausted credits — skipping it for ` +
       `${Math.round(PROVIDER_QUOTA_COOLDOWN_MS / 60000)}m and using fallbacks | ${error.message}`
     );
+  }
+
+  /**
+   * Is the provider selection locked (aiProviders.locked)? Cached briefly so the hot
+   * path does not hit Mongo per request. Fails CLOSED on spending: if the flag cannot be
+   * read and there is no prior reading, behave as locked.
+   */
+  async isLocked() {
+    const LOCK_CACHE_MS = 15000;
+    if (this._lockCache.value !== null && Date.now() - this._lockCache.at < LOCK_CACHE_MS) {
+      return this._lockCache.value;
+    }
+    try {
+      const { Agent } = await import('../models/Agent.js');
+      const agentName = process.env.AGENT_NAME || 'LANAgent';
+      const doc = await Agent.findOne({ name: agentName }, { 'aiProviders.locked': 1 });
+      const value = doc?.aiProviders?.locked === true;
+      this._lockCache = { value, at: Date.now() };
+      return value;
+    } catch (err) {
+      if (this._lockCache.value !== null) return this._lockCache.value;
+      logger.warn(`[provider-lock] lock check failed (${err.message}) — treating as LOCKED (no spend on other providers)`);
+      return true;
+    }
+  }
+
+  invalidateLockCache() {
+    this._lockCache = { value: null, at: 0 };
+  }
+
+  /**
+   * Providers a multi-provider capability (embedding / transcription / TTS) may use.
+   * Locked → only the locked provider, even if it means the capability is unavailable.
+   */
+  async allowedProviders(candidates) {
+    if (!(await this.isLocked())) return candidates;
+    const lockedTo = this.providerNameOf(this.activeProvider);
+    const allowed = candidates.filter(name => name === lockedTo);
+    if (allowed.length === 0) {
+      logger.warn(`[provider-lock] ${candidates.join('/')} requested but locked to ${lockedTo} — no other provider will be used`);
+    }
+    return allowed;
   }
 
   providerNameOf(provider) {
@@ -303,16 +352,9 @@ export class ProviderManager extends EventEmitter {
     // the only legitimate force-caller (JWT-authenticated, user intent).
     // Switching to the same provider, or initializing from null, always proceeds.
     if (!options.force && currentName && currentName !== name) {
-      try {
-        const { Agent } = await import('../models/Agent.js');
-        const agentName = process.env.AGENT_NAME || 'LANAgent';
-        const agentDoc = await Agent.findOne({ name: agentName }, { 'aiProviders.locked': 1 });
-        if (agentDoc?.aiProviders?.locked === true) {
-          logger.warn(`[provider-lock] switchProvider(${name}) BLOCKED — locked to ${currentName} | caller: ${stack}`);
-          return;
-        }
-      } catch (lockErr) {
-        logger.warn(`[provider-lock] lock check failed (${lockErr.message}) — proceeding without lock | caller: ${stack}`);
+      if (await this.isLocked()) {
+        logger.warn(`[provider-lock] switchProvider(${name}) BLOCKED — locked to ${currentName} | caller: ${stack}`);
+        return;
       }
     } else if (options.force) {
       logger.info(`[provider-lock] switchProvider(${name}) forced (UI/explicit) | caller: ${stack}`);
@@ -386,12 +428,20 @@ export class ProviderManager extends EventEmitter {
     // lapses. The configured provider is left in place — this never switches the selection.
     // Only worth skipping if something else can actually serve the request; with no usable
     // alternative, still call it (a failed attempt beats no attempt).
-    if (this.isCoolingDown(providerName) && this.hasUsableAlternative(provider)) {
+    // Locked → never skip the selected provider in favour of another one.
+    if (this.isCoolingDown(providerName) && this.hasUsableAlternative(provider) && !(await this.isLocked())) {
       return await this.tryFallbackProviders(prompt, options);
     }
 
     logger.info(`🤖 Generating response using provider: ${providerName}, model: ${model}`);
     logger.info(`Active provider check: ${this.activeProvider?.name || 'none'}, Provider count: ${this.providers.size}`);
+
+    // enableWebSearch is a tool call only anthropic/openai implement. Anywhere else it is
+    // dropped on the floor and the model answers from training data — the request looks like
+    // a success while carrying stale invented sources. Say so rather than let it pass silently.
+    if (options.enableWebSearch === true && provider.supportsWebSearch !== true) {
+      logger.warn(`${providerName} has no web search tool — enableWebSearch ignored, answering from training data`);
+    }
 
     try {
       return await retryOperation(() => provider.generateResponse(prompt, options), { retries: 3 });
@@ -434,7 +484,7 @@ export class ProviderManager extends EventEmitter {
   async generateEmbedding(text) {
     const embeddingProviders = ["openai", "huggingface", "ollama"];
     
-    for (const providerName of embeddingProviders) {
+    for (const providerName of await this.allowedProviders(embeddingProviders)) {
       const provider = this.providers.get(providerName);
       if (provider) {
         try {
@@ -452,7 +502,7 @@ export class ProviderManager extends EventEmitter {
   async transcribeAudio(audioBuffer) {
     const audioProviders = ["openai", "huggingface"];
     
-    for (const providerName of audioProviders) {
+    for (const providerName of await this.allowedProviders(audioProviders)) {
       const provider = this.providers.get(providerName);
       if (provider) {
         try {
@@ -470,7 +520,7 @@ export class ProviderManager extends EventEmitter {
   async generateSpeech(text, options = {}) {
     const ttsProviders = ["openai", "huggingface"];
     
-    for (const providerName of ttsProviders) {
+    for (const providerName of await this.allowedProviders(ttsProviders)) {
       const provider = this.providers.get(providerName);
       if (provider) {
         try {
@@ -491,6 +541,14 @@ export class ProviderManager extends EventEmitter {
   }
 
   async tryFallbackProviders(prompt, options) {
+    if (await this.isLocked()) {
+      this.lockedFallbackBlocks++;
+      this.lastLockedFallbackBlockAt = new Date().toISOString();
+      const lockedTo = this.providerNameOf(this.activeProvider);
+      logger.warn(`[provider-lock] fallback BLOCKED — locked to ${lockedTo}; the request fails rather than spending on another provider (${this.lockedFallbackBlocks} blocked since boot)`);
+      throw new Error(`AI request failed: locked provider ${lockedTo} is unavailable and cross-provider fallback is disabled by the provider lock`);
+    }
+
     // A cooldown must never be the sole reason we have no AI at all: if every provider is
     // cooling down, drop the cooldowns and let them be tried for real rather than hard-failing.
     if (Array.from(this.providers.keys()).every(name => this.isCoolingDown(name))) {

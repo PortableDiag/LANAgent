@@ -1040,6 +1040,7 @@ export class WebInterface {
         const { Agent } = await import('../../models/Agent.js');
         const agentName = process.env.AGENT_NAME || 'LANAgent';
         await Agent.updateOne({ name: agentName }, { $set: { 'aiProviders.locked': locked } });
+        this.agent?.providerManager?.invalidateLockCache?.();
         logger.info(`[provider-lock] lock set to ${locked} via API`);
         res.json({ success: true, locked });
       } catch (error) {
@@ -1053,10 +1054,15 @@ export class WebInterface {
         const { Agent } = await import('../../models/Agent.js');
         const agentName = process.env.AGENT_NAME || 'LANAgent';
         const doc = await Agent.findOne({ name: agentName }, { 'aiProviders.locked': 1, 'aiProviders.current': 1 });
+        const pm = this.agent?.providerManager;
         res.json({
           success: true,
           locked: doc?.aiProviders?.locked === true,
-          current: doc?.aiProviders?.current || null
+          current: doc?.aiProviders?.current || null,
+          // Requests that FAILED because the locked provider was unavailable and the lock
+          // forbade fallback — process-lifetime. Non-zero = the locked provider is unwell.
+          fallbacksBlocked: pm?.lockedFallbackBlocks ?? 0,
+          lastFallbackBlockedAt: pm?.lastLockedFallbackBlockAt ?? null
         });
       } catch (error) {
         logger.error('AI lock status error:', error);

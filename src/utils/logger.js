@@ -123,17 +123,48 @@ const redactFormat = winston.format((info) => {
 });
 
 // Custom log format for better readability
+// Merge plain-text extra arguments into the message.
+//
+// `logger.error('Failed to start X:', err.message)` puts the reason under
+// Symbol.for('splat'). Symbols are invisible to Object.keys(), to winston's
+// format.simple(), and to the `...meta` rest in our printf — so a STRING reason was
+// silently discarded everywhere while an OBJECT one survived as JSON. 408 call sites
+// use the string form.
+//
+// Doing this as its own layer, ahead of redaction, means (a) every transport gets it —
+// file, console and JSON alike, rather than the file transport only — and (b) the
+// merged text passes through redactFormat, so a secret arriving as a positional
+// argument is masked exactly like one arriving in the message.
+//
+// The splat symbol is cleared after merging so nothing downstream renders it twice.
+const appendSplat = winston.format((info) => {
+  const splat = info[Symbol.for('splat')];
+  if (Array.isArray(splat) && splat.length > 0) {
+    const extras = splat
+      .filter(v => typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean')
+      .map(v => String(v))
+      .filter(v => v.length > 0);
+    if (extras.length > 0) {
+      info.message = `${info.message} ${extras.join(' ')}`;
+      delete info[Symbol.for('splat')];
+    }
+  }
+  return info;
+});
+
 const customFormat = winston.format.combine(
+  appendSplat(),
   redactFormat(),
   winston.format.timestamp({ format: 'YYYY-MM-DD HH:mm:ss' }),
   winston.format.errors({ stack: true }),
-  winston.format.printf(({ timestamp, level, message, service, ...meta }) => {
+  winston.format.printf((info) => {
+    const { timestamp, level, message, service, ...meta } = info;
     let logMessage = `${timestamp} [${level.toUpperCase()}]`;
     if (service && service !== 'lan-agent') {
       logMessage += ` [${service}]`;
     }
     logMessage += ` ${message}`;
-    
+
     // Add metadata if present
     const metaKeys = Object.keys(meta).filter(key => 
       !['timestamp', 'level', 'message', 'service', 'stack'].includes(key)
@@ -155,6 +186,7 @@ const customFormat = winston.format.combine(
 
 // JSON format for machine processing
 const jsonFormat = winston.format.combine(
+  appendSplat(),
   redactFormat(),
   winston.format.timestamp(),
   winston.format.errors({ stack: true }),
@@ -307,6 +339,7 @@ const logger = winston.createLogger({
                msg.includes('tokentrader') ||
                msg.includes('token_trader') ||
                msg.includes('dollar_maximizer') ||
+               msg.includes('dollarmax') ||
                msg.includes('swap') ||
                msg.includes('v3 quote') ||
                msg.includes('v3 selected') ||
@@ -369,6 +402,7 @@ const logger = winston.createLogger({
 if (process.env.NODE_ENV !== 'production') {
   logger.add(new winston.transports.Console({
     format: winston.format.combine(
+      appendSplat(),
       winston.format.colorize(),
       winston.format.simple()
     )
@@ -444,6 +478,7 @@ export const createPluginLogger = (pluginName) => {
   if (process.env.NODE_ENV !== 'production') {
     pluginLogger.add(new winston.transports.Console({
       format: winston.format.combine(
+        appendSplat(),
         winston.format.colorize(),
         winston.format.simple()
       )

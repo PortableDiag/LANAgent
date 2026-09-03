@@ -12,6 +12,15 @@ const DEFAULT_TIMEOUT = 10;
 const MAX_TIMEOUT = 30;
 const MAX_OUTPUT_SIZE = 1024 * 1024; // 1MB stdout/stderr cap
 
+// Runtime configuration bounds
+// cpuShares follows Docker's relative scale: 1024 = the full 2-CPU allowance
+const RUNTIME_BOUNDS = {
+  memory: { min: 128, max: 512 }, // MB
+  cpuShares: { min: 100, max: 1024 },
+  timeout: { min: 1, max: MAX_TIMEOUT }
+};
+const MAX_CPUS = 2; // matches the pre-configurable fixed limit
+
 const LANGUAGE_CONFIG = {
   python: {
     image: 'python:3.12-alpine',
@@ -72,6 +81,50 @@ const LANGUAGE_CONFIG = {
   }
 };
 
+/**
+ * Validates runtime configuration against security bounds
+ * @param {Object} runtimeConfig - The runtime configuration to validate
+ * @returns {Object} Validated configuration with defaults applied
+ */
+export function validateRuntimeConfig(runtimeConfig = {}) {
+  const validated = {};
+  
+  // Validate memory
+  if (runtimeConfig.memory !== undefined) {
+    const memory = parseInt(runtimeConfig.memory);
+    if (isNaN(memory) || memory < RUNTIME_BOUNDS.memory.min || memory > RUNTIME_BOUNDS.memory.max) {
+      throw new Error(`Memory must be between ${RUNTIME_BOUNDS.memory.min}MB and ${RUNTIME_BOUNDS.memory.max}MB`);
+    }
+    validated.memory = memory;
+  }
+  
+  // Validate CPU shares
+  if (runtimeConfig.cpuShares !== undefined) {
+    const cpuShares = parseInt(runtimeConfig.cpuShares);
+    if (isNaN(cpuShares) || cpuShares < RUNTIME_BOUNDS.cpuShares.min || cpuShares > RUNTIME_BOUNDS.cpuShares.max) {
+      throw new Error(`CPU shares must be between ${RUNTIME_BOUNDS.cpuShares.min} and ${RUNTIME_BOUNDS.cpuShares.max}`);
+    }
+    validated.cpuShares = cpuShares;
+  }
+  
+  // Validate timeout
+  if (runtimeConfig.timeout !== undefined) {
+    const timeout = parseInt(runtimeConfig.timeout);
+    if (isNaN(timeout) || timeout < RUNTIME_BOUNDS.timeout.min || timeout > RUNTIME_BOUNDS.timeout.max) {
+      throw new Error(`Timeout must be between ${RUNTIME_BOUNDS.timeout.min}s and ${RUNTIME_BOUNDS.timeout.max}s`);
+    }
+    validated.timeout = timeout;
+  }
+  
+  return validated;
+}
+
+// Map relative cpuShares (100–1024) onto the fixed CPU allowance; unset = full allowance
+export function cpusFromShares(cpuShares) {
+  if (cpuShares === undefined) return MAX_CPUS;
+  return Math.round((cpuShares / 1024) * MAX_CPUS * 100) / 100;
+}
+
 // Node needs special handling — read from stdin via process.stdin
 // python3 - reads from stdin, sh reads from stdin, ruby reads from stdin
 // node -e reads from arg, so we use a stdin wrapper
@@ -86,7 +139,7 @@ function getDockerCmd(language) {
 router.post('/execute',
   ...hybridAuth('code-sandbox', 20),
   async (req, res) => {
-    const { language, code, timeout: reqTimeout } = req.body;
+    const { language, code, timeout: reqTimeout, runtimeConfig } = req.body;
 
     // Validate language
     if (!language || !LANGUAGE_CONFIG[language]) {
@@ -105,10 +158,19 @@ router.post('/execute',
       return res.status(400).json({ success: false, error: `Code exceeds maximum size of ${MAX_CODE_SIZE / 1024}KB` });
     }
 
-    const timeout = Math.min(Math.max(parseInt(reqTimeout) || DEFAULT_TIMEOUT, 1), MAX_TIMEOUT);
+    // Validate runtime configuration
+    let validatedRuntimeConfig;
+    try {
+      validatedRuntimeConfig = validateRuntimeConfig(runtimeConfig);
+    } catch (error) {
+      return res.status(400).json({ success: false, error: error.message });
+    }
+
+    const timeout = validatedRuntimeConfig.timeout || Math.min(Math.max(parseInt(reqTimeout) || DEFAULT_TIMEOUT, 1), MAX_TIMEOUT);
     const config = LANGUAGE_CONFIG[language];
     const cmd = getDockerCmd(language);
 
+    // Build Docker arguments with custom runtime config
     const dockerArgs = [
       'run',
       '--rm',
@@ -116,9 +178,9 @@ router.post('/execute',
       '--read-only',
       '--tmpfs', '/tmp:rw,noexec,size=64m',
       ...(config.needsExecTmpfs ? ['--tmpfs', '/build:rw,exec,size=128m'] : []),
-      '--memory', '256m',
-      '--memory-swap', '256m',
-      '--cpus', '2',
+      '--memory', `${validatedRuntimeConfig.memory || 256}m`,
+      '--memory-swap', `${validatedRuntimeConfig.memory || 256}m`,
+      '--cpus', `${cpusFromShares(validatedRuntimeConfig.cpuShares)}`,
       '--pids-limit', '64',
       '--security-opt', 'no-new-privileges',
       '--cap-drop', 'ALL',
@@ -169,7 +231,8 @@ router.post('/execute',
         stderr,
         exitCode: result.exitCode,
         executionTime: `${executionTime}ms`,
-        language
+        language,
+        runtimeConfig: validatedRuntimeConfig
       });
     } catch (error) {
       clearTimeout(nodeTimeout);
@@ -182,7 +245,8 @@ router.post('/execute',
           stderr: 'Execution timed out',
           exitCode: 124,
           executionTime: `${Date.now() - startTime}ms`,
-          language
+          language,
+          runtimeConfig: validatedRuntimeConfig
         });
       }
 
@@ -198,7 +262,8 @@ router.get('/health', (req, res) => {
     limits: {
       maxCodeSize: MAX_CODE_SIZE,
       maxTimeout: MAX_TIMEOUT,
-      maxOutputSize: MAX_OUTPUT_SIZE
+      maxOutputSize: MAX_OUTPUT_SIZE,
+      runtimeBounds: RUNTIME_BOUNDS
     }
   });
 });

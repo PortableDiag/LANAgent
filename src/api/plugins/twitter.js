@@ -1,6 +1,6 @@
 import { BasePlugin } from '../core/basePlugin.js';
 import { PluginSettings } from '../../models/PluginSettings.js';
-import { filterSensitiveCommits, getExcludedPathspecs, getSensitiveContentRules, isBadOpener, repetitionConflict, groundingAnchor } from '../../utils/autoPostFilter.js';
+import { filterSensitiveCommits, getExcludedPathspecs, getSensitiveContentRules, isBadOpener, repetitionConflict, groundingAnchor, foreignScript, recentTopicSummary } from '../../utils/autoPostFilter.js';
 import axios from 'axios';
 import crypto from 'crypto';
 import fs from 'fs/promises';
@@ -8,6 +8,7 @@ import { createWriteStream } from 'fs';
 import path from 'path';
 import os from 'os';
 import { pipeline } from 'stream/promises';
+import { REPO_PATH } from '../../utils/paths.js';
 
 export default class TwitterPlugin extends BasePlugin {
   constructor(agent) {
@@ -786,7 +787,7 @@ ${getSensitiveContentRules()}
 - Do NOT be generic or vague — "working on cool stuff" is slop
 - Do NOT start with "Just" or "Excited to" or "Been"
 - You're an AI agent and that's fine — own it
-${context.recentTweets ? '\nYOUR RECENT TWEETS (pick a DIFFERENT topic than ALL of these):\n' + context.recentTweets + '\n' : ''}
+${context.recentTopicSummary ? '\nTOPICS YOU HAVE ALREADY TWEETED ABOUT RECENTLY — pick a DIFFERENT one:\n' + context.recentTopicSummary + '\nDo NOT reuse any four-word sequence from any tweet you have posted before.\n' : ''}
 Return ONLY the tweet text, nothing else.`;
 
       // maxTokens budget includes reasoning for GPT-5/o-series models; 120
@@ -827,6 +828,15 @@ Return ONLY the tweet text, nothing else.`;
         if (!draft || draft.length < 15 || draft.length > 280) {
           validationFailure = `length_${draft?.length || 0}`;
           rejectedDrafts.push({ text: (draft || '').slice(0, 200), reason: validationFailure });
+          continue;
+        }
+
+        // The composer is multilingual; a stray non-Latin token mid-sentence has reached the
+        // public account before. Check the characters before anything else about the wording.
+        const foreign = foreignScript(draft);
+        if (foreign) {
+          validationFailure = `foreign_script:${foreign.script}:"${foreign.sample}"`;
+          rejectedDrafts.push({ text: draft.slice(0, 200), reason: `foreign_script:${foreign.script}` });
           continue;
         }
 
@@ -891,7 +901,14 @@ Return ONLY the tweet text, nothing else.`;
       try {
         const telegram = this.agent?.interfaces?.get('telegram');
         if (telegram?.sendNotification) {
-          const tweetUrl = postResult.data?.url || `https://x.com/${username}`;
+          // Build the canonical /<username>/status/<id> URL. The post path returns a
+          // /i/status/<id> form which X no longer reliably redirects for logged-out
+          // viewers (the broken "View tweet" link), so prefer username + id when we have
+          // both, falling back to the returned url, then the profile.
+          const tweetId = postResult.data?.id;
+          const tweetUrl = (username && tweetId)
+            ? `https://x.com/${username}/status/${tweetId}`
+            : (postResult.data?.url || (username ? `https://x.com/${username}` : 'https://x.com'));
           await telegram.sendNotification(
             `*Twitter post (${postsToday + 1}/${maxAutoPostsPerDay}):*\n\n${tweetText}\n\n[View tweet](${tweetUrl})`,
             { disable_notification: false }
@@ -950,7 +967,7 @@ Return ONLY the tweet text, nothing else.`;
     // Recent git commits
     try {
       const { execSync } = await import('child_process');
-      const repoPath = process.env.AGENT_REPO_PATH || '/root/lanagent-repo';
+      const repoPath = REPO_PATH;
       const excludedPaths = getExcludedPathspecs();
       const recentCommits = execSync(
         `cd ${repoPath} && git log --oneline --since="3 days ago" --no-merges -- ${excludedPaths} 2>/dev/null | head -5`,
@@ -1021,26 +1038,27 @@ Return ONLY the tweet text, nothing else.`;
     try {
       const pluginCount = this.agent?.apiManager?.apis?.size || 0;
       if (pluginCount > 0) {
-        items.push(`Operating with ${pluginCount} integrated capabilities — from on-chain analytics to media processing to autonomous code review`);
+        // Phrasing matters: `^operating with` is a BANNED_OPENER, so an item that
+        // opened with it handed the composer a sentence it was forbidden to quote.
+        // The topic pre-filter still matches on 'integrated capabilities'.
+        items.push(`${pluginCount} integrated capabilities are wired in — from on-chain analytics to media processing to autonomous code review`);
       }
     } catch { /* ignore */ }
 
     // Dedup against recent tweets
-    let recentTweets = null;
+    let recentTweetTopicSummary = null;
     const recentTopics = new Set();
     try {
       const userId = await this.getMyUserId();
       const tweetsRes = await this.xApiRequest('GET', `/users/${userId}/tweets?max_results=10`);
       const tweets = tweetsRes.data || [];
       if (tweets.length > 0) {
-        recentTweets = tweets.slice(0, 8).map(t => `- ${(t.text || '').substring(0, 150)}`).join('\n');
-
         // Topic-dedup window: only the last 3 tweets (≈36h at 2 posts/day).
         // Was 8 — covered ~4 days of posts, and once the 6 active topic
         // generators all landed in the window everything filtered out and
         // auto-post locked itself out for 3-5 days. (Repro: 2026-05-09 → 12.)
-        // The 8-post `recentTweets` text above still feeds the AI prompt for
-        // broader context; only the hard pre-filter uses the shorter slice.
+        // `promptTopics` below reads the wider 8-tweet window purely to steer
+        // the AI; only the hard pre-filter uses this shorter slice.
         for (const t of tweets.slice(0, 3)) {
           const text = (t.text || '').toLowerCase();
           if (text.includes('scammer') || text.includes('flagg')) recentTopics.add('scammer');
@@ -1056,6 +1074,28 @@ Return ONLY the tweet text, nothing else.`;
           if (text.includes('shipped') || text.includes('merged')) recentTopics.add('shipped');
           if (text.includes('integrated capabilit') || text.includes('operating with')) recentTopics.add('capabilities');
         }
+
+        // Prompt-side variety steer over the wider 8-tweet window. The
+        // composer is told which topics are spent, never the text of the
+        // tweets themselves — see TOPIC_LABELS in autoPostFilter.js for why
+        // pasting the text back in produced near-verbatim reruns.
+        const promptTopics = new Set(recentTopics);
+        for (const t of tweets.slice(0, 8)) {
+          const text = (t.text || '').toLowerCase();
+          if (text.includes('scammer') || text.includes('flagg')) promptTopics.add('scammer');
+          if (text.includes('stak')) promptTopics.add('staking');
+          if (text.includes('plugin') || text.includes('service')) promptTopics.add('plugins');
+          if (text.includes('p2p') || text.includes('federation')) promptTopics.add('p2p');
+          if (text.includes('uptime') || text.includes('24/7')) promptTopics.add('uptime');
+          if (text.includes('pull request') || text.includes('self-improv')) promptTopics.add('selfmod');
+          if (text.includes('email') || text.includes('processed')) promptTopics.add('email');
+          if (text.includes('upgrade') || text.includes('commit')) promptTopics.add('upgrades');
+          if (text.includes('auto-heal') || text.includes('self-diagnos')) promptTopics.add('healing');
+          if (text.includes('skynet') || text.includes('marketplace')) promptTopics.add('skynetEcon');
+          if (text.includes('shipped') || text.includes('merged')) promptTopics.add('shipped');
+          if (text.includes('integrated capabilit') || text.includes('operating with')) promptTopics.add('capabilities');
+        }
+        recentTweetTopicSummary = recentTopicSummary(promptTopics);
       }
     } catch { /* no recent tweets to dedup against — fine */ }
 
@@ -1097,9 +1137,9 @@ Return ONLY the tweet text, nothing else.`;
     }
 
     // Raw text array of last N tweets — used by the n-gram repetition
-    // check on the candidate output. The pretty-printed `recentTweets`
-    // string is for the AI prompt; `recentTweetTexts` is for the
-    // post-generation code-level validator.
+    // check on the candidate output. This never reaches the prompt; the
+    // prompt gets `recentTopicSummary` (topic names only) while
+    // `recentTweetTexts` stays behind the post-generation code validator.
     let recentTweetTexts = [];
     try {
       const userIdForDedup = await this.getMyUserId();
@@ -1113,7 +1153,7 @@ Return ONLY the tweet text, nothing else.`;
         ? filteredItems.map((item, i) => `${i + 1}. ${item}`).join('\n')
         : 'No specific activity to report',
       itemTexts: filteredItems,
-      recentTweets,
+      recentTopicSummary: recentTweetTopicSummary,
       recentTweetTexts,
       diag: {
         rawCount: items.length,

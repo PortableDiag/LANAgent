@@ -179,6 +179,37 @@ const POPULAR_TOKENS = {
     ]
 };
 
+// Dedicated getLogs-friendly RPCs. Default public RPCs increasingly reject wide
+// getLogs ranges (publicnode returns 403 "archive requests require a personal
+// token" on ethereum since 2026-07-15; BSC intermittently -32005 limit exceeded).
+const SCAN_RPCS = {
+    bsc: ['https://bsc.drpc.org', 'https://bsc-pokt.nodies.app', 'https://bsc-mainnet.public.blastapi.io'],
+    ethereum: ['https://eth.drpc.org', 'https://eth-pokt.nodies.app', 'https://eth-mainnet.public.blastapi.io'],
+    polygon: ['https://polygon.drpc.org', 'https://polygon-pokt.nodies.app']
+};
+// eth.drpc.org accepts the full 5000-block scan window in one call — fewer
+// requests matters because drpc rate-limits ALICE's VPN exit IP intermittently
+const SCAN_CHUNK_LIMITS = { bsc: 9999, ethereum: 5000, polygon: 2000 };
+// Chain IDs for the scan networks. Pinning staticNetwork on scan providers is
+// REQUIRED: without it, ethers runs an internal network-detection retry loop that
+// console.log()s "failed to detect network ... retry in 1s" every second FOREVER
+// when the RPC is unreachable, and the orphaned provider is never GC'd while its
+// timer is live. Leaked scan providers accumulated into a ~40 line/sec stdout
+// flood that ballooned the PM2 logs to multiple GB.
+const SCAN_CHAIN_IDS = { bsc: 56, ethereum: 1, polygon: 137 };
+
+// Build a scan provider with a pinned network (no auto-detect retry loop) and
+// batching disabled (public RPCs return "id: null" on rate-limit errors).
+function makeScanProvider(rpcUrl, network) {
+    const chainId = SCAN_CHAIN_IDS[network];
+    const staticNetwork = chainId ? ethers.Network.from(chainId) : undefined;
+    return new ethers.JsonRpcProvider(rpcUrl, staticNetwork, {
+        staticNetwork: !!staticNetwork,
+        batchMaxCount: 1
+    });
+}
+const SCAN_PROVIDER_CACHE_MS = 60 * 60 * 1000;
+
 class TokenScanner {
     constructor() {
         this.knownTokens = new Map(); // address -> token info
@@ -190,6 +221,73 @@ class TokenScanner {
         this.deepScanRunning = new Set(); // networks currently running deep scan
         this.explorerApiKeys = {}; // cached API keys from DB
         this.moralisApiKey = null; // optional Moralis key for enhanced token discovery
+        this.scanProviders = new Map(); // network -> { provider, url, ts } getLogs-capable RPC
+    }
+
+    /**
+     * Get a provider known to support wide getLogs ranges for this network,
+     * or null if none of the candidates respond. Cached per network.
+     */
+    async _getScanProvider(network) {
+        const cached = this.scanProviders.get(network);
+        if (cached && Date.now() - cached.ts < SCAN_PROVIDER_CACHE_MS) return cached.provider;
+
+        for (const rpcUrl of SCAN_RPCS[network] || []) {
+            let provider;
+            try {
+                provider = makeScanProvider(rpcUrl, network);
+                await provider.getBlockNumber();
+                this.scanProviders.set(network, { provider, url: rpcUrl, ts: Date.now() });
+                return provider;
+            } catch (e) {
+                // Destroy the failed provider so no retry timer / socket leaks.
+                try { provider?.destroy(); } catch { /* ignore */ }
+                logger.debug(`Scan RPC ${rpcUrl} unavailable: ${e.message}`);
+            }
+        }
+        return null;
+    }
+
+    /**
+     * getLogs with fallback: try the default provider first; if it rejects the
+     * range, retry through the dedicated scan RPCs in chunks. The chunked scan
+     * itself is the capability probe — an RPC that answers getBlockNumber but
+     * caps getLogs ranges (e.g. blastapi's 10-block limit) gets skipped, and a
+     * cached provider that starts failing is evicted.
+     */
+    async _getTransferLogs(network, provider, fromBlock, toBlock, topics) {
+        try {
+            return await provider.getLogs({ fromBlock, toBlock, topics });
+        } catch (primaryErr) {
+            const chunkSize = SCAN_CHUNK_LIMITS[network] || 2000;
+            const cached = this.scanProviders.get(network);
+            const candidates = [
+                ...(cached ? [cached.url] : []),
+                ...(SCAN_RPCS[network] || []).filter(u => u !== cached?.url)
+            ];
+
+            for (const rpcUrl of candidates) {
+                const reuseCached = cached?.url === rpcUrl;
+                let scanProvider;
+                try {
+                    scanProvider = reuseCached ? cached.provider : makeScanProvider(rpcUrl, network);
+                    const logs = [];
+                    for (let from = fromBlock; from <= toBlock; from += chunkSize) {
+                        const to = Math.min(from + chunkSize - 1, toBlock);
+                        logs.push(...await scanProvider.getLogs({ fromBlock: from, toBlock: to, topics }));
+                    }
+                    this.scanProviders.set(network, { provider: scanProvider, url: rpcUrl, ts: Date.now() });
+                    logger.info(`[TokenScanner] ${network}: default RPC getLogs failed (${primaryErr.shortMessage || primaryErr.message}), recovered via ${rpcUrl} (${logs.length} logs)`);
+                    return logs;
+                } catch (e) {
+                    if (reuseCached) this.scanProviders.delete(network);
+                    // Destroy a freshly-created (uncached) provider so no timer/socket leaks.
+                    else { try { scanProvider?.destroy(); } catch { /* ignore */ } }
+                    logger.info(`[TokenScanner] scan RPC ${rpcUrl} getLogs failed on ${network}: ${(e.shortMessage || e.message || '').slice(0, 120)}`);
+                }
+            }
+            throw primaryErr;
+        }
     }
 
     /**
@@ -489,15 +587,11 @@ class TokenScanner {
             const transferTopic = ethers.id('Transfer(address,address,uint256)');
             const toAddressPadded = ethers.zeroPadValue(this.walletAddress.toLowerCase(), 32);
 
-            const logs = await provider.getLogs({
-                fromBlock,
-                toBlock: currentBlock,
-                topics: [
-                    transferTopic,
-                    null, // from (any)
-                    toAddressPadded // to (our address)
-                ]
-            });
+            const logs = await this._getTransferLogs(network, provider, fromBlock, currentBlock, [
+                transferTopic,
+                null, // from (any)
+                toAddressPadded // to (our address)
+            ]);
 
             // Filter out tokens sent by flagged scammer addresses
             let scammerRegistry = null;
@@ -573,29 +667,13 @@ class TokenScanner {
 
             // Use a dedicated scan RPC with better getLogs range support
             // Public BSC RPCs return 0 for getLogs; dRPC supports 9999-block ranges
-            const scanRpcs = {
-                bsc: ['https://bsc.drpc.org', 'https://bsc-pokt.nodies.app', 'https://bsc-mainnet.public.blastapi.io'],
-                ethereum: [] // Default provider works for ETH
-            };
-            const scanChunkLimits = { bsc: 9999, ethereum: 2000 };
-
-            let scanProvider = provider;
-            const candidateRpcs = scanRpcs[network] || [];
-            for (const rpcUrl of candidateRpcs) {
-                try {
-                    const testProvider = new ethers.JsonRpcProvider(rpcUrl, undefined, { batchMaxCount: 1 });
-                    await testProvider.getBlockNumber();
-                    scanProvider = testProvider;
-                    logger.info(`[TokenScanner] Deep scan using dedicated RPC for ${network}: ${rpcUrl}`);
-                    break;
-                } catch (e) {
-                    logger.debug(`Deep scan RPC ${rpcUrl} unavailable: ${e.message}`);
-                }
-            }
+            const scanProvider = (await this._getScanProvider(network)) || provider;
+            const scanUrl = this.scanProviders.get(network)?.url;
+            if (scanUrl) logger.info(`[TokenScanner] Deep scan using dedicated RPC for ${network}: ${scanUrl}`);
 
             const currentBlock = await scanProvider.getBlockNumber();
             const startBlock = Math.max(0, currentBlock - maxBlocks);
-            const chunkSize = scanChunkLimits[network] || 2000;
+            const chunkSize = SCAN_CHUNK_LIMITS[network] || 2000;
             const totalChunks = Math.ceil(maxBlocks / chunkSize);
             const transferTopic = ethers.id('Transfer(address,address,uint256)');
             const toAddressPadded = ethers.zeroPadValue(this.walletAddress.toLowerCase(), 32);
@@ -1550,7 +1628,7 @@ class TokenScanner {
 
                 if (currentBal > lastBal && currentBal > 0) {
                     const received = currentBal - lastBal;
-                    // Skip tiny dust amounts (< [redacted] worth roughly)
+                    // Skip tiny dust amounts (< $0.001 worth roughly)
                     if (received < 0.000001) continue;
 
                     // Throttle between classifications to avoid RPC rate limiting (each classification makes ~20+ RPC calls)

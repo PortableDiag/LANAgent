@@ -332,7 +332,7 @@ class StrategyEvolutionService {
 
             case 'negative_pnl':
                 // This is a critical issue - might need strategy switch
-                if (Math.abs(issue.value) > 100) { // Lost more than [redacted]
+                if (Math.abs(issue.value) > 100) { // Lost more than $100
                     return {
                         type: IMPROVEMENT_TYPES.STRATEGY_SWITCH,
                         priority: 'high',

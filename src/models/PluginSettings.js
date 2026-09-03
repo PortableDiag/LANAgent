@@ -31,13 +31,23 @@ function computeSoftExpiresAt(ttl) {
   return Date.now() + Math.max(0, Math.floor(ttl * 1000 * jitter));
 }
 
-// Log cache statistics periodically
-setInterval(() => {
+// Log cache statistics periodically.
+//
+// unref()'d deliberately: this is a debug-only stats line, and a module-level
+// ref'd interval makes merely IMPORTING this model enough to pin the event loop
+// open forever. That is exactly what happened — `node --test tests/unit/` never
+// terminated (8h+ before anyone killed it) because 20 of 100 test files import
+// something that reaches this model, and each one then hung after its tests
+// passed. A process should exit when its work is done; nothing whose only job is
+// to log should be able to prevent that. In production the server holds the loop
+// open on its own, so unref changes nothing there.
+const cacheStatsTimer = setInterval(() => {
   const stats = settingsCache.getStats();
   if (stats.keys > 0) {
     logger.debug(`PluginSettings cache stats: ${stats.keys} keys, ${stats.hits} hits, ${stats.misses} misses`);
   }
 }, 300000); // Every 5 minutes
+cacheStatsTimer.unref();
 
 const pluginSettingsSchema = new mongoose.Schema({
   // Plugin identifier

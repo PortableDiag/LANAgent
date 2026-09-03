@@ -14,9 +14,17 @@ import { retryOperation } from '../../utils/retryUtils.js';
  *
  * Alerts via Telegram only when issues are found.
  */
+// sshd's default MaxSessions is 10 concurrent channels per connection (goliath
+// runs the default). Every check shares ONE connection and runs in parallel, so
+// stay well under it — the surplus opens are refused, not queued.
+const SSH_MAX_CONCURRENT_CHANNELS = 4;
+
 export class ServerMaintenanceAgent extends BaseAgentHandler {
   constructor(mainAgent, agentDoc) {
     super(mainAgent, agentDoc);
+    // Bounded SSH exec-channel concurrency (see runSSHCommand).
+    this._sshActiveChannels = 0;
+    this._sshChannelWaiters = [];
     this.sshConnectionId = null;
     this.checkResults = {};
   }
@@ -53,7 +61,18 @@ export class ServerMaintenanceAgent extends BaseAgentHandler {
         updates: { enabled: true },
         ntp: { enabled: true, maxDriftSec: 5 },
         uptime: { enabled: true },
-        temperature: { enabled: true, warningTempC: 75 }
+        temperature: { enabled: true, warningTempC: 75 },
+        // Every other check above passes on a host that is completely cut off from the
+        // internet, because they only ever look at the machine itself. A VPN-only host
+        // whose tunnel dies looks perfectly healthy locally while nothing can get out.
+        vpn: {
+          enabled: true,
+          interface: 'tun0',
+          expectedCountry: 'US',
+          // Two enabled units racing two copies of the watchdog caused a past outage.
+          watchdogProcess: 'netcheck.sh',
+          expectedWatchdogCount: 1
+        }
       },
       // Monitored application services — auto-restart on crash, skip if manually stopped
       monitoredServices: {
@@ -111,8 +130,23 @@ export class ServerMaintenanceAgent extends BaseAgentHandler {
     if (!config.targetHost) {
       await this.updateConfig(this.getDefaultConfig());
     } else {
-      // Always sync monitoredServices.apps from code defaults so new apps are picked up
       const defaults = this.getDefaultConfig();
+
+      // Adopt check types the stored config has never heard of. An agent configured before a
+      // check existed keeps its old `checks` object forever — the default is only written when
+      // there is no config at all — so shipping a new check would silently do nothing on every
+      // existing agent. Additive only: a key that is already present is left exactly as it is,
+      // because the operator may have tuned its thresholds.
+      const storedChecks = config.checks || {};
+      const missing = Object.keys(defaults.checks || {}).filter(k => !(k in storedChecks));
+      if (missing.length) {
+        logger.info(`ServerMaintenanceAgent: adopting new check(s) from defaults: ${missing.join(', ')}`);
+        const merged = { ...storedChecks };
+        for (const k of missing) merged[k] = defaults.checks[k];
+        await this.updateConfig({ checks: merged });
+      }
+
+      // Always sync monitoredServices.apps from code defaults so new apps are picked up
       if (defaults.monitoredServices?.apps) {
         const currentApps = config.monitoredServices?.apps || [];
         const defaultApps = defaults.monitoredServices.apps;
@@ -279,6 +313,7 @@ export class ServerMaintenanceAgent extends BaseAgentHandler {
     if (c.ntp?.enabled) checks.push({ name: 'ntp', fn: () => this.checkNTP() });
     if (c.uptime?.enabled) checks.push({ name: 'uptime', fn: () => this.checkUptime() });
     if (c.temperature?.enabled) checks.push({ name: 'temperature', fn: () => this.checkTemperature(c.temperature) });
+    if (c.vpn?.enabled) checks.push({ name: 'vpn', fn: () => this.checkVPN(c.vpn) });
     if (config.monitoredServices?.enabled) checks.push({ name: 'monitoredApps', fn: () => this.checkMonitoredServices(config.monitoredServices) });
 
     return checks;
@@ -319,18 +354,43 @@ export class ServerMaintenanceAgent extends BaseAgentHandler {
     }
   }
 
+  /**
+   * Run one command on the target host, bounded to a few concurrent SSH channels.
+   *
+   * execute() runs every check with Promise.allSettled over a SINGLE ssh2
+   * connection, and checkMonitoredServices alone wants one exec channel per app.
+   * sshd caps concurrent sessions per connection (`MaxSessions`, default 10 —
+   * goliath runs the default), so the surplus channel opens were REFUSED. The
+   * refusals were then swallowed by the check helpers and reported as "service
+   * stopped": all ten monitored apps went false together on 2026-08-14 and the
+   * manuallyStopped latch held them there, which silently disabled auto-restart
+   * for every one of them.
+   *
+   * Limiting channels here fixes it for every caller, and keeps working if
+   * someone adds a twelfth check or an eleventh app.
+   */
   async runSSHCommand(command) {
-    const result = await this.mainAgent.apiManager.executeAPI('ssh', 'execute', {
-      action: 'execute',
-      connectionId: this.sshConnectionId,
-      command
-    });
-
-    if (!result?.success) {
-      throw new Error(`SSH command failed: ${result?.error || 'unknown error'}`);
+    while (this._sshActiveChannels >= SSH_MAX_CONCURRENT_CHANNELS) {
+      await new Promise(resolve => this._sshChannelWaiters.push(resolve));
     }
+    this._sshActiveChannels++;
+    try {
+      const result = await this.mainAgent.apiManager.executeAPI('ssh', 'execute', {
+        action: 'execute',
+        connectionId: this.sshConnectionId,
+        command
+      });
 
-    return result.data?.stdout || '';
+      if (!result?.success) {
+        throw new Error(`SSH command failed: ${result?.error || 'unknown error'}`);
+      }
+
+      return result.data?.stdout || '';
+    } finally {
+      this._sshActiveChannels--;
+      const next = this._sshChannelWaiters.shift();
+      if (next) next();
+    }
   }
 
   // --- Check Methods ---
@@ -595,6 +655,104 @@ export class ServerMaintenanceAgent extends BaseAgentHandler {
     }
   }
 
+  /**
+   * VPN / egress health.
+   *
+   * Asserts three things, because any one of them alone lies:
+   *   1. the tunnel interface exists — but a zombie daemon reports "Connected" over a dead
+   *      tunnel, so the vendor CLI's own status is not evidence;
+   *   2. egress actually works — a killswitch blackhole answers HTTP 000 while every local
+   *      check still passes;
+   *   3. the exit is still in the expected country — a tunnel that silently moved region is
+   *      up, reachable, and wrong.
+   *
+   * Reported as `critical` when there is no egress at all (that is a total WAN outage on a
+   * VPN-only host) and `warning` for a wrong exit or a missing interface with egress intact.
+   */
+  async checkVPN(config = {}) {
+    const iface = config.interface || 'tun0';
+    const expectedCountry = config.expectedCountry || null;
+    const watchdog = config.watchdogProcess || null;
+    const expectedWatchdogCount = config.expectedWatchdogCount ?? 1;
+
+    let status = 'ok';
+    const issues = [];
+    const data = { interface: iface, tunnelUp: null, egressIp: null, country: null, watchdogCount: null };
+
+    try {
+      const link = await this.runSSHCommand(`ip link show ${iface} 2>/dev/null | head -1 || true`);
+      data.tunnelUp = /state (UP|UNKNOWN)/.test(link) || link.includes(`${iface}:`);
+
+      // A real request out. `-s -m 10 -o /dev/null -w %{http_code}` gives 000 on a blackhole
+      // rather than hanging, which is exactly the killswitch signature.
+      const egress = await this.runSSHCommand(
+        'curl -s -m 10 https://ifconfig.me/ip 2>/dev/null || true'
+      );
+      data.egressIp = (egress || '').trim() || null;
+
+      if (!data.egressIp) {
+        status = 'critical';
+        issues.push(`No egress: nothing reached the internet through ${iface}. Every local check still passes, so this is invisible without this probe.`);
+      } else if (expectedCountry) {
+        const geo = await this.runSSHCommand(
+          'curl -s -m 10 http://ip-api.com/json 2>/dev/null || true'
+        );
+        try {
+          const parsed = JSON.parse(geo);
+          data.country = parsed.countryCode || null;
+        } catch {
+          data.country = null;
+        }
+        if (data.country && data.country !== expectedCountry) {
+          status = 'warning';
+          issues.push(`VPN exit is in ${data.country}, expected ${expectedCountry}.`);
+        } else if (!data.country) {
+          issues.push('Egress works but the exit country could not be read (geo lookup failed) — not treated as a fault.');
+        }
+      }
+
+      if (!data.tunnelUp && data.egressIp) {
+        if (status === 'ok') status = 'warning';
+        issues.push(`Egress works but ${iface} is absent — traffic is leaving outside the tunnel.`);
+      }
+
+      if (watchdog) {
+        // `pgrep -f` matches FULL command lines, and the shell that runs this probe has the
+        // pattern sitting in its own command line — so a plain `pgrep -fc netcheck.sh`
+        // counts itself and reports 2 when exactly one watchdog is running. That false
+        // positive is worse than a missing check: the alert it raises ("racing watchdogs")
+        // is the signature of a real past outage (goliath, 2026-08-06), so a permanent
+        // false alarm trains the operator to ignore the genuine one.
+        //
+        // Wrapping the first character and any dots in character classes means the literal
+        // pattern no longer appears in our own command line, while the regex still matches
+        // the real process: `netcheck.sh` -> `[n]etcheck[.]sh`. Verified live on goliath —
+        // the old form returned 2, this returns 1, against a single running watchdog.
+        const selfSafe = String(watchdog)
+          .replace(/'/g, '')
+          .replace(/\./g, '[.]')
+          .replace(/^(.)/, '[$1]');
+        const count = await this.runSSHCommand(`pgrep -fc '${selfSafe}' 2>/dev/null || echo 0`);
+        data.watchdogCount = parseInt((count || '0').trim(), 10) || 0;
+        if (data.watchdogCount > expectedWatchdogCount) {
+          if (status === 'ok') status = 'warning';
+          issues.push(`${data.watchdogCount} copies of ${watchdog} are running, expected ${expectedWatchdogCount} — racing watchdogs caused a past outage.`);
+        }
+      }
+
+      return { name: 'vpn', status, data, issues };
+    } catch (error) {
+      // A failure to run the probe is not a failure of the tunnel. Say so rather than
+      // reporting a green check or inventing an outage.
+      return {
+        name: 'vpn',
+        status: 'warning',
+        data,
+        issues: [`VPN check could not run: ${error.message}`]
+      };
+    }
+  }
+
   async checkTemperature(config) {
     let status = 'ok';
     const issues = [];
@@ -660,6 +818,7 @@ export class ServerMaintenanceAgent extends BaseAgentHandler {
         version: prev.version || null,
         lastSeen: prev.lastSeen || null,
         error: null,
+        checkFailed: false,
         extra: null
       };
 
@@ -748,11 +907,18 @@ export class ServerMaintenanceAgent extends BaseAgentHandler {
           }
         }
       } catch (error) {
+        // A check that could not run is NOT an outage. Reporting it as one is how
+        // ten healthy services came to read "stopped" for over a week, and how the
+        // manuallyStopped latch silently disabled their auto-restart. Carry the
+        // last known state forward and say plainly that the check failed.
         const errMsg = error?.message || String(error);
         appState.error = errMsg;
-        issues.push(`${app.name}: check error — ${errMsg}`);
+        appState.checkFailed = true;
+        appState.running = prev.running ?? false;
+        appState.manuallyStopped = prev.manuallyStopped || false;
+        issues.push(`${app.name}: check could not run — ${errMsg}`);
         if (status !== 'critical') status = 'warning';
-        logger.warn(`ServerMaintenanceAgent: ${app.name} check threw: ${errMsg}`);
+        logger.warn(`ServerMaintenanceAgent: ${app.name} check could not run: ${errMsg}`);
       }
 
       data[app.name] = appState;
@@ -774,22 +940,29 @@ export class ServerMaintenanceAgent extends BaseAgentHandler {
     return { name: 'monitoredApps', status, data, issues };
   }
 
+  /**
+   * Both of these used to swallow the error and answer "not running". That made a
+   * failed SSH channel indistinguishable from a stopped service — the exact
+   * confusion that reported ten healthy services as down for over a week. They
+   * now throw, and the caller records a check failure instead of inventing an
+   * outage.
+   */
   async isProcessRunning(pattern) {
-    try {
-      const output = await this.runSSHCommand(`pgrep -f "${pattern}" >/dev/null 2>&1 && echo running || echo stopped`);
-      return output.trim() === 'running';
-    } catch {
-      return false;
+    const output = await this.runSSHCommand(`pgrep -f "${pattern}" >/dev/null 2>&1 && echo running || echo stopped`);
+    const trimmed = output.trim();
+    if (trimmed !== 'running' && trimmed !== 'stopped') {
+      throw new Error(`unusable pgrep output for "${pattern}": ${JSON.stringify(trimmed.slice(0, 80))}`);
     }
+    return trimmed === 'running';
   }
 
   async getSystemdState(unit) {
-    try {
-      const output = await this.runSSHCommand(`systemctl is-active ${unit} 2>/dev/null || echo inactive`);
-      return output.trim();
-    } catch {
-      return 'unknown';
+    const output = await this.runSSHCommand(`systemctl is-active ${unit} 2>/dev/null || echo inactive`);
+    const trimmed = output.trim();
+    if (!trimmed) {
+      throw new Error(`empty systemctl is-active response for ${unit}`);
     }
+    return trimmed;
   }
 
   async wasCleanStop(app) {

@@ -164,7 +164,11 @@ class UpsService extends EventEmitter {
       if (!config || !config.enabled) return;
 
       const status = await this.queryUpsStatus(upsName, config.host);
-      const previousStatus = this.previousStatuses.get(upsName);
+      // Fall back to the DB-persisted status on the first poll after a restart so
+      // state transitions that happened while we were down (RB latching, LB clearing)
+      // still fire their events instead of being silently absorbed.
+      const previousStatus = this.previousStatuses.get(upsName) ||
+        (config.lastStatus?.status ? config.lastStatus : undefined);
 
       // Update stored status
       await UpsConfig.updateStatus(upsName, status);
@@ -277,7 +281,8 @@ class UpsService extends EventEmitter {
       'DISCHRG': 'Discharging',
       'BYPASS': 'Bypass Mode',
       'CAL': 'Calibrating',
-      'OFF': 'Offline',
+      'OFF': 'OUTPUT OFF (not powering load)',
+      'ALARM': 'Alarm condition active (beeper may be muted)',
       'OVER': 'Overloaded',
       'TRIM': 'Trimming Voltage',
       'BOOST': 'Boosting Voltage',
@@ -329,8 +334,14 @@ class UpsService extends EventEmitter {
   async checkThresholds(upsName, status, config) {
     const { thresholds } = config;
 
+    // Charge/runtime thresholds only mean "we're running out of power" while actually
+    // discharging. On utility power a dead-but-charging battery reads 0% for hours and
+    // would re-alert "battery critical" every cooldown window; the LB/RB flag transitions
+    // in detectStatusChanges already cover battery-health failures on mains.
+    const onBattery = (status.status || '').includes('OB');
+
     // Check battery level thresholds
-    if (status.batteryCharge !== undefined) {
+    if (onBattery && status.batteryCharge !== undefined) {
       if (status.batteryCharge <= thresholds.shutdownBattery) {
         await this.handlePowerEvent(upsName, 'battery_critical', status, config);
         await this.checkAutoShutdown(upsName, status, config);
@@ -342,7 +353,7 @@ class UpsService extends EventEmitter {
     }
 
     // Check runtime threshold
-    if (status.batteryRuntime !== undefined) {
+    if (onBattery && status.batteryRuntime !== undefined) {
       if (status.batteryRuntime <= thresholds.criticalRuntime) {
         await this.handlePowerEvent(upsName, 'battery_critical', status, config);
         await this.checkAutoShutdown(upsName, status, config);
@@ -416,11 +427,17 @@ class UpsService extends EventEmitter {
    * Get human-readable event message
    */
   getEventMessage(eventType, status) {
+    // batteryCharge can legitimately be 0 (dead battery) — `||` would render it as '?'.
+    const charge = (status?.batteryCharge ?? '?');
     const messages = {
       'power_loss': 'Utility power lost',
-      'on_battery': `UPS running on battery (${status?.batteryCharge || '?'}% charge, ~${Math.round((status?.batteryRuntime || 0) / 60)} min remaining)`,
-      'low_battery': `UPS battery low (${status?.batteryCharge || '?'}%)`,
-      'battery_critical': `UPS battery critical (${status?.batteryCharge || '?'}%) - immediate action required`,
+      'on_battery': `UPS running on battery (${charge}% charge, ~${Math.round((status?.batteryRuntime || 0) / 60)} min remaining)`,
+      // A failed battery can still report a high charge % while the LB flag is set —
+      // call out the contradiction instead of printing a reassuring-looking number.
+      'low_battery': (status?.batteryCharge >= 50)
+        ? `UPS battery LOW flag set despite ${status.batteryCharge}% reported charge — charge reading unreliable, battery has likely failed`
+        : `UPS battery low (${charge}%)`,
+      'battery_critical': `UPS battery critical (${charge}%) - immediate action required`,
       'shutdown_initiated': 'System shutdown initiated due to UPS battery critical',
       'power_restored': 'Utility power restored - UPS back online',
       'communication_lost': 'Lost communication with UPS',
@@ -508,6 +525,13 @@ class UpsService extends EventEmitter {
       if (details.length > 0) {
         message += `\n\n${details.join(' | ')}`;
       }
+
+      // Always show the raw flags decoded — RB/OFF/FSD are the difference between
+      // "blip" and "UPS is failing"; hiding them made the 2026-07-31 dead-battery
+      // shutdown read like a routine low-battery notice.
+      if (status.status) {
+        message += `\nStatus: ${status.statusDescription || this.getStatusDescription(status.status)}`;
+      }
     }
 
     return message;
@@ -519,6 +543,9 @@ class UpsService extends EventEmitter {
   async checkAutoShutdown(upsName, status, config) {
     if (this.shutdownInitiated) return;
     if (!config?.autoShutdown?.enabled) return;
+    // Never auto-shutdown while on utility power: a failed battery reports 0% charge
+    // on mains, which would otherwise power-cycle the box in a loop.
+    if (!(status?.status || '').includes('OB')) return;
 
     const { autoShutdown, thresholds } = config;
     let shouldShutdown = false;

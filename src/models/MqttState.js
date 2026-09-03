@@ -1,4 +1,7 @@
 import mongoose from 'mongoose';
+import NodeCache from 'node-cache';
+import { retryOperation } from '../utils/retryUtils.js';
+import { logger } from '../utils/logger.js';
 
 /**
  * MQTT State Store
@@ -94,6 +97,24 @@ mqttStateSchema.pre('save', function(next) {
 mqttStateSchema.index({ 'topicMetadata.baseTopic': 1 });
 mqttStateSchema.index({ brokerId: 1, receivedAt: -1 });
 
+// Initialize cache with configuration from environment variables
+const envSize = parseInt(process.env.MQTT_PATTERN_CACHE_SIZE, 10);
+const envTtl = parseInt(process.env.MQTT_PATTERN_CACHE_TTL, 10);
+const CACHE_SIZE = Number.isFinite(envSize) ? envSize : 1000;
+const CACHE_TTL = Number.isFinite(envTtl) ? envTtl : 300; // 5 minutes; 0 = no expiry
+
+// Create cache instance for pattern queries
+const patternCache = new NodeCache({
+  stdTTL: CACHE_TTL,
+  maxKeys: CACHE_SIZE,
+  checkperiod: 60, // Check for expired keys every minute
+  useClones: false // Mongoose documents must not be deep-cloned
+});
+
+// Cache statistics tracking
+let cacheHits = 0;
+let cacheMisses = 0;
+
 // Static method to update state with change tracking
 mqttStateSchema.statics.updateState = async function(topic, brokerId, payload, options = {}) {
   const { qos = 0, retained = false, deviceId = null } = options;
@@ -147,10 +168,15 @@ mqttStateSchema.statics.updateState = async function(topic, brokerId, payload, o
       update.deviceId = deviceId;
     }
 
-    return this.findOneAndUpdate({ topic }, update, { new: true });
+    const result = await this.findOneAndUpdate({ topic }, update, { new: true });
+    
+    // Invalidate cache for this topic's patterns
+    invalidateTopicPatterns(topic);
+    
+    return result;
   } else {
     // Create new state
-    return this.create({
+    const result = await this.create({
       topic,
       brokerId,
       deviceId,
@@ -164,11 +190,54 @@ mqttStateSchema.statics.updateState = async function(topic, brokerId, payload, o
         changeCount: 0
       }
     });
+    
+    // Invalidate cache for this topic's patterns
+    invalidateTopicPatterns(topic);
+    
+    return result;
   }
 };
 
-// Static method to get states by topic pattern
+// Helper function to invalidate cached patterns for a topic
+function invalidateTopicPatterns(topic) {
+  // Get all keys (patterns) currently in cache
+  const keys = patternCache.keys();
+  
+  // For each pattern, check if this topic would match it
+  for (const pattern of keys) {
+    try {
+      // Convert MQTT wildcard pattern to regex
+      const regexPattern = pattern
+        .replace(/[.*+?^${}()|[\]\\]/g, '\\$&')  // Escape regex chars
+        .replace(/\\\+/g, '[^/]+')               // + = single level
+        .replace(/\\#/g, '.*');                  // # = multi level
+      
+      const regex = new RegExp(`^${regexPattern}$`);
+      
+      // If topic matches pattern, invalidate the cache entry
+      if (regex.test(topic)) {
+        patternCache.del(pattern);
+        logger.debug(`Invalidated cache for pattern: ${pattern} due to topic update: ${topic}`);
+      }
+    } catch (error) {
+      logger.warn(`Failed to check pattern invalidation for ${pattern}: ${error.message}`);
+    }
+  }
+}
+
+// Static method to get states by topic pattern with caching
 mqttStateSchema.statics.findByPattern = async function(pattern) {
+  // Check if result is cached
+  const cachedResult = patternCache.get(pattern);
+  if (cachedResult !== undefined) {
+    cacheHits++;
+    logger.debug(`Cache HIT for pattern: ${pattern}`);
+    return cachedResult;
+  }
+
+  cacheMisses++;
+  logger.debug(`Cache MISS for pattern: ${pattern}`);
+
   // Convert MQTT wildcard pattern to regex
   // + matches single level, # matches multiple levels
   const regexPattern = pattern
@@ -176,7 +245,43 @@ mqttStateSchema.statics.findByPattern = async function(pattern) {
     .replace(/\\\+/g, '[^/]+')                // + = single level
     .replace(/\\#/g, '.*');                   // # = multi level
 
-  return this.find({ topic: { $regex: `^${regexPattern}$` } });
+  // Perform the query with retry logic
+  const results = await retryOperation(
+    () => this.find({ topic: { $regex: `^${regexPattern}$` } }),
+    { retries: 3 }
+  );
+
+  // Cache the result (set() throws ECACHEFULL at maxKeys — never fail the read for that)
+  try {
+    patternCache.set(pattern, results);
+    logger.debug(`Cached results for pattern: ${pattern} (${results.length} items)`);
+  } catch (error) {
+    logger.debug(`Skipped caching pattern ${pattern}: ${error.message}`);
+  }
+
+  return results;
+};
+
+// Static method to get cache statistics
+mqttStateSchema.statics.getCacheStats = function() {
+  return {
+    hits: cacheHits,
+    misses: cacheMisses,
+    hitRate: cacheHits + cacheMisses > 0 ? (cacheHits / (cacheHits + cacheMisses)) * 100 : 0,
+    cacheSize: patternCache.keys().length,
+    maxCacheSize: CACHE_SIZE,
+    ttl: CACHE_TTL
+  };
+};
+
+// Static method to clear the pattern cache
+mqttStateSchema.statics.clearPatternCache = function() {
+  const itemCount = patternCache.keys().length;
+  patternCache.flushAll();
+  cacheHits = 0;
+  cacheMisses = 0;
+  logger.info(`Cleared MQTT pattern cache (${itemCount} items)`);
+  return { clearedItems: itemCount };
 };
 
 // Static method for batch updates (high-throughput scenarios)
@@ -234,7 +339,14 @@ mqttStateSchema.statics.batchUpdateStates = async function(updates) {
     };
   });
 
-  return this.bulkWrite(bulkOps);
+  const result = await this.bulkWrite(bulkOps);
+  
+  // Invalidate cache for all updated topics
+  updates.forEach(update => {
+    invalidateTopicPatterns(update.topic);
+  });
+  
+  return result;
 };
 
 export default mongoose.model('MqttState', mqttStateSchema);

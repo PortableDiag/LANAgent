@@ -45,21 +45,36 @@ export class BaseAgentHandler extends EventEmitter {
   async loadTools() {
     const allowedTools = this.agentDoc.config?.allowedTools || [];
 
-    // If empty, allow all plugin tools
-    const plugins = this.mainAgent.apiManager?.plugins;
-    if (!plugins) return;
+    // The registry is apiManager.apis, NOT .plugins — reading the wrong property
+    // yielded undefined and returned here, leaving every task/project agent with
+    // zero tools while still reporting a healthy start. Its values are wrapper
+    // entries {instance, enabled, calls, …}: `enabled` is on the wrapper, but the
+    // callable tool (execute/commands/description) is entry.instance.
+    const registry = this.mainAgent.apiManager?.apis;
+    if (!registry) {
+      logger.warn(`No plugin registry available — agent ${this.agentDoc.name} starts with no tools`);
+      return;
+    }
 
-    for (const [name, plugin] of plugins) {
-      if (!plugin.enabled) continue;
+    for (const [name, entry] of registry) {
+      const plugin = entry?.instance;
+      if (!plugin || !entry.enabled) continue;
 
-      // Check if this tool is allowed
+      // If empty, allow all plugin tools
       if (allowedTools.length === 0 || allowedTools.includes(name)) {
         this.tools.set(name, plugin);
         this.toolUsageStats.set(name, { frequency: 0, successRate: 0 });
       }
     }
 
-    logger.debug(`Loaded ${this.tools.size} tools for agent ${this.agentDoc.name}`);
+    // Logged at info, and loudly when empty: a toolless agent still "succeeds" —
+    // it just reports that it cannot do anything, which reads like a model failure
+    // rather than a wiring failure.
+    if (this.tools.size === 0) {
+      logger.warn(`Agent ${this.agentDoc.name} loaded 0 tools (allowedTools: ${allowedTools.length ? allowedTools.join(', ') : 'all'}) — it cannot take any action`);
+    } else {
+      logger.info(`Loaded ${this.tools.size} tools for agent ${this.agentDoc.name}`);
+    }
   }
 
   /**

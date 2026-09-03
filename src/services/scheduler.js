@@ -6,6 +6,10 @@ import { promisify } from 'util';
 import { safeInterval } from '../utils/errorHandlers.js';
 import { selfModLock } from './selfModLock.js';
 
+// The WireGuard peer this instance checks reachability against. Hardcoding a
+// tunnel address puts deployment topology in the source; it belongs in config.
+const WG_PEER_IP = process.env.WG_PEER_IP || '10.8.0.1';
+
 const execAsync = promisify(exec);
 
 class TaskScheduler {
@@ -585,24 +589,22 @@ Respond with ONLY the rephrased message, no explanation:`;
       }
     });
     
-    // Code analysis job for self-modification
+    // RETIRED. Nothing in this file schedules 'code-analysis' any more, but a
+    // persisted Agenda row from an earlier version kept firing it hourly, and it
+    // ran a full AI capability scan whose result it then threw away — the
+    // handler awaited analyzeCodebase() and discarded the return value.
+    //
+    // That was not merely wasted provider spend. The scan shuffles its target
+    // list, so the discarded run consumed the good draws: on 2026-09-02 the
+    // 07:03 run found 5 real upgrade opportunities and dropped them, and the
+    // 07:56 'self-mod-scan' — the only job that can open a PR — found 0.
+    //
+    // The definition is kept so the stale row does not raise "job not defined",
+    // and the row itself is cancelled in start(). 'self-mod-scan' performs the
+    // same analysis and now owns the lastCodeAnalysis timestamp the UI reads.
     this.agenda.define('code-analysis', async (job) => {
-      this.lastCodeAnalysis = new Date();
-      if (!this.agent.selfModification?.enabled) {
-        logger.debug('Self-modification service is not enabled, skipping analysis');
-        return;
-      }
-      
-      logger.info('Running code analysis for self-modification...');
-      
-      try {
-        const selfModService = this.agent.selfModification;
-        if (selfModService) {
-          await selfModService.analyzeCodebase();
-        }
-      } catch (error) {
-        logger.error('Code analysis job failed:', error);
-      }
+      logger.debug('code-analysis is retired; self-mod-scan performs this analysis');
+      await this.agenda.cancel({ name: 'code-analysis' }).catch(() => {});
     });
     
     // Task reminders
@@ -732,6 +734,9 @@ Respond with ONLY the rephrased message, no explanation:`;
     this.agenda.define('self-mod-scan', async (job) => {
       logger.info('Running self-modification scanner...');
       this.lastSelfModScan = new Date();
+      // This job runs analyzeCodebase(), so it owns this timestamp now that the
+      // separate 'code-analysis' job is retired.
+      this.lastCodeAnalysis = new Date();
       this.saveActivityTimestamps(); // Persist to database
 
       try {
@@ -754,6 +759,59 @@ Respond with ONLY the rephrased message, no explanation:`;
         logger.info('Self-modification check completed');
       } catch (error) {
         logger.error('Self-mod scan error:', error);
+      }
+    });
+
+    // Deploy merged changes.
+    //
+    // Merging and deploying used to be entirely disconnected: a PR merged into
+    // main sat there until somebody happened to run a deploy script by hand. On
+    // 2026-09-02 that had left the deployment running code up to three months
+    // old for 10 files. This job closes the loop, and refuses to ship anything
+    // that does not load — see selfModification.deployMergedChanges().
+    this.agenda.define('deploy-merged-changes', async (job) => {
+      this.lastDeployCheck = new Date();
+
+      const selfModService = this.agent.selfModification;
+      if (!selfModService?.deployMergedChanges) {
+        logger.debug('Deploy check: self-modification service unavailable, skipping');
+        return;
+      }
+
+      // ON by default. This is the instance's auto-update: without it a merged
+      // change sits in the repository until somebody runs a deploy script by
+      // hand, which is exactly how this deployment came to be running
+      // three-month-old code while every health check read green.
+      //
+      // It is safe to have on because deployMergedChanges() refuses to ship
+      // anything it cannot import, and aborts the whole batch if any single file
+      // fails to load — it will leave the deployment on the older, working code
+      // rather than half-apply a broken change.
+      //
+      // Set AUTO_DEPLOY_MERGED=false to opt an instance out; it then reports what
+      // is undeployed instead of deploying it.
+      if (process.env.AUTO_DEPLOY_MERGED === 'false') {
+        try {
+          const result = await selfModService.deployMergedChanges({ dryRun: true });
+          const pending = result.wouldDeploy || [];
+          if (pending.length > 0) {
+            logger.warn(`Deploy check: ${pending.length} merged file(s) are NOT deployed — ${pending.slice(0, 10).join(', ')}${pending.length > 10 ? '…' : ''}. Auto-deploy is disabled on this instance (AUTO_DEPLOY_MERGED=false).`);
+          }
+        } catch (error) {
+          logger.error('Deploy check failed:', error);
+        }
+        return;
+      }
+
+      try {
+        const result = await selfModService.deployMergedChanges();
+        if (result.deployed?.length) {
+          logger.info(`Deploy check: deployed ${result.deployed.length} merged file(s)`);
+        } else if (!result.success) {
+          logger.error(`Deploy check: ${result.reason}`);
+        }
+      } catch (error) {
+        logger.error('Deploy of merged changes failed:', error);
       }
     });
 
@@ -1623,7 +1681,7 @@ Respond with ONLY the rephrased message, no explanation:`;
         // Also ping the peer
         let peerReachable = false;
         try {
-          await execAsync('ping -c1 -W3 10.8.0.1 2>&1');
+          await execAsync(`ping -c1 -W3 ${WG_PEER_IP} 2>&1`);
           peerReachable = true;
         } catch { /* unreachable */ }
 
@@ -1649,7 +1707,7 @@ Respond with ONLY the rephrased message, no explanation:`;
           // Verify recovery
           let recovered = false;
           try {
-            await execAsync('ping -c1 -W3 10.8.0.1 2>&1');
+            await execAsync(`ping -c1 -W3 ${WG_PEER_IP} 2>&1`);
             recovered = true;
           } catch { /* still down */ }
 
@@ -2531,6 +2589,17 @@ Respond with ONLY the rephrased message, no explanation:`;
     // Self-modification scanner every hour
     // Schedule first run 5 min from now to avoid lock collision with git-monitor
     await this.agenda.every('1 hour', 'self-mod-scan');
+    await this.agenda.every('1 hour', 'deploy-merged-changes');
+
+    // Remove the retired hourly 'code-analysis' row left behind by an earlier
+    // version. Left in place it re-ran the AI capability scan 27 minutes before
+    // self-mod-scan and discarded the result.
+    try {
+      const removed = await this.agenda.cancel({ name: 'code-analysis' });
+      if (removed) logger.info(`Cancelled ${removed} retired 'code-analysis' job(s)`);
+    } catch (error) {
+      logger.warn(`Could not cancel retired code-analysis job: ${error.message}`);
+    }
     const selfModJob = await this.agenda.jobs({ name: 'self-mod-scan' });
     if (selfModJob.length > 0) {
       selfModJob[0].attrs.nextRunAt = new Date(Date.now() + 5 * 60 * 1000);

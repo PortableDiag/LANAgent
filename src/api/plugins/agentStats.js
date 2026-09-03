@@ -34,6 +34,15 @@ export default class AgentStatsPlugin extends BasePlugin {
           'compare improvement stats',
           'how are we doing compared to last month'
         ]
+      },
+      {
+        command: 'export',
+        description: 'Export agent statistics in structured JSON format',
+        usage: 'export [format]   (format: json, the default)',
+        examples: [
+          'export stats in JSON format',
+          'export raw data for external systems'
+        ]
       }
     ];
     this.cache = new NodeCache({ stdTTL: 300, checkperiod: 60 }); // 5 min TTL
@@ -49,6 +58,8 @@ export default class AgentStatsPlugin extends BasePlugin {
         return this.getErrorStats(params);
       case 'compare':
         return this.compareStats(params);
+      case 'export':
+        return this.getStatsExport(params);
       default:
         throw new Error(`Unknown action: ${action}`);
     }
@@ -62,6 +73,67 @@ export default class AgentStatsPlugin extends BasePlugin {
     const data = await fetchFunc();
     this.cache.set(key, data);
     return data;
+  }
+
+  /**
+   * Export agent statistics in structured JSON format for external consumption.
+   *
+   * `format` is validated rather than ignored. The command advertises
+   * `export [format]`, and silently returning JSON for `export csv` would report
+   * success for a request that was not honoured — a caller asking for a format
+   * this does not produce should be told so.
+   */
+  async getStatsExport(params = {}) {
+    try {
+      const format = (params.format || 'json').toLowerCase();
+      if (format !== 'json') {
+        return {
+          success: false,
+          error: `Unsupported export format '${format}'. Supported formats: json`
+        };
+      }
+
+      const rawStats = await this.getRawStats();
+      
+      if (!rawStats) {
+        return {
+          success: false,
+          error: 'Failed to retrieve raw statistics'
+        };
+      }
+
+      // Format the response as structured JSON
+      const formattedResponse = {
+        timestamp: new Date().toISOString(),
+        agent: {
+          version: rawStats.version,
+          uptime: rawStats.uptime,
+          // agent.startTime is set in the Agent constructor, but a plugin can be
+          // constructed against a partial agent in tests and tooling. new Date(
+          // undefined).toISOString() throws a RangeError rather than returning a
+          // falsy value, which would turn a stats export into a hard failure.
+          startTime: Number.isFinite(this.agent?.startTime)
+            ? new Date(this.agent.startTime).toISOString()
+            : null
+        },
+        statistics: {
+          improvements: rawStats.improvements,
+          errors: rawStats.errors,
+          selfModification: rawStats.selfModification
+        }
+      };
+
+      return {
+        success: true,
+        data: formattedResponse
+      };
+    } catch (error) {
+      logger.error('Stats export error:', error);
+      return {
+        success: false,
+        error: error.message
+      };
+    }
   }
 
   async getAgentStats(params) {

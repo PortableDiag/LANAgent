@@ -126,5 +126,122 @@ scrapeCookieJarSchema.statics.saveCookiesForHostname = async function (hostname,
   return true;
 };
 
+// How quickly confidence in a jar decays with age, expressed as a half-life.
+//
+// The original scoring decayed 1 point per hour and stopped at 50, so anything
+// older than ~2 days scored identically. Measured against production that made
+// the term inert: of 500 stored jars, ZERO are under 3 days old, 11 are under
+// 30 days and 421 sit between 60 and 120 days. hoursSinceSuccess therefore
+// exceeded the 50-hour cap for every single row, so the term contributed a flat
+// 50 to all of them. A one-week-old jar and a three-month-old jar came out four
+// points apart. That is not a staleness detector.
+//
+// THIRTY DAYS IS AN ESTIMATE, NOT A MEASUREMENT. Deliberately conservative:
+// primePageWithSavedCookies() records the observed behaviour as "the datadome
+// cookie persists for ~1y and subsequent visits sail through", and nothing here
+// contradicts that with evidence. A shorter half-life scores better on paper —
+// 7 days separates the buckets more sharply — but it would declare 492 of 500
+// live jars dead on the strength of a guess. Calibrating this properly needs
+// data we do not collect yet: whether an old jar still clears the challenge.
+// The score is logged on every prime so that data starts accumulating.
+const FRESHNESS_HALF_LIFE_DAYS = 30;
+
+// Weights. Expiry and age are near-equal because either one alone is sufficient
+// to make a jar useless: an expired cookie is definitively dead, and a
+// long-unused clearance is dead in practice whatever its expiry claims.
+const W_EXPIRY = 0.45;
+const W_AGE = 0.45;
+const W_HITS = 0.10;
+
+/**
+ * Score a jar's freshness from a plain object — no database, no mongoose.
+ *
+ * Split out from the model static so the scoring can be tested and audited
+ * directly, and so it can be run over a dump of real jars to check that it
+ * actually discriminates. Exported for that reason.
+ *
+ * @param {{cookies?: Array, lastSuccessAt?: Date|string|number, hitCount?: number}} jar
+ * @param {number} [now] - epoch ms, injectable so tests are not time-dependent
+ * @returns {number} 0 (stale) to 100 (fresh)
+ */
+export function computeFreshnessScore(jar, now = Date.now()) {
+  if (!jar || !Array.isArray(jar.cookies) || jar.cookies.length === 0) return 0;
+
+  const nowSeconds = Math.floor(now / 1000);
+  // Off the schema, not the model: the model const is declared below this
+  // function, so reaching for it here would rely on call-time hoisting.
+  const relevant = jar.cookies.filter(c => c?.name && scrapeCookieJarSchema.statics.shouldPersist(c.name));
+  if (relevant.length === 0) return 0;
+
+  // --- Expiry ---
+  let expirySum = 0;
+  let anyLive = false;
+  for (const cookie of relevant) {
+    // A session cookie (no expiry, or a negative one) is genuinely usable, just
+    // not durable. Matches how getCookiesForHostname's live-filter treats it.
+    //
+    // Number.isFinite also catches a corrupt `expires`: a NaN would otherwise
+    // survive every comparison below (NaN < 0 and NaN <= 0 are both false),
+    // reach Math.min(100, NaN) and turn the entire jar's score into NaN. One bad
+    // row poisoning a whole figure is the failure this guard exists to stop.
+    if (!Number.isFinite(cookie.expires) || cookie.expires < 0) {
+      expirySum += 80;
+      anyLive = true;
+      continue;
+    }
+    const secondsLeft = cookie.expires - nowSeconds;
+    if (secondsLeft <= 0) continue; // expired: contributes 0
+    anyLive = true;
+    const daysLeft = secondsLeft / 86400;
+    expirySum += Math.min(100, (daysLeft / 30) * 100);
+  }
+  // Every persistable cookie has expired. No weighting can rescue that.
+  if (!anyLive) return 0;
+  const expiryScore = expirySum / relevant.length;
+
+  // --- Age since last confirmed success ---
+  let ageScore = 100;
+  const last = jar.lastSuccessAt ? new Date(jar.lastSuccessAt).getTime() : NaN;
+  if (Number.isFinite(last)) {
+    const daysSince = Math.max(0, (now - last) / 86400000);
+    ageScore = 100 * Math.pow(0.5, daysSince / FRESHNESS_HALF_LIFE_DAYS);
+  }
+  // No lastSuccessAt at all leaves ageScore at 100 rather than 0: absence of a
+  // record is not evidence of staleness, and every jar written by
+  // saveCookiesForHostname has one.
+
+  // --- Usage, as a tiebreaker only ---
+  const hits = Number.isFinite(jar.hitCount) ? jar.hitCount : 0;
+  const hitScore = hits > 100 ? Math.max(80, 100 - hits / 100) : 100;
+
+  const score = (expiryScore * W_EXPIRY) + (ageScore * W_AGE) + (hitScore * W_HITS);
+  return Math.round(Math.min(100, Math.max(0, score)));
+}
+
+/**
+ * Calculate a freshness score (0-100) for a stored jar.
+ *
+ * @param {string} hostname - The hostname to analyze
+ * @returns {Promise<number>} Freshness score from 0 (stale) to 100 (fresh)
+ */
+scrapeCookieJarSchema.statics.getCookieFreshnessScore = async function (hostname) {
+  if (!hostname) return 0;
+  const jar = await this.findOne({ hostname }).lean();
+  return computeFreshnessScore(jar);
+};
+
+/**
+ * Determine if a cookie jar is stale based on its freshness score.
+ *
+ * @param {string} hostname - The hostname to check
+ * @param {number} threshold - Score below which the jar is considered stale (default: 70)
+ * @returns {Promise<boolean>} True if the jar is stale
+ */
+scrapeCookieJarSchema.statics.isJarStale = async function (hostname, threshold = 70) {
+  if (!hostname) return true;
+  const score = await this.getCookieFreshnessScore(hostname);
+  return score < threshold;
+};
+
 const ScrapeCookieJar = mongoose.model('ScrapeCookieJar', scrapeCookieJarSchema);
 export default ScrapeCookieJar;

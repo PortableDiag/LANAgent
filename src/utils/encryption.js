@@ -142,6 +142,113 @@ export function decrypt(encryptedData) {
 }
 
 /**
+ * Walk `fieldPath` while cloning every level along the way, so the returned root
+ * shares no mutable object with the input.
+ *
+ * A plain `{ ...obj }` is a SHALLOW copy: for a nested path it hands back a root
+ * whose children are still the caller's objects, so writing the encrypted value
+ * mutated the caller's original in place. The advertised example
+ * ('user.profile.email') hit exactly that, and the ciphertext was written into
+ * both the "copy" and the source.
+ *
+ * @param {object} obj - Root object
+ * @param {string[]} parts - Path segments
+ * @returns {{root: object, parent: object, key: string}}
+ */
+function cloneAlongPath(obj, parts) {
+  const copy = (v) => (Array.isArray(v) ? [...v] : { ...v });
+  const root = copy(obj);
+  let current = root;
+
+  for (let i = 0; i < parts.length - 1; i++) {
+    const segment = parts[i];
+    const child = current[segment];
+    if (child === null || typeof child !== 'object') {
+      throw new Error(`Field path ${parts.join('.')} does not exist in object`);
+    }
+    current[segment] = copy(child);
+    current = current[segment];
+  }
+
+  const key = parts[parts.length - 1];
+  if (!(key in current)) {
+    throw new Error(`Field ${key} does not exist at path ${parts.join('.')}`);
+  }
+  return { root, parent: current, key };
+}
+
+/**
+ * Encrypt a specific field in an object, returning a new object.
+ *
+ * Non-string values are JSON-encoded before encryption. Note this is lossy in one
+ * direction: a plain string that happens to look like JSON ('{"a":1}') will come
+ * back from decryptField as a parsed object. Encrypt a wrapper if that matters.
+ *
+ * @param {object} obj - The object containing the field to encrypt
+ * @param {string} fieldPath - Dot notation path to the field (e.g., 'user.profile.email')
+ * @returns {object} - New object with the specified field encrypted; `obj` is untouched
+ */
+export function encryptField(obj, fieldPath) {
+  if (!obj || !fieldPath) {
+    throw new Error('Object and field path are required');
+  }
+
+  const { root, parent, key } = cloneAlongPath(obj, fieldPath.split('.'));
+  const value = parent[key];
+
+  if (typeof value === 'string') {
+    parent[key] = encrypt(value);
+  } else if (typeof value === 'object' && value !== null) {
+    parent[key] = encrypt(JSON.stringify(value));
+  } else {
+    parent[key] = encrypt(String(value));
+  }
+
+  return root;
+}
+
+/**
+ * Decrypt a specific field in an object, returning a new object.
+ *
+ * A field that cannot be decrypted is left exactly as-is (and logged), so calling
+ * this on a record that was never encrypted is a no-op rather than an error.
+ *
+ * @param {object} obj - The object containing the field to decrypt
+ * @param {string} fieldPath - Dot notation path to the field (e.g., 'user.profile.email')
+ * @returns {object} - New object with the specified field decrypted; `obj` is untouched
+ */
+export function decryptField(obj, fieldPath) {
+  if (!obj || !fieldPath) {
+    throw new Error('Object and field path are required');
+  }
+
+  const { root, parent, key } = cloneAlongPath(obj, fieldPath.split('.'));
+  const value = parent[key];
+
+  if (typeof value !== 'string') return root;
+
+  try {
+    const plain = decrypt(value);
+    const looksJson = (plain.startsWith('{') && plain.endsWith('}')) ||
+                      (plain.startsWith('[') && plain.endsWith(']'));
+    if (looksJson) {
+      try {
+        parent[key] = JSON.parse(plain);
+      } catch {
+        parent[key] = plain;
+      }
+    } else {
+      parent[key] = plain;
+    }
+  } catch (error) {
+    logger.warn(`Failed to decrypt field ${fieldPath}:`, error.message);
+    // Leave the field as-is if decryption fails
+  }
+
+  return root;
+}
+
+/**
  * Generate a new encryption key
  * @returns {string} - Hex encoded encryption key
  */

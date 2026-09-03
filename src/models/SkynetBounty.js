@@ -1,4 +1,5 @@
 import mongoose from 'mongoose';
+import { logger } from '../utils/logger.js';
 
 /**
  * SkynetBounty - P2P bounty system where agents post tasks and offer SKYNET rewards.
@@ -173,6 +174,51 @@ skynetBountySchema.statics.getRecommendedBounties = function(agentSkills, prefer
   }
 
   return this.find(query).sort({ reward: -1 });
+};
+
+/**
+ * Aggregate bounty analytics: mean time-to-complete, reward split by category,
+ * and completion rate.
+ *
+ * Done entirely in the aggregation pipeline rather than by loading documents:
+ * averaging two dates over every completed bounty does not need those documents
+ * in application memory, and this collection only grows.
+ *
+ * Note $avg ignores Date values outright — it does not coerce them — so the
+ * duration is cast to a long before averaging. Without the cast this returns
+ * null and silently reports 0.
+ *
+ * @returns {Promise<{averageCompletionTimeMs:number, rewardDistribution:Array, successRate:number, completedCount:number, totalCount:number}>}
+ */
+skynetBountySchema.statics.getBountyAnalytics = async function() {
+  try {
+    const [durationAgg, rewardDistribution, totalCount, completedCount] = await Promise.all([
+      this.aggregate([
+        { $match: { status: 'completed', claimedAt: { $ne: null }, completedAt: { $ne: null } } },
+        { $project: { ms: { $subtract: [{ $toLong: '$completedAt' }, { $toLong: '$claimedAt' }] } } },
+        { $group: { _id: null, avgMs: { $avg: '$ms' } } }
+      ]),
+      this.aggregate([
+        { $group: { _id: '$category', totalReward: { $sum: '$reward' }, count: { $sum: 1 } } },
+        { $sort: { totalReward: -1 } }
+      ]),
+      this.countDocuments(),
+      this.countDocuments({ status: 'completed' })
+    ]);
+
+    return {
+      averageCompletionTimeMs: durationAgg[0]?.avgMs ?? 0,
+      rewardDistribution,
+      // Guarded explicitly: an empty collection would otherwise divide by zero and
+      // report NaN, which serialises to null in JSON rather than a number.
+      successRate: totalCount > 0 ? (completedCount / totalCount) * 100 : 0,
+      completedCount,
+      totalCount
+    };
+  } catch (error) {
+    logger.error('Error fetching bounty analytics:', error);
+    throw new Error('Failed to fetch bounty analytics');
+  }
 };
 
 const SkynetBounty = mongoose.model('SkynetBounty', skynetBountySchema);

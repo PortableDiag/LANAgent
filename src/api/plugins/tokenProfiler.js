@@ -401,7 +401,7 @@ export default class TokenProfilerPlugin extends BasePlugin {
    *   Not open source:       -10 pts
    *   Ownership not renounced:-10 pts
    *   Top holder >50%:       -15 pts
-   *   Low liquidity (<[redacted]): -10 pts
+   *   Low liquidity (<$1000): -10 pts
    *   Mintable:              -10 pts
    */
   calculateScore(data) {

@@ -135,6 +135,23 @@ export class PriceIndicators {
       description: 'Weighted price trend score (positive = uptrend, negative = downtrend)',
       category: 'price'
     });
+
+    // Like price_trend, but timeframes/weights come from strategy config:
+    // config.customTrend = { timeframes: ['change1h', ...], weights: [0.15, ...] }
+    this.register('custom_weighted_trend', async (ctx) => {
+      const cfg = ctx.strategy?.config?.customTrend;
+      const timeframes = cfg?.timeframes ?? ['change1h', 'change24h', 'change7d'];
+      const weights = cfg?.weights ?? [0.15, 0.35, 0.5];
+      try {
+        return await this.calculateCustomTrend(ctx, timeframes, weights);
+      } catch {
+        return 0; // invalid config must not break rule evaluation
+      }
+    }, {
+      type: 'number',
+      description: 'Weighted price trend with configurable timeframes/weights (config.customTrend)',
+      category: 'price'
+    });
   }
 
   register(name, fn, metadata) {
@@ -164,6 +181,44 @@ export class PriceIndicators {
       };
     }
     return result;
+  }
+
+  /**
+   * Calculate custom weighted price trend with configurable timeframes and weights
+   * @param {Object} ctx - Context object containing market data
+   * @param {Array<string>} timeframes - Array of timeframe identifiers (e.g., ['change1h', 'change24h', 'change7d'])
+   * @param {Array<number>} weights - Array of weights corresponding to each timeframe
+   * @returns {number} Weighted trend score
+   */
+  async calculateCustomTrend(ctx, timeframes, weights) {
+    const data = ctx.marketData?.prices?.[ctx.network];
+    if (!data?.price) return 0;
+
+    if (!Array.isArray(timeframes) || !Array.isArray(weights)) {
+      throw new Error('Timeframes and weights must be arrays');
+    }
+
+    if (timeframes.length !== weights.length) {
+      throw new Error('Timeframes and weights arrays must have the same length');
+    }
+
+    let weightedSum = 0;
+    let totalWeight = 0;
+
+    for (let i = 0; i < timeframes.length; i++) {
+      const timeframe = timeframes[i];
+      const weight = weights[i];
+
+      if (typeof weight !== 'number' || weight < 0) {
+        throw new Error('Weights must be non-negative numbers');
+      }
+
+      const value = data[timeframe] || 0;
+      weightedSum += value * weight;
+      totalWeight += weight;
+    }
+
+    return totalWeight > 0 ? weightedSum / totalWeight : 0;
   }
 }
 

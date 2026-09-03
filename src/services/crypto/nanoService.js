@@ -298,7 +298,7 @@ class NanoService {
                     await this.receiveAll(address);
                 }
             } catch (err) {
-                logger.error('Nano receivable monitor error:', err.message);
+                logger.error(`Nano receivable monitor error: ${err?.message || err?.code || String(err)}`);
             }
         }, 5 * 60 * 1000); // 5 minutes
     }

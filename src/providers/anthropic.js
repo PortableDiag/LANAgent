@@ -7,6 +7,7 @@ import { safeJsonParse, validateJsonSchema } from '../utils/jsonUtils.js';
 export class AnthropicProvider extends BaseProvider {
   constructor(config = {}) {
     super("Anthropic", config);
+    this.supportsWebSearch = true;
     this.client = null;
     this.models = {
       chat: config.chatModel || config.model || "claude-sonnet-4-5-20250929",

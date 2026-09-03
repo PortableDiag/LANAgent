@@ -173,4 +173,89 @@ memorySchema.statics.aggregateMemoriesByUser = function(matchCriteria = {}) {
   return this.aggregate(pipeline).exec();
 };
 
+/**
+ * Traverse memory relationships to build a graph of connected memories
+ * @param {string} memoryId - The ID of the starting memory
+ * @param {number} maxHops - Maximum number of relationship hops to traverse (default: 3)
+ * @param {Set} visited - Set of visited memory IDs to prevent cycles
+ * @returns {Promise<Object>} Graph representation of related memories
+ */
+memorySchema.statics.traverseRelationships = async function(memoryId, maxHops = 3, visited = new Set()) {
+  memoryId = memoryId.toString();
+  if (maxHops <= 0 || visited.has(memoryId)) {
+    return { nodes: [], edges: [] };
+  }
+
+  visited.add(memoryId);
+
+  const memory = await this.findById(memoryId);
+  if (!memory) {
+    return { nodes: [], edges: [] };
+  }
+
+  const graph = {
+    nodes: [{ id: memory._id.toString(), content: memory.content, type: memory.type }],
+    edges: []
+  };
+
+  if (memory.metadata.relatedMemories && memory.metadata.relatedMemories.length > 0) {
+    for (const relatedMemory of memory.metadata.relatedMemories) {
+      if (relatedMemory) {
+        const relatedId = relatedMemory._id ? relatedMemory._id.toString() : relatedMemory.toString();
+        graph.edges.push({
+          source: memoryId,
+          target: relatedId
+        });
+
+        const subGraph = await this.traverseRelationships(relatedId, maxHops - 1, visited);
+        graph.nodes = [...graph.nodes, ...subGraph.nodes];
+        graph.edges = [...graph.edges, ...subGraph.edges];
+      }
+    }
+  }
+
+  // Remove duplicate nodes and edges
+  const uniqueNodes = Array.from(new Map(graph.nodes.map(node => [node.id, node])).values());
+  const uniqueEdges = Array.from(new Map(graph.edges.map(edge => [`${edge.source}-${edge.target}`, edge])).values());
+
+  return { nodes: uniqueNodes, edges: uniqueEdges };
+};
+
+/**
+ * Create a relationship between two memories
+ * @param {string} sourceMemoryId - The ID of the source memory
+ * @param {string} targetMemoryId - The ID of the target memory
+ * @returns {Promise<Object>} Updated source memory document
+ */
+memorySchema.statics.createRelationship = async function(sourceMemoryId, targetMemoryId) {
+  if (sourceMemoryId.toString() === targetMemoryId.toString()) {
+    throw new Error('Cannot create relationship to self');
+  }
+
+  const sourceMemory = await this.findById(sourceMemoryId);
+  const targetMemory = await this.findById(targetMemoryId);
+
+  if (!sourceMemory) {
+    throw new Error(`Source memory with ID ${sourceMemoryId} not found`);
+  }
+
+  if (!targetMemory) {
+    throw new Error(`Target memory with ID ${targetMemoryId} not found`);
+  }
+
+  // Add target to source's related memories if not already present
+  if (!sourceMemory.metadata.relatedMemories) {
+    sourceMemory.metadata.relatedMemories = [];
+  }
+
+  const alreadyRelated = sourceMemory.metadata.relatedMemories
+    .some(id => id.toString() === targetMemoryId.toString());
+  if (!alreadyRelated) {
+    sourceMemory.metadata.relatedMemories.push(targetMemoryId);
+    await sourceMemory.save();
+  }
+
+  return sourceMemory;
+};
+
 export const Memory = mongoose.model('Memory', memorySchema);

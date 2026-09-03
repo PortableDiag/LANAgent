@@ -126,6 +126,39 @@ export function checkProviderConfig(type, settings = {}) {
   return result;
 }
 
+/**
+ * Validate provider configuration
+ * @param {string} type - Provider type
+ * @param {object} config - Provider configuration parameters
+ * @returns {object} Validation result with status and details
+ */
+export async function validateProviderConfiguration(type, config = {}) {
+  try {
+    // Create a temporary provider instance with the provided config
+    const provider = createProvider(type, config);
+    
+    // Test the configuration by attempting to initialize
+    await provider.initialize();
+    
+    // If we get here, the configuration is valid
+    return {
+      valid: true,
+      message: 'Configuration is valid',
+      details: {}
+    };
+  } catch (error) {
+    // Configuration is invalid
+    return {
+      valid: false,
+      message: `Configuration validation failed: ${error.message}`,
+      details: {
+        error: error.message,
+        code: error.code
+      }
+    };
+  }
+}
+
 // Export classes for direct use
 export { GitHostingProvider, GitHubProvider, GitLabProvider };
 
@@ -136,6 +169,7 @@ export default {
   clearProviderCache,
   getCurrentProviderType,
   checkProviderConfig,
+  validateProviderConfiguration,
   PROVIDER_TYPES,
   GitHostingProvider,
   GitHubProvider,

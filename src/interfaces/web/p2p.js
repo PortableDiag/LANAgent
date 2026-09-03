@@ -1192,6 +1192,38 @@ router.get('/api/skynet/payments', authenticateToken, async (req, res) => {
   }
 });
 
+// Re-verify a stored Skynet payment against the chain (audit / reorg / tamper check)
+router.get('/api/skynet/payments/:txHash/reconcile', authenticateToken, async (req, res) => {
+  try {
+    const txHash = req.params.txHash;
+    if (!/^0x[0-9a-fA-F]{64}$/.test(txHash)) {
+      return res.status(400).json({ success: false, error: 'Invalid transaction hash' });
+    }
+    const result = await SkynetPayment.reconcilePayment(txHash);
+    res.json({ success: true, ...result });
+  } catch (error) {
+    logger.error('Skynet payment reconciliation API error:', error);
+    const notFound = /not found/i.test(error.message);
+    res.status(notFound ? 404 : 500).json({ success: false, error: error.message });
+  }
+});
+
+// Flag a stored Skynet payment as disputed (record-keeping; resolution is manual)
+router.post('/api/skynet/payments/:txHash/dispute', authenticateToken, async (req, res) => {
+  try {
+    const txHash = req.params.txHash;
+    if (!/^0x[0-9a-fA-F]{64}$/.test(txHash)) {
+      return res.status(400).json({ success: false, error: 'Invalid transaction hash' });
+    }
+    const result = await SkynetPayment.submitDispute(txHash, req.body?.evidence ?? null);
+    res.status(result.success ? 200 : 409).json(result);
+  } catch (error) {
+    logger.error('Skynet payment dispute API error:', error);
+    const notFound = /not found/i.test(error.message);
+    res.status(notFound ? 404 : 500).json({ success: false, error: error.message });
+  }
+});
+
 // Request service catalog from a peer
 router.post('/api/peers/:fingerprint/catalog', authenticateToken, async (req, res) => {
   try {

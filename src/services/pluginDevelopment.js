@@ -815,33 +815,34 @@ export class PluginDevelopmentService extends EventEmitter {
       }
       
       if (webSearchPlugin) {
-        // Determine the best provider for web search (Anthropic or OpenAI)
-        const currentProvider = this.agent.providerManager?.getCurrentProvider();
-        let searchProvider = null;
-        
-        if (currentProvider?.name === 'anthropic') {
-          searchProvider = 'anthropic';
-        } else if (this.agent.providerManager?.providers?.has('openai')) {
-          searchProvider = 'openai';
-          logger.info(`Using OpenAI fallback for web search`);
-        } else {
-          logger.warn('No suitable provider for web search available');
-          return null;
-        }
-        
+        // Let the plugin pick — it knows which providers can actually search and which
+        // the provider lock allows. Passing a preference here used to force 'openai' on
+        // every run (getCurrentProvider() is async, so the un-awaited call made
+        // currentProvider?.name undefined) and each query then died on a blocked switch.
+
         const searchResponse = await webSearchPlugin.execute({
           action: 'search',
           query: searchQuery,
-          maxResults: 10,
-          provider: searchProvider
+          maxResults: 10
         });
         
         if (searchResponse.success && searchResponse.data && searchResponse.data.length > 0) {
           return searchResponse.data;
-        } else {
-          logger.warn(`Web search returned no results for: ${searchQuery}`);
-          return null;
         }
+
+        // "Could not search at all" is not "searched and found nothing". The fallback below
+        // used to be reachable only when the plugin was missing entirely, so once web search
+        // became unavailable — no provider with a search tool, or the provider lock pinning
+        // spend to one without — every scan walked 10 queries to zero candidates and developed
+        // nothing, every day. Ask the model directly instead: the same question, answered from
+        // training data rather than the live web.
+        if (!searchResponse.success) {
+          logger.warn(`Web search unavailable (${searchResponse.error}) — falling back to direct AI search`);
+          return await this.performFallbackSearch(searchQuery, focusArea);
+        }
+
+        logger.warn(`Web search returned no results for: ${searchQuery}`);
+        return null;
       } else {
         // Fallback to direct AI search
         return await this.performFallbackSearch(searchQuery, focusArea);
@@ -906,12 +907,20 @@ export class PluginDevelopmentService extends EventEmitter {
         `https://www.apipheny.io/free-api/` // Curated list of 90+ free tier APIs
       ];
       
-      // Build URLs based on whether they support categories
+      // Build URLs based on whether they support categories.
+      // The category slug is NOT the focus area. publicapis.dev publishes its
+      // own taxonomy ('documents-and-productivity', 'open-data', 'tracking'),
+      // and only 4 of the 10 focus areas happen to collide with a real slug —
+      // so `${baseUrl}/category/${focusArea}` 404'd on 6 of every 10 areas,
+      // burning a browser scrape each time (18 such 404s on 2026-08-30 alone).
+      // Resolve against the directory's live category list instead, and fall
+      // back to the directory root (a valid listing page) when nothing matches
+      // rather than fabricating a URL.
       const directoryUrls = [];
       for (const baseUrl of baseUrls) {
         if (baseUrl.includes('publicapis.dev') || baseUrl.includes('apilist.fun')) {
-          // These sites support categories
-          directoryUrls.push(`${baseUrl}/category/${focusArea}`);
+          const slug = await this._resolveDirectoryCategory(baseUrl, focusArea);
+          directoryUrls.push(slug ? `${baseUrl}/category/${slug}` : baseUrl);
         } else {
           // These are general lists - we'll filter by focus area during extraction
           directoryUrls.push(baseUrl);
@@ -951,6 +960,78 @@ export class PluginDevelopmentService extends EventEmitter {
     }
     
     return candidates;
+  }
+
+  /**
+   * Map one of our focus areas onto a category slug the directory actually
+   * publishes, by reading the directory's own category links.
+   *
+   * Matching order: exact slug, then an explicit alias, then a slug that
+   * contains the focus area as a word ('productivity' ->
+   * 'documents-and-productivity'). The alias comes first because a lexical
+   * hit can be an accident — 'data' word-matches 'data-validation', a much
+   * narrower category than the intended 'open-data'. Anything unresolved
+   * returns null so the caller uses the directory root, not a guessed 404.
+   *
+   * The live list is fetched once per base URL per process — a plain HTML GET,
+   * not a browser scrape — and a fetch failure resolves to null (root) rather
+   * than throwing, so a directory being down degrades the scan instead of
+   * failing it.
+   *
+   * @param {string} baseUrl
+   * @param {string} focusArea
+   * @returns {Promise<string|null>} a real category slug, or null for "use the root"
+   */
+  async _resolveDirectoryCategory(baseUrl, focusArea) {
+    // Focus areas whose name appears nowhere in any directory taxonomy.
+    const ALIASES = {
+      monitoring: 'tracking',
+      communication: 'email',
+      automation: 'development',
+      iot: 'environment',
+      data: 'open-data'
+    };
+
+    this._directoryCategoryCache = this._directoryCategoryCache || new Map();
+    let slugs = this._directoryCategoryCache.get(baseUrl);
+    if (!slugs) {
+      slugs = [];
+      try {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 15000);
+        try {
+          const res = await fetch(baseUrl, { signal: controller.signal });
+          if (res.ok) {
+            const html = await res.text();
+            slugs = Array.from(new Set(
+              (html.match(/href="\/category\/([^"#?]+)"/g) || [])
+                .map(h => h.replace(/^href="\/category\//, '').replace(/"$/, ''))
+                .filter(Boolean)
+            ));
+          }
+        } finally {
+          clearTimeout(timer);
+        }
+      } catch (error) {
+        logger.warn(`Could not read categories from ${baseUrl}: ${error.message}`);
+      }
+      this._directoryCategoryCache.set(baseUrl, slugs);
+    }
+
+    // No taxonomy readable — the root listing is still a valid page.
+    if (slugs.length === 0) return null;
+
+    const area = String(focusArea || '').toLowerCase();
+    if (slugs.includes(area)) return area;
+
+    const alias = ALIASES[area];
+    if (alias && slugs.includes(alias)) return alias;
+
+    const wordMatch = slugs.find(s => s.split('-').includes(area));
+    if (wordMatch) return wordMatch;
+
+    logger.info(`No ${baseUrl} category matches focus area "${focusArea}" — using the directory root`);
+    return null;
   }
 
   /**
@@ -1170,78 +1251,46 @@ NO NUMBERING, NO BULLETS, JUST PIPE-SEPARATED VALUES.`;
   }
 
   /**
-   * Process AI request with robust provider handling
+   * Run an internal AI prompt for plugin development.
+   *
+   * This used to call agent.processNaturalLanguage() — the USER command entry point, which
+   * runs intent detection and executes whatever plugin the detector matches. So the extraction
+   * prompt "Extract API services from this content about monitoring APIs: …" was matched to
+   * `apikeys list` (confidence 0.54) and the agent's own API key listing came back as the
+   * "model answer" to be parsed; other runs fired the spoonacular and anime plugins
+   * (2026-08-30). Internal prompts go straight to the provider: no intent detection, no plugin
+   * dispatch, and no switchProvider() — that mutates the ACTIVE provider globally for a
+   * background job, and the provider lock refuses it anyway.
    */
-  async processWithRobustProvider(prompt) {
-    const currentProvider = this.agent.providerManager?.getCurrentProvider();
-    
-    // Use current provider if it's Anthropic or OpenAI
-    if (currentProvider?.name === 'anthropic' || currentProvider?.name === 'openai') {
-      return await this.agent.processNaturalLanguage(prompt, 'system');
+  async processWithRobustProvider(prompt, options = {}) {
+    const providerManager = this.agent?.providerManager;
+    if (!providerManager) {
+      throw new Error('No AI provider available for plugin development');
     }
-    
-    // Switch to OpenAI for better parsing reliability
-    if (this.agent.providerManager?.providers?.has('openai')) {
-      logger.info('Switching to OpenAI for reliable API extraction');
-      const originalProvider = this.agent.providerManager.getCurrentProvider();
-      
-      try {
-        await this.agent.providerManager.switchProvider('openai');
-        const response = await this.agent.processNaturalLanguage(prompt, 'system');
-        return response;
-      } finally {
-        // Switch back only if we had an original provider
-        if (originalProvider?.name && originalProvider.name !== 'openai') {
-          await this.agent.providerManager.switchProvider(originalProvider.name);
-        }
-      }
-    }
-    
-    // Fallback to current provider
-    return await this.agent.processNaturalLanguage(prompt, 'system');
+
+    return await providerManager.generateResponse(prompt, {
+      maxTokens: 1000,
+      temperature: 0.2,
+      ...options
+    });
   }
 
   /**
-   * Fallback search method when web search plugin is unavailable
+   * Fallback search method when web search plugin is unavailable.
+   * Answers from the model's own knowledge — no switchProvider(), same reasons as above.
    */
   async performFallbackSearch(searchQuery, focusArea) {
     try {
-      const currentProvider = this.agent.providerManager?.getCurrentProvider();
-      
-      if (currentProvider?.name !== 'anthropic' && this.agent.providerManager?.providers?.has('openai')) {
-        logger.info('Switching to OpenAI for fallback search');
-        const originalProvider = this.agent.providerManager.getCurrentProvider();
-        await this.agent.providerManager.switchProvider('openai');
-        
-        try {
-          const response = await this.agent.processNaturalLanguage(
-            `Search for information about: "${searchQuery}". Provide information about available APIs in the ${focusArea} category that developers can use.`,
-            'system'
-          );
-          
-          // Return mock search results format for consistency
-          return [{
-            title: `${focusArea} APIs Information`,
-            url: 'https://example.com',
-            snippet: response
-          }];
-        } finally {
-          if (originalProvider?.name !== 'openai') {
-            await this.agent.providerManager.switchProvider(originalProvider.name);
-          }
-        }
-      } else {
-        const response = await this.agent.processNaturalLanguage(
-          `Search for information about: "${searchQuery}". Provide information about available APIs in the ${focusArea} category that developers can use.`,
-          'system'
-        );
-        
-        return [{
-          title: `${focusArea} APIs Information`,
-          url: 'https://example.com',
-          snippet: response
-        }];
-      }
+      const response = await this.processWithRobustProvider(
+        `Search for information about: "${searchQuery}". Provide information about available APIs in the ${focusArea} category that developers can use.`
+      );
+
+      // Mock search-result shape, for consistency with the web search plugin
+      return [{
+        title: `${focusArea} APIs Information`,
+        url: 'https://example.com',
+        snippet: response?.content || ''
+      }];
     } catch (error) {
       logger.error('Fallback search failed:', error);
       return null;
@@ -1927,7 +1976,7 @@ Be concise and specific.`;
    * Research API documentation in detail
    */
   async researchAPIDocumentation(api) {
-    const docsResult = await this.agent.processNaturalLanguage(
+    const docsResult = await this.processWithRobustProvider(
       `Research the ${api.name} API documentation at ${api.url} and provide detailed information about:
       1. Base URL and endpoints
       2. Authentication method and setup
@@ -1950,9 +1999,9 @@ Be concise and specific.`;
         "errorCodes": "string",
         "sdks": "string"
       }`,
-      'system'
+      { maxTokens: 1500 }
     );
-    
+
     // Extract the actual content from the response object
     let docsText = '';
     

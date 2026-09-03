@@ -9,8 +9,7 @@ const improvementMetricsSchema = new mongoose.Schema({
   date: {
     type: Date,
     required: true,
-    unique: true,
-    index: true
+    unique: true
   },
   daily: {
     total: { type: Number, default: 0 },
@@ -66,9 +65,12 @@ const improvementMetricsSchema = new mongoose.Schema({
     totalCapabilities: { type: Number, default: 0 }
   },
   trends: {
+    // `improvementType` (not `type`) so Mongoose doesn't parse the subdoc
+    // as a SchemaTypeOptions block (the `type:` key with a constructor value
+    // would otherwise cast the whole array to [String]).
     byType: [{
       date: Date,
-      type: String,
+      improvementType: String,
       count: Number
     }],
     byPriority: [{
@@ -196,9 +198,9 @@ improvementMetricsSchema.statics.updateMetrics = async function(date = new Date(
     };
 
     const trends = {
-      byType: Object.entries(dailyMetrics.byType).map(([type, count]) => ({
+      byType: Object.entries(dailyMetrics.byType).map(([improvementType, count]) => ({
         date: startOfDay,
-        type,
+        improvementType,
         count
       })),
       byPriority: Object.entries(dailyMetrics.byPriority).map(([priority, count]) => ({

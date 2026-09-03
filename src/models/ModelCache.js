@@ -93,7 +93,7 @@ const modelCacheSchema = new mongoose.Schema({
   timestamps: true
 });
 
-modelCacheSchema.index({ provider: 1 });
+// provider: unique on the field-level decl already creates this index
 modelCacheSchema.index({ lastChecked: -1 });
 
 modelCacheSchema.methods.isStale = function(maxAgeHours = 24) {

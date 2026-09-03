@@ -196,5 +196,81 @@ systemSettingsSchema.statics.bulkUpdateSettings = async function(settingsArray) 
   return results;
 };
 
+/**
+ * Export all system settings in a structured JSON format
+ * @returns {Object} - All settings organized by category
+ */
+systemSettingsSchema.statics.exportSettings = async function() {
+  try {
+    const settings = await this.find({});
+    const exported = {};
+    
+    settings.forEach(setting => {
+      if (!exported[setting.category]) {
+        exported[setting.category] = {};
+      }
+      exported[setting.category][setting.key] = {
+        value: setting.value,
+        description: setting.description,
+        createdAt: setting.createdAt,
+        updatedAt: setting.updatedAt
+      };
+    });
+    
+    return exported;
+  } catch (error) {
+    logger.error('Error exporting settings:', error);
+    throw error;
+  }
+};
+
+/**
+ * Import system settings from a structured JSON format
+ * @param {Object} settingsData - Settings data organized by category
+ * @param {String} strategy - Import strategy: 'merge' or 'replace'
+ * @returns {Object} - Import result with counts
+ */
+systemSettingsSchema.statics.importSettings = async function(settingsData, strategy = 'merge') {
+  try {
+    if (!settingsData || typeof settingsData !== 'object' || Array.isArray(settingsData)) {
+      throw new Error('settingsData must be an object keyed by category');
+    }
+    if (!['merge', 'replace'].includes(strategy)) {
+      throw new Error(`Unknown import strategy: ${strategy}`);
+    }
+
+    const settingsToImport = [];
+    for (const [category, settings] of Object.entries(settingsData)) {
+      for (const [key, settingData] of Object.entries(settings)) {
+        settingsToImport.push({
+          key,
+          value: settingData.value,
+          description: settingData.description,
+          category
+        });
+      }
+    }
+
+    if (strategy === 'replace') {
+      // Clear all existing settings (only after the payload parsed cleanly)
+      await this.deleteMany({});
+      cache.flushAll();
+    }
+
+    // bulkUpdateSettings swallows per-key failures and returns successes only
+    const results = await this.bulkUpdateSettings(settingsToImport);
+
+    return {
+      success: true,
+      processed: results.length,
+      skipped: settingsToImport.length - results.length,
+      errors: []
+    };
+  } catch (error) {
+    logger.error('Error importing settings:', error);
+    throw error;
+  }
+};
+
 export const SystemSettingsHistory = mongoose.model('SystemSettingsHistory', systemSettingsHistorySchema);
 export const SystemSettings = mongoose.model('SystemSettings', systemSettingsSchema);

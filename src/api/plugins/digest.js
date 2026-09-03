@@ -526,7 +526,7 @@ For EACH article found, you MUST provide ALL of the following:
 Format each article clearly with all 4 elements. Be specific and use real, current information from the web.${sourceDirective}`;
 
     // Use the currently selected provider with web search enabled
-    const currentProvider = this.agent.providerManager.getCurrentProvider()?.name;
+    const currentProvider = (await this.agent.providerManager.getCurrentProvider())?.name;
     this.logger.info(`Using ${currentProvider} for web search research`);
 
     const response = await this.agent.providerManager.generateResponse(prompt, {
@@ -560,7 +560,7 @@ Format each article clearly with all 4 elements. Be specific and use real, curre
     const searches = [];
 
     // Use the currently selected provider with web search enabled
-    const currentProvider = this.agent.providerManager.getCurrentProvider()?.name;
+    const currentProvider = (await this.agent.providerManager.getCurrentProvider())?.name;
     this.logger.info(`Using ${currentProvider} for web search deep research`);
 
     for (const query of queries) {

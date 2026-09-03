@@ -291,15 +291,12 @@ class TransactionService {
                 }, 5 * 60 * 1000);
             }
 
-            // Update wallet transaction
-            const wallet = await walletService.getWallet();
-            const walletTx = wallet.transactions.find(t => t.hash === tx.hash);
-            if (walletTx) {
-                walletTx.status = receipt.status === 1 ? 'confirmed' : 'failed';
-                walletTx.blockNumber = receipt.blockNumber;
-                walletTx.gasUsed = receipt.gasUsed?.toString();
-                await wallet.save();
-            }
+            // Update wallet transaction (atomic - see updateTransactionStatus)
+            await walletService.updateTransactionStatus(
+                tx.hash,
+                receipt.status === 1 ? 'confirmed' : 'failed',
+                { blockNumber: receipt.blockNumber, gasUsed: receipt.gasUsed?.toString() }
+            );
 
             logger.info(`Transaction ${tx.hash} ${receipt.status === 1 ? 'confirmed' : 'failed'}`);
             
@@ -402,17 +399,13 @@ class TransactionService {
      * Get filtered transaction history with pagination.
      *
      * Backed by the HistoricalTransaction collection (defined in
-     * SkynetTokenLedger.js). That schema has: transactionType, category,
-     * txHash, network, amount, date, description, idempotencyKey.
+     * SkynetTokenLedger.js). Filters applied directly to the Mongo query.
+     * Rows logged before address/status existed have those fields null; a
+     * filter on them excludes those legacy rows.
      *
-     * The route exposes additional filters (address, status) that the
-     * underlying schema does NOT track today — they're accepted for API
-     * forward-compatibility but currently ignored. When those fields get
-     * added to the schema, this method picks them up automatically.
-     *
-     * @param {string|null} address — TODO: not stored in current schema
+     * @param {string|null} address — case-insensitive exact match on the address field
      * @param {string|null} network — bsc / eth / polygon / etc
-     * @param {string|null} status — TODO: not stored in current schema
+     * @param {string|null} status — 'pending' | 'confirmed' | 'failed'
      * @param {string|Date|null} startDate
      * @param {string|Date|null} endDate
      * @param {number} limit — max rows; clamped to 1..500
@@ -430,6 +423,13 @@ class TransactionService {
 
         const query = {};
         if (network) query.network = network;
+        if (address) {
+            // Case-insensitive exact match (EVM addresses can be stored mixed-case via checksum)
+            query.address = new RegExp(`^${address.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i');
+        }
+        if (status && ['pending', 'confirmed', 'failed'].includes(status)) {
+            query.status = status;
+        }
         if (startDate || endDate) {
             query.date = {};
             if (startDate) {
@@ -442,7 +442,6 @@ class TransactionService {
             }
             if (Object.keys(query.date).length === 0) delete query.date;
         }
-        // address / status — see method doc. Schema doesn't track them yet.
 
         const [items, total] = await Promise.all([
             HistoricalTransaction.find(query)

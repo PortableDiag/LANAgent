@@ -124,7 +124,7 @@ function looksLikeJsShell(result) {
 
 // Single source of truth for "this result is unusable, try the next fallback".
 // Used by the Puppeteer-escalation, Twitterbot, Wayback, and archive.ph gates.
-function isUnusableResult(result) {
+export function isUnusableResult(result) {
   if (!result?.success) return true;
   const htmlLen = typeof result._rawHtml === 'string' ? result._rawHtml.length : 0;
   const textLen = typeof result.content?.text === 'string' ? result.content.text.length : 0;
@@ -132,8 +132,53 @@ function isUnusableResult(result) {
   // surfaces raw HTML, so it is no longer permanently zero outside FlareSolverr.
   // htmlLen === 0 still counts as stub-shaped, so a tier that genuinely returns
   // no HTML is not given a free pass just because the second half cannot measure.
-  const lengthLooksStub = textLen < 500 && (htmlLen === 0 || htmlLen < 8000);
+  //
+  // A SMALL PAGE IS NOT A STUB. The raw length test alone reported live pages as
+  // blocked: example.com is a complete 200 (559B HTML / 142B text) and tripped
+  // `textLen < 500 && htmlLen < 8000`, so every bypass layer ran against a page
+  // that was never blocked — 25s on basic, 112s on stealth — and the caller was
+  // told 422 "all bypass layers returned stub-shaped content" for a live URL.
+  // That is the worst possible answer for a link checker, and each false positive
+  // also burns an agent slot for the length of the whole ladder.
+  //
+  // A husk or interstitial is markup with almost no text in it; a genuinely small
+  // document has text proportionate to its markup. Measured densities
+  // (text/HTML): example.com 0.254, iana.org 0.196, a Wikipedia article 0.122 —
+  // complete documents sit at 0.12+, while shells and challenge pages sit far
+  // below. Shells and challenge pages are still caught on their own merits by the
+  // two guards below, including the 4000B/600B app-shell case that overlaps this
+  // size range, so this only spares documents that are small AND dense.
+  const density = htmlLen > 0 ? textLen / htmlLen : 0;
+  const completeButSmall = htmlLen > 0 && textLen >= 50 && density >= 0.08;
+  const lengthLooksStub = !completeButSmall && textLen < 500 && (htmlLen === 0 || htmlLen < 8000);
   return lengthLooksStub || looksLikeChallengePage(result) || looksLikeJsShell(result);
+}
+
+// Why a result was judged unusable, reported to the caller alongside the verdict.
+//
+// A consumer (SuperWeaponNews, 2026-09-01) asked the right question: a 422 reads
+// as an authoritative statement about the page, so a gate regression silently
+// turns live URLs into dead ones in their link scoring and they have no way to
+// know to ask us. That is not hypothetical — it is exactly what v2.25.261 fixed.
+//
+// So the verdict now ships its evidence. The distinction that matters is WHICH
+// detector fired: a challenge marker or an app-shell signature is positive
+// evidence of a block, whereas the size/density gate is an INFERENCE from shape
+// alone and is the one that has produced false positives on live pages. A caller
+// can treat `confidence: 'low'` as provisional (re-check, or record UNVERIFIED
+// rather than dead) and `'high'` as a real block.
+export function stubEvidence(result) {
+  const htmlBytes = typeof result?._rawHtml === 'string' ? result._rawHtml.length : 0;
+  const textBytes = typeof result?.content?.text === 'string' ? result.content.text.length : 0;
+  const challenge = looksLikeChallengePage(result);
+  const jsShell = looksLikeJsShell(result);
+  return {
+    htmlBytes,
+    textBytes,
+    density: htmlBytes > 0 ? Number((textBytes / htmlBytes).toFixed(3)) : 0,
+    detector: challenge ? 'challenge-marker' : (jsShell ? 'js-app-shell' : 'size-and-density'),
+    confidence: (challenge || jsShell) ? 'high' : 'low'
+  };
 }
 
 // Whether to reach for an archive (Wayback / archive.ph). Two cases:
@@ -184,7 +229,7 @@ function classifyScrapeError(errMsg) {
 // tuned to how recoverable that failure class is. Cached failures short-circuit
 // the next identical request — that's how we stop a client retry loop from
 // burning 7 × full 4-tier chains in 3 minutes on the same dead URL.
-function cacheFailure(cacheKey, errMsg) {
+function cacheFailure(cacheKey, errMsg, extra = null) {
   const cls = classifyScrapeError(errMsg);
   const failureRecord = {
     success: false,
@@ -192,10 +237,49 @@ function cacheFailure(cacheKey, errMsg) {
     errorKind: cls.kind,
     httpStatus: cls.status,
     cached: true,
-    targetError: true
+    targetError: true,
+    // Structured evidence for the verdict, when the caller can act on it. The
+    // gateway spreads the agent body into its own response, so this reaches the
+    // customer unchanged.
+    ...(extra || {})
   };
   scrapeCache.set(cacheKey, failureRecord, cls.cacheTtl);
   return failureRecord;
+}
+
+// Failure kinds that describe a condition which can clear on its own. `nxdomain`
+// is the one definitive negative — the resolver gave a real answer — so it is the
+// only kind a caller should treat as settled.
+const RETRYABLE_FAILURE_KINDS = new Set(['dns_temp', 'tcp_reset', 'timeout', 'blocked', 'other']);
+
+// A cached FAILURE replayed to a later caller is not a fresh verdict about the
+// page, and served bare it is indistinguishable from one: same body, same error
+// string, just returned in ~0ms instead of after a real attempt.
+//
+// That is what a customer (SuperWeaponNews, 2026-09-01) hit — an unpaced batch
+// came back 9 OK / 9 FAIL in 322-464ms per failure, and the same URLs succeeded
+// when probed individually minutes later, once the cached failures had aged out.
+// Their link checker could not tell "we just tried and this page is unreachable"
+// from "we are replaying a 40-second-old transient", so a retryable condition
+// scored links dead.
+//
+// The replay now says what it is and when it expires, so a caller can back off
+// for exactly the remaining TTL instead of guessing or treating it as settled.
+// Same principle as blockEvidence: never present an inference or a stale reading
+// as a fresh measurement.
+export function markReplayedFailure(cached, remainingMs) {
+  return {
+    ...cached,
+    cached: true,
+    cachedFailureReplay: true,
+    retryAfterSeconds: remainingMs > 0 ? Math.ceil(remainingMs / 1000) : 1,
+    retryable: RETRYABLE_FAILURE_KINDS.has(cached.errorKind)
+  };
+}
+
+function replayedFailure(cacheKey, cached) {
+  const expiresAt = scrapeCache.getTtl(cacheKey);
+  return markReplayedFailure(cached, expiresAt ? Math.max(0, expiresAt - Date.now()) : 0);
 }
 
 // Credit costs per tier (v2.25.25: render dropped from 5 → 3 to match `full` —
@@ -517,7 +601,7 @@ async function executeScrape(req, { url, selectors, extractType = 'text', userAg
   // Check cache
   const cacheKey = `${action}:${url}:${JSON.stringify(selectors || '')}:render=${renderTier}:fp=${!!fullPage}`;
   const cached = scrapeCache.get(cacheKey);
-  if (cached) return cached;
+  if (cached) return cached.success === false ? replayedFailure(cacheKey, cached) : cached;
 
   // X/Twitter tweet fast-path (see fetchTweetJson): pull /status/<id> URLs as
   // JSON instead of running the browser cascade that only ever gets the login
@@ -912,8 +996,11 @@ async function executeScrape(req, { url, selectors, extractType = 'text', userAg
       const reason = looksLikeChallengePage(rawResult)
         ? 'all bypass layers blocked (challenge page after Twitterbot/Wayback/archive.ph/removepaywalls)'
         : 'all bypass layers returned stub-shaped content';
-      logger.warn(`[ExternalScrape] Marking ${url} as failure — ${reason}`);
-      return cacheFailure(cacheKey, `Scrape blocked: ${reason}`);
+      const evidence = stubEvidence(rawResult);
+      logger.warn(`[ExternalScrape] Marking ${url} as failure — ${reason} `
+        + `(detector=${evidence.detector} confidence=${evidence.confidence} `
+        + `html=${evidence.htmlBytes}B text=${evidence.textBytes}B density=${evidence.density})`);
+      return cacheFailure(cacheKey, `Scrape blocked: ${reason}`, { blockEvidence: evidence });
     }
 
     // Quality-based escalation: if result looks suspicious, retry with Puppeteer.

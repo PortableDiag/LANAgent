@@ -5,6 +5,7 @@ import { logger } from "../utils/logger.js";
 export class OpenAIProvider extends BaseProvider {
   constructor(config = {}) {
     super("OpenAI", config);
+    this.supportsWebSearch = true;
     this.client = null;
     this.models = {
       chat: config.chatModel || config.model || "gpt-5.2-chat-latest",

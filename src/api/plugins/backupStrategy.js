@@ -5,11 +5,12 @@ import { promisify } from 'util';
 import fs from 'fs/promises';
 import path from 'path';
 import crypto from 'crypto';
+import { DEPLOY_PATH, TEMP_PATH } from '../../utils/paths.js';
 
 const execAsync = promisify(exec);
 
 const DEFAULT_CONFIG = {
-  primaryLocation: process.env.DEPLOY_PATH || './deploy',
+  primaryLocation: DEPLOY_PATH,
   localBackupPath: process.env.BACKUP_PATH || '/root/lanagent-backups',
   secondaryBackupPath: process.env.BACKUP_SECONDARY_PATH || '',
   offsiteBackupPath: '',
@@ -316,7 +317,7 @@ export class BackupStrategyPlugin extends BasePlugin {
     const backup = history.find(b => b.backupName === backupName);
     if (!backup) return { success: false, error: 'Backup not found' };
 
-    const target = targetPath || '/tmp/lanagent-restore-' + Date.now();
+    const target = targetPath || path.join(TEMP_PATH, 'restore-' + Date.now());
     await fs.mkdir(target, { recursive: true });
 
     let archivePath = backup.filePath;

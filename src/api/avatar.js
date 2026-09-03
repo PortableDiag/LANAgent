@@ -5,6 +5,7 @@ import { logger } from '../utils/logger.js';
 import avatarService from '../services/avatar/avatarService.js';
 import { retryOperation } from '../utils/retryUtils.js';
 import NodeCache from 'node-cache';
+import { DATA_PATH } from '../utils/paths.js';
 
 const router = express.Router();
 const cache = new NodeCache({ stdTTL: 300, checkperiod: 320 });
@@ -154,7 +155,7 @@ router.delete('/:avatarId', async (req, res) => {
         const paths = [avatar.baseModelPath, avatar.bakedModelPath, avatar.thumbnailPath];
         // Also delete source photo
         const path = await import('path');
-        const photoPath = path.join(avatarService.dataDir || (process.env.DEPLOY_PATH ? process.env.DEPLOY_PATH + '/data/avatars' : './data/avatars'), 'photos', `${avatar.avatarId}.jpg`);
+        const photoPath = path.join(avatarService.dataDir || path.join(DATA_PATH, 'avatars'), 'photos', `${avatar.avatarId}.jpg`);
         paths.push(photoPath);
 
         for (const p of paths) {

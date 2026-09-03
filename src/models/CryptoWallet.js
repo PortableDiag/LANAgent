@@ -54,6 +54,11 @@ const transactionSchema = new mongoose.Schema({
         enum: ['pending', 'confirmed', 'failed'],
         default: 'pending'
     },
+    // Written on confirmation. These were being set by the confirmation paths
+    // but were absent from the schema, so strict mode dropped them silently and
+    // every "confirmed" row recorded no block.
+    blockNumber: Number,
+    gasUsed: String,
     categories: [String], // New field for categories
     tags: [String] // New field for tags
 });

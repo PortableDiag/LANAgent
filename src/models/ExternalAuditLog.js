@@ -248,5 +248,51 @@ externalAuditLogSchema.statics.getAgentActivitySummary = async function({ days =
   return await this.aggregate(pipeline).exec();
 };
 
+/**
+ * Get top IP addresses by request volume
+ * @param {Object} options - Aggregation options
+ * @param {number} [options.days=30] - Number of days to look back
+ * @param {number} [options.limit=10] - Maximum number of IPs to return
+ * @returns {Promise<Array>} Array of IP addresses with request counts
+ */
+externalAuditLogSchema.statics.getTopIPAddresses = async function({ days = 30, limit = 10 } = {}) {
+  const pipeline = [
+    {
+      $match: {
+        ip: { $ne: null },
+        timestamp: {
+          $gte: new Date(Date.now() - days * 24 * 60 * 60 * 1000)
+        }
+      }
+    },
+    {
+      $group: {
+        _id: "$ip",
+        requestCount: { $sum: 1 },
+        avgDuration: { $avg: "$duration" },
+        successCount: {
+          $sum: {
+            $cond: [{ $eq: ["$success", true] }, 1, 0]
+          }
+        },
+        failureCount: {
+          $sum: {
+            $cond: [{ $eq: ["$success", false] }, 1, 0]
+          }
+        },
+        lastActivity: { $max: "$timestamp" }
+      }
+    },
+    {
+      $sort: { requestCount: -1 }
+    },
+    {
+      $limit: limit
+    }
+  ];
+
+  return await this.aggregate(pipeline).exec();
+};
+
 const ExternalAuditLog = mongoose.model('ExternalAuditLog', externalAuditLogSchema);
 export default ExternalAuditLog;

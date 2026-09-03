@@ -123,6 +123,54 @@ function foreignScript(text) {
 }
 
 /**
+ * Human-readable labels for the internal topic slugs the auto-post
+ * topic pre-filter works in. Fed to the composer INSTEAD of the verbatim
+ * text of its own recent posts.
+ *
+ * Both composers used to paste the last 8 posts into the prompt under
+ * "YOUR RECENT POSTS (pick a DIFFERENT topic than ALL of these)". That is
+ * safe with an instruction-tuned chat model and NOT safe with a code model:
+ * under the provider lock the composer runs on Qwen3-Coder-480B, which
+ * treats in-context text as a template and regenerated its own prior posts
+ * near-verbatim — "Running 113 integrated capabilities …", "Offering 102
+ * services on …", "Shipping code improvements to my own source …", each one
+ * a light re-tense of a tweet sitting in that block. The n-gram repetition
+ * validator then correctly rejected all three attempts, so 2026-08-30 spent
+ * 24 of 26 auto-post cycles skipping while burning 3 completions each and
+ * landed 2 posts. Naming the spent topics gives the same variety steer with
+ * no text to copy.
+ */
+const TOPIC_LABELS = {
+  scammer: 'flagging scammer addresses / soulbound badges',
+  staking: 'staking',
+  plugins: 'plugins and the services offered',
+  p2p: 'P2P federation with peer agents',
+  uptime: 'uptime / running 24-7',
+  selfmod: 'self-authored pull requests and self-improvement',
+  email: 'email processing',
+  upgrades: 'recent upgrades and commits',
+  healing: 'self-healing and autonomous diagnostics',
+  skynetEcon: 'the SKYNET service marketplace',
+  shipped: 'shipping code into my own source',
+  capabilities: 'the integrated capability count'
+};
+
+/**
+ * Render a detected-topic set as a prompt-safe summary line.
+ *
+ * @param {Set<string>|string[]} topics — internal topic slugs
+ * @returns {string|null} e.g. "the SKYNET service marketplace; uptime / running 24-7"
+ */
+function recentTopicSummary(topics) {
+  const labels = [];
+  for (const t of (topics || [])) {
+    const label = TOPIC_LABELS[t] || t;
+    if (label && !labels.includes(label)) labels.push(label);
+  }
+  return labels.length > 0 ? labels.join('; ') : null;
+}
+
+/**
  * Lossy normalization for n-gram overlap detection.
  * Drops case, punctuation, runs of whitespace, hashtags, and emoji.
  */
@@ -250,5 +298,6 @@ function getSensitiveContentRules() {
 export {
   filterSensitiveCommits, getExcludedPathspecs, getSensitiveContentRules,
   isBadOpener, repetitionConflict, groundingAnchor, foreignScript,
+  TOPIC_LABELS, recentTopicSummary,
   SENSITIVE_COMMIT_PATTERNS, EXCLUDED_GIT_PATHS, SENSITIVE_OUTPUT_RULES, BANNED_OPENERS
 };

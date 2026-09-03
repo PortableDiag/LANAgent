@@ -772,10 +772,17 @@ class RevenueService {
             }).sort({ date: 1 }).lean();
 
             if (records.length > 0) {
+                // dailyPnL/cumulativePnL keep their existing token-trader-only meaning so
+                // current callers are untouched; the DM and combined figures are added
+                // alongside, since before this a caller had no way to see the agent's
+                // second strategy at all.
                 return records.map(r => ({
                     date: r.date,
                     dailyPnL: r.dailyNet,
-                    cumulativePnL: r.cumulativePnL
+                    cumulativePnL: r.cumulativePnL,
+                    dmDailyPnL: r.dmRealizedPnL ?? 0,
+                    dmCumulativePnL: r.dmCumulativePnL ?? 0,
+                    combinedDailyPnL: (r.dailyNet || 0) + (r.dmRealizedPnL || 0)
                 }));
             }
         } catch (err) {
@@ -834,58 +841,163 @@ class RevenueService {
 
     /**
      * Update today's DailyPnL record from live token trader data.
-     * Called periodically to keep the chart current.
+     * Persisted values track REALIZED P&L only (closed-trade profits). Unrealized
+     * (mark-to-market on open positions) is exposed separately via the cache but
+     * never written to history — otherwise daily entries would balloon with
+     * intraday price swings, not actual locked-in gains.
      */
     async updateTodayPnL() {
         try {
             const { default: DailyPnL } = await import('../../models/DailyPnL.js');
             const today = new Date().toISOString().slice(0, 10);
 
-            // Get yesterday's cumulative as baseline
+            // Get the most recent prior day's cumulative as baseline.
+            // Whether we HAVE one is decided here; what to use when we don't is decided
+            // below, once the lifetime total is known (see prevCumulative).
             const yesterday = await DailyPnL.findOne({ date: { $lt: today } }).sort({ date: -1 }).lean();
-            const prevCumulative = yesterday ? yesterday.cumulativePnL : 0;
+            const prevRaw = yesterday?.cumulativePnL;
+            const havePrevCumulative = typeof prevRaw === 'number' && Number.isFinite(prevRaw);
 
-            // Get current token trader P&L and gas costs
-            let currentTotalPnL = 0;
+            // Sum lifetime realized + current unrealized across all token trader instances.
+            // Only lifetime realized is persisted; unrealized is a snapshot for the UI.
+            let lifetimeRealized = 0;
+            let currentUnrealized = 0;
             let totalGasCost = 0;
+            let tradersRead = 0;
             try {
                 const allTraders = strategyRegistry.getAllTokenTraders();
                 for (const [, instance] of allTraders) {
                     const status = instance.getTokenTraderStatus() || {};
                     const pnl = status.pnl || {};
                     const lr = pnl.lifetimeRealized != null ? pnl.lifetimeRealized : (pnl.realized || 0);
-                    currentTotalPnL += lr + (pnl.unrealized || 0);
+                    lifetimeRealized += lr;
+                    currentUnrealized += pnl.unrealized || 0;
                     totalGasCost += pnl.lifetimeGasCost || pnl.totalGasCost || 0;
+                    tradersRead++;
                 }
             } catch { return; }
 
-            const dailyNet = currentTotalPnL - prevCumulative;
+            // An EMPTY registry does not throw, so the catch above never fired for it and
+            // this ran on with lifetimeRealized = 0 — writing cumulativePnL: 0 and
+            // dailyNet: -prevCumulative, a phantom loss equal to everything ever earned.
+            // This method runs at init, when the traders are frequently not registered
+            // yet, so that was a live hazard on every restart; it self-corrected 15
+            // minutes later, which is precisely why it went unnoticed.
+            //
+            // Same reasoning as the DM block below: a read miss must leave the day's
+            // figures untouched rather than write a zero. Skipping the whole update is
+            // right because the next cycle rewrites the row in full once traders exist.
+            if (tradersRead === 0) {
+                logger.debug('Skipping today P&L update: no token traders registered yet (would write a phantom loss)');
+                return;
+            }
+
+            // No usable predecessor → open the series FLAT, exactly as the DM block below
+            // already does. Falling back to 0 here booked the entire lifetime total as a
+            // single day's profit: on a fresh database, after the retention trim drops the
+            // old rows, or across any gap with no earlier row, `dailyNet` became the whole
+            // running total. That is the mirror image of the phantom LOSS fixed in
+            // v2.25.224 — same function, same cause, opposite sign.
+            //
+            // A row whose cumulative is missing or non-numeric is treated as no
+            // predecessor rather than subtracted, which previously yielded NaN.
+            const prevCumulative = havePrevCumulative ? prevRaw : lifetimeRealized;
+            const dailyNet = lifetimeRealized - prevCumulative;
+
+            // DollarMaximizer, by the same lifetime-counter difference used for the
+            // token trader above. Its total lives on the agent's persisted domainState
+            // rather than a strategy instance, so it is read from the document; a miss
+            // must leave the day's DM figures untouched rather than write a 0, because
+            // a 0 cumulative here would make the NEXT day's difference invent a loss
+            // equal to everything DM has ever earned.
+            let dmFields = {};
+            try {
+                const { default: SubAgent } = await import('../../models/SubAgent.js');
+                const doc = await SubAgent.findOne(
+                    { name: 'Crypto Strategy Agent' },
+                    { 'state.domainState.totalPnL': 1 }
+                ).lean();
+                const dmLifetime = doc?.state?.domainState?.totalPnL;
+                if (typeof dmLifetime === 'number' && Number.isFinite(dmLifetime)) {
+                    const prevDmCumulative = yesterday && typeof yesterday.dmCumulativePnL === 'number'
+                        ? yesterday.dmCumulativePnL
+                        : dmLifetime; // no prior row yet → open the series flat, not with a phantom jump
+                    dmFields = {
+                        dmCumulativePnL: dmLifetime,
+                        dmRealizedPnL: dmLifetime - prevDmCumulative
+                    };
+                }
+            } catch (dmErr) {
+                logger.debug('DM daily P&L not recorded this cycle:', dmErr.message);
+            }
+
+            // ---- Ledger write tripwire --------------------------------------------
+            // Seven separate defects on 2026-08-20 came from one habit: a failed or empty
+            // read producing the same value as a successful one. Each was fixed at its
+            // own site, but the class will recur in code not yet written, so guard the
+            // CHOKE POINT too — every one of them had to pass through this write.
+            //
+            // Non-finite is refused outright: a NaN or Infinity cumulative poisons every
+            // later day, because tomorrow's figure is derived from today's.
+            if (!Number.isFinite(lifetimeRealized) || !Number.isFinite(dailyNet)) {
+                logger.error(`Refusing to write today's P&L: non-finite figures (lifetimeRealized=${lifetimeRealized}, dailyNet=${dailyNet}, prevCumulative=${prevCumulative}). Leaving the day unwritten rather than corrupting the series.`);
+                return;
+            }
+            // A single day matching or exceeding the whole accumulated total is the
+            // signature of a lost baseline — the phantom gain and phantom loss both
+            // looked exactly like this. It is not refused, because a genuinely large day
+            // is possible and refusing would itself lose data; it is made impossible to
+            // miss instead.
+            if (havePrevCumulative && Math.abs(dailyNet) >= Math.max(50, Math.abs(prevCumulative))) {
+                logger.warn(`Today's P&L move is implausibly large: dailyNet $${dailyNet.toFixed(4)} against a prior cumulative of $${prevCumulative.toFixed(4)} (lifetime $${lifetimeRealized.toFixed(4)}, ${tradersRead} trader(s) read). If this was not a genuinely exceptional day, suspect a lost baseline.`);
+            }
 
             await DailyPnL.findOneAndUpdate(
                 { date: today },
                 {
                     date: today,
                     dailyNet,
-                    cumulativePnL: currentTotalPnL,
+                    cumulativePnL: lifetimeRealized,
                     realizedPnL: dailyNet,
                     gasCost: totalGasCost,
+                    ...dmFields,
                     source: 'live'
                 },
                 { upsert: true }
             );
 
             // Cache for the web UI to read via getTodayPnLSummary()
-            this._todayPnLCache = { dailyNet, cumulativePnL: currentTotalPnL, gasCost: totalGasCost, updatedAt: Date.now() };
+            this._todayPnLCache = {
+                dailyNet,
+                cumulativePnL: lifetimeRealized,
+                unrealizedPnL: currentUnrealized,
+                gasCost: totalGasCost,
+                dmDailyNet: dmFields.dmRealizedPnL ?? null,
+                dmCumulativePnL: dmFields.dmCumulativePnL ?? null,
+                // Both strategies. null when DM could not be read, so a caller can tell
+                // "DM made nothing" apart from "DM was not readable".
+                combinedDailyNet: dmFields.dmRealizedPnL != null ? dailyNet + dmFields.dmRealizedPnL : null,
+                updatedAt: Date.now()
+            };
         } catch (err) {
             logger.debug('Failed to update today PnL:', err.message);
         }
     }
 
     /**
-     * Get cached today P&L summary (updated periodically by updateTodayPnL)
+     * Get cached today P&L summary (updated periodically by updateTodayPnL).
+     * cumulativePnL is lifetime realized; unrealizedPnL is current mark-to-market.
      */
     getTodayPnLSummary() {
-        return this._todayPnLCache || { dailyNet: 0, cumulativePnL: 0, gasCost: 0 };
+        // The cold default carries `updatedAt: null` so a caller can tell "not computed
+        // yet" from "computed, and the answer is zero". Without that discriminator every
+        // field reads as a legitimate 0 the moment the process restarts, and a caller
+        // checking `dailyNet !== undefined` caches those zeros as though they were real
+        // — which is exactly what made the status endpoint report $0.00 earnings against
+        // a ledger holding $9.20 (2026-08-20).
+        return this._todayPnLCache || {
+            dailyNet: 0, cumulativePnL: 0, unrealizedPnL: [redacted], gasCost: 0, updatedAt: null
+        };
     }
 
     /**

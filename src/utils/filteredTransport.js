@@ -82,6 +82,19 @@ export class FilteredFileTransport extends Transport {
   }
 
   /**
+   * Get metadata about currently active filters without exposing the actual functions
+   * @returns {Array<Object>} Array of filter metadata objects
+   */
+  getActiveFilters() {
+    return this.filterFuncs.map((fn, index) => ({
+      id: index,
+      name: fn.name || `anonymous_filter_${index}`,
+      logicalOperator: this.logicalOperator,
+      source: fn.toString()
+    }));
+  }
+
+  /**
    * Update the log level dynamically without restarting the service
    * @param {string} newLogLevel - New log level to apply
    */

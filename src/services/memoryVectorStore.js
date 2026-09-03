@@ -14,7 +14,17 @@ export class MemoryVectorStore {
   constructor() {
     this.db = null;
     this.table = null;
-    this.tableName = 'memory_embeddings';
+    this.baseTableName = 'memory_embeddings';
+    this.tableName = this.baseTableName;
+    // Width of the vectors in the active table. LanceDB fixes a table's vector
+    // width at creation, so a change of embedding provider (e.g. the provider
+    // lock routing embeddings from a 1536-wide model to a 384-wide one) must
+    // switch to a table of the new width instead of failing every insert.
+    this.tableDim = null;
+    this.legacyDim = null;
+    // Optional hook: (newDim, previousDim) => void, called when the active
+    // width changes so the owner can re-embed existing memories.
+    this.onDimensionChange = null;
     this.dbPath = process.env.VECTOR_STORE_PATH || './data/lancedb';
     this.initialized = false;
     this.similarityThreshold = 0.85; // Threshold for deduplication
@@ -41,7 +51,9 @@ export class MemoryVectorStore {
       if (tables.includes(this.tableName)) {
         this.table = await this.db.openTable(this.tableName);
         const count = await this.table.countRows();
-        logger.info(`MemoryVectorStore: Opened table '${this.tableName}' with ${count} memories`);
+        this.tableDim = await this._readVectorWidth(this.table);
+        this.legacyDim = this.tableDim;
+        logger.info(`MemoryVectorStore: Opened table '${this.tableName}' with ${count} memories (vector width ${this.tableDim ?? 'unknown'})`);
       } else {
         logger.info(`MemoryVectorStore: Table '${this.tableName}' will be created on first memory`);
       }
@@ -53,6 +65,70 @@ export class MemoryVectorStore {
       logger.error('Failed to initialize MemoryVectorStore:', error);
       throw error;
     }
+  }
+
+  /**
+   * Vector width of a table, from its Arrow schema (FixedSizeList[n]).
+   */
+  async _readVectorWidth(table) {
+    try {
+      const schema = await table.schema();
+      const field = (schema?.fields || []).find(f => f.name === 'vector');
+      if (!field) return null;
+      const size = field.type?.listSize;
+      if (Number.isInteger(size) && size > 0) return size;
+      const m = /FixedSizeList\[(\d+)\]/.exec(String(field.type));
+      return m ? Number(m[1]) : null;
+    } catch (err) {
+      logger.warn(`MemoryVectorStore: could not read vector width: ${err?.message || err}`);
+      return null;
+    }
+  }
+
+  _tableNameForDim(dim) {
+    if (this.legacyDim === null || this.legacyDim === dim) return this.baseTableName;
+    return `${this.baseTableName}_${dim}`;
+  }
+
+  /**
+   * Point the store at the table whose vector width matches `dim`, switching
+   * (and creating on first write) when the embedding provider's width has
+   * changed. Returns true when the active table (or a pending create) can
+   * take vectors of this width.
+   */
+  async _ensureTableForDim(dim) {
+    if (!Number.isInteger(dim) || dim <= 0 || !this.initialized) return false;
+    if (this.tableDim === dim) return true;
+    if (this.tableDim === null) {
+      // No table yet: the first width we see claims the base name.
+      this.tableDim = dim;
+      if (this.legacyDim === null) this.legacyDim = dim;
+      return true;
+    }
+
+    const previous = this.tableDim;
+    if (this.memoryBatch.length > 0) {
+      try { await this.flushBatch(); } catch (err) { /* already logged */ }
+    }
+
+    const name = this._tableNameForDim(dim);
+    const tables = await this.db.tableNames();
+    this.table = tables.includes(name) ? await this.db.openTable(name) : null;
+    this.tableName = name;
+    this.tableDim = dim;
+    this._invalidateCache();
+    const rows = this.table ? await this.table.countRows() : 0;
+    logger.warn(
+      `MemoryVectorStore: embedding width changed ${previous} → ${dim}; ` +
+      `using table '${name}' (${rows} memories). Memories embedded at width ${previous} ` +
+      `are not searchable at this width until re-embedded.`
+    );
+    if (typeof this.onDimensionChange === 'function') {
+      Promise.resolve()
+        .then(() => this.onDimensionChange(dim, previous))
+        .catch(err => logger.warn(`MemoryVectorStore: onDimensionChange failed: ${err?.message || err}`));
+    }
+    return true;
   }
 
   /**
@@ -109,6 +185,7 @@ export class MemoryVectorStore {
     }
 
     try {
+      await this._ensureTableForDim(memory.embedding.length);
       const record = {
         id: memory._id.toString(),
         vector: memory.embedding,
@@ -128,7 +205,11 @@ export class MemoryVectorStore {
       if (this.memoryBatch.length >= this.batchSize) {
         await this.flushBatch();
       } else if (!this.batchTimer) {
-        this.batchTimer = setTimeout(() => this.flushBatch(), this.batchTimeout);
+        this.batchTimer = setTimeout(() => {
+          // flushBatch logs its own failure; an unawaited rejection here
+          // surfaced as an "Unhandled Promise Rejection" in production.
+          this.flushBatch().catch(() => {});
+        }, this.batchTimeout);
       }
 
       logger.debug(`MemoryVectorStore: Queued memory ${memory._id}`);
@@ -153,15 +234,24 @@ export class MemoryVectorStore {
       clearTimeout(this.batchTimer);
       this.batchTimer = null;
 
+      const width = this.tableDim ?? batch[0]?.vector?.length ?? null;
+      const rows = width ? batch.filter(r => r.vector?.length === width) : batch;
+      if (rows.length !== batch.length) {
+        logger.warn(`MemoryVectorStore: dropped ${batch.length - rows.length} record(s) whose vector width != ${width}`);
+      }
+      if (rows.length === 0) return;
+
       if (!this.table) {
-        this.table = await this.db.createTable(this.tableName, batch);
-        logger.info(`MemoryVectorStore: Created table with first batch of memories`);
+        this.table = await this.db.createTable(this.tableName, rows);
+        this.tableDim = width;
+        if (this.legacyDim === null) this.legacyDim = width;
+        logger.info(`MemoryVectorStore: Created table '${this.tableName}' (vector width ${width}) with first batch of memories`);
       } else {
-        await retryOperation(() => this.table.add(batch));
+        await retryOperation(() => this.table.add(rows));
       }
 
       this._invalidateCache();
-      logger.info(`MemoryVectorStore: Flushed ${batch.length} memories to the database`);
+      logger.info(`MemoryVectorStore: Flushed ${rows.length} memories to the database`);
     } catch (error) {
       logger.error('Failed to flush memory batch to vector store:', error);
       throw error;
@@ -175,9 +265,9 @@ export class MemoryVectorStore {
    * @returns {Object|null} - The similar memory if found, null otherwise
    */
   async findDuplicate(embedding, threshold = null) {
-    if (!this.initialized || !this.table) {
-      return null;
-    }
+    if (!this.initialized) return null;
+    await this._ensureTableForDim(embedding?.length);
+    if (!this.table) return null;
 
     const similarityThreshold = threshold || this.similarityThreshold;
     const cacheKey = this.enableDupCache ? this._dupCacheKey(embedding, similarityThreshold) : null;
@@ -220,6 +310,7 @@ export class MemoryVectorStore {
    * @returns {Array} - Array of similar memories with similarity scores
    */
   async search(queryEmbedding, options = {}) {
+    if (this.initialized) await this._ensureTableForDim(queryEmbedding?.length);
     if (!this.initialized || !this.table) {
       logger.warn('MemoryVectorStore not initialized or empty, returning empty results');
       return [];
@@ -341,53 +432,81 @@ export class MemoryVectorStore {
     try {
       logger.info('MemoryVectorStore: Starting index rebuild...');
 
-      // Clear existing table
-      if (this.table) {
-        await this.db.dropTable(this.tableName);
-        this.table = null;
-      }
-
       // Get all memories with embeddings
       const memories = await getMemoriesWithEmbeddings();
+
+      // Drop every width table we own; each width is rebuilt separately below
+      // because a LanceDB table holds exactly one vector width.
+      const existing = await this.db.tableNames();
+      for (const name of existing) {
+        if (name === this.baseTableName || name.startsWith(`${this.baseTableName}_`)) {
+          await this.db.dropTable(name);
+        }
+      }
+      this.table = null;
+      this.tableDim = null;
+      this.legacyDim = null;
 
       if (memories.length === 0) {
         logger.info('MemoryVectorStore: No memories with embeddings to index');
         return { indexed: 0 };
       }
 
-      // Add in batches
+      const byWidth = new Map();
+      for (const m of memories) {
+        const w = m.embedding?.length;
+        if (!Number.isInteger(w) || w <= 0) continue;
+        if (!byWidth.has(w)) byWidth.set(w, []);
+        byWidth.get(w).push(m);
+      }
+      // The most populous width claims the base table name and stays active.
+      const widths = [...byWidth.keys()].sort((a, b) => byWidth.get(b).length - byWidth.get(a).length);
+      this.legacyDim = widths[0];
+
       const batchSize = 100;
       let indexed = 0;
+      const tablesBuilt = {};
 
-      for (let i = 0; i < memories.length; i += batchSize) {
-        const batch = memories.slice(i, i + batchSize);
-        const records = batch.map(m => ({
-          id: m._id.toString(),
-          vector: m.embedding,
-          type: m.type || 'unknown',
-          contentPreview: (m.content || '').substring(0, 500),
-          userId: m.metadata?.userId || '',
-          category: m.metadata?.category || '',
-          importance: m.metadata?.importance || 5,
-          tags: JSON.stringify(m.metadata?.tags || []),
-          source: m.metadata?.source || '',
-          context: m.metadata?.context || '',
-          createdAt: m.createdAt?.toISOString() || new Date().toISOString()
-        }));
+      for (const width of widths) {
+        const group = byWidth.get(width);
+        const name = this._tableNameForDim(width);
+        let table = null;
+        for (let i = 0; i < group.length; i += batchSize) {
+          const batch = group.slice(i, i + batchSize);
+          const records = batch.map(m => ({
+            id: m._id.toString(),
+            vector: m.embedding,
+            type: m.type || 'unknown',
+            contentPreview: (m.content || '').substring(0, 500),
+            userId: m.metadata?.userId || '',
+            category: m.metadata?.category || '',
+            importance: m.metadata?.importance || 5,
+            tags: JSON.stringify(m.metadata?.tags || []),
+            source: m.metadata?.source || '',
+            context: m.metadata?.context || '',
+            createdAt: m.createdAt?.toISOString() || new Date().toISOString()
+          }));
 
-        if (!this.table) {
-          this.table = await this.db.createTable(this.tableName, records);
-        } else {
-          await this.table.add(records);
+          if (!table) {
+            table = await this.db.createTable(name, records);
+          } else {
+            await table.add(records);
+          }
+
+          indexed += batch.length;
+          logger.info(`MemoryVectorStore: Indexed ${indexed}/${memories.length} memories`);
         }
-
-        indexed += batch.length;
-        logger.info(`MemoryVectorStore: Indexed ${indexed}/${memories.length} memories`);
+        tablesBuilt[width] = group.length;
+        if (width === widths[0]) {
+          this.table = table;
+          this.tableName = name;
+          this.tableDim = width;
+        }
       }
 
       this._invalidateCache();
-      logger.info(`MemoryVectorStore: Index rebuild complete. Indexed ${indexed} memories`);
-      return { indexed };
+      logger.info(`MemoryVectorStore: Index rebuild complete. Indexed ${indexed} memories across widths ${JSON.stringify(tablesBuilt)}`);
+      return { indexed, tables: tablesBuilt };
 
     } catch (error) {
       logger.error('Failed to rebuild memory vector index:', error);
@@ -411,8 +530,19 @@ export class MemoryVectorStore {
         byType: {}
       };
 
+      stats.vectorWidth = this.tableDim;
       if (this.table) {
         stats.totalMemories = await this.table.countRows();
+      }
+      try {
+        const names = (await this.db.tableNames()).filter(n => n === this.baseTableName || n.startsWith(`${this.baseTableName}_`));
+        stats.tables = {};
+        for (const name of names) {
+          const t = name === this.tableName && this.table ? this.table : await this.db.openTable(name);
+          stats.tables[name] = { rows: await t.countRows(), vectorWidth: await this._readVectorWidth(t) };
+        }
+      } catch (err) {
+        stats.tablesError = err?.message || String(err);
       }
 
       return stats;

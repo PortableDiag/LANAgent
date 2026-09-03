@@ -17,6 +17,75 @@ function buildContentDisposition(filename) {
 }
 
 /**
+ * Detect a file's MIME type from its leading bytes.
+ *
+ * Downloads are served from yt-dlp output and user uploads, and the token
+ * carries no content type, so the alternative is `application/octet-stream`
+ * for everything — which makes a browser download an MP4 instead of playing it.
+ *
+ * Signature notes (each of these was wrong on the first pass):
+ *  - ID3 is a THREE byte magic. Comparing a 4-byte slice against it makes
+ *    Buffer.equals() false on length alone, so the branch never fired.
+ *  - JPEG only guarantees `FF D8 FF`; the fourth byte is the segment marker and
+ *    is E0/E1 only for JFIF/Exif. Real files also use E2..EF, DB and EE.
+ *  - MP4's first four bytes are the ftyp BOX SIZE, which varies per muxer.
+ *    The stable check is the literal `ftyp` at offset 4.
+ *
+ * @param {Buffer} buffer — leading bytes of the file (12 are needed for MP4)
+ * @returns {string} a MIME type, or 'application/octet-stream' when unrecognised
+ */
+export function detectMimeType(buffer) {
+  if (!Buffer.isBuffer(buffer) || buffer.length < 3) {
+    return 'application/octet-stream';
+  }
+
+  const startsWith = (...bytes) =>
+    buffer.length >= bytes.length && buffer.subarray(0, bytes.length).equals(Buffer.from(bytes));
+
+  if (startsWith(0x25, 0x50, 0x44, 0x46)) return 'application/pdf';         // %PDF
+  if (startsWith(0xFF, 0xD8, 0xFF)) return 'image/jpeg';                    // JPEG SOI + marker
+  if (startsWith(0x89, 0x50, 0x4E, 0x47)) return 'image/png';               // .PNG
+  if (startsWith(0x47, 0x49, 0x46, 0x38)) return 'image/gif';               // GIF8
+  if (startsWith(0x49, 0x44, 0x33)) return 'audio/mpeg';                    // ID3
+  if (startsWith(0x1A, 0x45, 0xDF, 0xA3)) return 'video/webm';              // EBML (webm/mkv)
+
+  // ISO base media (mp4/m4a/mov): `ftyp` at offset 4, then a brand at 8.
+  if (buffer.length >= 12 && buffer.subarray(4, 8).toString('latin1') === 'ftyp') {
+    const brand = buffer.subarray(8, 12).toString('latin1');
+    if (brand.startsWith('M4A')) return 'audio/mp4';
+    if (brand === 'qt  ') return 'video/quicktime';
+    return 'video/mp4';
+  }
+
+  return 'application/octet-stream';
+}
+
+/**
+ * Read a file's leading bytes and derive a content type. Never throws — an
+ * unreadable file falls back to the generic type the route used before.
+ *
+ * @param {string} filePath
+ * @returns {string}
+ */
+function detectContentType(filePath) {
+  let fd;
+  try {
+    fd = fs.openSync(filePath, 'r');
+    const buffer = Buffer.alloc(12);
+    const bytesRead = fs.readSync(fd, buffer, 0, 12, 0);
+    // Short files must not be sniffed against the zero-fill of the remainder.
+    return detectMimeType(buffer.subarray(0, bytesRead));
+  } catch (err) {
+    logger.warn(`Failed to read file for MIME type detection: ${filePath} (${err.code})`);
+    return 'application/octet-stream';
+  } finally {
+    if (fd !== undefined) {
+      try { fs.closeSync(fd); } catch { /* already closed / never opened */ }
+    }
+  }
+}
+
+/**
  * Retrieve metadata for a download token without consuming a download attempt
  */
 router.get('/:token/metadata', (req, res) => {
@@ -45,9 +114,7 @@ router.get('/:token/metadata', (req, res) => {
     });
   }
 
-  // Get content type - for now we'll use a generic binary type since we don't store
-  // the original content type in the token, but this could be extended in the future
-  const contentType = 'application/octet-stream';
+  const contentType = detectContentType(filePath);
 
   // Return metadata without consuming download
   return res.json({
@@ -101,6 +168,8 @@ router.get('/:token', (req, res) => {
   const range = req.headers.range;
   const contentDisposition = buildContentDisposition(filename);
 
+  const contentType = detectContentType(filePath);
+
   if (range) {
     const parts = range.replace(/bytes=/, "").split("-");
     const start = parseInt(parts[0], 10);
@@ -117,7 +186,7 @@ router.get('/:token', (req, res) => {
       'Content-Range': `bytes ${start}-${end}/${fileSize}`,
       'Accept-Ranges': 'bytes',
       'Content-Length': chunksize,
-      'Content-Type': 'application/octet-stream',
+      'Content-Type': contentType,
       'Content-Disposition': contentDisposition
     };
 
@@ -126,7 +195,7 @@ router.get('/:token', (req, res) => {
   } else {
     const head = {
       'Content-Length': fileSize,
-      'Content-Type': 'application/octet-stream',
+      'Content-Type': contentType,
       'Content-Disposition': contentDisposition
     };
     res.writeHead(200, head);

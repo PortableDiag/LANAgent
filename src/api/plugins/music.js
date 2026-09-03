@@ -165,49 +165,76 @@ export default class MusicPlugin extends BasePlugin {
       requestedBy: data.userId || 'unknown'
     });
 
-    this.logger.info(`Generating song with ${selectedProvider}: "${prompt}"`);
+    this.logger.info(`Generating song with ${selectedProvider} (fallback chain enabled): "${prompt}"`);
 
     try {
-      const providerInstance = getProvider(selectedProvider, apiKey);
-      const result = await providerInstance.generate({
-        prompt,
-        genre: genre || settings.defaultGenre,
-        mood,
-        style,
-        duration: selectedDuration,
-        instrumental: instrumental || false
-      });
+      // generateWithRetry walks the healthy-provider list starting from
+      // selectedProvider; on per-provider failure it updates provider health
+      // and tries the next healthy one. Providers without a configured API
+      // key throw NO_API_KEY immediately and the chain advances.
+      const result = await GeneratedSong.generateWithRetry(
+        async (currentProvider) => {
+          const currentKey = this.getApiKeyForProvider(currentProvider);
+          if (!currentKey) {
+            const err = new Error(`No API key configured for ${currentProvider}`);
+            err.code = 'NO_API_KEY';
+            throw err;
+          }
+          const inst = getProvider(currentProvider, currentKey);
+          return await inst.generate({
+            prompt,
+            genre: genre || settings.defaultGenre,
+            mood,
+            style,
+            duration: selectedDuration,
+            instrumental: instrumental || false
+          });
+        },
+        { provider: selectedProvider, retries: 2 }
+      );
 
-      // Update song record
-      song.taskId = result.taskId;
-      song.title = result.title || 'Generated Song';
-      song.audioUrl = result.audioUrl;
-      song.duration = result.duration;
-      song.lyrics = result.lyrics;
-      song.status = result.status === 'completed' ? 'completed' : 'generating';
-      song.metadata = result.metadata;
-      if (result.status === 'completed') {
-        song.completedAt = new Date();
+      const actualProvider = result.provider || selectedProvider;
+      const fellBack = result.metadata?.fallbackUsed === true;
+      if (fellBack) {
+        this.logger.info(`Song generation fell back: ${selectedProvider} → ${actualProvider}`);
       }
-      await song.save();
+
+      // Persist result via updateGenerationStatus so provider-health bookkeeping
+      // (reset on success / unhealthy on fail) goes through the model statics.
+      const updates = {
+        provider: actualProvider,
+        taskId: result.taskId,
+        title: result.title || 'Generated Song',
+        audioUrl: result.audioUrl,
+        duration: result.duration,
+        lyrics: result.lyrics,
+        status: result.status === 'completed' ? 'completed' : 'generating',
+        metadata: result.metadata
+      };
+      const updated = await GeneratedSong.updateGenerationStatus(song._id, updates);
+      // Mirror updates locally so the in-memory song doc reflects the saved state
+      // (deliverSong / formatSongResponse / pollForCompletion read from it).
+      Object.assign(song, updates);
+      if (updated?.completedAt) song.completedAt = updated.completedAt;
 
       // If completed immediately, deliver
       if (result.status === 'completed' && (result.audioUrl || result.audioFile)) {
         await this.deliverSong(song, selectedDelivery, result.audioFile || null);
         return {
           success: true,
-          message: `Song generated and delivered via ${selectedDelivery}!`,
+          message: `Song generated and delivered via ${selectedDelivery}!${fellBack ? ` (fallback ${selectedProvider} → ${actualProvider})` : ''}`,
           song: this.formatSongResponse(song),
           delivered: true
         };
       }
 
-      // If async, start polling
+      // If async, start polling against the provider that actually accepted the job
       if (result.taskId && result.status !== 'completed') {
+        const providerInstance = getProvider(actualProvider, this.getApiKeyForProvider(actualProvider));
         this.pollForCompletion(song, providerInstance, selectedDelivery);
         return {
           success: true,
-          message: `Song generation started with ${selectedProvider}. I'll deliver it via ${selectedDelivery} when it's ready.`,
+          message: `Song generation started with ${actualProvider}. I'll deliver it via ${selectedDelivery} when it's ready.${fellBack ? ` (fallback ${selectedProvider} → ${actualProvider})` : ''}`,
           song: this.formatSongResponse(song),
           delivered: false,
           taskId: result.taskId
@@ -221,11 +248,14 @@ export default class MusicPlugin extends BasePlugin {
       };
 
     } catch (error) {
-      song.status = 'failed';
-      song.error = error.message;
-      await song.save();
+      // All providers exhausted. updateGenerationStatus tracks retryCount/lastError
+      // in metadata and flags the failing provider as unhealthy.
+      await GeneratedSong.updateGenerationStatus(song._id, {
+        status: 'failed',
+        error: error.message
+      });
 
-      this.logger.error(`Song generation failed (${selectedProvider}):`, error);
+      this.logger.error(`Song generation failed across all providers (started with ${selectedProvider}):`, error);
       return {
         success: false,
         error: `Song generation failed: ${error.message}`,

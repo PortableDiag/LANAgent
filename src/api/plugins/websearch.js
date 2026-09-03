@@ -1,6 +1,7 @@
 import { BasePlugin } from '../core/basePlugin.js';
 import axios from 'axios';
 import { logger } from '../../utils/logger.js';
+import webSearchService from '../../services/search/webSearchService.js';
 
 export default class WebSearchPlugin extends BasePlugin {
   constructor(agent) {
@@ -42,7 +43,9 @@ export default class WebSearchPlugin extends BasePlugin {
     ];
 
     this.newsApiKey = process.env.NEWS_API_KEY;
-    this.braveApiKey = process.env.BRAVE_SEARCH_API_KEY;
+    // Search backends are owned by webSearchService (src/services/search/) —
+    // Brave's key is read there. Kept off this class deliberately: it was an
+    // unread field here for months.
   }
 
   async execute(params) {
@@ -92,6 +95,30 @@ export default class WebSearchPlugin extends BasePlugin {
 
     logger.info(`Web search for: ${query}${preferredProvider ? ` (preferred: ${preferredProvider})` : ''}`);
 
+    // Direct search APIs first. They return ranked results with no model in the
+    // loop, so the AI provider lock is irrelevant to them — which is the only
+    // way search works at all while spend is pinned to a provider with no search
+    // tool. The LLM path below stays as the fallback for when no backend key is
+    // configured, and is still the only path that returns prose.
+    if (webSearchService.isAvailable()) {
+      const direct = await webSearchService.search(query);
+      if (direct.success) {
+        return {
+          success: true,
+          query,
+          provider: direct.provider,
+          results: direct.results,
+          cached: direct.cached === true,
+          // Callers that expect prose get a readable rendering of the same data
+          // rather than a shape change.
+          result: direct.results.length
+            ? direct.results.map((r, i) => `${i + 1}. ${r.title}\n   ${r.url}\n   ${r.snippet}`).join('\n\n')
+            : 'No results found.'
+        };
+      }
+      logger.warn(`Direct search backends failed, falling back to the model path: ${direct.error}`);
+    }
+
     const providerManager = this.agent?.providerManager;
     if (!providerManager) {
       return { success: false, error: 'No AI provider available for web search' };
@@ -101,7 +128,10 @@ export default class WebSearchPlugin extends BasePlugin {
     // a caller-supplied preference if one is explicitly passed in. Fallback
     // order ('openai' then 'anthropic') is used only when neither the current
     // provider nor the preference is registered.
-    const currentProviderObj = providerManager.getCurrentProvider();
+    // getCurrentProvider() is async — an un-awaited call yields a Promise, so
+    // currentProviderName was always undefined and the "respect the configured provider"
+    // branch below could never be taken.
+    const currentProviderObj = await providerManager.getCurrentProvider();
     const currentProviderName = currentProviderObj?.name?.toLowerCase();
     const fallbackOrder = ['openai', 'anthropic'];
     let searchOrder;
@@ -117,23 +147,29 @@ export default class WebSearchPlugin extends BasePlugin {
       searchOrder = fallbackOrder;
     }
 
-    // Find first available web-search-capable provider
-    let provider = null;
-    let providerName = null;
-    for (const name of searchOrder) {
-      if (providerManager.providers?.has(name)) {
-        provider = providerManager.providers.get(name);
-        providerName = name;
-        break;
-      }
+    // Only anthropic.js and openai.js implement the enableWebSearch tool call. Every other
+    // provider silently ignores the flag and answers from training data — on HuggingFace that
+    // is a 30s time-to-first-byte timeout, and under the provider lock the switch below is
+    // refused too, so the call can only ever fail. Ask a provider that can actually search,
+    // and only one the lock allows us to spend on; otherwise say so immediately instead of
+    // burning 30s per query (7 identical failures inside one plugin-development scan,
+    // 2026-08-30).
+    const candidates = searchOrder.filter(
+      name => providerManager.providers?.get(name)?.supportsWebSearch === true
+    );
+    const allowed = await providerManager.allowedProviders(candidates);
+
+    if (allowed.length === 0) {
+      const lockedTo = currentProviderName || 'unknown';
+      const reason = candidates.length === 0
+        ? 'no registered provider implements web search'
+        : `the provider lock pins spend to ${lockedTo}, which has no web search tool`;
+      const fix = `${reason}. Configure a direct search backend instead — ${webSearchService.unavailableReason()}`;
+      logger.warn(`Web search unavailable: ${fix}`);
+      return { success: false, error: `Web search unavailable: ${fix}` };
     }
 
-    if (!provider) {
-      // Last resort: stick with the current provider object
-      provider = currentProviderObj;
-      providerName = currentProviderName || 'unknown';
-    }
-
+    const providerName = allowed[0];
     logger.info(`Using ${providerName} provider for web search`);
 
     const needsSwitch = providerName !== currentProviderName;

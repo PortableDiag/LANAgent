@@ -23,6 +23,27 @@ export const TRANSCODE_PRESETS = {
     videoCodec: 'libx265',
     audioCodec: 'copy',
     videoBitrate: '8000k'
+  },
+  'interview': {
+    videoCodec: 'libx264',
+    audioCodec: 'aac',
+    resolution: '1280x720',
+    videoBitrate: '2500k',
+    audioBitrate: '128k'
+  },
+  'music': {
+    videoCodec: 'libx264',
+    audioCodec: 'aac',
+    resolution: '1920x1080',
+    videoBitrate: '5000k',
+    audioBitrate: '320k'
+  },
+  'gaming': {
+    videoCodec: 'libx264',
+    audioCodec: 'aac',
+    resolution: '1920x1080',
+    videoBitrate: '6000k',
+    audioBitrate: '256k'
   }
 };
 
@@ -47,6 +68,24 @@ export const PRESET_INFO = {
     displayName: 'Archive Quality',
     description: 'Maximum quality preservation for long-term storage',
     useCases: ['Digital preservation', 'Master copies', 'Professional archiving'],
+    supportedFormats: ['mp4', 'mkv']
+  },
+  'interview': {
+    displayName: 'Interview',
+    description: 'Optimized for talking head interviews with balanced quality and file size',
+    useCases: ['YouTube interviews', 'Educational content', 'Corporate training'],
+    supportedFormats: ['mp4', 'mkv']
+  },
+  'music': {
+    displayName: 'Music Performance',
+    description: 'High fidelity audio with good video quality for music content',
+    useCases: ['Concert recordings', 'Music videos', 'Studio sessions'],
+    supportedFormats: ['mp4', 'mkv']
+  },
+  'gaming': {
+    displayName: 'Gaming',
+    description: 'High bitrate video optimized for fast-paced gaming content',
+    useCases: ['Game streaming', 'Let\'s plays', 'Esports broadcasts'],
     supportedFormats: ['mp4', 'mkv']
   }
 };

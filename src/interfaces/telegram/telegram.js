@@ -1329,7 +1329,7 @@ export class TelegramInterface extends EventEmitter {
     try {
       if (!this.authorizedUserId) {
         logger.warn('Cannot send notification: No authorized user ID');
-        return;
+        return false;
       }
 
       // Ensure options is an object (defensive programming)
@@ -1381,8 +1381,10 @@ export class TelegramInterface extends EventEmitter {
       }
 
       logger.info('Telegram notification sent successfully');
+      return true;
     } catch (error) {
       logger.error('Failed to send Telegram notification:', error);
+      return false;
     }
   }
 

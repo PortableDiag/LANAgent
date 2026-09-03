@@ -479,8 +479,15 @@ Return ONLY valid JSON with the extracted parameters. No explanation.`;
       let releaseUrl = null;
       let changelog = null;
 
-      // Try the built-in update endpoint first (most *arr apps have this)
-      const updates = await this._apiGet('/update');
+      // Try the built-in update endpoint first (most *arr apps have this).
+      // Bypass retryOperation — Servarr's update server flaps 5xx daily; the
+      // GitHub fallback below covers it, and we don't need the retry noise.
+      let updates = null;
+      try {
+        const url = `${this.config.url}/api/${this.apiVersion}/update`;
+        const r = await axios.get(url, { headers: { 'X-Api-Key': this.config.apiKey }, timeout: this.config.timeout });
+        updates = r.data;
+      } catch { /* fall through to GitHub */ }
       if (Array.isArray(updates) && updates.length > 0) {
         const latest = updates[0];
         latestVersion = latest.version;

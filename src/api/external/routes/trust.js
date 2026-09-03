@@ -94,6 +94,20 @@ router.get('/level/stats', async (req, res) => {
     }
 });
 
+/**
+ * GET /api/external/trust/analytics/revocations
+ * Get trust revocation analytics including reasons, frequency over time, and top revoking entities
+ */
+router.get('/analytics/revocations', async (req, res) => {
+    try {
+        const analytics = await TrustAttestation.getRevocationAnalytics();
+        res.json({ success: true, analytics });
+    } catch (err) {
+        logger.error(`GET /trust/analytics/revocations error: ${err.message}`);
+        res.status(500).json({ success: false, error: err.message });
+    }
+});
+
 // --- Admin Routes (JWT auth) ---
 
 /**

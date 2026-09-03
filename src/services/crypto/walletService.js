@@ -3,6 +3,7 @@ import { cryptoLogger as logger } from '../../utils/logger.js';
 import { encrypt, decrypt } from '../../utils/encryption.js';
 import CryptoWallet from '../../models/CryptoWallet.js';
 import faucetService from './faucetService.js';
+import { retryOperation } from '../../utils/retryUtils.js';
 
 class WalletService {
     constructor() {
@@ -106,8 +107,29 @@ class WalletService {
                 this.logger.warn('Could not load network mode from database:', err.message);
             }
 
-            // Check if wallet already exists
-            const existingWallet = await CryptoWallet.findOne();
+            // Check if wallet already exists.
+            //
+            // This read gates trading on every boot, and it used to get exactly one attempt:
+            // Mongoose buffers for 10s while the connection is still coming up, then throws
+            // `buffering timed out`. On 2026-08-07 a slightly slow Mongo start lost that race
+            // and wallet init failed outright — it self-healed that time, but on a host with
+            // no failover a slower start on the wrong restart is an unattended outage.
+            //
+            // Only the read is retried. It is idempotent; retrying the whole initialise path
+            // could generate a second wallet.
+            const existingWallet = await retryOperation(
+                () => CryptoWallet.findOne(),
+                {
+                    retries: 4,
+                    minTimeout: 2000,
+                    maxTimeout: 15000,
+                    context: 'walletService.findOne',
+                    onRetry: (err, attempt) => this.logger.warn(
+                        `Wallet lookup attempt ${attempt} failed (${err.message}) — retrying; ` +
+                        'this is usually Mongo still coming up during boot.'
+                    )
+                }
+            );
             if (existingWallet) {
                 this.wallet = existingWallet;
                 this.initialized = true;
@@ -419,17 +441,20 @@ class WalletService {
 
     async getBalances() {
         const balances = {};
-        
+
         for (const addr of this.wallet.addresses) {
             try {
                 const balance = await this.getChainBalance(addr.chain, addr.address);
                 balances[addr.chain] = balance;
             } catch (error) {
                 this.logger.error(`Failed to get balance for ${addr.chain}:`, error);
-                balances[addr.chain] = '0';
+                // null = unknown, NOT zero. A failed read reported as '0' makes
+                // consumers act on a phantom-empty wallet (e.g. gas top-ups selling
+                // strategy capital to refill gas that was never missing).
+                balances[addr.chain] = null;
             }
         }
-        
+
         return balances;
     }
 
@@ -463,7 +488,8 @@ class WalletService {
             return balance.formatted;
         } catch (error) {
             this.logger.warn(`Failed to get balance for ${chain}:`, error.message);
-            return '0';
+            // Rethrow so callers can distinguish "unknown" from a real zero balance
+            throw error;
         }
     }
 
@@ -600,6 +626,64 @@ class WalletService {
         await this.wallet.save();
         
         this.logger.info(`Transaction added: ${txData.type} on ${txData.chain}`);
+    }
+
+    /**
+     * Stamp a transaction's terminal status atomically.
+     *
+     * The confirmation paths used to do load-mutate-save against the wallet
+     * document returned by getWallet() — but that is a SHARED cached Mongoose
+     * instance, saved concurrently by addTransaction, the balance refresh and
+     * both confirmation watchers. save() clears the dirty paths it is writing,
+     * so an overlapping save silently drops a status write that was made while
+     * it was in flight. 13 of the last 100 rows were stranded at 'pending'
+     * despite having confirmed on-chain, which made trade forensics much harder
+     * than it needed to be.
+     *
+     * A targeted updateOne with the positional operator cannot lose the write,
+     * and an unmatched hash is now reported instead of vanishing.
+     *
+     * @returns {Promise<boolean>} whether a row was actually updated
+     */
+    async updateTransactionStatus(hash, status, extra = {}) {
+        if (!hash || !status) return false;
+
+        const set = { 'transactions.$.status': status };
+        if (extra.blockNumber !== undefined && extra.blockNumber !== null) {
+            set['transactions.$.blockNumber'] = extra.blockNumber;
+        }
+        if (extra.gasUsed !== undefined && extra.gasUsed !== null) {
+            set['transactions.$.gasUsed'] = String(extra.gasUsed);
+        }
+
+        try {
+            const res = await CryptoWallet.updateOne({ 'transactions.hash': hash }, { $set: set });
+            const matched = (res.matchedCount ?? res.n ?? 0) > 0;
+            if (!matched) {
+                // Not an error on its own - the 100-row cap can age a hash out
+                // before its confirmation lands - but it must never be silent.
+                this.logger.warn(`No wallet transaction row for ${hash} - cannot mark ${status}`);
+                return false;
+            }
+
+            // Keep the cached document consistent with what was just written, so
+            // an in-memory read does not disagree with the database.
+            const cachedTx = this.wallet?.transactions?.find(t => t.hash === hash);
+            if (cachedTx) {
+                cachedTx.status = status;
+                if (set['transactions.$.blockNumber'] !== undefined) {
+                    cachedTx.blockNumber = extra.blockNumber;
+                }
+                if (set['transactions.$.gasUsed'] !== undefined) {
+                    cachedTx.gasUsed = String(extra.gasUsed);
+                }
+            }
+            return true;
+        } catch (error) {
+            // Bookkeeping must never take down a trade path.
+            this.logger.error(`Failed to mark transaction ${hash} as ${status}: ${error.message}`);
+            return false;
+        }
     }
 
     async getTransactions() {

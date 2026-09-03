@@ -205,18 +205,43 @@ export function stripFrontmatter(text) {
 }
 
 /**
+ * Read a scalar without coercing its type.
+ *
+ * Quotes are stripped — they are markup the author wrote to delimit the value,
+ * never part of it — but nothing else is interpreted: `3` stays "3", `true`
+ * stays "true", `[a, b]` stays "[a, b]". This is what a caller wants when the
+ * values leave JavaScript and land somewhere typed, such as vector-store
+ * metadata, where a field silently changing from string to number changes how
+ * it filters.
+ */
+function stringScalar(raw) {
+  const v = raw.trim();
+  if ((v.startsWith('"') && v.endsWith('"') && v.length > 1) ||
+      (v.startsWith("'") && v.endsWith("'") && v.length > 1)) {
+    return v.slice(1, -1);
+  }
+  return v;
+}
+
+/**
  * Parse a frontmatter block into an object.
  *
  * Returns {} when there is no frontmatter, and never throws — callers treat a
  * document without metadata as ordinary, not as an error.
  *
  * @param {string} text
+ * @param {Object} [options]
+ * @param {boolean} [options.coerce=true] - Coerce scalars to booleans, numbers,
+ *   null and inline arrays. Pass `false` to get every value as a string.
  * @returns {Object}
  */
-export function parseFrontmatter(text) {
+export function parseFrontmatter(text, options = {}) {
   if (typeof text !== 'string') return {};
   const match = text.match(FRONTMATTER_RE);
   if (!match) return {};
+
+  const { coerce = true } = options;
+  const readValue = coerce ? coerceScalar : stringScalar;
 
   const out = {};
   for (const line of match[2].split(/\r?\n/)) {
@@ -227,7 +252,7 @@ export function parseFrontmatter(text) {
     const key = trimmed.slice(0, sep).trim();
     if (!key) continue;
     // Values may contain colons (URLs, timestamps) — only the first splits.
-    out[key] = coerceScalar(trimmed.slice(sep + 1));
+    out[key] = readValue(trimmed.slice(sep + 1));
   }
   return out;
 }

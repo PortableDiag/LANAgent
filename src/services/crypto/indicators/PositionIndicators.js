@@ -169,6 +169,110 @@ export class PositionIndicators {
       description: 'Current position value in USD',
       category: 'position'
     });
+
+    // Composite risk score for the open position
+    this.register('position_risk_score', (ctx) => this.calculatePositionRiskScore(ctx), {
+      type: 'number',
+      description: 'Composite position risk score based on volatility, time, and unrealized losses',
+      category: 'risk'
+    });
+
+    // Stop-loss proximity level
+    this.register('stop_loss_risk_level', (ctx) => this.calculateStopLossRiskLevel(ctx), {
+      type: 'string',
+      description: 'Stop-loss proximity level (low, medium, high)',
+      category: 'risk'
+    });
+
+    // Concentration risk
+    this.register('concentration_risk', (ctx) => this.calculateConcentrationRisk(ctx), {
+      type: 'number',
+      description: 'Position concentration as percentage of network portfolio value (position + stablecoin)',
+      category: 'risk'
+    });
+  }
+
+  /**
+   * Calculate position risk score based on volatility, time in position, and unrealized losses
+   * @param {Object} ctx - Context object containing strategy, network, and market data
+   * @returns {Number} Risk score (0+, higher = riskier)
+   */
+  async calculatePositionRiskScore(ctx) {
+    if (!ctx.strategy) return 0;
+
+    const position = ctx.strategy.getPosition(ctx.network);
+    const marketData = ctx.marketData?.prices?.[ctx.network];
+
+    if (!marketData || !position.entryPrice || position.inStablecoin) return 0;
+
+    const currentPrice = marketData.price;
+    const volatility = marketData.volatility || 0;
+    // Position age from updatedAt (set by setPosition); absent = 0 time risk
+    const enteredAt = position.updatedAt ? new Date(position.updatedAt).getTime() : NaN;
+    const timeInPosition = Number.isFinite(enteredAt) ? (Date.now() - enteredAt) / (1000 * 60 * 60) : 0;
+
+    // Calculate unrealized P&L percentage
+    const pnlPercent = ((currentPrice - position.entryPrice) / position.entryPrice) * 100;
+
+    // Risk factors:
+    // 1. Volatility component (higher volatility = higher risk)
+    // 2. Time in position (longer = higher risk)
+    // 3. Unrealized loss (larger losses = higher risk)
+    const volatilityRisk = volatility * 10;
+    const timeRisk = Math.min(timeInPosition / 24, 10); // Cap at 10 for 24+ hours
+    const lossRisk = pnlPercent < 0 ? Math.abs(pnlPercent) : 0;
+
+    // Weighted combination
+    return (volatilityRisk * 0.4) + (timeRisk * 0.3) + (lossRisk * 0.3);
+  }
+
+  /**
+   * Determine risk level based on proximity to the strategy's stop-loss
+   * @param {Object} ctx - Context object containing strategy, network, and market data
+   * @returns {String} Risk level: 'low', 'medium', or 'high'
+   */
+  async calculateStopLossRiskLevel(ctx) {
+    if (!ctx.strategy) return 'low';
+
+    const position = ctx.strategy.getPosition(ctx.network);
+    const marketData = ctx.marketData?.prices?.[ctx.network];
+
+    if (!marketData || !position.entryPrice || position.inStablecoin) return 'low';
+
+    const currentPrice = marketData.price;
+    // Strategies store stop-loss as a negative percent (stopLossThreshold: -3)
+    const config = ctx.strategy.config || {};
+    const stopLossLevel = Math.abs(config.stopLossPercentage ?? config.stopLossThreshold ?? 10);
+
+    // Distance already lost toward the stop (positive = underwater)
+    const distanceToStopLoss = (position.entryPrice - currentPrice) / position.entryPrice * 100;
+
+    if (distanceToStopLoss >= stopLossLevel * 0.8) return 'high';
+    if (distanceToStopLoss >= stopLossLevel * 0.5) return 'medium';
+    return 'low';
+  }
+
+  /**
+   * Calculate position concentration as a percentage of the network's portfolio
+   * (position value + stablecoin reserve), or state.portfolioValue if a strategy tracks it
+   * @param {Object} ctx - Context object containing strategy, network, and market data
+   * @returns {Number} Concentration percentage (0-100)
+   */
+  async calculateConcentrationRisk(ctx) {
+    if (!ctx.strategy) return 0;
+
+    const position = ctx.strategy.getPosition(ctx.network);
+    const marketData = ctx.marketData?.prices?.[ctx.network];
+
+    if (!marketData || position.inStablecoin) return 0;
+
+    const positionValue = (position.nativeAmount || 0) * marketData.price;
+    const totalPortfolioValue = ctx.strategy.state?.portfolioValue
+      || (positionValue + (position.stablecoinAmount || 0));
+    if (totalPortfolioValue <= 0) return 0;
+
+    const concentration = (positionValue / totalPortfolioValue) * 100;
+    return Math.min(concentration, 100);
   }
 
   register(name, fn, metadata) {

@@ -66,6 +66,14 @@ const agentSchema = new mongoose.Schema({
       enum: ['openai', 'anthropic', 'xai', 'gab', 'huggingface', 'ollama', 'bitnet'],
       default: 'anthropic'
     },
+    // When true, only the JWT-gated /api/ai/switch endpoint can change `current`.
+    // Background services (pluginDevelopment, websearch, scheduler defaults) that
+    // call providerManager.switchProvider directly will be no-op'd. Toggle via
+    // POST /api/ai/lock with { locked: true|false }.
+    locked: {
+      type: Boolean,
+      default: false
+    },
     configurations: {
       openai: {
         enabled: Boolean,
@@ -702,7 +710,7 @@ const agentSchema = new mongoose.Schema({
 });
 
 // Indexes
-agentSchema.index({ name: 1 });
+// name: unique on the field-level decl already creates the {name:1} index
 agentSchema.index({ 'state.status': 1 });
 agentSchema.index({ 'security.authorizedUsers.userId': 1 });
 

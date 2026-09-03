@@ -23,11 +23,23 @@ async function getEthers() {
 const NETWORKS = {
   ethereum: {
     chainId: 1,
+    // Ordered by verified health (2026-06-18, tested from ALICE against the
+    // Chainlink ETH/USD feed). Dropped rpc.ankr.com/eth — Ankr deprecated keyless
+    // access and now returns "Unauthorized: you must authenticate with an API key".
+    // Dropped eth.llamarpc.com — persistently HTTP 521 (Cloudflare) since at least
+    // 2026-06-10, not transient; it was stranding the price monitor. Replaced with
+    // eth.merkle.io (verified 200, ~0.46s from ALICE).
+    // Added cloudflare-eth.com + gateway.tenderly.co (2026-07-03, both verified 200 /
+    // chainId 0x1 from ALICE at ~0.15s) after publicnode threw transient 502s. Note the
+    // 502/SERVER_ERROR failover fix in withRpcFallback() — extra endpoints only help once
+    // the classifier actually rotates off a bad-gateway response.
     rpc: [
       'https://ethereum-rpc.publicnode.com',
-      'https://eth.llamarpc.com'
-      // removed dead endpoints: rpc.ankr.com/eth (now requires an API key),
-      // 1rpc.io/eth (eth_call not whitelisted, returns 403)
+      'https://eth.drpc.org',
+      'https://1rpc.io/eth',
+      'https://eth.merkle.io',
+      'https://cloudflare-eth.com',
+      'https://gateway.tenderly.co/public/mainnet'
     ],
     explorer: 'https://etherscan.io'
   },
@@ -48,8 +60,7 @@ const NETWORKS = {
       'https://bsc-dataseed2.binance.org',
       'https://bsc-dataseed3.binance.org',
       'https://bsc-dataseed4.binance.org',
-      'https://bsc.publicnode.com',
-      'https://rpc.ankr.com/bsc'
+      'https://bsc.publicnode.com'
     ],
     explorer: 'https://bscscan.com'
   },
@@ -65,7 +76,6 @@ const NETWORKS = {
   polygon: {
     chainId: 137,
     rpc: [
-      'https://rpc.ankr.com/polygon',
       'https://polygon-bor-rpc.publicnode.com',
       'https://1rpc.io/matic'
     ],
@@ -205,8 +215,17 @@ class ContractService {
     const nextIndex = currentIndex + 1;
 
     if (nextIndex >= rpcUrls.length) {
-      // Reset to first RPC after trying all
+      // Reset to first RPC after trying all. Must also clear the cached provider
+      // and contracts — otherwise getProvider() keeps handing back the stale
+      // last-RPC provider (e.g. a dead endpoint) on every subsequent tick despite
+      // the index pointing at index 0.
       this.providerIndex[network] = 0;
+      delete this.providers[network];
+      for (const key of this.contracts.keys()) {
+        if (key.startsWith(`${network}:`)) {
+          this.contracts.delete(key);
+        }
+      }
       logger.warn(`All RPCs exhausted for ${network}, resetting to first`);
       return false;
     }
@@ -270,8 +289,20 @@ class ContractService {
           errorMsg.includes('missing response') ||
           errorMsg.includes('ECONNREFUSED') ||
           errorMsg.includes('ETIMEDOUT') ||
+          errorMsg.includes('ECONNRESET') ||
+          errorMsg.includes('EAI_AGAIN') ||
           errorMsg.includes('failed to detect network') ||
-          errorMsg.includes('could not coalesce');
+          errorMsg.includes('could not coalesce') ||
+          // Upstream gateway/server errors from public RPCs (e.g. publicnode returning
+          // a Cloudflare "502 Bad Gateway" — ethers surfaces this as code SERVER_ERROR).
+          // Without this the provider threw instead of rotating to a healthy endpoint.
+          error.code === 'SERVER_ERROR' ||
+          errorMsg.includes('Bad Gateway') ||
+          errorMsg.includes('Service Unavailable') ||
+          errorMsg.includes('Gateway Time') ||
+          errorMsg.includes('502') ||
+          errorMsg.includes('503') ||
+          errorMsg.includes('504');
 
         if (shouldFallback && attempt < maxRetries - 1) {
           logger.warn(`RPC error on ${network} (attempt ${attempt + 1}): ${errorMsg.substring(0, 100)}. Trying fallback...`);

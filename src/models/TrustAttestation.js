@@ -226,5 +226,60 @@ trustAttestationSchema.statics.getTopTrustors = async function (limit = 10) {
     }
 };
 
+/**
+ * Revocation analytics. A revocation in this data model is an attestation at
+ * level 'None' (written by revokeTrust and the scammer-sync path) with the
+ * human-readable reason in reasonCode.
+ * @returns {Promise<Object>} totals, reason/source breakdowns, top revokers, 30-day timeline
+ */
+trustAttestationSchema.statics.getRevocationAnalytics = async function () {
+    const cacheKey = 'revocationAnalytics';
+    const cached = cache.get(cacheKey);
+    if (cached) return cached;
+
+    try {
+        const revokedMatch = { level: 'None' };
+        const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+
+        const [totals, byReason, bySource, topRevokers, timeline] = await retryOperation(() =>
+            Promise.all([
+                this.countDocuments(revokedMatch),
+                this.aggregate([
+                    { $match: revokedMatch },
+                    { $group: { _id: { $ifNull: ['$reasonCode', ''] }, count: { $sum: 1 } } },
+                    { $sort: { count: -1 } },
+                    { $project: { _id: 0, reason: { $cond: [{ $eq: ['$_id', ''] }, 'unspecified', '$_id'] }, count: 1 } }
+                ]),
+                this.aggregate([
+                    { $match: revokedMatch },
+                    { $group: { _id: '$source', count: { $sum: 1 } } },
+                    { $sort: { count: -1 } },
+                    { $project: { _id: 0, source: '$_id', count: 1 } }
+                ]),
+                this.aggregate([
+                    { $match: revokedMatch },
+                    { $group: { _id: { trustorNode: '$trustorNode', trustorName: '$trustorName' }, count: { $sum: 1 } } },
+                    { $sort: { count: -1 } },
+                    { $limit: 10 },
+                    { $project: { _id: 0, trustorNode: '$_id.trustorNode', trustorName: '$_id.trustorName', count: 1 } }
+                ]),
+                this.aggregate([
+                    { $match: { ...revokedMatch, updatedAt: { $gte: thirtyDaysAgo } } },
+                    { $group: { _id: { $dateToString: { format: '%Y-%m-%d', date: '$updatedAt' } }, count: { $sum: 1 } } },
+                    { $sort: { _id: 1 } },
+                    { $project: { _id: 0, date: '$_id', count: 1 } }
+                ])
+            ]), { retries: 3 }
+        );
+
+        const analytics = { totalRevocations: totals, byReason, bySource, topRevokers, last30Days: timeline };
+        cache.set(cacheKey, analytics);
+        return analytics;
+    } catch (error) {
+        logger.error('Error fetching revocation analytics:', error);
+        throw error;
+    }
+};
+
 const TrustAttestation = mongoose.model('TrustAttestation', trustAttestationSchema);
 export default TrustAttestation;

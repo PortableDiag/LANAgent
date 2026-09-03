@@ -5,6 +5,7 @@ import * as cheerio from 'cheerio';
 import NodeCache from 'node-cache';
 import { logger } from '../../utils/logger.js';
 import { retryOperation } from '../../utils/retryUtils.js';
+import { parseFrontmatter, stripFrontmatter } from '../../utils/markdown.js';
 import { parseStringPromise } from 'xml2js';
 import crypto from 'node:crypto';
 
@@ -205,8 +206,6 @@ export class MarkdownLoader extends DocumentLoader {
       const content = await fs.readFile(this.filePath, 'utf-8');
       const stats = await fs.stat(this.filePath);
 
-      // Extract frontmatter if present
-      const frontmatterMatch = content.match(/^---\n([\s\S]*?)\n---\n([\s\S]*)$/);
       let metadata = {
         source: this.filePath,
         filename: path.basename(this.filePath),
@@ -215,23 +214,20 @@ export class MarkdownLoader extends DocumentLoader {
         modified: stats.mtime.toISOString()
       };
 
-      let bodyContent = content;
-
-      if (frontmatterMatch) {
-        try {
-          // Simple YAML-like parsing for frontmatter
-          const frontmatter = {};
-          frontmatterMatch[1].split('\n').forEach(line => {
-            const [key, ...valueParts] = line.split(':');
-            if (key && valueParts.length > 0) {
-              frontmatter[key.trim()] = valueParts.join(':').trim();
-            }
-          });
-          metadata = { ...metadata, ...frontmatter };
-          bodyContent = frontmatterMatch[2];
-        } catch {
-          // Ignore frontmatter parsing errors
-        }
+      // Frontmatter comes from the shared parser in utils/markdown.js rather
+      // than a second hand-rolled one here. That one handles CRLF, a leading
+      // BOM, `+++` delimiters, comment lines and a block that ends the file —
+      // all of which the local regex silently treated as "no frontmatter",
+      // dropping the metadata for the whole document.
+      //
+      // `coerce: false` is deliberate: these values become vector-store
+      // metadata, so `version: 3` must stay the string "3" and `draft: true`
+      // the string "true". Coercing them here would change how existing
+      // indexed documents filter, which is not this consolidation's job.
+      const frontmatter = parseFrontmatter(content, { coerce: false });
+      const bodyContent = stripFrontmatter(content);
+      if (Object.keys(frontmatter).length > 0) {
+        metadata = { ...metadata, ...frontmatter };
       }
 
       // Extract headings for structure metadata

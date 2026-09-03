@@ -28,6 +28,20 @@ export class ProcessManager extends EventEmitter {
         'mongod',
         'sshd',
         'systemd'
+      ],
+      // Persistent capture/monitor tools that legitimately peg a core forever.
+      // `ps` reports lifetime-average CPU, so these trip the >80% alert every
+      // cycle even though they're doing exactly what they should (e.g. the
+      // home-defense RF module runs airodump-ng continuously). Substring match
+      // against the command line; extend via IGNORE_HIGH_CPU_PROCESSES (csv).
+      ignoredProcesses: [
+        'airodump-ng',
+        'airmon-ng',
+        'kismet',
+        'tcpdump',
+        'tshark',
+        ...(process.env.IGNORE_HIGH_CPU_PROCESSES || '')
+          .split(',').map(s => s.trim()).filter(Boolean)
       ]
     };
 
@@ -163,19 +177,25 @@ export class ProcessManager extends EventEmitter {
       }).filter(p => p !== null);
 
       // Find high resource usage processes
-      // Filter out the ps command itself and other short-lived monitoring commands
-      const highCpuProcesses = processes.filter(p => 
+      // Filter out the ps command itself, short-lived monitoring commands, and
+      // known-benign persistent capture tools (see config.ignoredProcesses).
+      const isIgnored = (cmd) =>
+        this.config.ignoredProcesses.some(name => cmd.includes(name));
+
+      const highCpuProcesses = processes.filter(p =>
         p.cpu >= this.config.alertThresholds.cpuPercent &&
         !p.command.includes('ps aux') &&
         !p.command.includes('ps -') &&
         !p.command.includes('top -') &&
-        !p.command.includes('htop')
+        !p.command.includes('htop') &&
+        !isIgnored(p.command)
       );
-      
-      const highMemoryProcesses = processes.filter(p => 
+
+      const highMemoryProcesses = processes.filter(p =>
         p.memory >= this.config.alertThresholds.memoryPercent &&
         !p.command.includes('ps aux') &&
-        !p.command.includes('ps -')
+        !p.command.includes('ps -') &&
+        !isIgnored(p.command)
       );
 
       // Alert for high resource usage

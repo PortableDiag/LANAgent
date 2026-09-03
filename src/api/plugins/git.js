@@ -5,6 +5,12 @@ import path from 'path';
 import fs from 'fs/promises';
 import simpleGit from 'simple-git';
 import { determineProjectForIssue, parseIssueDetails } from '../../utils/projectContext.js';
+import os from 'os';
+
+// Where git's `store` credential helper keeps the token for automated pulls and
+// pushes. One stable file, in the home directory, mode 0600 — see the comment at
+// its use site for why a timestamped path in /tmp was a latent outage.
+const GIT_CREDENTIALS_FILE = path.join(os.homedir(), '.lanagent-git-credentials');
 
 const execAsync = promisify(exec);
 
@@ -357,8 +363,22 @@ export default class GitPlugin extends BasePlugin {
       if (remoteResult.success) {
         const url = remoteResult.stdout;
         if (url.includes('github.com')) {
-          // Configure credential helper temporarily
-          await this.executeGitCommand(`config credential.helper "store --file=/tmp/git-creds-${Date.now()}"`);
+          // Credential store: ONE durable file, not a timestamped path in /tmp.
+          //
+          // This used to be `/tmp/git-creds-${Date.now()}`, which is wrong three
+          // ways: /tmp is cleared on reboot, so after any restart the repo could
+          // no longer authenticate and every automated pull or push failed
+          // silently; a NEW file was created on every push and never cleaned up;
+          // and the repo's credential.helper config persists, so it was left
+          // permanently pointing at a path that would not survive the next boot.
+          //
+          // A stable file under the home directory, 0600, fixes all three.
+          await this.executeGitCommand(`config credential.helper "store --file=${GIT_CREDENTIALS_FILE}"`);
+          try {
+            await fs.chmod(GIT_CREDENTIALS_FILE, 0o600);
+          } catch {
+            // Not created until git writes to it; the mode is applied on the next push.
+          }
           
           // Write credentials
           const credUrl = url.replace('https://', `https://${this.gitToken}@`);

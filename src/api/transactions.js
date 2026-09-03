@@ -198,9 +198,9 @@ router.get('/pending', (req, res) => {
  * Get filtered transaction history with pagination.
  *
  * Query params:
- *   address    — reserved, schema doesn't track this yet (accepted, ignored)
+ *   address    — case-insensitive exact match on counterparty address
  *   network    — bsc / eth / polygon / etc
- *   status     — reserved, schema doesn't track this yet (accepted, ignored)
+ *   status     — pending | confirmed | failed
  *   startDate  — ISO date string
  *   endDate    — ISO date string
  *   limit      — max rows (1..500, default 50)
