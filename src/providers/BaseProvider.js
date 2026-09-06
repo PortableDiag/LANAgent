@@ -56,6 +56,24 @@ export class BaseProvider extends EventEmitter {
     throw new Error("generateResponse must be implemented by subclass");
   }
 
+  /**
+   * The wall-clock budget this provider allows ONE generateResponse() call before
+   * it aborts, in ms — or null when the provider imposes no budget it can describe.
+   *
+   * Callers that wrap generateResponse() in their own watchdog must derive it from
+   * this rather than hard-coding one, and must sit ABOVE it. A caller deadline
+   * shorter than the provider's own budget can never be satisfied: the caller gives
+   * up while the request is still legitimately in flight, so the slow tail of calls
+   * can never succeed — a permanent failure that looks like a flaky provider. The
+   * capability scanner raced a hard-coded 60s against HuggingFace's 90s budget and
+   * lost 15-24% of its analyses that way; ollama's budget is 600s, which the same
+   * deadline would truncate by an order of magnitude.
+   */
+  getGenerationTimeoutMs(options = {}) {
+    const budget = Number(this.requestTimeoutMs ?? this.timeout);
+    return Number.isFinite(budget) && budget > 0 ? budget : null;
+  }
+
   async generateEmbedding(text) {
     if (this.simulationMode) {
       logger.info(`[Simulation] ${this.name}.generateEmbedding called`);

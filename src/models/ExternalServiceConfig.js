@@ -71,6 +71,11 @@ const externalServiceConfigSchema = new mongoose.Schema({
   dependencies: {
     type: [String],
     default: []
+  },
+  // Fallback chain for service resilience
+  fallbackChain: {
+    type: [String],
+    default: []
   }
 }, {
   timestamps: true
@@ -105,6 +110,7 @@ externalServiceConfigSchema.statics.exportConfiguration = async function(service
       totalRevenue: config.totalRevenue,
       lastUsed: config.lastUsed,
       dependencies: config.dependencies,
+      fallbackChain: config.fallbackChain,
       createdAt: config.createdAt,
       updatedAt: config.updatedAt
     };
@@ -147,6 +153,10 @@ externalServiceConfigSchema.statics.validateImportPayload = function(payload) {
       totalRevenue: { type: 'string' },
       lastUsed: { type: 'string', format: 'date-time' },
       dependencies: {
+        type: 'array',
+        items: { type: 'string' }
+      },
+      fallbackChain: {
         type: 'array',
         items: { type: 'string' }
       }
@@ -322,6 +332,87 @@ externalServiceConfigSchema.statics.checkDependencies = async function(serviceId
       error: error.message,
       chain: []
     };
+  }
+};
+
+/**
+ * Get the fallback chain for a service
+ * @param {string} serviceId - The ID of the service to get fallback chain for
+ * @returns {Array<string>} Ordered list of fallback service IDs
+ */
+externalServiceConfigSchema.statics.getFallbackChain = async function(serviceId) {
+  try {
+    const config = await this.findOne({ serviceId });
+    if (!config) {
+      throw new Error(`Service with ID ${serviceId} not found`);
+    }
+    
+    return config.fallbackChain || [];
+  } catch (error) {
+    logger.error('Error getting fallback chain:', error);
+    throw error;
+  }
+};
+
+/**
+ * Select the best available fallback service based on availability and performance
+ * @param {string} currentServiceId - The ID of the current service that failed
+ * @returns {string|null} The ID of the selected fallback service or null if none available
+ */
+externalServiceConfigSchema.statics.selectFallbackService = async function(currentServiceId) {
+  try {
+    const fallbackChain = await this.getFallbackChain(currentServiceId);
+    
+    if (!fallbackChain || fallbackChain.length === 0) {
+      return null;
+    }
+    
+    // Find all fallback services that are enabled
+    const fallbackServices = await this.find({
+      serviceId: { $in: fallbackChain },
+      enabled: true
+    }).select('serviceId totalRequests lastUsed');
+    
+    // Create a map for quick lookup
+    const serviceMap = {};
+    fallbackServices.forEach(service => {
+      serviceMap[service.serviceId] = service;
+    });
+    
+    // Sort fallback services by performance metrics (prefer less used services)
+    const sortedFallbacks = fallbackChain
+      .filter(serviceId => serviceMap[serviceId]) // Only consider enabled services
+      .sort((a, b) => {
+        const serviceA = serviceMap[a];
+        const serviceB = serviceMap[b];
+        
+        // Prefer services with fewer total requests (less loaded)
+        if (serviceA.totalRequests !== serviceB.totalRequests) {
+          return serviceA.totalRequests - serviceB.totalRequests;
+        }
+        
+        // If requests are equal, prefer services used longer ago
+        if (serviceA.lastUsed && serviceB.lastUsed) {
+          return serviceA.lastUsed.getTime() - serviceB.lastUsed.getTime();
+        }
+        
+        // If one has lastUsed and the other doesn't, prefer the one with lastUsed
+        if (serviceA.lastUsed && !serviceB.lastUsed) {
+          return -1;
+        }
+        
+        if (!serviceA.lastUsed && serviceB.lastUsed) {
+          return 1;
+        }
+        
+        return 0;
+      });
+    
+    // Return the best fallback service ID or null if none available
+    return sortedFallbacks.length > 0 ? sortedFallbacks[0] : null;
+  } catch (error) {
+    logger.error('Error selecting fallback service:', error);
+    throw error;
   }
 };
 

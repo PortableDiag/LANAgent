@@ -21,7 +21,9 @@ export class BitNetProvider extends BaseProvider {
     this.availableModels = [];
     this.commands = [
       { command: 'healthcheck', description: 'Check if BitNet server is running', usage: 'healthcheck' },
-      { command: 'getserverinfo', description: 'Get BitNet server status and model info', usage: 'getserverinfo' }
+      { command: 'getserverinfo', description: 'Get BitNet server status and model info', usage: 'getserverinfo' },
+      { command: 'listmodels', description: 'List available BitNet models', usage: 'listmodels' },
+      { command: 'switchmodel', description: 'Switch the active BitNet model', usage: 'switchmodel <modelName>' }
     ];
   }
 
@@ -335,6 +337,73 @@ export class BitNetProvider extends BaseProvider {
   }
 
   /**
+   * List available models from the BitNet server
+   */
+  async listModels() {
+    try {
+      const response = await axios.get(`${this.baseUrl}/v1/models`, {
+        timeout: 10000
+      });
+      
+      if (response.data?.data) {
+        this.availableModels = response.data.data.map(m => m.id);
+        return {
+          models: this.availableModels,
+          currentModel: this.models.chat
+        };
+      }
+      
+      return {
+        models: [this.models.chat],
+        currentModel: this.models.chat
+      };
+    } catch (error) {
+      logger.error('Failed to fetch models from BitNet server:', error.message);
+      throw new Error(`Failed to list models: ${error.message}`);
+    }
+  }
+
+  /**
+   * Switch the active BitNet model
+   * @param {string} modelName - The name of the model to switch to
+   */
+  async switchModel(modelName) {
+    if (!modelName) {
+      throw new Error('Model name is required');
+    }
+
+    try {
+      // First verify the model exists by fetching the model list
+      const response = await axios.get(`${this.baseUrl}/v1/models`, {
+        timeout: 10000
+      });
+
+      if (response.data?.data) {
+        this.availableModels = response.data.data.map(m => m.id);
+        
+        if (!this.availableModels.includes(modelName)) {
+          throw new Error(`Model '${modelName}' is not available. Available models: ${this.availableModels.join(', ')}`);
+        }
+        
+        // Update the active model
+        this.models.chat = modelName;
+        logger.info(`Switched BitNet model to: ${modelName}`);
+        
+        return {
+          success: true,
+          message: `Successfully switched to model: ${modelName}`,
+          newModel: modelName
+        };
+      } else {
+        throw new Error('Invalid response from models endpoint');
+      }
+    } catch (error) {
+      logger.error('Failed to switch BitNet model:', error.message);
+      throw new Error(`Failed to switch model: ${error.message}`);
+    }
+  }
+
+  /**
    * Cost calculation - BitNet is local, $0 cost
    */
   calculateCost() {
@@ -367,6 +436,13 @@ export class BitNetProvider extends BaseProvider {
         return await this.serverHealthCheck();
       case 'getserverinfo':
         return await this.getServerInfo();
+      case 'listmodels':
+        return await this.listModels();
+      case 'switchmodel':
+        if (!params || !params.modelName) {
+          throw new Error('Missing required parameter: modelName');
+        }
+        return await this.switchModel(params.modelName);
       default:
         throw new Error(`Unknown command: ${command}`);
     }

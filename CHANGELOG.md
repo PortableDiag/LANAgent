@@ -2,6 +2,59 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.294] - 2026-09-06
+
+Targeted sync from upstream development, covering a reviewed batch of self-improvement proposals
+and one provider-timeout fix. Ten proposals were merged after repair and nine rejected; none was
+mergeable as submitted, so each entry below reflects the corrected version rather than what was
+originally proposed.
+
+### Added
+- **Runtime model listing and switching** for the local-inference provider, dispatched through the
+  command interface that provider already exposed.
+- **Check-result retrieval** for the uptime-monitoring plugin, with date-range, failure and
+  result-type filters and paging, built against the vendor's documented contract.
+- **Document summarisation** in the knowledge base, scoped to the requested source document.
+- **Log retrieval and execution metrics** for the serverless-functions plugin.
+- **Correlated-event lookup and sequence-pattern detection** on the contract-event model.
+- **Conflict detection and free-slot suggestion** on the calendar model, covering all three
+  overlap shapes, with configurable buffers between appointments.
+- **Optimisation advice** on the liquidity-position model: fee collection, tier migration,
+  rebalancing and compounding triggers.
+- **Participation benchmarks** on the referral and oracle models, comparing an individual against
+  network averages.
+- **Fallback chains** on the external-service model, selecting the least-loaded enabled service.
+
+### Fixed
+- **A watchdog that expired before the provider it was guarding.** The capability scanner wrapped
+  each AI file analysis in a fixed 60-second deadline while the provider's own budget for that
+  call is 90 seconds — a budget deliberately raised for these longer code-generation requests. The
+  caller therefore gave up thirty seconds before the provider was permitted to answer, so the slow
+  tail of analyses could never succeed no matter how healthy the provider was, and each loss also
+  consumed a full minute of the scan window. Providers now report their effective budget for a
+  given call and the caller derives its watchdog from that figure, staying above it. This also
+  removes an order-of-magnitude truncation of the local-inference provider, whose budget is ten
+  minutes.
+- **A rate that was structurally always 100%.** An aggregation filtered to successful rows and then
+  averaged whether each row was successful, so the average could only ever be 1. Every participant
+  short of a perfect record was reported as below the average.
+- **A benchmark comparing incompatible units**, subtracting a per-participant count from a per-day
+  rate, which reported the most active participant as well below average. A second figure in the
+  same report divided two averages by different denominators.
+- **A metrics request addressed to the wrong service**, with nested query parameters spelled so
+  that they would have been ignored rather than rejected — silently widening the query window.
+- **A summarisation call that expected a string** where the provider returns a result object, and
+  that searched the entire corpus rather than the named document.
+- **A guard rendered permanently false** by the removal of a Unicode replacement character, which
+  reduced calendar export folding to one byte per line.
+- **An advisory metric named for a duration it did not measure**, reporting time since the last
+  adjustment as though it were time spent outside the target range.
+
+### Changed
+- Tests accompanying these proposals were rewritten where they asserted against fixtures the real
+  code cannot produce, targeted functions the change did not touch, replaced the method under test,
+  or could not load at all.
+
 ## [2.25.269] - 2026-09-02
 
 Consolidated sync from upstream development (2.25.252–2.25.269). Highlights, by area:

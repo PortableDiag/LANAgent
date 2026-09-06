@@ -3,6 +3,15 @@ import fs from 'fs/promises';
 import path from 'path';
 import crypto from 'crypto';
 
+// Headroom the analysis watchdog keeps over the provider's own budget, so the
+// provider aborts and rejects on its own terms first and the logged error names
+// the real cause instead of a generic caller timeout.
+const ANALYSIS_WATCHDOG_MARGIN_MS = 15000;
+
+// Floor for a provider that cannot describe its budget. Only a lower bound — a
+// provider reporting a larger budget raises the watchdog above this.
+const ANALYSIS_MIN_WATCHDOG_MS = 60000;
+
 export class CapabilityIncrementalScanner {
   constructor(selfModService) {
     this.service = selfModService;
@@ -565,11 +574,6 @@ export class CapabilityIncrementalScanner {
   async analyzeFileWithAI(target, content, providerInfo, existingPRs = []) {
     try {
       const prompt = this.buildCapabilityAnalysisPrompt(target, content, existingPRs);
-      
-      // Add timeout wrapper to prevent hanging
-      const timeoutPromise = new Promise((resolve, reject) => {
-        setTimeout(() => reject(new Error('AI analysis timeout')), 60000); // 60 second timeout
-      });
 
       // Token budget: reasoning models (gpt-5, o-series) consume the budget
       // internally before any visible content. We were observing length=0
@@ -578,14 +582,51 @@ export class CapabilityIncrementalScanner {
       // the JSON output. Bumped to 10K plus reasoning_effort=low to cap the
       // think-time. Non-reasoning providers (anthropic, gab, etc.) ignore
       // both — the cap is harmless overhead for them.
-      const analysisPromise = this.agent.providerManager.generateResponse(prompt, {
+      const analysisOptions = {
         maxTokens: 10000,
         temperature: 0.3,
         enableWebSearch: false,
         additionalParams: { reasoning_effort: 'low' }
+      };
+
+      // Watchdog for a provider that never returns at all — deliberately ABOVE the
+      // provider's own budget, never below it.
+      //
+      // This was a hard-coded 60s while HuggingFace's budget for this very call is
+      // 90s (it scales with maxTokens and is capped at 90s — raised to 90s *for*
+      // these code-generation calls). So the watchdog always fired first: every
+      // analysis that ran long was rejected 30s before the provider was even
+      // allowed to answer, so the slow tail could never succeed — 54 "AI analysis
+      // timeout" failures between 2026-09-02 and 09-06 (119 succeeded against 21
+      // lost on 09-05, 22 against 7 on 09-06), each also burning a full 60s of the
+      // scan window. ollama's budget is 600s, which this would truncate tenfold.
+      //
+      // Ask the provider what it allows and sit above it, so this stays a backstop
+      // against a hung request rather than a second opinion on how long a call may
+      // take — and so it cannot silently fall behind the provider again.
+      const providerBudgetMs = await this.agent.providerManager.getGenerationTimeoutMs?.(analysisOptions);
+      const watchdogMs =
+        Math.max(Number(providerBudgetMs) > 0 ? Number(providerBudgetMs) : 0, ANALYSIS_MIN_WATCHDOG_MS) +
+        ANALYSIS_WATCHDOG_MARGIN_MS;
+
+      let timeoutHandle;
+      const timeoutPromise = new Promise((resolve, reject) => {
+        timeoutHandle = setTimeout(
+          () => reject(new Error(`AI analysis timeout after ${watchdogMs}ms`)),
+          watchdogMs
+        );
       });
-      
-      const response = await Promise.race([analysisPromise, timeoutPromise]);
+
+      const analysisPromise = this.agent.providerManager.generateResponse(prompt, analysisOptions);
+
+      let response;
+      try {
+        response = await Promise.race([analysisPromise, timeoutPromise]);
+      } finally {
+        // The loser of the race is never awaited; leaving its timer armed keeps a
+        // ref'd handle alive for the full budget on every successful analysis.
+        clearTimeout(timeoutHandle);
+      }
 
       // Debug: log raw AI response for troubleshooting
       const rawContent = response?.content || '';

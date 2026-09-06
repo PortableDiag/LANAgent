@@ -130,6 +130,17 @@ export class HuggingFaceProvider extends BaseProvider {
     }
   }
 
+  /**
+   * This provider's budget scales with max_tokens (see _generationTimeoutMs), so
+   * report the figure for the call the caller is actually about to make rather
+   * than the base TTFB budget.
+   */
+  getGenerationTimeoutMs(options = {}) {
+    const maxTokens = options.maxTokens ?? this.modelParams?.chat?.maxTokens;
+    const budget = this._generationTimeoutMs(maxTokens);
+    return Number.isFinite(budget) && budget > 0 ? budget : null;
+  }
+
   async initialize() {
     try {
       const apiKey = this.config.apiKey || process.env.HUGGINGFACE_TOKEN;

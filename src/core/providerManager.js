@@ -417,6 +417,24 @@ export class ProviderManager extends EventEmitter {
     });
   }
 
+  /**
+   * The wall-clock budget the provider that would serve `options` allows for one
+   * attempt, in ms — null when it cannot be determined (no active provider, or a
+   * provider that does not describe a budget).
+   *
+   * For callers that need to wrap generateResponse() in a watchdog. Derive the
+   * deadline from this and stay above it: a watchdog below the provider's own
+   * budget converts every slow call into a guaranteed failure.
+   */
+  async getGenerationTimeoutMs(options = {}) {
+    try {
+      const provider = await this.getCurrentProvider();
+      return provider?.getGenerationTimeoutMs?.(options) ?? null;
+    } catch (error) {
+      return null;
+    }
+  }
+
   async generateResponse(prompt, options = {}) {
     const provider = await this.getCurrentProvider();
 

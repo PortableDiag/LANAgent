@@ -82,12 +82,37 @@ export default class GoogleCloudFunctionsPlugin extends BasePlugin {
           'remove a trigger from myFunction',
           'delete trigger from myFunction'
         ]
+      },
+      {
+        command: 'getFunctionLogs',
+        description: 'Retrieve logs for a specific Google Cloud Function',
+        usage: 'getFunctionLogs({ projectId: "your-project-id", functionName: "myFunction", filter: "severity>=ERROR", limit: 100 })',
+        examples: [
+          'get logs for myFunction',
+          'show error logs for myFunction',
+          'retrieve last 50 logs for myFunction'
+        ]
+      },
+      {
+        command: 'monitorFunctionExecution',
+        description: 'Monitor execution metrics for a Google Cloud Function',
+        usage: 'monitorFunctionExecution({ projectId: "your-project-id", functionName: "myFunction", duration: "1h", status: "error" })',
+        examples: [
+          'monitor execution of myFunction',
+          'get execution metrics for myFunction',
+          'show recent execution stats for myFunction'
+        ]
       }
     ];
 
     this.config = {
       apiKey: null,
       baseUrl: 'https://cloudfunctions.googleapis.com/v1/projects',
+      loggingBaseUrl: 'https://logging.googleapis.com/v2',
+      // Time series live in Cloud Monitoring, which is a different service and a
+      // different major version from Cloud Logging. Reading them off the logging
+      // host 404s.
+      monitoringBaseUrl: 'https://monitoring.googleapis.com/v3'
     };
 
     this.initialized = false;
@@ -160,6 +185,10 @@ export default class GoogleCloudFunctionsPlugin extends BasePlugin {
           return await this.addTrigger(data);
         case 'removeTrigger':
           return await this.removeTrigger(data);
+        case 'getFunctionLogs':
+          return await this.getFunctionLogs(data);
+        case 'monitorFunctionExecution':
+          return await this.monitorFunctionExecution(data);
         default:
           throw new Error(`Unknown action: ${action}`);
       }
@@ -349,6 +378,122 @@ export default class GoogleCloudFunctionsPlugin extends BasePlugin {
       return { success: true, data: response.data };
     } catch (error) {
       this.logger.error('Error removing trigger:', error);
+      return { success: false, error: error.message };
+    }
+  }
+
+  /**
+   * Retrieve logs for a specific Google Cloud Function
+   * @param {Object} params - Parameters for retrieving logs
+   * @param {string} params.projectId - The project ID
+   * @param {string} params.functionName - The name of the function
+   * @param {string} [params.filter] - Optional filter for the logs
+   * @param {number} [params.limit=50] - Maximum number of log entries to retrieve
+   * @returns {Promise<Object>} - The log entries
+   */
+  async getFunctionLogs({ projectId, functionName, filter, limit = 50 }) {
+    this.validateParams({ projectId, functionName }, {
+      projectId: { required: true, type: 'string' },
+      functionName: { required: true, type: 'string' },
+      filter: { required: false, type: 'string' },
+      limit: { required: false, type: 'number' }
+    });
+
+    // Build the filter string for Google Cloud Logging
+    let logFilter = `resource.type="cloud_function" resource.labels.function_name="${functionName}"`;
+    if (filter) {
+      logFilter += ` ${filter}`;
+    }
+
+    const url = `${this.config.loggingBaseUrl}/entries:list`;
+    try {
+      const response = await retryOperation(() => axios.post(url, {
+        resourceNames: [`projects/${projectId}`],
+        filter: logFilter,
+        orderBy: 'timestamp desc',
+        pageSize: limit
+      }, {
+        headers: {
+          'Authorization': `Bearer ${this.config.apiKey}`,
+          'Content-Type': 'application/json'
+        }
+      }), { retries: 3, context: 'getFunctionLogs' });
+
+      return { success: true, data: response.data };
+    } catch (error) {
+      this.logger.error('Error retrieving function logs:', error);
+      return { success: false, error: error.message };
+    }
+  }
+
+  /**
+   * Monitor execution metrics for a Google Cloud Function
+   * @param {Object} params - Parameters for monitoring execution
+   * @param {string} params.projectId - The project ID
+   * @param {string} params.functionName - The name of the function
+   * @param {string} [params.duration="1h"] - Time duration to retrieve metrics for (e.g., "1h", "1d", "7d")
+   * @returns {Promise<Object>} - The execution metrics
+   */
+  async monitorFunctionExecution({ projectId, functionName, duration = "1h", status }) {
+    this.validateParams({ projectId, functionName, duration }, {
+      projectId: { required: true, type: 'string' },
+      functionName: { required: true, type: 'string' },
+      duration: { required: false, type: 'string' }
+    });
+
+    // Convert duration to seconds for the monitoring window
+    const durationMap = {
+      "1h": 3600,
+      "6h": 21600,
+      "1d": 86400,
+      "7d": 604800
+    };
+    
+    const seconds = durationMap[duration] || 3600;
+    const endTime = new Date();
+    const startTime = new Date(endTime.getTime() - (seconds * 1000));
+
+    // Format dates for the API
+    const formatTime = (date) => date.toISOString();
+
+    // Construct the metric filter for execution metrics.
+    //
+    // The status label is only applied when the caller asks for one. Pinning it
+    // to "ok" unconditionally would mean a command called "monitor execution"
+    // silently reported successes only — the failures are usually the reason
+    // somebody is looking.
+    const filterParts = [
+      'metric.type="cloudfunctions.googleapis.com/function/execution_count"',
+      'resource.type="cloud_function"',
+      `resource.labels.function_name="${functionName}"`,
+      `resource.labels.project_id="${projectId}"`
+    ];
+    if (status) filterParts.push(`metric.label.status="${status}"`);
+    const filter = filterParts.join(' AND ');
+
+    const url = `${this.config.monitoringBaseUrl}/projects/${projectId}/timeSeries`;
+    try {
+      const response = await retryOperation(() => axios.get(url, {
+        headers: {
+          'Authorization': `Bearer ${this.config.apiKey}`
+        },
+        // Nested request fields are expressed as dotted query parameters in
+        // Google's REST mapping; the underscore spellings are not recognised and
+        // are dropped, which would silently widen the interval to the API default.
+        params: {
+          filter,
+          'interval.startTime': formatTime(startTime),
+          'interval.endTime': formatTime(endTime),
+          'aggregation.groupByFields': 'resource.labels.function_name',
+          'aggregation.perSeriesAligner': 'ALIGN_RATE',
+          'aggregation.alignmentPeriod': '60s',
+          view: 'FULL'
+        }
+      }), { retries: 3, context: 'monitorFunctionExecution' });
+
+      return { success: true, data: response.data };
+    } catch (error) {
+      this.logger.error('Error monitoring function execution:', error);
       return { success: false, error: error.message };
     }
   }

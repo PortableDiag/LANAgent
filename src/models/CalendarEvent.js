@@ -463,4 +463,96 @@ calendarEventSchema.statics.findByCategory = function(category, limit = 50) {
     .limit(limit);
 };
 
+/**
+ * Find events that conflict with the given time range
+ * @param {Date} startDate - Start of the time range to check
+ * @param {Date} endDate - End of the time range to check
+ * @param {string} [excludeId] - Optional ID of an event to exclude from conflicts (e.g., when editing an existing event)
+ * @returns {Promise<Array>} - Array of conflicting events
+ */
+calendarEventSchema.statics.findConflictingEvents = function(startDate, endDate, excludeId = null) {
+  const query = {
+    $or: [
+      // Events that start within range
+      { startDate: { $gte: startDate, $lt: endDate } },
+      // Events that end within range
+      { endDate: { $gt: startDate, $lte: endDate } },
+      // Events that span the entire range
+      { startDate: { $lte: startDate }, endDate: { $gte: endDate } }
+    ],
+    status: { $ne: 'cancelled' }
+  };
+
+  if (excludeId) {
+    query._id = { $ne: excludeId };
+  }
+
+  return this.find(query).sort({ startDate: 1 });
+};
+
+/**
+ * Suggest available time slots within a given range
+ * @param {Date} startDate - Start of the time range to check
+ * @param {Date} endDate - End of the time range to check
+ * @param {number} durationMinutes - Duration of the desired time slot in minutes
+ * @param {number} [bufferMinutes=0] - Buffer time in minutes between events
+ * @returns {Promise<Array>} - Array of available time slots
+ */
+calendarEventSchema.statics.suggestAvailableSlots = async function(startDate, endDate, durationMinutes, bufferMinutes = 0) {
+  if (durationMinutes <= 0) {
+    throw new Error('Duration must be greater than zero');
+  }
+
+  // Find all events within the range
+  const events = await this.findByDateRange(startDate, endDate);
+  
+  // Sort events by start date
+  events.sort((a, b) => a.startDate - b.startDate);
+  
+  const slots = [];
+  let currentStart = new Date(startDate);
+  const rangeEnd = new Date(endDate);
+  
+  // Add buffer time to duration
+  const totalDuration = durationMinutes + bufferMinutes;
+  
+  for (const event of events) {
+    const eventStart = new Date(event.startDate);
+    const eventEnd = new Date(event.endDate);
+    
+    // Add buffer time to event boundaries
+    eventStart.setMinutes(eventStart.getMinutes() - bufferMinutes);
+    eventEnd.setMinutes(eventEnd.getMinutes() + bufferMinutes);
+    
+    // Check if there's enough time before this event
+    if (currentStart < eventStart) {
+      const availableTime = (eventStart - currentStart) / (1000 * 60); // Convert to minutes
+      if (availableTime >= totalDuration) {
+        slots.push({
+          startDate: new Date(currentStart),
+          endDate: new Date(currentStart.getTime() + durationMinutes * 60 * 1000)
+        });
+      }
+    }
+    
+    // Move current start to after this event
+    if (eventEnd > currentStart) {
+      currentStart = new Date(eventEnd);
+    }
+  }
+  
+  // Check for available time after the last event
+  if (currentStart < rangeEnd) {
+    const availableTime = (rangeEnd - currentStart) / (1000 * 60); // Convert to minutes
+    if (availableTime >= totalDuration) {
+      slots.push({
+        startDate: new Date(currentStart),
+        endDate: new Date(currentStart.getTime() + durationMinutes * 60 * 1000)
+      });
+    }
+  }
+  
+  return slots;
+};
+
 export const CalendarEvent = mongoose.model('CalendarEvent', calendarEventSchema);

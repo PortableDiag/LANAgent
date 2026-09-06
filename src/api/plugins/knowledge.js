@@ -56,6 +56,11 @@ export default class KnowledgePlugin extends BasePlugin {
         command: 'configure',
         description: 'Update RAG configuration',
         usage: 'configure({ chunkSize: 1500, retrieverType: "mmr", k: 10 })'
+      },
+      {
+        command: 'summarize',
+        description: 'Generate a summary of a document',
+        usage: 'summarize({ source: "/path/to/file.pdf", maxLength: 200 })'
       }
     ];
 
@@ -123,7 +128,7 @@ export default class KnowledgePlugin extends BasePlugin {
       action: {
         required: true,
         type: 'string',
-        enum: ['ingest', 'ingestUrl', 'ingestDirectory', 'query', 'search', 'list', 'delete', 'stats', 'configure']
+        enum: ['ingest', 'ingestUrl', 'ingestDirectory', 'query', 'search', 'list', 'delete', 'stats', 'configure', 'summarize']
       }
     });
 
@@ -146,6 +151,8 @@ export default class KnowledgePlugin extends BasePlugin {
         return await this.getStats();
       case 'configure':
         return await this.updateConfiguration(data);
+      case 'summarize':
+        return await this.summarizeDocument(data);
       default:
         throw new Error(`Unknown action: ${action}`);
     }
@@ -434,6 +441,62 @@ export default class KnowledgePlugin extends BasePlugin {
       success: true,
       message: 'Configuration updated',
       configuration: this.config
+    };
+  }
+
+  /**
+   * Generate a summary of a document using RAG chain
+   * @param {Object} data - Summary parameters
+   * @param {string} data.source - Document source path or URL
+   * @param {number} [data.maxLength=200] - Maximum length of the summary
+   * @returns {Promise<Object>} Summary result
+   */
+  async summarizeDocument(data) {
+    this.validateParams(data, {
+      source: { required: true, type: 'string' },
+      maxLength: { type: 'number' }
+    });
+
+    if (!this.ragChain) {
+      throw new Error('RAG system not initialized');
+    }
+
+    // Retrieve this document's own chunks. The filter is what scopes the
+    // summary to `source`: without it this is an unfiltered similarity search
+    // over the whole knowledge base for text resembling the query sentence,
+    // which can return chunks from entirely unrelated documents and summarise
+    // those instead. `source` is a real column on the vector store, so the
+    // filter becomes `source = '<value>'`.
+    const contextResult = await this.ragChain.getContext(`Summarize content from ${data.source}`, {
+      k: 10, // Retrieve more chunks to ensure we capture the full content
+      filter: { source: data.source },
+      formatAsString: true
+    });
+
+    if (!contextResult.context || contextResult.documentCount === 0) {
+      throw new Error(`No content found for source: ${data.source}`);
+    }
+
+    // Create summary prompt
+    const maxLength = data.maxLength || 200;
+    const prompt = `Please provide a concise summary of the following document content in no more than ${maxLength} words:\n\n${contextResult.context}`;
+
+    // Generate summary using the LLM provider
+    const response = await this.ragChain.llmProvider.generateResponse(prompt, {
+      maxTokens: maxLength * 2 // Approximate token count
+    });
+
+    // generateResponse resolves to a provider result object, not a string — the
+    // same `.content || response` unwrapping the RAG chain itself uses. Calling
+    // .trim() straight on the result throws on every invocation.
+    const summary = typeof response === 'string' ? response : (response?.content ?? '');
+
+    return {
+      success: true,
+      source: data.source,
+      summary: summary.trim(),
+      maxLength: maxLength,
+      originalLength: contextResult.context.length
     };
   }
 

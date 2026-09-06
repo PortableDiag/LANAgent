@@ -155,6 +155,153 @@ oracleParticipationSchema.statics.getStatistics = async function (options = {}) 
 };
 
 /**
+ * Get performance benchmark comparing user's metrics against network averages
+ * @param {string} userAddress - Address of the user to benchmark
+ * @returns {Promise<Object>} Performance comparison data
+ */
+oracleParticipationSchema.statics.getPerformanceBenchmark = async function (userAddress) {
+    try {
+        // Get user-specific stats
+        const userWinRateResult = await this.aggregate([
+            { $match: { requester: userAddress, role: 'info', status: { $in: ['won', 'lost'] } } },
+            { $group: {
+                _id: null,
+                total: { $sum: 1 },
+                wins: { $sum: { $cond: [{ $eq: ['$status', 'won'] }, 1, 0] } }
+            }},
+            { $project: {
+                total: 1, wins: 1,
+                winRate: { $cond: [{ $eq: ['$total', 0] }, 0, { $divide: ['$wins', '$total'] }] }
+            }}
+        ]);
+
+        const userEarningsResult = await this.aggregate([
+            { $match: { requester: userAddress, revenueTracked: true } },
+            { $group: {
+                _id: null,
+                count: { $sum: 1 },
+                totalEarned: { $sum: { $toDouble: '$rewardEarned' } }
+            }},
+            { $project: {
+                count: 1,
+                totalEarned: 1,
+                avgReward: { $cond: [{ $eq: ['$count', 0] }, 0, { $divide: ['$totalEarned', '$count'] }] }
+            }}
+        ]);
+
+        const userParticipationResult = await this.aggregate([
+            { $match: { requester: userAddress } },
+            { $group: {
+                _id: null,
+                totalCount: { $sum: 1 },
+                firstParticipation: { $min: '$createdAt' }
+            }}
+        ]);
+
+        // Get network-wide stats
+        const networkWinRateResult = await this.getWinRate();
+        const networkEarningsResult = await this.getEarningsStats();
+        const networkParticipationResult = await this.aggregate([
+            { $group: {
+                _id: null,
+                totalCount: { $sum: 1 },
+                uniqueParticipants: { $addToSet: '$requester' }
+            }},
+            { $project: {
+                totalCount: 1,
+                participantCount: { $size: '$uniqueParticipants' }
+            }}
+        ]);
+
+        // Per-participant activity, so the network frequency can be expressed in
+        // the same unit as the user's (participations per day) rather than in
+        // participations per participant. See the frequency note below.
+        const perParticipant = await this.aggregate([
+            { $group: {
+                _id: '$requester',
+                count: { $sum: 1 },
+                firstParticipation: { $min: '$createdAt' }
+            }}
+        ]);
+
+        // Calculate user metrics
+        const userWinRate = userWinRateResult.length > 0 ? userWinRateResult[0].winRate : 0;
+        const userTotalEarnings = userEarningsResult.length > 0 ? userEarningsResult[0].totalEarned : 0;
+        const userAvgReward = userEarningsResult.length > 0 ? userEarningsResult[0].avgReward : 0;
+        const userParticipationCount = userParticipationResult.length > 0 ? userParticipationResult[0].totalCount : 0;
+        const userFirstParticipation = userParticipationResult.length > 0 ? userParticipationResult[0].firstParticipation : null;
+
+        // Calculate network metrics
+        const networkWinRate = networkWinRateResult.length > 0 ? networkWinRateResult[0].winRate : 0;
+        const networkTotalEarnings = networkEarningsResult
+            .reduce((sum, item) => sum + item.totalEarned, 0);
+        const networkParticipationCount = networkParticipationResult.length > 0 ? 
+            networkParticipationResult[0].totalCount : 0;
+        const networkParticipantCount = networkParticipationResult.length > 0 ? 
+            networkParticipationResult[0].participantCount : 0;
+        // Average reward must use the same denominator as the user's, which counts
+        // revenue-tracked participations only (getEarningsStats matches on
+        // revenueTracked: true). Dividing network earnings by ALL participations
+        // instead would understate the network average and make almost every user
+        // look above it.
+        const networkRewardedCount = networkEarningsResult
+            .reduce((sum, item) => sum + (item.count || 0), 0);
+        const networkAvgReward = networkRewardedCount > 0 ?
+            (networkTotalEarnings / networkRewardedCount) : 0;
+
+        // Participation frequency, in participations per day.
+        //
+        // Both sides must be the same unit for the comparison below to mean
+        // anything. The user figure is a rate over their own active lifetime, so
+        // the network figure is the AVERAGE OF THAT SAME RATE across participants
+        // — not total participations per participant, which is a count and not a
+        // rate at all, and would have been subtracted from a per-day value.
+        const ratePerDay = (count, firstAt) => {
+            if (!firstAt) return 0;
+            const days = (Date.now() - new Date(firstAt).getTime()) / (1000 * 60 * 60 * 24);
+            return days > 0 ? count / days : count;
+        };
+
+        const userFrequency = ratePerDay(userParticipationCount, userFirstParticipation);
+
+        const networkFrequency = perParticipant.length > 0
+            ? perParticipant.reduce((sum, p) => sum + ratePerDay(p.count, p.firstParticipation), 0) / perParticipant.length
+            : 0;
+
+        return {
+            user: {
+                address: userAddress,
+                winRate: userWinRate,
+                totalEarnings: userTotalEarnings,
+                averageReward: userAvgReward,
+                participationCount: userParticipationCount,
+                participationFrequency: userFrequency
+            },
+            network: {
+                winRate: networkWinRate,
+                totalEarnings: networkTotalEarnings,
+                averageReward: networkAvgReward,
+                participationCount: networkParticipationCount,
+                participantCount: networkParticipantCount,
+                averageParticipationFrequency: networkFrequency
+            },
+            comparison: {
+                winRateDifference: userWinRate - networkWinRate,
+                rewardDifference: userAvgReward - networkAvgReward,
+                frequencyDifference: userFrequency - networkFrequency
+            }
+        };
+    } catch (error) {
+        logger.error('Failed to get performance benchmark', {
+            error: error.message,
+            stack: error.stack,
+            userAddress
+        });
+        throw error;
+    }
+};
+
+/**
  * Cleanup expired oracle participations older than the retention period
  * @param {number} retentionDays - Number of days to retain expired documents (default: 30)
  * @returns {Promise<Object>} Result of the cleanup operation

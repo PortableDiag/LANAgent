@@ -83,6 +83,16 @@ export default class ChecklyPlugin extends BasePlugin {
           'stop polling check 12345',
           'cancel scheduled check 67890'
         ]
+      },
+      {
+        command: 'get_check_results',
+        description: 'Retrieve check results with filtering capabilities',
+        usage: 'get_check_results({ checkId: "12345", startDate: "2023-01-01", endDate: "2023-01-31", limit: 50, hasFailures: true, resultType: "FINAL" })',
+        examples: [
+          'get recent results for check 12345',
+          'fetch failed check results',
+          'retrieve check results for last week'
+        ]
       }
     ];
 
@@ -198,6 +208,11 @@ export default class ChecklyPlugin extends BasePlugin {
             checkId: { required: true, type: 'string' }
           });
           return await this.cancelScheduledCheck(data.checkId);
+        case 'get_check_results':
+          this.validateParams(data, {
+            checkId: { required: true, type: 'string' }
+          });
+          return await this.getCheckResults(data);
         default:
           throw new Error(`Unknown action: ${action}`);
       }
@@ -397,6 +412,115 @@ export default class ChecklyPlugin extends BasePlugin {
     }
     this.logger.info(`[checkly] cancelled scheduled poll for check ${checkId}`);
     return { success: true, message: `Cancelled scheduled poll for check ${checkId}` };
+  }
+
+  /**
+   * Retrieve check results with filtering capabilities.
+   *
+   * Parameters follow the Checkly v1 contract exactly (GET /v1/check-results/{checkId}):
+   * `from`/`to` are UNIX timestamps in SECONDS, `limit` is 1-100, and failures are
+   * selected with the boolean `hasFailures` — there is no `status` parameter. Dates are
+   * accepted here in any form Date.parse understands and converted, so callers keep an
+   * ISO-friendly interface without sending ISO strings the API would ignore.
+   *
+   * @param {Object} params
+   * @param {string} params.checkId - The check to retrieve results for
+   * @param {string|number|Date} [params.startDate] - Range start (converted to UNIX seconds)
+   * @param {string|number|Date} [params.endDate] - Range end (converted to UNIX seconds)
+   * @param {number} [params.limit] - Results per page, 1-100 (Checkly's default is 10)
+   * @param {number} [params.page] - Page number, 1-based
+   * @param {boolean} [params.hasFailures] - Only results carrying one or more failures
+   * @param {string} [params.resultType] - FINAL | ATTEMPT | ALL (Checkly defaults to FINAL)
+   * @param {string} [params.checkType] - API, BROWSER, HEARTBEAT, TCP, …
+   * @param {string} [params.location] - AWS region code, e.g. eu-west-1
+   * @returns {Promise<Object>} Results data from Checkly API
+   */
+  async getCheckResults(params) {
+    const {
+      checkId, startDate, endDate, limit, page,
+      hasFailures, resultType, checkType, location
+    } = params;
+
+    try {
+      if (!checkId || typeof checkId !== 'string') {
+        throw new Error('checkId is required and must be a string');
+      }
+
+      const queryParams = new URLSearchParams();
+
+      // Checkly wants UNIX seconds. Accept a Date, an epoch number, or any string
+      // Date.parse understands, and convert — sending an ISO string here is silently
+      // ignored by the API, which is indistinguishable from "no results in range".
+      const toUnixSeconds = (value, label) => {
+        const ms = value instanceof Date ? value.getTime()
+          : typeof value === 'number' ? (value > 1e11 ? value : value * 1000)
+            : Date.parse(value);
+        if (Number.isNaN(ms)) {
+          throw new Error(`${label} must be a valid date or UNIX timestamp`);
+        }
+        return Math.floor(ms / 1000);
+      };
+
+      if (startDate !== undefined) {
+        queryParams.append('from', String(toUnixSeconds(startDate, 'startDate')));
+      }
+      if (endDate !== undefined) {
+        queryParams.append('to', String(toUnixSeconds(endDate, 'endDate')));
+      }
+
+      if (limit !== undefined) {
+        const limitNum = parseInt(limit, 10);
+        if (Number.isNaN(limitNum) || limitNum < 1 || limitNum > 100) {
+          throw new Error('limit must be a number between 1 and 100');
+        }
+        queryParams.append('limit', limitNum.toString());
+      }
+
+      if (page !== undefined) {
+        const pageNum = parseInt(page, 10);
+        if (Number.isNaN(pageNum) || pageNum < 1) {
+          throw new Error('page must be a number of 1 or greater');
+        }
+        queryParams.append('page', pageNum.toString());
+      }
+
+      if (hasFailures !== undefined) {
+        queryParams.append('hasFailures', hasFailures ? 'true' : 'false');
+      }
+
+      if (resultType) {
+        const validResultTypes = ['FINAL', 'ATTEMPT', 'ALL'];
+        const normalized = String(resultType).toUpperCase();
+        if (!validResultTypes.includes(normalized)) {
+          throw new Error(`resultType must be one of: ${validResultTypes.join(', ')}`);
+        }
+        queryParams.append('resultType', normalized);
+      }
+
+      if (checkType) queryParams.append('checkType', String(checkType).toUpperCase());
+      if (location) queryParams.append('location', location);
+
+      const url = `${this.config.baseUrl}/check-results/${checkId}`;
+      const queryString = queryParams.toString();
+      const fullUrl = queryString ? `${url}?${queryString}` : url;
+
+      const response = await retryOperation(() => axios.get(fullUrl, {
+        headers: {
+          Authorization: `Bearer ${this.config.apiKey}`
+        }
+      }), { retries: 3, context: 'Checkly getCheckResults' });
+
+      return {
+        success: true,
+        data: response.data
+      };
+    } catch (error) {
+      this.logger.error('get_check_results failed:', error);
+      return {
+        success: false,
+        error: error.message
+      };
+    }
   }
 
   async cleanup() {

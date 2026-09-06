@@ -60,6 +60,18 @@ const lpPositionSchema = new mongoose.Schema({
     inRange: { type: Boolean, default: true },         // Is current price in range
     lastRebalance: { type: Date, default: null }
   },
+  // Optimization preferences for yield recommendations
+  optimizationPreferences: {
+    maxSlippage: { type: Number, default: 0.5 },      // Maximum acceptable slippage percentage
+    preferredFeeTiers: [{ type: Number }],            // Preferred fee tiers for migration
+    rebalanceThreshold: { type: Number, default: 10 }, // Percentage gain threshold to trigger rebalance
+    autoCompound: { type: Boolean, default: false },   // Whether to automatically compound earnings
+    riskTolerance: { 
+      type: String, 
+      enum: ['low', 'medium', 'high'], 
+      default: 'medium' 
+    }
+  },
   // Status
   active: {
     type: Boolean,
@@ -231,6 +243,130 @@ lpPositionSchema.methods.getPerformanceMetrics = function(priceRatioChange = nul
     initialValue: this.initialValueBNB,
     ...timeWeightedMetrics
   };
+};
+
+/**
+ * Analyze fee growth patterns and suggest optimization opportunities
+ * @returns {object} Optimization recommendations including rebalancing or fee tier migration
+ */
+lpPositionSchema.methods.recommendOptimization = function() {
+  // Check if this is a V3 position with necessary data
+  if (this.protocol !== 'v3' || !this.v3) {
+    return {
+      action: 'none',
+      reason: 'Only V3 positions support optimization recommendations',
+      details: {}
+    };
+  }
+
+  const recommendations = {
+    action: 'none',
+    reason: 'No optimization opportunities found',
+    details: {}
+  };
+
+  // Analyze fee growth patterns
+  const feeGrowth0 = parseFloat(this.v3.feeGrowth0) || 0;
+  const feeGrowth1 = parseFloat(this.v3.feeGrowth1) || 0;
+  const collectedFees0 = parseFloat(this.v3.collectedFees0) || 0;
+  const collectedFees1 = parseFloat(this.v3.collectedFees1) || 0;
+  
+  // Calculate total potential fees (uncollected + collected)
+  const totalPotentialFees0 = feeGrowth0 + collectedFees0;
+  const totalPotentialFees1 = feeGrowth1 + collectedFees1;
+  
+  // Check if there are significant uncollected fees
+  if (feeGrowth0 > 0 || feeGrowth1 > 0) {
+    // Guard the divisor: only one of the two tokens may have accrued fees, and
+    // 0/0 is NaN rather than 0. NaN compares false so it would not misfire, but
+    // it must not reach the ratio either.
+    const uncollectedRatio0 = totalPotentialFees0 > 0 ? feeGrowth0 / totalPotentialFees0 : 0;
+    const uncollectedRatio1 = totalPotentialFees1 > 0 ? feeGrowth1 / totalPotentialFees1 : 0;
+
+    // If uncollected fees represent more than 30% of potential fees, suggest collecting
+    if (uncollectedRatio0 > 0.3 || uncollectedRatio1 > 0.3) {
+      recommendations.action = 'collect_fees';
+      recommendations.reason = 'Significant uncollected fees detected';
+      recommendations.details = {
+        uncollectedFees0: feeGrowth0,
+        uncollectedFees1: feeGrowth1,
+        collectedFees0: collectedFees0,
+        collectedFees1: collectedFees1
+      };
+      return recommendations;
+    }
+  }
+  
+  // Analyze current fee tier performance
+  const currentFeeTier = this.v3.feeTier;
+  const preferredFeeTiers = this.optimizationPreferences.preferredFeeTiers || [];
+  
+  // If current fee tier is not in preferred tiers, suggest migration
+  if (currentFeeTier && preferredFeeTiers.length > 0 && !preferredFeeTiers.includes(currentFeeTier)) {
+    // Find the closest preferred fee tier
+    const closestTier = preferredFeeTiers.reduce((prev, curr) => {
+      return Math.abs(curr - currentFeeTier) < Math.abs(prev - currentFeeTier) ? curr : prev;
+    });
+    
+    recommendations.action = 'migrate_fee_tier';
+    recommendations.reason = 'Current fee tier not aligned with preferences';
+    recommendations.details = {
+      currentFeeTier,
+      suggestedFeeTier: closestTier,
+      preferredFeeTiers
+    };
+    return recommendations;
+  }
+  
+  // Position is out of range and has not been rebalanced recently.
+  //
+  // Note the metric this actually measures: nothing records WHEN the position
+  // left its range, so time-out-of-range is not derivable from the schema. What
+  // is available is the age of the last rebalance, which is a different quantity
+  // — a position that drifted out an hour ago but was last rebalanced a month
+  // ago has a one-hour excursion and a 30-day rebalance age. Naming the field
+  // for the number actually computed keeps the recommendation honest.
+  if (this.v3.inRange === false) {
+    const lastRebalance = this.v3.lastRebalance ? new Date(this.v3.lastRebalance) : null;
+    const now = new Date();
+    const daysSinceLastRebalance = lastRebalance
+      ? (now - lastRebalance) / (1000 * 60 * 60 * 24)
+      : Infinity;
+
+    // Out of range, and untouched for more than 7 days (or never rebalanced).
+    if (daysSinceLastRebalance > 7) {
+      recommendations.action = 'rebalance_position';
+      recommendations.reason = lastRebalance
+        ? 'Position is out of range and has not been rebalanced in over 7 days'
+        : 'Position is out of range and has never been rebalanced';
+      recommendations.details = {
+        daysSinceLastRebalance: Number.isFinite(daysSinceLastRebalance)
+          ? Math.round(daysSinceLastRebalance)
+          : null,
+        currentInRange: this.v3.inRange,
+        lastRebalance
+      };
+      return recommendations;
+    }
+  }
+  
+  // Check ROI against rebalance threshold
+  const roi = this.calculateROI();
+  const rebalanceThreshold = this.optimizationPreferences.rebalanceThreshold || 10;
+  
+  if (roi > rebalanceThreshold) {
+    recommendations.action = 'rebalance_for_compounding';
+    recommendations.reason = `ROI (${roi.toFixed(2)}%) exceeds compounding threshold`;
+    recommendations.details = {
+      currentRoi: roi,
+      rebalanceThreshold,
+      currentValue: this.currentValueBNB,
+      initialValue: this.initialValueBNB
+    };
+    return recommendations;
+  }
+
+  return recommendations;
 };
 
 const LPPosition = mongoose.model('LPPosition', lpPositionSchema);

@@ -94,3 +94,113 @@ test('checkDependencies walks chains, allows diamonds, rejects cycles', async ()
     ExternalServiceConfig.findOne = origFindOne;
   }
 });
+
+test('validateImportPayload accepts fallbackChain as array of strings', () => {
+  const result = ExternalServiceConfig.validateImportPayload({
+    serviceId: 'svc-1',
+    name: 'Test Service',
+    price: '10',
+    fallbackChain: ['fallback-svc-1', 'fallback-svc-2']
+  });
+  assert.equal(result.valid, true);
+  assert.deepStrictEqual(result.errors, []);
+});
+
+// --- fallback chain -------------------------------------------------------
+//
+// The shipped test covered the import-schema half only. These exercise the
+// selection logic, which is where the ordering rules actually live.
+
+const withServices = (byId) => {
+  const origFindOne = ExternalServiceConfig.findOne;
+  const origFind = ExternalServiceConfig.find;
+  ExternalServiceConfig.findOne = async ({ serviceId }) => byId[serviceId] || null;
+  ExternalServiceConfig.find = ({ serviceId: { $in: ids }, enabled }) => ({
+    select: () => Promise.resolve(
+      ids.map(id => byId[id]).filter(s => s && (enabled === undefined || s.enabled === enabled))
+    )
+  });
+  return () => {
+    ExternalServiceConfig.findOne = origFindOne;
+    ExternalServiceConfig.find = origFind;
+  };
+};
+
+test('getFallbackChain returns the configured chain', async (t) => {
+  t.after(withServices({ a: { serviceId: 'a', fallbackChain: ['b', 'c'] } }));
+
+  assert.deepStrictEqual(await ExternalServiceConfig.getFallbackChain('a'), ['b', 'c']);
+});
+
+test('getFallbackChain returns an empty chain when none is set', async (t) => {
+  t.after(withServices({ a: { serviceId: 'a' } }));
+
+  assert.deepStrictEqual(await ExternalServiceConfig.getFallbackChain('a'), []);
+});
+
+test('getFallbackChain rejects an unknown service', async (t) => {
+  t.after(withServices({}));
+
+  await assert.rejects(() => ExternalServiceConfig.getFallbackChain('nope'), /not found/);
+});
+
+test('selectFallbackService returns null when there is no chain', async (t) => {
+  t.after(withServices({ a: { serviceId: 'a', fallbackChain: [] } }));
+
+  assert.equal(await ExternalServiceConfig.selectFallbackService('a'), null);
+});
+
+test('selectFallbackService skips disabled fallbacks', async (t) => {
+  t.after(withServices({
+    a: { serviceId: 'a', fallbackChain: ['off', 'on'] },
+    off: { serviceId: 'off', enabled: false, totalRequests: 0 },
+    on: { serviceId: 'on', enabled: true, totalRequests: 500 }
+  }));
+
+  assert.equal(await ExternalServiceConfig.selectFallbackService('a'), 'on',
+    'a disabled service must not be chosen even when it is first and least loaded');
+});
+
+test('selectFallbackService returns null when every fallback is disabled', async (t) => {
+  t.after(withServices({
+    a: { serviceId: 'a', fallbackChain: ['off1', 'off2'] },
+    off1: { serviceId: 'off1', enabled: false, totalRequests: 0 },
+    off2: { serviceId: 'off2', enabled: false, totalRequests: 0 }
+  }));
+
+  assert.equal(await ExternalServiceConfig.selectFallbackService('a'), null);
+});
+
+test('selectFallbackService prefers the least-loaded fallback', async (t) => {
+  t.after(withServices({
+    a: { serviceId: 'a', fallbackChain: ['busy', 'quiet'] },
+    busy: { serviceId: 'busy', enabled: true, totalRequests: 900 },
+    quiet: { serviceId: 'quiet', enabled: true, totalRequests: 3 }
+  }));
+
+  // Chain order is a preference list, but load wins — otherwise the first entry
+  // absorbs every failover and the chain is just a single spare.
+  assert.equal(await ExternalServiceConfig.selectFallbackService('a'), 'quiet');
+});
+
+test('selectFallbackService breaks a load tie with the longest-idle service', async (t) => {
+  const older = new Date('2026-01-01T00:00:00Z');
+  const newer = new Date('2026-09-01T00:00:00Z');
+  t.after(withServices({
+    a: { serviceId: 'a', fallbackChain: ['recent', 'stale'] },
+    recent: { serviceId: 'recent', enabled: true, totalRequests: 10, lastUsed: newer },
+    stale: { serviceId: 'stale', enabled: true, totalRequests: 10, lastUsed: older }
+  }));
+
+  assert.equal(await ExternalServiceConfig.selectFallbackService('a'), 'stale');
+});
+
+test('selectFallbackService ignores chain entries that do not exist', async (t) => {
+  t.after(withServices({
+    a: { serviceId: 'a', fallbackChain: ['ghost', 'real'] },
+    real: { serviceId: 'real', enabled: true, totalRequests: 42 }
+  }));
+
+  assert.equal(await ExternalServiceConfig.selectFallbackService('a'), 'real',
+    'a chain naming a deleted service must degrade, not throw');
+});

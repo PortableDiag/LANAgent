@@ -230,4 +230,126 @@ contractEventSchema.statics.getTopContractsByActivity = async function(filter = 
   ]).exec();
 };
 
+/**
+ * Find correlated events across different contracts within the same transaction
+ * @param {String} transactionHash - Transaction hash to search for correlated events
+ * @returns {Promise<Array>} - List of correlated events
+ */
+contractEventSchema.statics.findCorrelatedEvents = async function(transactionHash) {
+  if (!transactionHash) {
+    throw new Error('Transaction hash is required');
+  }
+
+  return this.aggregate([
+    { $match: { transactionHash: transactionHash.toLowerCase() } },
+    { $sort: { contractAddress: 1, logIndex: 1 } }
+  ]).exec();
+};
+
+/**
+ * Detect event patterns using aggregation pipelines to identify common sequences or combinations
+ * @param {Object} filter - Mongo filter for events
+ * @param {Number} minSequenceLength - Minimum sequence length to consider (default: 2)
+ * @param {Number} limit - Maximum number of patterns to return (default: 10)
+ * @returns {Promise<Array>} - List of detected patterns with occurrence counts
+ */
+contractEventSchema.statics.detectEventPatterns = async function(filter = {}, minSequenceLength = 2, limit = 10) {
+  // Ensure minSequenceLength is at least 2 for meaningful patterns
+  minSequenceLength = Math.max(2, minSequenceLength);
+  limit = Math.max(1, Math.min(limit, 100));
+
+  // Pipeline to detect event sequences within transactions
+  const pipeline = [
+    { $match: filter },
+    // Group events by transaction hash and sort by log index
+    {
+      $group: {
+        _id: '$transactionHash',
+        events: {
+          $push: {
+            eventName: '$eventName',
+            contractAddress: '$contractAddress',
+            logIndex: '$logIndex'
+          }
+        }
+      }
+    },
+    // Sort events within each transaction by log index
+    {
+      $addFields: {
+        events: {
+          $sortArray: {
+            input: "$events",
+            sortBy: { logIndex: 1 }
+          }
+        }
+      }
+    },
+    // Extract event sequences of specified minimum length
+    {
+      $project: {
+        _id: 1,
+        eventSequences: {
+          $map: {
+            input: {
+              $range: [0, { $subtract: [{ $size: "$events" }, minSequenceLength - 1] }]
+            },
+            as: "startIndex",
+            in: {
+              $slice: ["$events", "$$startIndex", minSequenceLength]
+            }
+          }
+        }
+      }
+    },
+    // Unwind the sequences to process each individually
+    { $unwind: "$eventSequences" },
+    // Create pattern identifiers from event sequences
+    {
+      $addFields: {
+        pattern: {
+          $reduce: {
+            input: "$eventSequences",
+            initialValue: "",
+            in: {
+              $concat: [
+                "$$value",
+                { $cond: [{ $eq: ["$$value", ""] }, "", " -> "] },
+                "$$this.eventName"
+              ]
+            }
+          }
+        }
+      }
+    },
+    // Group by pattern and count occurrences
+    {
+      $group: {
+        _id: "$pattern",
+        count: { $sum: 1 },
+        transactions: { $addToSet: "$_id" },
+        sampleEvents: { $first: "$eventSequences" }
+      }
+    },
+    // Filter out single occurrences (not really patterns)
+    { $match: { count: { $gt: 1 } } },
+    // Sort by count descending
+    { $sort: { count: -1 } },
+    // Limit results
+    { $limit: limit },
+    // Format output
+    {
+      $project: {
+        _id: 0,
+        pattern: "$_id",
+        count: 1,
+        transactionCount: { $size: "$transactions" },
+        sampleEvents: 1
+      }
+    }
+  ];
+
+  return this.aggregate(pipeline).exec();
+};
+
 export const ContractEvent = mongoose.model('ContractEvent', contractEventSchema);
