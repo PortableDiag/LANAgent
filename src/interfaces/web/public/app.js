@@ -9992,7 +9992,6 @@ class LANAgentDashboard {
             '0x8ac76a51cc950d9822d68b83fe1ad97b32cd580d': 'USDC',
             '0xbb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c': 'WBNB',
             '0xd55c9fb62e176a8eb6968f32958fefdd0962727e': 'FHE',
-            '0x997a58129890bbda032231a52ed1ddc845fc18e1': '[redacted-token]',
             '0xf8a0bf9cf54bb92f17374d9e9a321e6a111a51bd': 'LINK',
             // Ethereum
             '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48': 'USDC',

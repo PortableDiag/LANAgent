@@ -62,3 +62,8 @@ scripts/privacy-scan.sh
 scripts/install-git-hooks.sh
 scripts/genesis-to-public-sync.sh
 scripts/git-hooks/
+
+# Auto-written by the self-modification pipeline from session context.
+# It repeatedly accumulated wallet addresses, credit balances and trading
+# positions, and the sync carried them public (2026-09-06). Genesis-only.
+docs/feature-progress.json

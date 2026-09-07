@@ -4174,7 +4174,7 @@ Respond in JSON format:
       // If buy failed due to no swap path and we never held this token, it may be untradeable
       const isSwapPathError = execError.message?.includes('forceV3') || execError.message?.includes('No viable swap path');
       if (isSwapPathError && tokenStrategy.state.tokenBalance <= 0) {
-        // Check if this is a system token (like [redacted-token]) — never remove system tokens
+        // Check if this is a system token — never remove system tokens
         const currentAddr = tokenAddress?.toLowerCase();
         const watchlistEntry = tokenStrategy.config.tokenWatchlist?.find(
           t => t.address?.toLowerCase() === currentAddr
