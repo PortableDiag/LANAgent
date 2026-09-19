@@ -62,6 +62,10 @@ scripts/privacy-scan.sh
 scripts/install-git-hooks.sh
 scripts/genesis-to-public-sync.sh
 scripts/git-hooks/
+# ci-local.sh replaced the "PR Security Check" GitHub Action when Actions was
+# retired 2026-09-19 (billed). Same class as the others: the pre-push hook needs
+# it on disk, and it is operator tooling rather than shipped product.
+scripts/ci-local.sh
 
 # Auto-written by the self-modification pipeline from session context.
 # It repeatedly accumulated wallet addresses, credit balances and trading
