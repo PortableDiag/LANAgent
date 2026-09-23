@@ -160,7 +160,12 @@ router.get('/portfolio', async (req, res) => {
 
         for (const [chain, info] of Object.entries(nativeTokens)) {
             const bal = balances[chain];
-            const rawBal = parseFloat(bal?.balance || bal || 0);
+            // A read that failed is unknown, not empty. Skip the chain rather than
+            // publish a figure for it: rendering an RPC blip as a zero (or, once the
+            // service stopped faking one, as a NaN) makes a funded chain look drained.
+            if (bal?.unavailable) continue;
+            const parsed = Number(bal?.balance ?? bal ?? 0);
+            const rawBal = Number.isFinite(parsed) ? parsed : 0;
             if (rawBal <= 0 && !positions[info.network]) continue;
 
             // Live price first; baseline and entry price are progressively staler
@@ -1189,6 +1194,9 @@ router.get('/strategy/exit-analysis', async (req, res) => {
             opts.since = new Date(Date.now() - days * 86400000).toISOString();
         }
         const byTrigger = await CryptoExitRecord.analyzeByTrigger(opts);
+        // The book-level roll-up. Reported FIRST because a per-trigger table can show
+        // every trigger behaving and still be summing to a loss — see analyzeBook().
+        const book = await CryptoExitRecord.analyzeBook(opts);
         const total = byTrigger.reduce((n, b) => n + b.fills, 0);
         res.json({
             success: true,
@@ -1198,6 +1206,7 @@ router.get('/strategy/exit-analysis', async (req, res) => {
             note: total < 20
                 ? 'Sample is small — treat as indicative, not decisive. Exit rules need dozens of firings before a retune is evidence-led.'
                 : undefined,
+            book,
             byTrigger
         });
     } catch (error) {
@@ -1545,7 +1554,10 @@ router.post('/strategy/token-trader/configure', async (req, res) => {
         }
 
         const { tokenAddress, tokenNetwork, capitalAllocationPercent, dumpThreshold, maxSlippage, tokenTaxPercent,
-                trancheSellEnabled, trancheSellPercent, trancheSellCooldownMs } = req.body;
+                trancheSellEnabled, trancheSellPercent, trancheSellCooldownMs,
+                profitLockBankPercent, profitLockEnabled, profitLockMinReserveUsd,
+                profitLockMinIncrement, profitLockGrowthTargetUsd,
+                profitLockGrowthTargetMultiple } = req.body;
         if (!tokenAddress || !tokenNetwork) {
             return res.status(400).json({ error: 'tokenAddress and tokenNetwork are required' });
         }
@@ -1554,6 +1566,57 @@ router.post('/strategy/token-trader/configure', async (req, res) => {
         const validNetworks = ['ethereum', 'bsc', 'polygon', 'base'];
         if (!validNetworks.includes(tokenNetwork)) {
             return res.status(400).json({ error: `Invalid network. Must be one of: ${validNetworks.join(', ')}` });
+        }
+
+        // Profit-lock split. 0 snowballs every dollar of realized gain back into the
+        // deployable reserve, 100 banks every dollar out of the bot's reach, and anything
+        // between splits it. Validated rather than clamped here so a caller learns their
+        // value was wrong instead of silently getting a different policy than they asked for.
+        if (profitLockBankPercent !== undefined) {
+            const pct = Number(profitLockBankPercent);
+            if (!Number.isFinite(pct) || pct < 0 || pct > 100) {
+                return res.status(400).json({
+                    error: 'profitLockBankPercent must be a number between 0 and 100 (0 = snowball all gains, 100 = bank all gains)'
+                });
+            }
+        }
+
+        if (profitLockMinReserveUsd !== undefined) {
+            const floor = Number(profitLockMinReserveUsd);
+            if (!Number.isFinite(floor) || floor < 0) {
+                return res.status(400).json({
+                    error: 'profitLockMinReserveUsd must be a number >= 0 (the deployable reserve the profit lock will never bank below)'
+                });
+            }
+        }
+
+        if (profitLockMinIncrement !== undefined) {
+            const inc = Number(profitLockMinIncrement);
+            if (!Number.isFinite(inc) || inc < 0) {
+                return res.status(400).json({
+                    error: 'profitLockMinIncrement must be a number >= 0 (the smallest gain that triggers a bank/snowball split)'
+                });
+            }
+        }
+
+        // Growth goal. Either an absolute figure, or a multiple of the capital currently
+        // under management ("2x the pot"), which is resolved to an absolute figure here so
+        // the target cannot drift as the pot moves. Both are rejected rather than clamped.
+        if (profitLockGrowthTargetUsd !== undefined && profitLockGrowthTargetUsd !== null) {
+            const target = Number(profitLockGrowthTargetUsd);
+            if (!Number.isFinite(target) || target < 0) {
+                return res.status(400).json({
+                    error: 'profitLockGrowthTargetUsd must be a number >= 0, or null to clear the goal'
+                });
+            }
+        }
+        if (profitLockGrowthTargetMultiple !== undefined && profitLockGrowthTargetMultiple !== null) {
+            const mult = Number(profitLockGrowthTargetMultiple);
+            if (!Number.isFinite(mult) || mult <= 1) {
+                return res.status(400).json({
+                    error: 'profitLockGrowthTargetMultiple must be a number greater than 1 (e.g. 2 to double the pot before banking resumes)'
+                });
+            }
         }
 
         // Get token metadata (name, symbol, decimals, tax)
@@ -1586,6 +1649,37 @@ router.post('/strategy/token-trader/configure', async (req, res) => {
         const existingInstance = strategyRegistry.getTokenTrader(tokenAddress);
         const effectiveAlloc = capitalAllocationPercent
             ?? existingInstance?.config?.capitalAllocationPercent ?? 20;
+        // instanceConfig REPLACES the instance's config, so anything omitted has to be
+        // carried forward explicitly — same reason effectiveAlloc exists above. A
+        // reconfigure that only changes the token must not silently reset the profit split.
+        const effectiveBankPct = profitLockBankPercent
+            ?? existingInstance?.config?.profitLockBankPercent ?? 50;
+        const effectiveLockEnabled = profitLockEnabled
+            ?? existingInstance?.config?.profitLockEnabled ?? true;
+        const effectiveMinReserve = profitLockMinReserveUsd
+            ?? existingInstance?.config?.profitLockMinReserveUsd ?? 100;
+        const effectiveMinIncrement = profitLockMinIncrement
+            ?? existingInstance?.config?.profitLockMinIncrement ?? 5;
+
+        // A multiple is resolved against the pot AS IT STANDS NOW and stored absolute.
+        // Kept as a multiple it would be re-evaluated against a moving pot and could
+        // never be reached — the target would climb every time the pot did.
+        let effectiveGrowthTarget = profitLockGrowthTargetUsd
+            ?? existingInstance?.config?.profitLockGrowthTargetUsd ?? null;
+        let growthTargetBasis = null;
+        if (profitLockGrowthTargetMultiple !== undefined && profitLockGrowthTargetMultiple !== null) {
+            const st = existingInstance?.state || {};
+            growthTargetBasis = (st.tokenBalance || 0) * (st.averageEntryPrice || 0)
+                + (st.stablecoinReserve || 0);
+            if (!(growthTargetBasis > 0)) {
+                return res.status(400).json({
+                    error: 'Cannot set a growth multiple before the trader holds any capital — set profitLockGrowthTargetUsd directly instead'
+                });
+            }
+            effectiveGrowthTarget = growthTargetBasis * Number(profitLockGrowthTargetMultiple);
+        }
+        // An explicit null clears the goal.
+        if (profitLockGrowthTargetUsd === null) effectiveGrowthTarget = null;
 
         const instanceConfig = {
             tokenAddress,
@@ -1599,6 +1693,11 @@ router.post('/strategy/token-trader/configure', async (req, res) => {
             trancheSellEnabled,
             trancheSellPercent,
             trancheSellCooldownMs,
+            profitLockBankPercent: Number(effectiveBankPct),
+            profitLockEnabled: Boolean(effectiveLockEnabled),
+            profitLockMinReserveUsd: Number(effectiveMinReserve),
+            profitLockMinIncrement: Number(effectiveMinIncrement),
+            profitLockGrowthTargetUsd: effectiveGrowthTarget === null ? null : Number(effectiveGrowthTarget),
             userConfigured: true  // Prevents watchlist rotation — user explicitly added this token
         };
 

@@ -18,7 +18,7 @@ git clone https://github.com/PortableDiag/LANAgent.git && cd LANAgent && bash sc
 
 The installer handles everything — naming your agent, connecting AI providers, forking the repo to your GitHub, generating a wallet, joining the P2P network, and installing dependencies (Node.js, MongoDB, FFmpeg, PM2, Chromium). The web UI comes up at `http://localhost:3000` (~3 min to fully start).
 
-**You'll need:** an API key for [Anthropic](https://console.anthropic.com/) or [OpenAI](https://platform.openai.com/), and a [GitHub PAT](https://github.com/settings/tokens) for the self-modification pipeline.
+**You'll need:** an API key for [Anthropic](https://console.anthropic.com/), [OpenAI](https://platform.openai.com/) or [OpenRouter](https://openrouter.ai/), and a [GitHub PAT](https://github.com/settings/tokens) for the self-modification pipeline.
 
 **Unattended / CI:**
 ```bash
@@ -57,7 +57,7 @@ Configure via `.env`: `LANAGENT_AUTO_UPDATE` (default `true`), `LANAGENT_AUTO_UP
 ## Features
 
 **Core AI & Communication**
-- Multiple hot-swappable AI providers: OpenAI, Anthropic, Gab, HuggingFace, Ollama, BitNet
+- Multiple hot-swappable AI providers: OpenAI, Anthropic, OpenRouter (400+ models on one key), Gab, HuggingFace, Ollama, BitNet
 - Natural-language intent detection (28+ base intents + dynamic plugin intents), optional embedding-based [vector intent](docs/VECTOR_INTENT.md)
 - Advanced Telegram (streaming responses, voice input, media, reply context); voice with custom/local wake-word detection
 - AI image generation (OpenAI, FLUX/SD) and video generation (ModelsLab, Sora 2)

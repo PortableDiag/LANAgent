@@ -190,7 +190,7 @@ externalCreditBalanceSchema.statics.getCreditAnalytics = async function (wallet)
   // Calculate credit utilization ratio
   const creditUtilizationRatio = balance.totalPurchased > 0 
     ? balance.totalSpent / balance.totalPurchased 
-    : [redacted];
+    : 0;
 
   // Calculate remaining credits percentage
   const remainingCreditsPercentage = balance.totalPurchased > 0 
@@ -200,7 +200,7 @@ externalCreditBalanceSchema.statics.getCreditAnalytics = async function (wallet)
   // Calculate refund ratio
   const refundRatio = balance.totalSpent > 0 
     ? balance.totalRefunded / balance.totalSpent 
-    : [redacted];
+    : 0;
 
   return {
     wallet: balance.wallet,

@@ -1,4 +1,5 @@
 import { getGravatarUrl } from './gravatarHelper.js';
+import { logger } from './logger.js';
 import QRCode from 'qrcode';
 
 /**
@@ -71,7 +72,8 @@ async function generateContactQRCode(contact) {
   try {
     return await QRCode.toDataURL(vCard, { errorCorrectionLevel: 'H', margin: 1, width: 200 });
   } catch (error) {
-    console.error('Error generating contact QR code:', error);
+    // console.* never reaches the log files — this failure was invisible.
+    logger.error('Error generating contact QR code:', error);
     return '';
   }
 }

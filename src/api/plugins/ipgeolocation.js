@@ -369,7 +369,7 @@ export default class IpgeolocationPlugin extends BasePlugin {
 
   async batchLookupIP(params) {
     this.validateParams(params, {
-      ips: { required: true, type: 'object' },
+      ips: { required: true, type: 'array' },
       fields: { required: false, type: 'string' }
     });
 

@@ -12,7 +12,7 @@ const modelCacheSchema = new mongoose.Schema({
     type: String,
     required: true,
     unique: true,
-    enum: ['openai', 'anthropic', 'huggingface', 'gab', 'xai', 'ollama', 'bitnet']
+    enum: ['openai', 'anthropic', 'huggingface', 'gab', 'xai', 'ollama', 'bitnet', 'uncensored', 'openrouter']
   },
   
   models: {
@@ -210,6 +210,47 @@ modelCacheSchema.methods.getUsageAnalytics = function() {
 };
 
 /**
+ * Calculate adaptive TTL based on update frequency
+ * @returns {number} TTL in seconds
+ */
+modelCacheSchema.methods.calculateAdaptiveTTL = function() {
+  try {
+    // Fewer than two versions means no interval to measure. Fall back to the cache's
+    // OWN configured default rather than a second hardcoded 3600 that would silently
+    // stop matching if stdTTL were ever changed.
+    if (!Array.isArray(this.versionHistory) || this.versionHistory.length < 2) {
+      return cache.options.stdTTL;
+    }
+
+    // Sort versions by timestamp descending
+    const sortedVersions = [...this.versionHistory].sort((a, b) => b.timestamp - a.timestamp);
+    
+    // Calculate time differences between consecutive updates
+    const timeDiffs = [];
+    for (let i = 1; i < sortedVersions.length && i <= 5; i++) {
+      const diff = sortedVersions[i-1].timestamp - sortedVersions[i].timestamp;
+      timeDiffs.push(diff);
+    }
+    
+    // Calculate average time between updates (in milliseconds)
+    const avgDiff = timeDiffs.reduce((sum, diff) => sum + diff, 0) / timeDiffs.length;
+    
+    // Convert to hours and calculate TTL
+    // We want to cache for about 1/4 of the average update frequency
+    const avgDiffHours = avgDiff / (1000 * 60 * 60);
+    let ttlHours = avgDiffHours / 4;
+    
+    // Apply bounds: minimum 15 minutes, maximum 24 hours
+    ttlHours = Math.max(0.25, Math.min(24, ttlHours));
+    
+    return Math.round(ttlHours * 60 * 60); // Convert to seconds
+  } catch (error) {
+    logger.error(`Error calculating adaptive TTL for ${this.provider}:`, error);
+    return cache.options.stdTTL;
+  }
+};
+
+/**
  * Static method to aggregate usage analytics data
  * and format it for external consumption.
  */
@@ -263,7 +304,10 @@ modelCacheSchema.statics.getLatestModels = async function(provider) {
     
     const data = await retryOperation(() => this.findOne({ provider }).sort({ lastChecked: -1 }), { retries: 3 });
     if (data) {
-      cache.set(cacheKey, data);
+      // Use adaptive TTL for caching
+      const ttl = data.calculateAdaptiveTTL();
+      cache.set(cacheKey, data, ttl);
+      logger.debug(`Cached latest models for ${provider} with TTL ${ttl}s`);
     }
     return data;
   } catch (error) {
@@ -371,7 +415,12 @@ modelCacheSchema.statics.updateCache = async function(provider, models, apiForma
       existingEntry.metadata = metadata;
       
       const savedEntry = await retryOperation(() => existingEntry.save(), { retries: 3, context: 'ModelCache.save' });
-      cache.set(`latestModels:${provider}`, savedEntry);
+      
+      // Update cache with adaptive TTL
+      const ttl = savedEntry.calculateAdaptiveTTL();
+      cache.set(`latestModels:${provider}`, savedEntry, ttl);
+      logger.debug(`Cached updated models for ${provider} with adaptive TTL ${ttl}s`);
+      
       return savedEntry;
     } else {
       logger.info(`Creating new model cache entry for ${provider}`);
@@ -383,7 +432,12 @@ modelCacheSchema.statics.updateCache = async function(provider, models, apiForma
         metadata,
         versionHistory: [versionData]
       }), { retries: 3, context: 'ModelCache.create' });
-      cache.set(`latestModels:${provider}`, newEntry);
+      
+      // Update cache with adaptive TTL
+      const ttl = newEntry.calculateAdaptiveTTL();
+      cache.set(`latestModels:${provider}`, newEntry, ttl);
+      logger.debug(`Cached new models for ${provider} with adaptive TTL ${ttl}s`);
+      
       return newEntry;
     }
   } catch (error) {
@@ -458,6 +512,39 @@ modelCacheSchema.statics.compareVersions = async function(provider, version1, ve
   } catch (error) {
     logger.error(`Error comparing versions for provider ${provider}:`, error);
     throw error;
+  }
+};
+
+/**
+ * Health check method to verify cache status
+ * @returns {Object} Health status information
+ */
+modelCacheSchema.statics.getHealthStatus = async function() {
+  try {
+    const stats = cache.getStats();
+    const keys = cache.keys();
+    
+    const providerEntries = await this.countDocuments();
+    const recentUpdates = await this.countDocuments({
+      lastChecked: { $gte: new Date(Date.now() - 24 * 60 * 60 * 1000) }
+    });
+    
+    return {
+      cache: {
+        keys: keys.length,
+        hits: stats.hits,
+        misses: stats.misses,
+        hitRate: stats.hits / (stats.hits + stats.misses || 1)
+      },
+      database: {
+        providerEntries,
+        recentUpdates
+      },
+      timestamp: new Date().toISOString()
+    };
+  } catch (error) {
+    logger.error('Error getting health status:', error);
+    throw new Error('Failed to retrieve health status');
   }
 };
 

@@ -115,13 +115,13 @@ export class VectorStoreService {
     }
   }
 
-  async search(queryEmbedding, k = 15, filter = null) {
+  async search(queryEmbedding, k = 15, filter = null, minimumSimilarity = 0) {
     if (!this.initialized || !this.table) {
       throw new Error('VectorStore not initialized or empty');
     }
 
     try {
-      logger.info(`Starting vector search with k=${k}, embedding length=${queryEmbedding.length}`);
+      logger.info(`Starting vector search with k=${k}, embedding length=${queryEmbedding.length}, minimumSimilarity=${minimumSimilarity}`);
       
       // Build the search query
       let searchQuery = this.table.search(queryEmbedding);
@@ -157,7 +157,7 @@ export class VectorStoreService {
       }
       
       // Transform results into our format
-      const formattedResults = (Array.isArray(results) ? results : []).map(result => {
+      let formattedResults = (Array.isArray(results) ? results : []).map(result => {
         const { vector, _distance, examples, ...metadata } = result;
         return {
           id: metadata.id,
@@ -170,11 +170,63 @@ export class VectorStoreService {
         };
       });
       
+      // Apply semantic similarity threshold filtering
+      if (minimumSimilarity > 0) {
+        formattedResults = formattedResults.filter(result => result.similarity >= minimumSimilarity);
+        logger.info(`Filtered results by minimum similarity ${minimumSimilarity}. ${formattedResults.length} results remaining.`);
+      }
+      
       logger.info(`Vector search returned ${formattedResults.length} results`);
       return formattedResults;
       
     } catch (error) {
       logger.error('Vector search failed:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Distribution of similarities for one query, for threshold tuning.
+   *
+   * Note that vectorIntentDetector applies its OWN threshold to the best match, varying
+   * it by plugin and raising it for destructive actions. This is a measurement aid for
+   * choosing those numbers, not a replacement for them — a flat store-level cutoff
+   * cannot express a per-action policy.
+   */
+  async getSimilarityThresholdStats(queryEmbedding, k = 15, filter = null) {
+    if (!this.initialized || !this.table) {
+      throw new Error('VectorStore not initialized or empty');
+    }
+
+    try {
+      // Get all results without similarity filtering
+      const allResults = await this.search(queryEmbedding, k, filter, 0);
+      
+      // Calculate statistics
+      const similarities = allResults.map(r => r.similarity);
+      // null, not 0, on an empty result set. This method exists to tune thresholds, so
+      // a fabricated 0 is the worst possible answer: it reads as "every candidate was
+      // maximally dissimilar" when the truth is that there were no candidates at all,
+      // and it would drag any average computed over several queries towards zero.
+      const stats = {
+        totalResults: allResults.length,
+        averageSimilarity: similarities.length > 0 ?
+          similarities.reduce((sum, sim) => sum + sim, 0) / similarities.length : null,
+        maxSimilarity: similarities.length > 0 ? Math.max(...similarities) : null,
+        minSimilarity: similarities.length > 0 ? Math.min(...similarities) : null,
+        distribution: {
+          high: similarities.filter(s => s >= 0.8).length,     // 0.8 - 1.0
+          medium: similarities.filter(s => s >= 0.5 && s < 0.8).length, // 0.5 - 0.8
+          low: similarities.filter(s => s >= 0.2 && s < 0.5).length,    // 0.2 - 0.5
+          veryLow: similarities.filter(s => s < 0.2).length              // 0.0 - 0.2
+        }
+      };
+      
+      logger.info(`Generated similarity threshold stats: ${JSON.stringify(stats)}`);
+      return stats;
+      
+    } catch (error) {
+      logger.error('Failed to generate similarity threshold stats:', error);
       throw error;
     }
   }

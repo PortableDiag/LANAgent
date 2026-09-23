@@ -1,12 +1,32 @@
 import WebSocket from 'ws';
 import { EventEmitter } from 'events';
 import { logger } from '../../utils/logger.js';
-import { retryOperation } from '../../utils/retryUtils.js';
+import { retryOperation, isRetryableError } from '../../utils/retryUtils.js';
 
 const HEARTBEAT_INTERVAL = 30000; // 30 seconds
 const REQUEST_TIMEOUT = 15000; // 15 seconds
 const MAX_RECONNECT_DELAY = 60000; // 60 seconds
 const INITIAL_RECONNECT_DELAY = 5000; // 5 seconds
+
+/**
+ * Opening a WebSocket is idempotent — nothing has been sent, so a second attempt
+ * cannot duplicate an effect — which makes a connect timeout exactly the case a
+ * retry budget exists for. The shared `isRetryableError` deliberately does NOT
+ * treat timeouts as retryable: it is used by transaction broadcast paths where a
+ * timed-out send may already be in flight and replaying it can double-send. So
+ * the exception is declared here, at the call that is safe to repeat, rather than
+ * widened in the classifier 464 other call sites depend on.
+ *
+ * Without this, `ws` errors such as "Opening handshake has timed out" were graded
+ * fatal on attempt 1, the configured 3 retries never ran, and every registry blip
+ * fell through to the slower `_scheduleReconnect` backoff instead.
+ */
+const CONNECT_TRANSIENT = /opening handshake has timed out|socket hang up|handshake timeout|ETIMEDOUT|EAI_AGAIN/i;
+
+export function isTransientConnectError(error) {
+  if (!error) return false;
+  return isRetryableError(error) || CONNECT_TRANSIENT.test(error.message || '');
+}
 
 /**
  * RegistryClient manages the WebSocket connection to the LANP registry server
@@ -92,7 +112,8 @@ class RegistryClient extends EventEmitter {
           retries: 3,
           minTimeout: 2000,
           maxTimeout: 10000,
-          context: 'P2P Registry connection'
+          context: 'P2P Registry connection',
+          customErrorClassifier: isTransientConnectError
         }
       );
     } catch (error) {

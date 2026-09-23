@@ -1,6 +1,19 @@
 import { BasePlugin } from '../core/basePlugin.js';
-import { CloudWatchClient, GetMetricDataCommand, PutMetricDataCommand, ListMetricsCommand, PutMetricAlarmCommand, DeleteAlarmsCommand, DescribeAlarmsCommand, PutAnomalyDetectorCommand } from '@aws-sdk/client-cloudwatch';
+import { CloudWatchClient, GetMetricDataCommand, PutMetricDataCommand, ListMetricsCommand, PutMetricAlarmCommand, DeleteAlarmsCommand, DescribeAlarmsCommand, PutAnomalyDetectorCommand, GetMetricWidgetImageCommand } from '@aws-sdk/client-cloudwatch';
 import { logger } from '../../utils/logger.js';
+
+// Supported dashboard time ranges, in milliseconds back from now.
+const TIME_RANGES = {
+  '1h': 60 * 60 * 1000,
+  '3h': 3 * 60 * 60 * 1000,
+  '6h': 6 * 60 * 60 * 1000,
+  '12h': 12 * 60 * 60 * 1000,
+  '1d': 24 * 60 * 60 * 1000,
+  '3d': 3 * 24 * 60 * 60 * 1000,
+  '7d': 7 * 24 * 60 * 60 * 1000
+};
+
+const DASHBOARD_LAYOUTS = ['grid', 'vertical', 'horizontal'];
 
 /**
  * Usage Examples:
@@ -13,7 +26,7 @@ export default class AmazonCloudWatchPlugin extends BasePlugin {
   constructor(agent) {
     super(agent);
     this.name = 'amazoncloudwatch';
-    this.version = '1.1.0';
+    this.version = '1.2.0';
     this.description = 'Monitoring and observability service for applications and infrastructure';
     this.commands = [
       {
@@ -55,6 +68,11 @@ export default class AmazonCloudWatchPlugin extends BasePlugin {
         command: 'getmultiplemetrics',
         description: 'Retrieve historical data for multiple metrics simultaneously',
         usage: 'getmultiplemetrics({ metrics: [{ metricName: "CPUUtilization", instanceId: "i-1234567890abcdef0" }, { metricName: "NetworkIn", instanceId: "i-1234567890abcdef0" }] })'
+      },
+      {
+        command: 'generatedashboard',
+        description: 'Generate a dashboard with customizable widgets and layouts',
+        usage: 'generatedashboard({ widgets: [{ type: "metric", metricName: "CPUUtilization", instanceId: "i-1234567890abcdef0" }], layout: "grid", timeRange: "1h" })'
       }
     ];
 
@@ -101,6 +119,9 @@ export default class AmazonCloudWatchPlugin extends BasePlugin {
 
         case 'getmultiplemetrics':
           return await this.getMultipleMetrics(params);
+
+        case 'generatedashboard':
+          return await this.generateDashboard(params);
 
         default:
           return {
@@ -339,7 +360,7 @@ export default class AmazonCloudWatchPlugin extends BasePlugin {
     const { AlarmNames } = params;
 
     this.validateParams(params, {
-      AlarmNames: { required: true, type: 'object' }
+      AlarmNames: { required: true, type: 'array' }
     });
 
     if (!this.client) {
@@ -443,8 +464,9 @@ export default class AmazonCloudWatchPlugin extends BasePlugin {
   async getMultipleMetrics(params) {
     const { metrics, startTime, endTime, period = 300 } = params;
 
+    // 'object' excludes arrays in validateType(), so this must be 'array'.
     this.validateParams(params, {
-      metrics: { required: true, type: 'object' }
+      metrics: { required: true, type: 'array', minItems: 1 }
     });
 
     if (!this.client) {
@@ -487,5 +509,148 @@ export default class AmazonCloudWatchPlugin extends BasePlugin {
       logger.error('Error fetching multiple metrics:', error.message);
       return { success: false, error: 'Failed to retrieve multiple metrics: ' + error.message };
     }
+  }
+
+  /**
+   * Generate a dashboard by rendering one CloudWatch metric-widget image per
+   * requested widget.
+   *
+   * Images come back from the API as binary PNG blobs (Uint8Array); they are
+   * base64-encoded here so the result survives JSON serialisation on its way
+   * to the web UI / Telegram / NL layers.
+   *
+   * @param {Object} params - Dashboard configuration parameters.
+   * @param {Array<Object>} params.widgets - Widgets to render. Each needs
+   *   `type: 'metric'`, a `metricName`, and either `instanceId` (EC2 shorthand)
+   *   or an explicit `dimensions` map. `namespace` defaults to 'AWS/EC2'.
+   * @param {string} [params.layout='grid'] - Layout hint echoed to the caller.
+   * @param {string} [params.timeRange='1h'] - One of 1h, 3h, 6h, 12h, 1d, 3d, 7d.
+   * @returns {Object} Result with the rendered widgets.
+   */
+  async generateDashboard(params) {
+    const { widgets, layout = 'grid', timeRange = '1h', period = 300 } = params;
+
+    // NOTE: validateType() treats 'object' as "object and NOT an array", so an
+    // array param must be declared as 'array' or validation rejects every call.
+    this.validateParams(params, {
+      widgets: { required: true, type: 'array', minItems: 1 },
+      layout: { type: 'string', enum: DASHBOARD_LAYOUTS },
+      timeRange: { type: 'string', enum: Object.keys(TIME_RANGES) }
+    });
+
+    if (!this.client) {
+      return { success: false, error: 'AWS credentials not configured' };
+    }
+
+    if (widgets.length === 0) {
+      return { success: false, error: 'At least one widget is required' };
+    }
+
+    const unsupported = widgets
+      .map((w, i) => (w?.type === 'metric' ? null : `#${i} (type: ${w?.type ?? 'undefined'})`))
+      .filter(Boolean);
+    if (unsupported.length > 0) {
+      return {
+        success: false,
+        error: `Unsupported widget type(s): ${unsupported.join(', ')}. Only "metric" widgets are supported.`
+      };
+    }
+
+    const endTime = new Date();
+    const startTime = new Date(endTime.getTime() - TIME_RANGES[timeRange]);
+
+    logger.info(`Generating dashboard: ${widgets.length} widget(s), layout=${layout}, range=${timeRange}`);
+
+    const rendered = [];
+    const failed = [];
+
+    for (const [index, widget] of widgets.entries()) {
+      const namespace = widget.namespace || 'AWS/EC2';
+      // `dimensions` wins; `instanceId` is kept as the EC2 shorthand the
+      // command usage string documents.
+      const dimensions = widget.dimensions
+        ? { ...widget.dimensions }
+        : (widget.instanceId ? { InstanceId: widget.instanceId } : {});
+
+      const dimensionLabel = Object.values(dimensions).join(', ') || namespace;
+      const id = widget.id || `${widget.metricName}-${dimensionLabel}-${index}`;
+      const title = widget.title || `${widget.metricName} for ${dimensionLabel}`;
+
+      if (!widget.metricName) {
+        failed.push({ id, error: 'Widget is missing metricName' });
+        continue;
+      }
+
+      // CloudWatch metric syntax: [ Namespace, MetricName, DimName, DimValue, ... ]
+      const metricSpec = [namespace, widget.metricName];
+      for (const [name, value] of Object.entries(dimensions)) {
+        metricSpec.push(name, String(value));
+      }
+
+      const metricWidget = {
+        metrics: [metricSpec],
+        view: widget.view || 'timeSeries',
+        stacked: widget.stacked === true,
+        region: widget.region || this.region,
+        title,
+        stat: widget.stat || 'Average',
+        period: widget.period || period,
+        start: startTime.toISOString(),
+        end: endTime.toISOString()
+      };
+      if (widget.width) metricWidget.width = widget.width;
+      if (widget.height) metricWidget.height = widget.height;
+
+      try {
+        const command = new GetMetricWidgetImageCommand({
+          MetricWidget: JSON.stringify(metricWidget)
+        });
+        const response = await this.client.send(command);
+
+        if (!response?.MetricWidgetImage) {
+          failed.push({ id, error: 'CloudWatch returned no image for this widget' });
+          continue;
+        }
+
+        rendered.push({
+          id,
+          type: 'metric',
+          title,
+          namespace,
+          metricName: widget.metricName,
+          dimensions,
+          contentType: 'image/png',
+          imageBase64: Buffer.from(response.MetricWidgetImage).toString('base64')
+        });
+      } catch (error) {
+        // One bad widget must not discard the ones that did render.
+        logger.error(`Dashboard widget "${id}" failed: ${error.message}`);
+        failed.push({ id, error: error.message });
+      }
+    }
+
+    if (rendered.length === 0) {
+      return {
+        success: false,
+        error: `Failed to generate dashboard: no widgets could be rendered (${failed.map(f => `${f.id}: ${f.error}`).join('; ')})`,
+        failed
+      };
+    }
+
+    return {
+      success: true,
+      data: {
+        widgets: rendered,
+        failed,
+        layout,
+        timeRange,
+        start: startTime.toISOString(),
+        end: endTime.toISOString(),
+        generatedAt: new Date().toISOString()
+      },
+      message: failed.length === 0
+        ? `Dashboard generated with ${rendered.length} widget(s)`
+        : `Dashboard generated with ${rendered.length} widget(s); ${failed.length} failed`
+    };
   }
 }

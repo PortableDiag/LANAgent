@@ -69,6 +69,207 @@ class GatewayClient {
   }
 
   /**
+   * Connectivity diagnostics: WireGuard tunnel state, gateway reachability and
+   * latency, and the gateway's own view of this agent.
+   *
+   * Read-only — it never re-registers or otherwise mutates gateway state, so it
+   * is safe to call while triaging an outage.
+   *
+   * @returns {Promise<Object>} diagnostics
+   */
+  async getConnectivityDiagnostics() {
+    const diagnostics = {
+      timestamp: new Date().toISOString(),
+      registered: this.registered,
+      mode: this.mode,
+      agentId: this.agentId,
+      allocatedIp: this.allocatedIp,
+      gatewayUrl: GATEWAY_URL,
+      tunnel: null,
+      reachability: null,
+      gatewayView: null
+    };
+
+    // Settle each probe independently: a dead tunnel must not hide the fact
+    // that the gateway itself is answering (or vice versa).
+    const [tunnel, reachability, gatewayView] = await Promise.all([
+      this._getTunnelStatus().catch(e => ({ error: e.message })),
+      this._probeGateway().catch(e => ({ error: e.message })),
+      this._getGatewayView().catch(e => ({ error: e.message }))
+    ]);
+
+    diagnostics.tunnel = tunnel;
+    diagnostics.reachability = reachability;
+    diagnostics.gatewayView = gatewayView;
+
+    return diagnostics;
+  }
+
+  /**
+   * WireGuard tunnel status, read from `wg show <iface> dump`.
+   *
+   * `dump` is tab-separated and machine-readable; the human `wg show` output is
+   * not safely parseable (its peers are introduced by an unindented `peer:`
+   * line while `public key:` belongs to the interface, and endpoints carry a
+   * colon-separated port).
+   *
+   * @returns {Promise<Object>} tunnel status
+   */
+  async _getTunnelStatus() {
+    if (this.mode && this.mode !== 'TUNNEL') {
+      return { interface: WG_INTERFACE, configured: false, reason: `mode is ${this.mode}` };
+    }
+
+    try {
+      const stdout = await this._wgDump();
+      const lines = stdout.split('\n').filter(Boolean);
+      if (lines.length === 0) {
+        return { interface: WG_INTERFACE, configured: false, reason: 'no output from wg show' };
+      }
+
+      // First line describes the interface: privkey, pubkey, listen-port, fwmark
+      const [, ifacePublicKey, listenPort] = lines[0].split('\t');
+      const nowSec = Math.floor(Date.now() / 1000);
+
+      const peers = lines.slice(1).map(line => {
+        const [publicKey, , endpoint, allowedIps, latestHandshake, rx, tx, keepalive] = line.split('\t');
+        const handshakeSec = Number(latestHandshake) || 0;
+        return {
+          publicKey,
+          // 'off' is what wg prints for an unset endpoint; keep host:port intact.
+          endpoint: endpoint && endpoint !== '(none)' ? endpoint : null,
+          allowedIps,
+          latestHandshake: handshakeSec > 0 ? new Date(handshakeSec * 1000).toISOString() : null,
+          handshakeAgeSeconds: handshakeSec > 0 ? nowSec - handshakeSec : null,
+          rxBytes: Number(rx) || 0,
+          txBytes: Number(tx) || 0,
+          persistentKeepalive: keepalive === 'off' ? null : Number(keepalive) || null
+        };
+      });
+
+      // A peer that has not handshaken in >3 min is stale: WireGuard rekeys
+      // roughly every 2 min while traffic flows, so this is the tell for the
+      // gateway having dropped our peer entry.
+      const stalePeers = peers.filter(p => p.handshakeAgeSeconds === null || p.handshakeAgeSeconds > 180);
+
+      return {
+        interface: WG_INTERFACE,
+        configured: true,
+        publicKey: ifacePublicKey || null,
+        listenPort: Number(listenPort) || null,
+        peerCount: peers.length,
+        stalePeerCount: stalePeers.length,
+        healthy: peers.length > 0 && stalePeers.length === 0,
+        peers
+      };
+    } catch (error) {
+      return { interface: WG_INTERFACE, configured: false, error: error.message };
+    }
+  }
+
+  /**
+   * Raw `wg show <iface> dump` output. Separated from the parser so the parser
+   * can be exercised without wireguard-tools installed.
+   * @returns {Promise<string>}
+   */
+  async _wgDump() {
+    const { stdout } = await execFile('wg', ['show', WG_INTERFACE, 'dump'], { timeout: 5000 });
+    return stdout;
+  }
+
+  /**
+   * Probe the gateway's /health endpoint a few times, deriving reachability and
+   * latency from the same samples rather than issuing a separate round of
+   * requests for each.
+   *
+   * @returns {Promise<Object>} reachability + latency
+   */
+  async _probeGateway(samples = 3) {
+    const results = [];
+
+    for (let i = 0; i < samples; i++) {
+      const start = Date.now();
+      try {
+        const response = await axios.get(`${GATEWAY_URL}/health`, {
+          timeout: 5000,
+          validateStatus: () => true
+        });
+        results.push({
+          attempt: i + 1,
+          statusCode: response.status,
+          ok: response.status < 500,
+          latencyMs: Date.now() - start,
+          body: i === 0 ? response.data : undefined
+        });
+      } catch (error) {
+        results.push({ attempt: i + 1, ok: false, error: error.message, latencyMs: Date.now() - start });
+      }
+      if (i < samples - 1) await new Promise(r => setTimeout(r, 100));
+    }
+
+    const ok = results.filter(r => r.ok);
+    const latencies = ok.map(r => r.latencyMs);
+
+    return {
+      url: `${GATEWAY_URL}/health`,
+      reachable: ok.length > 0,
+      successRate: results.length ? ok.length / results.length : 0,
+      averageLatencyMs: latencies.length ? Math.round(latencies.reduce((a, b) => a + b, 0) / latencies.length) : null,
+      minLatencyMs: latencies.length ? Math.min(...latencies) : null,
+      maxLatencyMs: latencies.length ? Math.max(...latencies) : null,
+      samples: results
+    };
+  }
+
+  /**
+   * What the gateway believes about this agent — whether it considers us
+   * online, when it last saw us, and our routing reliability.
+   *
+   * This is the half that catches a one-way failure: we can reach the gateway
+   * while it has already written us off.
+   *
+   * @returns {Promise<Object>} the gateway's view of this agent
+   */
+  async _getGatewayView() {
+    if (!this.registered || !this.agentId) {
+      return { status: 'unregistered', registered: this.registered, agentId: this.agentId };
+    }
+
+    try {
+      const start = Date.now();
+      const response = await axios.get(`${GATEWAY_URL}/agents/${encodeURIComponent(this.agentId)}`, {
+        timeout: 10000,
+        validateStatus: () => true
+      });
+      const responseTimeMs = Date.now() - start;
+
+      if (response.status === 404) {
+        // Registered locally but unknown to the gateway — the state that a
+        // dropped peer or a wiped gateway record produces.
+        return { status: 'unknown_to_gateway', statusCode: 404, responseTimeMs };
+      }
+
+      const agent = response.data?.agent;
+      if (response.status >= 400 || !agent) {
+        return { status: 'degraded', statusCode: response.status, responseTimeMs };
+      }
+
+      return {
+        status: agent.online ? 'healthy' : 'stale',
+        statusCode: response.status,
+        responseTimeMs,
+        online: agent.online,
+        lastSeen: agent.lastSeen,
+        reliability: agent.reliability,
+        avgResponseTime: agent.avgResponseTime,
+        serviceCount: Array.isArray(agent.services) ? agent.services.length : null
+      };
+    } catch (error) {
+      return { status: 'unreachable', error: error.message };
+    }
+  }
+
+  /**
    * Ensure a WireGuard keypair exists; return both keys.
    */
   async _ensureWireGuardKeypair() {

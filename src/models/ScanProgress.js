@@ -359,4 +359,193 @@ ScanProgressSchema.statics.getPriorityStats = async function(scanId) {
   return stats;
 };
 
+/**
+ * Estimate when a scan session will finish.
+ *
+ * Keyed on `sessionScanId`, NOT `scanId`. `scanId` is a per-chunk composite
+ * (`<session>_<path>_chunk_N`, see incrementalScanner.createScanEntries), so
+ * matching a session identifier against it finds nothing and the estimate
+ * comes back empty forever — while looking like a scan with no work in it.
+ *
+ * "Finished" counts failed entries as well as completed ones: a failed entry
+ * still burned its processingTime and still leaves the queue, so excluding it
+ * both understates throughput and leaves it counted as remaining work.
+ *
+ * Velocity is measured against wall-clock elapsed (first start → last finish),
+ * not against the span between finishes. The span form divides by zero for a
+ * single finish and over-states throughput on small samples; elapsed-time also
+ * absorbs concurrency, which a per-item average cannot.
+ *
+ * @param {string} sessionScanId - The scan session to estimate
+ * @returns {Object} Estimate plus the basis it was computed from. A null
+ *   `estimatedCompletionTime` means "not enough data", never "done now".
+ */
+ScanProgressSchema.statics.estimateCompletionTime = async function(sessionScanId) {
+  // Sample size below which throughput is not yet trustworthy, used to keep
+  // `confidence` from reading 1.0 off a single finished file.
+  const MIN_VELOCITY_SAMPLE = 5;
+
+  const empty = {
+    estimatedCompletionTime: null,
+    estimatedMillisecondsRemaining: null,
+    processingVelocity: null,
+    avgProcessingTime: null,
+    totalFiles: 0,
+    filesFinished: 0,
+    filesRemaining: 0,
+    queuedFilesAhead: 0,
+    confidence: 0
+  };
+
+  const [agg] = await this.aggregate([
+    { $match: { sessionScanId } },
+    {
+      $group: {
+        _id: null,
+        totalFiles: { $sum: 1 },
+        finishedFiles: {
+          $sum: { $cond: [{ $in: ['$status', ['completed', 'failed']] }, 1, 0] }
+        },
+        remainingFiles: {
+          $sum: { $cond: [{ $in: ['$status', ['pending', 'processing']] }, 1, 0] }
+        },
+        timedFiles: {
+          $sum: { $cond: [{ $gt: ['$processingTime', 0] }, 1, 0] }
+        },
+        totalProcessingTime: { $sum: { $ifNull: ['$processingTime', 0] } },
+        // $avg and $min/$max ignore Date values, so cast before aggregating.
+        firstStartedAt: { $min: { $toLong: { $ifNull: ['$startedAt', '$createdAt'] } } },
+        lastFinishedAt: { $max: { $toLong: '$completedAt' } },
+        oldestPendingCreatedAt: {
+          $min: {
+            $cond: [{ $eq: ['$status', 'pending'] }, { $toLong: '$createdAt' }, null]
+          }
+        },
+        priorityRank: {
+          $max: {
+            $switch: {
+              branches: [
+                { case: { $eq: ['$priority', 'critical'] }, then: PRIORITY_RANK.critical },
+                { case: { $eq: ['$priority', 'high'] },     then: PRIORITY_RANK.high },
+                { case: { $eq: ['$priority', 'low'] },      then: PRIORITY_RANK.low }
+              ],
+              default: DEFAULT_PRIORITY_RANK
+            }
+          }
+        }
+      }
+    }
+  ]);
+
+  if (!agg || !agg.totalFiles) return empty;
+
+  const { totalFiles, finishedFiles, remainingFiles, timedFiles, totalProcessingTime } = agg;
+
+  // $toLong yields a BSON Int64. The driver promotes it to a JS number by
+  // default, but not under `promoteLongs: false`, and arithmetic on a Long
+  // object silently produces NaN rather than throwing.
+  const asMillis = v => (v === null || v === undefined ? null : Number(v));
+  const firstStartedAt = asMillis(agg.firstStartedAt);
+  const lastFinishedAt = asMillis(agg.lastFinishedAt);
+  const oldestPendingCreatedAt = asMillis(agg.oldestPendingCreatedAt);
+
+  const avgProcessingTime = timedFiles > 0 ? totalProcessingTime / timedFiles : null;
+
+  // Files per millisecond of wall-clock. Needs a start, a finish, and a
+  // non-zero span between them.
+  let processingVelocity = null;
+  if (finishedFiles > 0 && firstStartedAt && lastFinishedAt) {
+    const elapsed = lastFinishedAt - firstStartedAt;
+    if (elapsed > 0) processingVelocity = finishedFiles / elapsed;
+  }
+  // Fall back to the per-file average, which assumes no concurrency.
+  if (processingVelocity === null && avgProcessingTime > 0) {
+    processingVelocity = 1 / avgProcessingTime;
+  }
+
+  if (remainingFiles === 0) {
+    return {
+      ...empty,
+      estimatedCompletionTime: lastFinishedAt ? new Date(lastFinishedAt).toISOString() : null,
+      estimatedMillisecondsRemaining: 0,
+      processingVelocity,
+      avgProcessingTime,
+      totalFiles,
+      filesFinished: finishedFiles,
+      filesRemaining: 0,
+      confidence: 1
+    };
+  }
+
+  // Pending work from OTHER sessions that the queue will serve first, using
+  // the same ordering as getQueuedScansByPriority: higher priority rank, then
+  // older first. Counted in the database rather than by pulling the whole
+  // global queue into memory.
+  let queuedFilesAhead = 0;
+  if (oldestPendingCreatedAt !== null) {
+    const [ahead] = await this.aggregate([
+      { $match: { status: 'pending', sessionScanId: { $ne: sessionScanId } } },
+      {
+        $addFields: {
+          _priorityRank: {
+            $switch: {
+              branches: [
+                { case: { $eq: ['$priority', 'critical'] }, then: PRIORITY_RANK.critical },
+                { case: { $eq: ['$priority', 'high'] },     then: PRIORITY_RANK.high },
+                { case: { $eq: ['$priority', 'low'] },      then: PRIORITY_RANK.low }
+              ],
+              default: DEFAULT_PRIORITY_RANK
+            }
+          }
+        }
+      },
+      {
+        $match: {
+          $expr: {
+            $or: [
+              { $gt: ['$_priorityRank', agg.priorityRank] },
+              {
+                $and: [
+                  { $eq: ['$_priorityRank', agg.priorityRank] },
+                  { $lt: [{ $toLong: '$createdAt' }, oldestPendingCreatedAt] }
+                ]
+              }
+            ]
+          }
+        }
+      },
+      { $count: 'n' }
+    ]);
+    queuedFilesAhead = ahead?.n || 0;
+  }
+
+  let estimatedMillisecondsRemaining = null;
+  if (processingVelocity > 0) {
+    estimatedMillisecondsRemaining = (remainingFiles + queuedFilesAhead) / processingVelocity;
+  }
+
+  // Coverage of this scan, held down by how little throughput data exists.
+  // Without the sample floor a one-file scan reports full confidence off a
+  // single timing.
+  const coverage = finishedFiles / totalFiles;
+  const sampleFactor = Math.min(1, finishedFiles / MIN_VELOCITY_SAMPLE);
+  const confidence = estimatedMillisecondsRemaining === null
+    ? 0
+    : Math.min(coverage, sampleFactor);
+
+  return {
+    estimatedCompletionTime: estimatedMillisecondsRemaining === null
+      ? null
+      : new Date(Date.now() + estimatedMillisecondsRemaining).toISOString(),
+    estimatedMillisecondsRemaining,
+    processingVelocity,
+    avgProcessingTime,
+    totalFiles,
+    filesFinished: finishedFiles,
+    filesRemaining: remainingFiles,
+    queuedFilesAhead,
+    confidence
+  };
+};
+
 export const ScanProgress = mongoose.model('ScanProgress', ScanProgressSchema);

@@ -316,6 +316,99 @@ improvementMetricsSchema.statics.getTrends = async function() {
   }
 };
 
+/**
+ * Compare metrics between two time periods.
+ * @param {Date} startDate1 - Start date of the first period.
+ * @param {Date} endDate1 - End date of the first period.
+ * @param {Date} startDate2 - Start date of the second period.
+ * @param {Date} endDate2 - End date of the second period.
+ * @returns {Promise<Object>} - Statistical comparison of metrics between the two periods.
+ */
+improvementMetricsSchema.statics.comparePeriods = async function(startDate1, endDate1, startDate2, endDate2) {
+  try {
+    const [period1Metrics, period2Metrics] = await Promise.all([
+      this.getMetricsForRange(startDate1, endDate1),
+      this.getMetricsForRange(startDate2, endDate2)
+    ]);
+
+    // Helper function to calculate statistics
+    const calculateStats = (metrics) => {
+      if (!metrics || metrics.length === 0) {
+        return {
+          totalImprovements: 0,
+          mergedImprovements: 0,
+          successRate: 0,
+          avgImprovementsPerDay: 0,
+          avgTimeToMerge: 0
+        };
+      }
+
+      const totalImprovements = metrics.reduce((sum, metric) => sum + (metric.daily?.total || 0), 0);
+      const mergedImprovements = metrics.reduce((sum, metric) => sum + (metric.daily?.merged || 0), 0);
+      const successRate = totalImprovements > 0 ? (mergedImprovements / totalImprovements) * 100 : 0;
+      const avgImprovementsPerDay = metrics.length > 0 ? totalImprovements / metrics.length : 0;
+      // cumulative.averageTimeToMerge is a lifetime running figure recomputed on every
+      // snapshot, so averaging it across the period would double-count; getMetricsForRange
+      // sorts date-descending, so the first row is the latest reading in the period.
+      const avgTimeToMerge = metrics[0]?.cumulative?.averageTimeToMerge || 0;
+
+      return {
+        totalImprovements,
+        mergedImprovements,
+        successRate,
+        avgImprovementsPerDay,
+        avgTimeToMerge
+      };
+    };
+
+    const stats1 = calculateStats(period1Metrics);
+    const stats2 = calculateStats(period2Metrics);
+
+    // Calculate differences
+    const differences = {
+      totalImprovements: stats2.totalImprovements - stats1.totalImprovements,
+      mergedImprovements: stats2.mergedImprovements - stats1.mergedImprovements,
+      successRate: stats2.successRate - stats1.successRate,
+      avgImprovementsPerDay: stats2.avgImprovementsPerDay - stats1.avgImprovementsPerDay,
+      avgTimeToMerge: stats2.avgTimeToMerge - stats1.avgTimeToMerge
+    };
+
+    // Calculate percentage changes
+    const percentageChanges = {
+      totalImprovements: stats1.totalImprovements !== 0 ? (differences.totalImprovements / stats1.totalImprovements) * 100 : 0,
+      mergedImprovements: stats1.mergedImprovements !== 0 ? (differences.mergedImprovements / stats1.mergedImprovements) * 100 : 0,
+      successRate: stats1.successRate !== 0 ? (differences.successRate / stats1.successRate) * 100 : 0,
+      avgImprovementsPerDay: stats1.avgImprovementsPerDay !== 0 ? (differences.avgImprovementsPerDay / stats1.avgImprovementsPerDay) * 100 : 0,
+      avgTimeToMerge: stats1.avgTimeToMerge !== 0 ? (differences.avgTimeToMerge / stats1.avgTimeToMerge) * 100 : 0
+    };
+
+    return {
+      period1: {
+        startDate: startDate1,
+        endDate: endDate1,
+        stats: stats1
+      },
+      period2: {
+        startDate: startDate2,
+        endDate: endDate2,
+        stats: stats2
+      },
+      differences,
+      percentageChanges,
+      improvement: {
+        totalImprovements: differences.totalImprovements > 0,
+        mergedImprovements: differences.mergedImprovements > 0,
+        successRate: differences.successRate > 0,
+        avgImprovementsPerDay: differences.avgImprovementsPerDay > 0,
+        avgTimeToMerge: differences.avgTimeToMerge < 0 // Lower time is better
+      }
+    };
+  } catch (error) {
+    logger.error('Error comparing periods:', error);
+    throw error;
+  }
+};
+
 const ImprovementMetrics = mongoose.model('ImprovementMetrics', improvementMetricsSchema);
 
 export default ImprovementMetrics;

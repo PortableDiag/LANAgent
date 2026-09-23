@@ -26,7 +26,7 @@ const providerStatsArchiveSchema = new mongoose.Schema({
   providers: [{
     provider: {
       type: String,
-      enum: ['openai', 'anthropic', 'gab', 'huggingface', 'xai', 'ollama', 'bitnet']
+      enum: ['openai', 'anthropic', 'gab', 'huggingface', 'xai', 'ollama', 'bitnet', 'uncensored', 'openrouter']
     },
     totalRequests: { type: Number, default: 0 },
     totalTokens: { type: Number, default: 0 },

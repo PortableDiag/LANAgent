@@ -1,6 +1,7 @@
 import { logger } from '../../utils/logger.js';
 import abiManager from './abiManager.js';
 import walletService from './walletService.js';
+import { hasStatusCode } from '../../utils/rpcErrorClassifier.js';
 
 // Lazy load ethers to avoid WebSocket import issue
 let ethersLib = null;
@@ -285,7 +286,8 @@ class ContractService {
         const shouldFallback =
           errorMsg.includes('rate limit') ||
           errorMsg.includes('Too many requests') ||
-          errorMsg.includes('429') ||
+          // Hex-safe: a bare includes('429') also matches an address ending in 429
+          hasStatusCode(errorMsg, 429) ||
           errorMsg.includes('missing response') ||
           errorMsg.includes('ECONNREFUSED') ||
           errorMsg.includes('ETIMEDOUT') ||

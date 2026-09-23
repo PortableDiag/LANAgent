@@ -14,7 +14,7 @@ const ipBucket = (ip) => {
 import { killSwitchMiddleware } from './middleware/killSwitch.js';
 import { auditLogMiddleware } from './middleware/auditLog.js';
 import { responseSanitizer, handleStatsRequest } from './middleware/responseSanitizer.js';
-import { setKillSwitch, isKillSwitchActive, getKillSwitchStatus, setKillSwitchNotificationHooks, getKillSwitchNotificationHooks } from './middleware/killSwitch.js';
+import { setKillSwitch, isKillSwitchActive, getKillSwitchStatus, getKillSwitchTimeline, setKillSwitchNotificationHooks, getKillSwitchNotificationHooks } from './middleware/killSwitch.js';
 import ExternalServiceConfig from '../../models/ExternalServiceConfig.js';
 import { logger } from '../../utils/logger.js';
 import { authenticateToken } from '../../interfaces/web/auth.js';
@@ -248,6 +248,18 @@ router.get('/admin/kill-switch/status', authenticateToken, async (req, res) => {
     res.json({ success: true, ...status });
   } catch (error) {
     logger.error('Kill switch status error:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Kill-switch state-change history (process-local, resets on restart). Also
+// under /admin so it stays readable while the kill switch is blocking traffic.
+router.get('/admin/kill-switch/timeline', authenticateToken, (req, res) => {
+  try {
+    const timeline = getKillSwitchTimeline({ limit: req.query.limit, since: req.query.since });
+    res.json({ success: true, timeline, count: timeline.length });
+  } catch (error) {
+    logger.error('Kill switch timeline error:', error);
     res.status(500).json({ success: false, error: error.message });
   }
 });

@@ -155,7 +155,7 @@ export default class NASAPlugin extends BasePlugin {
     const solArray = Array.isArray(sols) ? sols : [sols];
     this.validateParams({ roverName, sols: solArray }, {
       roverName: { required: true, type: 'string' },
-      sols: { required: true, type: 'object' }
+      sols: { required: true, type: 'array' }
     });
 
     if (!this.apiKey) {

@@ -46,6 +46,13 @@ export class ModelUpdaterService extends EventEmitter {
         modelsUrl: 'https://gab.ai/models?initial=false',
         apiUrl: 'https://gab.ai/api/models',
         docsUrl: 'https://gab.ai/docs'
+      },
+      openrouter: {
+        // Public and unauthenticated — the only provider here whose catalog is
+        // a real API rather than a scrape, so it needs no fallback path.
+        apiUrl: 'https://openrouter.ai/api/v1/models',
+        modelsUrl: 'https://openrouter.ai/models',
+        docsUrl: 'https://openrouter.ai/docs'
       }
     };
   }
@@ -89,7 +96,7 @@ export class ModelUpdaterService extends EventEmitter {
       failed: []
     };
     
-    for (const provider of ['openai', 'anthropic', 'huggingface', 'gab']) {
+    for (const provider of ['openai', 'anthropic', 'huggingface', 'gab', 'openrouter']) {
       try {
         logger.info(`Updating ${provider} models...`);
         const updated = await this.updateProviderModels(provider);
@@ -121,6 +128,8 @@ export class ModelUpdaterService extends EventEmitter {
           return await this.fetchHuggingFaceModels();
         case 'gab':
           return await this.scrapeGabModels();
+        case 'openrouter':
+          return await this.fetchOpenRouterModels();
         default:
           throw new Error(`Unknown provider: ${provider}`);
       }
@@ -656,6 +665,51 @@ export class ModelUpdaterService extends EventEmitter {
     // Extract API format changes from documentation
     // For now, return empty - can be enhanced later
     return {};
+  }
+
+  /**
+   * OpenRouter publishes its full catalog unauthenticated, so this is a plain
+   * fetch with no scrape fallback. The list is large (400+) and turns over
+   * weekly; storing it whole is what lets the dashboard offer a real dropdown
+   * instead of a hardcoded shortlist that goes stale between releases.
+   */
+  async fetchOpenRouterModels() {
+    const config = this.providerConfigs.openrouter;
+    const response = await fetch(config.apiUrl, { signal: AbortSignal.timeout(30000) });
+    if (!response.ok) {
+      throw new Error(`OpenRouter model catalog returned ${response.status}`);
+    }
+    const payload = await response.json();
+    const entries = Array.isArray(payload?.data) ? payload.data : [];
+
+    if (entries.length === 0) {
+      // Treat an empty catalog as a failure rather than persisting it — an
+      // empty ModelCache row silently empties the dashboard's model dropdown.
+      throw new Error('OpenRouter returned an empty model catalog');
+    }
+
+    const models = entries
+      .filter(m => m?.id)
+      .map(m => ({
+        id: m.id,
+        name: m.name || m.id,
+        contextWindow: m.context_length || m.top_provider?.context_length || null,
+        // Per-token USD, as published — NOT per 1K, which is the unit every
+        // other provider config in this file uses.
+        // Negative is OpenRouter's "priced at routing time" sentinel (the auto-router
+        // entries publish -1). Clamp to 0 so a cached price can never credit a spend figure.
+        pricing: {
+          prompt: Math.max(0, Number.parseFloat(m.pricing?.prompt) || 0),
+          completion: Math.max(0, Number.parseFloat(m.pricing?.completion) || 0)
+        },
+        vision: (m.architecture?.input_modalities || []).includes('image'),
+        category: 'chat'
+      }));
+
+    await this.saveModelCache('openrouter', models, { unit: 'per-token-usd' });
+    logger.info(`Fetched ${models.length} OpenRouter models`);
+
+    return { models, apiFormat: { unit: 'per-token-usd' } };
   }
 
   async saveModelCache(provider, models, apiFormat) {

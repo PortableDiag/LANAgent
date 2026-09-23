@@ -113,9 +113,39 @@ if git diff --name-only "$PRE" "$UP" | grep -qE '^package(-lock)?\.json$'; then
   DEPS_CHANGED=1
 fi
 
+# Untracked files that the update would START tracking. git will not overwrite an
+# untracked file on a fast-forward or a merge, so a single one (an instance-local
+# copy of a file that later ships upstream) blocks every future update. The old
+# behaviour exited 0 with a message about tracked files, so the stall was silent —
+# the same shape as the eleven days an instance sat frozen in 2026-09. Move each one
+# aside (never delete: it may hold local edits), log where it went, and put it back
+# if the update is rolled back.
+DISPLACED_DIR="${LANAGENT_DISPLACED_DIR:-$HOME/.lanagent-update-displaced}/$(date +%Y%m%d-%H%M%S)"
+DISPLACED=()
+while IFS= read -r f; do
+  [ -n "$f" ] && [ -e "$f" ] || continue
+  git ls-files --error-unmatch -- "$f" >/dev/null 2>&1 && continue   # already tracked
+  mkdir -p "$DISPLACED_DIR/$(dirname "$f")"
+  if mv -- "$f" "$DISPLACED_DIR/$f"; then
+    DISPLACED+=("$f")
+    log "moved aside untracked $f — the update now tracks it (kept at $DISPLACED_DIR/$f)"
+  else
+    log "ERROR: could not move aside untracked $f, which the update would overwrite"; exit 1
+  fi
+done < <(git diff --name-only --diff-filter=A "$PRE" "$UP")
+
+restore_displaced() {
+  local f
+  for f in "${DISPLACED[@]}"; do
+    mkdir -p "$(dirname "$f")"
+    mv -- "$DISPLACED_DIR/$f" "$f" && log "restored untracked $f"
+  done
+}
+
 rollback() {
   log "rolling back to $(git rev-parse --short "$PRE")"
   git reset --hard "$PRE" >>"$LOG" 2>&1
+  restore_displaced
   [ "$DEPS_CHANGED" = "1" ] && npm install --legacy-peer-deps --no-audit --no-fund >>"$LOG" 2>&1
 }
 
@@ -132,13 +162,15 @@ case "$STRATEGY" in
     if git merge-base --is-ancestor "$PRE" "$UP" 2>/dev/null; then
       log "fast-forward $(git rev-parse --short "$PRE") -> $(git rev-parse --short "$UP")"
       if ! git merge --ff-only "$REMOTE/$BRANCH" >>"$LOG" 2>&1; then
-        log "SKIP: fast-forward blocked by local changes to tracked files. Commit/stash them, or set LANAGENT_AUTO_UPDATE=false."
+        restore_displaced
+        log "SKIP: fast-forward refused — see git's reason above (usually local edits to tracked files). Commit/stash them, or set LANAGENT_AUTO_UPDATE=false."
         exit 0
       fi
     else
       log "diverged from $REMOTE/$BRANCH — attempting clean merge"
       if ! git merge --no-edit "$REMOTE/$BRANCH" >>"$LOG" 2>&1; then
         git merge --abort >>"$LOG" 2>&1 || true
+        restore_displaced
         log "SKIP: update does not merge cleanly with your local changes. Nothing was changed — resolve by hand, or set LANAGENT_AUTO_UPDATE=false to stop auto-updating this edited fork."
         exit 0
       fi

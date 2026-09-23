@@ -107,6 +107,21 @@ const mcpServerSchema = new mongoose.Schema({
   webhookUrl: {
     type: String,
     default: null
+  },
+
+  // Environment overlaid onto a spawned stdio child. mcpTransport.createTransport
+  // has always read `serverConfig.env`, but this path did not exist, so under
+  // Mongoose strict mode it was always undefined and the overlay was dead code —
+  // every child inherited the agent's entire process.env instead.
+  // NOTE: this is an OVERLAY, not a sandbox. It adds to and overrides the parent
+  // environment; it does not withhold it. Scoping what a child may NOT see is a
+  // separate piece of work.
+  // A plain object, deliberately: the consumer spreads it
+  // (`{ ...process.env, ...this.options.env }`) and a Mongoose Map does not
+  // spread into an object — that would have left the overlay just as dead.
+  env: {
+    type: Object,
+    default: undefined
   }
 }, {
   timestamps: true

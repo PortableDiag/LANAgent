@@ -30,7 +30,41 @@
 // public post, so the undated phrasings are now covered. Deliberately NOT a blanket
 // /session/: this product has real user-session and session-timeout commits that must
 // still be postable, so only the report-ish suffixes and `handoff`/`wrap-up` match.
-const SENSITIVE_COMMIT_PATTERNS = /outreach|proposal|business.plan|linkedin|strategy|monetiz|revenue|pricing|release.plan|contact.email|partner|investor|funding|pitch|competitive|roadmap|session.*\d{4}-\d{2}-\d{2}|docs\(session|session.?(report|summary|notes|wrap|handoff|recap|log)|\bhandoff\b|wrap.?up|crypto|token.?trad|watchlist|dollar.?max|native.?max|realized.?pnl|circuit.?break|grid.?buy|scale.?out|trailing.?stop|dump.?threshold|capital.?alloc|arbitrag|arb.?sig|arb.?scan|arbsignal|cross.?dex|max.?trade|trade.?cap|trade.?size|tranche|scalp|lot.?basis|profit.?gate|spread.?percent|min.?profit|take.?profit|stop.?loss|entry.?anchor|sell.?anchor|avg.?entry|average.?entry|cost.?basis|baseline.?reset|idle.?easing|price.?impact|slippage|cow.?swap|cowswap|\bcow\b|\bdex\b|\bswap|\bv[234]\b(?![.\d])|uniswap|pancake|1inch|permit2|order.?book|liquidity|mev|front.?run|quoter|routing|regime|heartbeat.?tick|position.?ledger|\bdm\b|\btt\b/i;
+// 2026-09-21 (SEVENTH widening): a commit adding a `<TICKER>/USD` oracle feed passed
+// cleanly on the same day the trader was switched onto that token. It named the
+// operator's live pick in a few characters and matched nothing, and an oracle-feed
+// commit reads like infrastructure rather than trading. The previous six widenings all
+// added MECHANICS by name, which is why each one only held until the next unnamed
+// mechanic; this one adds the SHAPE as well — any `<TICKER>/USD` or `<TICKER>/USDT`
+// pair, oracle/price-feed wording, and the traded universe by symbol. Symbols are
+// matched case-insensitively and will occasionally hit an ordinary English word; that
+// is the correct trade, because a suppressed post costs nothing and a published pick
+// invites front-running.
+//
+// The operator's own traded symbols come from AUTOPOST_TRADED_SYMBOLS (comma- or
+// pipe-separated) and are NOT written here: this file is published, and a hardcoded
+// list would itself announce the picks. Only generic majors live in code. When the
+// traded universe changes, update the env var — the pair-shape and oracle rules are
+// the backstop for forgetting.
+const BASE_TRADED_SYMBOLS = ['ETH', 'BNB', 'WBNB', 'USDT', 'USDC', 'MATIC'];
+const OPERATOR_TRADED_SYMBOLS = (process.env.AUTOPOST_TRADED_SYMBOLS || '')
+  .split(/[,|\s]+/)
+  .filter(sym => /^[A-Za-z0-9]{2,12}$/.test(sym));
+const TRADED_SYMBOLS = new RegExp(`\\b(${[...BASE_TRADED_SYMBOLS, ...OPERATOR_TRADED_SYMBOLS].join('|')})\\b`, 'i');
+const MARKET_PAIR_SHAPE = /\b[A-Z]{2,6}\s?\/\s?(USD|USDT|USDC|BNB|ETH)\b|\boracle\b|\bprice.?feed\b|\bchainlink\b|\bfeed (for|on) bsc\b/i;
+const SENSITIVE_COMMIT_PATTERNS = /outreach|proposal|business.plan|linkedin|strategy|monetiz|revenue|pricing|release.plan|contact.email|partner|investor|funding|pitch|competitive|roadmap|session.*\d{4}-\d{2}-\d{2}|docs\(session|session.?(report|summary|notes|wrap|handoff|recap|log)|\bhandoff\b|wrap.?up|crypto|token.?trad|watchlist|dollar.?max|native.?max|realized.?pnl|circuit.?break|grid.?buy|scale.?out|trailing.?stop|dump.?threshold|capital.?alloc|arbitrag|arb.?sig|arb.?scan|arbsignal|cross.?dex|max.?trade|trade.?cap|trade.?size|tranche|scalp|lot.?basis|profit.?gate|spread.?percent|min.?profit|take.?profit|stop.?loss|entry.?anchor|sell.?anchor|avg.?entry|average.?entry|cost.?basis|baseline.?reset|idle.?easing|price.?impact|slippage|cow.?swap|cowswap|\bcow\b|\bdex\b|\bswap|\bv[234]\b(?![.\d])|uniswap|pancake|1inch|permit2|order.?book|liquidity|mev|front.?run|quoter|routing|regime|heartbeat.?tick|position.?ledger|core.?position|satellite|discretionary.?sells?|\bsells?\b|\bbuys?\b|re-?entry|ladder|full.?exit|episode.?peak|vwap|replay.?harness|price.?tape|profit.?lock|bank(ed|ing)?.?profit|snowball|growth.?target|growth.?goal|cold.?storage|sweep|reinvest|high.?water|hwm|deployable|dry.?powder|\bdm\b|\btt\b|password|passwd|credential|\bsecret(s)?\b|api.?key|private.?key|ssh.?key|deploy.?key|vault|keystore|rotat(e|ed|ion)|purge|redact|leak(ed|age)?|exposed?|breach|incident|gitleaks|filter.?repo|force.?push|history.?rewrite|pre.?push|privacy.?scan|firewall|ufw|sshd|key.?only|auth.?bypass|hardening/i;
+// Security-posture terms were added 2026-09-06. On that day the public repo was found
+// to have carried live host credentials in its git history, and the remediation commits
+// were subjects like "security: move host passwords into the vault, out of prose" and
+// "privacy: drop <file> and redact trading data from the public repo". Both PASSED the
+// filter and were inside the composer's 3-day window, so the daily post could have
+// announced the incident and the shape of the fix. A security fix is exactly the kind of
+// work that reads as publishable progress and is exactly the kind that should not be
+// broadcast — describing what was leaked, where, and what now guards it is a roadmap.
+// Verified by running filterSensitiveCommits() over the day's own subjects before and
+// after; see the note above on \bv[234]\b for why running the deployed filter over real
+// subjects is the only check that catches these.
+
 // NOTE on `\bv[234]\b` above: the negative lookahead `(?![.\d])` is load-bearing.
 // It was added to catch DEX protocol versions ("V3 routing", "uniswap v4"), but a bare
 // \bv[234]\b also matches the leading `v2` of every `v2.25.x` RELEASE version, because
@@ -276,7 +310,10 @@ function groundingAnchor(candidate, itemTexts) {
  * @returns {string[]} Filtered commits safe for public posting
  */
 function filterSensitiveCommits(commits) {
-  return commits.filter(c => !SENSITIVE_COMMIT_PATTERNS.test(c));
+  return commits.filter(c =>
+    !SENSITIVE_COMMIT_PATTERNS.test(c)
+    && !TRADED_SYMBOLS.test(c)
+    && !MARKET_PAIR_SHAPE.test(c));
 }
 
 /**
@@ -299,5 +336,5 @@ export {
   filterSensitiveCommits, getExcludedPathspecs, getSensitiveContentRules,
   isBadOpener, repetitionConflict, groundingAnchor, foreignScript,
   TOPIC_LABELS, recentTopicSummary,
-  SENSITIVE_COMMIT_PATTERNS, EXCLUDED_GIT_PATHS, SENSITIVE_OUTPUT_RULES, BANNED_OPENERS
+  SENSITIVE_COMMIT_PATTERNS, TRADED_SYMBOLS, MARKET_PAIR_SHAPE, EXCLUDED_GIT_PATHS, SENSITIVE_OUTPUT_RULES, BANNED_OPENERS
 };

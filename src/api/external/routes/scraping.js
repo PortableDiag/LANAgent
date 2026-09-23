@@ -439,6 +439,37 @@ router.get('/block-stats', adminKeyAuth, async (req, res) => {
 });
 
 /**
+ * The same counters aggregated in the database, with a first-half/second-half trend
+ * and an optional tier filter.
+ *
+ * GET /block-stats/aggregated?days=30&tier=render
+ *
+ * Distinct from /block-stats above, which returns the full daily series for a caller
+ * to reduce itself. This one answers "is it getting worse" without shipping every row.
+ *
+ * adminKeyAuth for the same reasons spelled out on /block-stats: these are our own
+ * block and recovery rates, not customer data, and hybridAuth is a factory whose bare
+ * form hangs the request.
+ */
+router.get('/block-stats/aggregated', adminKeyAuth, async (req, res) => {
+  try {
+    // parseInt(...) || 30 would turn an explicit days=0 into 30; the clamp below
+    // handles the out-of-range case honestly instead.
+    const parsedDays = Number.parseInt(req.query.days, 10);
+    const days = Math.min(Math.max(Number.isFinite(parsedDays) ? parsedDays : 30, 1), 365);
+    const tier = typeof req.query.tier === 'string' && req.query.tier.trim()
+      ? req.query.tier.trim()
+      : null;
+
+    const stats = await ScrapeBlockStats.getAggregatedStats({ days, tier });
+    res.json({ success: true, ...stats });
+  } catch (error) {
+    logger.error(`[ExternalScrape] block-stats/aggregated failed: ${error.message}`);
+    res.status(500).json({ success: false, error: 'Failed to aggregate block stats' });
+  }
+});
+
+/**
  * Execute a single scrape operation.
  *
  * tier semantics for fallback chain:

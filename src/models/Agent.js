@@ -63,7 +63,7 @@ const agentSchema = new mongoose.Schema({
   aiProviders: {
     current: {
       type: String,
-      enum: ['openai', 'anthropic', 'xai', 'gab', 'huggingface', 'ollama', 'bitnet'],
+      enum: ['openai', 'anthropic', 'xai', 'gab', 'huggingface', 'ollama', 'bitnet', 'uncensored', 'openrouter'],
       default: 'anthropic'
     },
     // When true, only the JWT-gated /api/ai/switch endpoint can change `current`.
@@ -118,6 +118,7 @@ const agentSchema = new mongoose.Schema({
       },
       ollama: {
         enabled: { type: Boolean, default: false },
+        model: String,
         baseUrl: { type: String, default: 'http://localhost:11434' },
         chatModel: { type: String, default: 'mistral' },
         embeddingModel: { type: String, default: 'nomic-embed-text' },
@@ -127,9 +128,31 @@ const agentSchema = new mongoose.Schema({
       },
       bitnet: {
         enabled: { type: Boolean, default: false },
+        model: String,
         baseUrl: { type: String, default: 'http://localhost:8080' },
         chatModel: { type: String, default: 'BitNet-b1.58-2B-4T' },
         contextLength: { type: Number, default: 2048 },
+        temperature: Number,
+        maxTokens: Number
+      },
+      openrouter: {
+        enabled: Boolean,
+        apiKey: String,
+        // `model` is what POST /api/ai/update-model writes. A provider that declares only
+        // chatModel has that write silently dropped by strict mode while the endpoint still
+        // answers success — the model changes in memory and reverts on the next restart.
+        model: String,
+        // OpenRouter model ids are namespaced (vendor/model) — a bare 'gpt-4o'
+        // is a 400, not a fallback.
+        chatModel: { type: String, default: 'openai/gpt-4o-mini' },
+        visionModel: String,
+        temperature: Number,
+        maxTokens: Number
+      },
+      uncensored: {
+        enabled: Boolean,
+        apiKey: String,
+        model: String,
         temperature: Number,
         maxTokens: Number
       }

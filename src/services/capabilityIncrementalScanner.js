@@ -12,6 +12,36 @@ const ANALYSIS_WATCHDOG_MARGIN_MS = 15000;
 // provider reporting a larger budget raises the watchdog above this.
 const ANALYSIS_MIN_WATCHDOG_MS = 60000;
 
+// Attempts this scan is willing to fund per file: one retry, so 2 attempts.
+//
+// providerManager defaults generation calls to 3 retries, which is right for an
+// interactive call and wrong here — files are analysed SERIALLY inside a cycle
+// budget, so four 90s attempts on one unlucky file would spend six minutes of the
+// hourly window and leave the watchdog too high to still be a backstop against a
+// genuinely hung request. One retry gives the transient case a real second chance
+// while keeping the worst case bounded (~197s for the HuggingFace path).
+//
+// This number feeds BOTH the call and the watchdog that guards it, which is the
+// point: they cannot drift apart the way the 60s literal drifted below the
+// provider's 90s budget.
+const ANALYSIS_RETRIES = 1;
+
+// How long a file stays off the candidate list after a capability-upgrade PR
+// against it was CLOSED rather than merged.
+//
+// A closed PR is a rejection: a reviewer or the operator looked at the proposal
+// and decided it should not ship. Nothing recorded that. The scanner asked only
+// for open and merged PRs, so a closed one left no trace and the same file came
+// straight back round on the shuffle. TimeIndicators.js was selected on 09-04,
+// again on 09-14 (PR 2455) and again on 09-16 (PR 2461) — three proposals
+// against one file in twelve days, all three closed, each costing a full cycle
+// and a human review.
+//
+// 30 days matches the window the merged-PR lookup already uses. It is a
+// cooldown and not a permanent exclusion on purpose: a file rejected for one
+// bad proposal may still deserve a good one later.
+const CLOSED_PR_COOLDOWN_DAYS = 30;
+
 export class CapabilityIncrementalScanner {
   constructor(selfModService) {
     this.service = selfModService;
@@ -351,6 +381,30 @@ export class CapabilityIncrementalScanner {
   /**
    * Scan directory for upgrade targets
    */
+  /**
+   * Is this file a real module the pipeline could legitimately rewrite?
+   *
+   * `src/api/plugins/_ai_template.js` is a SCAFFOLD, not a module: its body is
+   * literal `{{PLUGIN_NAME}}` placeholders, so it has never parsed and never
+   * will. The scanner had no file-level filter at all — every `.js` under 50KB
+   * was a candidate — so it selected the template, spent a provider call
+   * analysing it, generated a rewrite, APPLIED it, and only then died in the
+   * pre-PR load check with `syntax: …/_ai_template.js:5`. Seven cycles were
+   * burned that way, each one an hour of the pipeline's budget producing
+   * nothing.
+   *
+   * The leading underscore is this codebase's existing marker for "not a live
+   * module" — featureClassifier.js already skips on it, and pluginDevelopment.js
+   * names these files as templates. Honouring the same convention here is the
+   * fix; a parse check per file would cost a subprocess per candidate for the
+   * one case the convention already describes.
+   */
+  isUpgradeCandidate(name) {
+    if (name.startsWith('_')) return false;       // scaffolds and templates
+    if (name.endsWith('.example')) return false;  // never loaded
+    return true;
+  }
+
   async scanDirectoryForTargets(dirPath, targets, type) {
     try {
       logger.info(`Reading directory: ${dirPath}`);
@@ -359,6 +413,7 @@ export class CapabilityIncrementalScanner {
       
       for (const entry of entries) {
         if (entry.isFile() && entry.name.endsWith('.js')) {
+          if (!this.isUpgradeCandidate(entry.name)) continue;
           const fullPath = path.join(dirPath, entry.name);
           const stats = await fs.stat(fullPath);
           
@@ -403,6 +458,7 @@ export class CapabilityIncrementalScanner {
             await this.scanDirectoryRecursive(fullPath, targets, type, options);
           }
         } else if (entry.isFile() && entry.name.endsWith('.js')) {
+          if (!this.isUpgradeCandidate(entry.name)) continue;
           const stats = await fs.stat(fullPath);
           
           // Skip very large files (>50KB) for now
@@ -443,7 +499,33 @@ export class CapabilityIncrementalScanner {
         { cwd: workingDir, timeout: 10000 }
       );
 
-      const [openResult, mergedResult] = await Promise.all([openPRsPromise, mergedPRsPromise]);
+      // Closed-but-not-merged PRs — rejections. Three traps here:
+      //
+      //  1. `gh pr list --state closed` returns MERGED ones too, so `state` is
+      //     requested and filtered on below. Without that filter every merged PR
+      //     would read as a rejection and cool its own file down.
+      //  2. A flat `--limit N` is a COUNT, and the cooldown is a DURATION, so a
+      //     limit that is too small silently shortens the cooldown instead of
+      //     failing. `--limit 50` reached back about eighteen days against this
+      //     repo's ~83-closures-a-month; 200 reaches back roughly eighty, and
+      //     the coverage assertion below says so out loud if that ever stops
+      //     being true.
+      //  3. Do NOT reach for `--search "closed:>=<date>"` to make the window a
+      //     duration directly. It looks like the precise form and it is the
+      //     wrong one: measured 2026-09-17, that query returned nothing closed
+      //     after 09-06 while the plain list returned closures up to that
+      //     morning — the search index lagged by eleven days and omitted every
+      //     rejection this cooldown exists to catch, with no error.
+      const closedPRsPromise = this.agent.systemExecutor.execute(
+        'gh pr list --state closed --json title,headRefName,body,state,closedAt --limit 200',
+        { cwd: workingDir, timeout: 15000 }
+      );
+
+      const [openResult, mergedResult, closedResult] = await Promise.all([
+        openPRsPromise,
+        mergedPRsPromise,
+        closedPRsPromise
+      ]);
 
       let allPRs = [];
 
@@ -461,6 +543,33 @@ export class CapabilityIncrementalScanner {
         logger.warn('Could not get merged PRs:', mergedResult.stderr);
       }
 
+      if (closedResult.exitCode === 0) {
+        const closedPRs = JSON.parse(closedResult.stdout || '[]');
+        const rejected = closedPRs.filter(pr => pr.state === 'CLOSED');
+        allPRs = allPRs.concat(rejected.map(pr => ({ ...pr, _state: 'closed' })));
+
+        // Does the page actually span the cooldown? If the oldest rejection it
+        // returned is NEWER than the cooldown start, the list was truncated by
+        // the limit and files rejected in the older part of the window will be
+        // re-selected as though they had never been proposed. That is the exact
+        // failure the cooldown is meant to end, so it is logged rather than left
+        // to look like a quiet success.
+        const cooldownStart = Date.now() - CLOSED_PR_COOLDOWN_DAYS * 24 * 60 * 60 * 1000;
+        const oldest = rejected
+          .map(pr => Date.parse(pr.closedAt))
+          .filter(t => !Number.isNaN(t))
+          .sort((a, b) => a - b)[0];
+        if (oldest !== undefined && oldest > cooldownStart) {
+          const days = Math.floor((Date.now() - oldest) / (24 * 60 * 60 * 1000));
+          logger.warn(
+            `Closed-PR list covers only ~${days} days but the rejection cooldown is ` +
+            `${CLOSED_PR_COOLDOWN_DAYS} days — raise the --limit; older rejections are invisible`
+          );
+        }
+      } else {
+        logger.warn('Could not get closed PRs:', closedResult.stderr);
+      }
+
       // Filter for capability upgrade PRs and extract relevant info.
       // Carry _state so the per-target dedupe can treat open PRs (still active)
       // differently from merged PRs (historical) — see analyzeTargetForUpgrades.
@@ -470,6 +579,7 @@ export class CapabilityIncrementalScanner {
           title: pr.title,
           branch: pr.headRefName,
           state: pr._state,
+          closedAt: pr.closedAt || null,
           description: pr.body?.substring(0, 200) || '' // First 200 chars of PR description
         }));
 
@@ -491,6 +601,9 @@ export class CapabilityIncrementalScanner {
       //     proposing the SAME capability type. We can't know the type until
       //     analyzeFileWithAI runs, so we collect mergedTypesForFile here and
       //     pass it into analyzeFileWithAI to dedupe at the per-upgrade level.
+      //   - CLOSED PR for this file within the cooldown → skip. A close is a
+      //     rejection of this file as a target, whatever capability type comes
+      //     back next time, so it is checked before any analysis is funded.
       const targetFileName = target.name.toLowerCase().replace('.js', '');
       const CAP_TYPES = [
         'enhance_plugin_features',
@@ -515,6 +628,8 @@ export class CapabilityIncrementalScanner {
 
       let hasOpenPRForFile = false;
       const mergedTypesForFile = new Set();
+      let coolingUntil = null;   // most recent rejection's cooldown expiry
+      const cooldownMs = CLOSED_PR_COOLDOWN_DAYS * 24 * 60 * 60 * 1000;
       for (const pr of existingPRs) {
         const prTitle = (pr.title || '').toLowerCase();
         if (!mentionsThisFile(prTitle)) continue;
@@ -524,6 +639,15 @@ export class CapabilityIncrementalScanner {
         if (!isCapabilityPR) continue;
         if (pr.state === 'merged') {
           for (const t of CAP_TYPES) if (prTitle.includes(t)) mergedTypesForFile.add(t);
+        } else if (pr.state === 'closed') {
+          // A close with no usable timestamp still counts as a rejection — fall
+          // back to a full cooldown from now rather than ignoring it, so a gh
+          // response missing closedAt cannot quietly re-open the target.
+          const closedAt = pr.closedAt ? Date.parse(pr.closedAt) : NaN;
+          const expiry = Number.isNaN(closedAt) ? Date.now() + cooldownMs : closedAt + cooldownMs;
+          if (expiry > Date.now() && (coolingUntil === null || expiry > coolingUntil)) {
+            coolingUntil = expiry;
+          }
         } else {
           // treat unknown state as open (back-compat) and any explicit 'open'
           hasOpenPRForFile = true;
@@ -532,6 +656,12 @@ export class CapabilityIncrementalScanner {
 
       if (hasOpenPRForFile) {
         logger.info(`✓ Skipping ${target.name} - has open capability upgrade PR`);
+        return [];
+      }
+
+      if (coolingUntil !== null) {
+        const daysLeft = Math.ceil((coolingUntil - Date.now()) / (24 * 60 * 60 * 1000));
+        logger.info(`✓ Skipping ${target.name} - a capability upgrade PR against it was closed; cooling down for ${daysLeft} more day(s)`);
         return [];
       }
       
@@ -586,6 +716,7 @@ export class CapabilityIncrementalScanner {
         maxTokens: 10000,
         temperature: 0.3,
         enableWebSearch: false,
+        retries: ANALYSIS_RETRIES,
         additionalParams: { reasoning_effort: 'low' }
       };
 
@@ -604,6 +735,13 @@ export class CapabilityIncrementalScanner {
       // Ask the provider what it allows and sit above it, so this stays a backstop
       // against a hung request rather than a second opinion on how long a call may
       // take — and so it cannot silently fall behind the provider again.
+      //
+      // getGenerationTimeoutMs reports the budget for the whole RETRY LOOP, not one
+      // attempt at it. Sizing this from a single attempt's 90s was the same bug over
+      // again one layer down: the loop beneath this watchdog is allowed several
+      // attempts, so a watchdog set 15s above one of them aborts partway through the
+      // next. It was masked only because a timeout was classified non-retryable and
+      // the loop therefore never took a second attempt.
       const providerBudgetMs = await this.agent.providerManager.getGenerationTimeoutMs?.(analysisOptions);
       const watchdogMs =
         Math.max(Number(providerBudgetMs) > 0 ? Number(providerBudgetMs) : 0, ANALYSIS_MIN_WATCHDOG_MS) +

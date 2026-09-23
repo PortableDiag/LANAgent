@@ -915,13 +915,42 @@ class RevenueService {
                 const { default: SubAgent } = await import('../../models/SubAgent.js');
                 const doc = await SubAgent.findOne(
                     { name: 'Crypto Strategy Agent' },
-                    { 'state.domainState.totalPnL': 1 }
+                    {
+                        'state.domainState.dmRealizedUsd': 1,
+                        'state.domainState.dmRealizedSince': 1
+                    }
                 ).lean();
-                const dmLifetime = doc?.state?.domainState?.totalPnL;
-                if (typeof dmLifetime === 'number' && Number.isFinite(dmLifetime)) {
-                    const prevDmCumulative = yesterday && typeof yesterday.dmCumulativePnL === 'number'
+                // `dmRealizedUsd`, not `totalPnL`. totalPnL is the pre-2026-09-05
+                // edge-vs-holding metric and is FROZEN as of v2.25.276 — reading it here
+                // would peg this ledger to a number that never moves again, so DM would
+                // book $0.00 every day however much it actually realized. Exactly the
+                // failure that change was made to remove, arriving in a second consumer.
+                const dmLifetime = doc?.state?.domainState?.dmRealizedUsd ?? 0;
+                const dmSince = doc?.state?.domainState?.dmRealizedSince;
+                if (Number.isFinite(dmLifetime)) {
+                    // Yesterday's row may predate the accounting change, in which case its
+                    // cumulative holds the OLD quantity. Differencing across that boundary
+                    // would invent a one-day swing equal to the gap between two different
+                    // measurements, so the series opens flat instead — the same reasoning
+                    // as the no-prior-row case below.
+                    // Compare DATE KEYS, not a key against a timestamp. Rows are dated
+                    // 'YYYY-MM-DD'; dmSince is an instant. `new Date('2026-09-05')` is
+                    // midnight UTC, so a row written at the END of the day the series began
+                    // would test as older than the series and be discarded as incomparable
+                    // — losing a real day's movement every time. Both sides are day keys
+                    // here, and 'YYYY-MM-DD' compares correctly as a string.
+                    const sinceDay = dmSince ? new Date(dmSince).toISOString().slice(0, 10) : null;
+                    const priorIsComparable = yesterday
+                        && typeof yesterday.dmCumulativePnL === 'number'
+                        && (!sinceDay || (yesterday.date && yesterday.date >= sinceDay));
+                    // If the series itself began today it opened at zero this morning, so
+                    // everything in the total was earned today and the day's movement is the
+                    // whole figure. Without this the series' first day reports 0.00 against
+                    // real trading — the understatement switching to this field was meant to end.
+                    const seriesStartedToday = sinceDay === today;
+                    const prevDmCumulative = priorIsComparable
                         ? yesterday.dmCumulativePnL
-                        : dmLifetime; // no prior row yet → open the series flat, not with a phantom jump
+                        : (seriesStartedToday ? 0 : dmLifetime); // else open flat, not with a phantom jump
                     dmFields = {
                         dmCumulativePnL: dmLifetime,
                         dmRealizedPnL: dmLifetime - prevDmCumulative
@@ -996,7 +1025,7 @@ class RevenueService {
         // — which is exactly what made the status endpoint report $0.00 earnings against
         // a ledger holding $9.20 (2026-08-20).
         return this._todayPnLCache || {
-            dailyNet: 0, cumulativePnL: 0, unrealizedPnL: [redacted], gasCost: 0, updatedAt: null
+            dailyNet: 0, cumulativePnL: 0, unrealizedPnL: 0, gasCost: 0, updatedAt: null
         };
     }
 

@@ -48,6 +48,11 @@ export default class SlackPlugin extends BasePlugin {
         command: 'addReaction',
         description: 'Add a reaction (emoji) to a message',
         usage: 'addReaction [channel] [timestamp] [emoji]'
+      },
+      {
+        command: 'getMessageHistory',
+        description: 'Retrieve message history from a Slack channel',
+        usage: 'getMessageHistory [channel] [limit] [oldest] [latest]'
       }
     ];
     
@@ -56,7 +61,7 @@ export default class SlackPlugin extends BasePlugin {
   }
 
   async execute(params) {
-    const { action, channel, text, userId, sendAt, threadTs, buttons, blocks, timestamp, emoji } = params;
+    const { action, channel, text, userId, sendAt, threadTs, buttons, blocks, timestamp, emoji, limit, oldest, latest } = params;
     
     try {
       switch(action) {
@@ -76,6 +81,8 @@ export default class SlackPlugin extends BasePlugin {
           return await this.sendFormattedMessage(channel, blocks);
         case 'addReaction':
           return await this.addReaction(channel, timestamp, emoji);
+        case 'getMessageHistory':
+          return await this.getMessageHistory(channel, limit, oldest, latest);
         default:
           return { 
             success: false, 
@@ -369,6 +376,68 @@ export default class SlackPlugin extends BasePlugin {
     } catch (error) {
       logger.error('Add reaction error:', error.message);
       return { success: false, error: `Failed to add reaction: ${error.message}` };
+    }
+  }
+
+  /**
+   * Retrieve message history from a Slack channel
+   * @param {string} channel - The channel ID to retrieve history from
+   * @param {number} limit - Number of messages to retrieve (optional, defaults to 10)
+   * @param {string} oldest - Start of time range of messages to include (timestamp)
+   * @param {string} latest - End of time range of messages to include (timestamp)
+   * @returns {Promise<Object>}
+   */
+  async getMessageHistory(channel, limit = 10, oldest, latest) {
+    this.validateParams({ channel }, {
+      channel: { required: true, type: 'string' },
+      limit: { required: false, type: 'number' },
+      oldest: { required: false, type: 'string' },
+      latest: { required: false, type: 'string' }
+    });
+
+    if (!this.apiKey) {
+      return { success: false, error: 'API key not configured' };
+    }
+
+    try {
+      const params = {
+        // Slack rejects a limit above 1000; clamp rather than let the API refuse the
+        // whole call over an argument we can bound ourselves.
+        channel,
+        limit: Math.min(Math.max(Number(limit) || 10, 1), 1000)
+      };
+
+      if (oldest) params.oldest = oldest;
+      if (latest) params.latest = latest;
+
+      const response = await axios.get(`${this.baseUrl}/conversations.history`, {
+        headers: {
+          Authorization: `Bearer ${this.apiKey}`
+        },
+        params
+      });
+
+      // Slack answers a FAILED call with HTTP 200 and { ok: false, error: '...' }, so
+      // axios does not throw. Returning response.data.messages without checking `ok`
+      // yields { success: true, data: undefined } — a channel that does not exist, or a
+      // token missing a scope, reported as an empty history. The sibling methods return
+      // the whole envelope so a caller can at least see `ok`; this one narrows to
+      // `.messages`, which would have discarded the error entirely.
+      if (!response.data?.ok) {
+        const reason = response.data?.error || 'unknown_error';
+        logger.error(`Get message history error: Slack returned ${reason}`);
+        return { success: false, error: `Failed to get message history: ${reason}` };
+      }
+
+      return {
+        success: true,
+        data: response.data.messages || [],
+        hasMore: response.data.has_more === true,
+        nextCursor: response.data.response_metadata?.next_cursor || null
+      };
+    } catch (error) {
+      logger.error('Get message history error:', error.message);
+      return { success: false, error: `Failed to get message history: ${error.message}` };
     }
   }
 }

@@ -2,10 +2,11 @@ import { logger, selfModLogger, logDebugSeparator, logStep } from '../utils/logg
 import { EventEmitter } from 'events';
 import simpleGit from 'simple-git';
 import path from 'path';
+import { pathToFileURL } from 'url';
 import { TEMP_PATH } from '../utils/paths.js';
 import fs from 'fs/promises';
 import { existsSync, readdirSync } from 'fs';
-import { execSync } from 'child_process';
+import { execSync, execFileSync } from 'child_process';
 import { resolveGitRemote } from '../utils/gitRemote.js';
 import crypto from 'crypto';
 import { TestFramework } from './testFramework.js';
@@ -35,6 +36,62 @@ import {
 // identifiers so this is belt-and-braces, but the import *path* is arbitrary
 // text and does reach a pattern.
 const escapeRegex = (str) => str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+// Blank out comments and string/template literals, preserving length-per-line and
+// every newline, so a scanner that looks for CODE cannot be fooled by prose. The
+// UNREACHABLE_CODE check needed this: it read the raw file, and a comment ending
+// in the word "function" made whatever word came next a "function name".
+// Regex literals are not tracked - a quote inside one can garble the rest of that
+// line, which costs accuracy in a lint check, never correctness of the file.
+const stripCommentsAndStrings = (code) => {
+  let out = '';
+  let mode = 'code'; // code | line | block | single | double | template
+  let i = 0;
+  while (i < code.length) {
+    const ch = code[i];
+    const next = code[i + 1];
+    const blank = ch === '\n' ? '\n' : ' ';
+
+    if (mode === 'code') {
+      if (ch === '/' && next === '/') { mode = 'line'; out += '  '; i += 2; continue; }
+      if (ch === '/' && next === '*') { mode = 'block'; out += '  '; i += 2; continue; }
+      if (ch === "'") { mode = 'single'; out += ' '; i += 1; continue; }
+      if (ch === '"') { mode = 'double'; out += ' '; i += 1; continue; }
+      if (ch === '`') { mode = 'template'; out += ' '; i += 1; continue; }
+      out += ch; i += 1; continue;
+    }
+
+    if (mode === 'line') {
+      if (ch === '\n') { mode = 'code'; out += '\n'; i += 1; continue; }
+      out += ' '; i += 1; continue;
+    }
+
+    if (mode === 'block') {
+      if (ch === '*' && next === '/') { mode = 'code'; out += '  '; i += 2; continue; }
+      out += blank; i += 1; continue;
+    }
+
+    // Inside a string literal.
+    if (ch === '\\') { out += '  '; i += 2; continue; }
+    if ((mode === 'single' && ch === "'") ||
+        (mode === 'double' && ch === '"') ||
+        (mode === 'template' && ch === '`')) {
+      mode = 'code'; out += ' '; i += 1; continue;
+    }
+    out += blank; i += 1;
+  }
+  return out;
+};
+
+// A word that can never be a function name. `function const` is a syntax error,
+// so a match on one is proof the matcher read something that was not code.
+const JS_RESERVED_WORDS = new Set([
+  'await', 'break', 'case', 'catch', 'class', 'const', 'continue', 'debugger',
+  'default', 'delete', 'do', 'else', 'enum', 'export', 'extends', 'false',
+  'finally', 'for', 'function', 'if', 'import', 'in', 'instanceof', 'let', 'new',
+  'null', 'return', 'static', 'super', 'switch', 'this', 'throw', 'true', 'try',
+  'typeof', 'var', 'void', 'while', 'with', 'yield'
+]);
 
 const AUTO_APPROVE_SETTING_KEY = 'featureRequests.autoApprove';
 
@@ -2926,20 +2983,63 @@ COMMON MISTAKES TO AVOID:
     // never clear the cache — stale data served for 5 minutes after every status change
     CORRECT: If you add caching, also add cache invalidation in the mutation paths
 
-16. WRONG - Creating WebSocket/server without wiring it up:
+16. WRONG - retryOperation or NodeCache around pure synchronous code:
+    const fees = await retryOperation(async () => this._computeFees(order));
+    const cache = new NodeCache(); // caching a pure function of its arguments
+    CORRECT: retryOperation is for calls that can fail transiently — network, RPC, disk.
+    A local computation cannot fail transiently, so retrying it only hides a real bug and
+    caching it only adds a stale copy. Leave synchronous code alone.
+
+17. WRONG - Comparing a bare value against a qualified one:
+    if (model === 'mistral')            // the field actually holds 'mistral:latest'
+    positions[symbol]                   // the map is keyed by network, not symbol
+    CORRECT: These never throw. They return EMPTY, FOREVER, and read as "no results"
+    rather than as a failure. Check what the field actually contains — normalise both
+    sides, or match on the base name — before comparing.
+
+18. WRONG - Matching a status code as a bare substring:
+    if (msg.includes('429')) { /* back off and retry */ }
+    CORRECT: Error messages carry addresses, hashes and amounts. A token at
+    0xeb52…cd35429 made a permanent "no liquidity" error read as an HTTP 429 and
+    retried for eleven hours. Use the shared helpers in src/utils/rpcErrorClassifier.js
+    (isRateLimitError, isTransientRpcError, hasStatusCode), which strip hex runs and
+    match on a word boundary. And always test the DEFINITIVE error before the
+    transient ones, so a misread cannot turn a permanent failure into a retry loop.
+
+19. WRONG - Creating WebSocket/server without wiring it up:
     const wss = new WebSocket.Server({ noServer: true });
     // But never adds server.on('upgrade') handler — WebSocket is unreachable!
     CORRECT: If you create infrastructure, wire it end-to-end or don't create it
 
-17. WRONG - Breaking API contracts:
+20. WRONG - Breaking API contracts:
     // Before: accepts { query: "..." } returns { results: [...] }
     // After: requires { queries: [...] } returns [...]
     // Every existing caller is now broken!
     CORRECT: Maintain backward compatibility — add new params as optional
 
-18. WRONG - Embedding unbounded arrays in MongoDB documents:
+21. WRONG - Embedding unbounded arrays in MongoDB documents:
     versions: [{ state: Object, timestamp: Date }] // Grows forever toward 16MB BSON limit
-    CORRECT: Use a separate collection for history/audit trails, or cap the array size`;
+    CORRECT: Use a separate collection for history/audit trails, or cap the array size
+
+22. WRONG - Writing a test against test infrastructure this repo does not have:
+    import request from 'supertest';           // NOT a dependency here, in any form
+    import { mockAgent } from '../mocks/agent.js';  // tests/mocks/ does not exist
+    CORRECT: A test file that cannot even be imported proves nothing, and it is reported
+    as a passing contribution. This repo runs 'npm run test:unit'
+    (node --test over tests/unit/*.test.js) — plain node:test, node:assert and the
+    built-in mock helpers, nothing else. ('npm test' is wired to jest and is NOT the
+    suite in use.) There is no HTTP-level route testing harness: to test a router,
+    export the handler and call it directly with stub req/res objects, the way the
+    existing tests in tests/unit/ do. Import only from 'node:test', 'node:assert' and
+    the module under test.
+
+23. WRONG - A test whose mock does not match the shape the code actually parses:
+    // vendor really answers { success: true, data: {...} }
+    axiosGet.mock.mockImplementation(async () => ({ data: { line_type: 'mobile' } }));
+    CORRECT: Then the code under test falls into its ERROR branch on every run, the
+    logic you think you are testing has never executed once, and the assertions still
+    pass. Before asserting, assert that the happy path was actually reached — check a
+    value only the success branch can produce.`;
   }
 
   /**
@@ -3302,25 +3402,36 @@ COMMON MISTAKES TO AVOID:
     }
 
     // BLOCKING CHECK 9: New standalone functions must be exported or called
-    const funcPattern = /(?:export\s+)?(?:async\s+)?function\s+(\w+)/g;
-    const origFunctions = new Set([...originalCode.matchAll(funcPattern)].map(m => m[1]));
-    const modFunctions = [...modifiedCode.matchAll(funcPattern)];
+    //
+    // Read CODE ONLY, and require the name on the same line as the keyword. The
+    // matcher used to run `function\s+(\w+)` over the raw file, and `\s` spans
+    // newlines: an ordinary comment ending in the word "function" turned the first
+    // word of the NEXT line into a function name. `// helper function` above
+    // `const x = ...` was reported as a new function named `const`, and the whole
+    // generation was thrown away for it. Over the retained log window the blocked
+    // names were `to`, `const`, `should`, `with`, `reloads`, `from`, `syntax` and
+    // `is` - prose, every one, and the majority of everything this check rejected.
+    const modCodeOnly = stripCommentsAndStrings(modifiedCode);
+    const origCodeOnly = stripCommentsAndStrings(originalCode);
+    const funcPattern = /(?:export[ \t]+)?(?:async[ \t]+)?function(?:[ \t]+\*?[ \t]*|[ \t]*\*[ \t]*)(\w+)/g;
+    const origFunctions = new Set([...origCodeOnly.matchAll(funcPattern)].map(m => m[1]));
+    const modFunctions = [...modCodeOnly.matchAll(funcPattern)];
     for (const match of modFunctions) {
       const funcName = match[1];
-      if (!origFunctions.has(funcName)) {
+      if (!origFunctions.has(funcName) && !JS_RESERVED_WORDS.has(funcName)) {
         // New function - check if it's exported or called somewhere
-        const isExported = modifiedCode.includes(`export function ${funcName}`) ||
-                          modifiedCode.includes(`export async function ${funcName}`) ||
-                          modifiedCode.includes(`export default ${funcName}`) ||
-                          modifiedCode.includes(`export { ${funcName}`) ||
-                          new RegExp(`exports\\.${funcName}\\b`).test(modifiedCode);
+        const isExported = modCodeOnly.includes(`export function ${funcName}`) ||
+                          modCodeOnly.includes(`export async function ${funcName}`) ||
+                          modCodeOnly.includes(`export default ${funcName}`) ||
+                          modCodeOnly.includes(`export { ${funcName}`) ||
+                          new RegExp(`exports\\.${funcName}\\b`).test(modCodeOnly);
         // Check if it's called anywhere (not just in its own declaration)
         const callRegex = new RegExp(`(?<!function\\s+)(?<!async\\s+function\\s+)\\b${funcName}\\s*\\(`, 'g');
-        const codeWithoutDecl = modifiedCode.replace(match[0], '');
+        const codeWithoutDecl = modCodeOnly.replace(match[0], '');
         const isCalled = callRegex.test(codeWithoutDecl);
         // Check if it's a class method (attached to prototype or in a class body)
-        const isMethod = new RegExp(`\\.${funcName}\\s*=`).test(modifiedCode) ||
-                        modifiedCode.includes(`this.${funcName}`);
+        const isMethod = new RegExp(`\\.${funcName}\\s*=`).test(modCodeOnly) ||
+                        modCodeOnly.includes(`this.${funcName}`);
         if (!isExported && !isCalled && !isMethod) {
           errors.push(`UNREACHABLE_CODE: New function '${funcName}' is defined but never exported, called, or attached as a method - it is dead code`);
         }
@@ -4390,6 +4501,9 @@ Provide only the corrected code line(s).`;
    * Create pull request
    */
   async createPullRequest(branchName, improvement) {
+    // Load-test the changed modules before anything leaves the machine.
+    await this.verifyBranchModulesLoad(improvement);
+
     // Push branch to remote
     await this.git.push(this.gitRemote, branchName, ['--set-upstream']);
 
@@ -4512,6 +4626,109 @@ Provide only the corrected code line(s).`;
   }
 
   /**
+   * Load-test one JavaScript module in a child process: `node --check` first
+   * (syntax), then a real `import()` from the repository so bad named imports,
+   * missing relative modules and load-time ReferenceErrors surface. Two of the
+   * five crypto-side PRs reviewed on 2026-09-14 would have crashed boot
+   * (`import { TrustService }` from a default-only module; `await` in a
+   * non-async method) and both had reached a PR because nothing loaded them.
+   *
+   * The child exits as soon as the import settles, so module-level timers
+   * cannot keep it alive. A missing BARE package is only a warning (the
+   * analysis repo's node_modules can lag the deploy); a missing in-repo path,
+   * a SyntaxError, a ReferenceError, a TypeError at load, or an unknown named
+   * export is fatal.
+   *
+   * @param {string} absPath - absolute path of the file to load
+   * @returns {{ ok: boolean, fatal: boolean, message: string }}
+   */
+  verifyModuleLoads(absPath) {
+    const rel = path.relative(this.developmentPath, absPath);
+    try {
+      execSync(`node --check "${absPath}"`, { timeout: 10000, stdio: 'pipe' });
+    } catch (err) {
+      const stderr = err.stderr?.toString() || err.message;
+      return { ok: false, fatal: true, message: `syntax: ${firstLine(stderr)}` };
+    }
+
+    const fileUrl = pathToFileURL(absPath).href;
+    const script = `import(${JSON.stringify(fileUrl)}).then(() => process.exit(0), (e) => { console.error(e && (e.stack || String(e))); process.exit(1); });`;
+    try {
+      execFileSync(process.execPath, ['--no-warnings', '--input-type=module', '-e', script], {
+        cwd: this.developmentPath,
+        timeout: 30000,
+        stdio: 'pipe',
+        env: { ...process.env, NODE_ENV: 'test', SELFMOD_LOAD_CHECK: '1' }
+      });
+      return { ok: true, fatal: false, message: '' };
+    } catch (err) {
+      if (err.killed || err.signal) {
+        return { ok: false, fatal: false, message: 'load did not settle within 30s (module-level await?)' };
+      }
+      const stderr = err.stderr?.toString() || err.message || '';
+      return this.classifyLoadFailure(stderr, rel);
+    }
+
+    function firstLine(text) {
+      return String(text).split('\n').find(l => l.trim()) || 'unknown error';
+    }
+  }
+
+  /**
+   * Decide whether a failed import() is the PR's fault. Exposed for tests.
+   * @param {string} stderr
+   * @param {string} rel - repo-relative path of the file that was loaded
+   */
+  classifyLoadFailure(stderr, rel) {
+    const text = String(stderr);
+    const line = text.split('\n').find(l => /Error|error/.test(l))?.trim() || text.trim().split('\n')[0] || 'unknown error';
+    const missing = text.match(/Cannot find (?:module|package) '([^']+)'/);
+    if (missing) {
+      const spec = missing[1];
+      const inRepo = spec.startsWith('.') || spec.startsWith('/') || spec.startsWith('file:');
+      return inRepo
+        ? { ok: false, fatal: true, message: `${rel}: missing module ${spec}` }
+        : { ok: false, fatal: false, message: `${rel}: package '${spec}' not installed in the analysis repo` };
+    }
+    if (/does not provide an export named|SyntaxError|ReferenceError|TypeError/.test(text)) {
+      return { ok: false, fatal: true, message: `${rel}: ${line}` };
+    }
+    return { ok: false, fatal: false, message: `${rel}: ${line}` };
+  }
+
+  /**
+   * Load-test every JavaScript file the branch changes under src/ before it is
+   * pushed. Throws on a fatal failure so no PR is opened for code that cannot
+   * load; warnings are attached to `improvement.reviewWarnings` for the PR body.
+   *
+   * @param {Object} improvement - carries reviewWarnings for the PR body
+   * @returns {Promise<string[]>} the files that were checked
+   */
+  async verifyBranchModulesLoad(improvement = {}) {
+    const diff = await this.git.raw(['diff', '--name-only', '--diff-filter=d', 'main...HEAD', '--', 'src/']);
+    const files = diff.split('\n').map(l => l.trim()).filter(l => l.endsWith('.js'));
+    if (files.length === 0) return [];
+
+    const warnings = [];
+    for (const rel of files) {
+      const abs = path.join(this.developmentPath, rel);
+      const result = this.verifyModuleLoads(abs);
+      if (result.ok) continue;
+      if (result.fatal) {
+        selfModLogger.error(`❌ Load check failed for ${rel}: ${result.message}`);
+        throw new Error(`LOAD_CHECK: ${result.message}`);
+      }
+      warnings.push(`LOAD_CHECK: ${result.message}`);
+    }
+    if (warnings.length) {
+      selfModLogger.warn(`Load check warnings: ${warnings.join('; ')}`);
+      improvement.reviewWarnings = [...(improvement.reviewWarnings || []), ...warnings];
+    }
+    selfModLogger.info(`✅ Load check passed for ${files.length} changed file(s): ${files.join(', ')}`);
+    return files;
+  }
+
+  /**
    * Create pull request specifically for capability upgrades
    */
   async createUpgradePullRequest(branchName, upgrade) {
@@ -4528,7 +4745,11 @@ Provide only the corrected code line(s).`;
     }
     
     selfModLogger.info(`Found ${commitCount} commit(s) on branch ${branchName}`);
-    
+
+    // Nothing else loads the changed modules before a PR opens: do it here.
+    selfModLogger.info("Load-testing changed modules before push");
+    await this.verifyBranchModulesLoad(upgrade);
+
     // Push branch to remote
     await this.git.push(this.gitRemote, branchName, ['--set-upstream']);
     
@@ -5086,6 +5307,26 @@ ${newCapsBlock}${reviewFlagsBlock}
             { timeout: 60000, cwd: this.productionPath }
           );
         } catch (error) {
+          // A TIMEOUT IS NOT A FAILURE. What is being tested is whether the
+          // module throws while importing — not whether the process exits.
+          //
+          // Several modules legitimately start long-running work at import: the
+          // avatar API pulls in avatarService, which reaches walletService and
+          // its documented Mongo-startup retry (10s buffer, then 4s/8s/15s/15s
+          // backoff — hardening added 2026-08-07 after a single attempt lost the
+          // race and wallet init failed outright). In a standalone verification
+          // process there is no database, so that retry runs past any timeout
+          // worth setting. On 2026-09-02 this rolled back a perfectly good
+          // deploy of seven files because one of them was still retrying.
+          //
+          // A module that is still running has, by definition, got past its
+          // imports without throwing. A module that throws exits quickly and
+          // non-zero. So: killed by the timeout counts as verified; anything
+          // else is a real failure.
+          if (error.killed || error.signal === 'SIGTERM') {
+            logger.info(`Deploy: ${rel} imported and is still running (boot-time work) — treated as verified`);
+            continue;
+          }
           unverifiable.push({ file: rel, error: (error.stderr || error.message || '').slice(0, 300) });
         }
       }

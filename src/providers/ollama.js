@@ -19,6 +19,10 @@ export class OllamaProvider extends BaseProvider {
     this.contextLength = config.contextLength || 4096;
     this.timeout = config.timeout || 600000; // 10 minutes — local CPU inference can be slow on modest hardware
     this.availableModels = [];
+    // Tag name -> the `details` block /api/tags reports for it (family, families,
+    // parameter_size, ...). Capabilities are read from here; the name hints below
+    // are only a fallback for servers that report no details.
+    this.modelDetails = new Map();
     this.metrics.usage = {}; // Per-model usage analytics (do not overwrite BaseProvider.metrics)
     this.commands = [
       { command: 'listmodels', description: 'List all available models', usage: 'listmodels' },
@@ -26,7 +30,9 @@ export class OllamaProvider extends BaseProvider {
       { command: 'getmodelinfo', description: 'Get information about a specific model', usage: 'getmodelinfo <modelName>' },
       { command: 'switchmodelversion', description: 'Switch to a specific version of a model', usage: 'switchmodelversion <modelName> <version>' },
       { command: 'streamresponse', description: 'Stream response for real-time applications', usage: 'streamresponse <prompt>' },
-      { command: 'getmodelusageanalytics', description: 'Get per-model usage analytics', usage: 'getmodelusageanalytics' }
+      { command: 'getmodelusageanalytics', description: 'Get per-model usage analytics', usage: 'getmodelusageanalytics' },
+      { command: 'getmodelcompatibility', description: 'Get model compatibility matrix', usage: 'getmodelcompatibility' },
+      { command: 'routetask', description: 'Route task based on capability requirements', usage: 'routetask <taskType> [requirements]' }
     ];
   }
 
@@ -40,7 +46,7 @@ export class OllamaProvider extends BaseProvider {
       });
 
       if (response.data && response.data.models) {
-        this.availableModels = response.data.models.map(m => m.name);
+        this.availableModels = this._ingestModelList(response.data.models);
         logger.info(`Ollama connected. Available models: ${this.availableModels.join(', ')}`);
 
         // Check if configured models are available
@@ -53,6 +59,17 @@ export class OllamaProvider extends BaseProvider {
       logger.error('Failed to initialize Ollama provider:', error.message);
       throw new Error(`Ollama initialization failed: ${error.message}`);
     }
+  }
+
+  /**
+   * Record an /api/tags model list: returns the tag names and keeps each entry's
+   * `details` block so capabilities can be read from what the server reports
+   * instead of guessed from the name.
+   */
+  _ingestModelList(models) {
+    const list = Array.isArray(models) ? models : [];
+    this.modelDetails = new Map(list.filter(m => m?.name).map(m => [m.name, m.details || null]));
+    return list.map(m => m.name).filter(Boolean);
   }
 
   validateConfiguredModels() {
@@ -277,7 +294,7 @@ export class OllamaProvider extends BaseProvider {
         timeout: 10000
       });
 
-      this.availableModels = response.data.models?.map(m => m.name) || [];
+      this.availableModels = this._ingestModelList(response.data.models);
       return this.availableModels;
     } catch (error) {
       logger.error('Failed to list Ollama models:', error.message);
@@ -392,6 +409,165 @@ export class OllamaProvider extends BaseProvider {
   }
 
   /**
+   * Normalise a tagged model name: "mistral:7b-instruct" -> "mistral".
+   * /api/tags always reports a tag, configured models are usually written
+   * without one, so every comparison between the two goes through here.
+   */
+  _baseName(modelName) {
+    return String(modelName || '').split(':')[0];
+  }
+
+  /**
+   * Families Ollama reports for a model, lower-cased. Empty when the server
+   * gave us no details for it.
+   */
+  _familiesFor(modelName) {
+    const details = this.modelDetails.get(modelName)
+      || this.modelDetails.get(`${this._baseName(modelName)}:latest`);
+    if (!details) return [];
+    const families = Array.isArray(details.families) ? details.families : [];
+    return [...families, details.family]
+      .filter(Boolean)
+      .map(f => String(f).toLowerCase());
+  }
+
+  /**
+   * Get model compatibility matrix showing which models support which capabilities
+   */
+  getModelCompatibilityMatrix() {
+    const compatibility = {};
+
+    for (const modelName of this.availableModels) {
+      compatibility[modelName] = {
+        chat: this.isChatModel(modelName),
+        embedding: this.isEmbeddingModel(modelName),
+        vision: this.isVisionModel(modelName)
+      };
+    }
+
+    return compatibility;
+  }
+
+  /**
+   * Determine if a model supports chat capabilities.
+   * Every generative model Ollama serves answers /api/chat — vision models
+   * included — so the only non-chat models are the embedding-only ones. An
+   * allowlist of known names would silently exclude every model not on it.
+   */
+  isChatModel(modelName) {
+    return !this.isEmbeddingModel(modelName);
+  }
+
+  /**
+   * Determine if a model supports embedding capabilities.
+   * Ollama reports embedding models under a BERT-derived family
+   * (bert, nomic-bert, ...); the name hints cover servers that report no
+   * details block.
+   */
+  isEmbeddingModel(modelName) {
+    if (this._familiesFor(modelName).some(family => family.includes('bert'))) {
+      return true;
+    }
+    const embeddingNameHints = [
+      'nomic-embed', 'mxbai-embed', 'all-minilm', 'snowflake-arctic-embed', 'embed'
+    ];
+    const baseName = this._baseName(modelName);
+    return embeddingNameHints.some(hint => baseName.includes(hint));
+  }
+
+  /**
+   * Determine if a model supports vision capabilities.
+   * Multi-modal models carry an image-encoder family (clip, mllama, ...)
+   * alongside their text family; the name hints are the no-details fallback.
+   */
+  isVisionModel(modelName) {
+    const families = this._familiesFor(modelName);
+    if (families.some(family => family.includes('clip') || family.includes('mllama'))) {
+      return true;
+    }
+    const visionNameHints = ['llava', 'bakllava', 'moondream', 'nanollava'];
+    const baseName = this._baseName(modelName);
+    return visionNameHints.some(hint => baseName.includes(hint));
+  }
+
+  /**
+   * Route a task to an appropriate model based on capability requirements
+   * @param {string} taskType - 'chat' | 'embedding' | 'vision'
+   * @param {Object} [requirements]
+   * @param {boolean} [requirements.autoPull=false] - allow pulling a default
+   *   model when nothing local can serve the task
+   */
+  async routeTaskByCapability(taskType, requirements = {}) {
+    const task = String(taskType || '').toLowerCase();
+    if (!['chat', 'embedding', 'vision'].includes(task)) {
+      throw new Error(`Unsupported task type: ${taskType}`);
+    }
+
+    const compatibilityMatrix = this.getModelCompatibilityMatrix();
+    let compatibleModels = Object.keys(compatibilityMatrix).filter(
+      model => compatibilityMatrix[model][task]
+    );
+
+    // Pulling downloads gigabytes and can run for ten minutes, so a routing
+    // question never triggers one unless the caller explicitly opted in.
+    if (compatibleModels.length === 0 && requirements.autoPull) {
+      const defaultModel = this.getDefaultModelForTask(task);
+      if (defaultModel) {
+        try {
+          await this.pullModel(defaultModel); // pullModel refreshes the model list itself
+          const updatedMatrix = this.getModelCompatibilityMatrix();
+          // /api/tags reports the pull tagged ("mistral:latest"), never under the
+          // bare name we asked for, so match on the base name.
+          compatibleModels = Object.keys(updatedMatrix).filter(
+            model => this._baseName(model) === this._baseName(defaultModel)
+              && updatedMatrix[model][task]
+          );
+        } catch (error) {
+          logger.warn(`Failed to pull default model ${defaultModel}:`, error.message);
+        }
+      }
+    }
+
+    if (compatibleModels.length === 0) {
+      throw new Error(`No compatible models found for task type: ${taskType}`);
+    }
+
+    // Prefer the model configured for this task when it is one of the candidates.
+    // The configured value is usually untagged, so fall back to a base-name match.
+    let selectedModel = compatibleModels[0];
+    const configuredModel = this.models[task];
+    if (configuredModel) {
+      const match = compatibleModels.find(model => model === configuredModel)
+        || compatibleModels.find(model => this._baseName(model) === this._baseName(configuredModel));
+      if (match) {
+        selectedModel = match;
+      }
+    }
+
+    return {
+      model: selectedModel,
+      taskType,
+      availableModels: compatibleModels
+    };
+  }
+
+  /**
+   * Get default model for a specific task type
+   */
+  getDefaultModelForTask(taskType) {
+    switch (String(taskType || '').toLowerCase()) {
+      case 'chat':
+        return 'mistral';
+      case 'embedding':
+        return 'nomic-embed-text';
+      case 'vision':
+        return 'llava';
+      default:
+        return null;
+    }
+  }
+
+  /**
    * Cost calculation - Ollama is local so cost is $0
    */
   calculateCost() {
@@ -434,6 +610,10 @@ export class OllamaProvider extends BaseProvider {
         return await this.streamResponse(params.prompt);
       case 'getmodelusageanalytics':
         return this.getModelUsageAnalytics();
+      case 'getmodelcompatibility':
+        return this.getModelCompatibilityMatrix();
+      case 'routetask':
+        return await this.routeTaskByCapability(params.taskType, params.requirements || {});
       default:
         throw new Error(`Unknown command: ${command}`);
     }

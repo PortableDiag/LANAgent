@@ -194,6 +194,76 @@ router.post('/probe', creditAuth(false), async (req, res) => {
   }
 });
 
+/**
+ * Preview available download formats for a URL without consuming credits.
+ * Uses the ytdlp plugin's 'formats' action to return available formats,
+ * quality options, and estimated file sizes.
+ */
+router.post('/preview', creditAuth(false), async (req, res) => {
+  const { url } = req.body || {};
+  if (!url || typeof url !== 'string') {
+    return res.status(400).json({ success: false, error: 'Missing url parameter' });
+  }
+  
+  const extractor = pickExtractor(url);
+  if (!extractor) {
+    return res.status(400).json({ success: false, error: 'Invalid URL' });
+  }
+  
+  // Only ytdlp extractor supports format previews
+  if (extractor !== 'ytdlp') {
+    return res.status(400).json({ 
+      success: false, 
+      error: 'Format preview only available for yt-dlp supported sites' 
+    });
+  }
+
+  try {
+    const apis = req.app.locals.agent?.apiManager?.apis;
+    if (!apis) {
+      return res.status(503).json({ success: false, error: 'Agent not ready' });
+    }
+
+    const entry = apis.get('ytdlp');
+    const ytdlp = entry?.instance || entry;
+    if (!ytdlp?.execute) {
+      return res.status(503).json({ success: false, error: 'yt-dlp extractor not available' });
+    }
+
+    // Call the ytdlp plugin's formats action to get available download options
+    const result = await ytdlp.execute({ action: 'formats', url });
+    
+    if (!result?.success) {
+      return res.status(422).json({
+        success: false,
+        extractor,
+        error: result?.error || 'Failed to retrieve format information',
+        result: result?.result || null
+      });
+    }
+
+    // The plugin returns formats as { video, audio, all } — an object, not an array —
+    // and has no `metadata` field at all, so `result.metadata || {}` was permanently {}.
+    // Report the real shape, plus counts so a caller can size the response without
+    // walking it.
+    const formats = result.formats || { video: [], audio: [], all: [] };
+    res.json({
+      success: true,
+      extractor,
+      formats,
+      counts: {
+        video: (formats.video || []).length,
+        audio: (formats.audio || []).length,
+        total: (formats.all || []).length
+      },
+      summary: result.result || null
+    });
+  } catch (error) {
+    logger.error(`[social/preview] ${extractor} failed for ${url}: ${error.message}`);
+    res.status(500).json({ success: false, extractor, error: 'Format preview failed' });
+  }
+});
+
 router.get('/supported-sites', async (req, res) => {
   try {
     const apis = req.app.locals.agent?.apiManager?.apis;
@@ -215,7 +285,7 @@ router.get('/supported-sites', async (req, res) => {
       sites.push({
         extractor: 'ytdlp',
         verified: ['youtube.com', 'tiktok.com', 'soundcloud.com', 'dailymotion.com', 'bilibili.com', 'streamable.com', 'twitch.tv'],
-        capabilities: ['download', 'audio', 'info']
+        capabilities: ['download', 'audio', 'info', 'formats']
       });
     }
 

@@ -157,7 +157,14 @@ export default class WebSearchPlugin extends BasePlugin {
     const candidates = searchOrder.filter(
       name => providerManager.providers?.get(name)?.supportsWebSearch === true
     );
-    const allowed = await providerManager.allowedProviders(candidates);
+    // NOTE (2026-09-18, v2.25.312): allowedProviders() changed meaning. It used to filter to
+    // the locked provider even when the locked provider was not a candidate, which is what made
+    // the refusal below reachable for web search. It now falls through to the normal candidate
+    // list in that case — so a lock pointing at a provider WITHOUT web search no longer blocks
+    // the spend, it redirects it. Benign while the active provider is itself search-capable
+    // (OpenRouter is), but it is a change of intent for this call site specifically; revert
+    // to a capability-specific rule here if web search should stay inside the lock.
+    const allowed = await providerManager.allowedProviders(candidates, 'web search');
 
     if (allowed.length === 0) {
       const lockedTo = currentProviderName || 'unknown';

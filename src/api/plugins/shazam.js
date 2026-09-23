@@ -62,6 +62,11 @@ export default class ShazamPlugin extends BasePlugin {
           'lyrics for shazam id 123456',
           'show lyrics for this song'
         ]
+      },
+      {
+        command: 'createPlaylistFromRecommendations',
+        description: 'Create a playlist from recommended songs and generate export links for Spotify/Youtube',
+        usage: 'createPlaylistFromRecommendations({ songIds: ["id1", "id2", "id3"], playlistName: "My Playlist" })'
       }
     ];
   }
@@ -80,6 +85,8 @@ export default class ShazamPlugin extends BasePlugin {
         return await this.getSongDetails(data);
       case 'getLyrics':
         return await this.getLyrics(data);
+      case 'createPlaylistFromRecommendations':
+        return await this.createPlaylistFromRecommendations(data);
       default:
         return { success: false, error: `Unknown action: ${action}` };
     }
@@ -244,11 +251,14 @@ export default class ShazamPlugin extends BasePlugin {
     const cacheKey = `recommendations_${songId}`;
     const cachedResult = this.cache.get(cacheKey);
     if (cachedResult) {
+      // Cache the metadata with the text. Caching only the rendered string
+      // meant the track ids — the input createPlaylistFromRecommendations
+      // needs — vanished for the whole 5-minute TTL after the first call.
       return {
         success: true,
         type: 'text',
-        result: cachedResult,
-        metadata: { fromCache: true }
+        result: cachedResult.text,
+        metadata: { ...cachedResult.metadata, fromCache: true }
       };
     }
 
@@ -278,13 +288,16 @@ export default class ShazamPlugin extends BasePlugin {
         response += '\n';
       });
 
-      this.cache.set(cacheKey, response);
-
-      return {
-        success: true,
-        type: 'text',
-        result: response
+      const metadata = {
+        tracks: tracks.map(track => ({
+          id: track.key,
+          title: track.title,
+          artist: track.subtitle
+        }))
       };
+      this.cache.set(cacheKey, { text: response, metadata });
+
+      return { success: true, type: 'text', result: response, metadata };
     } catch (error) {
       this.logger.error('Failed to fetch recommendations:', error);
       return {
@@ -340,7 +353,8 @@ export default class ShazamPlugin extends BasePlugin {
       if (coverUrl) response += `*Cover:* ${coverUrl}\n`;
       if (shazamUrl) response += `\n🔗 ${shazamUrl}`;
 
-      const metadata = { title, artist, genre, album, coverUrl, shazamUrl, songId };
+      const isrc = track.isrc || null;
+      const metadata = { title, artist, genre, album, coverUrl, shazamUrl, songId, isrc };
       this.cache.set(cacheKey, { text: response, metadata });
 
       this.logger.info(`Song details fetched: ${title} by ${artist}`);
@@ -437,5 +451,124 @@ export default class ShazamPlugin extends BasePlugin {
       this.logger.error('Failed to fetch lyrics:', error);
       return { success: false, error: `Failed to get lyrics: ${error.message}` };
     }
+  }
+
+  /**
+   * Build search links for one track on each streaming service.
+   *
+   * Spotify's `isrc:` is a filter that takes exactly one code per query —
+   * there is no comma-joined multi-ISRC form, so a single link covering the
+   * whole playlist returns nothing. One link per track is the only form the
+   * vendor actually answers. Where no ISRC is known, fall back to Spotify's
+   * track/artist filters.
+   *
+   * Every query is encoded as one unit: interpolating an encoded title and an
+   * encoded artist with a literal space between them leaves a raw space in the
+   * URL, which truncates the link wherever it is auto-detected.
+   */
+  buildExportLinks(song) {
+    const spotifyQuery = song.isrc
+      ? `isrc:${song.isrc}`
+      : `track:"${song.title}" artist:"${song.artist}"`;
+
+    return {
+      spotify: `https://open.spotify.com/search/${encodeURIComponent(spotifyQuery)}`,
+      youtube: `https://www.youtube.com/results?search_query=${encodeURIComponent(`${song.title} ${song.artist}`)}`
+    };
+  }
+
+  /**
+   * Create a playlist from recommended songs and generate export links.
+   *
+   * Track lookup goes through getSongDetails so the plugin's existing cache is
+   * shared rather than re-querying Shazam for ids the caller just saw in a
+   * recommend() response.
+   */
+  async createPlaylistFromRecommendations(data) {
+    const { songIds, playlistName } = data;
+
+    if (!songIds || !Array.isArray(songIds) || songIds.length === 0) {
+      return { success: false, error: 'Please provide an array of song IDs.' };
+    }
+
+    // Each id costs one Shazam round-trip; a long list would sit there making
+    // them serially.
+    const MAX_SONGS = 25;
+    const ids = songIds.slice(0, MAX_SONGS);
+    const truncated = songIds.length - ids.length;
+
+    const songDetails = [];
+    const unresolved = [];
+
+    for (const songId of ids) {
+      let details;
+      try {
+        details = await this.getSongDetails({ songId });
+      } catch (err) {
+        this.logger.warn(`Failed to fetch details for song ID ${songId}: ${err.message}`);
+        unresolved.push({ songId, reason: err.message });
+        continue;
+      }
+
+      // getSongDetails answers success:true with no metadata when Shazam knows
+      // nothing about the id, so presence of metadata is the real test.
+      if (!details?.success) {
+        unresolved.push({ songId, reason: details?.error || 'lookup failed' });
+        continue;
+      }
+      if (!details.metadata?.title) {
+        unresolved.push({ songId, reason: 'not found on Shazam' });
+        continue;
+      }
+
+      const song = {
+        id: songId,
+        title: details.metadata.title,
+        artist: details.metadata.artist || 'Unknown',
+        isrc: details.metadata.isrc || null,
+        shazamUrl: details.metadata.shazamUrl || ''
+      };
+      song.links = this.buildExportLinks(song);
+      songDetails.push(song);
+    }
+
+    if (songDetails.length === 0) {
+      return {
+        success: false,
+        error: 'Could not fetch details for any of the provided song IDs.',
+        metadata: { unresolved }
+      };
+    }
+
+    const finalPlaylistName = playlistName || `Recommended Playlist - ${new Date().toLocaleDateString()}`;
+
+    let response = `📋 *Playlist: ${finalPlaylistName}*\n\n`;
+    songDetails.forEach((song, i) => {
+      response += `${i + 1}. *${song.title}* — ${song.artist}\n`;
+      response += `   [Spotify](${song.links.spotify}) · [YouTube](${song.links.youtube})\n`;
+    });
+
+    // A silently shorter playlist is the same failure as a wrong one: say what
+    // was dropped rather than letting the count speak for itself.
+    if (unresolved.length > 0) {
+      response += `\n⚠️ ${unresolved.length} of ${ids.length} track${ids.length === 1 ? '' : 's'} could not be resolved.\n`;
+    }
+    if (truncated > 0) {
+      response += `\n⚠️ Only the first ${MAX_SONGS} of ${songIds.length} ids were looked up.\n`;
+    }
+
+    return {
+      success: true,
+      type: 'text',
+      result: response,
+      metadata: {
+        playlistName: finalPlaylistName,
+        songCount: songDetails.length,
+        requestedCount: songIds.length,
+        songs: songDetails,
+        unresolved,
+        truncated
+      }
+    };
   }
 }

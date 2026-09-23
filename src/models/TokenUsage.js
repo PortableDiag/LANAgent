@@ -9,7 +9,7 @@ const tokenUsageSchema = new mongoose.Schema({
   provider: {
     type: String,
     required: true,
-    enum: ['openai', 'anthropic', 'gab', 'huggingface', 'xai', 'ollama', 'bitnet', 'uncensored']
+    enum: ['openai', 'anthropic', 'gab', 'huggingface', 'xai', 'ollama', 'bitnet', 'uncensored', 'openrouter']
   },
   
   model: {

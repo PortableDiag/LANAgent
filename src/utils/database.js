@@ -53,7 +53,7 @@ export async function connectDatabase() {
   isConnecting = true;
   
   try {
-    const uri = process.env.MONGODB_URI || '***REMOVED***';
+    const uri = process.env.MONGODB_URI || 'mongodb://localhost:27017/lanagent';
 
     await retryOperation(() => mongoose.connect(uri, {
       serverSelectionTimeoutMS: 5000, // 5 second timeout

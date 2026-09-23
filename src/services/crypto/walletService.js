@@ -506,7 +506,12 @@ class WalletService {
             return balance;
         } catch (error) {
             this.logger.warn(`Failed to get balance for network ${network}:`, error.message);
-            return { raw: '0', formatted: '0', symbol: 'UNKNOWN', network };
+            // Rethrow so callers can distinguish "unknown" from a real zero balance.
+            // v2.25.148 removed this phantom zero from getBalances/getChainBalance after
+            // it drove the auto gas top-up to sell strategy capital four times; the same
+            // shape survived here, where a failed read still reported a confident '0'
+            // with no error field at all. The only tell was symbol 'UNKNOWN'.
+            throw error;
         }
     }
 
@@ -538,7 +543,7 @@ class WalletService {
                     };
                 } catch (error) {
                     this.logger.error('Failed to get Nano mainnet balance:', error);
-                    balances.nano = { network: 'nano', balance: '0', symbol: 'XNO', error: error.message };
+                    balances.nano = { network: 'nano', balance: null, unavailable: true, symbol: 'XNO', error: error.message };
                 }
                 continue;
             }
@@ -559,7 +564,13 @@ class WalletService {
                 };
             } catch (error) {
                 this.logger.error(`Failed to get mainnet balance for ${addr.chain}:`, error);
-                balances[addr.chain] = { network: mainnetNetwork, balance: '0', symbol: 'UNKNOWN', error: error.message };
+                // null = unknown, NOT zero. This route is documented as the one to check
+                // before switching network mode, so a read that failed must not render as
+                // an empty chain.
+                balances[addr.chain] = {
+                    network: mainnetNetwork, balance: null, unavailable: true,
+                    symbol: 'UNKNOWN', address: addr.address, error: error.message
+                };
             }
         }
 

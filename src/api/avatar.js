@@ -5,6 +5,7 @@ import { logger } from '../utils/logger.js';
 import avatarService from '../services/avatar/avatarService.js';
 import { retryOperation } from '../utils/retryUtils.js';
 import NodeCache from 'node-cache';
+import path from 'path';
 import { DATA_PATH } from '../utils/paths.js';
 
 const router = express.Router();
@@ -111,6 +112,13 @@ router.get('/stats', async (req, res) => {
     }
 });
 
+// GET /api/avatar/health
+// Must stay ABOVE '/:avatarId' — Express matches in registration order, so the
+// parameterised route was swallowing '/health' and answering with a 404 avatar lookup.
+router.get('/health', (req, res) => {
+    res.json({ success: true, message: 'Avatar service is healthy' });
+});
+
 // GET /api/avatar/:avatarId
 router.get('/:avatarId', async (req, res) => {
     try {
@@ -198,6 +206,27 @@ router.put('/:avatarId/customize', async (req, res) => {
     }
 });
 
+// GET /api/avatar/:avatarId/optimization
+// ?persist=true also writes the scores onto the document.
+router.get('/:avatarId/optimization', async (req, res) => {
+    try {
+        const { Avatar } = await import('../models/Avatar.js');
+        const avatar = await Avatar.findOne({ avatarId: req.params.avatarId });
+        if (!avatar) {
+            return res.status(404).json({ success: false, error: 'Avatar not found' });
+        }
+
+        const analysis = req.query.persist === 'true'
+            ? await avatar.updateOptimizationScores()
+            : avatar.analyzeOptimizationOpportunities();
+
+        res.json({ success: true, data: analysis });
+    } catch (error) {
+        logger.error('Failed to analyze avatar optimization:', error);
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
 // GET /api/avatar/:avatarId/export
 router.get('/:avatarId/export', async (req, res) => {
     try {
@@ -269,11 +298,6 @@ router.post('/:avatarId/items/unlock', async (req, res) => {
         logger.error('Failed to unlock avatar item:', error);
         res.status(error.message.includes('not found') ? 404 : 500).json({ success: false, error: error.message });
     }
-});
-
-// Health check endpoint
-router.get('/health', (req, res) => {
-    res.json({ success: true, message: 'Avatar service is healthy' });
 });
 
 export default router;

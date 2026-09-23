@@ -4,6 +4,9 @@ import NodeCache from 'node-cache';
 import { retryOperation } from '../../utils/retryUtils.js';
 
 export default class XueqiuPlugin extends BasePlugin {
+  // Each symbol is one live upstream request; the caller supplies the list length.
+  static MAX_COMPARE_SYMBOLS = 20;
+
   constructor(agent) {
     super(agent);
     this.name = 'xueqiu';
@@ -29,6 +32,11 @@ export default class XueqiuPlugin extends BasePlugin {
         command: 'hotStocks',
         description: 'Get popular stocks leaderboard by market',
         usage: 'hotStocks [limit] [market: CN|HK|US]'
+      },
+      {
+        command: 'compare',
+        description: 'Compare multiple stock quotes side-by-side',
+        usage: 'compare [symbols...] (e.g., compare TSLA AAPL 600519)'
       }
     ];
 
@@ -77,6 +85,15 @@ export default class XueqiuPlugin extends BasePlugin {
         case 'hotStocks': {
           const { limit, market } = params;
           const data = await this.getHotStocks(Number(limit) || 10, (market || 'CN').toUpperCase());
+          return { success: true, data };
+        }
+
+        case 'compare': {
+          const { symbols } = params;
+          if (!symbols || !Array.isArray(symbols) || symbols.length === 0) {
+            return { success: false, error: 'Missing required param: symbols (array)' };
+          }
+          const data = await this.compareStocks(symbols);
           return { success: true, data };
         }
 
@@ -342,5 +359,51 @@ export default class XueqiuPlugin extends BasePlugin {
     }
     // US
     return { page: 1, size, order: 'desc', order_by: 'volume', market: 'US', type: 'us' };
+  }
+
+  /**
+   * Compare multiple stock quotes side-by-side.
+   *
+   * Symbols that could not be fetched are REPORTED, not dropped. A comparison that
+   * silently returns two rows for three requested symbols reads as "that one has no
+   * data" when the truth is "that request failed" — the caller cannot tell the
+   * difference from the result alone.
+   *
+   * @param {string[]} symbols
+   * @returns {Promise<{requested:number, quotes:Object[], failed:Object[]}>}
+   */
+  async compareStocks(symbols) {
+    if (!Array.isArray(symbols) || symbols.length === 0) {
+      throw new Error('Symbols must be a non-empty array');
+    }
+    // Bound the fan-out. Every symbol is a live upstream request, and nothing between
+    // the caller and this method limits the list length.
+    if (symbols.length > XueqiuPlugin.MAX_COMPARE_SYMBOLS) {
+      throw new Error(`Too many symbols: ${symbols.length} requested, maximum is ${XueqiuPlugin.MAX_COMPARE_SYMBOLS}`);
+    }
+
+    const uniqueSymbols = [...new Set(symbols.map(sym => this.normalizeSymbol(sym)))];
+
+    const settled = await Promise.all(uniqueSymbols.map(async (symbol) => {
+      try {
+        return { symbol, quote: await this.getStockQuote(symbol) };
+      } catch (err) {
+        this.logger.warn(`Failed to fetch quote for ${symbol}: ${err.message}`);
+        return { symbol, error: err.message };
+      }
+    }));
+
+    const FIELDS = ['symbol', 'name', 'price', 'change', 'percent', 'open', 'high',
+      'low', 'lastClose', 'volume', 'turnoverRate', 'market', 'time'];
+
+    return {
+      requested: uniqueSymbols.length,
+      quotes: settled
+        .filter(r => r.quote)
+        .map(r => Object.fromEntries(FIELDS.map(f => [f, r.quote[f] ?? null]))),
+      failed: settled
+        .filter(r => !r.quote)
+        .map(r => ({ symbol: r.symbol, error: r.error }))
+    };
   }
 }

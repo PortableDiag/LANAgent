@@ -499,9 +499,52 @@ export default class YtDlpPlugin extends BasePlugin {
     return data;
   }
 
+  /**
+   * Characters that let a value break out of a shell command.
+   *
+   * Every command in this plugin is built by string interpolation and run through a
+   * shell (`promisify(exec)`), and double quotes do not stop command substitution:
+   *
+   *     yt-dlp -F "https://youtube.com/watch?v=a"$(id)""
+   *
+   * That URL parses cleanly with `new URL()` and reports hostname `youtube.com`, so
+   * every host check upstream passes it. `-f ${format}` is not even quoted.
+   *
+   * The values are reachable from customer-facing routes (external/routes/social.js
+   * /probe, /download, /preview and the youtube routes), so this is an input boundary,
+   * not a nicety. Rejecting is used rather than escaping because it is a single choke
+   * point that cannot be undone by a later edit to any one of the ten command builders:
+   * a legitimate media URL never carries these unencoded — they percent-encode.
+   */
+  static SHELL_METACHARACTERS = /[`$;|&<>\n\r\\"']/;
+
+  /**
+   * Reject any user-supplied value that could escape the shell command it is
+   * interpolated into. Applied once, at the only entry point every action goes through.
+   */
+  _rejectShellUnsafe(data) {
+    for (const field of ['url', 'format', 'quality', 'query', 'output', 'audioFormat']) {
+      const value = data[field];
+      if (value === undefined || value === null) continue;
+      if (typeof value !== 'string') continue;
+      if (YtDlpPlugin.SHELL_METACHARACTERS.test(value)) {
+        logger.warn(`[ytdlp] Refusing ${field} containing shell metacharacters`);
+        return `Invalid ${field}: contains characters that are not allowed`;
+      }
+    }
+    return null;
+  }
+
   async execute(params) {
     const { action, ...data } = params;
     this._recoverParamsFromContext(data);
+
+    // Input boundary — see _rejectShellUnsafe. Checked after param recovery so a value
+    // restored from context is covered too.
+    const unsafe = this._rejectShellUnsafe(data);
+    if (unsafe) {
+      return { success: false, error: unsafe };
+    }
 
     try {
       switch(action) {

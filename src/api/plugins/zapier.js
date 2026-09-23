@@ -87,6 +87,16 @@ export default class ZapierPlugin extends BasePlugin {
           'trigger Catch Hook with JSON',
           'post data to webhook URL'
         ]
+      },
+      {
+        command: 'get_zap_execution_history',
+        description: 'Get execution history for a specific Zap with filtering capabilities',
+        usage: 'get_zap_execution_history({ zapId: "12345", startDate: "2023-01-01", endDate: "2023-12-31", status: "success" })',
+        examples: [
+          'get execution history for zap 12345',
+          'show failed runs of zap 67890 in January 2023',
+          'list all successful executions of zap 112233'
+        ]
       }
     ];
 
@@ -165,6 +175,8 @@ export default class ZapierPlugin extends BasePlugin {
           return await this.triggerWebhook(data);
         case 'resume_zap':
           return await this.resumeZap(data);
+        case 'get_zap_execution_history':
+          return await this.getZapExecutionHistory(data);
         default:
           throw new Error(`Unknown action: ${action}`);
       }
@@ -363,6 +375,73 @@ export default class ZapierPlugin extends BasePlugin {
         status: error?.response?.status,
         data: error?.response?.data
       };
+    }
+  }
+
+  /**
+   * Get execution history for a specific Zap with filtering capabilities
+   * @param {Object} params
+   * @param {string} params.zapId - The ID of the Zap to get execution history for
+   * @param {string} [params.startDate] - Start date for filtering (ISO 8601 format)
+   * @param {string} [params.endDate] - End date for filtering (ISO 8601 format)
+   * @param {string} [params.status] - Status filter (e.g., 'success', 'error')
+   * @returns {Promise<Object>} Execution history data
+   */
+  /**
+   * Build the runs URL for getZapExecutionHistory.
+   *
+   * Separated so the query construction is testable without a network call, and
+   * because an unparseable date has to be REFUSED rather than dropped. The first
+   * version skipped a bad date silently, so `startDate: 'last tuesday'` returned the
+   * unfiltered history — a full log presented as a filtered one, which is the same
+   * unknown-treated-as-fine shape the codebase has been audited for elsewhere.
+   *
+   * @throws {Error} on a date that cannot be parsed
+   */
+  _buildZapRunsUrl({ zapId, startDate, endDate, status }) {
+    const queryParams = new URLSearchParams();
+
+    for (const [label, value, param] of [
+      ['startDate', startDate, 'start_date'],
+      ['endDate', endDate, 'end_date']
+    ]) {
+      if (value === undefined || value === null || value === '') continue;
+      const parsed = new Date(value);
+      if (Number.isNaN(parsed.getTime())) {
+        throw new Error(`Invalid ${label}: ${value} is not a parseable date`);
+      }
+      queryParams.append(param, parsed.toISOString());
+    }
+
+    if (status) queryParams.append('status', status);
+
+    const url = `${this.config.baseUrl}/zaps/${zapId}/runs`;
+    const qs = queryParams.toString();
+    return qs ? `${url}?${qs}` : url;
+  }
+
+  async getZapExecutionHistory({ zapId, startDate, endDate, status }) {
+    this.validateParams({ zapId }, {
+      zapId: { required: true, type: 'string' }
+    });
+
+    const cacheKey = `zapExecutionHistory:${zapId}:${startDate || ''}:${endDate || ''}:${status || ''}`;
+    const cached = this.cache.get(cacheKey);
+    if (cached) return cached;
+
+    try {
+      const fullUrl = this._buildZapRunsUrl({ zapId, startDate, endDate, status });
+
+      const response = await retryOperation(() => axios.get(fullUrl, {
+        headers: { 'Authorization': `Bearer ${this.config.apiKey}` }
+      }), { retries: 3, context: 'getZapExecutionHistory API call' });
+
+      const result = { success: true, data: response.data };
+      this.cache.set(cacheKey, result);
+      return result;
+    } catch (error) {
+      this.logger.error('getZapExecutionHistory failed:', error);
+      return { success: false, error: error.message };
     }
   }
 

@@ -690,7 +690,7 @@ class SelfHealingService extends EventEmitter {
         return { success: true, message: 'Database already connected' };
       }
 
-      const mongoUri = process.env.MONGODB_URI || '***REMOVED***';
+      const mongoUri = process.env.MONGODB_URI || 'mongodb://localhost:27017/lanagent';
 
       // Close existing connection if any
       if (mongoose.connection.readyState !== 0) {

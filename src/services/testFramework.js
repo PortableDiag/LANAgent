@@ -17,6 +17,8 @@ export class TestFramework extends EventEmitter {
     super();
     this.agent = agent;
     this.testResults = [];
+    // Per-test budget for the run in progress; runTestSuite sets it from its options.
+    this.activeTimeout = null;
     this.testSession = {
       id: null,
       startTime: null,
@@ -60,7 +62,18 @@ export class TestFramework extends EventEmitter {
       this.testSession.startTime = new Date();
       this.testResults = [];
 
-      logger.info(`🧪 Starting test suite ${this.testSession.id}`);
+      // Options the caller passes were accepted and then never read. Self-modification
+      // calls this with a 5-minute timeout; every test still ran under the 30s default,
+      // which is SHORTER than the locked provider's own request timeout (HuggingFace
+      // requests recorded at 30s / 37.5s / 75s / 90s). The AI Provider Test therefore
+      // could not pass whenever the provider was slow, and one 'Test timeout' fails the
+      // whole self-modification gate.
+      const requestedTimeout = Number(options.timeout);
+      this.activeTimeout = Number.isFinite(requestedTimeout) && requestedTimeout > 0
+        ? requestedTimeout
+        : this.config.testTimeout;
+
+      logger.info(`🧪 Starting test suite ${this.testSession.id} (per-test budget ${this.activeTimeout}ms)`);
 
       // 1. Pre-test validation
       await this.preTestValidation();
@@ -80,8 +93,8 @@ export class TestFramework extends EventEmitter {
         await this.runFunctionalTests();
       }
 
-      // 5. Performance tests (optional)
-      if (this.config.testSuites.performance.enabled) {
+      // 5. Performance tests (optional) - the caller may ask for them explicitly.
+      if (this.config.testSuites.performance.enabled || options.includePerformance === true) {
         await this.runPerformanceTests();
       }
 
@@ -413,7 +426,7 @@ export class TestFramework extends EventEmitter {
         codePath,
         environment: [
           'NODE_ENV=test',
-          `MONGODB_URI=${process.env.MONGODB_URI || '***REMOVED***_test'}`
+          `MONGODB_URI=${process.env.MONGODB_URI || 'mongodb://localhost:27017/lanagent_test'}`
         ],
         timeout
       });
@@ -497,13 +510,24 @@ export class TestFramework extends EventEmitter {
     try {
       logger.debug(`Running test: ${name}`);
       
-      // Set timeout for test
-      const timeout = new Promise((_, reject) => 
-        setTimeout(() => reject(new Error('Test timeout')), this.config.testTimeout)
-      );
+      // Set timeout for test. The budget is the one runTestSuite was called with;
+      // this used to read this.config.testTimeout directly, which is how a caller
+      // asking for five minutes silently got thirty seconds.
+      const budgetMs = this.activeTimeout || this.config.testTimeout;
+      let timeoutHandle = null;
+      const timeout = new Promise((_, reject) => {
+        timeoutHandle = setTimeout(() => reject(new Error('Test timeout')), budgetMs);
+      });
 
-      const result = await Promise.race([testFunction(), timeout]);
-      
+      // The loser of the race is still pending, and its timer keeps the event loop
+      // alive for the whole budget if it is not cleared.
+      let result;
+      try {
+        result = await Promise.race([testFunction(), timeout]);
+      } finally {
+        clearTimeout(timeoutHandle);
+      }
+
       test.endTime = Date.now();
       test.duration = test.endTime - test.startTime;
       test.status = result.status || 'passed';

@@ -46,6 +46,26 @@ export default class ThousandEyesPlugin extends BasePlugin {
           'list all tests',
           'retrieve test list'
         ]
+      },
+      {
+        command: 'listAlerts',
+        description: 'Retrieve a list of alerts from ThousandEyes',
+        usage: 'listAlerts()',
+        examples: [
+          'show me the current alerts',
+          'list all alerts',
+          'retrieve alert list'
+        ]
+      },
+      {
+        command: 'getAlertDetails',
+        description: 'Get details of a specific alert by ID',
+        usage: 'getAlertDetails({ alertId: "12345" })',
+        examples: [
+          'check details of alert 12345',
+          'get information for alert with ID 67890',
+          'alert details for ID 54321'
+        ]
       }
     ];
 
@@ -148,6 +168,10 @@ export default class ThousandEyesPlugin extends BasePlugin {
           return await this.getAgentStatus(data);
         case 'listTests':
           return await this.listTests();
+        case 'listAlerts':
+          return await this.listAlerts();
+        case 'getAlertDetails':
+          return await this.getAlertDetails(data);
         default:
           throw new Error(`Unknown action: ${action}`);
       }
@@ -190,6 +214,41 @@ export default class ThousandEyesPlugin extends BasePlugin {
       return { success: true, data };
     } catch (error) {
       this.logger.error('listTests failed:', error);
+      return { success: false, error: error.message };
+    }
+  }
+
+  async listAlerts() {
+    try {
+      const data = await this.getCachedData('alerts_list', () => this._fetch('/alerts', 'listAlerts'));
+      return { success: true, data };
+    } catch (error) {
+      this.logger.error('listAlerts failed:', error);
+      return { success: false, error: error.message };
+    }
+  }
+
+  async getAlertDetails({ alertId, alertRuleId }) {
+    this.validateParams({ alertId }, {
+      alertId: { required: true, type: 'string' }
+    });
+
+    try {
+      // Encode both: they are caller-supplied and are interpolated into a URL. An id
+      // carrying a '/', '?' or '&' would otherwise rewrite the path or inject a
+      // parameter rather than being sent as a value.
+      let path = `/alerts/${encodeURIComponent(alertId)}`;
+      if (alertRuleId) {
+        path += `?alertRuleId=${encodeURIComponent(alertRuleId)}`;
+      }
+      // The cache key has to carry every input that changes the response. Keying on
+      // alertId alone means a request filtered by one rule would be answered from a
+      // different rule's cached result for the life of the entry.
+      const cacheKey = `alert_details_${alertId}::${alertRuleId || 'all'}`;
+      const data = await this.getCachedData(cacheKey, () => this._fetch(path, 'getAlertDetails'));
+      return { success: true, data };
+    } catch (error) {
+      this.logger.error('getAlertDetails failed:', error);
       return { success: false, error: error.message };
     }
   }

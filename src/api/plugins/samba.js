@@ -64,6 +64,11 @@ export default class SambaPlugin extends BasePlugin {
         command: 'browse',
         description: 'Browse files in a mounted share',
         usage: 'browse({ mountPoint: "/mnt/share", path: "/" })'
+      },
+      {
+        command: 'getShareSpace',
+        description: 'Report total/used/available space for a mounted share',
+        usage: 'getShareSpace({ mountId: "mount-id" })'
       }
     ];
     
@@ -120,6 +125,8 @@ export default class SambaPlugin extends BasePlugin {
           return await this.unmountAll();
         case 'browse':
           return await this.browse(args);
+        case 'getShareSpace':
+          return await this.getShareSpace(args);
         default:
           throw new Error(`Unknown Samba action: ${action}`);
       }
@@ -639,6 +646,26 @@ export default class SambaPlugin extends BasePlugin {
         success: false,
         error: `Failed to browse mount: ${error.message}`
       };
+    }
+  }
+
+  /**
+   * Space and utilization for a saved mount, read from df on its mount point.
+   * Only works while the share is mounted — SambaMount.getShareSpace refuses to
+   * report the local disk's figures for an unmounted directory.
+   */
+  async getShareSpace({ mountId, id } = {}) {
+    const target = mountId || id;
+    if (!target) {
+      return { success: false, error: 'mountId is required' };
+    }
+
+    try {
+      const space = await SambaMount.getShareSpace(target);
+      return { success: true, space };
+    } catch (error) {
+      logger.error(`Failed to get share space for ${target}: ${error.message}`);
+      return { success: false, error: error.message };
     }
   }
 

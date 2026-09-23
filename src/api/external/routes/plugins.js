@@ -1,6 +1,8 @@
 import { Router } from 'express';
 import path from 'path';
 import { creditAuth } from '../middleware/creditAuth.js';
+import { adminKeyAuth } from '../middleware/adminKeyAuth.js';
+import ExternalAuditLog from '../../../models/ExternalAuditLog.js';
 import { generateDownloadToken } from '../services/downloadTokenService.js';
 import { logger } from '../../../utils/logger.js';
 
@@ -331,6 +333,155 @@ router.get('/', async (req, res) => {
   }
 
   res.json({ success: true, services, totalCommands: services.reduce((n, s) => n + s.commands.length, 0) });
+});
+
+export const USAGE_WINDOW_DAYS = 30;
+export const TREND_WINDOW_DAYS = 7;
+
+/**
+ * Where the numbers come from.
+ *
+ * ExternalAuditLog is the only place a per-plugin call is recorded. It gets one
+ * row per external request from auditLogMiddleware, carrying `path`, `method`,
+ * `timestamp` and `success`, and it is the source used here.
+ *
+ * ExternalCreditBalance — the obvious-looking candidate — cannot answer this
+ * question at all. It is one document per wallet, not a transaction collection;
+ * its debits live in a 500-entry embedded `transactions` array that is $slice'd
+ * on every write; and `debitCredits()` is called from the proxy route below with
+ * no options, so `category` stays 'general', `tags` stays empty and the plugin
+ * name is never written down anywhere on the debit. No query over that model can
+ * produce per-plugin usage.
+ *
+ * The plugin name is recovered from the request path. The proxy route is
+ * POST /api/external/service/:plugin/:action, so splitting the path on '/' puts
+ * the plugin at index 4.
+ *
+ * Retention bounds the answer: ExternalAuditLog rows carry a 90-day TTL, so a
+ * 30-day window is always fully covered, but nothing older can ever be asked
+ * for.
+ */
+export function buildPluginUsagePipeline(now = new Date()) {
+  const since = new Date(now.getTime() - USAGE_WINDOW_DAYS * 24 * 60 * 60 * 1000);
+  const trendSince = new Date(now.getTime() - TREND_WINDOW_DAYS * 24 * 60 * 60 * 1000);
+
+  return {
+    since,
+    trendSince,
+    pipeline: [
+      {
+        $match: {
+          timestamp: { $gte: since },
+          method: 'POST',
+          path: { $regex: '^/api/external/service/' }
+        }
+      },
+      {
+        // Drop any query string before splitting, or '?foo=1' rides along on the
+        // last segment.
+        $addFields: {
+          _plugin: {
+            $arrayElemAt: [
+              { $split: [{ $arrayElemAt: [{ $split: ['$path', '?'] }, 0] }, '/'] },
+              4
+            ]
+          }
+        }
+      },
+      { $match: { _plugin: { $nin: [null, ''] } } },
+      {
+        $facet: {
+          popularPlugins: [
+            {
+              $group: {
+                _id: '$_plugin',
+                calls: { $sum: 1 },
+                succeeded: { $sum: { $cond: [{ $eq: ['$success', true] }, 1, 0] } }
+              }
+            },
+            { $sort: { calls: -1, _id: 1 } },
+            { $limit: 10 },
+            { $project: { _id: 0, plugin: '$_id', calls: 1, succeeded: 1 } }
+          ],
+          usageTrends: [
+            { $match: { timestamp: { $gte: trendSince } } },
+            {
+              $group: {
+                _id: { $dateToString: { format: '%Y-%m-%d', date: '$timestamp', timezone: 'UTC' } },
+                calls: { $sum: 1 }
+              }
+            },
+            { $sort: { _id: 1 } },
+            { $project: { _id: 0, date: '$_id', calls: 1 } }
+          ],
+          peakUsageTimes: [
+            {
+              $group: {
+                _id: { $hour: { date: '$timestamp', timezone: 'UTC' } },
+                calls: { $sum: 1 }
+              }
+            },
+            { $sort: { calls: -1, _id: 1 } },
+            { $limit: 5 },
+            { $project: { _id: 0, hourUtc: '$_id', calls: 1 } }
+          ],
+          totals: [{ $count: 'calls' }]
+        }
+      }
+    ]
+  };
+}
+
+/**
+ * Turn the $facet result into the response body.
+ *
+ * `sampleSize` is what makes an empty answer readable: three empty arrays could
+ * mean "nobody called a plugin this month" or "the query is wrong", and only the
+ * number of rows the aggregation actually matched tells them apart.
+ */
+export function shapePluginUsage(facetResult, { since, trendSince, now }) {
+  const facet = (Array.isArray(facetResult) ? facetResult[0] : facetResult) || {};
+  return {
+    popularPlugins: facet.popularPlugins || [],
+    usageTrends: facet.usageTrends || [],
+    peakUsageTimes: facet.peakUsageTimes || [],
+    meta: {
+      source: 'ExternalAuditLog',
+      generatedAt: now.toISOString(),
+      windowDays: USAGE_WINDOW_DAYS,
+      since: since.toISOString(),
+      trendWindowDays: TREND_WINDOW_DAYS,
+      trendSince: trendSince.toISOString(),
+      timezone: 'UTC',
+      retentionDays: 90,
+      sampleSize: facet.totals?.[0]?.calls || 0
+    }
+  };
+}
+
+/**
+ * Plugin usage analytics across every customer.
+ * GET /api/external/service/analytics   (admin key required)
+ *
+ * Aggregate, cross-tenant figures — which plugins are being called, how often,
+ * and when — are operator data, not customer data. adminKeyAuth, not creditAuth:
+ * a customer `lsk_` key must not be able to read the whole service's demand
+ * profile.
+ */
+router.get('/analytics', adminKeyAuth, async (req, res) => {
+  try {
+    const now = new Date();
+    const { since, trendSince, pipeline } = buildPluginUsagePipeline(now);
+    const facetResult = await ExternalAuditLog.aggregate(pipeline);
+
+    res.json({
+      success: true,
+      data: shapePluginUsage(facetResult, { since, trendSince, now })
+    });
+  } catch (error) {
+    logger.error(`GET /service/analytics error: ${error.message}`);
+    res.status(500).json({ success: false, error: 'Failed to build plugin usage analytics' });
+  }
 });
 
 export default router;

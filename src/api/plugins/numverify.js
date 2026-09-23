@@ -66,6 +66,16 @@ export default class NumverifyPlugin extends BasePlugin {
           'find out the region of +447911123456',
           'get the region for +33123456789'
         ]
+      },
+      {
+        command: 'assessPhoneNumberRisk',
+        description: 'Assess the risk level of a phone number based on validity, carrier type, and region consistency',
+        usage: 'assessPhoneNumberRisk({ number: "+14158586273" })',
+        examples: [
+          'assess risk for phone number +14158586273',
+          'check fraud risk of +447911123456',
+          'evaluate risk level of +33123456789'
+        ]
       }
     ];
 
@@ -88,8 +98,25 @@ export default class NumverifyPlugin extends BasePlugin {
       return cached;
     }
     const data = await fetchFunc();
-    this.cache.set(key, data);
+    // Never cache a failure. A bad access key or an exhausted quota used to be
+    // stored like a real answer and served for the full TTL, so one bad response
+    // poisoned every lookup of that number for five minutes.
+    if (data?.success !== false) this.cache.set(key, data);
     return data;
+  }
+
+  /**
+   * numverify answers an API error with HTTP 200 and `{success:false, error:{code, info}}`,
+   * so axios never rejects and the envelope reads like data. Returns the vendor's own
+   * message when the payload is an error, otherwise null.
+   */
+  _vendorError(payload) {
+    if (payload && payload.success === false) {
+      const info = payload.error?.info || payload.error?.type || 'unknown error';
+      const code = payload.error?.code;
+      return code ? `numverify error ${code}: ${info}` : `numverify error: ${info}`;
+    }
+    return null;
   }
 
   async initialize() {
@@ -159,6 +186,9 @@ export default class NumverifyPlugin extends BasePlugin {
         case 'detectPhoneNumberRegion':
           return await this.detectPhoneNumberRegion(data);
 
+        case 'assessPhoneNumberRisk':
+          return await this.assessPhoneNumberRisk(data);
+
         default:
           throw new Error(`Unknown action: ${action}`);
       }
@@ -201,6 +231,11 @@ export default class NumverifyPlugin extends BasePlugin {
             }
           }), { retries: 3, context: 'validatePhoneNumber API call' });
 
+        const vendorError = this._vendorError(response.data);
+        if (vendorError) {
+          this.logger.error(`validatePhoneNumber rejected by numverify: ${vendorError}`);
+          return { success: false, error: vendorError };
+        }
         return { success: true, data: response.data };
       } catch (error) {
         this.logger.error('validatePhoneNumber failed:', error);
@@ -221,6 +256,11 @@ export default class NumverifyPlugin extends BasePlugin {
             }
           }), { retries: 3, context: 'getCarrierInfo API call' });
 
+        const vendorError = this._vendorError(response.data);
+        if (vendorError) {
+          this.logger.error(`getCarrierInfo rejected by numverify: ${vendorError}`);
+          return { success: false, error: vendorError };
+        }
         const { carrier, line_type } = response.data;
         return { success: true, data: { carrier, line_type } };
       } catch (error) {
@@ -312,6 +352,135 @@ export default class NumverifyPlugin extends BasePlugin {
     } catch (error) {
       this.logger.error('detectPhoneNumberRegion failed:', error);
       return { success: false, error: error.message };
+    }
+  }
+
+  /**
+   * Assess the risk level of a phone number from its validation record.
+   *
+   * Scoring is advisory only: it is derived entirely from the numverify
+   * lookup plus a local libphonenumber parse. It makes no external call of
+   * its own, so it costs one cached validatePhoneNumber lookup.
+   */
+  async assessPhoneNumberRisk({ number }) {
+    try {
+      const validationResponse = await this.validatePhoneNumber({ number });
+
+      // numverify answers API-level failures with HTTP 200 and an error
+      // envelope, so a truthy transport result is not proof of a lookup.
+      const payload = validationResponse && validationResponse.data;
+      const lookupFailed =
+        !validationResponse ||
+        validationResponse.success !== true ||
+        !payload ||
+        payload.success === false ||
+        payload.error;
+
+      if (lookupFailed) {
+        const reason =
+          (payload && payload.error && (payload.error.info || payload.error.type)) ||
+          (validationResponse && validationResponse.error) ||
+          'lookup unavailable';
+        return {
+          success: false,
+          error: `Failed to validate phone number: ${reason}`,
+          data: {
+            riskScore: null,
+            riskLevel: 'unknown',
+            factors: ['validation_unavailable']
+          }
+        };
+      }
+
+      const { valid, carrier, country_code: countryCode, line_type: lineType } = payload;
+
+      let riskScore = 0;
+      const riskFactors = [];
+
+      if (!valid) {
+        riskScore += 40;
+        riskFactors.push('invalid_number');
+      }
+
+      if (!carrier) {
+        riskScore += 20;
+        riskFactors.push('missing_carrier_info');
+      }
+
+      // numverify line_type values: landline, mobile, special_services,
+      // toll_free, premium_rate, satellite, paging, voip. There is no
+      // "prepaid" value, so do not test for one.
+      const normalizedLineType = typeof lineType === 'string' ? lineType.toLowerCase() : '';
+
+      if (normalizedLineType === 'voip') {
+        riskScore += 25;
+        riskFactors.push('voip_line');
+      }
+
+      if (normalizedLineType === 'premium_rate') {
+        riskScore += 25;
+        riskFactors.push('premium_rate_line');
+      }
+
+      if (!normalizedLineType) {
+        riskScore += 10;
+        riskFactors.push('unknown_line_type');
+      }
+
+      const phoneNumber = parsePhoneNumberFromString(number);
+      if (phoneNumber) {
+        // numverify country_code and libphonenumber country are both ISO 3166-1
+        // alpha-2, so they are directly comparable once cased alike.
+        const reportedCountry = typeof countryCode === 'string' ? countryCode.toUpperCase() : '';
+        if (reportedCountry && phoneNumber.country && reportedCountry !== phoneNumber.country) {
+          riskScore += 30;
+          riskFactors.push('inconsistent_region');
+        }
+
+        // Dialable shape but not an allocated number for that country.
+        if (phoneNumber.isPossible() && !phoneNumber.isValid()) {
+          riskScore += 25;
+          riskFactors.push('possible_but_invalid');
+        }
+      } else {
+        riskScore += 35;
+        riskFactors.push('unparseable_number');
+      }
+
+      let riskLevel;
+      if (riskScore >= 70) {
+        riskLevel = 'high';
+      } else if (riskScore >= 40) {
+        riskLevel = 'medium';
+      } else if (riskScore >= 10) {
+        riskLevel = 'low';
+      } else {
+        riskLevel = 'minimal';
+      }
+
+      return {
+        success: true,
+        data: {
+          riskScore,
+          riskLevel,
+          factors: riskFactors,
+          validated: valid === true,
+          carrier: carrier || 'Unknown',
+          lineType: lineType || 'Unknown',
+          countryCode: countryCode || 'Unknown'
+        }
+      };
+    } catch (error) {
+      this.logger.error('assessPhoneNumberRisk failed:', error);
+      return {
+        success: false,
+        error: error.message,
+        data: {
+          riskScore: null,
+          riskLevel: 'unknown',
+          factors: ['internal_error']
+        }
+      };
     }
   }
 

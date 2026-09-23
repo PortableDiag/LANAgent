@@ -51,12 +51,36 @@ export default class GroqPlugin extends BasePlugin {
           'talk to an AI about cooking recipes'
         ]
       },
+      {
+        command: 'get_usage_stats',
+        description: 'Retrieve usage statistics and cost estimates',
+        usage: 'get_usage_stats()',
+        examples: [
+          'show me my token usage',
+          'how much have I spent on Groq API calls',
+          'what are my usage statistics',
+          'give me a cost breakdown of my API usage'
+        ]
+      }
     ];
 
     // Configuration - API key loaded dynamically via loadCredentials()
     this.config = {
       apiKey: null,
       baseUrl: 'https://api.groq.com/openai/v1',
+    };
+
+    // Usage tracking. Prompt and completion tokens are kept apart because they are
+    // priced apart — a single blended rate over total_tokens cannot produce a correct
+    // cost for any provider that charges differently for input and output.
+    this.usageStats = {
+      totalTokens: 0,
+      totalPromptTokens: 0,
+      totalCompletionTokens: 0,
+      totalCalls: 0,
+      totalCost: 0,
+      uncostedCalls: 0,
+      modelUsage: {}
     };
 
     this.initialized = false;
@@ -82,6 +106,13 @@ export default class GroqPlugin extends BasePlugin {
         const { apiKey, ...otherConfig } = savedConfig;
         Object.assign(this.config, otherConfig);
         this.logger.info('Loaded cached configuration');
+      }
+
+      // Load usage stats
+      const savedUsageStats = await PluginSettings.getCached(this.name, 'usageStats');
+      if (savedUsageStats) {
+        this.usageStats = savedUsageStats;
+        this.logger.info('Loaded cached usage statistics');
       }
 
       // Check if API key is configured
@@ -126,6 +157,8 @@ export default class GroqPlugin extends BasePlugin {
           return await this.generateCompletion(data);
         case 'chat_completion':
           return await this.chatCompletion(data);
+        case 'get_usage_stats':
+          return await this.getUsageStats();
         default:
           throw new Error(`Unknown action: ${action}`);
       }
@@ -217,6 +250,8 @@ export default class GroqPlugin extends BasePlugin {
         { retries: 3, context: 'Generate Completion API call' }
       );
 
+      this.trackTokenUsage(response.data.usage, params.model);
+
       return {
         success: true,
         data: response.data
@@ -254,6 +289,8 @@ export default class GroqPlugin extends BasePlugin {
         { retries: 3, context: 'Chat Completion API call' }
       );
 
+      this.trackTokenUsage(response.data.usage, params.model);
+
       return {
         success: true,
         data: response.data
@@ -261,6 +298,94 @@ export default class GroqPlugin extends BasePlugin {
     } catch (error) {
       throw new Error(`Chat completion failed: ${error.response?.data?.error?.message || error.message}`);
     }
+  }
+
+  /**
+   * Record what an API response reported it used.
+   *
+   * Fire-and-forget on the persist, with an explicit catch: this is telemetry, and a
+   * settings write that fails must never surface as an unhandled rejection or fail the
+   * completion the caller actually asked for. The original called setCached() without
+   * awaiting it and without a catch, which is exactly that rejection.
+   *
+   * @param {object} usage - the `usage` block from the API response
+   * @param {string} model - model identifier (required by both callers' validation)
+   */
+  trackTokenUsage(usage, model) {
+    const prompt = Number(usage?.prompt_tokens) || 0;
+    const completion = Number(usage?.completion_tokens) || 0;
+    // Prefer the provider's own total; fall back to the parts if it is absent.
+    const total = Number.isFinite(Number(usage?.total_tokens))
+      ? Number(usage.total_tokens)
+      : prompt + completion;
+
+    this.usageStats.totalTokens += total;
+    this.usageStats.totalPromptTokens += prompt;
+    this.usageStats.totalCompletionTokens += completion;
+    this.usageStats.totalCalls += 1;
+
+    if (!this.usageStats.modelUsage[model]) {
+      this.usageStats.modelUsage[model] = { tokens: 0, promptTokens: 0, completionTokens: 0, calls: 0, cost: 0 };
+    }
+    const entry = this.usageStats.modelUsage[model];
+    entry.tokens += total;
+    entry.promptTokens += prompt;
+    entry.completionTokens += completion;
+    entry.calls += 1;
+
+    const cost = this.calculateCost({ promptTokens: prompt, completionTokens: completion }, model);
+    if (cost === null) {
+      // No configured rate for this model. Counting it as $0 would understate the
+      // total and read as "these calls were free", so it is counted separately and
+      // the reported cost says how many calls it could not price.
+      this.usageStats.uncostedCalls += 1;
+    } else {
+      this.usageStats.totalCost += cost;
+      entry.cost += cost;
+    }
+
+    Promise.resolve(PluginSettings.setCached(this.name, 'usageStats', this.usageStats))
+      .catch(err => this.logger.warn(`Could not persist Groq usage stats: ${err.message}`));
+  }
+
+  /**
+   * Estimate cost from a configured rate table.
+   *
+   * Rates are NOT hardcoded. Provider prices change and input/output are charged at
+   * different rates, so a built-in blended constant produces a dollar figure that is
+   * wrong by construction and goes quietly staler every month — while being reported
+   * as money spent. Configure `this.config.pricing` as
+   * `{ '<model>': { inputPerMillion, outputPerMillion } }` to enable costing.
+   *
+   * @returns {number|null} USD, or null when this model has no configured rate
+   */
+  calculateCost({ promptTokens = 0, completionTokens = 0 } = {}, model) {
+    const rate = this.config.pricing?.[model];
+    const input = Number(rate?.inputPerMillion);
+    const output = Number(rate?.outputPerMillion);
+    if (!Number.isFinite(input) || !Number.isFinite(output)) return null;
+    return (promptTokens / 1e6) * input + (completionTokens / 1e6) * output;
+  }
+
+  /**
+   * Usage statistics. Token counts are measured; cost is only reported when rates
+   * are configured, and never presented as complete while some calls went unpriced.
+   */
+  async getUsageStats() {
+    const priced = this.usageStats.totalCalls - this.usageStats.uncostedCalls;
+    return {
+      success: true,
+      data: {
+        ...this.usageStats,
+        costEstimate: priced > 0 ? this.usageStats.totalCost : null,
+        costComplete: this.usageStats.uncostedCalls === 0 && priced > 0,
+        costNote: priced === 0
+          ? 'No model pricing configured — token counts are measured, cost is not estimated.'
+          : (this.usageStats.uncostedCalls > 0
+            ? `${this.usageStats.uncostedCalls} of ${this.usageStats.totalCalls} calls used a model with no configured rate and are excluded from the cost.`
+            : undefined)
+      }
+    };
   }
 
   async cleanup() {

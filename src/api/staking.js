@@ -197,6 +197,131 @@ router.get('/history', async (req, res) => {
     }
 });
 
+// POST /api/staking/project — calculate projected staking rewards
+router.post('/project', async (req, res) => {
+    try {
+        const { stakeAmount, tierId, duration } = req.body;
+        
+        if (!stakeAmount || stakeAmount <= 0) {
+            return res.status(400).json({ success: false, error: 'Valid stake amount required' });
+        }
+        
+        if (tierId === undefined || tierId < 0) {
+            return res.status(400).json({ success: false, error: 'Valid tier ID required' });
+        }
+        
+        if (!duration || duration <= 0) {
+            return res.status(400).json({ success: false, error: 'Valid duration required' });
+        }
+
+        const projectedRewards = await calculateProjectedRewards(stakeAmount, tierId, duration);
+        res.json({ success: true, data: projectedRewards });
+    } catch (error) {
+        logger.error('Failed to calculate projected rewards:', error);
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+/**
+ * Project staking rewards from the contract's actual emission rate.
+ *
+ * The first version computed `rewardPool / totalStaked` as an APR. getContractStats()
+ * has no `rewardPool` field, so that read undefined -> 0 and the endpoint returned a
+ * projection of exactly zero for every input. Even with a pool balance it would have
+ * been wrong: the remaining pool is not one year's yield, and it swings whenever the
+ * pool is topped up, while the contract's own emission schedule says nothing about it.
+ *
+ * The service already derives APY correctly from `stakingRewardRate()`, the per-second
+ * emission rate, so that is what this uses. Three things the original omitted and a
+ * staker would feel:
+ *
+ *  - DILUTION. The projected share must count the new stake in the denominator, or the
+ *    figure overstates by more the larger the stake — precisely when it matters most.
+ *  - PERIOD END. Emission stops at `periodFinish`. Projecting past `timeUntilEnd`
+ *    invents rewards from a period that is not funded.
+ *  - The tier multiplier weights the staker's share against everyone else's, rather
+ *    than multiplying the whole APR.
+ *
+ * @param {number} stakeAmount tokens to stake
+ * @param {number} tierId lock tier
+ * @param {number} duration days
+ */
+async function calculateProjectedRewards(stakeAmount, tierId, duration) {
+    const stats = await skynetStakingService.getContractStats();
+    if (!stats?.available) {
+        throw new Error('Staking contract is not available');
+    }
+
+    const tiers = await skynetStakingService.getLockTiers();
+    const tier = (tiers || []).find(t => t.id === tierId);
+    if (!tier) {
+        throw new Error(`Tier with ID ${tierId} not found`);
+    }
+
+    const principal = parseFloat(stakeAmount);
+    const totalStaked = parseFloat(stats.totalStaked) || 0;
+    const rewardRate = parseFloat(stats.rewardRate) || 0;
+    const timeUntilEnd = Number(stats.timeUntilEnd) || 0;
+    const tierMultiplier = tier.multiplier || 1;
+
+    // Refuse rather than return zero. "The contract is not currently emitting" and
+    // "you would earn nothing" are different answers, and a staker reading a projection
+    // of 0 would take it as the second.
+    if (rewardRate <= 0 || timeUntilEnd <= 0) {
+        return {
+            principal,
+            projectedRewards: null,
+            totalValue: null,
+            apr: null,
+            tierName: tier.name,
+            tierMultiplier,
+            duration,
+            basis: 'unavailable',
+            note: rewardRate <= 0
+                ? 'The contract is not currently emitting rewards, so no projection can be made.'
+                : 'The current reward period has ended; rewards resume only when it is refunded.'
+        };
+    }
+
+    const requestedSeconds = duration * 86400;
+    const accruingSeconds = Math.min(requestedSeconds, timeUntilEnd);
+
+    // Weighted share, with this stake included in the denominator.
+    const effectiveStake = principal * tierMultiplier;
+    const projectedShare = effectiveStake / (totalStaked + effectiveStake);
+    const projectedRewards = rewardRate * accruingSeconds * projectedShare;
+
+    // Annualised for display, over the same weighted share.
+    const secondsInYear = 365.25 * 24 * 3600;
+    const apr = principal > 0
+        ? (rewardRate * secondsInYear * projectedShare / principal) * 100
+        : null;
+
+    return {
+        principal,
+        projectedRewards: Number(projectedRewards.toFixed(6)),
+        totalValue: Number((principal + projectedRewards).toFixed(6)),
+        apr: apr === null ? null : Number(apr.toFixed(2)),
+        tierName: tier.name,
+        tierMultiplier,
+        duration,
+        // Say what the number rests on. A projection without its assumptions is a promise.
+        basis: 'contract_emission_rate',
+        assumptions: {
+            currentApy: stats.apy,
+            totalStakedBeforeThisStake: totalStaked,
+            projectedShareOfPool: Number((projectedShare * 100).toFixed(4)),
+            rewardRatePerDay: stats.rewardRatePerDay,
+            rewardPeriodEnds: stats.periodFinish,
+            daysRequested: duration,
+            daysActuallyAccruing: Number((accruingSeconds / 86400).toFixed(2)),
+            truncatedByPeriodEnd: accruingSeconds < requestedSeconds,
+            note: 'Assumes the emission rate and total staked hold constant. Both move as '
+                + 'others stake, unstake, or the reward period is refunded.'
+        }
+    };
+}
+
 // ── LP Staking Routes ────────────────────────────────────────────────────────
 
 router.get('/lp/info', async (req, res) => {

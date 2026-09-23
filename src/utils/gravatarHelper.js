@@ -279,6 +279,36 @@ export async function enrichContactWithGravatar(contact) {
 }
 
 /**
+ * Batch enrich contacts with Gravatar profile information
+ * @param {Array} contacts - Array of contact objects with email properties
+ * @returns {Array} Same length and order as the input; a contact whose lookup fails is returned as-is
+ */
+export async function batchEnrichContacts(contacts) {
+  if (!Array.isArray(contacts) || contacts.length === 0) {
+    return contacts;
+  }
+
+  // Process in chunks to control parallelism
+  const CHUNK_SIZE = 10;
+  const results = [];
+  
+  for (let i = 0; i < contacts.length; i += CHUNK_SIZE) {
+    const chunk = contacts.slice(i, i + CHUNK_SIZE);
+    // allSettled, not safePromiseAll: that helper DROPS rejected entries (and
+    // throws when a whole chunk fails), so the output would silently lose
+    // contacts. A failed lookup returns the contact unchanged instead.
+    const settled = await Promise.allSettled(
+      chunk.map(contact => enrichContactWithGravatar(contact))
+    );
+    settled.forEach((result, idx) => {
+      results.push(result.status === 'fulfilled' ? result.value : chunk[idx]);
+    });
+  }
+  
+  return results;
+}
+
+/**
  * Check if an email has a Gravatar avatar (not just default)
  * @param {string} email - Email address to check
  * @returns {boolean} True if email has a custom Gravatar avatar

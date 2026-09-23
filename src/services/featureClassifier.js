@@ -1,8 +1,10 @@
 import path from 'path';
+import os from 'os';
 import fs from 'fs/promises';
 import { logger } from '../utils/logger.js';
 
-const DEV_PATH = process.env.AGENT_REPO_PATH || '/root/lanagent-repo';
+// The self-analysis clone. Defaults to ~/lanagent-repo, the location install.sh uses.
+const DEV_PATH = process.env.AGENT_REPO_PATH || path.join(os.homedir(), 'lanagent-repo');
 const PLUGINS_DIR = 'src/api/plugins';
 
 /**

@@ -148,6 +148,58 @@ cryptoExitRecordSchema.statics.analyzeByTrigger = async function (opts = {}) {
     })).sort((a, b) => b.fills - a.fills);
 };
 
+/**
+ * The book. analyzeByTrigger() reports each trigger on its own, and every trigger can
+ * look defensible while the book loses: a series can show a large majority of winning
+ * exits, every stop vindicated at its own 1h/4h/24h horizon, and still net a loss,
+ * because the average loser is many times the average winner. Nothing summed the
+ * column, so tuning optimised per-exit vindication
+ * — a metric that cannot see a payoff ratio — instead of expectancy.
+ *
+ * breakEvenWinRate is the share of fills the current payoff ratio needs just to reach
+ * zero. Above the actual win rate means the shape cannot pay, whatever the hit rate.
+ */
+cryptoExitRecordSchema.statics.analyzeBook = async function (opts = {}) {
+    const q = {};
+    if (opts.tokenSymbol) q.tokenSymbol = opts.tokenSymbol;
+    if (opts.since) q.exitedAt = { $gte: new Date(opts.since) };
+
+    const rows = await this.find(q).lean();
+    if (!rows.length) return null;
+
+    let winners = 0, losers = 0, winUsd = 0, lossUsd = 0, gas = 0;
+    for (const r of rows) {
+        const pnl = r.pnl || 0;
+        gas += r.gasCostUsd || 0;
+        if (pnl > 0) { winners++; winUsd += pnl; }
+        else if (pnl < 0) { losers++; lossUsd += Math.abs(pnl); }
+    }
+    const net = winUsd - lossUsd;
+    const avgWin = winners ? winUsd / winners : 0;
+    const avgLoss = losers ? lossUsd / losers : 0;
+    const payoffRatio = avgWin > 0 ? avgLoss / avgWin : null;
+    const scored = winners + losers;
+
+    return {
+        fills: rows.length,
+        winners,
+        losers,
+        winRatePct: scored ? parseFloat(((winners / scored) * 100).toFixed(1)) : null,
+        grossWinUsd: parseFloat(winUsd.toFixed(2)),
+        grossLossUsd: parseFloat(lossUsd.toFixed(2)),
+        netUsd: parseFloat(net.toFixed(2)),
+        gasUsd: parseFloat(gas.toFixed(3)),
+        avgWinUsd: parseFloat(avgWin.toFixed(2)),
+        avgLossUsd: parseFloat(avgLoss.toFixed(2)),
+        // how many dollars lost per dollar won, on the average fill
+        lossToWinRatio: payoffRatio === null ? null : parseFloat(payoffRatio.toFixed(1)),
+        expectancyUsd: scored ? parseFloat((net / scored).toFixed(4)) : null,
+        breakEvenWinRatePct: payoffRatio === null ? null
+            : parseFloat(((payoffRatio / (1 + payoffRatio)) * 100).toFixed(1)),
+        verdict: net >= 0 ? 'book is positive' : 'BOOK IS NEGATIVE — the payoff ratio, not the hit rate'
+    };
+};
+
 const CryptoExitRecord = mongoose.models.CryptoExitRecord
     || mongoose.model('CryptoExitRecord', cryptoExitRecordSchema);
 

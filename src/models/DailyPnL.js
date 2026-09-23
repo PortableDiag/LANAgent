@@ -93,7 +93,7 @@ dailyPnLSchema.statics.getAggregatedPnL = async function({ groupBy = 'daily', st
         { $project: {
             _id: 0,
             period: '$_id',
-            realizedPnL: [redacted], dmRealizedPnL: 1, gasCost: 1, dailyNet: 1,
+            realizedPnL: 1, dmRealizedPnL: 1, gasCost: 1, dailyNet: 1,
             // Both strategies together — the figure "what did the agent make this
             // period" actually wants, and which no caller could compute before.
             combinedRealizedPnL: { $add: ['$realizedPnL', '$dmRealizedPnL'] },

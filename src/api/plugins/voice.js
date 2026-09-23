@@ -353,7 +353,7 @@ export default class VoicePlugin extends BasePlugin {
   async getVoiceStats() {
     try {
       const { MongoClient } = await import('mongodb');
-      const mongoUri = process.env.MONGODB_URI || '***REMOVED***';
+      const mongoUri = process.env.MONGODB_URI || 'mongodb://localhost:27017/lanagent';
       const client = new MongoClient(mongoUri);
       
       await client.connect();

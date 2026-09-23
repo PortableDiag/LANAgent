@@ -105,7 +105,37 @@ const AvatarSchema = new mongoose.Schema({
       default: Date.now
     },
     reason: String
-  }]
+  }],
+  optimizationScores: {
+    performance: {
+      type: Number,
+      min: 0,
+      max: 100,
+      default: 0
+    },
+    quality: {
+      type: Number,
+      min: 0,
+      max: 100,
+      default: 0
+    },
+    compression: {
+      type: Number,
+      min: 0,
+      max: 100,
+      default: 0
+    },
+    overall: {
+      type: Number,
+      min: 0,
+      max: 100,
+      default: 0
+    },
+    lastAnalyzed: {
+      type: Date,
+      default: null
+    }
+  }
 }, {
   timestamps: true
 });
@@ -234,6 +264,173 @@ AvatarSchema.methods.rollbackToVersion = async function(versionNumber) {
  */
 AvatarSchema.methods.getVersion = async function(versionNumber) {
   return this.versions.find(v => v.version === versionNumber) || null;
+};
+
+// Scoring weights for the optimization heuristic. These are rules of thumb for
+// real-time VRM playback, not measurements — they are here, named, so a future
+// tuning pass edits one table instead of hunting magic numbers in branches.
+const OPT = {
+  polyCount: { heavy: 50000, high: 25000, moderate: 10000, thin: 5000, minimal: 1000 },
+  complexity: { high: 10, moderate: 5 },
+  compressible: { large: 30000, medium: 15000 }
+};
+
+/**
+ * Total number of customization knobs set on this avatar.
+ * @returns {number}
+ * @private
+ */
+AvatarSchema.methods._customizationComplexity = function () {
+  const c = this.customizations || {};
+  return Object.keys(c.body || {}).length +
+    Object.keys(c.face || {}).length +
+    Object.keys(c.outfit || {}).length +
+    (Array.isArray(c.accessories) ? c.accessories.length : 0);
+};
+
+/**
+ * Score this avatar for runtime performance, visual quality and remaining
+ * compression headroom, and list the concrete actions worth taking.
+ *
+ * Synchronous and side-effect free: it reads fields already loaded on this
+ * document and touches neither the database nor `this`. The submitted version
+ * wrapped the arithmetic in `retryOperation` (nothing here can fail
+ * transiently, and a retry would have re-run the embedded `save()`), memoised
+ * it in a module-level NodeCache with no invalidation (so editing an avatar's
+ * customizations served the pre-edit scores for five more minutes, shared
+ * across every document in the process), and saved the document from inside a
+ * method named "analyze". Use `updateOptimizationScores()` to persist.
+ *
+ * `polyCount` is optional on the schema. When it is unset the poly-based
+ * penalties are skipped rather than silently evaluating false, which would
+ * have scored an unmeasured model identically to a well-optimised one.
+ *
+ * @returns {{performance:number, quality:number, compression:number, overall:number, lastAnalyzed:Date, recommendations:Array<Object>}}
+ */
+AvatarSchema.methods.analyzeOptimizationOpportunities = function () {
+  const complexity = this._customizationComplexity();
+  const polyCount = Number.isFinite(this.polyCount) ? this.polyCount : null;
+  const recommendations = [];
+
+  // Performance: start perfect, deduct for everything the GPU has to chew on.
+  let performance = 100;
+  if (polyCount !== null) {
+    if (polyCount > OPT.polyCount.heavy) performance -= 30;
+    else if (polyCount > OPT.polyCount.high) performance -= 15;
+    else if (polyCount > OPT.polyCount.moderate) performance -= 5;
+  }
+  if (this.hasRig) performance -= 10;
+  if (this.hasMorphTargets) performance -= 15;
+  if (complexity > OPT.complexity.high) performance -= 20;
+  else if (complexity > OPT.complexity.moderate) performance -= 10;
+
+  // Quality: rig and morph targets buy expressiveness; too few polys cost it.
+  let quality = 70;
+  if (this.hasMorphTargets) quality += 20;
+  if (this.hasRig) quality += 10;
+  if (polyCount !== null) {
+    if (polyCount < OPT.polyCount.minimal) quality -= 20;
+    else if (polyCount < OPT.polyCount.thin) quality -= 10;
+  }
+
+  // Compression: how much size there is left to win, not how good it is now.
+  let compression = 50;
+  if (this.format === 'glb') compression += 20;
+  else if (this.format === 'gltf') compression += 10;
+  if (polyCount !== null) {
+    if (polyCount > OPT.compressible.large) compression += 20;
+    else if (polyCount > OPT.compressible.medium) compression += 10;
+  }
+  if (complexity > 8) compression += 15;
+  else if (complexity > 4) compression += 5;
+
+  const clamp = (n) => Math.max(0, Math.min(100, n));
+  performance = clamp(performance);
+  quality = clamp(quality);
+  compression = clamp(compression);
+
+  if (polyCount === null) {
+    recommendations.push({
+      type: 'performance',
+      priority: 'low',
+      message: 'polyCount is not recorded, so poly-based scoring was skipped.',
+      action: 'Record polyCount when the model is imported or baked'
+    });
+  } else if (polyCount > OPT.polyCount.heavy) {
+    recommendations.push({
+      type: 'performance',
+      priority: 'high',
+      message: 'High polygon count detected. Consider decimation to improve performance.',
+      action: `Reduce polyCount to under ${OPT.polyCount.heavy.toLocaleString('en-US')} for better frame rates`
+    });
+  }
+
+  if (!this.hasRig && Array.isArray(this.customizations?.accessories) && this.customizations.accessories.length > 0) {
+    recommendations.push({
+      type: 'quality',
+      priority: 'medium',
+      message: 'Accessories detected without rig. Consider adding skeletal structure for better animation.',
+      action: 'Add rig to support accessory animations'
+    });
+  }
+
+  if (this.hasMorphTargets && !this.hasRig) {
+    recommendations.push({
+      type: 'quality',
+      priority: 'medium',
+      message: 'Morph targets detected without rig. Combining both can significantly enhance expressiveness.',
+      action: 'Consider adding a skeletal rig to complement morph targets'
+    });
+  }
+
+  if (this.format !== 'glb' && ((polyCount !== null && polyCount > 20000) || complexity > OPT.complexity.moderate)) {
+    recommendations.push({
+      type: 'compression',
+      priority: 'high',
+      message: 'Model could benefit from GLB format compression.',
+      action: 'Convert to GLB format for better compression and faster loading'
+    });
+  }
+
+  if (complexity > OPT.complexity.high) {
+    recommendations.push({
+      type: 'performance',
+      priority: 'high',
+      message: 'High customization complexity detected.',
+      action: 'Simplify customizations or optimize individual components'
+    });
+  }
+
+  return {
+    performance,
+    quality,
+    compression,
+    overall: Math.round((performance + quality + compression) / 3),
+    lastAnalyzed: new Date(),
+    recommendations
+  };
+};
+
+/**
+ * Run the optimization analysis and persist the scores on this document.
+ * Mirrors `saveVersion()`: the method that mutates is the method that saves.
+ * @returns {Promise<Object>} The analysis, including recommendations (which are not persisted)
+ */
+AvatarSchema.methods.updateOptimizationScores = async function () {
+  const analysis = this.analyzeOptimizationOpportunities();
+
+  this.optimizationScores = {
+    performance: analysis.performance,
+    quality: analysis.quality,
+    compression: analysis.compression,
+    overall: analysis.overall,
+    lastAnalyzed: analysis.lastAnalyzed
+  };
+
+  await this.save();
+  logger.info(`Completed optimization analysis for avatar ${this.avatarId} (overall ${analysis.overall})`);
+
+  return analysis;
 };
 
 AvatarSchema.statics.getByOwner = function (owner) {

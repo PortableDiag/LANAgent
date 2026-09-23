@@ -286,6 +286,122 @@ export function extractMetadata(text) {
   };
 }
 
+/**
+ * Analyze the structure of a Markdown document and return a hierarchical outline
+ * @param {string} markdownText - The Markdown text to analyze
+ * @returns {Object} - Document structure with headers, code blocks, lists, and blockquotes
+ */
+export function analyzeDocumentStructure(markdownText) {
+  if (typeof markdownText !== 'string') {
+    throw new TypeError('markdownText must be a string');
+  }
+
+  const lines = markdownText.split(/\r?\n/);
+  const structure = {
+    headers: [],
+    codeBlocks: [],
+    lists: [],
+    blockquotes: [],
+    summary: {
+      headerCount: 0,
+      codeBlockCount: 0,
+      listCount: 0,
+      blockquoteCount: 0
+    }
+  };
+
+  let inCodeBlock = false;
+  let currentCodeBlockStart = -1;
+  let currentLanguage = '';
+  
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const trimmedLine = line.trim();
+
+    // Check for code blocks
+    if (/^```/.test(trimmedLine)) {
+      if (!inCodeBlock) {
+        inCodeBlock = true;
+        currentCodeBlockStart = i;
+        currentLanguage = trimmedLine.slice(3).trim();
+      } else {
+        inCodeBlock = false;
+        structure.codeBlocks.push({
+          startLine: currentCodeBlockStart,
+          endLine: i,
+          language: currentLanguage,
+          content: lines.slice(currentCodeBlockStart + 1, i).join('\n')
+        });
+        structure.summary.codeBlockCount++;
+        currentCodeBlockStart = -1;
+        currentLanguage = '';
+      }
+      continue;
+    }
+
+    // Skip content inside code blocks
+    if (inCodeBlock) {
+      continue;
+    }
+
+    // Check for headers
+    const headerMatch = line.match(/^(#{1,6})\s+(.+)$/);
+    if (headerMatch) {
+      const level = headerMatch[1].length;
+      const text = headerMatch[2].trim();
+      structure.headers.push({
+        level,
+        text,
+        line: i
+      });
+      structure.summary.headerCount++;
+      continue;
+    }
+
+    // Check for blockquotes
+    if (/^>\s*/.test(line)) {
+      // Check if this continues a previous blockquote or starts a new one
+      const lastBlockquote = structure.blockquotes[structure.blockquotes.length - 1];
+      if (lastBlockquote && lastBlockquote.endLine === i - 1) {
+        // Extend the existing blockquote
+        lastBlockquote.endLine = i;
+        lastBlockquote.lines.push(line);
+      } else {
+        // Start a new blockquote
+        structure.blockquotes.push({
+          startLine: i,
+          endLine: i,
+          lines: [line]
+        });
+        structure.summary.blockquoteCount++;
+      }
+      continue;
+    }
+
+    // Check for lists (unordered and ordered)
+    if (/^(\s*[-*+]\s+|\s*\d+\.\s+)/.test(line)) {
+      // Check if this continues a previous list or starts a new one
+      const lastList = structure.lists[structure.lists.length - 1];
+      if (lastList && lastList.endLine === i - 1) {
+        // Extend the existing list
+        lastList.endLine = i;
+        lastList.items.push(line.trim());
+      } else {
+        // Start a new list
+        structure.lists.push({
+          startLine: i,
+          endLine: i,
+          items: [line.trim()]
+        });
+        structure.summary.listCount++;
+      }
+      continue;
+    }
+  }
+
+  return structure;
+}
+
 export default {
   escapeMarkdown,
   escapeMarkdownLite,
@@ -296,5 +412,6 @@ export default {
   hasFrontmatter,
   stripFrontmatter,
   parseFrontmatter,
-  extractMetadata
+  extractMetadata,
+  analyzeDocumentStructure
 };

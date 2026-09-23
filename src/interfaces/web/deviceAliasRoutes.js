@@ -262,4 +262,142 @@ router.post('/bulk', async (req, res) => {
   }
 });
 
+/**
+ * Largest page of aliases the popularity endpoint will return per plugin.
+ * Bounded so a caller cannot ask Mongo to materialise an unbounded array.
+ */
+export const MAX_POPULAR_LIMIT = 100;
+
+/** Supported `timeframe` values, mapped to a lookback in milliseconds. */
+const TIMEFRAME_MS = {
+  hour: 60 * 60 * 1000,
+  day: 24 * 60 * 60 * 1000,
+  week: 7 * 24 * 60 * 60 * 1000,
+  month: 30 * 24 * 60 * 60 * 1000
+};
+
+/**
+ * Raised for caller error so the route can answer 400 rather than 500.
+ */
+class PopularAliasesInputError extends Error {}
+
+/**
+ * Build the aggregation pipeline behind GET /analytics/popular.
+ *
+ * Ranking is done with a `$sort` stage BEFORE `$group` rather than `$sortArray`
+ * inside `$project`: `$push` preserves input order, so this yields the same
+ * top-N-per-group while still running on MongoDB below 5.2, where `$sortArray`
+ * does not exist and the whole aggregation would fail.
+ *
+ * Grouping is by `plugin` only. DeviceAlias has no `deviceType` path, so a
+ * second grouping key on it would be null for every document — a dimension that
+ * looks like analysis but can never separate anything.
+ *
+ * @param {Object} [opts]
+ * @param {number|string} [opts.limit=10] - Aliases returned per plugin, 1..MAX_POPULAR_LIMIT.
+ * @param {string} [opts.timeframe] - One of hour|day|week|month; restricts to aliases used since.
+ * @param {string} [opts.plugin] - Restrict to a single plugin.
+ * @param {Date} [opts.now=new Date()] - Injectable clock, so the window is testable.
+ * @returns {Array<Object>} Aggregation pipeline stages.
+ * @throws {PopularAliasesInputError} On an out-of-range limit or unknown timeframe.
+ */
+export function buildPopularAliasesPipeline({ limit = 10, timeframe, plugin, now = new Date() } = {}) {
+  // parseInt('abc') is NaN, and a NaN reaching $slice makes Mongo throw — which
+  // would surface as a 500 for what is really a bad query string.
+  const limitNum = Number(limit);
+  if (!Number.isInteger(limitNum) || limitNum < 1 || limitNum > MAX_POPULAR_LIMIT) {
+    throw new PopularAliasesInputError(
+      `limit must be an integer between 1 and ${MAX_POPULAR_LIMIT}`
+    );
+  }
+
+  const matchCriteria = {};
+  if (plugin) matchCriteria.plugin = plugin;
+
+  if (timeframe !== undefined && timeframe !== '') {
+    const windowMs = TIMEFRAME_MS[String(timeframe).toLowerCase()];
+    if (!windowMs) {
+      throw new PopularAliasesInputError(
+        `timeframe must be one of: ${Object.keys(TIMEFRAME_MS).join(', ')}`
+      );
+    }
+    // lastUsed defaults to null for aliases that have never been resolved, and
+    // null fails $gte — so an unused alias is correctly absent from a windowed
+    // "popular" list rather than appearing with a zero count.
+    matchCriteria.lastUsed = { $gte: new Date(now.getTime() - windowMs) };
+  }
+
+  return [
+    { $match: matchCriteria },
+    // alias is the tiebreaker so equal usage counts rank deterministically
+    // instead of shifting between calls.
+    { $sort: { usageCount: -1, alias: 1 } },
+    {
+      $group: {
+        _id: '$plugin',
+        aliasCount: { $sum: 1 },
+        totalUsage: { $sum: { $ifNull: ['$usageCount', 0] } },
+        aliases: {
+          $push: {
+            alias: '$alias',
+            deviceName: '$deviceName',
+            usageCount: { $ifNull: ['$usageCount', 0] },
+            lastUsed: '$lastUsed'
+          }
+        }
+      }
+    },
+    {
+      $project: {
+        _id: 0,
+        plugin: '$_id',
+        aliasCount: 1,
+        totalUsage: 1,
+        aliases: { $slice: ['$aliases', limitNum] }
+      }
+    },
+    { $sort: { plugin: 1 } }
+  ];
+}
+
+/**
+ * GET /analytics/popular — aliases ranked by usageCount, grouped by plugin.
+ *
+ * Deliberately not served from the module cache: a five-minute-stale copy of a
+ * usage ranking is indistinguishable from a fresh one to the caller, and the
+ * write paths that bump usageCount do not invalidate that cache.
+ */
+export async function popularAliasesHandler(req, res) {
+  let pipeline;
+  try {
+    pipeline = buildPopularAliasesPipeline(req.query || {});
+  } catch (error) {
+    if (error instanceof PopularAliasesInputError) {
+      return res.status(400).json({ success: false, error: error.message });
+    }
+    throw error;
+  }
+
+  try {
+    const results = await retryOperation(
+      () => DeviceAlias.aggregate(pipeline).exec(),
+      { retries: 3 }
+    );
+
+    res.json({
+      success: true,
+      data: results
+    });
+  } catch (error) {
+    logger.error('Failed to get popular aliases:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to get popular aliases',
+      message: error.message
+    });
+  }
+}
+
+router.get('/analytics/popular', popularAliasesHandler);
+
 export default router;

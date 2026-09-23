@@ -96,14 +96,17 @@ export class TimeIndicators {
     // Is market hours (9:30am-4pm ET, Mon-Fri) - DST aware
     this.register('is_us_market_hours', async () => {
       const now = new Date();
-      const day = now.getUTCDay();
-      if (day === 0 || day === 6) return false;
 
-      // Use Intl to get actual Eastern Time hour/minute
+      // Read weekday AND time from the same Eastern-Time rendering. Taking the day
+      // from getUTCDay() while measuring ET minutes mixes two clocks; it happens not
+      // to diverge inside 9:30-16:00 ET, which is why it has never shown up.
       const etParts = new Intl.DateTimeFormat('en-US', {
         timeZone: 'America/New_York',
-        hour: 'numeric', minute: 'numeric', hour12: false
+        weekday: 'short', hour: 'numeric', minute: 'numeric', hour12: false
       }).formatToParts(now);
+      const etWeekday = etParts.find(p => p.type === 'weekday')?.value;
+      if (etWeekday === 'Sat' || etWeekday === 'Sun') return false;
+
       const etHour = parseInt(etParts.find(p => p.type === 'hour')?.value || '0');
       const etMinute = parseInt(etParts.find(p => p.type === 'minute')?.value || '0');
       const etTime = etHour * 60 + etMinute; // minutes since midnight ET

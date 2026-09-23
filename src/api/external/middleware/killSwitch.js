@@ -14,6 +14,47 @@ let previousKillSwitchState = {
   scheduledActive: false
 };
 
+// Rolling, in-memory audit trail of kill-switch state changes. Process-local
+// by design: it is an operator debugging aid, not a durable log (persistent
+// request auditing already lives in ExternalAuditLog).
+const MAX_TIMELINE_EVENTS = 1000;
+let killSwitchTimeline = [];
+
+/**
+ * Record a kill-switch event on the timeline.
+ *
+ * BLOCKED arrives once per rejected request, which during an outage is every
+ * customer call. Those are coalesced into a single rolling entry so request
+ * volume cannot evict the state-change history the timeline exists to hold,
+ * the per-request cost stays O(1), and the log does not get one line per
+ * rejected request.
+ *
+ * @param {string} action - ACTIVATED | DEACTIVATED | SCHEDULE_SET | BLOCKED
+ * @param {string} [details] - Request path for BLOCKED, context otherwise
+ */
+function logKillSwitchEvent(action, details = '') {
+  const now = new Date().toISOString();
+
+  if (action === 'BLOCKED') {
+    const head = killSwitchTimeline[0];
+    if (head && head.action === 'BLOCKED') {
+      head.count += 1;
+      head.lastTimestamp = now;
+      head.details = details;
+      return;
+    }
+    killSwitchTimeline.unshift({ timestamp: now, lastTimestamp: now, action, details, count: 1 });
+  } else {
+    killSwitchTimeline.unshift({ timestamp: now, action, details });
+  }
+
+  if (killSwitchTimeline.length > MAX_TIMELINE_EVENTS) {
+    killSwitchTimeline.length = MAX_TIMELINE_EVENTS;
+  }
+
+  logger.info(`Kill switch event: ${safeJsonStringify(killSwitchTimeline[0])}`);
+}
+
 async function refreshKillSwitch() {
   try {
     const value = await PluginSettings.getCached('external-gateway', 'kill_switch', 30);
@@ -208,6 +249,39 @@ export async function getKillSwitchStatus() {
   };
 }
 
+/**
+ * Kill-switch state-change history, newest first. Consecutive BLOCKED requests
+ * are collapsed into one entry carrying `count` and `lastTimestamp`.
+ *
+ * @param {Object} [options]
+ * @param {number|string} [options.limit=50] - Max entries (1..1000); bad values fall back to 50
+ * @param {string} [options.since=null] - Only entries with activity after this ISO timestamp
+ * @returns {Array<Object>} Copies of the matching entries, newest first
+ */
+export function getKillSwitchTimeline({ limit = 50, since = null } = {}) {
+  const parsed = Number.parseInt(limit, 10);
+  const cappedLimit = Number.isFinite(parsed) && parsed > 0
+    ? Math.min(parsed, MAX_TIMELINE_EVENTS)
+    : 50;
+
+  let events = killSwitchTimeline;
+
+  if (since) {
+    const sinceTime = new Date(since).getTime();
+    if (Number.isFinite(sinceTime)) {
+      // Compare against lastTimestamp so a still-accumulating BLOCKED entry
+      // stays visible to a poller that already saw its first occurrence.
+      events = events.filter((event) => {
+        const seen = new Date(event.lastTimestamp || event.timestamp).getTime();
+        return Number.isFinite(seen) && seen > sinceTime;
+      });
+    }
+  }
+
+  // Copy: coalesced entries are mutated in place by later blocked requests.
+  return events.slice(0, cappedLimit).map((event) => ({ ...event }));
+}
+
 export async function killSwitchMiddleware(req, res, next) {
   // Admin routes bypass kill switch (needed to toggle it off)
   if (req.path.startsWith('/admin')) {
@@ -231,18 +305,4 @@ export async function killSwitchMiddleware(req, res, next) {
   }
 
   next();
-}
-
-/**
- * Logs detailed metrics about kill switch activations and deactivations.
- * @param {string} action - The action performed (e.g., 'ACTIVATED', 'DEACTIVATED', 'BLOCKED').
- * @param {string} [path] - The request path if applicable.
- */
-function logKillSwitchEvent(action, path = '') {
-  const eventDetails = {
-    timestamp: new Date().toISOString(),
-    action,
-    path
-  };
-  logger.info(`Kill switch event: ${safeJsonStringify(eventDetails)}`);
 }

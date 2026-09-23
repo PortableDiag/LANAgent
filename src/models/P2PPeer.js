@@ -222,37 +222,124 @@ p2pPeerSchema.statics.resetOnlineStatus = async function() {
  * - Activity (transfer count): up to +10 (caps at 50 transfers)
  */
 p2pPeerSchema.methods.calculateTrustScore = function() {
-  let score = 0;
+  // Single source of truth for the weights lives in getTrustScoreBreakdown(); this
+  // method only persists its total so the two can never drift apart.
+  this.trustScore = this.getTrustScoreBreakdown().total;
+  return this.trustScore;
+};
+
+/**
+ * Get detailed breakdown of trust score components (0-100 total).
+ * The weights here ARE the trust-score formula — calculateTrustScore() persists
+ * this breakdown's total. Change a weight here and nowhere else.
+ */
+p2pPeerSchema.methods.getTrustScoreBreakdown = function() {
+  const breakdown = {
+    manualTrust: 0,
+    erc8004Verification: 0,
+    tokenBalances: {
+      skynet: 0,
+      sentinel: 0
+    },
+    longevity: 0,
+    activity: 0,
+    total: 0
+  };
 
   // Manual trust: 30 points
-  if (this.trustLevel === 'trusted') score += 30;
+  if (this.trustLevel === 'trusted') {
+    breakdown.manualTrust = 30;
+  }
 
   // ERC-8004 identity: 20 points
-  if (this.erc8004?.verified) score += 20;
+  if (this.erc8004?.verified) {
+    breakdown.erc8004Verification = 20;
+  }
 
   // SKYNET balance: up to 20 points (log scale)
   if (this.skynetBalance > 0) {
-    // log10(balance) / log10(1_000_000) * 20, capped at 20
     const balanceScore = Math.min(20, (Math.log10(Math.max(1, this.skynetBalance)) / 6) * 20);
-    score += Math.round(balanceScore);
+    breakdown.tokenBalances.skynet = Math.round(balanceScore);
   }
 
   // Sentinel tokens: up to 15 points (+5 per verified token, caps at 3 tokens)
   if (this.sentinelBalance > 0 && this.sentinelBalanceVerified) {
-    score += Math.min(15, this.sentinelBalance * 5);
+    breakdown.tokenBalances.sentinel = Math.min(15, this.sentinelBalance * 5);
   }
 
   // Longevity: up to 10 points (linear, caps at 30 days)
   if (this.firstSeen) {
     const daysSinceFirst = (Date.now() - new Date(this.firstSeen).getTime()) / (1000 * 60 * 60 * 24);
-    score += Math.min(10, Math.round((daysSinceFirst / 30) * 10));
+    breakdown.longevity = Math.min(10, Math.round((daysSinceFirst / 30) * 10));
   }
 
   // Activity: up to 10 points (linear, caps at 50 transfers)
-  score += Math.min(10, Math.round((this.transferCount / 50) * 10));
+  breakdown.activity = Math.min(10, Math.round((this.transferCount / 50) * 10));
 
-  this.trustScore = Math.min(100, score);
-  return this.trustScore;
+  // Calculate total
+  breakdown.total = Math.min(100, 
+    breakdown.manualTrust +
+    breakdown.erc8004Verification +
+    breakdown.tokenBalances.skynet +
+    breakdown.tokenBalances.sentinel +
+    breakdown.longevity +
+    breakdown.activity
+  );
+
+  return breakdown;
+};
+
+/**
+ * Get comprehensive reputation report for a peer
+ */
+p2pPeerSchema.statics.getPeerReputationReport = async function(peerId) {
+  const peer = await this.findById(peerId);
+  if (!peer) {
+    throw new Error(`Peer with ID ${peerId} not found`);
+  }
+
+  // Get trust score breakdown
+  const trustBreakdown = peer.getTrustScoreBreakdown();
+  
+  // Calculate connection stability metrics
+  const stabilityMetrics = peer.calculateConnectionStability();
+  
+  // Compile reputation report
+  const report = {
+    peerId: peer._id,
+    fingerprint: peer.fingerprint,
+    displayName: peer.displayName,
+    trustLevel: peer.trustLevel,
+    trustScore: peer.trustScore,
+    trustScoreBreakdown: trustBreakdown,
+    connectionStability: stabilityMetrics,
+    erc8004Verification: peer.erc8004,
+    tokenBalances: {
+      skynet: {
+        balance: peer.skynetBalance,
+        verified: peer.skynetBalanceVerified,
+        verifiedAt: peer.skynetBalanceVerifiedAt
+      },
+      sentinel: {
+        balance: peer.sentinelBalance,
+        verified: peer.sentinelBalanceVerified
+      }
+    },
+    activityMetrics: {
+      transferCount: peer.transferCount,
+      sessionCount: peer.sessionCount,
+      reconnectionCount: peer.reconnectionCount,
+      totalConnectionSeconds: peer.totalConnectionSeconds
+    },
+    timestamps: {
+      firstSeen: peer.firstSeen,
+      lastSeen: peer.lastSeen,
+      createdAt: peer.createdAt,
+      updatedAt: peer.updatedAt
+    }
+  };
+
+  return report;
 };
 
 /**

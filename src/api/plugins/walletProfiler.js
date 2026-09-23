@@ -3,6 +3,7 @@ import axios from 'axios';
 import NodeCache from 'node-cache';
 import { PluginSettings } from '../../models/PluginSettings.js';
 import { decrypt } from '../../utils/encryption.js';
+import { isTransientRpcError as isTransientRpcErrorShared } from '../../utils/rpcErrorClassifier.js';
 
 // Etherscan V2 unified API — single key works for all chains via chainid param.
 // V1 hosts (api.bscscan.com etc.) are deprecated and return NOTOK.
@@ -56,16 +57,9 @@ const NETWORK_CONFIG = {
 
 // Treat a wider set of errors as "try next RPC", since public endpoints surface
 // rate limits as 429, 403, generic 5xx, or even socket-level resets.
-function isTransientRpcError(err) {
-    const msg = (err?.message || '').toLowerCase();
-    const code = err?.code;
-    if (code === 'NETWORK_ERROR' || code === 'TIMEOUT' || code === 'SERVER_ERROR') return true;
-    if (msg.includes('429') || msg.includes('rate limit') || msg.includes('too many')) return true;
-    if (msg.includes('403') || msg.includes('forbidden')) return true;
-    if (msg.includes('etimedout') || msg.includes('econnreset') || msg.includes('econnrefused')) return true;
-    if (msg.includes('502') || msg.includes('503') || msg.includes('504')) return true;
-    return false;
-}
+// Shared, hex-safe implementation: matching '429'/'502' as bare substrings also
+// matched the digits inside a wallet or token address.
+const isTransientRpcError = isTransientRpcErrorShared;
 
 export default class WalletProfilerPlugin extends BasePlugin {
     constructor(agent) {

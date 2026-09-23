@@ -224,10 +224,10 @@ router.get('/balance', creditAuth(true), async (req, res) => {
     if (!account) {
       return res.json({
         success: true,
-        credits: [redacted],
-        totalPurchased: [redacted],
-        totalSpent: [redacted],
-        totalRefunded: [redacted]
+        credits: 0,
+        totalPurchased: 0,
+        totalSpent: 0,
+        totalRefunded: 0
       });
     }
 
@@ -260,9 +260,9 @@ router.get('/analytics', creditAuth(true), async (req, res) => {
         analytics: {
           wallet: req.wallet,
           currentBalance: 0,
-          totalPurchased: [redacted],
-          totalSpent: [redacted],
-          totalRefunded: [redacted],
+          totalPurchased: 0,
+          totalSpent: 0,
+          totalRefunded: 0,
           creditUtilizationRatio: 0,
           remainingCreditsPercentage: 0,
           refundRatio: 0,

@@ -1,4 +1,5 @@
 import express from 'express';
+import { ethers } from 'ethers';
 import compression from 'compression';
 import { authenticateToken } from '../interfaces/web/auth.js';
 import scammerRegistryService from '../services/crypto/scammerRegistryService.js';
@@ -32,6 +33,54 @@ router.use(async (req, res, next) => {
     next();
 });
 
+const MAX_BATCH_SCREEN = 50;
+
+/**
+ * Screen one address against the registry.
+ *
+ * Single source of truth for /check/:address and /batch-screen — both used to
+ * carry their own copy of the isScammer + getReport pair.
+ *
+ * Results are memoised in the module cache (flushed by every write route), so
+ * a batch containing repeats, or a repeat of a recent batch, does not re-issue
+ * the on-chain reads.
+ *
+ * @param {string} address
+ * @returns {Promise<{address: string, flagged: boolean, riskLevel: string, report?: object}>}
+ */
+async function screenAddress(address) {
+    if (typeof address !== 'string' || !ethers.isAddress(address)) {
+        const err = new Error(`Invalid address: ${address}`);
+        err.statusCode = 400;
+        throw err;
+    }
+
+    const key = `screen_${address.toLowerCase()}`;
+    const cached = cache.get(key);
+    if (cached) return cached;
+
+    const flagged = await scammerRegistryService.isScammer(address);
+    let result;
+
+    if (flagged) {
+        const report = await scammerRegistryService.getReport(address);
+        result = {
+            address,
+            flagged: true,
+            // An inactive (revoked) report is a flag the chain no longer stands behind.
+            riskLevel: report?.active === false ? 'cleared' : 'high',
+            category: report?.category ?? null,
+            categoryName: report?.categoryName ?? 'Unknown',
+            report
+        };
+    } else {
+        result = { address, flagged: false, riskLevel: 'low', category: null, categoryName: null };
+    }
+
+    cache.set(key, result);
+    return result;
+}
+
 // GET /api/scammer-registry/stats
 router.get('/stats', async (req, res) => {
     try {
@@ -50,14 +99,12 @@ router.get('/stats', async (req, res) => {
 // GET /api/scammer-registry/check/:address
 router.get('/check/:address', async (req, res) => {
     try {
-        const { address } = req.params;
-        const flagged = await scammerRegistryService.isScammer(address);
-        const result = { address, flagged };
-        if (flagged) {
-            result.report = await scammerRegistryService.getReport(address);
-        }
+        const result = await screenAddress(req.params.address);
         res.json({ success: true, data: result });
     } catch (error) {
+        if (error.statusCode === 400) {
+            return res.status(400).json({ success: false, error: error.message });
+        }
         logger.error('Failed to check address:', error);
         res.status(500).json({ success: false, error: error.message });
     }
@@ -66,6 +113,11 @@ router.get('/check/:address', async (req, res) => {
 // GET /api/scammer-registry/immunity/:address
 router.get('/immunity/:address', async (req, res) => {
     try {
+        // Validate before any on-chain read — an unchecked string reaches a contract
+        // call, and a typo used to come back as a clean answer rather than an error.
+        if (!ethers.isAddress(req.params.address)) {
+            return res.status(400).json({ success: false, error: 'Invalid address' });
+        }
         const immune = await scammerRegistryService.checkImmunity(req.params.address);
         res.json({ success: true, data: { address: req.params.address, immune } });
     } catch (error) {
@@ -178,6 +230,9 @@ router.post('/set-immunity-threshold', async (req, res) => {
 router.get('/report-history/:address', async (req, res) => {
     try {
         const { address } = req.params;
+        if (!ethers.isAddress(address)) {
+            return res.status(400).json({ success: false, error: 'Invalid address' });
+        }
         const reportHistory = await scammerRegistryService.getReportHistory(address);
         res.json({ success: true, data: reportHistory });
     } catch (error) {
@@ -186,4 +241,79 @@ router.get('/report-history/:address', async (req, res) => {
     }
 });
 
+/**
+ * POST /api/scammer-registry/batch-screen
+ *
+ * Screen up to MAX_BATCH_SCREEN addresses in one call. Addresses are validated
+ * up front and the whole batch is rejected if any entry is malformed, so a typo
+ * cannot silently produce a "not flagged" verdict for an address that was never
+ * actually looked up.
+ *
+ * Body: { addresses: string[] }
+ */
+router.post('/batch-screen', async (req, res) => {
+    try {
+        const { addresses } = req.body;
+
+        if (!Array.isArray(addresses) || addresses.length === 0) {
+            return res.status(400).json({
+                success: false,
+                error: 'Addresses array required with at least one address'
+            });
+        }
+
+        if (addresses.length > MAX_BATCH_SCREEN) {
+            return res.status(400).json({
+                success: false,
+                error: `Maximum ${MAX_BATCH_SCREEN} addresses allowed per batch`
+            });
+        }
+
+        const invalid = addresses.filter(a => typeof a !== 'string' || !ethers.isAddress(a));
+        if (invalid.length > 0) {
+            return res.status(400).json({
+                success: false,
+                error: `Invalid address(es): ${invalid.slice(0, 5).join(', ')}${invalid.length > 5 ? ` (+${invalid.length - 5} more)` : ''}`
+            });
+        }
+
+        const results = [];
+        let failed = 0;
+
+        // Bounded concurrency: the reads go on-chain, so do not fan out the
+        // whole batch at once.
+        const chunkSize = 10;
+        for (let i = 0; i < addresses.length; i += chunkSize) {
+            const chunk = addresses.slice(i, i + chunkSize);
+            const chunkResults = await Promise.all(chunk.map(async (address) => {
+                try {
+                    return await screenAddress(address);
+                } catch (err) {
+                    logger.error(`Error screening address ${address}:`, err);
+                    failed++;
+                    // 'unknown' is NOT a clean bill of health — the caller must
+                    // be able to tell a miss from a real "not flagged".
+                    return { address, flagged: null, riskLevel: 'unknown', error: err.message };
+                }
+            }));
+            results.push(...chunkResults);
+        }
+
+        res.json({
+            success: true,
+            data: {
+                total: addresses.length,
+                screened: results.length - failed,
+                failed,
+                flagged: results.filter(r => r.flagged === true).length,
+                results
+            }
+        });
+    } catch (error) {
+        logger.error('Failed to batch screen addresses:', error);
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+export { screenAddress, MAX_BATCH_SCREEN };
 export default router;

@@ -60,6 +60,20 @@ class CircuitBreaker {
   }
 
   /**
+   * Get current circuit breaker state
+   * @returns {Object} Current circuit breaker state information
+   */
+  getState() {
+    return {
+      state: this.state,
+      failureCount: this.failureCount,
+      failureThreshold: this.failureThreshold,
+      recoveryTimeout: this.recoveryTimeout,
+      lastFailureTime: this.lastFailureTime
+    };
+  }
+
+  /**
    * Dynamically adjust circuit breaker parameters based on historical data
    * @param {string} operationName - Unique name of the operation
    */
@@ -114,6 +128,58 @@ function calculateDynamicRetryParams(operationName) {
 }
 
 /**
+ * Worst-case wall clock for a `retryOperation` call whose every attempt is bounded.
+ *
+ * A caller that races `retryOperation` against its own deadline must compare against
+ * THIS figure, not against one attempt's budget. `retryOperation` runs up to
+ * `retries + 1` attempts with exponential backoff between them, so a wrapper sized
+ * for a single attempt aborts partway through attempt two — the caller-below-callee
+ * timeout bug, one layer up from where it is usually looked for.
+ *
+ * Resolution mirrors retryOperation exactly (explicit option, then the dynamic
+ * per-operation tuning, then the default), so the estimate tracks what the loop will
+ * really do rather than what its defaults say.
+ *
+ * @param {Object} params
+ * @param {number} params.perAttemptMs - Bound on ONE attempt, e.g. a provider's own budget.
+ * @param {string} [params.context] - The same `context` the retryOperation call uses;
+ *   dynamic tuning is keyed on it, so a mismatch estimates the wrong loop.
+ * @returns {number|null} Worst-case total ms, or null when one attempt is unbounded.
+ */
+export function estimateRetryWallClockMs({
+  perAttemptMs,
+  context = 'Operation',
+  retries,
+  factor,
+  minTimeout,
+  maxTimeout
+} = {}) {
+  const perAttempt = Number(perAttemptMs);
+  // An unbounded attempt has no finite total: say so rather than returning a
+  // confident number a caller would then size a watchdog against.
+  if (!Number.isFinite(perAttempt) || perAttempt <= 0) return null;
+
+  const dynamic = calculateDynamicRetryParams(context);
+  const finalRetries = retries ?? dynamic.retries ?? 3;
+  const finalFactor = factor ?? dynamic.factor ?? 2;
+  const finalMinTimeout = minTimeout ?? dynamic.minTimeout ?? 1000;
+  const finalMaxTimeout = maxTimeout ?? dynamic.maxTimeout ?? 4000;
+
+  const attempts = finalRetries + 1;
+  let total = perAttempt * attempts;
+
+  // Backoff is applied AFTER a failed attempt and only between attempts, so there
+  // are `finalRetries` sleeps, not `attempts` of them.
+  let delay = finalMinTimeout;
+  for (let i = 0; i < finalRetries; i++) {
+    delay = Math.min(delay * finalFactor, finalMaxTimeout);
+    total += delay;
+  }
+
+  return total;
+}
+
+/**
  * Update historical data for retry adjustments
  * @param {string} operationName - Unique name of the operation
  * @param {boolean} success - Whether the operation was successful
@@ -126,6 +192,47 @@ function updateRetryHistory(operationName, success) {
     history.failureCount += 1;
   }
   retryHistoryCache.set(operationName, history);
+}
+
+/**
+ * Get retry policy information for an operation
+ * @param {string} operationName - Unique name of the operation
+ * @returns {Object} Retry policy information including parameters, circuit breaker state, and statistics
+ */
+export function getRetryPolicyInfo(operationName) {
+  // `history` and `dynamicParams` are genuine per-operation measurements:
+  // updateRetryHistory() writes this cache keyed by `context` on every settled attempt.
+  const tracked = retryHistoryCache.get(operationName);
+  const history = tracked || { successCount: 0, failureCount: 0 };
+  const dynamicParams = calculateDynamicRetryParams(operationName);
+
+  const attempts = (history.successCount || 0) + (history.failureCount || 0);
+
+  return {
+    operationName,
+    // Distinguish "this operation has never run" from "it ran and never failed".
+    // Both produce zeroes, and for a monitoring endpoint they mean opposite things.
+    tracked: Boolean(tracked),
+    history,
+    attempts,
+    successRate: attempts > 0 ? Number(((history.successCount / attempts) * 100).toFixed(1)) : null,
+    // History is a rolling window, not a lifetime total — state the span so a caller
+    // does not read an hour's figures as the operation's whole record.
+    historyWindowSeconds: retryHistoryCache.options.stdTTL,
+    dynamicParams,
+    // Deliberately null, and not a default-constructed breaker's state.
+    //
+    // There is no per-operation circuit breaker to report on: `circuitBreaker` is a
+    // DESTRUCTURED DEFAULT in retryOperation's options, so unless a caller supplies one
+    // a fresh breaker is built for that single call and discarded when it returns. The
+    // original built its own `new CircuitBreaker()` here and reported its state, which
+    // is therefore always CLOSED with a failure count of zero, for every operation,
+    // permanently — including one whose breaker had just tripped. A monitoring API that
+    // always answers "healthy" is worse than one that answers "not measured".
+    circuitBreakerState: null,
+    circuitBreakerNote: 'Not tracked per operation: retryOperation defaults to a per-call '
+      + 'breaker, so no cross-call state exists to report.'
+  };
 }
 
 /**

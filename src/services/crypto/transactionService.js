@@ -205,6 +205,86 @@ class TransactionService {
     /**
      * Send native currency (ETH, BNB, MATIC)
      */
+    /**
+     * Transfer an ERC-20 token, awaiting the receipt before reporting success.
+     *
+     * Unlike sendNative, this does NOT return once the transaction is broadcast. The
+     * only caller is the banked-profit sweep, which decrements its own accounting by
+     * whatever this reports as sent — so "submitted" is not good enough. A broadcast
+     * that later reverts would otherwise reduce the recorded balance against money that
+     * never left, and the difference is unrecoverable without an on-chain audit.
+     *
+     * An indeterminate outcome throws rather than returning a partial result: the caller
+     * must be able to treat anything other than an explicit success as "nothing moved"
+     * and retry safely.
+     *
+     * @returns {Promise<{hash: string, confirmed: true, amount: string}>}
+     */
+    async sendToken(tokenAddress, to, amount, network, { decimals = 18 } = {}) {
+        // Same recipient check sendNative performs.
+        try {
+            const scammerRegistry = (await import('./scammerRegistryService.js')).default;
+            if (scammerRegistry.isAddressFlagged(to)) {
+                throw new Error(`Send blocked: recipient ${to} is flagged in scammer registry`);
+            }
+        } catch (e) {
+            if (e.message.startsWith('Send blocked')) throw e;
+        }
+
+        const ethers = await getEthers();
+        if (!ethers.isAddress(to)) {
+            throw new Error(`Send blocked: ${to} is not a valid address`);
+        }
+        if (!ethers.isAddress(tokenAddress)) {
+            throw new Error(`Send blocked: ${tokenAddress} is not a valid token address`);
+        }
+
+        const signer = await this.getWalletSigner(network);
+        if (to.toLowerCase() === signer.address.toLowerCase()) {
+            throw new Error('Send blocked: recipient is the sending wallet itself');
+        }
+
+        const erc20 = new ethers.Contract(
+            tokenAddress,
+            ['function transfer(address to, uint256 amount) returns (bool)',
+             'function balanceOf(address) view returns (uint256)'],
+            signer
+        );
+
+        const units = ethers.parseUnits(String(amount), decimals);
+        const onChain = await erc20.balanceOf(signer.address);
+        if (onChain < units) {
+            throw new Error(
+                `Send blocked: wallet holds ${ethers.formatUnits(onChain, decimals)} but ${amount} was requested`
+            );
+        }
+
+        const tx = await retryOperation(
+            () => erc20.transfer(to, units),
+            { retries: 3, context: 'sendToken transaction' }
+        );
+
+        const receipt = await tx.wait();
+        if (!receipt || receipt.status !== 1) {
+            throw new Error(`Token transfer ${tx.hash} did not confirm successfully`);
+        }
+
+        logger.info(`Token transfer confirmed: ${amount} of ${tokenAddress} to ${to} on ${network} (${tx.hash})`);
+
+        try {
+            await walletService.addTransaction({
+                type: 'sent', chain: network, hash: tx.hash,
+                from: signer.address, to, value: String(amount), status: 'confirmed'
+            });
+        } catch (histErr) {
+            // History is a record, not the transfer. A failed write must not make a
+            // confirmed transfer look like it failed.
+            logger.warn(`Token transfer ${tx.hash} confirmed but history write failed: ${histErr.message}`);
+        }
+
+        return { hash: tx.hash, confirmed: true, amount: String(amount) };
+    }
+
     async sendNative(to, amount, network) {
         try {
             // Check scammer registry — refuse to send to flagged addresses

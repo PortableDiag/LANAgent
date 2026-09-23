@@ -2,6 +2,80 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.328] - 2026-09-23
+
+Sync from upstream development covering 2.25.295–2.25.328. It also brings roughly sixty source
+files that had drifted out of the public release back into step. Two of those previously did
+not load at all in the public build, and both now do.
+
+### Added
+- **OpenRouter provider.** One API key for 400+ models across every upstream vendor. Set
+  `OPENROUTER_API_KEY`, then `POST /api/ai/switch {"provider":"openrouter"}`. Model ids are
+  namespaced (`openai/gpt-4o-mini`), and the catalog is fetched live from OpenRouter's public
+  model list rather than hardcoded. Per-request cost is what OpenRouter actually billed, not an
+  estimate. Prompt caching is pinned to the model vendor so the cache stays warm, and the
+  provider's health check reports its hit rate. OpenRouter serves chat, streaming, web search and
+  vision, but no embeddings, transcription or speech; those stay on other providers.
+- **Web search without a search-capable model.** Plain HTTP search backends are now available,
+  so the agent can search the web under a provider lock that points at a model with no search
+  tool.
+- **Email sender authentication.** Inbound mail is treated as coming from the trusted sender
+  only when the receiving server reports aligned `dmarc=pass` and `dkim=pass`. The `From` header
+  alone is never enough. Configure with `MAIL_AUTHSERV_ID` / `MAIL_TRUSTED_HOST`. AI auto-reply
+  to arbitrary senders is permanently disabled.
+- **Social download format preview** (`POST /social/preview`, external gateway): lists the
+  available formats and sizes for a URL without spending credits.
+- **Cookie-jar validation** (`POST /api/admin/cookies/:host/validate`).
+- **Kill-switch event timeline** (`GET /admin/kill-switch/timeline`) and **per-plugin service
+  analytics** (`GET /api/external/service/analytics`).
+- **Scammer-registry batch screening** (`POST /api/scammer-registry/batch-screen`, up to 50
+  addresses).
+- **Device-alias usage analytics** (`GET /api/device-aliases/analytics/popular`).
+- **Avatar optimization scoring** (`GET /api/avatar/:avatarId/optimization`).
+- **CloudWatch dashboard rendering**, plus new FRED, Kaggle, Unsplash and Trellis-notes plugins
+  and an RF home-presence plugin. Each one loads without its credentials and refuses cleanly
+  until they are configured.
+- **Exit-quality book roll-up** in the exit-analysis model: one expectancy figure across all
+  exits, alongside the per-trigger breakdown.
+
+### Changed
+- **The provider lock controls spend instead of deleting capabilities.** A lock binds a
+  capability only when the locked provider actually offers it. Chat stays hard-locked.
+  Embedding order is now `huggingface, openai, ollama`.
+- **`POST /api/ai/update-model` verifies the write.** It reads the value back and returns 500,
+  naming the cause, if the change did not persist. Previously the endpoint could report success
+  for a change the database silently dropped.
+- **The internal MQTT broker binds to loopback by default.** Set `MQTT_BIND_HOST` to expose it.
+  A non-loopback bind without authentication logs a warning at startup.
+- **Self-update is resilient to instance-local files.** An untracked file that a new release
+  starts tracking used to block every later update silently. It is now moved aside (never
+  deleted), logged, and restored if the update rolls back.
+- **The auto-post commit filter** also rejects market-pair and oracle-feed wording. Symbols
+  specific to an instance come from `AUTOPOST_TRADED_SYMBOLS`.
+- The self-modification pipeline load-tests every changed module before opening a PR, and its
+  generator prompt carries three new anti-patterns drawn from rejected proposals.
+
+### Fixed
+- **Two public modules could not load.** `websearch.js` imported a service that was missing
+  from the release. `models/index.js` imported named exports as defaults.
+- **Cookie expiry was read in the wrong epoch.** Browser jars store microseconds since 1601,
+  so expired cookies read as valid for millennia. `#HttpOnly_` rows are also now counted, not
+  skipped as comments.
+- **An array parameter declared as `object` made four plugin commands reject their own valid
+  input.**
+- **Status codes were matched inside hex addresses**, so a permanent error could be retried as
+  a rate limit. Codes are now matched on a word boundary after stripping hex.
+- **Retries measured a deadline against one attempt** while the layer below was allowed several,
+  and the most common transient failure was the one error that was never retried.
+- **A failed balance read could still render as a confident zero** on one display path.
+- **The registry client's configured connect retries never ran.**
+- **The WireGuard watchdog** now reports outcomes accurately, bounds how often it bounces the
+  tunnel per outage, and logs when an outage ends.
+- A phone-validation vendor error was cached and served as data. Scan-progress ETAs no longer
+  add the whole global backlog. Music-playlist export links now resolve.
+- OpenRouter usage rows no longer fail validation and discard the whole batch, and its
+  "priced at routing time" sentinel is no longer stored as a price.
+
 ## [2.25.294] - 2026-09-06
 
 Targeted sync from upstream development, covering a reviewed batch of self-improvement proposals

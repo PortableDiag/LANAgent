@@ -7,8 +7,14 @@ import { HuggingFaceProvider } from "../providers/huggingface.js";
 import { OllamaProvider } from "../providers/ollama.js";
 import { BitNetProvider } from "../providers/bitnet.js";
 import { UncensoredProvider } from "../providers/uncensored.js";
-import { retryOperation } from '../utils/retryUtils.js';
+import { OpenRouterProvider } from "../providers/openrouter.js";
+import { retryOperation, estimateRetryWallClockMs } from '../utils/retryUtils.js';
 import NodeCache from 'node-cache';
+
+// Attempts allowed for one generation call are `GENERATION_RETRIES + 1`. Named because
+// getGenerationTimeoutMs() has to report a budget covering the whole loop, and a literal
+// repeated in both places is how the two drift apart.
+const GENERATION_RETRIES = 3;
 
 // How long to skip a provider that reported depleted credits before probing it again.
 // Short enough that a mid-cycle top-up is picked up quickly without a restart.
@@ -97,16 +103,36 @@ export class ProviderManager extends EventEmitter {
 
   /**
    * Providers a multi-provider capability (embedding / transcription / TTS) may use.
-   * Locked → only the locked provider, even if it means the capability is unavailable.
+   *
+   * Locked → only the locked provider, so work the locked provider CAN do is never
+   * billed to another one.
+   *
+   * But the lock only has something to say when the locked provider is actually a
+   * candidate. If it is not on the list at all, filtering to it deletes the capability
+   * rather than controlling spend — there was no substitution to prevent, because the
+   * locked provider was never going to serve this. So the lock does not apply and the
+   * normal candidate list stands.
+   *
+   * 2026-09-18: found the hard way. Locking to OpenRouter — which serves no embeddings
+   * endpoint at all — silently killed embeddings agent-wide the moment it became the
+   * active provider: the candidate list is openai/huggingface/ollama, the lock filtered
+   * it to nothing, and every caller logged "No provider available for embedding
+   * generation". It also defeated the standing decision that vector-intent embeddings
+   * run on OpenAI, whenever the lock pointed anywhere else.
    */
-  async allowedProviders(candidates) {
+  async allowedProviders(candidates, capability = 'this capability') {
     if (!(await this.isLocked())) return candidates;
     const lockedTo = this.providerNameOf(this.activeProvider);
-    const allowed = candidates.filter(name => name === lockedTo);
-    if (allowed.length === 0) {
-      logger.warn(`[provider-lock] ${candidates.join('/')} requested but locked to ${lockedTo} — no other provider will be used`);
+
+    if (!candidates.includes(lockedTo)) {
+      logger.info(
+        `[provider-lock] locked to ${lockedTo}, which cannot serve ${capability} — ` +
+        `the lock does not apply here; using ${candidates.join('/')}`
+      );
+      return candidates;
     }
-    return allowed;
+
+    return candidates.filter(name => name === lockedTo);
   }
 
   providerNameOf(provider) {
@@ -231,6 +257,23 @@ export class ProviderManager extends EventEmitter {
       }
     }
 
+    // OpenRouter - one key, 400+ models across every upstream vendor.
+    // Env vars take precedence over saved DB config, matching ollama/bitnet.
+    if (process.env.OPENROUTER_API_KEY && !providerDisabled('openrouter')) {
+      try {
+        const config = {
+          apiKey: process.env.OPENROUTER_API_KEY,
+          ...savedConfigs.openrouter,
+          ...(process.env.OPENROUTER_CHAT_MODEL && { chatModel: process.env.OPENROUTER_CHAT_MODEL }),
+          ...(process.env.OPENROUTER_VISION_MODEL && { visionModel: process.env.OPENROUTER_VISION_MODEL })
+        };
+        const openrouter = new OpenRouterProvider(config);
+        await this.registerProvider("openrouter", openrouter);
+      } catch (error) {
+        logger.warn(`OpenRouter provider not available: ${error.message}`);
+      }
+    }
+
     // Uncensored AI - OpenAI-compatible uncensored LLM
     if (process.env.UNCENSORED_API_KEY && !providerDisabled('uncensored')) {
       try {
@@ -262,7 +305,7 @@ export class ProviderManager extends EventEmitter {
       }
       
       if (!defaultProvider || !this.providers.has(defaultProvider)) {
-        const priorityOrder = ["openai", "anthropic", "gab", "huggingface", "ollama", "bitnet"];
+        const priorityOrder = ["openai", "anthropic", "openrouter", "gab", "huggingface", "ollama", "bitnet"];
         for (const provider of priorityOrder) {
           if (this.providers.has(provider)) {
             defaultProvider = provider;
@@ -426,10 +469,32 @@ export class ProviderManager extends EventEmitter {
    * deadline from this and stay above it: a watchdog below the provider's own
    * budget converts every slow call into a guaranteed failure.
    */
+  /**
+   * Wall-clock budget for one `generateResponse()` call ON THIS MANAGER — the whole
+   * retry loop, not one attempt at it.
+   *
+   * The provider reports what it allows for a single attempt. This method wraps that
+   * call in `retryOperation`, so a caller racing `generateResponse` against its own
+   * deadline and sizing it from the per-attempt figure aborts partway through attempt
+   * two. That is the same caller-below-callee bug the per-attempt budget was
+   * introduced to fix, displaced one layer up: the scanner's watchdog sat 15s above
+   * 90s while the loop beneath it could legitimately run to ~370s.
+   *
+   * Returns null when the provider cannot describe its budget, so the caller falls
+   * back to its own floor rather than to a number invented here.
+   */
   async getGenerationTimeoutMs(options = {}) {
     try {
       const provider = await this.getCurrentProvider();
-      return provider?.getGenerationTimeoutMs?.(options) ?? null;
+      const perAttemptMs = provider?.getGenerationTimeoutMs?.(options) ?? null;
+      if (perAttemptMs === null || perAttemptMs === undefined) return null;
+      // Derived from the SAME option the call will use, so a caller that funds a
+      // different number of attempts is quoted the budget for the loop it will
+      // actually get rather than for the default one.
+      return estimateRetryWallClockMs({
+        perAttemptMs,
+        retries: options.retries ?? GENERATION_RETRIES
+      });
     } catch (error) {
       return null;
     }
@@ -462,7 +527,7 @@ export class ProviderManager extends EventEmitter {
     }
 
     try {
-      return await retryOperation(() => provider.generateResponse(prompt, options), { retries: 3 });
+      return await retryOperation(() => provider.generateResponse(prompt, options), { retries: options.retries ?? GENERATION_RETRIES });
     } catch (error) {
       if (this.isQuotaError(error)) {
         this.markQuotaExhausted(providerName, error);
@@ -500,9 +565,19 @@ export class ProviderManager extends EventEmitter {
   }
 
   async generateEmbedding(text) {
-    const embeddingProviders = ["openai", "huggingface", "ollama"];
+    // HuggingFace FIRST, deliberately. Memory embeddings were benched onto
+    // sentence-transformers/all-MiniLM-L6-v2 on 2026-08-29 and have served every
+    // embedding on this agent since (OpenAI: zero). That decision used to hold only
+    // by accident — the provider lock happened to point at HuggingFace, so the lock
+    // did the ordering. The moment the lock moved to a provider without embeddings,
+    // the accident stopped working and this list would have sent embeddings to
+    // OpenAI at 1536 dimensions instead of 384: new spend, and a THIRD vector table
+    // that strands every row written since the bench (the store is one table per
+    // width — see memory_embeddings_384). Encode the decision here instead.
+    // Changing this order is changing the embedding model; read that note first.
+    const embeddingProviders = ["huggingface", "openai", "ollama"];
     
-    for (const providerName of await this.allowedProviders(embeddingProviders)) {
+    for (const providerName of await this.allowedProviders(embeddingProviders, 'embeddings')) {
       const provider = this.providers.get(providerName);
       if (provider) {
         try {
@@ -520,7 +595,7 @@ export class ProviderManager extends EventEmitter {
   async transcribeAudio(audioBuffer) {
     const audioProviders = ["openai", "huggingface"];
     
-    for (const providerName of await this.allowedProviders(audioProviders)) {
+    for (const providerName of await this.allowedProviders(audioProviders, 'transcription')) {
       const provider = this.providers.get(providerName);
       if (provider) {
         try {
@@ -538,7 +613,7 @@ export class ProviderManager extends EventEmitter {
   async generateSpeech(text, options = {}) {
     const ttsProviders = ["openai", "huggingface"];
     
-    for (const providerName of await this.allowedProviders(ttsProviders)) {
+    for (const providerName of await this.allowedProviders(ttsProviders, 'speech')) {
       const provider = this.providers.get(providerName);
       if (provider) {
         try {
@@ -578,7 +653,7 @@ export class ProviderManager extends EventEmitter {
       if (provider !== this.activeProvider && !this.isCoolingDown(name)) {
         try {
           logger.info(`Trying fallback provider: ${name}`);
-          return await retryOperation(() => provider.generateResponse(prompt, options), { retries: 3 });
+          return await retryOperation(() => provider.generateResponse(prompt, options), { retries: options.retries ?? GENERATION_RETRIES });
         } catch (error) {
           if (this.isQuotaError(error)) {
             this.markQuotaExhausted(name, error);

@@ -271,16 +271,26 @@ class MqttService extends EventEmitter {
         this.bumpError(config.brokerId, 'connection_error');
       });
 
+      // Bind host. Node defaults to 0.0.0.0 when `listen()` is given no host, and
+      // the internal broker is auto-created with `requireAuth: false` — so the old
+      // default published an unauthenticated broker, subscribed to '#', on every
+      // interface. On an unfirewalled host that is a remote write path into the
+      // agent's database. Loopback unless an operator deliberately widens it.
+      const bindHost = settings.bindHost || process.env.MQTT_BIND_HOST || '127.0.0.1';
+      if (bindHost !== '127.0.0.1' && bindHost !== 'localhost' && !settings.requireAuth) {
+        logger.warn(`MQTT broker is binding to ${bindHost} with requireAuth disabled — anyone who can reach this port can publish into the agent's state store`);
+      }
+
       // Start TCP server
       const tcpPort = settings.port || 1883;
       this.tcpServer = createServer(this.aedes.handle);
       await new Promise((resolve, reject) => {
-        this.tcpServer.listen(tcpPort, (err) => {
+        this.tcpServer.listen(tcpPort, bindHost, (err) => {
           if (err) reject(err);
           else resolve();
         });
       });
-      logger.info(`MQTT broker listening on TCP port ${tcpPort}`);
+      logger.info(`MQTT broker listening on ${bindHost}:${tcpPort}`);
 
       // Start WebSocket server if configured
       const wsPort = settings.wsPort;
@@ -292,12 +302,12 @@ class MqttService extends EventEmitter {
           this.aedes.handle(duplex);
         });
         await new Promise((resolve, reject) => {
-          this.httpServer.listen(wsPort, (err) => {
+          this.httpServer.listen(wsPort, bindHost, (err) => {
             if (err) reject(err);
             else resolve();
           });
         });
-        logger.info(`MQTT WebSocket server listening on port ${wsPort}`);
+        logger.info(`MQTT WebSocket server listening on ${bindHost}:${wsPort}`);
       }
 
       this.brokerEnabled = true;

@@ -70,11 +70,19 @@ export default class NewRelicPlugin extends BasePlugin {
         command: 'createSyntheticsMonitor',
         description: 'Create a new Synthetics monitor in New Relic',
         usage: 'createSyntheticsMonitor({ monitorData: {...} })'
+      },
+      {
+        command: 'executeNRQL',
+        description: 'Execute a NRQL query via NerdGraph',
+        usage: 'executeNRQL({ query: "SELECT count(*) FROM Transaction", accountId: "1234567" })'
       }
     ];
     
     this.apiKey = process.env.NEW_RELIC_API_KEY;
+    this.accountId = process.env.NEW_RELIC_ACCOUNT_ID;
     this.baseUrl = 'https://api.newrelic.com/v2/';
+    // NRQL is not part of the REST v2 API — it is only reachable through NerdGraph.
+    this.nerdGraphUrl = process.env.NEW_RELIC_NERDGRAPH_URL || 'https://api.newrelic.com/graphql';
     this.syntheticsBaseUrl = 'https://synthetics.newrelic.com/synthetics/api/v3/';
   }
 
@@ -115,6 +123,9 @@ export default class NewRelicPlugin extends BasePlugin {
 
         case 'createSyntheticsMonitor':
           return await this.createSyntheticsMonitor(params);
+
+        case 'executeNRQL':
+          return await this.executeNRQL(params);
 
         default:
           return { 
@@ -161,7 +172,7 @@ export default class NewRelicPlugin extends BasePlugin {
     const { applicationId } = params;
     
     this.validateParams(params, { 
-      applicationId: { required: true, type: 'string' } 
+      applicationId: { required: true, type: 'string' }
     });
 
     if (!this.apiKey) {
@@ -439,6 +450,95 @@ export default class NewRelicPlugin extends BasePlugin {
     } catch (error) {
       logger.error('Error creating Synthetics monitor:', error.message);
       return { success: false, error: 'Failed to create Synthetics monitor: ' + error.message };
+    }
+  }
+
+  /**
+   * Execute a NRQL query through NerdGraph.
+   *
+   * NRQL has no REST v2 endpoint; the only supported transport is the
+   * NerdGraph GraphQL API, which needs a numeric account id in addition to
+   * the API key. NerdGraph answers 200 with an `errors` array on a bad
+   * query, so a 2xx alone does not mean the query ran.
+   *
+   * @param {Object} params - { query, accountId? }
+   * @returns {Object} { success, data: { results, metadata }, ... } or an error
+   */
+  async executeNRQL(params) {
+    this.validateParams(params, {
+      query: { required: true, type: 'string' }
+    });
+
+    const { query } = params;
+    const accountId = params.accountId ?? this.accountId;
+
+    if (!this.apiKey) {
+      return { success: false, error: 'API key not configured' };
+    }
+
+    if (!accountId) {
+      return {
+        success: false,
+        error: 'Account ID not configured. Set NEW_RELIC_ACCOUNT_ID or pass accountId.'
+      };
+    }
+
+    const numericAccountId = Number(accountId);
+    if (!Number.isInteger(numericAccountId) || numericAccountId <= 0) {
+      return { success: false, error: `Invalid account ID: ${accountId}` };
+    }
+
+    const graphqlQuery = `
+      query($accountId: Int!, $nrql: Nrql!) {
+        actor {
+          account(id: $accountId) {
+            nrql(query: $nrql) {
+              results
+              totalResult
+            }
+          }
+        }
+      }
+    `;
+
+    try {
+      logger.info(`Executing NRQL query on account ${numericAccountId}`);
+
+      const response = await axios.post(
+        this.nerdGraphUrl,
+        { query: graphqlQuery, variables: { accountId: numericAccountId, nrql: query } },
+        {
+          headers: {
+            'Api-Key': this.apiKey,
+            'Content-Type': 'application/json'
+          }
+        }
+      );
+
+      const body = response.data;
+
+      // GraphQL reports failures in-band with HTTP 200 — do not report success.
+      if (Array.isArray(body?.errors) && body.errors.length > 0) {
+        const message = body.errors.map(e => e?.message || String(e)).join('; ');
+        logger.error('NRQL query rejected by NerdGraph:', message);
+        return { success: false, error: 'NRQL query failed: ' + message };
+      }
+
+      const nrql = body?.data?.actor?.account?.nrql;
+      if (!nrql) {
+        return { success: false, error: 'NerdGraph returned no NRQL payload (check the account ID and key permissions)' };
+      }
+
+      return {
+        success: true,
+        data: {
+          results: nrql.results ?? [],
+          totalResult: nrql.totalResult ?? null
+        }
+      };
+    } catch (error) {
+      logger.error('Error executing NRQL query:', error.message);
+      return { success: false, error: 'Failed to execute NRQL query: ' + error.message };
     }
   }
 }

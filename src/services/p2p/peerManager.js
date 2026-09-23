@@ -397,6 +397,61 @@ class PeerManager {
   }
 
   /**
+   * Compare two dotted version strings.
+   * Missing segments count as 0, so "1.0" and "1.0.0" compare equal, and a
+   * pre-release suffix ("1.2.0-beta") is dropped rather than turned into NaN —
+   * NaN comparisons are all false, which would have let a garbage version pass.
+   * @param {string} a
+   * @param {string} b
+   * @returns {number} -1 if a < b, 0 if equal, 1 if a > b
+   */
+  compareVersions(a, b) {
+    const parse = (version) => String(version ?? '')
+      .split('-')[0]
+      .split('.')
+      .map(part => {
+        const n = parseInt(part, 10);
+        return Number.isNaN(n) ? 0 : n;
+      });
+
+    const left = parse(a);
+    const right = parse(b);
+
+    for (let i = 0; i < Math.max(left.length, right.length); i++) {
+      const l = left[i] || 0;
+      const r = right[i] || 0;
+      if (l !== r) return l > r ? 1 : -1;
+    }
+    return 0;
+  }
+
+  /**
+   * Find online peers advertising a capability at or above a minimum version.
+   * Capability names are the peer's enabled plugin names — see
+   * pluginSharing.getLocalCapabilities(), which is what fills this array.
+   * @param {string} capabilityName - Name of the capability to search for
+   * @param {string} [minVersion='0.0.0'] - Minimum version; omit to accept any
+   * @returns {Promise<P2PPeer[]>} List of compatible peers
+   */
+  async findPeersWithCapability(capabilityName, minVersion = '0.0.0') {
+    if (!capabilityName) return [];
+
+    const onlinePeers = await this.getOnlinePeers();
+
+    return onlinePeers.filter(peer => {
+      if (!Array.isArray(peer.capabilities)) return false;
+
+      const capability = peer.capabilities.find(cap => cap?.name === capabilityName);
+      if (!capability) return false;
+
+      // capabilities[].version is a free-form String on the schema with no
+      // default, so a peer can advertise a capability with no version at all.
+      // Read that as the 1.0.0 getLocalCapabilities() assigns by default.
+      return this.compareVersions(capability.version || '1.0.0', minVersion) >= 0;
+    });
+  }
+
+  /**
    * Shutdown - cleanup
    */
   shutdown() {

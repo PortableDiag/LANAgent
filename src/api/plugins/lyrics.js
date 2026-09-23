@@ -42,6 +42,16 @@ export default class LyricsPlugin extends BasePlugin {
           'get synced lyrics for Hello by Adele',
           'get timed lyrics for Lose Yourself by Eminem'
         ]
+      },
+      {
+        command: 'karaoke',
+        description: 'Get karaoke-mode lyrics with word-by-word timing for singing along',
+        usage: 'karaoke({ artist: "Queen", title: "Bohemian Rhapsody" })',
+        offerAsService: true,
+        examples: [
+          'start karaoke for Bohemian Rhapsody by Queen',
+          'get word-timed lyrics for Don\'t Stop Me Now by Queen'
+        ]
       }
     ];
 
@@ -67,8 +77,10 @@ export default class LyricsPlugin extends BasePlugin {
           return await this.searchLyrics(data);
         case 'synced':
           return await this.getSyncedLyrics(data);
+        case 'karaoke':
+          return await this.getKaraokeLyrics(data);
         default:
-          return { success: false, error: `Unknown action '${action}'. Use: get, search, or synced` };
+          return { success: false, error: `Unknown action '${action}'. Use: get, search, synced, or karaoke` };
       }
     } catch (error) {
       const msg = error.message || String(error);
@@ -213,6 +225,178 @@ export default class LyricsPlugin extends BasePlugin {
       this.logger.error('Synced lyrics fetch failed:', error.message);
       return { success: false, error: `Failed to fetch synced lyrics: ${error.message}` };
     }
+  }
+
+  /**
+   * Get karaoke-mode lyrics with word-by-word timing
+   */
+  async getKaraokeLyrics(data) {
+    const { artist, title, query } = data;
+
+    if (!artist || !title) {
+      if (query) {
+        // Try to find via search
+        const searchResult = await this._lrclibSearch(query);
+        if (searchResult && searchResult.syncedLyrics) {
+          const karaokeData = this._parseLrcToKaraoke(searchResult.syncedLyrics);
+          return {
+            success: true,
+            artist: searchResult.artistName,
+            title: searchResult.trackName,
+            album: searchResult.albumName,
+            karaoke: karaokeData,
+            result: `Karaoke lyrics for "${searchResult.trackName}" by ${searchResult.artistName}`
+          };
+        }
+        return { success: false, error: `No synced lyrics found for: "${query}"` };
+      }
+      return { success: false, error: 'Please provide artist and title for karaoke lyrics' };
+    }
+
+    const cacheKey = `karaoke:${artist.toLowerCase()}:${title.toLowerCase()}`;
+    const cached = cache.get(cacheKey);
+    if (cached) return cached;
+
+    try {
+      const response = await axios.get(`${this.lrclibBase}/get`, {
+        params: { artist_name: artist, track_name: title },
+        timeout: 10000,
+        headers: { 'User-Agent': 'LANAgent/1.0' }
+      });
+
+      if (!response.data?.syncedLyrics) {
+        return {
+          success: false,
+          error: `No synced lyrics available for "${title}" by ${artist}. Karaoke mode requires time-synced lyrics.`
+        };
+      }
+
+      const karaokeData = this._parseLrcToKaraoke(response.data.syncedLyrics);
+      
+      const result = {
+        success: true,
+        artist: response.data.artistName,
+        title: response.data.trackName,
+        album: response.data.albumName,
+        karaoke: karaokeData,
+        result: `Karaoke lyrics for "${response.data.trackName}" by ${response.data.artistName}`
+      };
+
+      cache.set(cacheKey, result);
+      return result;
+
+    } catch (error) {
+      if (error.response?.status === 404) {
+        return { success: false, error: `No synced lyrics found for "${title}" by ${artist}` };
+      }
+      this.logger.error('Karaoke lyrics fetch failed:', error.message);
+      return { success: false, error: `Failed to fetch karaoke lyrics: ${error.message}` };
+    }
+  }
+
+  /**
+   * Parse LRC lyrics into word-by-word karaoke timing.
+   *
+   * The first version gave every line a hardcoded `totalDuration = 1000` and split that
+   * across its words, so a four-second line finished highlighting after one second and
+   * sat idle for three. The timings were invented, which for a feature whose entire
+   * purpose is word timing meant it never actually worked.
+   *
+   * A line's real duration is the gap to the NEXT timestamp — that is what LRC encodes,
+   * and it was already being parsed and then discarded.
+   *
+   * Two sources of word timing, and the result says which was used:
+   *   - Enhanced LRC carries per-word tags, `[00:12.00]<00:12.00>Some <00:12.50>words`.
+   *     Where present those are exact and are used as-is.
+   *   - Plain LRC has none, so words are apportioned across the line by character
+   *     length. That is an estimate and is labelled one; longer words take longer to
+   *     sing than short ones, so this beats an even split, but it is not measurement.
+   */
+  _parseLrcToKaraoke(lrcContent) {
+    const LINE_TS = /\[(\d{1,3}):(\d{2})(?:[.:](\d{1,3}))?\]/g;
+    const WORD_TS = /<(\d{1,3}):(\d{2})(?:[.:](\d{1,3}))?>/g;
+
+    const toMs = (min, sec, frac) => {
+      // LRC fractions are usually centiseconds but milliseconds appear in the wild;
+      // scale by the digit count rather than assuming two.
+      let fracMs = 0;
+      if (frac !== undefined && frac !== null && frac !== '') {
+        fracMs = frac.length === 3 ? parseInt(frac, 10) : parseInt(frac, 10) * (frac.length === 1 ? 100 : 10);
+      }
+      return (parseInt(min, 10) * 60 + parseInt(sec, 10)) * 1000 + fracMs;
+    };
+
+    // Pass 1 — every (timestamp, text) pair. A line may carry several timestamps when
+    // the same words recur, e.g. a chorus; the original kept only the first and dropped
+    // every later repeat.
+    const entries = [];
+    for (const line of lrcContent.split('\n')) {
+      if (!line.trim()) continue;
+
+      LINE_TS.lastIndex = 0;
+      const stamps = [];
+      let match, textFrom = 0;
+      while ((match = LINE_TS.exec(line)) !== null) {
+        stamps.push(toMs(match[1], match[2], match[3]));
+        textFrom = match.index + match[0].length;
+      }
+      if (stamps.length === 0) continue;
+
+      const raw = line.substring(textFrom).trim();
+      const plain = raw.replace(WORD_TS, '').replace(/\s+/g, ' ').trim();
+      if (!plain || plain === '//') continue;
+
+      for (const start of stamps) entries.push({ start, raw, text: plain });
+    }
+
+    entries.sort((a, b) => a.start - b.start);
+
+    // Pass 2 — a line runs until the next one begins.
+    const DEFAULT_LAST_LINE_MS = 3000;
+    return entries.map((entry, i) => {
+      const next = entries[i + 1];
+      const duration = next ? Math.max(0, next.start - entry.start) : DEFAULT_LAST_LINE_MS;
+
+      // Enhanced LRC: exact per-word tags.
+      WORD_TS.lastIndex = 0;
+      const tagged = [];
+      let m, cursor = 0;
+      while ((m = WORD_TS.exec(entry.raw)) !== null) {
+        if (tagged.length > 0) {
+          tagged[tagged.length - 1].text = entry.raw.slice(cursor, m.index).trim();
+        }
+        tagged.push({ start: toMs(m[1], m[2], m[3]), text: '' });
+        cursor = m.index + m[0].length;
+      }
+      if (tagged.length > 0) {
+        tagged[tagged.length - 1].text = entry.raw.slice(cursor).trim();
+        const words = tagged
+          .filter(t => t.text)
+          .map((t, idx, arr) => ({
+            word: t.text,
+            start: t.start,
+            end: idx + 1 < arr.length ? arr[idx + 1].start : entry.start + duration
+          }));
+        if (words.length > 0) {
+          return { text: entry.text, start: entry.start, end: entry.start + duration,
+                   timingSource: 'lrc_word_tags', words };
+        }
+      }
+
+      // Plain LRC: apportion the real line duration by word length.
+      const words = entry.text.split(/\s+/).filter(Boolean);
+      const totalChars = words.reduce((sum, w) => sum + w.length, 0) || 1;
+      let cursorMs = entry.start;
+      const timed = words.map(word => {
+        const share = (word.length / totalChars) * duration;
+        const start = Math.round(cursorMs);
+        cursorMs += share;
+        return { word, start, end: Math.round(cursorMs) };
+      });
+
+      return { text: entry.text, start: entry.start, end: entry.start + duration,
+               timingSource: 'estimated_from_line_duration', words: timed };
+    }).filter(line => line.words.length > 0);
   }
 
   async _fetchLyrics(artist, title) {

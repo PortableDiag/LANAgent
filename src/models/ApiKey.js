@@ -190,6 +190,27 @@ function scopeMatches(granted, required) {
 }
 
 /**
+ * Scope check against a plain granted-scope ARRAY, for callers that hold a validated
+ * key's data rather than the document — `apiKeyService.validateApiKey()` returns
+ * `{ id, name, scopes }`, not a mongoose doc, so `hasScope()` is unavailable there.
+ *
+ * Same semantics as hasScope, and deliberately the same `scopeMatches` underneath:
+ * authorisation logic that exists twice will eventually disagree with itself.
+ */
+export function scopesSatisfy(grantedScopes, required, { mode = 'any' } = {}) {
+  try {
+    const have = apiKeySchema.statics.normalizeScopes(grantedScopes);
+    const need = apiKeySchema.statics.normalizeScopes(required);
+    if (have.includes('*')) return true;
+    const check = (req) => have.some(h => scopeMatches(h, req));
+    return mode === 'all' ? need.every(check) : need.some(check);
+  } catch (err) {
+    logger.error('Error evaluating API key scopes', { error: err?.message });
+    return false;
+  }
+}
+
+/**
  * Check if this key has the required scope(s). Wildcard and namespace aware.
  * @param {string|string[]} required - scope or list of scopes to check
  * @param {{mode?: 'any'|'all'}} [options] - 'any' (default): at least one matches; 'all': every required matches

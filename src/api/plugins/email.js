@@ -799,6 +799,21 @@ Sent by {{agentName}}
       endDate: { type: 'string' }
     });
     
+    // AI auto-reply to arbitrary senders is permanently disabled (operator decision,
+    // 2026-09-21): the reply path feeds the email body to the model and into intent
+    // detection, which can dispatch plugins, so answering strangers is remote code
+    // execution with a politeness layer. `enabled: true` is REFUSED here rather than
+    // stored-and-ignored — a switch that reports success and changes nothing is how
+    // you end up believing a control exists. The scheduler no longer reads this state
+    // at all; only a DKIM/DMARC-verified master reaches the AI.
+    if (data.enabled === true) {
+      return {
+        success: false,
+        error: 'AI auto-reply is permanently disabled. The reply path passes untrusted email text to a model that can dispatch plugins; only a DKIM/DMARC-verified master sender reaches it. Re-enabling requires a code change in src/services/scheduler.js.',
+        enabled: false
+      };
+    }
+
     // Store auto-reply settings
     this.setState('autoReply', {
       enabled: data.enabled,
@@ -1090,6 +1105,16 @@ Sent by {{agentName}}
                       email.text = parsed.text;
                       email.html = parsed.html;
                       email.textAsHtml = parsed.textAsHtml;
+                      // Ordered auth headers, for verifying the sender is who From claims.
+                      // ORDER IS THE SECURITY PROPERTY — the verifier stops trusting at the
+                      // ingress Received hop — so keep these in the sequence mailparser
+                      // yields and never collapse them into a key/value map: the server
+                      // emits Authentication-Results TWICE (dmarc, then dkim) and a map
+                      // keeps only one of them. Deliberately not persisted to Mongo; this
+                      // is for the in-flight decision, not a record.
+                      email.authHeaderLines = (parsed.headerLines || [])
+                        .filter(h => h.key === 'received' || h.key === 'authentication-results')
+                        .map(h => ({ key: h.key, line: h.line }));
                       email.attachments = parsed.attachments?.map(att => ({
                         filename: att.filename,
                         contentType: att.contentType,

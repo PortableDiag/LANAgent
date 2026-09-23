@@ -11,7 +11,7 @@ router.use(adminKeyAuth);
 router.get('/wallets', async (req, res) => {
   try {
     const docs = await ExternalCreditBalance
-      .find({}, { wallet: 1, credits: [redacted], totalPurchased: [redacted], totalSpent: [redacted], totalRefunded: [redacted], lastPurchase: 1, lastUsed: 1, createdAt: 1, _id: 0 })
+      .find({}, { wallet: 1, credits: 1, totalPurchased: 1, totalSpent: 1, totalRefunded: 1, lastPurchase: 1, lastUsed: 1, createdAt: 1, _id: 0 })
       .sort({ lastPurchase: -1 })
       .lean();
 
@@ -22,7 +22,7 @@ router.get('/wallets', async (req, res) => {
       acc.totalSpent += w.totalSpent || 0;
       acc.totalRefunded += w.totalRefunded || 0;
       return acc;
-    }, { count: 0, credits: [redacted], totalPurchased: [redacted], totalSpent: [redacted], totalRefunded: [redacted] });
+    }, { count: 0, credits: 0, totalPurchased: 0, totalSpent: 0, totalRefunded: 0 });
 
     res.json({ success: true, summary, wallets: docs });
   } catch (err) {
@@ -42,7 +42,7 @@ router.get('/wallets/:wallet/purchases', async (req, res) => {
   try {
     const wallet = String(req.params.wallet || '').toLowerCase();
     const balance = await ExternalCreditBalance
-      .findOne({ wallet }, { wallet: 1, credits: [redacted], totalPurchased: [redacted], totalSpent: [redacted], totalRefunded: [redacted], lastPurchase: 1, lastUsed: 1, _id: 0 })
+      .findOne({ wallet }, { wallet: 1, credits: 1, totalPurchased: 1, totalSpent: 1, totalRefunded: 1, lastPurchase: 1, lastUsed: 1, _id: 0 })
       .lean();
     if (!balance) {
       return res.status(404).json({ success: false, error: 'Wallet not found' });

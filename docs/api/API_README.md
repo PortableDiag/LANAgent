@@ -553,6 +553,55 @@ Live in-memory snapshot of download-token usage (tokens within their TTL window)
 
 ---
 
+## Recent Updates (September 23, 2026)
+
+### v2.25.328 — sync covering 2.25.295–2.25.328
+
+The AI-provider changes (OpenRouter, lock scope, write-verified model updates, prompt cache)
+are documented under **AI Provider Management**. External-gateway and admin additions:
+
+- **`GET /admin/kill-switch/timeline`** (external gateway, auth; v2.25.303) — recent kill-switch
+  events, newest first. Query: `limit` (1-1000, default 100; a non-numeric or negative value is
+  rejected rather than silently emptying the result), `since` (ISO or epoch ms). Consecutive
+  blocked requests coalesce into one entry carrying `count` and `lastTimestamp`, so a long
+  outage cannot push the `ACTIVATED` event out of the buffer. Deliberately registered under
+  `/admin`, which the kill-switch middleware bypasses — on any other path it would 503 exactly
+  when you need to read it. **The buffer is in-process and resets on restart**; the durable
+  record is `ExternalAuditLog`.
+- **`GET /api/external/service/analytics?days=30`** (admin key, v2.25.299+) — per-plugin call
+  counts over the window, read from the external audit log (one row per request, 90-day
+  retention); `meta` carries window, source, retention and `sampleSize` so an empty answer is
+  distinguishable from a wrong query. 503 when no admin key is configured.
+- **`GET /api/admin/cookies/:host/analytics`** — cookie-jar summary (cookie count, domains, expiry
+  buckets) for an allow-listed host. Auth: `Authorization: Bearer <token>` (JWT).
+  **Expiry counts changed meaning in v2.25.309.** Browsers store cookie expiry as
+  *microseconds since 1601*, and this route previously parsed it as *seconds since 1970* —
+  so expired cookies were reported as valid for tens of thousands of years. Both encodings
+  are now handled, and `#HttpOnly_` rows (previously skipped as comments) are counted.
+  Expect the expired count on an existing jar to jump when compared against a reading taken
+  before v2.25.309; that is the correction, not a regression.
+
+- **`POST /api/admin/cookies/:host/validate`** — validate a Netscape-format cookie jar for
+  an allow-listed host, returning per-line format errors, warnings and counts. Auth:
+  `Authorization: Bearer <token>` (JWT). Accepts three request shapes:
+
+  | Body | Validates |
+  |---|---|
+  | `Content-Type: text/plain` with the file as the body | the supplied content |
+  | `Content-Type: application/json`, `{"content": "<file>"}` | the supplied content |
+  | *no body* | the jar already stored on disk for `:host` |
+
+  The no-body form is the common case — it is what `:host` implies. A file that contains no
+  parsable cookie rows is an **error**, not a warning: an empty or comment-only jar is not a
+  valid jar.
+
+**Self-update (deployment).** `scripts/ops/self-update/lanagent-self-update.sh` now moves aside
+any untracked file that an incoming release starts tracking. It is moved, never deleted, and
+logged with its new location under `~/.lanagent-update-displaced/<timestamp>/` (override with
+`LANAGENT_DISPLACED_DIR`); it is restored if the update rolls back. Previously a single such file made
+the fast-forward fail on every run while the updater exited successfully, so an instance could
+stop updating without any visible error.
+
 ## Recent Updates (August 2, 2026)
 
 ### v2.25.178 — Arbitrage signals are recorded locally
@@ -2089,7 +2138,7 @@ Reference implementation for the MindSwarm API — covers every endpoint in the 
 - Closed with comments: 5 PRs (broken implementations, no-ops, breaking schema changes)
 
 **New Endpoints/Features:**
-- `express-rate-limit` on `/api/scammer-registry/*` routes (10 req/min report, 30 req/min read)
+- `express-rate-limit` on `/api/scammer-registry/*` routes (one limiter for every route: 100 requests per 15 minutes per IP)
 
 ---
 
@@ -2342,6 +2391,7 @@ VRM animated avatar system with motion-captured idle animations, facial expressi
 | POST | `/api/avatar/:avatarId/rig` | Auto-rig avatar with Blender (19-bone humanoid skeleton) |
 | PUT | `/api/avatar/:avatarId/rename` | Rename an avatar |
 | DELETE | `/api/avatar/:avatarId` | Delete avatar and all associated files |
+| GET | `/api/avatar/:avatarId/optimization` | Optimization opportunities and score for an avatar (v2.25.303). Read-only — scoring does not persist; an unmeasured `polyCount` is reported as unknown rather than scored as optimal |
 
 **Avatar Rig Request:**
 ```
@@ -3132,9 +3182,17 @@ Deployed an on-chain ScammerRegistry smart contract on BSC with soulbound SCAMME
 | GET | `/api/scammer-registry/categories` | Get scam category definitions (1-7) |
 | POST | `/api/scammer-registry/report` | Report a scammer address (body: `{ "address": "0x...", "category": 1, "reason": "..." }`) |
 | POST | `/api/scammer-registry/batch-report` | Batch report up to 50 addresses (body: `{ "reports": [...] }`) |
+| POST | `/api/scammer-registry/batch-screen` | Screen up to 50 addresses in one call (body: `{ "addresses": ["0x..."] }`) — returns per-address `flagged` / `riskLevel`; the whole batch 400s if any address is malformed |
 | POST | `/api/scammer-registry/remove` | Remove scammer flag, genesis agent only (body: `{ "address": "0x..." }`) |
 | POST | `/api/scammer-registry/set-fee` | Update report fee in SKYNET (body: `{ "amount": 50000 }`) — genesis agent only |
 | POST | `/api/scammer-registry/set-immunity-threshold` | Update immunity threshold (body: `{ "amount": 100000 }`) — genesis agent only |
+
+**Address validation (v2.25.303):** `/check/:address`, `/immunity/:address`,
+`/report-history/:address` and `/batch-screen` reject a malformed address with **400** before
+any on-chain read. Previously an unvalidated string reached the contract call and a typo came
+back as `flagged:false, riskLevel:"low"` — a clean bill of health for an address that was never
+looked up. A lookup that fails now returns `flagged:null, riskLevel:"unknown"` with a `failed`
+tally, so a miss can never read as a negative result.
 
 > **v2.24.3 fix:** `set-fee` and `set-immunity-threshold` were previously broken (`REGISTRY_ABI` was missing the write methods, so `ethers.Contract.setReportFee` threw `TypeError` on first use). Both endpoints are functional as of v2.24.3.
 
@@ -7058,6 +7116,7 @@ curl -X POST http://localhost:3000/api/plugin \
   - `POST /api/device-aliases` - Create or update device alias
   - `DELETE /api/device-aliases/:alias` - Delete device alias
   - `POST /api/device-aliases/bulk` - Bulk import aliases
+  - `GET /api/device-aliases/analytics/popular` - Most-used aliases per plugin (v2.25.309)
 
 ### Enhanced Email Integration (v2.8.59)
 - **Email Plugin Updates** - Advanced AI email composition
@@ -7553,6 +7612,17 @@ When the rate limit is exceeded, you'll receive:
 ### Device Alias Management
 
 #### Health Check
+- **GET** `/api/device-aliases/analytics/popular` - Most-used aliases, grouped by plugin.
+  Auth: same as the rest of the router. Query parameters:
+
+  | Param | Default | Notes |
+  |---|---|---|
+  | `timeframe` | `30d` | One of `24h`, `7d`, `30d`, `90d`, `all`. An unrecognised value is a **400** — it is not silently ignored. |
+  | `limit` | `10` | Per-plugin cap, bounded to 100. A non-numeric value is a **400**, not a 500. |
+
+  Results are ordered by usage count with `alias` as a tiebreaker, so equal counts do not
+  reorder between calls. Added v2.25.309.
+
 - **GET** `/api/device-aliases/health` - Health check endpoint (no auth required, exempt from rate limiting)
   ```bash
   curl -X GET http://localhost:3000/api/device-aliases/health
@@ -7785,14 +7855,46 @@ When the rate limit is exceeded, you'll receive:
 
 ### AI Provider Management
 
-Available providers: OpenAI, Anthropic, Gab, HuggingFace, Ollama, BitNet
+Available providers: OpenAI, Anthropic, OpenRouter, Gab, HuggingFace, Ollama, BitNet, Uncensored
+
+#### OpenRouter (v2.25.311+)
+
+One key for 400+ models across every upstream vendor. Enabled by setting `OPENROUTER_API_KEY`;
+it then appears in `GET /api/ai/providers` and can be selected with
+`POST /api/ai/switch {"provider": "openrouter"}` like any other provider.
+
+- **Model ids are namespaced** — `openai/gpt-4o-mini`, `anthropic/claude-sonnet-4.5`. A bare
+  `gpt-4o-mini` is a **400 from OpenRouter**, not a fallback to something sensible. Default is
+  `openai/gpt-4o-mini`, overridden with `OPENROUTER_CHAT_MODEL` or the saved
+  `aiProviders.configurations.openrouter.chatModel`.
+- **`GET /api/ai/models/openrouter` returns the live catalog** (400+ entries), refreshed by the
+  scheduled model updater from OpenRouter's public, unauthenticated catalog endpoint. No
+  hardcoded shortlist to go stale.
+- **Cost is what was billed, not an estimate.** Each request asks for usage accounting and the
+  cost OpenRouter reports is recorded as that request's cost, so `GET /api/ai/metrics` reflects
+  real spend. A model absent from the catalog contributes 0 to the rolled-up estimate rather
+  than a guessed price — the per-request figure already carries the true total.
+- **Capabilities:** chat, streaming, web search (OpenRouter's `web` plugin), and vision through
+  the same chat endpoint. **No embeddings, transcription or speech** — OpenRouter serves no such
+  endpoint, so those methods return `null` and `allowedProviders()` routes them elsewhere unless
+  the provider lock forbids it.
+- `OPENROUTER_VISION_MODEL` selects the model `analyzeImage` uses; it defaults to the chat model.
+  A model the catalog says is text-only is refused **before** the request is spent.
+- **Lock scope (v2.25.312+):** the lock binds a capability only when the locked provider is
+  actually a candidate for it. Embeddings, transcription and TTS each have their own candidate
+  list; if the locked provider is not on that list — OpenRouter, for instance, serves no
+  embeddings endpoint — the lock has no substitution to prevent and the normal list is used.
+  Chat is unaffected and stays hard-locked: a failed request fails rather than falling back.
+  Embedding order is `huggingface, openai, ollama`; changing it changes the embedding model
+  and therefore the vector width.
 
 #### Provider Operations
 - **GET** `/api/ai/providers` - List all AI providers with current models
 - **POST** `/api/ai/switch` - Switch active AI provider (body: `{"provider": "bitnet"}`)
 - **POST** `/api/ai/update-models` - Update available models for providers
 - **GET** `/api/ai/models/:provider` - Get available models for specific provider
-- **POST** `/api/ai/update-model` - Update model for specific provider
+- **POST** `/api/ai/update-model` - Update model for specific provider. **Verifies the write (v2.25.315+):** the value is read back after saving and a **500** is returned, naming the cause, if it did not land — a provider whose schema lacks the field has the write dropped by Mongoose strict mode with no error, which previously returned success for a change that reverted on the next restart. Writes both `model` and `chatModel` where the provider declares them, because `chatModel` is what those providers read at construction.
+- **Prompt cache (OpenRouter, v2.25.316+):** the provider's `healthCheck()` carries a `promptCache` block — `hitRate`, `cachedTokenShare`, `eligibleRequests`, `consecutiveMisses` and the pinned upstream. Individual usage records carry `metadata.cachedTokens` and `metadata.upstream`. Prompts under 1,024 tokens are excluded from these statistics because upstreams do not cache them. Five consecutive misses on larger prompts logs a warning naming the two causes worth checking: an unstable prompt prefix, or the router moving between upstreams.
 
 #### Provider Metrics
 - **GET** `/api/ai/metrics` - Get comprehensive AI usage metrics
@@ -8289,6 +8391,42 @@ LANAgent provides a complete Hardhat development environment API for creating, c
 #### Email Settings
 - **GET** `/api/email/notification-settings` - Get email notification settings
 - **POST** `/api/email/notification-settings` - Update email notification settings
+
+#### Email sender authentication (v2.25.319)
+
+Inbound mail is authenticated before any of its content reaches the AI. The reply path passes
+the message body to a model whose output continues into intent detection, which can dispatch
+plugins, so the sender check is an authentication boundary rather than a preference.
+
+A message is treated as coming from the configured trusted sender only when the **receiving
+mail server** reports both **`dmarc=pass`** and **`dkim=pass`**, each aligned to the `From`
+domain, in `Authentication-Results`. The `From` header alone is never sufficient — it is
+written by whoever sends the message. Only headers stamped above the ingress hop are read, so a
+copy included in the message by its sender is ignored. Anything absent, misaligned or
+unparseable is untrusted.
+
+Configuration (both optional; the defaults suit the bundled mail host):
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `MAIL_AUTHSERV_ID` | `mail.lanagent.net` | authserv-id whose verdicts are trusted |
+| `MAIL_TRUSTED_HOST` | same as `MAIL_AUTHSERV_ID` | hostname that marks an internal `Received` hop |
+
+**`setAutoReply` behaviour change.** AI auto-reply to arbitrary senders is permanently
+disabled. `enabled: true` is now **refused** rather than stored:
+
+```json
+POST /api/plugins/email  { "action": "setAutoReply", "enabled": true }
+→ {
+    "success": false,
+    "error": "AI auto-reply is permanently disabled. …",
+    "enabled": false
+  }
+```
+
+`enabled: false` still succeeds. The scheduler no longer reads this stored state at all, so the
+setting cannot be re-armed through this endpoint or by editing the database; re-enabling
+requires a code change.
 
 ### Project Management
 

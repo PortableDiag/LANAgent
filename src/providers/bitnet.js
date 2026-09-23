@@ -2,6 +2,7 @@ import { BaseProvider } from './BaseProvider.js';
 import axios from 'axios';
 import { logger } from '../utils/logger.js';
 import { retryOperation } from '../utils/retryUtils.js';
+import NodeCache from 'node-cache';
 
 /**
  * BitNet Provider
@@ -19,12 +20,80 @@ export class BitNetProvider extends BaseProvider {
     this.contextLength = config.contextLength || 2048;
     this.timeout = config.timeout || 120000;
     this.availableModels = [];
+    // Known per-model context windows. Anything not listed falls back to the
+    // configured contextLength, so a config override is never silently ignored.
+    this.modelContextWindows = new Map([
+      ['BitNet-b1.58-2B-4T', 2048],
+      ['BitNet-b1.58-3B-4T', 2048]
+    ]);
+    this.cache = new NodeCache({ stdTTL: 300 }); // 5 minute cache for model info
     this.commands = [
       { command: 'healthcheck', description: 'Check if BitNet server is running', usage: 'healthcheck' },
       { command: 'getserverinfo', description: 'Get BitNet server status and model info', usage: 'getserverinfo' },
       { command: 'listmodels', description: 'List available BitNet models', usage: 'listmodels' },
       { command: 'switchmodel', description: 'Switch the active BitNet model', usage: 'switchmodel <modelName>' }
     ];
+  }
+
+  /**
+   * Get optimal context window length for a specific model
+   * @param {string} modelName - Name of the model
+   * @returns {number} Optimal context length
+   */
+  getContextWindowForModel(modelName) {
+    return this.modelContextWindows.get(modelName) || this.contextLength || 2048;
+  }
+
+  /**
+   * Truncate conversation history to fit within the context window.
+   * Keeps every system message (in place, at the front), then the newest
+   * non-system messages that fit, in their original order. The newest
+   * message is always kept, even if it alone exceeds the budget — sending
+   * an empty prompt is worse than an oversize one. When anything was
+   * dropped, a notice is inserted right after the system messages.
+   * @param {Array} messages - Array of message objects
+   * @param {number} maxContextLength - Context window of the model, in tokens
+   * @param {number} [reserveTokens=0] - Tokens to leave free for the reply (max_tokens)
+   * @returns {Array} Truncated messages array
+   */
+  truncateConversationHistory(messages, maxContextLength, reserveTokens = 0) {
+    if (!messages || messages.length === 0) return [];
+
+    // Rough token estimate: ~4 characters per token
+    const estimateTokens = (text) => Math.ceil(String(text ?? '').length / 4);
+
+    // Leave a 10% buffer on top of the reply reservation
+    const budget = Math.max(0, Math.floor(maxContextLength * 0.9) - reserveTokens);
+    const totalTokens = messages.reduce((sum, msg) => sum + estimateTokens(msg.content), 0);
+    if (totalTokens <= budget) {
+      return messages;
+    }
+
+    const systemMessages = messages.filter(msg => msg.role === 'system');
+    const nonSystemMessages = messages.filter(msg => msg.role !== 'system');
+    let currentTokens = systemMessages.reduce((sum, msg) => sum + estimateTokens(msg.content), 0);
+
+    // Walk newest → oldest, keeping what fits; the newest message is always kept
+    const kept = [];
+    for (let i = nonSystemMessages.length - 1; i >= 0; i--) {
+      const msg = nonSystemMessages[i];
+      const msgTokens = estimateTokens(msg.content);
+      if (kept.length > 0 && currentTokens + msgTokens > budget) {
+        break;
+      }
+      kept.unshift(msg);
+      currentTokens += msgTokens;
+    }
+
+    const result = [...systemMessages];
+    if (kept.length < nonSystemMessages.length) {
+      result.push({
+        role: 'system',
+        content: '[Previous conversation history has been truncated to fit within context window]'
+      });
+    }
+    result.push(...kept);
+    return result;
   }
 
   async initialize() {
@@ -80,6 +149,7 @@ export class BitNetProvider extends BaseProvider {
 
     const startTime = Date.now();
     const model = options.model || this.models.chat;
+    const contextLength = this.getContextWindowForModel(model);
 
     try {
       logger.debug(`BitNet generating response with model: ${model}`);
@@ -102,12 +172,16 @@ export class BitNetProvider extends BaseProvider {
         messages.push({ role: 'user', content: String(prompt) });
       }
 
+      // Reserve the reply budget, then fit the prompt into what remains
+      const maxTokens = options.maxTokens || this.config.maxTokens || Math.min(2048, Math.floor(contextLength * 0.3));
+      const processedMessages = this.truncateConversationHistory(messages, contextLength, maxTokens);
+
       // Use OpenAI-compatible /v1/chat/completions endpoint
       const requestBody = {
         model,
-        messages,
+        messages: processedMessages,
         temperature: options.temperature ?? 0.7,
-        max_tokens: options.maxTokens || this.config.maxTokens || 2048,
+        max_tokens: maxTokens,
         top_p: options.topP ?? 0.9,
         stream: false
       };
@@ -166,6 +240,7 @@ export class BitNetProvider extends BaseProvider {
 
     const startTime = Date.now();
     const model = options.model || this.models.chat;
+    const contextLength = this.getContextWindowForModel(model);
 
     try {
       const messages = [];
@@ -186,11 +261,15 @@ export class BitNetProvider extends BaseProvider {
         messages.push({ role: 'user', content: String(prompt) });
       }
 
+      // Reserve the reply budget, then fit the prompt into what remains
+      const maxTokens = options.maxTokens || this.config.maxTokens || Math.min(2048, Math.floor(contextLength * 0.3));
+      const processedMessages = this.truncateConversationHistory(messages, contextLength, maxTokens);
+
       const requestBody = {
         model,
-        messages,
+        messages: processedMessages,
         temperature: options.temperature ?? 0.7,
-        max_tokens: options.maxTokens || this.config.maxTokens || 2048,
+        max_tokens: maxTokens,
         stream: true
       };
 
@@ -319,18 +398,31 @@ export class BitNetProvider extends BaseProvider {
    */
   async getServerInfo() {
     try {
+      const cacheKey = `bitnet_server_info_${this.baseUrl}`;
+      const cached = this.cache.get(cacheKey);
+      if (cached) {
+        return cached;
+      }
+
       const [health, models] = await Promise.all([
         axios.get(`${this.baseUrl}/health`, { timeout: 5000 }).catch(() => null),
         axios.get(`${this.baseUrl}/v1/models`, { timeout: 5000 }).catch(() => null)
       ]);
 
-      return {
+      const result = {
         serverRunning: !!health,
         status: health?.data?.status || 'unknown',
         models: models?.data?.data || [],
         configuredModel: this.models.chat,
         baseUrl: this.baseUrl
       };
+
+      // Only a healthy answer is worth caching — a cached "down" would keep
+      // healthcheck reporting an outage for 5 minutes after the server returns
+      if (result.serverRunning) {
+        this.cache.set(cacheKey, result);
+      }
+      return result;
     } catch (error) {
       return { serverRunning: false, error: error.message };
     }
@@ -387,6 +479,8 @@ export class BitNetProvider extends BaseProvider {
         
         // Update the active model
         this.models.chat = modelName;
+        // Clear cache when model changes
+        this.cache.flushAll();
         logger.info(`Switched BitNet model to: ${modelName}`);
         
         return {

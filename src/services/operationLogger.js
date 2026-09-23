@@ -57,14 +57,39 @@ export class OperationLogger {
   }
 
   /**
-   * Get operation history
-   * @param {number} limit - Number of operations to return
-   * @param {Object} filters - Optional filters
+   * Coerce a time bound to a comparable epoch value. Bounds arrive as a Date
+   * from internal callers but as an ISO string from anything HTTP-shaped, and
+   * `dateObject >= "2026-01-01"` is always false — the string coerces to NaN —
+   * so an un-normalised string bound silently matched nothing.
+   * @returns {number|null} epoch ms, or null when the bound is absent/unparseable
    */
-  getHistory(limit = 50, filters = {}) {
-    let ops = [...this.operations];
+  toEpoch(value) {
+    if (value === undefined || value === null || value === '') return null;
+    const ms = value instanceof Date ? value.getTime() : new Date(value).getTime();
+    return Number.isNaN(ms) ? null : ms;
+  }
 
-    // Apply filters
+  /**
+   * Apply the shared filter set to a list of operations. Used by both
+   * getHistory() and searchOperations() so the two can never drift apart.
+   * @param {Array} operations
+   * @param {Object} filters
+   * @param {string} [filters.type]
+   * @param {string} [filters.plugin]
+   * @param {string} [filters.status]
+   * @param {string} [filters.userId]
+   * @param {Date|string} [filters.startTime] - inclusive lower bound
+   * @param {Date|string} [filters.endTime] - inclusive upper bound
+   * @param {string} [filters.query] - case-insensitive substring match against
+   *   action, plugin and the sanitized params
+   * @returns {Array} a new array, newest first
+   */
+  filterOperations(operations, filters = {}) {
+    // Reversed up front so that entries sharing a millisecond — two operations
+    // logged in the same tick get the same `new Date()` — still come out newest
+    // first once the stable sort below leaves them tied.
+    let ops = [...operations].reverse();
+
     if (filters.type) {
       ops = ops.filter(op => op.type === filters.type);
     }
@@ -77,14 +102,73 @@ export class OperationLogger {
     if (filters.userId) {
       ops = ops.filter(op => op.userId === filters.userId);
     }
-    if (filters.startTime) {
-      ops = ops.filter(op => op.timestamp >= filters.startTime);
+
+    const startTime = this.toEpoch(filters.startTime);
+    if (startTime !== null) {
+      ops = ops.filter(op => this.toEpoch(op.timestamp) >= startTime);
+    }
+    const endTime = this.toEpoch(filters.endTime);
+    if (endTime !== null) {
+      ops = ops.filter(op => this.toEpoch(op.timestamp) <= endTime);
     }
 
-    // Sort by timestamp desc and limit
-    return ops
-      .sort((a, b) => b.timestamp - a.timestamp)
-      .slice(0, limit);
+    if (filters.query) {
+      const lowerQuery = String(filters.query).toLowerCase();
+      // params are already run through sanitizeParams, so a search can never
+      // match on a redacted secret
+      ops = ops.filter(op =>
+        (op.action && op.action.toLowerCase().includes(lowerQuery)) ||
+        (op.plugin && op.plugin.toLowerCase().includes(lowerQuery)) ||
+        (op.params && safeJsonStringify(op.params).toLowerCase().includes(lowerQuery))
+      );
+    }
+
+    return ops.sort((a, b) => this.toEpoch(b.timestamp) - this.toEpoch(a.timestamp));
+  }
+
+  /**
+   * Get operation history
+   * @param {number} limit - Number of operations to return
+   * @param {Object} filters - Optional filters (see filterOperations), including
+   *   a `query` substring search
+   */
+  getHistory(limit = 50, filters = {}) {
+    return this.filterOperations(this.operations, filters).slice(0, limit);
+  }
+
+  /**
+   * Search operations by substring across action, plugin and params
+   * @param {string} query - Text to search for
+   * @param {Object} filters - Additional filters to apply
+   * @returns {Array} Matching operations, newest first (unlimited)
+   */
+  searchOperations(query, filters = {}) {
+    return this.filterOperations(this.operations, { ...filters, query });
+  }
+
+  /**
+   * Get operations within a time range. Either bound may be omitted, which
+   * leaves that side open rather than matching nothing.
+   * @param {Date|string} [startTime] - Start of time range
+   * @param {Date|string} [endTime] - End of time range
+   * @returns {Array} Operations within the time range, newest first
+   */
+  getOperationsByTimeRange(startTime, endTime) {
+    return this.filterOperations(this.operations, { startTime, endTime });
+  }
+
+  /**
+   * Get searchable history with enhanced filtering capabilities
+   * @param {Object} params - Search parameters
+   * @param {string} [params.query] - Text to search for
+   * @param {number} [params.limit=50] - Maximum results; 0 or less means no limit
+   * @param {Object} [params.filters] - Additional filters
+   * @returns {Array} Search results, newest first
+   */
+  getSearchableHistory(params = {}) {
+    const { query = '', limit = 50, filters = {} } = params;
+    const ops = this.filterOperations(this.operations, { ...filters, query });
+    return limit > 0 ? ops.slice(0, limit) : ops;
   }
 
   /**

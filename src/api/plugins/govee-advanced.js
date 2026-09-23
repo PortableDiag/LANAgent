@@ -373,7 +373,7 @@ export const ScheduleManagement = {
     try {
       const Agenda = (await import('agenda')).default;
       const agenda = new Agenda({
-        db: { address: process.env.MONGODB_URI || '***REMOVED***' }
+        db: { address: process.env.MONGODB_URI || 'mongodb://localhost:27017/lanagent' }
       });
       
       await agenda.start();
@@ -412,7 +412,7 @@ export const ScheduleManagement = {
     try {
       const Agenda = (await import('agenda')).default;
       const agenda = new Agenda({
-        db: { address: process.env.MONGODB_URI || '***REMOVED***' }
+        db: { address: process.env.MONGODB_URI || 'mongodb://localhost:27017/lanagent' }
       });
       
       await agenda.start();
@@ -517,7 +517,7 @@ export const ScheduleManagement = {
       const Agenda = (await import('agenda')).default;
       const { ObjectId } = await import('mongodb');
       const agenda = new Agenda({
-        db: { address: process.env.MONGODB_URI || '***REMOVED***' }
+        db: { address: process.env.MONGODB_URI || 'mongodb://localhost:27017/lanagent' }
       });
 
       await agenda.start();
@@ -587,7 +587,7 @@ export const ScheduleManagement = {
       const Agenda = (await import('agenda')).default;
       const { ObjectId } = await import('mongodb');
       const agenda = new Agenda({
-        db: { address: process.env.MONGODB_URI || '***REMOVED***' }
+        db: { address: process.env.MONGODB_URI || 'mongodb://localhost:27017/lanagent' }
       });
 
       await agenda.start();
@@ -613,7 +613,7 @@ export const ScheduleManagement = {
     try {
       const Agenda = (await import('agenda')).default;
       const agenda = new Agenda({
-        db: { address: process.env.MONGODB_URI || '***REMOVED***' }
+        db: { address: process.env.MONGODB_URI || 'mongodb://localhost:27017/lanagent' }
       });
       
       await agenda.start();
@@ -645,7 +645,7 @@ export const ScheduleManagement = {
     try {
       const Agenda = (await import('agenda')).default;
       const agenda = new Agenda({
-        db: { address: process.env.MONGODB_URI || '***REMOVED***' }
+        db: { address: process.env.MONGODB_URI || 'mongodb://localhost:27017/lanagent' }
       });
       
       await agenda.start();

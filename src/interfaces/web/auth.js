@@ -2,12 +2,20 @@ import jwt from 'jsonwebtoken';
 import NodeCache from 'node-cache';
 import { logger } from '../../utils/logger.js';
 import apiKeyService from '../../services/apiKeyService.js';
+import { scopesSatisfy } from '../../models/ApiKey.js';
 
 // Cache for JWT secret after first successful retrieval
 let cachedJWTSecret = null;
 
 // In-memory cache for revoked tokens (TTL matches max token lifetime of 24h)
 const revokedTokensCache = new NodeCache({ stdTTL: 86400, checkperiod: 3600 });
+
+// Define role hierarchy for RBAC
+const ROLE_HIERARCHY = {
+  admin: ['user', 'moderator'],
+  moderator: ['user'],
+  user: []
+};
 
 /**
  * JWT secret key for token signing and verification
@@ -53,10 +61,11 @@ function getJWTSecret() {
  * 
  * @param {Object} payload - Data to be encoded in the token
  * @param {string} [payload.userId] - User identifier
- * @param {string} [payload.role] - User role/permissions
+ * @param {string} [payload.role] - User role
+ * @param {Array<string>} [payload.permissions] - Array of permissions
  * @returns {string} Signed JWT token valid for 24 hours
  * @example
- * const token = generateToken({ userId: '12345', role: 'admin' });
+ * const token = generateToken({ userId: '12345', role: 'admin', permissions: ['read', 'write'] });
  */
 export function generateToken(payload) {
   return jwt.sign(payload, getJWTSecret(), {
@@ -202,6 +211,93 @@ export async function authenticateToken(req, res, next) {
       error: 'Invalid API key'
     });
   }
+}
+
+/**
+ * Express middleware for checking if a user has a specific permission
+ * 
+ * This middleware should be used after authenticateToken to ensure
+ * the user is authenticated and has the required permission.
+ * 
+ * @param {string} permission - The permission to check for
+ * @returns {Function} Express middleware function
+ * @example
+ * router.get('/admin', authenticateToken, authorizePermission('admin'), (req, res) => {
+ *   res.json({ message: 'Admin access granted' });
+ * });
+ */
+export function authorizePermission(permission) {
+  return (req, res, next) => {
+    // API keys carry scopes, so check them rather than waving the request through.
+    //
+    // The generated version returned next() unconditionally here, on the grounds that
+    // keys "have their own permissions system". They have the FIELD — `scopes` on the
+    // ApiKey model, marked "for future use" — but nothing enforced it, so an
+    // authorisation middleware would have been silently inert for an entire auth class.
+    // A control that looks like it restricts access and does not is worse than no
+    // control, because a route gets marked protected on the strength of it.
+    //
+    // Behaviour for existing keys is unchanged: normalizeScopes() turns an empty scope
+    // list into ['*'], and '*' satisfies everything. Only a deliberately scoped key is
+    // newly restricted.
+    if (req.authType === 'apikey') {
+      if (scopesSatisfy(req.apiKey?.scopes, permission)) {
+        return next();
+      }
+      return res.status(403).json({
+        success: false,
+        error: 'Insufficient permissions'
+      });
+    }
+
+    // For JWT tokens, check permissions
+    if (req.authType === 'jwt' && req.user) {
+      // Check direct permissions
+      if (req.user.permissions && req.user.permissions.includes(permission)) {
+        return next();
+      }
+
+      // Check role-based permissions
+      if (req.user.role) {
+        // Direct role match
+        if (req.user.role === permission) {
+          return next();
+        }
+
+        // Check role hierarchy
+        if (ROLE_HIERARCHY[req.user.role] && ROLE_HIERARCHY[req.user.role].includes(permission)) {
+          return next();
+        }
+
+        // Check if role inherits from another role that has the permission.
+        // `seen` guards the recursion: ROLE_HIERARCHY is acyclic today, but a future
+        // entry pointing back up (user: ['admin']) would otherwise recurse until the
+        // stack blew — inside auth middleware, on every request.
+        const checkInheritedRoles = (role, targetPermission, seen = new Set()) => {
+          if (!ROLE_HIERARCHY[role] || seen.has(role)) return false;
+          seen.add(role);
+
+          if (ROLE_HIERARCHY[role].includes(targetPermission)) {
+            return true;
+          }
+
+          return ROLE_HIERARCHY[role].some(childRole =>
+            checkInheritedRoles(childRole, targetPermission, seen)
+          );
+        };
+
+        if (checkInheritedRoles(req.user.role, permission)) {
+          return next();
+        }
+      }
+    }
+
+    // If we get here, the user doesn't have the required permission
+    return res.status(403).json({
+      success: false,
+      error: 'Insufficient permissions'
+    });
+  };
 }
 
 /**

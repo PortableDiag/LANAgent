@@ -653,7 +653,11 @@ export class WebInterface {
     this.app.post('/api/bitnet/start', authenticateToken, async (req, res) => {
       try {
         const { exec } = await import('child_process');
-        const cmd = '/root/BitNet/build/bin/llama-server -m /root/BitNet/models/BitNet-b1.58-2B-4T/ggml-model-i2_s.gguf -t 4 -c 2048 -n 4096 --host 0.0.0.0 --port 8080 -ngl 0';
+        const os = await import('os');
+        const pathMod = await import('path');
+        // Install location from BITNET_DIR; defaults to ~/BitNet (the build script's target).
+        const bitnetDir = process.env.BITNET_DIR || pathMod.join(os.homedir(), 'BitNet');
+        const cmd = `${pathMod.join(bitnetDir, 'build/bin/llama-server')} -m ${pathMod.join(bitnetDir, 'models/BitNet-b1.58-2B-4T/ggml-model-i2_s.gguf')} -t 4 -c 2048 -n 4096 --host 0.0.0.0 --port 8080 -ngl 0`;
         exec(`nohup ${cmd} > /dev/null 2>&1 &`);
         res.json({ success: true, message: 'BitNet server starting' });
       } catch (error) { res.status(500).json({ success: false, error: error.message }); }
@@ -4004,11 +4008,12 @@ export class WebInterface {
         
         // Update the model in the provider
         if (providerInstance.models && typeof providerInstance.models === 'object') {
-          // Update chat model by default
+          // Read vision BEFORE overwriting chat: the old code compared vision against the
+          // already-updated chat value, so a vision model that tracked chat stopped tracking
+          // it on the first switch and silently stayed on the previous model.
+          const visionTrackedChat = providerInstance.models.vision === providerInstance.models.chat;
           providerInstance.models.chat = model;
-          
-          // Also update vision model if it's the same
-          if (providerInstance.models.vision === providerInstance.models.chat) {
+          if (visionTrackedChat) {
             providerInstance.models.vision = model;
           }
         } else if (providerInstance.model) {
@@ -4029,11 +4034,49 @@ export class WebInterface {
           // Save to the configurations structure  
           agentData.aiProviders.configurations[provider].model = model;
           
-          // Also save chatModel for backward compatibility
-          if (!agentData.aiProviders[provider]) agentData.aiProviders[provider] = {};
-          agentData.aiProviders[provider].chatModel = model;
+          // Some providers (openrouter, ollama, bitnet) also carry `chatModel`, and THAT is
+          // the field their constructor reads at boot — `model` is only applied afterwards by
+          // syncModelsWithDatabase(). Leaving chatModel stale means the two disagree and the
+          // provider is briefly constructed on the OLD model on every restart. Write both, but
+          // only where the schema declares it: writing a field a provider does not have is the
+          // same silent drop this endpoint was just fixed for.
+          if (Agent.schema.path(`aiProviders.configurations.${provider}.chatModel`)) {
+            agentData.aiProviders.configurations[provider].chatModel = model;
+          }
           
           await agentData.save();
+
+          // Read it back. A provider whose schema does not declare the field it was written
+          // to has the write dropped by strict mode WITHOUT an error, so `save()` resolving
+          // is not evidence the value landed — the model would change in memory and revert on
+          // the next restart while this endpoint reported success. (2026-09-18: exactly that,
+          // for openrouter.)
+          const persisted = await Agent.findOne(
+            { name: process.env.AGENT_NAME || "LANAgent" },
+            { [`aiProviders.configurations.${provider}`]: 1 }
+          );
+          const conf = persisted?.aiProviders?.configurations?.[provider];
+          const landed = conf?.model;
+          // chatModel only counts where the provider actually declares it
+          const tracksChatModel = !!Agent.schema.path(`aiProviders.configurations.${provider}.chatModel`);
+          const chatLanded = tracksChatModel ? conf?.chatModel : model;
+
+          if (landed !== model || chatLanded !== model) {
+            logger.error(
+              `Model change for ${provider} did NOT persist (wrote ${model}, read back ` +
+              `model=${landed ?? 'undefined'} chatModel=${chatLanded ?? 'undefined'}) — the ` +
+              `runtime is updated but will revert on restart. Declare 'model' (and 'chatModel' ` +
+              `where the provider uses it) on aiProviders.configurations.${provider}.`
+            );
+            return res.status(500).json({
+              success: false,
+              error: `Model updated in memory but did not persist for ${provider} — it will ` +
+                     `revert on restart.`,
+              runtimeModel: model,
+              persistedModel: landed ?? null,
+              persistedChatModel: chatLanded ?? null
+            });
+          }
         }
         
         res.json({ success: true, message: `Model updated to ${model}` });
@@ -5105,7 +5148,8 @@ export class WebInterface {
         { key: 'apiKey', label: 'API Key', envVar: 'STATUSCAKE_API_KEY', required: true }
       ],
       newrelic: [
-        { key: 'apiKey', label: 'API Key', envVar: 'NEW_RELIC_API_KEY', required: true }
+        { key: 'apiKey', label: 'API Key', envVar: 'NEW_RELIC_API_KEY', required: true },
+        { key: 'accountId', label: 'Account ID', envVar: 'NEW_RELIC_ACCOUNT_ID', required: false }
       ],
       thingsboard: [
         { key: 'url', label: 'Server URL', envVar: 'THINGSBOARD_URL', required: true },

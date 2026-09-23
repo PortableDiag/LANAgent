@@ -5,13 +5,14 @@ import { promisify } from 'util';
 import fs from 'fs/promises';
 import path from 'path';
 import crypto from 'crypto';
+import os from 'os';
 import { DEPLOY_PATH, TEMP_PATH } from '../../utils/paths.js';
 
 const execAsync = promisify(exec);
 
 const DEFAULT_CONFIG = {
   primaryLocation: DEPLOY_PATH,
-  localBackupPath: process.env.BACKUP_PATH || '/root/lanagent-backups',
+  localBackupPath: process.env.BACKUP_PATH || path.join(os.homedir(), 'lanagent-backups'),
   secondaryBackupPath: process.env.BACKUP_SECONDARY_PATH || '',
   offsiteBackupPath: '',
   encryptionEnabled: false,

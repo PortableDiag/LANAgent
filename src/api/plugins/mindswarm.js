@@ -3955,7 +3955,7 @@ Return ONLY the post text, nothing else.`;
   async _createGroupConversation(data) {
     this._requireAuth();
     this.validateParams(data, {
-      participantIds: { required: true, type: 'object' }
+      participantIds: { required: true, type: 'array' }
     });
     if (!Array.isArray(data.participantIds) || data.participantIds.length === 0) {
       throw new Error('participantIds must be a non-empty array');

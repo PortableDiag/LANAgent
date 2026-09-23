@@ -120,9 +120,18 @@ export class HuggingFaceProvider extends BaseProvider {
       return await fetch(url, { ...init, signal: controller.signal });
     } catch (err) {
       if (err?.name === 'AbortError' || controller.signal.aborted) {
-        throw new Error(
+        // Carry a code the retry classifier recognises. Without it this is a bare
+        // Error with no `code` and no `response`, so `isRetryableError` returned
+        // false and the canonical transient failure — the provider not answering
+        // in time — was the one thing never retried. Reads and generations are
+        // idempotent, so replay is safe here; the send paths in transactionService
+        // are NOT, which is why this is tagged at the provider rather than by
+        // teaching the shared classifier to match timeouts everywhere.
+        const timeoutError = new Error(
           `HuggingFace request timed out after ${timeoutMs}ms (no response headers)`
         );
+        timeoutError.code = 'ETIMEDOUT';
+        throw timeoutError;
       }
       throw err;
     } finally {

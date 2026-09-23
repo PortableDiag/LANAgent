@@ -222,7 +222,7 @@ export class CommandParser {
         if (groups[3]) {
           // Try to parse additional parameters
           try {
-            params = { ...params, ...JSON.parse(groups[3]) };
+            Object.assign(params, JSON.parse(groups[3]));
           } catch {
             params.data = groups[3].trim();
           }

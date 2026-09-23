@@ -5,10 +5,16 @@ import { exec } from 'child_process';
 import { promisify } from 'util';
 import { safeInterval } from '../utils/errorHandlers.js';
 import { selfModLock } from './selfModLock.js';
+import { verifyTrustedSender } from '../utils/emailSenderAuth.js';
 
 // The WireGuard peer this instance checks reachability against. Hardcoding a
 // tunnel address puts deployment topology in the source; it belongs in config.
 const WG_PEER_IP = process.env.WG_PEER_IP || '10.8.0.1';
+// How long to wait for a bounced tunnel to complete a handshake before calling it
+// dead. The watchdog runs every 2 minutes, so this stays well inside one tick.
+const WG_RECOVERY_WINDOW_MS = 30000;
+// Bounces attempted per outage before the watchdog concludes the fault is not local.
+const WG_MAX_BOUNCES_PER_OUTAGE = 2;
 
 const execAsync = promisify(exec);
 
@@ -1140,12 +1146,14 @@ Respond with ONLY the rephrased message, no explanation:`;
         // Handlers are keyed by agentId, so the crypto handler has to be looked
         // up through its SubAgent document — same resolution the crypto API uses.
         let cryptoConfig = {};
+        let cryptoHandler = null;
         try {
           const orchestrator = this.agent?.subAgentOrchestrator;
           if (orchestrator) {
             const { default: SubAgent } = await import('../models/SubAgent.js');
             const agents = await SubAgent.find({ domain: 'crypto', type: 'domain' });
             const handler = agents?.[0] && orchestrator.agentHandlers?.get(agents[0]._id.toString());
+            cryptoHandler = handler || null;
             cryptoConfig = handler?.getConfig?.() || {};
           }
         } catch (err) {
@@ -1156,6 +1164,20 @@ Respond with ONLY the rephrased message, no explanation:`;
 
         if (cryptoConfig.emergencyStop === true) {
           logger.debug('Arb signal scan: emergency stop set, skipping');
+          return;
+        }
+
+        // The active-strategy check above is not enough: the crypto heartbeat scans
+        // arbitrage on EVERY tick "independent of primary/secondary", so it scans
+        // even when something else is the active strategy — which is the normal
+        // case. Two full scans against the same public RPCs (which already 403/429)
+        // were observed overlapping on production 2026-09-04 08:59:28. Share the
+        // heartbeat's single-scan slot: whoever starts first owns it, and this job
+        // waits for the next 30-minute run rather than doubling the load.
+        const releaseArbSlot = cryptoHandler?.claimArbScanSlot?.('signal-scan');
+        if (cryptoHandler?.claimArbScanSlot && !releaseArbSlot) {
+          const running = cryptoHandler.getArbScanInFlight?.();
+          logger.info(`Arb signal scan: a ${running?.label || 'tick'} scan has been running ${Math.round((running?.ageMs || 0) / 1000)}s — skipping this run`);
           return;
         }
 
@@ -1172,6 +1194,7 @@ Respond with ONLY the rephrased message, no explanation:`;
         const networks = strategy.config?.scanNetworks?.length ? strategy.config.scanNetworks : ['bsc'];
 
         let totalFound = 0;
+        try {
         for (const network of networks) {
           try {
             // Evaluate at the strategy's hard ceiling rather than the live
@@ -1194,6 +1217,10 @@ Respond with ONLY the rephrased message, no explanation:`;
 
         if (totalFound > 0) {
           logger.info(`Arb signal scan: recorded ${totalFound} signal(s) — analysis only, no trade decisions produced`);
+        }
+        } finally {
+          // Hold the shared slot for the whole scan, however it ends.
+          if (releaseArbSlot) releaseArbSlot();
         }
       } catch (error) {
         logger.error('Arb signal scan error:', error);
@@ -1272,6 +1299,40 @@ Respond with ONLY the rephrased message, no explanation:`;
         await handler.sendDailyPnLReport();
       } catch (error) {
         logger.error('Crypto daily report error:', error);
+      }
+    });
+
+    // Weekly sweep of banked trading profit to cold storage. The handler is inert
+    // unless CRYPTO_COLD_STORAGE_ADDRESS is set, so defining and scheduling this is
+    // safe on an instance that has not configured a destination — it logs and returns.
+    this.agenda.define('crypto-sweep-banked-profit', async (job) => {
+      try {
+        const orchestrator = this.agent?.subAgentOrchestrator;
+        if (!orchestrator) return;
+
+        const { default: SubAgent } = await import('../models/SubAgent.js');
+        const agents = await SubAgent.find({ domain: 'crypto' });
+        if (!agents.length) return;
+
+        const handler = orchestrator.agentHandlers.get(agents[0]._id.toString());
+        if (!handler) {
+          logger.warn('Banked-profit sweep: crypto agent handler not initialized');
+          return;
+        }
+        // A build whose crypto agent has no sweep (the public one) is not a fault;
+        // warning weekly about it would be a false alarm on every such instance.
+        if (typeof handler.sweepBankedProfit !== 'function') {
+          logger.debug('Banked-profit sweep: not available in this build');
+          return;
+        }
+
+        const result = await handler.sweepBankedProfit();
+        const moved = (result?.swept || []).filter(r => r.hash);
+        if (moved.length) {
+          logger.info(`Banked-profit sweep completed: ${moved.length} transfer(s)`);
+        }
+      } catch (error) {
+        logger.error('Banked-profit sweep error:', error);
       }
     });
 
@@ -1643,9 +1704,19 @@ Respond with ONLY the rephrased message, no explanation:`;
     });
 
     // WireGuard tunnel watchdog — checks handshake age and peer reachability
-    // every 2 minutes. Auto-bounces (wg-quick down/up) if the tunnel is stale
-    // or unreachable. The PostUp hooks in wg0.conf re-add the static route and
+    // every 2 minutes. Bounces wg0 (wg-quick down/up) when the tunnel looks
+    // locally wedged. The PostUp hooks in wg0.conf re-add the static route and
     // iptables exception for ExpressVPN coexistence automatically.
+    //
+    // The bounce is a remedy for a LOCAL wedge only, and the logs say that is
+    // rarely what is wrong: across the retained history the watchdog logged
+    // "tunnel still down after bounce" 399 times and "tunnel recovered after
+    // bounce" zero times, on days whose app logs stall outright for minutes —
+    // an upstream outage, which no amount of down/up can shorten. So the job
+    // bounces a bounded number of times per outage and then holds, and it
+    // records the END of an outage as well as its start; previously the healthy
+    // path returned silently, so the log carried an outage that began and never
+    // visibly finished.
     this.agenda.define('vpn-wireguard-watchdog', async (job) => {
       try {
         const { exec } = await import('child_process');
@@ -1667,54 +1738,120 @@ Respond with ONLY the rephrased message, no explanation:`;
           return;
         }
 
-        // Quick check: is wg0 up and has a recent handshake?
-        let handshakeAge = null;
-        try {
-          const { stdout } = await execAsync('wg show wg0 latest-handshakes');
-          const epoch = parseInt(stdout.split('\t')[1]);
-          if (epoch > 0) handshakeAge = Math.floor(Date.now() / 1000) - epoch;
-        } catch {
-          // wg0 interface not up
-          handshakeAge = Infinity;
+        const MAX_AGE = 180; // 3 minutes (keepalive is 25s, so >3min = dead)
+
+        // One sample of tunnel health: handshake age plus peer reachability.
+        // handshakeAge is Infinity when wg0 is not up at all, null when the
+        // interface exists but has never completed a handshake — a fresh
+        // interface sends nothing until something asks it to, so that state is
+        // normal for a second or two after `wg-quick up` and is not a wedge.
+        const wgProbe = async () => {
+          let handshakeAge = null;
+          try {
+            const { stdout } = await execAsync('wg show wg0 latest-handshakes');
+            const epoch = parseInt(stdout.split('\t')[1]);
+            if (epoch > 0) handshakeAge = Math.floor(Date.now() / 1000) - epoch;
+          } catch {
+            handshakeAge = Infinity; // wg0 interface not up
+          }
+
+          let peerReachable = false;
+          try {
+            await execAsync(`ping -c2 -W3 ${WG_PEER_IP} 2>&1`);
+            peerReachable = true;
+          } catch { /* unreachable */ }
+
+          return {
+            handshakeAge,
+            peerReachable,
+            healthy: peerReachable && handshakeAge !== null && handshakeAge < MAX_AGE
+          };
+        };
+
+        const describe = ({ handshakeAge, peerReachable }) => (
+          handshakeAge === Infinity
+            ? 'interface_down'
+            : !peerReachable
+              ? 'peer_unreachable'
+              : handshakeAge === null
+                ? 'no_handshake_yet'
+                : `handshake_stale_${handshakeAge}s`
+        );
+
+        const probe = await wgProbe();
+
+        if (probe.healthy) {
+          // Close out an outage we opened, so the log carries its duration and
+          // whether any of our bounces plausibly ended it.
+          if (this._wgOutage) {
+            const secs = Math.round((Date.now() - this._wgOutage.since) / 1000);
+            logger.info(
+              `WireGuard watchdog: tunnel healthy again after ${secs}s ` +
+              `(${this._wgOutage.bounces} bounce(s), handshake ${probe.handshakeAge}s old)`
+            );
+            this._wgOutage = null;
+          }
+          return;
         }
 
-        // Also ping the peer
-        let peerReachable = false;
-        try {
-          await execAsync(`ping -c1 -W3 ${WG_PEER_IP} 2>&1`);
-          peerReachable = true;
-        } catch { /* unreachable */ }
+        const reason = describe(probe);
 
-        const MAX_AGE = 180; // 3 minutes (keepalive is 25s, so >3min = dead)
-        const healthy = peerReachable && handshakeAge !== null && handshakeAge < MAX_AGE;
+        if (!this._wgOutage) {
+          this._wgOutage = { since: Date.now(), bounces: 0, holding: false };
+          logger.warn(`WireGuard watchdog: tunnel unhealthy (${reason})`);
+        }
 
-        if (healthy) return; // silent no-op when healthy
+        // A bounce only helps a local wedge. Past WG_MAX_BOUNCES_PER_OUTAGE it is
+        // churn against an upstream outage — and each down/up drops any handshake
+        // that was in flight, so repeating it can delay the recovery it is meant
+        // to cause. Hold, keep probing, and let the healthy branch above report
+        // the end. Bouncing resumes once the tunnel has been healthy again.
+        if (this._wgOutage.bounces >= WG_MAX_BOUNCES_PER_OUTAGE) {
+          if (!this._wgOutage.holding) {
+            this._wgOutage.holding = true;
+            const secs = Math.round((Date.now() - this._wgOutage.since) / 1000);
+            logger.warn(
+              `WireGuard watchdog: ${this._wgOutage.bounces} bounce(s) did not clear ${reason} ` +
+              `after ${secs}s — holding off further bounces, still probing`
+            );
+          }
+          return;
+        }
 
-        const reason = handshakeAge === Infinity
-          ? 'interface_down'
-          : !peerReachable
-            ? 'peer_unreachable'
-            : `handshake_stale_${handshakeAge}s`;
-
-        logger.warn(`WireGuard watchdog: tunnel unhealthy (${reason}) — bouncing wg0`);
+        this._wgOutage.bounces += 1;
+        logger.warn(`WireGuard watchdog: bouncing wg0 (${reason}, attempt ${this._wgOutage.bounces})`);
 
         try {
           await execAsync('wg-quick down wg0 2>&1').catch(() => {});
           await new Promise(r => setTimeout(r, 2000));
           await execAsync('wg-quick up wg0 2>&1');
-          await new Promise(r => setTimeout(r, 6000));
+          await new Promise(r => setTimeout(r, 2000));
 
-          // Verify recovery
+          // Verify against the SAME criteria the health check uses, polled over a
+          // window rather than sampled once. The old check was a single ping six
+          // seconds after `wg-quick up`, which cannot tell a bounce that worked in
+          // twelve seconds from one that did not work at all.
+          const deadline = Date.now() + WG_RECOVERY_WINDOW_MS;
+          let after = null;
           let recovered = false;
-          try {
-            await execAsync(`ping -c1 -W3 ${WG_PEER_IP} 2>&1`);
-            recovered = true;
-          } catch { /* still down */ }
+          while (Date.now() < deadline) {
+            after = await wgProbe();
+            if (after.healthy) { recovered = true; break; }
+            await new Promise(r => setTimeout(r, 3000));
+          }
 
           if (recovered) {
-            logger.info('WireGuard watchdog: tunnel recovered after bounce');
+            const secs = Math.round((Date.now() - this._wgOutage.since) / 1000);
+            logger.info(
+              `WireGuard watchdog: tunnel recovered after bounce ` +
+              `(${secs}s outage, handshake ${after.handshakeAge}s old)`
+            );
+            this._wgOutage = null;
           } else {
-            logger.error('WireGuard watchdog: tunnel still down after bounce');
+            logger.error(
+              `WireGuard watchdog: tunnel still down ` +
+              `${Math.round(WG_RECOVERY_WINDOW_MS / 1000)}s after bounce (${describe(after)})`
+            );
           }
         } catch (bounceErr) {
           logger.error('WireGuard watchdog: bounce failed:', bounceErr.message);
@@ -2569,6 +2706,7 @@ Respond with ONLY the rephrased message, no explanation:`;
     }
     const [hh, mm] = reportTime.split(':').map(Number);
     await this.agenda.every(`${mm} ${hh} * * *`, 'crypto-daily-report');
+
     logger.info(`Crypto daily report scheduled for ${reportTime} (server local time)`);
   }
 
@@ -2658,6 +2796,41 @@ Respond with ONLY the rephrased message, no explanation:`;
     // (was every('24 hours'), which free-ran from whenever the job was first
     // created and ignored the configured time entirely)
     await this.scheduleCryptoDailyReport();
+
+    // Banked-profit sweep. Defaults to weekly, Sunday 04:00 — off-peak, and far from the
+    // daily report so a sweep cannot land mid-report and make the two disagree about the
+    // banked balance. Override with CRYPTO_COLD_STORAGE_SCHEDULE (standard 5-field cron),
+    // e.g. '0 4 * * *' daily, '0 4 1 * *' monthly on the 1st.
+    //
+    // Validated and wrapped: this runs during scheduler init, which is the boot chain, on
+    // an instance with no failover. A typo in an env var must degrade to the default and
+    // log — never throw out of boot.
+    const DEFAULT_SWEEP_CRON = '0 4 * * 0';
+    let sweepCron = DEFAULT_SWEEP_CRON;
+    const configuredCron = (process.env.CRYPTO_COLD_STORAGE_SCHEDULE || '').trim();
+    if (configuredCron) {
+      // Five whitespace-separated fields, each made only of cron-legal characters.
+      const fields = configuredCron.split(/\s+/);
+      const fieldOk = /^[\d*,\-/]+$/;
+      if (fields.length === 5 && fields.every(f => fieldOk.test(f))) {
+        sweepCron = configuredCron;
+      } else {
+        logger.warn(`Invalid CRYPTO_COLD_STORAGE_SCHEDULE "${configuredCron}" — expected 5 cron fields; using the default ${DEFAULT_SWEEP_CRON}`);
+      }
+    }
+    try {
+      await this.agenda.every(sweepCron, 'crypto-sweep-banked-profit');
+      logger.info(`Banked-profit sweep scheduled: ${sweepCron}${configuredCron && sweepCron === configuredCron ? ' (from CRYPTO_COLD_STORAGE_SCHEDULE)' : ' (default)'}`);
+    } catch (err) {
+      logger.error(`Could not schedule the banked-profit sweep with "${sweepCron}": ${err.message}. Falling back to ${DEFAULT_SWEEP_CRON}.`);
+      try {
+        await this.agenda.every(DEFAULT_SWEEP_CRON, 'crypto-sweep-banked-profit');
+      } catch (fallbackErr) {
+        // Never take boot down over a housekeeping job. The sweep simply does not run.
+        logger.error(`Banked-profit sweep could not be scheduled at all: ${fallbackErr.message}`);
+      }
+    }
+
 
     // MindSwarm engagement - process notifications, auto-reply, daily post.
     // 15 min (was 5) — at 5 min we were generating ~288 /notifications hits/
@@ -2960,16 +3133,41 @@ Respond with ONLY the rephrased message, no explanation:`;
       return;
     }
     
-    // Check if we should auto-reply
+    // === WHO IS ALLOWED TO REACH THE AI ===
+    //
+    // What follows hands the email body to the model and on into intent detection,
+    // which can dispatch plugins. So this is not a preference check, it is an
+    // authentication boundary, and it has to be treated like one.
+    //
+    // It used to read `fromEmail === masterEmail`. `From:` is typed by whoever sends
+    // the mail, so that let anyone through by writing the master's address in a
+    // header. On 2026-01-18 a phish impersonating "GitHub Developer Support" came
+    // through this path and was answered by the AI. Now the only thing that counts
+    // is our own mail server's verdict: DMARC pass AND DKIM pass, both aligned to
+    // the From domain, read from Authentication-Results stamped above the ingress
+    // hop (see src/utils/emailSenderAuth.js). No verdict means no reply.
     const masterEmail = process.env.EMAIL_OF_MASTER?.toLowerCase();
-    const shouldReplyToMaster = masterEmail && fromEmail === masterEmail;
-    
-    // Check email plugin auto-reply settings
-    const emailPlugin = this.apiManager.getPlugin('email');
-    const autoReplySettings = emailPlugin?.getState('autoReply');
-    const autoReplyEnabled = autoReplySettings?.enabled || false;
-    
-    logger.info(`Auto-reply check: shouldReplyToMaster=${shouldReplyToMaster}, autoReplyEnabled=${autoReplyEnabled}, masterEmail=${masterEmail}, fromEmail=${fromEmail}`);
+    const trustedAuthservId = process.env.MAIL_AUTHSERV_ID || 'mail.lanagent.net';
+    const senderCheck = verifyTrustedSender(email.authHeaderLines, email.from, {
+      trustedAuthservId,
+      trustedHost: process.env.MAIL_TRUSTED_HOST || trustedAuthservId,
+      expectedAddress: masterEmail
+    });
+    const shouldReplyToMaster = senderCheck.trusted;
+
+    // AUTO-REPLY TO ARBITRARY SENDERS IS PERMANENTLY OFF (operator decision,
+    // 2026-09-21). It is not a stored setting any more, so it cannot be switched
+    // back on through the plugin's setAutoReply action or by editing a document in
+    // Mongo — re-enabling it means editing this line and explaining why. Replying
+    // to strangers with a model that can call plugins is a remote-controlled agent
+    // with extra steps; the only sender that reaches the AI is the verified master.
+    const autoReplyEnabled = false;
+
+    logger.info(`Auto-reply check: verifiedMaster=${shouldReplyToMaster} (${senderCheck.reason}), autoReplyEnabled=${autoReplyEnabled} (permanently disabled), fromEmail=${fromEmail}`);
+    if (!shouldReplyToMaster && masterEmail && fromEmail === masterEmail) {
+      // Claims to be the master but the server did not verify it. Worth seeing.
+      logger.warn(`Email claims to be from the master (${fromEmail}) but FAILED sender verification: ${senderCheck.reason}. Not replying.`);
+    }
     
     // Track email conversation as guest conversation
     const telegram = this.agent.interfaces?.get('telegram');
@@ -3383,7 +3581,9 @@ ${ttUrEmoji} Unrealized: $${cryptoStats.tokenTraderUnrealizedPnL.toFixed(2)}
 • Job success rate: ${systemStats.jobSuccessRate || 0}%`);
 
       // Scheduled Jobs (fixed - actual run counts)
-      sections.push(`🔄 **Scheduled Jobs (${periodLabel})**\n${systemStats.jobSummary || '• No jobs run this period'}`);
+      // Exceptions only — see getSystemActivity for why a run-count roll-call was
+      // worse than nothing here.
+      sections.push(`🔄 **Scheduled Jobs (${periodLabel})**\n${systemStats.jobSummary || '• Job statistics unavailable'}`);
 
       const report = sections.join('\n\n');
 
@@ -3575,6 +3775,7 @@ ${ttUrEmoji} Unrealized: $${cryptoStats.tokenTraderUnrealizedPnL.toFixed(2)}
       // lastRunAt, and lastFinishedAt. We estimate run counts from the interval
       // and the period overlap.
       const jobCounts = {};
+      const jobExceptions = [];
       let successCount = 0;
       let failCount = 0;
 
@@ -3587,6 +3788,30 @@ ${ttUrEmoji} Unrealized: $${cryptoStats.tokenTraderUnrealizedPnL.toFixed(2)}
         for (const job of jobDocs) {
           const name = job.name;
           if (!name) continue;
+
+          // Exceptions are judged on the job document itself, not on the window,
+          // because a job that stopped running has no run inside the window to
+          // count — which is exactly why the run-count summary could never show it.
+          const lastRunAt = job.lastRunAt ? new Date(job.lastRunAt) : null;
+          const lastFinished = job.lastFinishedAt ? new Date(job.lastFinishedAt) : null;
+          const failedAt = job.failedAt ? new Date(job.failedAt) : null;
+          if (failedAt && (!lastFinished || failedAt > lastFinished)) {
+            const when = failedAt.toLocaleString();
+            const why = (job.failReason || '').toString().split('\n')[0].slice(0, 120);
+            jobExceptions.push({ name, detail: `last run FAILED ${when}${why ? ` — ${why}` : ''}` });
+          } else if (!job.disabled && job.repeatInterval && lastRunAt) {
+            const intervalMs = this._parseIntervalToMs(job.repeatInterval);
+            const overdueBy = Date.now() - lastRunAt.getTime();
+            // Three intervals of slack: one missed tick is scheduling jitter,
+            // three in a row is a job that has stopped.
+            if (intervalMs > 0 && overdueBy > intervalMs * 3) {
+              const hours = Math.round(overdueBy / 3600e3);
+              jobExceptions.push({
+                name,
+                detail: `has not run for ${hours}h (every ${job.repeatInterval})`
+              });
+            }
+          }
 
           // Calculate how many times this job ran in the report period.
           // Agenda only stores the latest lastRunAt per job definition, not a
@@ -3640,9 +3865,21 @@ ${ttUrEmoji} Unrealized: $${cryptoStats.tokenTraderUnrealizedPnL.toFixed(2)}
       const sortedJobs = Object.entries(jobCounts)
         .sort((a, b) => b[1] - a[1]);
 
-      const jobSummary = sortedJobs.length > 0
-        ? sortedJobs.map(([name, count]) => `• ${name}: ${count.toLocaleString()} runs`).join('\n')
-        : '• No jobs run this period';
+      // Report EXCEPTIONS, not a roll-call.
+      //
+      // The old summary listed all ~41 jobs with a run count each ("system-health:
+      // 1,440 runs"). Those counts are not measurements: Agenda keeps only the
+      // latest lastRunAt per definition, so runs is computed as period ÷ interval.
+      // 1,440 is 24h ÷ 1min — arithmetic that comes out the same whether the job
+      // ran every minute or died after the first one. It cannot report the one
+      // thing worth knowing, which is that something did not run.
+      //
+      // What the same documents DO support: a job whose last run failed, and a job
+      // that is overdue against its own interval. Those are the two lines worth a
+      // reader's attention, and silence is then meaningful.
+      const jobSummary = jobExceptions.length > 0
+        ? jobExceptions.map(e => `• ${e.name}: ${e.detail}`).join('\n')
+        : `• ${sortedJobs.length} scheduled job(s), none failed or overdue`;
 
       const jobDetails = sortedJobs.map(([name, count]) => ({ name, count }));
 
@@ -3690,7 +3927,7 @@ ${ttUrEmoji} Unrealized: $${cryptoStats.tokenTraderUnrealizedPnL.toFixed(2)}
         peakMemoryUsage: 0,
         avgResponseTime: 0,
         jobSuccessRate: 0,
-        jobSummary: '• Statistics unavailable',
+        jobSummary: '• Job statistics unavailable',
         jobDetails: []
       };
     }
