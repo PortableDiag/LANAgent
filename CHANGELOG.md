@@ -2,6 +2,18 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.329] - 2026-09-23
+
+### Security
+- **Changing the web password had no effect.** The installers and `.env.example` set
+  `WEB_UI_PASSWORD` and say to change it there, but login read only `WEB_PASSWORD`, so the
+  default stayed valid. Login now reads `WEB_UI_PASSWORD`, then `WEB_PASSWORD`, then the default.
+  **If you changed `WEB_UI_PASSWORD`, it takes effect after this update; the default stops
+  working.**
+- **The dashboard password is no longer in the system prompt.** It had been included in the
+  prompt sent to the AI provider on every request, where a user talking to the agent could ask
+  for it.
+
 ## [2.25.328] - 2026-09-23
 
 Sync from upstream development covering 2.25.295–2.25.328. It also brings roughly sixty source

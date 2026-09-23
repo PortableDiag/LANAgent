@@ -353,7 +353,11 @@ export class WebInterface {
     this.app.post('/api/auth/login', async (req, res) => {
       try {
         const { password } = req.body;
-        const correctPassword = process.env.WEB_PASSWORD || 'lanagent';
+        // WEB_UI_PASSWORD is the name install.sh, docker-setup.sh and .env.example write and
+        // tell the user to change. This read only WEB_PASSWORD, so changing the documented
+        // variable had no effect and every install kept accepting the default. WEB_PASSWORD
+        // stays as a fallback for anyone who set it by reading this code.
+        const correctPassword = process.env.WEB_UI_PASSWORD || process.env.WEB_PASSWORD || 'lanagent';
         
         if (password === correctPassword) {
           const token = generateToken({ user: 'admin' });

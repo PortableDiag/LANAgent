@@ -4540,7 +4540,6 @@ Return ONLY a valid JSON object with the extracted parameters, nothing else.`;
     // Dynamic configuration values (no hardcoding)
     const agentEmail = process.env.AGENT_EMAIL || process.env.EMAIL_USER || process.env.IMAP_USER || 'alice@lanagent.net';
     const serverHost = getServerHost();
-    const webPassword = process.env.WEB_PASSWORD || 'lanagent';
     const webPort = this.config.port || process.env.AGENT_PORT || 80;
     const sshPort = this.config.sshPort || process.env.AGENT_SSH_PORT || 2222;
     const githubRepo = process.env.GITHUB_REPO || 'https://github.com/PortableDiag/LANAgent';
@@ -4568,7 +4567,10 @@ Return ONLY a valid JSON object with the extracted parameters, nothing else.`;
     systemPrompt += `📡 INTERFACES (How users reach you):\n`;
     systemPrompt += `1. Telegram Bot: Full natural language interface with dashboards and menus\n`;
     systemPrompt += `2. Email: Receive commands/questions at ${agentEmail}, auto-reply enabled\n`;
-    systemPrompt += `3. Web Dashboard: http://${serverHost}:${webPort} (password: ${webPassword})\n`;
+    // The dashboard password is deliberately NOT in the prompt. It used to be: the prompt goes
+    // to the AI provider on every request, and anyone who can talk to the agent can ask the
+    // model to repeat it.
+    systemPrompt += `3. Web Dashboard: http://${serverHost}:${webPort} (password-protected)\n`;
     systemPrompt += `4. SSH Server: Port ${sshPort} for terminal access\n\n`;
     
     // Core Capabilities
