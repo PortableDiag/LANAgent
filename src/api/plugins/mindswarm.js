@@ -2672,7 +2672,7 @@ Return ONLY the post text, nothing else.`;
     }
 
     // Step 4: Complete verification
-    this.pluginLogger.info(`Verifying with token: ${token.substring(0, 10)}...`);
+    this.pluginLogger.info('Verifying with token (present)');
     const result = await this._apiRequest('get', `/auth/verify-email?token=${encodeURIComponent(token)}`, null, false);
 
     this.pluginLogger.info('Email verified successfully!');

@@ -120,7 +120,7 @@ export class TTSService {
       logger.info(`Checking for HuggingFace token: HF_TOKEN=${!!process.env.HF_TOKEN}, HUGGINGFACE_TOKEN=${!!process.env.HUGGINGFACE_TOKEN}`);
       if (hfToken) {
         this.huggingface = new InferenceClient(hfToken);
-        logger.info(`HuggingFace TTS provider initialized successfully with token (first 10 chars): ${hfToken.substring(0, 10)}...`);
+        logger.info('HuggingFace TTS provider initialized successfully (token present)');
       } else {
         logger.warn('HuggingFace token not found - TTS will not be available');
       }

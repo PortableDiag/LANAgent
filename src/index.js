@@ -32,7 +32,6 @@ dotenv.config({ path: envPath });
 // Debug env loading
 logger.info('Loading environment from: ' + envPath);
 logger.info('Environment loaded, TELEGRAM_BOT_TOKEN exists: ' + !!process.env.TELEGRAM_BOT_TOKEN);
-logger.info('First 10 chars of token: ' + (process.env.TELEGRAM_BOT_TOKEN || 'undefined').substring(0, 10));
 
 // Import and setup global error handlers
 import { setupGlobalErrorHandlers } from './utils/errorHandlers.js';

@@ -2,6 +2,13 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.330] - 2026-09-23
+
+### Security
+- **Three log lines printed the first characters of a credential** (the Telegram bot token at
+  startup, the HuggingFace token when TTS initialises, and an email-verification token). They
+  now log only that the credential is present.
+
 ## [2.25.329] - 2026-09-23
 
 ### Security
