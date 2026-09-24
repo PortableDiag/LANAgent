@@ -40,8 +40,12 @@ class EmailLeaseService {
 
   _signRequest(method, path, body) {
     const timestamp = String(Date.now());
+    // Hash `{}` for a bodiless request: the mail API (Express 4 + express.json) sets
+    // req.body to {} when there is no body, and hashes JSON.stringify(req.body). Hashing
+    // JSON.stringify(null) === "null" here meant every GET and DELETE — listing mailboxes,
+    // and deleting one on lease revocation or expiry — failed with "Invalid signature".
     const bodyHash = crypto.createHash('sha256')
-      .update(JSON.stringify(body) || '')
+      .update(JSON.stringify(body ?? {}))
       .digest('hex');
     const signature = crypto.createHmac('sha256', this.mailApiSecret)
       .update(`${method}:${path}:${timestamp}:${bodyHash}`)

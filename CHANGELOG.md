@@ -2,6 +2,13 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.335] - 2026-09-23
+
+### Fixed
+- **Mail API calls without a body always failed their signature check.** GET and DELETE requests
+  hashed `null` while the mail API hashes `{}`, so listing mailboxes and deleting one on lease
+  revocation or expiry returned "Invalid signature". Bodiless requests now hash `{}`.
+
 ## [2.25.334] - 2026-09-23
 
 ### Fixed
