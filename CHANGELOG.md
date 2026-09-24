@@ -2,6 +2,14 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.333] - 2026-09-23
+
+### Fixed
+- **A welcome package could report a mailbox that was never created.** The address was
+  recorded before the mail account existed, and a creation failure was swallowed, so the
+  recipient list and the reply to the new agent named an address that did not exist. The address
+  is now recorded only after creation succeeds; on failure the record carries `emailError`.
+
 ## [2.25.332] - 2026-09-23
 
 ### Fixed

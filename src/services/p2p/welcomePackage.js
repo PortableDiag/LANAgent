@@ -161,6 +161,7 @@ class WelcomePackage {
       let email = null;
       let emailPassword = null;
       let emailLease = null;
+      let emailError = null;
       try {
         const emailLeaseService = (await import('../email/emailLeaseService.js')).default;
         if (!emailLeaseService.initialized) await emailLeaseService.initialize();
@@ -191,10 +192,14 @@ class WelcomePackage {
             const password = emailLeaseService._generatePassword();
             const quotaMB = await emailLeaseService._getDefaultQuotaMB();
             const durationDays = await emailLeaseService._getLeaseDurationDays();
-            email = `${chosenUsername}@${DOMAIN}`;
-
-            await emailLeaseService._createMailAccount(email, password);
-            await emailLeaseService._setQuota(email, quotaMB);
+            // Assigned to `email` only once the mailbox exists. It used to be assigned first,
+            // so a failed creation was still recorded, reported to the peer and logged as the
+            // agent's address — how a mailbox that never existed sat in the recipient list
+            // for four months while the mail API was unreachable.
+            const address = `${chosenUsername}@${DOMAIN}`;
+            await emailLeaseService._createMailAccount(address, password);
+            await emailLeaseService._setQuota(address, quotaMB);
+            email = address;
 
             const expiresAt = new Date();
             expiresAt.setDate(expiresAt.getDate() + durationDays);
@@ -259,7 +264,12 @@ class WelcomePackage {
         }
       } catch (err) {
         logger.error(`Welcome package: email creation failed for ${fp}...: ${err.message}`);
-        // Continue — tokens were already sent, email is bonus
+        // Continue — tokens were already sent, email is bonus. But say so: nothing below may
+        // describe a mailbox that was not created.
+        email = null;
+        emailPassword = null;
+        emailLease = null;
+        emailError = err.message;
       }
 
       // 8. Record the recipient
@@ -268,6 +278,7 @@ class WelcomePackage {
         agentName,
         walletAddress,
         email: email || null,
+        ...(emailError && { emailError }),
         txHash
       };
       await SystemSettings.setSetting('skynet.welcomeRecipients', recipients,
