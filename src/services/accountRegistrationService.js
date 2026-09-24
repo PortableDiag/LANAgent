@@ -99,7 +99,7 @@ class AccountRegistrationService {
         const timestamp = Date.now();
         const randomStr = crypto.randomBytes(4).toString('hex');
 
-        // Get email from EMAIL_USER or GMAIL_USER env var (e.g., alice@lanagent.net)
+        // Get email from EMAIL_USER or GMAIL_USER env var (e.g., agent@example.com)
         const gmailUser = process.env.EMAIL_USER || process.env.GMAIL_USER || 'lanagent@example.com';
         const [emailPrefix, emailDomain] = gmailUser.split('@');
 

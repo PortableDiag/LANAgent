@@ -2,6 +2,16 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.332] - 2026-09-23
+
+### Fixed
+- **An agent with no email configured claimed another agent's address as its own.** The system
+  prompt fell back to a hardcoded mailbox when `AGENT_EMAIL` / `EMAIL_USER` / `IMAP_USER` were
+  unset. It now says email is not configured and tells the model never to invent an address. The
+  email interface is listed only when there is one.
+- **The prompt said email auto-reply was enabled.** It is permanently disabled; the prompt now
+  says only the verified owner's mail is acted on.
+
 ## [2.25.330] - 2026-09-23
 
 ### Security

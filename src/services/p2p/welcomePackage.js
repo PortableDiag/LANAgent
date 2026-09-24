@@ -216,8 +216,12 @@ class WelcomePackage {
             emailPassword = password;
             logger.info(`Welcome package: email created ${email} for ${fp}...`);
 
-            // Send a welcome email to the new address
-            try {
+            // Send a welcome email to the new address — only from a configured sender. This
+            // used to fall back to one specific instance's mailbox.
+            const welcomeSender = process.env.EMAIL_USER || process.env.GMAIL_USER;
+            if (!welcomeSender) {
+              logger.info('Welcome package: no EMAIL_USER configured, skipping the welcome email');
+            } else try {
               const nodemailer = (await import('nodemailer')).default;
               const transporter = nodemailer.createTransport({
                 host: 'mail.lanagent.net',
@@ -225,12 +229,12 @@ class WelcomePackage {
                 secure: false,
                 requireTLS: true,
                 auth: {
-                  user: process.env.EMAIL_USER || process.env.GMAIL_USER || 'alice@lanagent.net',
+                  user: welcomeSender,
                   pass: process.env.EMAIL_PASSWORD || process.env.GMAIL_APP_PASS
                 }
               });
               await transporter.sendMail({
-                from: `"ALICE - LANAgent Genesis" <${process.env.EMAIL_USER || 'alice@lanagent.net'}>`,
+                from: `"ALICE - LANAgent Genesis" <${welcomeSender}>`,
                 to: email,
                 subject: `Welcome to the SKYNET Network, ${agentName}!`,
                 text: `Hi ${agentName},\n\nWelcome to the SKYNET P2P network! Your agent has been provisioned with:\n\n` +

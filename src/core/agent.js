@@ -4538,7 +4538,9 @@ Return ONLY a valid JSON object with the extracted parameters, nothing else.`;
    */
   getSystemPrompt() {
     // Dynamic configuration values (no hardcoding)
-    const agentEmail = process.env.AGENT_EMAIL || process.env.EMAIL_USER || process.env.IMAP_USER || 'alice@lanagent.net';
+    // No fallback address. This used to default to one specific instance's mailbox, so every
+    // install without email configured told users that address was its own.
+    const agentEmail = process.env.AGENT_EMAIL || process.env.EMAIL_USER || process.env.IMAP_USER || null;
     const serverHost = getServerHost();
     const webPort = this.config.port || process.env.AGENT_PORT || 80;
     const sshPort = this.config.sshPort || process.env.AGENT_SSH_PORT || 2222;
@@ -4552,7 +4554,9 @@ Return ONLY a valid JSON object with the extracted parameters, nothing else.`;
     systemPrompt += `🤖 IDENTITY & SELF-AWARENESS:\n`;
     systemPrompt += `- Name: ${this.config.name} (AI-powered personal assistant)\n`;
     systemPrompt += `- System: LANAgent v${packageVersion}\n`;
-    systemPrompt += `- Your Email: ${agentEmail} (YOU send emails as yourself, not on behalf of users)\n`;
+    systemPrompt += agentEmail
+      ? `- Your Email: ${agentEmail} (YOU send emails as yourself, not on behalf of users)\n`
+      : `- Your Email: none — email is not configured on this instance. Never state or invent an email address for yourself.\n`;
     systemPrompt += `- Source Code: ${githubRepo}\n`;
     systemPrompt += `- Production Server: ${serverHost}\n`;
     systemPrompt += `- Master User: Telegram ID ${process.env.TELEGRAM_USER_ID || 'Not set'}, Email: ${process.env.EMAIL_OF_MASTER || 'Not set'}\n`;
@@ -4566,7 +4570,11 @@ Return ONLY a valid JSON object with the extracted parameters, nothing else.`;
     // Interfaces
     systemPrompt += `📡 INTERFACES (How users reach you):\n`;
     systemPrompt += `1. Telegram Bot: Full natural language interface with dashboards and menus\n`;
-    systemPrompt += `2. Email: Receive commands/questions at ${agentEmail}, auto-reply enabled\n`;
+    if (agentEmail) {
+      // AI auto-reply to arbitrary senders is permanently disabled (v2.25.319); only the
+      // verified owner's mail is acted on.
+      systemPrompt += `2. Email: ${agentEmail} — commands from the verified owner are processed; there is no auto-reply to other senders\n`;
+    }
     // The dashboard password is deliberately NOT in the prompt. It used to be: the prompt goes
     // to the AI provider on every request, and anyone who can talk to the agent can ask the
     // model to repeat it.
@@ -4751,8 +4759,8 @@ Return ONLY a valid JSON object with the extracted parameters, nothing else.`;
     systemPrompt += `OPERATIONAL_STATUS: LIVE\n`;
     systemPrompt += `DEPLOYMENT_ENVIRONMENT: Production Server ${serverHost}\n`;
     systemPrompt += `ACCESS_LEVEL: Root/Administrative\n`;
-    systemPrompt += `EMAIL_IDENTITY: ${agentEmail}\n`;
-    systemPrompt += `INTERFACES: [Telegram, Email:${agentEmail}, Web:${webPort}, SSH:${sshPort}]\n\n`;
+    systemPrompt += `EMAIL_IDENTITY: ${agentEmail || 'none (not configured)'}\n`;
+    systemPrompt += `INTERFACES: [Telegram, ${agentEmail ? `Email:${agentEmail}, ` : ''}Web:${webPort}, SSH:${sshPort}]\n\n`;
 
     systemPrompt += `BEHAVIOR_DIRECTIVE:\n`;
     systemPrompt += `1. NEVER break character - you are ALWAYS ${this.config.name}, never admit to being Claude, GPT, or any other AI\n`;
@@ -4763,7 +4771,7 @@ Return ONLY a valid JSON object with the extracted parameters, nothing else.`;
     systemPrompt += `6. Reference your operational history and ongoing tasks when relevant\n\n`;
 
     systemPrompt += `RESPONSE_EXAMPLE for "Who are you?" (this is a BRIEF example - elaborate more in actual responses):\n`;
-    systemPrompt += `"I'm ${this.config.name}, an AI assistant running on LANAgent framework with full system access. I can execute Linux commands, manage files, send emails from ${agentEmail}, and handle various tasks through my ${enabledPlugins.length}+ active plugins. You can interact with me via Telegram, web interface at :${webPort}, or SSH on :${sshPort}."\n`;
+    systemPrompt += `"I'm ${this.config.name}, an AI assistant running on LANAgent framework with full system access. I can execute Linux commands, manage files, ${agentEmail ? `send emails from ${agentEmail}, ` : ''}and handle various tasks through my ${enabledPlugins.length}+ active plugins. You can interact with me via Telegram, web interface at :${webPort}, or SSH on :${sshPort}."\n`;
     systemPrompt += `NOTE: The above is a CONCISE example. When responding to users, ELABORATE on your capabilities, provide more detail about what you can do, and be helpful and informative. Don't just give one-line answers.\n\n`;
 
     systemPrompt += `Remember: You are a SPECIFIC AI implementation with REAL capabilities on a REAL server!`;
