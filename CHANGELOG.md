@@ -2,6 +2,13 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.334] - 2026-09-23
+
+### Fixed
+- **MindSwarm email verification could never complete.** The inbox reader reported "no token"
+  before the verification email had been parsed. It now waits for every parse, takes the newest
+  token, and polls for delivery for up to about a minute.
+
 ## [2.25.333] - 2026-09-23
 
 ### Fixed

@@ -2662,11 +2662,13 @@ Return ONLY the post text, nothing else.`;
     this.pluginLogger.info('Requesting verification email from MindSwarm...');
     await this._apiRequest('post', '/auth/resend-verification');
 
-    // Step 2: Wait a moment for email delivery
-    await new Promise(resolve => setTimeout(resolve, 5000));
-
-    // Step 3: Read the verification email via IMAP
-    const token = await this._readVerificationToken();
+    // Step 2+3: poll the inbox until the email lands. One fixed 5s wait lost the race
+    // against delivery; poll for up to ~60s instead.
+    let token = null;
+    for (let attempt = 0; attempt < 12 && !token; attempt++) {
+      await new Promise(resolve => setTimeout(resolve, 5000));
+      token = await this._readVerificationToken();
+    }
     if (!token) {
       return { success: false, error: 'Could not find verification token in email. Check inbox manually or try again.' };
     }
@@ -2754,28 +2756,31 @@ Return ONLY the post text, nothing else.`;
 
   _fetchAndParseEmails(imap, results, simpleParser, resolve) {
     const fetch = imap.fetch(results.slice(-5), { bodies: '' }); // Last 5 emails
-    let found = false;
+    // Parsing is asynchronous, and 'end' fires when the FETCH finishes — before the parser
+    // has read a single body. Resolving on 'end' returned null every time a token was
+    // present, so verification could never complete. Collect every parse and wait for all.
+    const parses = [];
 
     fetch.on('message', (msg) => {
       msg.on('body', (stream) => {
-        simpleParser(stream, (err, mail) => {
-          if (err || found) return;
+        parses.push(simpleParser(stream).then((mail) => {
           const body = (mail.text || '') + (mail.html || '');
-          // Look for verification link with token
           const tokenMatch = body.match(/verify-email[?&]token=([a-zA-Z0-9._-]+)/) ||
                              body.match(/verification.*token[=:][\s]*([a-zA-Z0-9._-]+)/) ||
                              body.match(/token=([a-f0-9]{32,})/i);
-          if (tokenMatch) {
-            found = true;
-            resolve(tokenMatch[1]);
-          }
-        });
+          return tokenMatch ? tokenMatch[1] : null;
+        }).catch(() => null));
       });
     });
 
-    fetch.once('end', () => {
-      imap.end();
-      if (!found) resolve(null);
+    fetch.once('error', () => { try { imap.end(); } catch {} resolve(null); });
+
+    fetch.once('end', async () => {
+      // Results arrive oldest first; a resend usually invalidates earlier links, so take
+      // the newest token found.
+      const tokens = (await Promise.all(parses)).filter(Boolean);
+      try { imap.end(); } catch {}
+      resolve(tokens.length ? tokens[tokens.length - 1] : null);
     });
   }
 
