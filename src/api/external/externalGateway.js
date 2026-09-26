@@ -24,6 +24,7 @@ import downloadRoutes from './routes/download.js';
 import youtubeRoutes from './routes/youtube.js';
 import socialRoutes from './routes/social.js';
 import transcodeRoutes from './routes/transcode.js';
+import transcribeRoutes from './routes/transcribe.js';
 import imageGenRoutes from './routes/imageGen.js';
 import scrapingRoutes from './routes/scraping.js';
 import documentsRoutes from './routes/documents.js';
@@ -81,6 +82,7 @@ router.use('/admin', adminRoutes);
 router.use('/youtube', youtubeRoutes);
 router.use('/social', socialRoutes);
 router.use('/transcode', transcodeRoutes);
+router.use('/transcribe', transcribeRoutes);
 router.use('/image', imageGenRoutes);
 router.use('/scrape', scrapingRoutes);
 router.use('/documents', documentsRoutes);
@@ -130,6 +132,7 @@ router.get('/admin/dashboard', authenticateToken, async (req, res) => {
       else if (path.includes('/youtube/download')) serviceId = 'youtube-download';
       else if (path.includes('/youtube/audio')) serviceId = 'youtube-audio';
       else if (path.includes('/transcode')) serviceId = 'media-transcode';
+      else if (path.includes('/transcribe')) serviceId = 'audio-transcription';
       else if (path.includes('/image/')) serviceId = 'image-generation';
       else if (path.includes('/documents/')) serviceId = 'document-processing';
       else if (path.includes('/sandbox/')) serviceId = 'code-sandbox';
@@ -342,6 +345,21 @@ async function seedServiceConfigs() {
       estimatedTime: '1-3 minutes',
       inputFormat: 'json',
       outputFormat: 'file'
+    },
+    {
+      // Credits only, billed per started minute (see routes/transcribe.js). `price` is the
+      // legacy per-call BNB field the schema requires; the transcription route does not
+      // accept legacy payment, so it is nominal.
+      serviceId: 'audio-transcription',
+      name: 'Audio Transcription',
+      description: 'Speech to text from an uploaded audio/video file or a media URL. 2 credits per started minute (min 2), +5 for URLs, max 60 minutes',
+      price: '0.00003',
+      enabled: true,
+      rateLimit: { maxPerAgent: 10, windowMinutes: 15 },
+      maxFileSize: 524288000,
+      estimatedTime: '10 seconds - 3 minutes',
+      inputFormat: 'multipart',
+      outputFormat: 'json'
     },
     {
       serviceId: 'media-transcode',

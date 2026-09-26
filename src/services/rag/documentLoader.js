@@ -363,6 +363,131 @@ export class XMLLoader extends DocumentLoader {
 }
 
 /**
+ * DocxLoader - Load Word documents as plain text via mammoth
+ */
+export class DocxLoader extends DocumentLoader {
+  constructor(filePath, options = {}) {
+    super(options);
+    this.filePath = filePath;
+  }
+
+  async load() {
+    try {
+      const mammoth = (await import('mammoth')).default;
+      const { value } = await mammoth.extractRawText({ path: this.filePath });
+      const text = (value || '').trim();
+      const { hash, documentId } = computeFingerprint(text, this.filePath);
+      return [new Document(text, {
+        source: this.filePath,
+        filename: path.basename(this.filePath),
+        type: 'docx',
+        hash,
+        documentId
+      })];
+    } catch (error) {
+      logger.error(`DocxLoader error for ${this.filePath}:`, error.message);
+      throw error;
+    }
+  }
+}
+
+/**
+ * XlsxLoader - Load Excel workbooks, one Document per sheet rendered as CSV.
+ * An .xlsx is a zip of XML parts; reading it with jszip + xml2js avoids a
+ * spreadsheet dependency. Formulas yield their cached values; styling is ignored.
+ */
+export class XlsxLoader extends DocumentLoader {
+  constructor(filePath, options = {}) {
+    super(options);
+    this.filePath = filePath;
+    this.maxRows = options.maxRows || 5000;
+  }
+
+  static columnIndex(ref) {
+    const letters = (ref.match(/^[A-Z]+/) || ['A'])[0];
+    let n = 0;
+    for (const ch of letters) n = n * 26 + (ch.charCodeAt(0) - 64);
+    return n - 1;
+  }
+
+  static csvCell(value) {
+    const s = value == null ? '' : String(value);
+    return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+  }
+
+  // Text of a shared-string or inline-string item: plain <t>, or rich-text runs <r><t>
+  static stringItemText(si) {
+    if (!si) return '';
+    if (si.t) return si.t.map(t => (typeof t === 'string' ? t : t._ || '')).join('');
+    if (si.r) return si.r.map(r => XlsxLoader.stringItemText(r)).join('');
+    return '';
+  }
+
+  async load() {
+    try {
+      const JSZip = (await import('jszip')).default;
+      const zip = await JSZip.loadAsync(await fs.readFile(this.filePath));
+      const readXml = async (name) => {
+        const file = zip.file(name);
+        return file ? parseStringPromise(await file.async('string')) : null;
+      };
+
+      const sst = await readXml('xl/sharedStrings.xml');
+      const shared = (sst?.sst?.si || []).map(si => XlsxLoader.stringItemText(si));
+
+      // Sheet names come from workbook.xml; their part paths from the workbook rels
+      const workbook = await readXml('xl/workbook.xml');
+      const rels = await readXml('xl/_rels/workbook.xml.rels');
+      const targets = {};
+      for (const rel of rels?.Relationships?.Relationship || []) {
+        targets[rel.$.Id] = rel.$.Target.replace(/^\/?(xl\/)?/, 'xl/');
+      }
+
+      const documents = [];
+      for (const sheet of workbook?.workbook?.sheets?.[0]?.sheet || []) {
+        const sheetName = sheet.$.name;
+        const part = targets[sheet.$['r:id']];
+        const xml = part ? await readXml(part) : null;
+        const rows = xml?.worksheet?.sheetData?.[0]?.row || [];
+
+        const lines = [];
+        for (const row of rows.slice(0, this.maxRows)) {
+          const cells = [];
+          for (const c of row.c || []) {
+            const type = c.$?.t;
+            let value = c.v?.[0];
+            if (type === 's') value = shared[Number(value)];
+            else if (type === 'inlineStr') value = XlsxLoader.stringItemText(c.is?.[0]);
+            else if (type === 'b') value = value === '1' ? 'TRUE' : 'FALSE';
+            cells[XlsxLoader.columnIndex(c.$?.r || 'A')] = XlsxLoader.csvCell(value);
+          }
+          lines.push(Array.from(cells, v => v ?? '').join(','));
+        }
+
+        const text = lines.join('\n').trim();
+        if (!text) continue;
+        const sheetSource = `${this.filePath}#sheet=${sheetName}`;
+        const { hash, documentId } = computeFingerprint(text, sheetSource);
+        documents.push(new Document(text, {
+          source: this.filePath,
+          filename: path.basename(this.filePath),
+          type: 'xlsx',
+          sheet: sheetName,
+          rows: rows.length,
+          truncated: rows.length > this.maxRows,
+          hash,
+          documentId
+        }));
+      }
+      return documents;
+    } catch (error) {
+      logger.error(`XlsxLoader error for ${this.filePath}:`, error.message);
+      throw error;
+    }
+  }
+}
+
+/**
  * DirectoryLoader - Load all files from a directory
  */
 export class DirectoryLoader extends DocumentLoader {
@@ -376,7 +501,9 @@ export class DirectoryLoader extends DocumentLoader {
       '.md': MarkdownLoader,
       '.pdf': PDFLoader,
       '.json': JSONLoader,
-      '.xml': XMLLoader
+      '.xml': XMLLoader,
+      '.docx': DocxLoader,
+      '.xlsx': XlsxLoader
     };
   }
 
@@ -435,6 +562,10 @@ export function createLoader(source, options = {}) {
       return new JSONLoader(source, options);
     case '.xml':
       return new XMLLoader(source, options);
+    case '.docx':
+      return new DocxLoader(source, options);
+    case '.xlsx':
+      return new XlsxLoader(source, options);
     case '.txt':
     default:
       return new TextLoader(source, options);
@@ -450,6 +581,8 @@ export default {
   MarkdownLoader,
   JSONLoader,
   XMLLoader,
+  DocxLoader,
+  XlsxLoader,
   DirectoryLoader,
   createLoader
 };

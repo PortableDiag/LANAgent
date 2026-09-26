@@ -253,8 +253,14 @@ app = FastAPI(title="AI Content Detector", version="1.0.0", lifespan=lifespan)
 
 @app.get("/health")
 async def health():
+    # The image model loads lazily, so a missing backend only shows up on the first
+    # paid request. transformers 5.x needs torchvision for AutoImageProcessor; without
+    # it every /detect/image (and detectVideo) 500s while this endpoint said "ok".
+    from transformers.utils import is_torchvision_available
+    missing = [] if is_torchvision_available() else ["torchvision"]
     return {
-        "status": "ok",
+        "status": "degraded" if missing else "ok",
+        "missing_backends": missing,
         "device": model_manager.device,
         "cuda_available": torch.cuda.is_available(),
         "loaded_models": model_manager.loaded_models,

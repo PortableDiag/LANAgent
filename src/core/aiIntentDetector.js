@@ -2341,7 +2341,7 @@ Types: disk, memory, cpu, network, uptime, os, all
 Respond with just the type word:`;
 
     try {
-      const response = await this.agent.providerManager.generateResponse(prompt, { maxTokens: 20 });
+      const response = await this.agent.providerManager.generateAux(prompt, { maxTokens: 20 });
       const type = response.content.trim().toLowerCase();
       
       // Validate type
@@ -2376,7 +2376,7 @@ RESPOND WITH ONLY THIS JSON FORMAT (no explanation):
 }`;
 
     try {
-      const response = await this.agent.providerManager.generateResponse(prompt, { maxTokens: 100 });
+      const response = await this.agent.providerManager.generateAux(prompt, { maxTokens: 100 });
       
       // Clean the response to extract just JSON
       let jsonStr = response.content.trim();
@@ -2453,7 +2453,7 @@ Examples:
 Respond with just the package name:`;
 
     try {
-      const response = await this.agent.providerManager.generateResponse(prompt, { maxTokens: 50 });
+      const response = await this.agent.providerManager.generateAux(prompt, { maxTokens: 50 });
       const packageName = response.content.trim().replace(/[^a-zA-Z0-9\-_.]/g, '');
       return { package: packageName };
     } catch (error) {
@@ -2472,7 +2472,7 @@ Examples:
 Respond with just the name or URL:`;
 
     try {
-      const response = await this.agent.providerManager.generateResponse(prompt, { maxTokens: 100 });
+      const response = await this.agent.providerManager.generateAux(prompt, { maxTokens: 100 });
       const url = response.content.trim();
       return { url };
     } catch (error) {
@@ -2492,7 +2492,7 @@ Examples:
 Respond with just the command:`;
 
     try {
-      const response = await this.agent.providerManager.generateResponse(prompt, { maxTokens: 50 });
+      const response = await this.agent.providerManager.generateAux(prompt, { maxTokens: 50 });
       const command = response.content.trim();
       return { command };
     } catch (error) {
@@ -2515,7 +2515,7 @@ Respond in JSON format:
 }`;
 
     try {
-      const response = await this.agent.providerManager.generateResponse(prompt, { maxTokens: 100 });
+      const response = await this.agent.providerManager.generateAux(prompt, { maxTokens: 100 });
       
       // Clean up response - remove markdown code blocks if present
       let cleanedResponse = response.content.trim();
@@ -2573,7 +2573,7 @@ Respond in JSON format:
   "sendAt": "ISO 8601 datetime string (e.g., 2025-01-15T14:00:00Z)"
 }`;
 
-      const timeResponse = await this.agent.providerManager.generateResponse(timePrompt, { maxTokens: 100 });
+      const timeResponse = await this.agent.providerManager.generateAux(timePrompt, { maxTokens: 100 });
       
       // Clean up response
       let cleanedTime = timeResponse.content.trim();
@@ -2632,7 +2632,7 @@ Respond in JSON format:
   "recurrence": "cron expression or interval (e.g., '0 9 * * *' or '5 minutes')"
 }`;
 
-      const recurrenceResponse = await this.agent.providerManager.generateResponse(recurrencePrompt, { maxTokens: 100 });
+      const recurrenceResponse = await this.agent.providerManager.generateAux(recurrencePrompt, { maxTokens: 100 });
       
       // Clean up response
       let cleanedRecurrence = recurrenceResponse.content.trim();
@@ -2695,7 +2695,7 @@ Respond in JSON format:
 }`;
 
     try {
-      const response = await this.agent.providerManager.generateResponse(prompt, { maxTokens: 200 });
+      const response = await this.agent.providerManager.generateAux(prompt, { maxTokens: 200 });
       // Clean up response - remove markdown code blocks if present
       let cleanedResponse = response.content.trim();
       if (cleanedResponse.startsWith('```json')) {
@@ -2781,7 +2781,7 @@ Respond in JSON format:
 }`;
 
     try {
-      const extractResponse = await this.agent.providerManager.generateResponse(extractPrompt, { maxTokens: 100 });
+      const extractResponse = await this.agent.providerManager.generateAux(extractPrompt, { maxTokens: 100 });
       // Clean up response - remove markdown code blocks if present
       let cleanedResponse = extractResponse.content.trim();
       if (cleanedResponse.startsWith('```json')) {
@@ -3114,7 +3114,7 @@ Respond in JSON format:
   "provider": "provider name or null"
 }`;
 
-      const response = await this.agent.providerManager.generateResponse(extractPrompt, { maxTokens: 150 });
+      const response = await this.agent.providerManager.generateAux(extractPrompt, { maxTokens: 150 });
 
       let cleaned = response.content.trim();
       if (cleaned.startsWith('```json')) {
@@ -3292,7 +3292,7 @@ Respond in JSON format:
     if (actionType === 'stock') {
       const prompt = `Extract the stock symbol from: "${query}"\nExamples: "AAPL stock" -> AAPL, "Tesla price" -> TSLA\nSymbol:`;
       try {
-        const response = await this.agent.providerManager.generateResponse(prompt, { maxTokens: 20 });
+        const response = await this.agent.providerManager.generateAux(prompt, { maxTokens: 20 });
         extractedParam = response.content.trim().toUpperCase();
         return { symbol: extractedParam };
       } catch (error) {
@@ -3318,7 +3318,7 @@ Important: Respond with ONLY the symbol (like BTC) or name (like chainlink) or N
 
 Symbol/Name:`;
       try {
-        const response = await this.agent.providerManager.generateResponse(prompt, { maxTokens: 10 });
+        const response = await this.agent.providerManager.generateAux(prompt, { maxTokens: 10 });
         extractedParam = response.content.trim().replace(/[^a-zA-Z]/g, '');
         if (!extractedParam || extractedParam === 'NONE') {
           throw new Error('Which cryptocurrency would you like the price for? Please specify a token name or symbol (e.g. "Bitcoin price" or "SKYNET price").');
@@ -3333,7 +3333,7 @@ Symbol/Name:`;
     if (actionType === 'weather') {
       const prompt = `Extract the location from: "${query}"\nExamples: "weather in New York" -> New York\nLocation:`;
       try {
-        const response = await this.agent.providerManager.generateResponse(prompt, { maxTokens: 50 });
+        const response = await this.agent.providerManager.generateAux(prompt, { maxTokens: 50 });
         extractedParam = response.content.trim();
         return { location: extractedParam };
       } catch (error) {
@@ -3353,7 +3353,7 @@ Symbol/Name:`;
       // Try to extract URL using AI
       const prompt = `Extract the URL from this request: "${query}"\n\nIf no URL found, respond with "NO_URL".\nURL:`;
       try {
-        const response = await this.agent.providerManager.generateResponse(prompt, { maxTokens: 100 });
+        const response = await this.agent.providerManager.generateAux(prompt, { maxTokens: 100 });
         const extractedUrl = response.content.trim();
         if (extractedUrl === 'NO_URL') {
           return { error: 'No URL found in query' };
@@ -3394,7 +3394,7 @@ Respond in JSON format:
 }`;
 
     try {
-      const response = await this.agent.providerManager.generateResponse(prompt, { maxTokens: 100 });
+      const response = await this.agent.providerManager.generateAux(prompt, { maxTokens: 100 });
       let cleanedResponse = response.content.trim();
       if (cleanedResponse.startsWith('```json')) {
         cleanedResponse = cleanedResponse.replace(/^```json\s*/, '').replace(/\s*```$/, '');
@@ -3766,7 +3766,7 @@ Examples:
 Return ONLY a valid JSON object, nothing else.`;
 
     try {
-      const response = await this.agent.providerManager.generateResponse(prompt, {
+      const response = await this.agent.providerManager.generateAux(prompt, {
         maxTokens: 200,
         temperature: 0.2
       });
@@ -3800,7 +3800,7 @@ Examples:
 Respond with JSON: {"topic": "extracted_topic"}`;
 
     try {
-      const response = await this.agent.providerManager.generateResponse(prompt, { maxTokens: 50 });
+      const response = await this.agent.providerManager.generateAux(prompt, { maxTokens: 50 });
       const parsed = JSON.parse(response.content.trim());
       return { topic: parsed.topic || query };
     } catch (error) {
@@ -3820,7 +3820,7 @@ Examples:
 Respond with JSON: {"feature": "extracted_feature"}`;
 
     try {
-      const response = await this.agent.providerManager.generateResponse(prompt, { maxTokens: 50 });
+      const response = await this.agent.providerManager.generateAux(prompt, { maxTokens: 50 });
       const parsed = JSON.parse(response.content.trim());
       return { feature: parsed.feature || query };
     } catch (error) {
@@ -3840,7 +3840,7 @@ Examples:
 Respond with JSON: {"suggestion": "extracted_suggestion"}`;
 
     try {
-      const response = await this.agent.providerManager.generateResponse(prompt, { maxTokens: 100 });
+      const response = await this.agent.providerManager.generateAux(prompt, { maxTokens: 100 });
       const parsed = JSON.parse(response.content.trim());
       return { suggestion: parsed.suggestion || query };
     } catch (error) {

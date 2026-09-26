@@ -1,5 +1,6 @@
 import { EventEmitter } from "events";
 import { connectDatabase } from "../utils/database.js";
+import { isConversationOnly, conversationOnlyReply } from './guestGuard.js';
 import { logger } from "../utils/logger.js";
 import { safeJsonStringify } from "../utils/jsonUtils.js";
 import { ProviderManager } from "./providerManager.js";
@@ -35,6 +36,8 @@ import TaskScheduler from '../services/scheduler.js';
 import mqttService from '../services/mqtt/mqttService.js';
 import eventEngine from '../services/mqtt/eventEngine.js';
 import { ReActAgent, PlanExecuteAgent, ThoughtStore } from '../services/reasoning/index.js';
+import { ClarificationStore, resumePendingClarification, renderReasoningResult } from './clarifications.js';
+import { getSkillsService } from '../services/skills/skillsService.js';
 import { setGlobalAgent } from './agentAccessor.js';
 import { getServerHost } from '../utils/paths.js';
 import { exec } from 'child_process';
@@ -87,6 +90,8 @@ export class Agent extends EventEmitter {
 
     // Reasoning agents (initialized after services are ready)
     this.reactAgent = null;
+    // Reasoning tasks waiting on the user's answer to a clarifying question
+    this.clarifications = new ClarificationStore();
     this.planExecuteAgent = null;
     this.thoughtStore = null;
 
@@ -880,8 +885,16 @@ export class Agent extends EventEmitter {
     return false;
   }
 
-  // Natural language processing
-  async processNaturalLanguage(input, context = {}) {
+  // Natural language processing. `systemPrompt` is only used for a conversation-only
+  // (guest) context — see core/guestGuard.js.
+  async processNaturalLanguage(input, context = {}, systemPrompt = null) {
+    // Anyone who is not the operator gets a model reply and nothing else: this router runs
+    // plugins, and the guest path's restrictions used to be ignored here.
+    if (isConversationOnly(context)) {
+      return await conversationOnlyReply(
+        (p, o) => this.providerManager.generateResponse(p, o), input, context, systemPrompt, this.config?.name
+      );
+    }
     try {
       // Validate input at entry point
       if (input === undefined || input === null || input === '') {
@@ -897,6 +910,16 @@ export class Agent extends EventEmitter {
 
       // Use inputStr throughout the function
       input = inputStr;
+
+      // A reasoning task asked this user a question: this message is the answer.
+      const resumed = await resumePendingClarification({
+        store: this.clarifications,
+        reactAgent: this.reactAgent,
+        input,
+        context,
+        render: (text, result, ctx, query) => this.renderReasoningResult(text, result, ctx, query)
+      });
+      if (resumed) return resumed;
 
       // Check if this is a personal question that memory can answer BEFORE intent detection.
       // Without this, "what is my name?" routes to song-ID, "favorite color" to smart home, etc.
@@ -916,7 +939,8 @@ export class Agent extends EventEmitter {
             const contextualInput = `${memoryContext}\nUser's question: ${input}`;
             const response = await this.providerManager.generateResponse(contextualInput, {
               maxTokens: 300,
-              temperature: 0.7
+              temperature: 0.7,
+              systemPrompt: this.getSystemPrompt()
             });
             await this.memoryManager.storeConversation(context.userId, input, response, context);
             return { type: 'text', content: response };
@@ -928,9 +952,9 @@ export class Agent extends EventEmitter {
 
       // ─── Conversational context check ─────────────────────────────────
       // Before intent detection, check if this is a follow-up to the previous exchange.
-      // Uses an in-memory conversation buffer (not DB — raw conversations aren't persisted).
+      // Uses the in-memory conversation buffer (restored from the transcript after a restart).
       const userId = context.userId || 'default';
-      const userBuffer = this.memoryManager?._conversationBuffer?.get(userId) || [];
+      const userBuffer = this.memoryManager?._conversationBuffer?.get(String(userId)) || [];
 
       if (this.providerManager && userBuffer.length >= 2) {
         try {
@@ -938,7 +962,23 @@ export class Agent extends EventEmitter {
           const hasFollowUpSignals = /\b(that|it|this|those|these|what|why|how|really|huh|wtf|hmm|ok|yes|no|yeah|nah|sure|exactly|right|is it|was it|did it|can you|could you|about|more|else|also|too|again|same)\b/i.test(input);
           const isQuestion = /\?$/.test(input.trim());
           const noStrongIntent = !/\b(post|search|send|create|get me|show me|turn|set|check my|configure|login|register|deploy|scan|generate|download|upload|play)\b/i.test(input);
-          const looksLikeFollowUp = isShort && (hasFollowUpSignals || isQuestion) && noStrongIntent;
+          let looksLikeFollowUp = isShort && (hasFollowUpSignals || isQuestion) && noStrongIntent;
+
+          // Almost every short question passes the checks above, including real
+          // commands ("how much free disk space is there?"), which were answered as
+          // chat instead of run. A confident intent match wins; the detector caches
+          // per input, so the detection below reuses this result.
+          if (looksLikeFollowUp && this.vectorIntentDetector?.enabled) {
+            try {
+              const intentMatch = await this.vectorIntentDetector.detectIntent(input, context);
+              if (intentMatch) {
+                logger.info(`Not a follow-up: matched intent ${intentMatch.plugin}.${intentMatch.action}`);
+                looksLikeFollowUp = false;
+              }
+            } catch (err) {
+              logger.debug('Intent pre-check failed, treating as follow-up:', err.message);
+            }
+          }
 
           if (looksLikeFollowUp) {
             // Build context from recent buffer (last 3 exchanges max)
@@ -958,7 +998,8 @@ User: ${input}
 Respond conversationally — elaborate, clarify, or answer based on what was just discussed. Be natural, not robotic. Keep it concise.`;
 
             const response = await this.providerManager.generateResponse(followUpPrompt, {
-              maxTokens: 400, temperature: 0.7
+              maxTokens: 400, temperature: 0.7,
+              systemPrompt: this.getSystemPrompt()
             });
             const content = (response?.content || response?.text || '').toString().trim();
             if (content && content.length > 5) {
@@ -1063,9 +1104,12 @@ Respond conversationally — elaborate, clarify, or answer based on what was jus
       }
       
       if (intentResult.detected) {
-        // Show thinking message if interface supports it
+        // Show what is about to run, if the interface shows progress
         if (context.showThinking) {
-          await context.showThinking("🤔 Thinking...");
+          const target = intentResult.plugin
+            ? `${intentResult.plugin}${intentResult.action ? `.${intentResult.action}` : ''}`
+            : intentResult.intent;
+          await context.showThinking(target ? `🔧 ${target}` : "🤔 Thinking...");
         }
         
         logger.info(`Intent detected: ${intentResult.intent}`, {
@@ -1167,13 +1211,14 @@ Respond conversationally — elaborate, clarify, or answer based on what was jus
               if (context.onStreamChunk) {
                 queryResponse = await this.providerManager.generateStreamingResponse(
                   contextualInput,
-                  { maxTokens: 500, temperature: 0.7 },
+                  { maxTokens: 500, temperature: 0.7, systemPrompt: this.getSystemPrompt() },
                   context.onStreamChunk
                 );
               } else {
                 queryResponse = await this.providerManager.generateResponse(contextualInput, {
                   maxTokens: 500,
-                  temperature: 0.7
+                  temperature: 0.7,
+                  systemPrompt: this.getSystemPrompt()
                 });
               }
               const response_content = { type: 'text', content: queryResponse.content };
@@ -3393,26 +3438,7 @@ Return ONLY a valid JSON object with the extracted parameters, nothing else.`;
             }
 
             if (reasoningResult) {
-              const content = reasoningResult.success
-                ? reasoningResult.answer || reasoningResult.summary || 'Task completed successfully.'
-                : reasoningResult.error || 'Unable to complete the task.';
-
-              // Store in memory
-              await this.memoryManager.storeConversation(
-                context.userId,
-                input,
-                content,
-                { ...context, reasoning: true, reasoningMode: this.reasoningMode }
-              );
-
-              return {
-                type: 'text',
-                content,
-                reasoning: true,
-                success: reasoningResult.success,
-                iterations: reasoningResult.iterations,
-                thoughts: reasoningResult.thoughts
-              };
+              return await this.renderReasoningResult(input, reasoningResult, context, input);
             }
           }
         } catch (reasoningError) {
@@ -3526,6 +3552,18 @@ Return ONLY a valid JSON object with the extracted parameters, nothing else.`;
     }
   }
   
+  /**
+   * Turn a ReAct / Plan-Execute result into a reply. A clarifying question is parked in
+   * this.clarifications (10 minutes) so the user's next message resumes the same task.
+   */
+  async renderReasoningResult(input, reasoningResult, context, originalQuery) {
+    return renderReasoningResult({
+      store: this.clarifications,
+      memoryManager: this.memoryManager,
+      reasoningMode: this.reasoningMode
+    }, input, reasoningResult, context, originalQuery);
+  }
+
   async handleNaturalQuery(query, context) {
     try {
       // Get relevant memories for context
@@ -3569,6 +3607,12 @@ Return ONLY a valid JSON object with the extracted parameters, nothing else.`;
       // Add user preferences if available
       if (Object.keys(preferences).length > 0) {
         systemPrompt += `User preferences: ${safeJsonStringify(preferences)}\n\n`;
+      }
+
+      // Skills (SKILL.md procedures) that match the question
+      const skillsText = await getSkillsService().promptFor(query).catch(() => '');
+      if (skillsText) {
+        systemPrompt += `Relevant skills (procedures you know — answer from them when they apply):\n${skillsText}\n\n`;
       }
       
       // Generate response using AI
@@ -4579,7 +4623,11 @@ Return ONLY a valid JSON object with the extracted parameters, nothing else.`;
     // to the AI provider on every request, and anyone who can talk to the agent can ask the
     // model to repeat it.
     systemPrompt += `3. Web Dashboard: http://${serverHost}:${webPort} (password-protected)\n`;
-    systemPrompt += `4. SSH Server: Port ${sshPort} for terminal access\n\n`;
+    systemPrompt += `4. SSH Server: Port ${sshPort} for terminal access\n`;
+    if (process.env.TRELLIS_LISTEN === 'true') {
+      systemPrompt += `5. Trellis: you read and answer the owner's messages in Trellis channels, and share one conversation memory with your other interfaces\n`;
+    }
+    systemPrompt += `\n`;
     
     // Core Capabilities
     systemPrompt += `💪 CORE CAPABILITIES:\n`;

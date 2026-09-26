@@ -27,6 +27,16 @@ export default class MessageBirdPlugin extends BasePlugin {
         ]
       },
       {
+        command: 'sendBulkSMS',
+        description: 'Send one SMS to multiple recipients',
+        usage: 'sendBulkSMS({ originator: "YourName", recipients: ["+1234567890", "+1987654321"], message: "Hello!" })',
+        examples: [
+          'send an SMS to multiple recipients',
+          'text the team about the meeting',
+          'send a bulk message to these phone numbers'
+        ]
+      },
+      {
         command: 'sendMMS',
         description: 'Send an MMS with media to a recipient',
         usage: 'sendMMS({ originator: "YourName", recipient: "+1234567890", message: "Check this out!", mediaUrl: "https://example.com/image.jpg" })',
@@ -61,6 +71,8 @@ export default class MessageBirdPlugin extends BasePlugin {
     this.config = {
       apiKey: null,
       baseUrl: 'https://rest.messagebird.com',
+      // MessageBird accepts at most 50 recipients per /messages request.
+      maxBatchSize: 50
     };
 
     this.initialized = false;
@@ -122,6 +134,9 @@ export default class MessageBirdPlugin extends BasePlugin {
         
         case 'sendSMS':
           return await this.sendSMS(data);
+
+        case 'sendBulkSMS':
+          return await this.sendBulkSMS(data);
 
         case 'sendMMS':
           return await this.sendMMS(data);
@@ -191,6 +206,52 @@ export default class MessageBirdPlugin extends BasePlugin {
       return { success: true, data: response.data };
     } catch (error) {
       this.logger.error('sendSMS failed:', error);
+      return { success: false, error: error.message };
+    }
+  }
+
+  /**
+   * Send one SMS message to multiple recipients through MessageBird's
+   * POST /messages endpoint.
+   */
+  async sendBulkSMS({ originator, recipients, message }) {
+    this.validateParams({ originator, message }, {
+      originator: { required: true, type: 'string' },
+      message: { required: true, type: 'string' }
+    });
+
+    if (!Array.isArray(recipients) || recipients.length === 0) {
+      throw new Error('recipients must be a non-empty array');
+    }
+
+    const maxBatchSize = Number(this.config.maxBatchSize);
+    if (!Number.isInteger(maxBatchSize) || maxBatchSize < 1) {
+      throw new Error('MessageBird maxBatchSize must be a positive integer');
+    }
+
+    if (recipients.length > maxBatchSize) {
+      throw new Error(`recipients cannot contain more than ${maxBatchSize} recipients`);
+    }
+
+    if (recipients.some(recipient => typeof recipient !== 'string' || recipient.trim().length === 0)) {
+      throw new Error('recipients must contain only non-empty strings');
+    }
+
+    const url = `${this.config.baseUrl}/messages`;
+    const headers = {
+      Authorization: `AccessKey ${this.config.apiKey}`
+    };
+    const data = {
+      originator,
+      recipients,
+      body: message
+    };
+
+    try {
+      const response = await retryOperation(() => axios.post(url, data, { headers }), { retries: 3, context: 'sendBulkSMS' });
+      return { success: true, data: response.data };
+    } catch (error) {
+      this.logger.error('sendBulkSMS failed:', error);
       return { success: false, error: error.message };
     }
   }

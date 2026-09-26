@@ -1,5 +1,6 @@
 import mongoose from 'mongoose';
 import NodeCache from 'node-cache';
+import { logger } from '../utils/logger.js';
 
 // Correlation results are derived from a rolling window of signals, so a short
 // TTL keeps repeated dashboard/API polls off the aggregation pipeline without
@@ -360,6 +361,236 @@ arbSignalSchema.statics.findCorrelatedSignals = async function (symbol, network,
   const trimmed = results.slice(0, limit);
   if (!options.noCache) correlationCache.set(cacheKey, trimmed);
   return trimmed;
+};
+
+/**
+ * Detect anomalous signals using z-score analysis
+ * @param {Object} options - Detection options
+ * @param {number} options.threshold - Z-score threshold for anomaly detection
+ * @param {string} options.timeWindow - Time window for analysis (e.g., '24h')
+ * @returns {Promise<Array>} Anomalous signals
+ */
+arbSignalSchema.statics.detectAnomalousSignals = async function ({ threshold = 2.0, timeWindow = '24h' } = {}) {
+  try {
+    // '12h' / '7d'; anything unparseable falls back to 24h. Signals carry a 30-day TTL,
+    // so a longer window cannot see more than that.
+    const m = /^(\d+)([hd])$/.exec(String(timeWindow).trim());
+    const timeWindowMs = m && Number(m[1]) > 0
+      ? Number(m[1]) * (m[2] === 'd' ? 24 : 1) * 60 * 60 * 1000
+      : 24 * 60 * 60 * 1000;
+
+    const cutoffTime = new Date(Date.now() - timeWindowMs);
+    
+    // Get recent signals for statistical analysis
+    const recentSignals = await this.find({ 
+      createdAt: { $gte: cutoffTime },
+      expired: false 
+    }).select('spread netProfit symbol');
+
+    if (recentSignals.length === 0) {
+      return [];
+    }
+
+    // Calculate mean and standard deviation for spread
+    const spreads = recentSignals.map(s => s.spread);
+    const meanSpread = spreads.reduce((a, b) => a + b, 0) / spreads.length;
+    const stdDevSpread = Math.sqrt(spreads.map(x => Math.pow(x - meanSpread, 2)).reduce((a, b) => a + b, 0) / spreads.length);
+
+    // Calculate mean and standard deviation for profit
+    const profits = recentSignals.map(s => s.netProfit);
+    const meanProfit = profits.reduce((a, b) => a + b, 0) / profits.length;
+    const stdDevProfit = Math.sqrt(profits.map(x => Math.pow(x - meanProfit, 2)).reduce((a, b) => a + b, 0) / profits.length);
+
+    // Identify anomalies based on z-score
+    const anomalies = [];
+    for (const signal of recentSignals) {
+      const spreadZScore = stdDevSpread !== 0 ? Math.abs(signal.spread - meanSpread) / stdDevSpread : 0;
+      const profitZScore = stdDevProfit !== 0 ? Math.abs(signal.netProfit - meanProfit) / stdDevProfit : 0;
+      
+      if (spreadZScore > threshold || profitZScore > threshold) {
+        anomalies.push({
+          ...signal.toObject(),
+          spreadZScore,
+          profitZScore
+        });
+      }
+    }
+
+    return anomalies;
+  } catch (error) {
+    logger.error('Error detecting anomalous signals:', error);
+    throw error;
+  }
+};
+
+/**
+ * Get signal patterns using time-series analysis
+ * @param {Object} options - Pattern detection options
+ * @param {string} options.patternType - Type of pattern to detect (volatility|trend)
+ * @param {string|null} options.symbol - Specific symbol to analyze (null for all)
+ * @returns {Promise<Array>} Detected patterns
+ */
+arbSignalSchema.statics.getSignalPatterns = async function ({ patternType = 'volatility', symbol = null } = {}) {
+  if (!['volatility', 'trend'].includes(patternType)) {
+    throw new Error(`Unknown pattern type: ${patternType}`);
+  }
+  try {
+    const match = { expired: false };
+    if (symbol) match.symbol = symbol;
+    
+    // Get data for the last 7 days
+    const cutoffTime = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+    match.createdAt = { $gte: cutoffTime };
+    
+    const signals = await this.find(match)
+      .sort({ createdAt: 1 })
+      .select('symbol spread netProfit createdAt');
+    
+    if (signals.length === 0) {
+      return [];
+    }
+    
+    // Group signals by symbol
+    const signalsBySymbol = {};
+    signals.forEach(signal => {
+      if (!signalsBySymbol[signal.symbol]) {
+        signalsBySymbol[signal.symbol] = [];
+      }
+      signalsBySymbol[signal.symbol].push(signal);
+    });
+    
+    const patterns = [];
+    
+    // Analyze each symbol's data
+    for (const sym in signalsBySymbol) {
+      const symbolSignals = signalsBySymbol[sym];
+      
+      switch (patternType) {
+        case 'volatility':
+          // Calculate rolling volatility (standard deviation of spreads over a window)
+          const volatilityPattern = this._calculateVolatilityPattern(symbolSignals);
+          if (volatilityPattern) {
+            patterns.push({
+              symbol: sym,
+              patternType: 'volatility',
+              ...volatilityPattern
+            });
+          }
+          break;
+          
+        case 'trend':
+          // Calculate trend using linear regression
+          const trendPattern = this._calculateTrendPattern(symbolSignals);
+          if (trendPattern) {
+            patterns.push({
+              symbol: sym,
+              patternType: 'trend',
+              ...trendPattern
+            });
+          }
+          break;
+          
+        default:
+          throw new Error(`Unknown pattern type: ${patternType}`);
+      }
+    }
+    
+    return patterns;
+  } catch (error) {
+    logger.error('Error getting signal patterns:', error);
+    throw error;
+  }
+};
+
+/**
+ * Calculate volatility pattern for a series of signals
+ * @private
+ * @param {Array} signals - Array of signals for a symbol
+ * @returns {Object|null} Volatility pattern data
+ */
+arbSignalSchema.statics._calculateVolatilityPattern = function(signals) {
+  if (signals.length < 10) return null;
+  
+  // Calculate rolling standard deviation over 10-point windows
+  const windowSize = Math.min(10, Math.floor(signals.length / 2));
+  const volatilities = [];
+  
+  for (let i = 0; i <= signals.length - windowSize; i++) {
+    const window = signals.slice(i, i + windowSize);
+    const spreads = window.map(s => s.spread);
+    const mean = spreads.reduce((a, b) => a + b, 0) / spreads.length;
+    const variance = spreads.map(x => Math.pow(x - mean, 2)).reduce((a, b) => a + b, 0) / spreads.length;
+    const stdDev = Math.sqrt(variance);
+    volatilities.push({
+      timestamp: window[Math.floor(window.length/2)].createdAt,
+      volatility: stdDev
+    });
+  }
+  
+  // Calculate overall volatility metrics
+  const avgVolatility = volatilities.reduce((a, b) => a + b.volatility, 0) / volatilities.length;
+  const maxVolatility = Math.max(...volatilities.map(v => v.volatility));
+  const minVolatility = Math.min(...volatilities.map(v => v.volatility));
+  
+  return {
+    avgVolatility,
+    maxVolatility,
+    minVolatility,
+    volatilitySeries: volatilities
+  };
+};
+
+/**
+ * Calculate trend pattern using linear regression
+ * @private
+ * @param {Array} signals - Array of signals for a symbol
+ * @returns {Object|null} Trend pattern data
+ */
+arbSignalSchema.statics._calculateTrendPattern = function(signals) {
+  if (signals.length < 5) return null;
+  
+  // Convert timestamps to numeric values for regression
+  const startTime = signals[0].createdAt.getTime();
+  const points = signals.map((s, i) => ({
+    x: s.createdAt.getTime() - startTime,
+    y: s.netProfit
+  }));
+  
+  // Calculate linear regression
+  const n = points.length;
+  let sumX = 0, sumY = 0, sumXY = 0, sumXX = 0;
+  
+  for (const point of points) {
+    sumX += point.x;
+    sumY += point.y;
+    sumXY += point.x * point.y;
+    sumXX += point.x * point.x;
+  }
+  
+  const denom = n * sumXX - sumX * sumX;
+  if (denom === 0) return null;   // every signal at one instant — no time axis to fit
+  const slope = (n * sumXY - sumX * sumY) / denom;
+  const intercept = (sumY - slope * sumX) / n;
+  
+  // Calculate R-squared
+  const yMean = sumY / n;
+  let totalSS = 0, regressionSS = 0;
+  
+  for (const point of points) {
+    const predictedY = slope * point.x + intercept;
+    totalSS += Math.pow(point.y - yMean, 2);
+    regressionSS += Math.pow(predictedY - yMean, 2);
+  }
+  
+  const rSquared = totalSS > 0 ? regressionSS / totalSS : 0;
+  
+  return {
+    slope,
+    intercept,
+    rSquared,
+    startPoint: { x: points[0].x, y: points[0].y },
+    endPoint: { x: points[points.length - 1].x, y: points[points.length - 1].y }
+  };
 };
 
 const ArbSignal = mongoose.model('ArbSignal', arbSignalSchema);

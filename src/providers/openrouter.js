@@ -402,12 +402,37 @@ export class OpenRouterProvider extends BaseProvider {
     return { model, params };
   }
 
+  /**
+   * Per-request budget for a non-streaming call. The client default
+   * (requestTimeoutMs, 120s) is right for chat-sized replies, but a whole-file
+   * self-mod generation asks for tens of thousands of tokens plus reasoning; at a
+   * fixed 120s those would be cut off mid-reply. Scale with max_tokens at a
+   * conservative 50 tok/s plus 30s of first-byte/reasoning latency, never below
+   * the base, capped at 10 minutes.
+   */
+  _generationTimeoutMs(maxTokens) {
+    const base = this.requestTimeoutMs;
+    const tokens = Number(maxTokens);
+    if (!Number.isFinite(tokens) || tokens <= 0) return base;
+    return Math.min(600000, Math.max(base, 30000 + Math.ceil(tokens / 50) * 1000));
+  }
+
+  /** Budget for the call the caller is about to make (see providerManager.getGenerationTimeoutMs). */
+  getGenerationTimeoutMs(options = {}) {
+    const maxTokens = options.maxTokens ?? this.modelParams?.chat?.maxTokens;
+    const budget = this._generationTimeoutMs(maxTokens);
+    return Number.isFinite(budget) && budget > 0 ? budget : null;
+  }
+
   async generateResponse(prompt, options = {}) {
     const startTime = Date.now();
 
     try {
       const { model, params } = this._buildParams(prompt, options);
-      const completion = await this.client.chat.completions.create({ ...params, stream: false });
+      const completion = await this.client.chat.completions.create(
+        { ...params, stream: false },
+        { timeout: this._generationTimeoutMs(params.max_tokens) }
+      );
       this._assertUsableCompletion(completion, model);
 
       const responseTime = Date.now() - startTime;

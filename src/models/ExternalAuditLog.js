@@ -4,6 +4,7 @@ import { safeJsonStringify, safeJsonParse } from '../utils/jsonUtils.js';
 
 const DEFAULT_REDACT_KEYS = ['password', 'authorization', 'token', 'apikey', 'secret', 'cookie', 'x-api-key'];
 const MAX_AUDIT_BODY_BYTES = 10240;
+const MAX_LOG_QUERY_LIMIT = 500;
 
 function sanitizeAuditPayload(value) {
   if (value === null || value === undefined) return null;
@@ -40,6 +41,36 @@ function sanitizeAuditPayload(value) {
     end--;
   }
   return new TextDecoder('utf-8', { fatal: false }).decode(bytes.slice(0, end));
+}
+
+function encodeAuditCursor(timestamp, id) {
+  return Buffer.from(JSON.stringify({
+    timestamp: new Date(timestamp).toISOString(),
+    id: String(id)
+  }), 'utf8').toString('base64url');
+}
+
+function decodeAuditCursor(cursor) {
+  if (typeof cursor !== 'string' || !cursor) {
+    throw new TypeError('cursor must be a non-empty string');
+  }
+
+  let parsed;
+  try {
+    parsed = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8'));
+  } catch {
+    throw new TypeError('cursor is invalid');
+  }
+
+  const timestamp = new Date(parsed?.timestamp);
+  if (!parsed?.id || Number.isNaN(timestamp.getTime()) || !mongoose.isValidObjectId(parsed.id)) {
+    throw new TypeError('cursor is invalid');
+  }
+
+  return {
+    timestamp,
+    id: new mongoose.Types.ObjectId(parsed.id)
+  };
 }
 
 const externalAuditLogSchema = new mongoose.Schema({
@@ -110,6 +141,100 @@ externalAuditLogSchema.pre('save', function(next) {
     next();
   }
 });
+
+/**
+ * Query audit logs using bounded cursor-based pagination and composable filters.
+ * @param {Object} options - Query options
+ * @param {Date|string} [options.startDate] - Inclusive lower timestamp bound
+ * @param {Date|string} [options.endDate] - Inclusive upper timestamp bound
+ * @param {string} [options.agentId] - Agent identifier
+ * @param {string} [options.ip] - Client IP address
+ * @param {string} [options.method] - HTTP method
+ * @param {string} [options.path] - Request path
+ * @param {number} [options.statusCode] - HTTP status code
+ * @param {boolean} [options.success] - Whether the request succeeded
+ * @param {string} [options.paymentTx] - Payment transaction identifier
+ * @param {string} [options.cursor] - Cursor returned by a previous query
+ * @param {number} [options.limit=100] - Maximum number of records to return
+ * @param {boolean} [options.includeBodies=false] - Include sanitized request and response bodies
+ * @returns {Promise<{logs: Array, nextCursor: string|null}>} Paginated audit logs
+ */
+externalAuditLogSchema.statics.queryLogs = async function({
+  startDate,
+  endDate,
+  agentId,
+  ip,
+  method,
+  path,
+  statusCode,
+  success,
+  paymentTx,
+  cursor,
+  limit = 100,
+  includeBodies = false
+} = {}) {
+  const numericLimit = Number(limit);
+  if (!Number.isFinite(numericLimit) || numericLimit < 1) {
+    throw new TypeError('limit must be a positive number');
+  }
+
+  const boundedLimit = Math.min(Math.floor(numericLimit), MAX_LOG_QUERY_LIMIT);
+  const query = {};
+
+  if (startDate !== undefined || endDate !== undefined) {
+    const timestamp = {};
+    if (startDate !== undefined) {
+      const value = new Date(startDate);
+      if (Number.isNaN(value.getTime())) throw new TypeError('startDate is invalid');
+      timestamp.$gte = value;
+    }
+    if (endDate !== undefined) {
+      const value = new Date(endDate);
+      if (Number.isNaN(value.getTime())) throw new TypeError('endDate is invalid');
+      timestamp.$lte = value;
+    }
+    query.timestamp = timestamp;
+  }
+
+  for (const [key, value] of Object.entries({
+    agentId,
+    ip,
+    method,
+    path,
+    statusCode,
+    success,
+    paymentTx
+  })) {
+    if (value !== undefined) query[key] = value;
+  }
+
+  if (cursor !== undefined) {
+    const decoded = decodeAuditCursor(cursor);
+    query.$or = [
+      { timestamp: { $lt: decoded.timestamp } },
+      { timestamp: decoded.timestamp, _id: { $lt: decoded.id } }
+    ];
+  }
+
+  let request = this.find(query)
+    .sort({ timestamp: -1, _id: -1 })
+    .limit(boundedLimit + 1);
+
+  if (!includeBodies) {
+    request = request.select('-requestBody -responseBody');
+  }
+
+  const records = await request.lean().exec();
+  const hasMore = records.length > boundedLimit;
+  const logs = hasMore ? records.slice(0, boundedLimit) : records;
+
+  return {
+    logs,
+    nextCursor: hasMore && logs.length > 0
+      ? encodeAuditCursor(logs[logs.length - 1].timestamp, logs[logs.length - 1]._id)
+      : null
+  };
+};
 
 /**
  * Get daily aggregates of audit logs within a date range

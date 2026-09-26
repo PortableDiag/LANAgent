@@ -70,7 +70,14 @@ export class VectorIntentDetector {
       }
       
       this.cacheMisses++;
-      
+
+      // The intent index is rebuilt in the background after every boot. Until it
+      // exists, AI detection handles the message; that is expected, not an error.
+      if (!vectorStore.initialized || !vectorStore.table) {
+        logger.info('Intent index still building, using AI intent detection');
+        return null;
+      }
+
       // Generate embedding for the input with retry logic
       const embedding = await retryOperation(
         () => embeddingService.generateEmbedding(input),
@@ -120,12 +127,15 @@ export class VectorIntentDetector {
       // because vector similarity often confuses create/update/delete/list operations.
       // The 'system' plugin (restart, redeploy, etc.) needs a higher threshold to prevent
       // accidental destructive actions from vague inputs like the agent's name.
-      const isSystemPlugin = !metadata.plugin || metadata.plugin === '_system' || metadata.plugin === 'system';
+      // Base 0.6 (was 0.5 for plugins): on ALICE every plugin match below 0.6 was a
+      // wrong action run on a conversational message ("what's your status?" ran
+      // voice.telegram-voice at 0.53, "did you see me in Trellis?" ran trellisStatus
+      // at 0.56), while every match from 0.6 up was correct. Below it, AI detection decides.
       const isDangerousAction = metadata.action && /^(restart|redeploy|shutdown|stop)$/i.test(metadata.action);
-      let threshold = isSystemPlugin ? 0.6 : 0.5;
+      let threshold = 0.6;
       if (isDangerousAction) threshold = Math.max(threshold, 0.7);
       if (similarity < threshold) {
-        logger.info(`Best match similarity ${similarity.toFixed(3)} below threshold ${threshold}${isDangerousAction ? ' (dangerous action)' : isSystemPlugin ? '' : ` (${metadata.plugin})`}, falling back to AI`);
+        logger.info(`Best match similarity ${similarity.toFixed(3)} below threshold ${threshold}${isDangerousAction ? ' (dangerous action)' : ` (${metadata.plugin || 'system'})`}, falling back to AI`);
         return null;
       }
       

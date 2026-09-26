@@ -36,6 +36,37 @@ const dailyPnLSchema = new mongoose.Schema({
 // date: unique on the field-level decl already creates the {date:1} index
 
 /**
+ * Build the common result shape used for strategy attribution.
+ * @param {number[]} values - Daily net values for the selected series.
+ * @param {number} contributionPct - Contribution to combined realized PnL.
+ * @param {number} totalRealized - Total realized PnL for the series.
+ */
+function buildStrategyResult(values, contributionPct, totalRealized) {
+    const numbers = values.map(value => Number(value) || 0);
+    const risk = computeRiskMetrics(numbers);
+    const positiveDays = numbers.filter(value => value > 0).length;
+    const negativeDays = numbers.filter(value => value < 0).length;
+    const grossProfit = numbers.filter(value => value > 0)
+        .reduce((sum, value) => sum + value, 0);
+    const grossLoss = Math.abs(numbers.filter(value => value < 0)
+        .reduce((sum, value) => sum + value, 0));
+
+    return {
+        total: Number(totalRealized.toFixed(4)),
+        totalNet: risk.totalNet,
+        positiveDays,
+        negativeDays,
+        averageDailyResult: numbers.length
+            ? Number((risk.totalNet / numbers.length).toFixed(4))
+            : 0,
+        grossProfit: Number(grossProfit.toFixed(4)),
+        grossLoss: Number(grossLoss.toFixed(4)),
+        contributionPct: Number(contributionPct.toFixed(4)),
+        ...risk
+    };
+}
+
+/**
  * Aggregate PnL across days, weeks, months, or quarters in a date range.
  * @param {Object} opts
  * @param {'daily'|'weekly'|'monthly'|'quarterly'} [opts.groupBy='daily']
@@ -103,6 +134,63 @@ dailyPnLSchema.statics.getAggregatedPnL = async function({ groupBy = 'daily', st
     ];
 
     const result = await this.aggregate(pipeline);
+    pnlAggregationCache.set(cacheKey, result);
+    return result;
+};
+
+/**
+ * Return strategy-level performance attribution for a date range.
+ * Gas is not attributed per strategy (the day record carries one gasCost), so it is
+ * reported once at the top level and subtracted only from the combined series — the
+ * same convention as dailyNet.
+ * @param {Object} opts
+ * @param {string} [opts.startDate] - YYYY-MM-DD inclusive
+ * @param {string} [opts.endDate] - YYYY-MM-DD inclusive
+ */
+dailyPnLSchema.statics.getStrategyPerformance = async function({ startDate, endDate } = {}) {
+    const cacheKey = `strategy:${startDate || ''}:${endDate || ''}`;
+    const cached = pnlAggregationCache.get(cacheKey);
+    if (cached) return cached;
+
+    const match = {};
+    if (startDate || endDate) {
+        match.date = {};
+        if (startDate) match.date.$gte = startDate;
+        if (endDate) match.date.$lte = endDate;
+    }
+
+    const data = await this.find(
+        match,
+        { date: 1, realizedPnL: 1, dmRealizedPnL: 1, gasCost: 1 }
+    ).sort({ date: 1 }).lean();
+
+    const tokenValues = data.map(day => Number(day.realizedPnL) || 0);
+    const dollarValues = data.map(day => Number(day.dmRealizedPnL) || 0);
+    const combinedValues = data.map(day =>
+        (Number(day.realizedPnL) || 0) + (Number(day.dmRealizedPnL) || 0) -
+        (Number(day.gasCost) || 0)
+    );
+    const gasCost = data.reduce((sum, day) => sum + (Number(day.gasCost) || 0), 0);
+    const tokenTotal = tokenValues.reduce((sum, value) => sum + value, 0);
+    const dollarTotal = dollarValues.reduce((sum, value) => sum + value, 0);
+    const combinedRealized = tokenTotal + dollarTotal;
+    const contribution = total => combinedRealized === 0
+        ? 0
+        : (total / combinedRealized) * 100;
+
+    const series = {
+        tokenTrader: buildStrategyResult(tokenValues, contribution(tokenTotal), tokenTotal),
+        dollarMaximizer: buildStrategyResult(dollarValues, contribution(dollarTotal), dollarTotal),
+        combined: buildStrategyResult(combinedValues, 100, combinedRealized)
+    };
+
+    const result = {
+        startDate: data[0]?.date || null,
+        endDate: data[data.length - 1]?.date || null,
+        gasCost: Number(gasCost.toFixed(4)),
+        ...series
+    };
+
     pnlAggregationCache.set(cacheKey, result);
     return result;
 };

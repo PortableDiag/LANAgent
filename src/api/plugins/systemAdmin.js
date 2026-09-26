@@ -1,9 +1,10 @@
-import { exec } from 'child_process';
+import { exec, execFile } from 'child_process';
 import { promisify } from 'util';
 import { BasePlugin } from '../core/basePlugin.js';
 import fs from 'fs/promises';
 
 const execAsync = promisify(exec);
+const execFileAsync = promisify(execFile);
 
 /**
  * System Administration Plugin for LANAgent
@@ -43,24 +44,9 @@ export default class SystemAdminPlugin extends BasePlugin {
         usage: 'optimize-database({ type: "all" })'
       },
       {
-        command: 'schedule-maintenance',
-        description: 'Schedule system maintenance',
-        usage: 'schedule-maintenance({ task: "update", time: "02:00", frequency: "weekly" })'
-      },
-      {
         command: 'health-check',
         description: 'Perform system health check',
         usage: 'health-check({ detailed: true })'
-      },
-      {
-        command: 'backup',
-        description: 'Create or schedule system backup',
-        usage: 'backup({ paths: ["/etc", "/home"], destination: "/backup" })'
-      },
-      {
-        command: 'logs-cleanup',
-        description: 'Clean up old log files',
-        usage: 'logs-cleanup({ olderThan: 30, dryRun: false })'
       },
       {
         command: 'disk-usage',
@@ -89,7 +75,6 @@ export default class SystemAdminPlugin extends BasePlugin {
       },
       updateFrequency: 'weekly',
       zombieCleanupInterval: '6h',
-      logRetentionDays: 30,
       diskCleanupThreshold: 85
     };
 
@@ -121,6 +106,17 @@ export default class SystemAdminPlugin extends BasePlugin {
    * autoUpdatesEnabled config gate.
    */
   async defineSchedulerJobs() {
+    // Log cleanup was removed (v2.25.348): its find pattern matched live files such as
+    // /var/log/dpkg.log and the app's own rotated logs, both already managed by logrotate
+    // and the app's log rotation. It had only ever failed (missing `path` import). Remove
+    // the weekly job Agenda persisted in scheduled_jobs so it stops being scheduled.
+    try {
+      const removed = await this.agent.scheduler?.agenda?.cancel({ name: 'system-admin-log-cleanup' });
+      if (removed) this.logger.info(`Removed retired job system-admin-log-cleanup (${removed})`);
+    } catch (error) {
+      this.logger.warn(`Could not remove retired job system-admin-log-cleanup: ${error.message}`);
+    }
+
     if (this.config.autoUpdatesEnabled) {
       await this.scheduleMaintenanceTasks();
     }
@@ -207,14 +203,20 @@ export default class SystemAdminPlugin extends BasePlugin {
         case 'optimize-database':
           return await this.optimizeDatabase(options);
 
-        case 'cleanup-logs':
-          return await this.cleanupLogs(options);
-
         case 'disk-cleanup':
           return await this.performDiskCleanup(options);
 
         case 'health-check':
           return await this.performHealthCheck(options);
+
+        case 'disk-usage':
+          return await this.getDiskUsage(options);
+
+        case 'service-status':
+          return await this.getServiceStatus(options);
+
+        case 'restart-service':
+          return await this.restartService(options);
 
         // Scheduling Operations
         case 'schedule-maintenance':
@@ -577,64 +579,6 @@ export default class SystemAdminPlugin extends BasePlugin {
   }
 
   /**
-   * Cleanup old log files
-   */
-  async cleanupLogs(options = {}) {
-    try {
-      const { days = this.config.logRetentionDays, dryRun = false } = options;
-      
-      const logDirectories = [
-        '/var/log',
-        process.env.LOGS_PATH || path.join(process.cwd(), 'logs')
-      ];
-
-      let totalSize = 0;
-      let filesRemoved = 0;
-
-      for (const logDir of logDirectories) {
-        try {
-          const command = dryRun 
-            ? `find "${logDir}" -name "*.log*" -mtime +${days} -type f -exec ls -la {} \\; 2>/dev/null || true`
-            : `find "${logDir}" -name "*.log*" -mtime +${days} -type f -delete 2>/dev/null || true`;
-          
-          const { stdout } = await execAsync(command);
-          
-          if (dryRun && stdout) {
-            const files = stdout.trim().split('\n').filter(line => line.trim());
-            filesRemoved += files.length;
-            
-            // Calculate total size
-            for (const line of files) {
-              const sizeMatch = line.match(/\s+(\d+)\s+/);
-              if (sizeMatch) {
-                totalSize += parseInt(sizeMatch[1]);
-              }
-            }
-          }
-        } catch (error) {
-          this.logger.warn(`Could not cleanup logs in ${logDir}:`, error.message);
-        }
-      }
-
-      return {
-        success: true,
-        data: {
-          filesRemoved: dryRun ? `${filesRemoved} (estimated)` : 'Unknown',
-          sizeFreed: dryRun ? `${(totalSize / 1024 / 1024).toFixed(2)} MB` : 'Unknown',
-          retentionDays: days,
-          cleaned: !dryRun,
-          message: dryRun ? 'Dry run - would remove old log files' : 'Log cleanup completed'
-        }
-      };
-    } catch (error) {
-      return {
-        success: false,
-        error: `Failed to cleanup logs: ${error.message}`
-      };
-    }
-  }
-
-  /**
    * Schedule maintenance tasks
    */
   async scheduleMaintenanceTasks() {
@@ -654,15 +598,9 @@ export default class SystemAdminPlugin extends BasePlugin {
         await this.performScheduledMaintenance('zombie-cleanup');
       });
 
-      // Schedule log cleanup weekly
-      await this.agent.scheduler.agenda.define('system-admin-log-cleanup', async (job) => {
-        await this.performScheduledMaintenance('log-cleanup');
-      });
-
       // Schedule the tasks
       await this.agent.scheduler.agenda.every('1 week', 'system-admin-updates');
       await this.agent.scheduler.agenda.every('6 hours', 'system-admin-zombie-cleanup');
-      await this.agent.scheduler.agenda.every('1 week', 'system-admin-log-cleanup');
 
       this.logger.info('System administration maintenance tasks scheduled');
     } catch (error) {
@@ -695,12 +633,6 @@ export default class SystemAdminPlugin extends BasePlugin {
           }
           break;
           
-        case 'log-cleanup':
-          const logResult = await this.cleanupLogs();
-          if (logResult.success) {
-            await this.agent.notify(`📁 **Log Cleanup Complete**\n\nOld log files cleaned up to free disk space.`);
-          }
-          break;
       }
     } catch (error) {
       this.logger.error(`Scheduled maintenance failed for ${type}:`, error);
@@ -762,6 +694,65 @@ export default class SystemAdminPlugin extends BasePlugin {
   /**
    * Get system administration status
    */
+  /** Filesystem usage (df), flagging mounts at or above `threshold` percent. */
+  async getDiskUsage({ threshold = 85 } = {}) {
+    const { stdout } = await execFileAsync('df', ['-hP', '-x', 'tmpfs', '-x', 'devtmpfs', '-x', 'squashfs', '-x', 'overlay', '-x', 'efivarfs']);
+    const rows = stdout.trim().split('\n').slice(1).map(line => {
+      const [filesystem, size, used, available, usePct, mount] = line.split(/\s+/);
+      return { filesystem, size, used, available, usePercent: parseInt(usePct, 10), mount };
+    });
+    const high = rows.filter(r => r.usePercent >= threshold);
+    const lines = rows.map(r => `${r.usePercent >= threshold ? '⚠️' : '•'} ${r.mount}: ${r.used} of ${r.size} used (${r.usePercent}%), ${r.available} free`);
+    return {
+      success: true,
+      filesystems: rows,
+      result: `💾 Disk usage:\n${lines.join('\n')}${high.length ? `\n\n${high.length} filesystem(s) at or above ${threshold}%.` : ''}`
+    };
+  }
+
+  static validServiceName(service) {
+    return typeof service === 'string' && /^[A-Za-z0-9@._-]+$/.test(service);
+  }
+
+  /** systemd status of one service. */
+  async getServiceStatus({ service } = {}) {
+    if (!SystemAdminPlugin.validServiceName(service)) {
+      return { success: false, error: 'A valid service name is required, e.g. { service: "nginx" }' };
+    }
+    const state = await execFileAsync('systemctl', ['is-active', service]).then(r => r.stdout.trim(), e => (e.stdout || 'unknown').trim());
+    const enabled = await execFileAsync('systemctl', ['is-enabled', service]).then(r => r.stdout.trim(), e => (e.stdout || 'unknown').trim());
+    const detail = await execFileAsync('systemctl', ['status', service, '--no-pager', '-n', '5']).then(r => r.stdout, e => e.stdout || e.message);
+    return {
+      success: true,
+      service,
+      active: state,
+      enabled,
+      result: `⚙️ ${service}: ${state} (${enabled})\n\n${String(detail).trim().substring(0, 1500)}`
+    };
+  }
+
+  /** Restart one systemd service (gated by requiresApproval). */
+  async restartService({ service } = {}) {
+    if (!SystemAdminPlugin.validServiceName(service)) {
+      return { success: false, error: 'A valid service name is required, e.g. { service: "nginx" }' };
+    }
+    await execFileAsync('systemctl', ['restart', service]);
+    const state = await execFileAsync('systemctl', ['is-active', service]).then(r => r.stdout.trim(), e => (e.stdout || 'unknown').trim());
+    return { success: state === 'active', service, active: state, result: `🔄 Restarted ${service}: now ${state}` };
+  }
+
+  /** Disk, memory and load summary. */
+  async performHealthCheck(options = {}) {
+    const disk = await this.getDiskUsage(options);
+    const { stdout: mem } = await execFileAsync('free', ['-h']);
+    const { stdout: uptime } = await execFileAsync('uptime');
+    return {
+      success: true,
+      disk: disk.filesystems,
+      result: `🩺 Health check\n\n${disk.result}\n\n🧠 Memory:\n${mem.trim()}\n\n⏱️ ${uptime.trim()}`
+    };
+  }
+
   async getSystemAdminStatus() {
     return {
       success: true,

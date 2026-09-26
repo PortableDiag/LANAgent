@@ -20,6 +20,12 @@ const mcpServer = getMCPServer();
  * Provides REST API for managing MCP servers, tools, and tokens
  */
 
+// ==================== MCP Server (protocol endpoint) ====================
+
+// Streamable HTTP MCP endpoint for external clients (Claude Code, Cursor...).
+// Authenticated with an MCP token inside the handler, not the dashboard JWT.
+router.all('/server', (req, res) => mcpServer.handleHttpRequest(req, res));
+
 // ==================== Service Status ====================
 
 // Get overall MCP service status

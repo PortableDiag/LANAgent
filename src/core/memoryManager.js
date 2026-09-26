@@ -1,4 +1,5 @@
 import { Memory } from "../models/Memory.js";
+import { Transcript } from "../models/Transcript.js";
 import { logger } from "../utils/logger.js";
 import { safeJsonParse } from "../utils/jsonUtils.js";
 import { memoryVectorStore } from "../services/memoryVectorStore.js";
@@ -46,6 +47,10 @@ export class MemoryManager {
 
     // Load recent memories into cache
     await this.loadRecentMemories();
+
+    // Restore the short follow-up buffer from the transcript so a restart does not make
+    // the agent forget what it was just talking about.
+    await this.restoreConversationBuffer();
 
     // Set up periodic cleanup
     setInterval(() => this.cleanup(), 3600000); // Every hour
@@ -298,11 +303,84 @@ export class MemoryManager {
     .limit(limit);
   }
 
+  /**
+   * Refill the in-memory follow-up buffer (last 10 messages per user, 30-minute window)
+   * from the transcript after a restart.
+   */
+  async restoreConversationBuffer() {
+    try {
+      const since = new Date(Date.now() - 30 * 60 * 1000);
+      const recent = await Transcript.find({ createdAt: { $gte: since } }).sort({ _id: -1 }).limit(500).lean();
+      recent.reverse(); // newest 500, replayed in insertion order
+      if (!this._conversationBuffer) this._conversationBuffer = new Map();
+      for (const m of recent) {
+        const buffer = this._conversationBuffer.get(m.userId) || [];
+        buffer.push({ role: m.role, content: m.content.substring(0, 1000), ts: new Date(m.createdAt).getTime() });
+        this._conversationBuffer.set(m.userId, buffer.slice(-10));
+      }
+      if (recent.length) logger.info(`Restored conversation buffer: ${recent.length} messages across ${this._conversationBuffer.size} user(s)`);
+    } catch (error) {
+      logger.warn(`Could not restore conversation buffer: ${error.message}`);
+    }
+  }
+
+  /**
+   * Full-text search over past conversations.
+   * @param {string} query - words to find
+   * @param {object} [opts] - { userId, days (default 90), limit (default 10), role }
+   * @returns {Promise<Array>} matching messages, best match first, each with the reply or
+   *   question next to it for context
+   */
+  async searchConversations(query, { userId, days = 90, limit = 10, role } = {}) {
+    const filter = { createdAt: { $gte: new Date(Date.now() - days * 86400000) } };
+    if (userId) filter.userId = userId;
+    if (role) filter.role = role;
+    const cap = Math.min(Number(limit) || 10, 50);
+
+    let hits;
+    try {
+      hits = await Transcript.find({ ...filter, $text: { $search: query } }, { score: { $meta: 'textScore' } })
+        .sort({ score: { $meta: 'textScore' } }).limit(cap).lean();
+    } catch (error) {
+      // Text index still building (first boot) or a query the parser rejects: fall back to regex
+      const escaped = String(query).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      hits = await Transcript.find({ ...filter, content: { $regex: escaped, $options: 'i' } })
+        .sort({ _id: -1 }).limit(cap).lean();
+    }
+
+    // Attach the adjacent message (the question for an answer, the answer for a question).
+    // Ordered by _id, not createdAt: both sides of an exchange share a timestamp, and
+    // ObjectIds increase monotonically in insertion order.
+    return Promise.all(hits.map(async (hit) => {
+      const after = hit.role === 'user';
+      const neighbour = await Transcript.findOne({
+        userId: hit.userId,
+        role: after ? 'assistant' : 'user',
+        _id: after ? { $gt: hit._id } : { $lt: hit._id }
+      }).sort({ _id: after ? 1 : -1 }).lean();
+      return {
+        when: hit.createdAt,
+        interface: hit.interface,
+        role: hit.role,
+        content: hit.content,
+        context: neighbour ? { role: neighbour.role, content: neighbour.content.substring(0, 500) } : null
+      };
+    }));
+  }
+
+  /** Most recent messages, newest last. */
+  async recentConversations({ userId, limit = 20 } = {}) {
+    const filter = userId ? { userId } : {};
+    const rows = await Transcript.find(filter).sort({ _id: -1 }).limit(Math.min(Number(limit) || 20, 100)).lean();
+    return rows.reverse().map(r => ({ when: r.createdAt, interface: r.interface, role: r.role, content: r.content }));
+  }
+
   async storeConversation(userId, userMessage, agentResponse, metadata = {}) {
     // Track in-memory conversation buffer for follow-up detection
     // (raw conversations are NOT stored in DB — only learnable knowledge is persisted)
     if (!this._conversationBuffer) this._conversationBuffer = new Map();
-    const uid = userId || 'default';
+    // String key: Telegram passes a numeric id, the transcript restore a string one
+    const uid = String(userId || 'default');
     const buffer = this._conversationBuffer.get(uid) || [];
     const userContent = typeof userMessage === 'string' ? userMessage : (userMessage?.content || String(userMessage || ''));
     const agentContent = typeof agentResponse === 'string' ? agentResponse : (agentResponse?.content || String(agentResponse || ''));
@@ -312,6 +390,16 @@ export class MemoryManager {
     const now = Date.now();
     const filtered = buffer.filter(m => now - m.ts < 30 * 60 * 1000).slice(-10);
     this._conversationBuffer.set(uid, filtered);
+
+    // Verbatim transcript (separate collection, TTL-expired). Not awaited: a slow write
+    // must never delay a reply, and a failed one only costs searchable history.
+    const iface = metadata.interface || 'unknown';
+    const docs = [];
+    if (userContent) docs.push({ userId: uid, interface: iface, role: 'user', content: userContent.substring(0, 8000) });
+    if (agentContent) docs.push({ userId: uid, interface: iface, role: 'assistant', content: agentContent.substring(0, 8000) });
+    if (docs.length) {
+      Transcript.insertMany(docs).catch(err => logger.debug(`Transcript write failed: ${err.message}`));
+    }
 
     // Only analyze for learnable knowledge — don't store raw conversations as memories.
     // Raw conversation storage was creating 13K+ junk entries (every message and response
@@ -446,9 +534,10 @@ User message: "${message.substring(0, 500)}"
 Respond with ONLY valid JSON, no other text:
 {"worth_remembering": true/false, "type": "preference|fact|instruction|relationship|context", "summary": "concise fact to remember", "importance": 1-10}`;
 
-      const response = await this.agent.providerManager.generateResponse(prompt, {
+      const response = await this.agent.providerManager.generateAux(prompt, {
         maxTokens: 150,
-        temperature: 0.1
+        temperature: 0.1,
+        auxTask: 'memory-analysis'
       });
 
       if (!response) return;

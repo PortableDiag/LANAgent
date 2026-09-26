@@ -19,6 +19,8 @@ const SERVICE_CREDIT_COSTS = {
   'youtube-download': 10,
   'youtube-audio': 8,
   'media-transcode': 20,
+  // Per started minute of audio (routes/transcribe.js); the charge is set by the measured length.
+  'audio-transcription': { perMinute: 2, minimum: 2, urlFetch: 5, maxMinutes: 60 },
   'image-transcode': 2,
   'image-generation': 30,
   'document-processing': 10,

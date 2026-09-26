@@ -110,6 +110,16 @@ export class CapabilityIncrementalScanner {
         'wizardlm': 32000,
         'default': 16000
       },
+      'openrouter': {
+        // Normally answered by the provider's live catalog (see getCurrentProviderInfo);
+        // these cover a boot before the catalog has loaded. Ids arrive normalised
+        // ("openaigpt-5.6-luna"), so these are substring keys.
+        'gpt-5': 400000,
+        'gpt-4.1': 1000000,
+        'claude': 200000,
+        'qwen3': 262144,
+        'default': 128000
+      },
       'groq': {
         'llama3': 8000,
         'mixtral': 32000,
@@ -142,7 +152,12 @@ export class CapabilityIncrementalScanner {
 
       // Calculate max files based on context limit and average file size
       const maxFilesForContext = this.calculateMaxFilesForContext(providerInfo.contextLimit);
-      const maxFiles = Math.min(shuffledFiles.length, maxFilesForContext);
+      // Spend cap, separate from the context budget. Each file is its own analysis
+      // call and scans run hourly, so a 1M-context model would otherwise analyse 20
+      // files a scan (~400 calls/day). SELFMOD_FILES_PER_SCAN overrides.
+      const perScanCap = Number.parseInt(process.env.SELFMOD_FILES_PER_SCAN, 10);
+      const filesPerScan = Number.isFinite(perScanCap) && perScanCap > 0 ? perScanCap : 3;
+      const maxFiles = Math.min(shuffledFiles.length, maxFilesForContext, filesPerScan);
       
       logger.info(`Analyzing ${maxFiles} files (context limit: ${providerInfo.contextLimit} tokens)`);
       
@@ -216,10 +231,12 @@ export class CapabilityIncrementalScanner {
     try {
       let currentProvider = null;
       let currentModel = 'default';
+      let providerObj = null;
 
       // Get the active provider from providerManager
       if (this.agent.providerManager?.getCurrentProvider) {
         const provider = await this.agent.providerManager.getCurrentProvider();
+        providerObj = provider || null;
 
         // Get the provider name from the providers map
         if (this.agent.providerManager.providers) {
@@ -247,6 +264,19 @@ export class CapabilityIncrementalScanner {
         }
       }
 
+      // Prefer the provider's own model catalog over the static table. OpenRouter
+      // publishes context_length per model; the table had no 'openrouter' entry at
+      // all, so openai/gpt-5.6-luna (1.05M context) fell through to the HuggingFace
+      // default of 8,000 and every scan analysed ~1 file.
+      const rawModel = currentModel;
+      let catalogLimit = null;
+      try {
+        const meta = providerObj?.catalog?.get?.(rawModel);
+        if (Number.isFinite(meta?.contextLength) && meta.contextLength > 0) {
+          catalogLimit = meta.contextLength;
+        }
+      } catch { /* catalog is optional — fall back to the table */ }
+
       // Normalize model names for lookup
       currentModel = currentModel.toLowerCase().replace(/[^a-z0-9.-]/g, '');
 
@@ -259,9 +289,10 @@ export class CapabilityIncrementalScanner {
 
       logger.info(`Provider detection: provider=${currentProvider}, model=${currentModel}`);
 
-      const contextLimit = this.getContextLimit(currentProvider, currentModel);
+      const contextLimit = catalogLimit || this.getContextLimit(currentProvider, currentModel);
 
-      logger.info(`Context limit for ${currentProvider}/${currentModel}: ${contextLimit} tokens`);
+      logger.info(`Context limit for ${currentProvider}/${currentModel}: ${contextLimit} tokens` +
+        (catalogLimit ? ' (from provider catalog)' : ''));
 
       return { provider: currentProvider, model: currentModel, contextLimit };
     } catch (error) {

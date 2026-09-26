@@ -78,7 +78,8 @@ class AccountRegistrationService {
 
     async initBrowser() {
         if (!this.browser) {
-            this.browser = await launchBrowser();
+            // Own profile: Chromium cannot share a user-data-dir with the scraper's browser
+            this.browser = await launchBrowser({ userDataDir: '/var/tmp/puppeteer-profile-registration' });
         }
         return this.browser;
     }

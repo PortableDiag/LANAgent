@@ -38,6 +38,8 @@ import vectorIntentRoutes from './vectorIntentRoutes.js';
 import deviceAliasRoutes from './deviceAliasRoutes.js';
 import mqttRoutes from './mqtt.js';
 import mcpRoutes from './mcp.js';
+import { createOpenAICompatRouter } from './openaiCompat.js';
+import { getMCPServer } from '../../services/mcp/mcpServer.js';
 import subagentsRoutes from './subagents.js';
 import p2pRoutes, { syncServicesFromPlugins } from './p2p.js';
 import coordinationRoutes from '../../api/coordination.js';
@@ -80,6 +82,10 @@ export class WebInterface {
   async initialize() {
     logger.info('Initializing Web Interface...');
     
+    // Network-origin gate FIRST: only trusted networks (WEB_UI_ALLOWED_CIDRS) reach the
+    // dashboard and its API; /api/external/* (the key-authenticated paid API a gateway
+    // proxies in) stays open to whatever the firewall admits. See utils/networkAccess.js.
+
     // Middleware
     this.app.use(express.json({ limit: '10mb' }));
     // Serve VRM avatar models from data directory
@@ -273,8 +279,13 @@ export class WebInterface {
     // Setup MQTT & Automation routes
     this.app.use('/mqtt', mqttRoutes);
 
-    // Setup MCP (Model Context Protocol) routes
+    // Setup MCP (Model Context Protocol) routes. Attaching the agent here makes the
+    // /mcp/server endpoint independent of whether the mcp plugin is enabled.
+    getMCPServer(this.agent);
     this.app.use('/mcp', mcpRoutes);
+
+    // OpenAI-compatible chat endpoint (Home Assistant Assist, Open WebUI, openai SDK clients)
+    this.app.use('/v1', createOpenAICompatRouter(this.agent));
 
     // Setup Sub-Agent Orchestrator routes
     this.app.use('/api/subagents', subagentsRoutes);
@@ -4836,6 +4847,7 @@ export class WebInterface {
 
   setupWebSocket() {
     this.io = new Server(this.server, {
+      // Same origin rule as the HTTP routes; Express middleware never sees a socket handshake.
       cors: {
         origin: '*',
         methods: ['GET', 'POST']

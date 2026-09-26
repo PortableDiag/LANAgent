@@ -8,6 +8,10 @@ import { isTransientRpcError as isTransientRpcErrorShared } from '../../utils/rp
 // Etherscan V2 unified API — single key works for all chains via chainid param.
 // V1 hosts (api.bscscan.com etc.) are deprecated and return NOTOK.
 const ETHERSCAN_V2_URL = 'https://api.etherscan.io/v2/api';
+// Etherscan's free V2 tier refuses some chains outright (BSC: "Free API access is
+// not supported for this chain"), which made every BSC profile read as a wallet
+// with no history. Moralis serves both chains and is the fallback.
+const MORALIS_URL = 'https://deep-index.moralis.io/api/v2.2';
 const apiKeyCache = new NodeCache({ stdTTL: 300 });
 
 let ethersLib = null;
@@ -37,6 +41,7 @@ const NETWORK_CONFIG = {
         nativeSymbol: 'BNB',
         explorerKeySlot: 'bsc',
         legacyEnvKey: 'BSCSCAN_API_KEY',
+        moralisChain: 'bsc',
         goPlusChainId: '56'
     },
     ethereum: {
@@ -51,6 +56,7 @@ const NETWORK_CONFIG = {
         chainId: 1,
         nativeSymbol: 'ETH',
         explorerKeySlot: 'eth',
+        moralisChain: 'eth',
         goPlusChainId: '1'
     }
 };
@@ -133,6 +139,8 @@ export default class WalletProfilerPlugin extends BasePlugin {
     // ── Helpers ────────────────────────────────────────────────────────
 
     _validateAddressAndNetwork(data) {
+        // Chat requests rarely name a chain ("profile 0x…"); BSC is the default.
+        if (!data.network) data.network = 'bsc';
         this.validateParams(data, {
             address: { required: true, type: 'string' },
             network: { required: true, type: 'string', enum: ['bsc', 'ethereum'] }
@@ -243,40 +251,126 @@ export default class WalletProfilerPlugin extends BasePlugin {
     async _isContract(networkCfg, address) {
         try {
             const code = await this._withProviderFallback(networkCfg, p => p.getCode(address));
-            return code !== '0x';
+            // EIP-7702: an EOA that delegates to a contract carries 0xef0100 + address
+            // as its code. It is still a wallet, not a contract.
+            return code !== '0x' && !/^0xef0100[0-9a-f]{40}$/i.test(code);
         } catch {
             return false;
         }
     }
 
+    async _getMoralisKey() {
+        const hit = apiKeyCache.get('moralis');
+        if (hit !== undefined) return hit;
+        let key = '';
+        try {
+            const stored = await PluginSettings.getCached('crypto', 'moralis_api_key');
+            if (stored) key = decrypt(stored) || '';
+        } catch (err) {
+            this.logger.debug(`Moralis key lookup failed: ${err.message}`);
+        }
+        if (!key) key = process.env.MORALIS_API_KEY || '';
+        apiKeyCache.set('moralis', key);
+        return key;
+    }
+
+    async _moralisGet(path, params) {
+        const apiKey = await this._getMoralisKey();
+        if (!apiKey) return null;
+        try {
+            const { data } = await axios.get(`${MORALIS_URL}${path}`, {
+                params, headers: { 'X-API-Key': apiKey }, timeout: 20000
+            });
+            return data;
+        } catch (error) {
+            this.logger.warn(`Moralis request failed: ${error.message}`);
+            return null;
+        }
+    }
+
+    // Moralis native tx -> the explorer's txlist shape the rest of this file reads.
+    _fromMoralisTx(tx) {
+        return {
+            hash: tx.hash,
+            from: tx.from_address,
+            to: tx.to_address,
+            value: tx.value,
+            timeStamp: String(Math.floor(Date.parse(tx.block_timestamp) / 1000))
+        };
+    }
+
+    /**
+     * Oldest (up to 100) and newest transaction, plus a total count.
+     * `txs` is null when no source could supply history — callers must treat that
+     * as UNKNOWN, not as a wallet with no transactions.
+     */
     async _getTransactionHistory(networkCfg, address) {
+        let txs = null;
+        let latestTx = null;
+        let source = null;
+
         const data = await this._explorerGet(networkCfg, {
-            module: 'account',
-            action: 'txlist',
-            address,
-            startblock: 0,
-            endblock: 99999999,
-            page: 1,
-            offset: 100,
-            sort: 'asc'
+            module: 'account', action: 'txlist', address,
+            startblock: 0, endblock: 99999999, page: 1, offset: 100, sort: 'asc'
         });
+        if (data && Array.isArray(data.result)) {
+            txs = data.result;
+            source = 'etherscan';
+            if (txs.length === 100) {
+                const newest = await this._explorerGet(networkCfg, {
+                    module: 'account', action: 'txlist', address,
+                    startblock: 0, endblock: 99999999, page: 1, offset: 1, sort: 'desc'
+                });
+                if (Array.isArray(newest?.result)) latestTx = newest.result[0] || null;
+            }
+        } else {
+            const oldest = await this._moralisGet(`/${address}`, {
+                chain: networkCfg.moralisChain, order: 'ASC', limit: 100
+            });
+            if (Array.isArray(oldest?.result)) {
+                txs = oldest.result.map(tx => this._fromMoralisTx(tx));
+                source = 'moralis';
+                if (oldest.cursor) {
+                    const newest = await this._moralisGet(`/${address}`, {
+                        chain: networkCfg.moralisChain, order: 'DESC', limit: 1
+                    });
+                    if (Array.isArray(newest?.result) && newest.result[0]) {
+                        latestTx = this._fromMoralisTx(newest.result[0]);
+                    }
+                }
+            }
+        }
+        if (txs && !latestTx) latestTx = txs[txs.length - 1] || null;
 
-        if (!data || !Array.isArray(data.result)) return { txs: [], totalCount: 0 };
-
-        // Get total tx count from a separate call (the list is capped at offset)
-        let totalCount = data.result.length;
-        const countData = await this._explorerGet(networkCfg, {
-            module: 'proxy',
-            action: 'eth_getTransactionCount',
-            address,
-            tag: 'latest'
-        });
-        if (countData?.result) {
-            const parsed = parseInt(countData.result, 16);
-            if (!isNaN(parsed)) totalCount = parsed;
+        // The list is capped, so count separately. The nonce (transactions SENT) comes
+        // from RPC, which works on every chain; a receive-only wallet has nonce 0, so
+        // never report fewer than we actually listed.
+        let totalCount = txs ? txs.length : null;
+        try {
+            const nonce = await this._withProviderFallback(networkCfg, p => p.getTransactionCount(address));
+            totalCount = Math.max(nonce, totalCount || 0);
+        } catch (err) {
+            this.logger.debug(`Nonce lookup failed: ${err.message}`);
         }
 
-        return { txs: data.result, totalCount };
+        return { txs, latestTx, totalCount, source };
+    }
+
+    // Tokens the wallet holds, from Moralis, in the shape tokens() returns.
+    async _getMoralisTokens(networkCfg, address) {
+        const data = await this._moralisGet(`/wallets/${address}/tokens`, { chain: networkCfg.moralisChain });
+        if (!Array.isArray(data?.result)) return null;
+        return data.result
+            .filter(t => !t.native_token)
+            .map(t => ({
+                contractAddress: t.token_address,
+                symbol: t.symbol || 'UNKNOWN',
+                name: t.name || 'Unknown Token',
+                decimals: parseInt(t.decimals) || 18,
+                balance: parseFloat(t.balance_formatted),
+                possibleSpam: !!t.possible_spam
+            }))
+            .filter(t => t.balance > 0);
     }
 
     // ── Commands ───────────────────────────────────────────────────────
@@ -308,15 +402,14 @@ export default class WalletProfilerPlugin extends BasePlugin {
         let firstTxDate = null;
         let lastTxDate = null;
         let walletAgeDays = null;
-        if (txHistory.txs.length > 0) {
+        if (txHistory.txs?.length > 0) {
             firstTxDate = new Date(parseInt(txHistory.txs[0].timeStamp) * 1000).toISOString();
-            const lastTx = txHistory.txs[txHistory.txs.length - 1];
-            lastTxDate = new Date(parseInt(lastTx.timeStamp) * 1000).toISOString();
+            lastTxDate = new Date(parseInt(txHistory.latestTx.timeStamp) * 1000).toISOString();
             walletAgeDays = Math.floor((Date.now() - parseInt(txHistory.txs[0].timeStamp) * 1000) / 86400000);
         }
 
-        // Token count from explorer
-        let tokenCount = 0;
+        // Token count from explorer, else Moralis holdings; null = unknown
+        let tokenCount = null;
         const tokenData = await this._explorerGet(networkCfg, {
             module: 'account',
             action: 'tokentx',
@@ -330,6 +423,9 @@ export default class WalletProfilerPlugin extends BasePlugin {
         if (tokenData && Array.isArray(tokenData.result)) {
             const uniqueTokens = new Set(tokenData.result.map(t => t.contractAddress.toLowerCase()));
             tokenCount = uniqueTokens.size;
+        } else {
+            const held = await this._getMoralisTokens(networkCfg, address);
+            if (held) tokenCount = held.length;
         }
 
         // Risk flags
@@ -350,7 +446,9 @@ export default class WalletProfilerPlugin extends BasePlugin {
                 total: txHistory.totalCount,
                 firstTxDate,
                 lastTxDate,
-                walletAgeDays
+                walletAgeDays,
+                historyAvailable: txHistory.txs !== null,
+                source: txHistory.source
             },
             isContract,
             riskFlags
@@ -383,7 +481,17 @@ export default class WalletProfilerPlugin extends BasePlugin {
             sort: 'desc'
         });
 
-        if (!tokenData || !Array.isArray(tokenData.result) || tokenData.result.length === 0) {
+        if (!tokenData || !Array.isArray(tokenData.result)) {
+            const held = await this._getMoralisTokens(networkCfg, address);
+            if (!held) {
+                return { success: false, address, network, error: `Token data is unavailable for ${network} right now` };
+            }
+            held.sort((a, b) => b.balance - a.balance);
+            const result = { success: true, address, network, tokenCount: held.length, tokens: held, source: 'moralis' };
+            profileCache.set(cacheKey, result);
+            return result;
+        }
+        if (tokenData.result.length === 0) {
             const result = { success: true, address, network, tokens: [], message: 'No token transfers found' };
             profileCache.set(cacheKey, result);
             return result;
@@ -459,7 +567,7 @@ export default class WalletProfilerPlugin extends BasePlugin {
         ]);
 
         let walletAgeDays = null;
-        if (txHistory.txs.length > 0) {
+        if (txHistory.txs?.length > 0) {
             walletAgeDays = Math.floor((Date.now() - parseInt(txHistory.txs[0].timeStamp) * 1000) / 86400000);
         }
 
@@ -546,16 +654,19 @@ export default class WalletProfilerPlugin extends BasePlugin {
             flags.push({ id: 'newWallet', label: 'New wallet', detail: `Wallet is only ${walletAgeDays} day(s) old` });
         }
 
-        // No transaction history at all
-        if (txHistory.txs.length === 0) {
-            flags.push({ id: 'noTxHistory', label: 'No transaction history', detail: 'Address has no recorded transactions' });
-        } else if (txHistory.totalCount < 5) {
-            flags.push({ id: 'lowTxCount', label: 'Low transaction count', detail: `Only ${txHistory.totalCount} transactions` });
+        // No transaction history at all. Skipped when history is unknown (txs null):
+        // an unavailable source is not evidence of an empty wallet.
+        if (txHistory.txs !== null) {
+            if (txHistory.txs.length === 0 && !txHistory.totalCount) {
+                flags.push({ id: 'noTxHistory', label: 'No transaction history', detail: 'Address has no recorded transactions' });
+            } else if (txHistory.totalCount < 5) {
+                flags.push({ id: 'lowTxCount', label: 'Low transaction count', detail: `Only ${txHistory.totalCount} transactions` });
+            }
         }
 
         // High-value transfers (> 10 ETH/BNB in a single tx)
         const highValueThreshold = 10n * (10n ** 18n); // 10 native tokens in wei
-        const hasHighValue = txHistory.txs.some(tx => {
+        const hasHighValue = (txHistory.txs || []).some(tx => {
             try { return BigInt(tx.value) >= highValueThreshold; } catch { return false; }
         });
         if (hasHighValue) {

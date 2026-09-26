@@ -7,6 +7,31 @@ import { EventEmitter } from 'events';
  * Base class for all sub-agent handlers.
  * Provides common functionality for execution, state management, and tool access.
  */
+const MAX_TRACE_ENTRIES = 200;
+const MAX_TRACE_FIELD_CHARS = 2000;
+
+/**
+ * Reduce a prompt/params/result/response to a bounded, serialisable form so
+ * the trace never pins large provider responses or tool payloads in memory.
+ */
+function summarizeForTrace(value) {
+  if (value === undefined || value === null) return value;
+  let text;
+  if (typeof value === 'string') {
+    text = value;
+  } else {
+    try {
+      text = JSON.stringify(value);
+    } catch {
+      text = String(value);
+    }
+  }
+  if (text === undefined) return undefined;
+  return text.length > MAX_TRACE_FIELD_CHARS
+    ? `${text.slice(0, MAX_TRACE_FIELD_CHARS)}… [${text.length} chars]`
+    : text;
+}
+
 export class BaseAgentHandler extends EventEmitter {
   constructor(mainAgent, agentDoc) {
     super();
@@ -28,6 +53,10 @@ export class BaseAgentHandler extends EventEmitter {
       tokens: 0,
       cost: 0
     };
+
+    // Execution trace for debugging and audit. In-memory ring buffer — the
+    // handler lives for the process lifetime, so it must stay bounded.
+    this.executionTrace = [];
   }
 
   /**
@@ -131,33 +160,58 @@ export class BaseAgentHandler extends EventEmitter {
    * Execute a tool
    */
   async executeTool(toolName, action, params = {}) {
-    const tool = this.tools.get(toolName);
-    if (!tool) {
-      throw new Error(`Tool not available: ${toolName}`);
-    }
+    const startTime = Date.now();
+    const traceEntry = {
+      type: 'tool_execution',
+      timestamp: new Date(),
+      toolName,
+      action,
+      params: summarizeForTrace(params),
+      sessionId: this.agentDoc.state?.currentSession?.startedAt?.toISOString()
+    };
 
-    // Check if action requires approval
-    const requiresApproval = this.agentDoc.config?.requiresApproval?.forActions || [];
-    if (requiresApproval.includes(`${toolName}.${action}`)) {
-      const approval = await this.requestApproval(
-        `${toolName}.${action}`,
-        `Execute ${toolName}.${action} with params: ${JSON.stringify(params)}`,
-        { toolName, action, params }
-      );
-
-      if (approval.status !== 'approved') {
-        return { success: false, reason: 'Action requires approval' };
+    try {
+      const tool = this.tools.get(toolName);
+      if (!tool) {
+        throw new Error(`Tool not available: ${toolName}`);
       }
+
+      // Check if action requires approval
+      const requiresApproval = this.agentDoc.config?.requiresApproval?.forActions || [];
+      if (requiresApproval.includes(`${toolName}.${action}`)) {
+        const approval = await this.requestApproval(
+          `${toolName}.${action}`,
+          `Execute ${toolName}.${action} with params: ${JSON.stringify(params)}`,
+          { toolName, action, params }
+        );
+
+        if (approval.status !== 'approved') {
+          traceEntry.approvalStatus = 'denied';
+          traceEntry.duration = Date.now() - startTime;
+          this.recordTrace(traceEntry);
+          return { success: false, reason: 'Action requires approval' };
+        }
+        traceEntry.approvalStatus = 'approved';
+      }
+
+      // Execute the tool
+      const result = await tool.execute({ action, ...params });
+      
+      // Track usage
+      this.sessionCosts.apiCalls++;
+      this.updateToolUsageStats(toolName, result.success);
+
+      traceEntry.result = summarizeForTrace(result);
+      traceEntry.duration = Date.now() - startTime;
+      this.recordTrace(traceEntry);
+
+      return result;
+    } catch (error) {
+      traceEntry.error = error.message;
+      traceEntry.duration = Date.now() - startTime;
+      this.recordTrace(traceEntry);
+      throw error;
     }
-
-    // Execute the tool
-    const result = await tool.execute({ action, ...params });
-
-    // Track usage
-    this.sessionCosts.apiCalls++;
-    this.updateToolUsageStats(toolName, result.success);
-
-    return result;
   }
 
   /**
@@ -193,44 +247,63 @@ export class BaseAgentHandler extends EventEmitter {
    * Generate AI response with cost tracking
    */
   async generateResponse(prompt, options = {}) {
-    if (!this.mainAgent.providerManager) {
-      throw new Error('Provider manager not available');
-    }
+    const startTime = Date.now();
+    const traceEntry = {
+      type: 'ai_response',
+      timestamp: new Date(),
+      prompt: summarizeForTrace(prompt),
+      sessionId: this.agentDoc.state?.currentSession?.startedAt?.toISOString()
+    };
 
-    // Refresh agentDoc from database to get latest budget/usage
-    if (this.agentDoc._id) {
-      const SubAgent = this.agentDoc.constructor;
-      const freshDoc = await SubAgent.findById(this.agentDoc._id);
-      if (freshDoc) {
-        this.agentDoc = freshDoc;
+    try {
+      if (!this.mainAgent.providerManager) {
+        throw new Error('Provider manager not available');
       }
-    }
 
-    // Check budget before calling
-    const budget = this.agentDoc.config?.budget;
-    if (budget) {
-      const dailyUsed = this.agentDoc.usage?.daily?.apiCalls || 0;
-      if (dailyUsed >= budget.dailyApiCalls) {
-        throw new Error('Daily API call budget exceeded');
+      // Refresh agentDoc from database to get latest budget/usage
+      if (this.agentDoc._id) {
+        const SubAgent = this.agentDoc.constructor;
+        const freshDoc = await SubAgent.findById(this.agentDoc._id);
+        if (freshDoc) {
+          this.agentDoc = freshDoc;
+        }
       }
+
+      // Check budget before calling
+      const budget = this.agentDoc.config?.budget;
+      if (budget) {
+        const dailyUsed = this.agentDoc.usage?.daily?.apiCalls || 0;
+        if (dailyUsed >= budget.dailyApiCalls) {
+          throw new Error('Daily API call budget exceeded');
+        }
+      }
+
+      const response = await this.mainAgent.providerManager.generateResponse(prompt, options);
+
+      // Track usage
+      this.sessionCosts.apiCalls++;
+      if (response.usage) {
+        this.sessionCosts.tokens += response.usage.total_tokens || 0;
+      }
+
+      // Record usage to agent doc
+      await this.agentDoc.recordUsage(
+        1,
+        response.usage?.total_tokens || 0,
+        0 // TODO: calculate cost based on model
+      );
+
+      traceEntry.response = summarizeForTrace(response);
+      traceEntry.duration = Date.now() - startTime;
+      this.recordTrace(traceEntry);
+
+      return response;
+    } catch (error) {
+      traceEntry.error = error.message;
+      traceEntry.duration = Date.now() - startTime;
+      this.recordTrace(traceEntry);
+      throw error;
     }
-
-    const response = await this.mainAgent.providerManager.generateResponse(prompt, options);
-
-    // Track usage
-    this.sessionCosts.apiCalls++;
-    if (response.usage) {
-      this.sessionCosts.tokens += response.usage.total_tokens || 0;
-    }
-
-    // Record usage to agent doc
-    await this.agentDoc.recordUsage(
-      1,
-      response.usage?.total_tokens || 0,
-      0 // TODO: calculate cost based on model
-    );
-
-    return response;
   }
 
   /**
@@ -360,6 +433,32 @@ export class BaseAgentHandler extends EventEmitter {
       toolCount: this.tools.size,
       sessionCosts: this.sessionCosts
     };
+  }
+
+  /**
+   * Append a trace entry, dropping the oldest beyond MAX_TRACE_ENTRIES.
+   * @param {Object} entry
+   */
+  recordTrace(entry) {
+    this.executionTrace.push(entry);
+    if (this.executionTrace.length > MAX_TRACE_ENTRIES) {
+      this.executionTrace.splice(0, this.executionTrace.length - MAX_TRACE_ENTRIES);
+    }
+  }
+
+  /**
+   * Get execution trace for debugging and audit purposes
+   * @param {string} sessionId - Session ID to filter traces
+   * @returns {Array} Chronological history of tool executions, prompts, and responses
+   */
+  getExecutionTrace(sessionId) {
+    if (!sessionId) {
+      return [...this.executionTrace];
+    }
+    
+    return this.executionTrace.filter(entry => 
+      entry.sessionId === sessionId
+    );
   }
 }
 

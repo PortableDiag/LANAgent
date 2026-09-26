@@ -82,6 +82,7 @@ export default class AviationstackPlugin extends BasePlugin {
     };
 
     this.cache = new NodeCache({ stdTTL: 300, checkperiod: 60 });
+    this.inFlightRequests = new Map();
     this.initialized = false;
   }
 
@@ -108,7 +109,12 @@ export default class AviationstackPlugin extends BasePlugin {
       this.initialized = true;
       this.logger.info(`${this.name} plugin initialized successfully`);
     } catch (error) {
-      if (error && error.message && (error.message.includes('Missing required credentials') || /API[_-]?KEY.*(required|missing|not configured)/i.test(error.message) || /environment variable .* (required|not set)/i.test(error.message) || /credentials? (not configured|missing|required)/i.test(error.message))) {
+      if (error && error.message && (
+        error.message.includes('Missing required credentials') ||
+        /API[_-]?KEY.*(required|missing|not configured)/i.test(error.message) ||
+        /environment variable .* (required|not set)/i.test(error.message) ||
+        /credentials? (not configured|missing|required)/i.test(error.message)
+      )) {
         this.logger.warn(`Failed to initialize ${this.name} plugin: ${error.message}`);
       } else {
         this.logger.error(`Failed to initialize ${this.name} plugin:`, error);
@@ -179,26 +185,51 @@ export default class AviationstackPlugin extends BasePlugin {
     return parsed;
   }
 
+  /**
+   * Fetches a flights resource while coalescing identical in-flight requests.
+   * Query values are normalized so concurrent callers share one HTTP request.
+   */
+  async requestFlights(params, context) {
+    const normalizedParams = Object.entries(params)
+      .filter(([key, value]) => key !== 'access_key' && value !== undefined && value !== null && value !== '')
+      .sort(([first], [second]) => first.localeCompare(second))
+      .map(([key, value]) => [key, String(value).trim().toUpperCase()]);
+
+    const key = JSON.stringify(normalizedParams);
+    const existingRequest = this.inFlightRequests.get(key);
+    if (existingRequest) {
+      return existingRequest;
+    }
+
+    const request = retryOperation(
+      () => axios.get(`${this.config.baseUrl}/flights`, { params }),
+      { retries: 3, context }
+    );
+
+    this.inFlightRequests.set(key, request);
+
+    try {
+      return await request;
+    } finally {
+      if (this.inFlightRequests.get(key) === request) {
+        this.inFlightRequests.delete(key);
+      }
+    }
+  }
+
   async getFlightStatus({ flightNumber, date }) {
     if (!flightNumber) {
       return { success: false, error: 'flightNumber parameter is required' };
     }
 
-    const url = `${this.config.baseUrl}/flights`;
     try {
       const params = {
         access_key: this.config.apiKey,
         flight_iata: flightNumber
       };
-      if (date) {
-        params.flight_date = date;
-      }
+      if (date) params.flight_date = date;
 
-      const response = await retryOperation(() => axios.get(url, { params }), {
-        retries: 3,
-        context: 'aviationstack getFlightStatus'
-      });
-
+      const response = await this.requestFlights(params, 'aviationstack getFlightStatus');
       return { success: true, data: response.data };
     } catch (error) {
       this.logger.error('Error fetching flight status:', error);
@@ -278,19 +309,13 @@ export default class AviationstackPlugin extends BasePlugin {
       return { success: false, error: 'Both startDate and endDate parameters are required' };
     }
 
-    const url = `${this.config.baseUrl}/flights`;
     try {
-      const params = {
+      const response = await this.requestFlights({
         access_key: this.config.apiKey,
         flight_iata: flightNumber,
         date_from: startDate,
         date_to: endDate
-      };
-
-      const response = await retryOperation(() => axios.get(url, { params }), {
-        retries: 3,
-        context: 'aviationstack getHistoricalFlightData'
-      });
+      }, 'aviationstack getHistoricalFlightData');
 
       return { success: true, data: response.data };
     } catch (error) {
@@ -303,14 +328,21 @@ export default class AviationstackPlugin extends BasePlugin {
    * Flights filtered by route (departure + arrival IATA codes).
    */
   async getFlightsByRoute({ depIata, arrIata, date, limit, offset }) {
-    if (!depIata || !arrIata) return { success: false, error: 'depIata and arrIata parameters are required' };
-    const url = `${this.config.baseUrl}/flights`;
+    if (!depIata || !arrIata) {
+      return { success: false, error: 'depIata and arrIata parameters are required' };
+    }
+
     try {
-      const params = { access_key: this.config.apiKey, dep_iata: depIata, arr_iata: arrIata };
+      const params = {
+        access_key: this.config.apiKey,
+        dep_iata: depIata,
+        arr_iata: arrIata
+      };
       if (date) params.flight_date = date;
       if (typeof limit !== 'undefined') params.limit = limit;
       if (typeof offset !== 'undefined') params.offset = offset;
-      const response = await retryOperation(() => axios.get(url, { params }), { retries: 3, context: 'aviationstack getFlightsByRoute' });
+
+      const response = await this.requestFlights(params, 'aviationstack getFlightsByRoute');
       return { success: true, data: response.data };
     } catch (error) {
       this.logger.error('Error fetching flights by route:', error);
@@ -322,17 +354,23 @@ export default class AviationstackPlugin extends BasePlugin {
    * Flights filtered by airline IATA code.
    */
   async getAirlineFlights({ airlineCode, date, limit, offset }) {
-    if (!airlineCode) return { success: false, error: 'airlineCode parameter is required' };
-    const url = `${this.config.baseUrl}/flights`;
+    if (!airlineCode) {
+      return { success: false, error: 'airlineCode parameter is required' };
+    }
+
     try {
-      const params = { access_key: this.config.apiKey, airline_iata: airlineCode };
+      const params = {
+        access_key: this.config.apiKey,
+        airline_iata: airlineCode
+      };
       if (date) params.flight_date = date;
       if (typeof limit !== 'undefined') params.limit = limit;
       if (typeof offset !== 'undefined') params.offset = offset;
-      const response = await retryOperation(() => axios.get(url, { params }), { retries: 3, context: 'aviationstack getAirlineFlights' });
+
+      const response = await this.requestFlights(params, 'aviationstack getAirlineFlights');
       return { success: true, data: response.data };
     } catch (error) {
-      this.logger.error('Error fetching airline flights:', error);
+      this.logger.error('Error fetching flights by airline:', error);
       return { success: false, error: error.message };
     }
   }
@@ -341,17 +379,26 @@ export default class AviationstackPlugin extends BasePlugin {
    * Slimmed live position object for the first matching flight, when available.
    */
   async getLiveFlightPosition({ flightNumber, date }) {
-    if (!flightNumber) return { success: false, error: 'flightNumber parameter is required' };
-    const url = `${this.config.baseUrl}/flights`;
+    if (!flightNumber) {
+      return { success: false, error: 'flightNumber parameter is required' };
+    }
+
     try {
-      const params = { access_key: this.config.apiKey, flight_iata: flightNumber };
+      const params = {
+        access_key: this.config.apiKey,
+        flight_iata: flightNumber
+      };
       if (date) params.flight_date = date;
-      const response = await retryOperation(() => axios.get(url, { params }), { retries: 3, context: 'aviationstack getLiveFlightPosition' });
+
+      const response = await this.requestFlights(params, 'aviationstack getLiveFlightPosition');
       const data = Array.isArray(response?.data?.data) ? response.data.data : [];
+
       if (!data.length) return { success: true, data: null };
+
       const first = data[0];
       const live = first?.live || first?.data?.live || null;
       if (!live) return { success: true, data: null };
+
       return {
         success: true,
         data: {
@@ -371,6 +418,8 @@ export default class AviationstackPlugin extends BasePlugin {
 
   async cleanup() {
     this.logger.info(`Cleaning up ${this.name} plugin...`);
+    this.inFlightRequests.clear();
+    this.cache.flushAll();
     await PluginSettings.clearCache(this.name);
     this.initialized = false;
   }

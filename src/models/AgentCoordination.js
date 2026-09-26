@@ -141,7 +141,7 @@ agentCoordinationSchema.statics.validateMultisigCompletion = async function (int
         return true;
     }
 
-    const { threshold, authorizedSigners } = coordination.multisigRequirements;
+    const { threshold, authorizedSigners = [] } = coordination.multisigRequirements;
     
     // Count accepted participants who are authorized signers
     const acceptedAuthorizedParticipants = coordination.participants.filter(participant => 
@@ -174,7 +174,7 @@ agentCoordinationSchema.statics.getStatus = async function (intentHash) {
 
     // Add multisig information if applicable
     if (coordination.multisigRequirements) {
-        const { threshold, authorizedSigners } = coordination.multisigRequirements;
+        const { threshold, authorizedSigners = [] } = coordination.multisigRequirements;
         const acceptedAuthorizedParticipants = coordination.participants.filter(participant => 
             participant.accepted && authorizedSigners.includes(participant.address)
         );
@@ -189,6 +189,122 @@ agentCoordinationSchema.statics.getStatus = async function (intentHash) {
     }
 
     return baseStatus;
+};
+
+const allowedTransitions = {
+    None: new Set(['Proposed', 'Cancelled']),
+    Proposed: new Set(['Ready', 'Cancelled', 'Expired']),
+    Ready: new Set(['Executed', 'Cancelled', 'Expired']),
+    Executed: new Set(),
+    Cancelled: new Set(),
+    Expired: new Set()
+};
+
+function quorumMet(coordination) {
+    const requirements = coordination.multisigRequirements;
+    if (!requirements || !requirements.threshold) return true;
+
+    const authorized = new Set(requirements.authorizedSigners || []);
+    const accepted = coordination.participants.filter(
+        participant => participant.accepted && authorized.has(participant.address)
+    ).length;
+
+    return accepted >= requirements.threshold;
+}
+
+/**
+ * Atomically transition a coordination status using optimistic concurrency.
+ *
+ * No multi-document transaction: production MongoDB is a standalone server
+ * (transactions need a replica set). Atomicity comes from the conditional
+ * findOneAndUpdate — the write only lands if status and updatedAt are still what
+ * was read, so a concurrent writer makes this return null instead of clobbering.
+ *
+ * @param {string} intentHash - Coordination identifier
+ * @param {string} nextStatus - Desired status
+ * @param {{executionResults?: Array<{address: string, executionResult: object}>, session?: object}} options
+ * @returns {Promise<object>} Updated coordination, or the already-applied coordination.
+ */
+agentCoordinationSchema.statics.transitionStatus = async function (intentHash, nextStatus, options = {}) {
+    if (!intentHash) throw new Error('intentHash is required');
+    if (!Object.prototype.hasOwnProperty.call(allowedTransitions, nextStatus)) {
+        throw new Error(`Invalid coordination status: ${nextStatus}`);
+    }
+
+    const session = options.session;
+    const findCurrent = () => {
+        const q = this.findOne({ intentHash });
+        return session && typeof q.session === 'function' ? q.session(session) : q;
+    };
+
+    const coordination = await findCurrent();
+    if (!coordination) throw new Error('Coordination not found');
+
+    if (coordination.status === nextStatus) return coordination;
+
+    if (!allowedTransitions[coordination.status]?.has(nextStatus)) {
+        throw new Error(`Invalid transition from ${coordination.status} to ${nextStatus}`);
+    }
+
+    if (coordination.expiry && coordination.expiry <= new Date() && nextStatus !== 'Expired') {
+        throw new Error('Coordination has expired');
+    }
+
+    if (['Ready', 'Executed'].includes(nextStatus) && !quorumMet(coordination)) {
+        throw new Error('Multisig quorum has not been met');
+    }
+
+    const filter = {
+        intentHash,
+        status: coordination.status,
+        updatedAt: coordination.updatedAt
+    };
+    const set = { status: nextStatus };
+    const arrayFilters = [];
+
+    // arrayFilters identifiers must start with a lowercase letter and be
+    // alphanumeric — an address (0x…, mixed-case checksum) cannot be embedded in
+    // one, so identifiers are positional (p0, p1, …).
+    (options.executionResults || []).forEach((update, i) => {
+        set[`participants.$[p${i}].executionResult`] = update.executionResult;
+        arrayFilters.push({ [`p${i}.address`]: update.address });
+    });
+
+    const updateOptions = { new: true };
+    if (arrayFilters.length) updateOptions.arrayFilters = arrayFilters;
+    if (session) updateOptions.session = session;
+
+    const updated = await this.findOneAndUpdate(filter, { $set: set }, updateOptions);
+    if (updated) {
+        logger.info(`Coordination ${intentHash.slice(0, 10)}... transitioned to ${nextStatus}`);
+        return updated;
+    }
+
+    // Lost the race. If the other writer already moved it where we wanted, that's success.
+    const current = await findCurrent();
+    if (current?.status === nextStatus) return current;
+    throw new Error('Coordination changed concurrently');
+};
+
+/**
+ * Transition a coordination to Ready when its quorum has been satisfied.
+ * @param {string} intentHash - Coordination identifier
+ * @returns {Promise<object>} Updated coordination, or the existing document when not ready.
+ */
+agentCoordinationSchema.statics.finalizeIfReady = async function (intentHash) {
+    if (!intentHash) throw new Error('intentHash is required');
+
+    const coordination = await this.findOne({ intentHash });
+    if (!coordination) throw new Error('Coordination not found');
+    if (coordination.status === 'Ready') return coordination;
+    if (coordination.status !== 'Proposed') return coordination;
+
+    if (coordination.expiry && coordination.expiry <= new Date()) {
+        return this.transitionStatus(intentHash, 'Expired');
+    }
+
+    if (!quorumMet(coordination)) return coordination;
+    return this.transitionStatus(intentHash, 'Ready');
 };
 
 const AgentCoordination = mongoose.model('AgentCoordination', agentCoordinationSchema);

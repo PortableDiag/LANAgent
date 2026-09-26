@@ -1,5 +1,7 @@
 import { logger } from '../../utils/logger.js';
 import { EventEmitter } from 'events';
+import { listTools, selectRelevantTools, formatToolsForPrompt, executeTool, findPastExamples } from './toolCatalog.js';
+import { getSkillsService } from '../skills/skillsService.js';
 
 /**
  * PlanExecuteAgent - Implements the Plan-and-Execute pattern
@@ -51,7 +53,7 @@ export class PlanExecuteAgent extends EventEmitter {
 
     try {
       // Step 1: Create initial plan
-      plan = await this.planner.createPlan(task, context);
+      plan = await this.planner.createPlan(task, context, this.thoughtStore);
       this.emit('planCreated', { plan });
 
       if (this.showProgress && context.showThinking) {
@@ -248,37 +250,24 @@ class Planner {
   }
 
   async refreshTools() {
-    this.tools = [];
-    if (!this.agent.apiManager || !this.agent.apiManager.plugins) return;
-
-    for (const [name, plugin] of this.agent.apiManager.plugins) {
-      if (!plugin.enabled) continue;
-
-      this.tools.push({
-        name,
-        description: plugin.description || `${name} plugin`,
-        commands: (plugin.commands || []).map(cmd => ({
-          command: cmd.command,
-          description: cmd.description
-        }))
-      });
-    }
+    this.tools = listTools(this.agent);
   }
 
   /**
    * Create an initial plan for a task
    */
-  async createPlan(task, context = {}) {
-    const toolDescriptions = this.tools.map(t => {
-      const cmds = t.commands.map(c => `  - ${c.command}: ${c.description}`).join('\n');
-      return `**${t.name}**: ${t.description}\n${cmds}`;
-    }).join('\n\n');
+  async createPlan(task, context = {}, thoughtStore = null) {
+    await this.refreshTools();
+    const relevant = await selectRelevantTools(this.agent, task, { available: this.tools });
+    const toolDescriptions = formatToolsForPrompt(this.tools, relevant, null, { describeHint: false });
+    const pastExamples = await findPastExamples(thoughtStore, task);
+    const skills = await getSkillsService().promptFor(task).catch(() => '');
 
     const prompt = `You are a planning agent. Create a step-by-step plan to accomplish the following task.
 
 ## Available Tools:
 ${toolDescriptions}
-
+${skills ? `\n## Skills (known procedures; follow them where they apply):\n${skills}\n` : ''}${pastExamples ? `\n## Similar Tasks That Worked Before:\n${pastExamples}\n` : ''}
 ## Task:
 ${task}
 
@@ -441,7 +430,6 @@ Respond with valid JSON only.`;
 class Executor {
   constructor(agent, options = {}) {
     this.agent = agent;
-    this.stepTimeout = options.stepTimeout || 30000;
     this.toolMap = new Map();
   }
 
@@ -450,14 +438,7 @@ class Executor {
   }
 
   async refreshTools() {
-    this.toolMap.clear();
-    if (!this.agent.apiManager || !this.agent.apiManager.plugins) return;
-
-    for (const [name, plugin] of this.agent.apiManager.plugins) {
-      if (plugin.enabled) {
-        this.toolMap.set(name, plugin);
-      }
-    }
+    this.toolMap = new Map(listTools(this.agent).map(t => [t.name, t]));
   }
 
   /**
@@ -467,33 +448,13 @@ class Executor {
     const { tool, command, params } = step;
 
     try {
-      // Validate tool exists
-      const plugin = this.toolMap.get(tool);
-      if (!plugin) {
-        return {
-          success: false,
-          error: `Tool '${tool}' not found or not enabled`,
-          step
-        };
+      // executeTool re-reads the live catalog, runs through apiManager.executeAPI (which
+      // enforces the plugin timeout) and never retries a command with side effects.
+      const outcome = await executeTool(this.agent, tool, command, params || {});
+      if (!outcome.success) {
+        return { success: false, error: outcome.error || 'Plugin reported failure', output: outcome.result, step };
       }
-
-      // Execute with timeout
-      const timeoutPromise = new Promise((_, reject) =>
-        setTimeout(() => reject(new Error('Step execution timeout')), this.stepTimeout)
-      );
-
-      const executionPromise = plugin.execute({
-        action: command,
-        ...params
-      });
-
-      const result = await Promise.race([executionPromise, timeoutPromise]);
-
-      return {
-        success: true,
-        output: result,
-        step
-      };
+      return { success: true, output: outcome.result, step };
     } catch (error) {
       logger.error(`Executor error for ${tool}.${command}:`, error);
       return {

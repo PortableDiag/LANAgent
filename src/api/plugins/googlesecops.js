@@ -16,6 +16,11 @@ export default class GoogleSecOpsPlugin extends BasePlugin {
         usage: 'listRules [forceRefresh=false] [pageSize] [pageToken]'
       },
       {
+        command: 'listAllRules',
+        description: 'List all detection rules across every available page',
+        usage: 'listAllRules [pageSize] [maxPages] [forceRefresh=false]'
+      },
+      {
         command: 'getRule',
         description: 'Get a detection rule by ID (cached)',
         usage: 'getRule [ruleId]'
@@ -47,6 +52,9 @@ export default class GoogleSecOpsPlugin extends BasePlugin {
       case 'listRules':
         return await this.listRules(rest);
 
+      case 'listAllRules':
+        return await this.listAllRules(rest);
+
       case 'getRule':
         return await this.getRule(rest);
 
@@ -59,7 +67,7 @@ export default class GoogleSecOpsPlugin extends BasePlugin {
       default:
         return {
           success: false,
-          error: 'Unknown action. Available actions: listRules, getRule, searchDetections, getPluginConfig'
+          error: 'Unknown action. Available actions: listRules, listAllRules, getRule, searchDetections, getPluginConfig'
         };
     }
   }
@@ -124,6 +132,71 @@ export default class GoogleSecOpsPlugin extends BasePlugin {
       return { success: true, data };
     } catch (error) {
       this.logger.error(`Google SecOps: listRules failed - ${error.message}`);
+      return this.formatHttpError(error);
+    }
+  }
+
+  /**
+   * List every page of detection rules and aggregate the complete collection.
+   *
+   * @param {Object} options
+   * @param {number|string} [options.pageSize] Number of rules requested per page.
+   * @param {number|string} [options.maxPages=100] Maximum number of pages to fetch.
+   * @param {boolean} [options.forceRefresh=false] Bypass cached individual pages.
+   * @returns {Promise<Object>} Aggregated rules and pagination metadata.
+   */
+  async listAllRules({ pageSize, maxPages = 100, forceRefresh = false } = {}) {
+    try {
+      this.requireConfig();
+
+      const parsedMaxPages = Number(maxPages);
+      if (!Number.isInteger(parsedMaxPages) || parsedMaxPages < 1) {
+        return { success: false, error: 'maxPages must be a positive integer' };
+      }
+
+      const rules = [];
+      let pageToken;
+      let pageCount = 0;
+      let truncated = false;
+
+      while (pageCount < parsedMaxPages) {
+        const page = await this.listRules({
+          pageSize,
+          pageToken,
+          forceRefresh
+        });
+
+        if (!page.success) {
+          return page;
+        }
+
+        const data = page.data || {};
+        const pageRules = Array.isArray(data.rules) ? data.rules : [];
+        rules.push(...pageRules);
+        pageCount += 1;
+
+        const nextPageToken = data.nextPageToken ?? data.next_page_token;
+        if (!nextPageToken) {
+          break;
+        }
+
+        pageToken = nextPageToken;
+        if (pageCount >= parsedMaxPages) {
+          truncated = true;
+        }
+      }
+
+      return {
+        success: true,
+        data: {
+          rules,
+          pageCount,
+          totalRules: rules.length,
+          truncated
+        }
+      };
+    } catch (error) {
+      this.logger.error(`Google SecOps: listAllRules failed - ${error.message}`);
       return this.formatHttpError(error);
     }
   }

@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import mongoose from 'mongoose';
 
 const p2pTransferSchema = new mongoose.Schema({
@@ -205,5 +206,53 @@ p2pTransferSchema.statics.getTransferProgress = function(transferId) {
 p2pTransferSchema.methods.isRetryable = function() {
   return this.status === 'failed' && this.direction === 'incoming';
 };
+
+/**
+ * Verify the assembled payload against its stored SHA-256 digest.
+ * The digest comparison is timing-safe when the stored value is valid hex.
+ */
+p2pTransferSchema.methods.verifyPayloadIntegrity = function() {
+  const actualHash = crypto
+    .createHash('sha256')
+    .update(typeof this.assembledSource === 'string' ? this.assembledSource : '')
+    .digest('hex');
+  const expectedHash = typeof this.sha256 === 'string' ? this.sha256.trim().toLowerCase() : '';
+  const expectedBuffer = /^[a-f0-9]{64}$/.test(expectedHash)
+    ? Buffer.from(expectedHash, 'hex')
+    : null;
+  const actualBuffer = Buffer.from(actualHash, 'hex');
+  const valid = Boolean(
+    expectedBuffer &&
+    expectedBuffer.length === actualBuffer.length &&
+    crypto.timingSafeEqual(expectedBuffer, actualBuffer)
+  );
+
+  return {
+    verified: valid,
+    expectedSha256: expectedHash,
+    actualSha256: actualHash,
+    reason: valid ? null : (
+      expectedBuffer
+        ? 'Assembled payload SHA-256 does not match the stored digest'
+        : 'Stored SHA-256 digest is missing or invalid'
+    )
+  };
+};
+
+// Defence in depth: pluginSharing verifies the hash when chunks are assembled, but
+// approveInstall() later installs whatever assembledSource is in the DB. Refuse to
+// enter approved/installed if that stored source no longer matches its digest.
+p2pTransferSchema.pre('validate', function(next) {
+  if (['approved', 'installed'].includes(this.status)) {
+    const verification = this.verifyPayloadIntegrity();
+    if (!verification.verified) {
+      this.invalidate(
+        'status',
+        `Cannot transition to ${this.status}: payload integrity verification failed: ${verification.reason}`
+      );
+    }
+  }
+  next();
+});
 
 export const P2PTransfer = mongoose.model('P2PTransfer', p2pTransferSchema);

@@ -48,6 +48,16 @@ export default class FixerPlugin extends BasePlugin {
         ]
       },
       {
+        command: 'batchConvertCurrency',
+        description: 'Convert multiple amounts and currency pairs using one latest-rates request.',
+        usage: 'batchConvertCurrency({ conversions: [{ amount: 100, from: "USD", to: "EUR" }] })',
+        examples: [
+          'convert several currency amounts at once',
+          'batch convert USD, GBP, and CAD amounts to EUR',
+          'convert multiple currency pairs using the latest rates'
+        ]
+      },
+      {
         command: 'getFluctuation',
         description: 'Calculate the fluctuation percentage between two dates for a given currency pair.',
         usage: 'getFluctuation({ startDate: "2023-01-01", endDate: "2023-01-31", base: "USD", target: "EUR" })',
@@ -137,6 +147,8 @@ export default class FixerPlugin extends BasePlugin {
           return await this.getHistoricalRates(data);
         case 'convertCurrency':
           return await this.convertCurrency(data);
+        case 'batchConvertCurrency':
+          return await this.batchConvertCurrency(data);
         case 'getFluctuation':
           return await this.getFluctuation(data);
         case 'getCurrencyTrend':
@@ -241,6 +253,73 @@ export default class FixerPlugin extends BasePlugin {
       this.logger.error('convertCurrency failed:', error);
       return { success: false, error: error.message };
     }
+  }
+
+  /**
+   * Convert multiple amounts with a single latest-rates request.
+   *
+   * Fixer's free tier only serves EUR-based rates (any other `base` returns HTTP 200 with
+   * success:false, code 105), so every pair is computed as a cross rate off one EUR table:
+   * rate(from->to) = rates[to] / rates[from]. One request covers any number of pairs.
+   */
+  async batchConvertCurrency({ conversions } = {}) {
+    const currencyCode = value => typeof value === 'string' && /^[A-Za-z]{3}$/.test(value);
+
+    if (!Array.isArray(conversions) || conversions.length === 0 || conversions.length > 100) {
+      throw new Error('conversions must be a non-empty array containing no more than 100 items');
+    }
+
+    const parsed = conversions.map((conversion, index) => {
+      if (!conversion || typeof conversion !== 'object' || Array.isArray(conversion)) {
+        return { index, success: false, error: 'Malformed conversion entry' };
+      }
+      const { amount, from, to } = conversion;
+      if (typeof amount !== 'number' || !Number.isFinite(amount) || amount <= 0) {
+        return { index, success: false, error: 'amount must be a positive number' };
+      }
+      if (!currencyCode(from) || !currencyCode(to)) {
+        return { index, success: false, error: 'from and to must be three-letter currency codes' };
+      }
+      return { index, amount, from: from.toUpperCase(), to: to.toUpperCase() };
+    });
+
+    const needsRates = parsed.some(item => item.success !== false && item.from !== item.to);
+    let rates = null;
+    let rateDate = null;
+    let ratesError = null;
+    if (needsRates) {
+      const response = await this.getLatestRates({ base: 'EUR' });
+      if (response?.success && response.data?.success !== false && response.data?.rates) {
+        rates = { ...response.data.rates, EUR: 1 };
+        rateDate = response.data.date || null;
+      } else {
+        ratesError = response?.data?.error?.info || response?.error || 'Failed to retrieve latest rates';
+      }
+    }
+
+    const results = parsed.map(item => {
+      if (item.success === false) return item;
+      const { index, amount, from, to } = item;
+
+      if (from === to) {
+        return { index, success: true, amount, from, to, result: amount, effectiveRate: 1, rateDate: null };
+      }
+      if (!rates) {
+        return { index, success: false, from, to, error: ratesError };
+      }
+      const fromRate = rates[from];
+      const toRate = rates[to];
+      if (!(Number.isFinite(fromRate) && fromRate > 0) || !Number.isFinite(toRate)) {
+        return { index, success: false, from, to, error: `Rate for ${from} to ${to} not found` };
+      }
+      const effectiveRate = toRate / fromRate;
+      return { index, success: true, amount, from, to, result: amount * effectiveRate, effectiveRate, rateDate };
+    });
+
+    return {
+      success: results.every(item => item.success),
+      results
+    };
   }
 
   /**

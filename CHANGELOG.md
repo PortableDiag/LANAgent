@@ -2,6 +2,513 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.374] - 2026-09-26
+
+### Fixed
+- **Wallet profile and risk-score requests failed when no chain was named.** Asking the agent to
+  "profile 0x…" errored with "Required field 'network' is missing"; the chain now defaults to BSC.
+- **Messages sent while the intent index rebuilds after a restart logged a false error.** They
+  already fell back to AI intent detection; that is now logged as expected behaviour, and the
+  wasted embedding call is skipped.
+
+## [2.25.373] - 2026-09-26
+
+### Fixed
+- **Wallets using EIP-7702 delegation were reported as contracts.** An EOA that delegates to a
+  contract carries a short delegation marker as its on-chain code, so any wallet that had
+  signed a 7702 authorization was profiled as `isContract: true` and picked up the contract
+  risk flag. Delegation markers are now recognised as wallets.
+
+## [2.25.372] - 2026-09-26
+
+### Fixed
+- **Wallet profiles on BSC reported 0 transactions for busy wallets.** Etherscan's free V2 tier
+  no longer serves BSC ("Free API access is not supported for this chain"), and the profiler
+  read that refusal as an empty history. Busy wallets came back with 0 transactions and no age,
+  and the risk score added a "No transaction history" flag. Now:
+  - History falls back to Moralis when the explorer refuses a chain.
+  - The transaction count comes from the chain itself (RPC), which works everywhere.
+  - `tokens` falls back to Moralis holdings.
+  - When no source can supply history, the profile says so (`historyAvailable: false`) and
+    the history-based risk flags are skipped instead of assuming an empty wallet.
+- **`lastTxDate` was the 100th-oldest transaction** for wallets with 100 or more; it is now the
+  newest.
+
+## [2.25.371] - 2026-09-26
+
+### Fixed
+- **Concurrent scrapes no longer fail with "Failed to launch the browser process!"** When two
+  scrapes arrived together and no browser was running, each launched its own Chromium on the
+  same profile directory. Chromium allows one process per profile, so the second launch failed
+  and that scrape errored (15 occurrences since 2026-08-21, including paid scrapes). Concurrent
+  callers now share a single launch, for both the scrape browser and the screenshot browser.
+  The nano faucet and account-registration browsers, which also used the scraper's default
+  profile, now have their own.
+
+## [2.25.370] - 2026-09-26
+
+### Fixed
+- **Chat replies no longer deny the agent's own interfaces.** General questions, follow-ups and
+  memory-backed answers were sent to the model with no system prompt, so they were answered by
+  a generic "helpful AI assistant": asked about its status it said it had no Telegram account,
+  and asked "did you see me in Trellis?" it said it could not see Trellis. These paths now carry
+  the agent's own system prompt, which also lists Trellis as an interface when the Trellis
+  listener is on.
+
+## [2.25.369] - 2026-09-26
+
+### Fixed
+- **Short questions ran as chat instead of commands once a conversation had started.** Any
+  question of ten words or fewer with an earlier exchange in the buffer was answered as a
+  "follow-up" before intent detection ran, so "how much free disk space is there?" got "I can't
+  inspect your disk" instead of the disk report. A confident intent match now takes priority;
+  only messages with no confident match are treated as follow-ups.
+
+## [2.25.368] - 2026-09-26
+
+### Fixed
+- **Conversational messages no longer run unrelated plugin actions.** The vector intent
+  matcher executed any plugin action it matched at 0.5 similarity or better, which is a weak
+  match: "what's your status?" ran the Telegram voice action, "did you see me in Trellis?" ran
+  the Trellis status command, and "the chat went all weird" pulled chat history. In production
+  every plugin match below 0.6 was wrong and every match from 0.6 up was right, so the threshold
+  is now 0.6 for all plugins. Weaker matches go to AI intent detection, which reads the whole
+  message. Restart/redeploy/shutdown/stop still require 0.7.
+
+## [2.25.367] - 2026-09-26
+
+### Fixed
+- **MQTT per-user topic ACLs are now enforced on the internal broker.** With `requireAuth`
+  on, the publish and subscribe authorization hooks were TODO stubs that allowed everything, so
+  the `acl` rules stored on each user did nothing. Publishes outside a user's write rules are now
+  refused (the connection is closed and the message never reaches the agent), and subscriptions
+  outside the user's read rules are refused with SUBACK 0x80. A user with no ACL rules keeps
+  unrestricted access, so existing configurations behave as before. Brokers without
+  `requireAuth` are unaffected.
+
+## [2.25.365] - 2026-09-26
+
+### Fixed
+- **The agent's Telegram side did not know what it had said in Trellis.** Trellis replies were
+  never recorded in its conversation memory, so "did you see me in Trellis?" on Telegram right
+  after a Trellis exchange was matched to `trellisStatus` and answered with server status. The
+  listener now records each exchange in the operator's conversation buffer (labelled with the
+  card), and runs the operator's Trellis requests under their own user id, so Trellis and
+  Telegram are one conversation.
+
+## [2.25.364] - 2026-09-26
+
+### Fixed
+- **Trellis listener missed the first mention in a new channel.** Every channel it had not seen
+  was treated as history. Since web 0.57.1 / desktop 0.203.3 a channel where the agent is
+  @mentioned without being a member is flagged `waiting` for it — and appears to the listener
+  for the first time at that moment. Channels seen at start-up are still never answered; a
+  channel that appears later already waiting has its newest message answered.
+
+## [2.25.363] - 2026-09-26
+
+### Changed
+- **Trellis listener: no endless agent-to-agent exchanges.** A peer's "thanks" or other message
+  that needs no answer gets nothing posted (the model answers `NO_REPLY`), and after 4
+  consecutive agent messages (`TRELLIS_LISTEN_MAX_AGENT_RUN`) the listener waits for a person
+  to speak before answering again — the same limits Outrider adopted.
+
+## [2.25.362] - 2026-09-26
+
+### Security
+- **Trellis listener: the operator is a server-recorded fact, not a name.** On the web a
+  person's `from` is a display name, and names are not unique across accounts — a collaborator
+  in a shared document could use the owner's. The listener now requires `kind: person` **and**
+  the server's `from_key_owner: true` (both: every agent key on the owner's account is also
+  from_key_owner, but posts as `agent`). On web servers that do not send `from_key_owner` yet,
+  the owner's name counts only in a document the owner owns with no other writers — and when
+  the grants cannot be read (a basket-scoped key cannot), it does not count: everyone gets
+  conversation only until the server records it.
+
+## [2.25.361] - 2026-09-26
+
+### Security
+- **Telegram guests reached the full command router.** The guest path marked its context
+  `isGuest: true, restrictions: 'conversational_only'` and passed a "do not perform system
+  operations" prompt as a third argument, but `processNaturalLanguage(input, context)` read
+  neither — so anyone messaging the bot who was not the authorized user could trigger plugin
+  commands. A new `core/guestGuard.js` runs before any routing: a conversation-only context
+  gets a model reply and nothing else (the supplied guest prompt is now honoured). The
+  authorized user's messages are unaffected.
+
+## [2.25.360] - 2026-09-26
+
+### Added — answering in Trellis channels (`TRELLIS_LISTEN=true`)
+- **`services/trellisChannelListener.js`**, started by `trellis-notes` when `TRELLIS_LISTEN=true`.
+  It watches the followed documents' channels (`GET /api/channels` `waiting` under the agent's
+  `X-Agent` name, then a `/api/wait` long-poll) and answers messages addressed to it — in a
+  group channel (Trellis web v0.56 / desktop v0.203) only those whose server-computed `to`
+  includes the agent; in a one-agent channel, the newest message from someone else.
+- **Operator's rule:** only the operator's own messages may make the agent act — they go
+  through the normal command pipeline. Everyone else (other agents, built-in agents, other
+  people) gets a conversation-only reply from `generateResponse`, which runs no plugins. The
+  operator is a server-recorded `kind: person` named as the key owner (`GET /api/me`) on the
+  web, or `operator` on the desktop; an unkinded or agent-posted message never counts.
+- Never answers history (cursors start at the current seq), one reply per wake-up with recent
+  context, an hourly per-channel cap (`TRELLIS_LISTEN_MAX_PER_HOUR`, default 20), failures
+  logged only.
+- `readChannel` exposes `to`, `group` and `lead`; `listChannels` rows carry `group`.
+
+## [2.25.359] - 2026-09-26
+
+### Fixed
+- **`huggingface.spamDetection` could never report spam.** The default model
+  (mrm8488/bert-tiny-finetuned-sms-spam-detection) labels its classes `LABEL_0` (ham) and
+  `LABEL_1` (spam); the plugin only recognised a label containing the word "spam", so every
+  answer read "Not spam". `LABEL_1` now counts as spam. Found while repairing the SKYNET API
+  Telegram bot's `/spam`.
+
+## [2.25.358] - 2026-09-25
+
+### Changed
+- **`trellis-notes` channel messages use the server's sender `kind`** — `person`, `builtin` or
+  `agent`, the vocabulary trellis-web v0.52.0 records per message (requested by LANAgent and
+  TrellisBridge). The server's value wins (`kindSource: "server"`); older messages and the
+  desktop fall back to inference (`kindSource: "inferred"`), so a guess is never presented as a
+  fact. `listChannels` rows carry `lastKind`.
+
+## [2.25.357] - 2026-09-25
+
+### Changed — `trellis-notes` for trellis-web v0.51.0
+- **One path shape.** Web v0.51.0 serves `/api/tasks`, `/api/kanban` and `/api/search` with
+  `?document=`, so every route is now the desktop's spelling plus the document parameter on the web.
+- **`listAgents`** — the server's built-in agents, which since v0.51.0 can reach a basket, a whole
+  document or every document the owner has; their home, channel card, active state and last
+  error; and the names seen in each project's channels.
+- **Channel messages are tagged by sender:** `operator`, `built-in agent` or `agent`, so a
+  built-in agent's work is not read as the operator's. On the web a person signs with their
+  account name (`display_name` or the email's local part), not "operator"; the key owner from
+  `GET /api/me` is recognised as the operator.
+- A warning at boot when the agent's own name is one the server refuses (a model's name such as
+  `claude` or `agent`), rather than a rejected reply later.
+
+## [2.25.356] - 2026-09-25
+
+### Added — `trellis-notes`: one key, many documents
+Matches TrellisBridge's settled convention (agreed on its agent card), so a config is portable
+between the two:
+- `TRELLIS_DOCUMENT` — the default document (uuid, or a name). `TRELLIS_DOCUMENTS` —
+  comma-separated uuids to follow; empty means every document the key reaches, re-read from
+  `GET /api/agent` every 5 minutes.
+- Every action takes an optional `document`; a card or channel may be written
+  `"<document-uuid>:<card>"`. The choice travels with the call (AsyncLocalStorage), so two
+  actions in flight against different documents cannot cross.
+- `listChannels` covers every followed document and tags each row with its document and a `ref`
+  (`"<uuid>:<card>"` outside the default), so a reply goes back to the document it came from.
+- A key reaching several documents with no default is no longer a boot error; a call that names
+  no document is refused with the list. A desktop instance refuses a `document` (one per port).
+
+## [2.25.355] - 2026-09-25
+
+### Changed
+- **`trellis-notes` recognises trellis-web by its identity route.** From web v0.50.0,
+  `GET /api/instance` answers `{"app":"trellis-web", …}` (the desktop answers `"app":"trellis"`);
+  `app` is now what decides the mode, with the old 404 probe kept for earlier web servers. The
+  desktop-shaped board and task rows web v0.50.0 sends are read unchanged, and a server-sent
+  `bucket` wins over the derived one.
+
+## [2.25.354] - 2026-09-25
+
+### Fixed — `trellis-notes` against the live trellis-web server
+Verified end to end on https://trellis-cards.com with a basket-scoped key: status, documents,
+baskets, read, search, channels, create task → append → status → read back → on the agenda and
+the board. Three differences found and handled:
+- **Document choice follows the key's scope.** `GET /api/documents` lists the account's documents,
+  and a basket-scoped key 404s on the ones outside its scope; documents now come from
+  `GET /api/agent`, which answers for the key (falls back to `/api/documents`).
+- **Kanban:** the web server answers `columns` as `{<status>: [cards]}`, the desktop as an array.
+  Both are read.
+- **Agenda:** the web server sends `due_days` and `root_title` rather than `bucket` and
+  `project_title`; the bucket (overdue / today / week / later) is derived against the local day,
+  the desktop's rule.
+
+## [2.25.353] - 2026-09-25
+
+### Changed — `trellis-notes` plugin v2: trellis-web by default, desktop still supported
+- **Default server is now trellis-web** (`https://trellis-cards.com`). The desktop app is still
+  supported by pointing `TRELLIS_BASE_URL` at it; the server type is detected (the desktop answers
+  `GET /api/instance`, the web server 404s it) and `TRELLIS_MODE=web|desktop` forces it. Detection
+  keys on the HTTP status, not the error wording.
+- **Multi-document routing on the web:** document-scoped routes take `?document=<id>`; search,
+  tasks and kanban use `/api/documents/{id}/…`. `TRELLIS_DOCUMENT` (id or name) picks the document
+  when a key reaches more than one.
+- **New actions:** `listDocuments`, `readCard`, `listChannels`, `readChannel`, `replyChannel`.
+  Every request carries `X-Agent` (the agent's name), so channel replies are attributed to the
+  agent and `waiting` is computed for it.
+- `appendNote` uses the server's append route instead of read-modify-write, so it cannot race an
+  edit in the window; a numeric `card` needs no basket. Project filtering of tasks and the board
+  is done client-side from the tree, identically on both servers.
+- Still no delete action of any kind.
+
+## [2.25.352] - 2026-09-25
+
+### Improved — self-modification PR quality
+The 2026-09-25 sweep found 0 of 34 generated PRs mergeable as written. The causes were in the
+pipeline, not only the model:
+- **The generator now sees the codebase, not just its target file.** A new
+  `selfModContext.js` adds a CODEBASE CONTEXT block to whole-file, partial-edit and test prompts:
+  the real API of every in-repo module the target imports (exports, class methods, model
+  statics, schema fields; missing files flagged), the files that import the target and with which
+  names, and for Mongoose models the code that writes the collection — or an explicit "nothing
+  writes this". The most common defect (reading a field or calling a method that does not exist)
+  was one the model had been told to check with nothing to check against.
+- **Reasoning is funded.** Generation ran at `reasoning_effort: minimal` in a 32K cap sized for
+  older models; it now runs at `medium` (`SELFMOD_REASONING_EFFORT` overrides) with 16K of
+  headroom in a 48K cap, which also raises the largest whole-file target (17.3K → 21.3K tokens).
+- **The model may decline.** It answers `NO_SAFE_CHANGE` when no correct change exists, instead
+  of being retried at rising temperature with "you MUST make changes" — the pressure that produced
+  fabricated metrics and invented features.
+- **The generated test is run before a PR opens.** The test writer now sees the whole new file,
+  the codebase context and explicit node:test rules, with a real budget. Its output is executed:
+  a pass is committed; a failure gets one repair round with the real output; a test that finds a
+  bug in the change blocks the PR; a test that still cannot pass is dropped and the PR opens
+  flagged "No test shipped" — the feature is never lost over its test.
+
+### Fixed
+- **The capability scanner analysed ~1 file per scan.** `openrouter` had no entry in the context
+  table, so `openai/gpt-5.6-luna` (1.05M context) took the HuggingFace default of 8,000 tokens. The
+  limit now comes from the provider's live model catalog, with an `openrouter` table fallback.
+  Files per scan are capped at 3 (`SELFMOD_FILES_PER_SCAN`) as a spend limit.
+- **OpenRouter requests had a fixed 120s timeout** regardless of `max_tokens`, which would cut off
+  long generations. The per-request budget now scales with the requested output (30s + 1s per 50
+  tokens, never below the base, capped at 10 minutes) and is reported to the provider manager.
+
+## [2.25.351] - 2026-09-25
+
+### Added (self-improvement PRs, reviewed and repaired before merge)
+- **Plugins:** `fixer` currency conversion via one EUR-based request and cross rates (works on
+  the free tier); `groq` model fallback chain, walked once per request, no fallback on 401;
+  `aviationstack` de-duplicates identical in-flight `/flights` requests; `googlesecops`
+  additions; `ipifyorg` brought under version control with IPv4/IPv6 lookup.
+- **Models:** query statics on `Journal` (cache now invalidated on save), `NetworkDevice`,
+  `RuntimeError` (`recordOccurrence`), `ExternalAuditLog`, `AgentCoordination` (no transactions:
+  the production Mongo is standalone), `MqttBroker` (topic-permission check with correct MQTT
+  wildcard semantics; publishing to a wildcard topic is refused), `PluginDevelopment`,
+  `TokenUsage`, `ContractABI` (ABI compatibility diff), `P2PTransfer` (integrity check refuses
+  approved/installed plugins whose stored source no longer matches its hash),
+  `SkynetGovernance` (strict-majority finalisation; a tie does not pass), and analytics statics
+  on `DailyPnL`, `CryptoExitRecord` and `ArbSignal`.
+- **Core:** `hybridAuth` accepts an optional `policy` (`either` default — unchanged behaviour —
+  `credit-only`, `legacy-only`); `validation` reports the required fields when input is missing;
+  `BaseAgentHandler` keeps a bounded execution trace (200 entries, truncated payloads);
+  `scanProgressCache` invalidation also drops in-flight queries so a stale result cannot be
+  cached after it.
+
+### Fixed
+- **Document categorisation returned a random confidence.** `calculateClassificationConfidence`
+  was `Math.random() * 0.3 + 0.7`, served as `confidence` by the paid documents endpoint. It is now
+  the share of the matched category's keyword signals present in the text (0.3 for `other`).
+- `scripts/ci-local.sh`, `privacy-scan.sh`, `install-git-hooks.sh` and `genesis-to-public-sync.sh`
+  are tracked as executable. They were mode 100644, so in a fresh checkout or worktree the
+  pre-push hook refused every push.
+
+## [2.25.350] - 2026-09-25
+
+### Fixed
+- **`ScanProgress.getScanProgressSummary` and `getPriorityStats` matched the wrong key.** They
+  filtered on `scanId`, which is a per-file/per-chunk key (`<session>_<path>_chunk_N`), so a scan
+  session id selected at most one row. Both now match `sessionScanId`, as `estimateCompletionTime`
+  already did.
+
+## [2.25.349] - 2026-09-25
+
+### Fixed
+- **AI image and video detection returned 500 on every call.** transformers 5.x requires
+  `torchvision` for `AutoImageProcessor`, and the detector's `requirements.txt` never listed it, so
+  the image model failed to load on first use. `detectImage` and `detectVideo` (which classifies
+  frames through the same endpoint) were unusable; failed calls were refunded. `torchvision` is now
+  in `requirements.txt` (installed from the PyTorch CPU index by `install.sh`).
+- **Detector `/health` said "ok" while image detection could not run.** It now reports
+  `status: "degraded"` and a `missing_backends` list when `torchvision` is unavailable.
+
+## [2.25.348] - 2026-09-24
+
+### Removed
+- **systemAdmin log cleanup** (`cleanupLogs`, the `cleanup-logs` action and the weekly
+  `system-admin-log-cleanup` job). Its `find <dir> -name "*.log*" -mtime +30 -delete` matched live
+  files as well as archives — on a real host, `/var/log/dpkg.log`, `/var/log/apt/term.log` and 115
+  of the agent's own rotated logs — and both locations are already managed (logrotate; the app's
+  log rotation). It had never deleted anything only because it referenced `path` without importing
+  it and failed every week. The job Agenda had persisted in `scheduled_jobs` is removed at startup.
+
+## [2.25.347] - 2026-09-24
+
+### Fixed
+- **systemAdmin advertised commands it could not run.** `disk-usage`, `service-status`,
+  `restart-service` and `health-check` were offered to intent detection with no case in
+  `execute()` (or a missing method), so "how much disk space is free?" answered "Unknown System
+  Admin action". They are implemented now (`df`, `systemctl` via execFile with validated service
+  names, `free`/`uptime`); `restart-service` still requires approval. `backup` and
+  `schedule-maintenance` (no implementation) and `logs-cleanup` (broken, and would delete logs)
+  are no longer advertised.
+- **MCP `search_tools` ranking.** Ranked by raw substring counts, so "disk space" returned a
+  command whose *example* mentioned disk space, then "AppSpace". It now ranks with the vector
+  intent index, then whole-word keyword matches weighted toward name and description.
+- `chathistory` searched for the whole request when intent detection passed it as the query,
+  and printed times in UTC; it now extracts the topic and shows server-local time.
+
+## [2.25.346] - 2026-09-24
+
+### Added
+- **Skills** (`src/services/skills/skillsService.js`, `skills` plugin). Procedures written as
+  markdown in the open agentskills.io `SKILL.md` format, under `data/skills/<name>/SKILL.md`
+  (`SKILLS_PATH`). Only names and descriptions are indexed; a skill's body is loaded when a
+  request matches it (embedding similarity, keyword fallback), and then it is given to the chat
+  reply, ReAct and Plan-Execute as a procedure to follow. The `skills` plugin lists, shows, saves
+  ("save this as a skill: …") and deletes skills; third-party SKILL.md files can be dropped in.
+- **The agent learns skills from its own successes.** After a ReAct task that took three or more
+  tool steps succeeds, and no existing skill covers it, the auxiliary model drafts a generalised
+  skill from the steps (`source: auto`). `SKILLS_AUTO_LEARN=false` turns this off.
+
+## [2.25.345] - 2026-09-24
+
+### Changed
+- **Telegram progress says what is running.** The live status message the Telegram dashboard
+  already edits while a request runs (before its streamed reply) now names the step: `🔧
+  plugin.action` for a detected intent instead of a generic "Thinking…", and each tool call a
+  ReAct task makes (previously shown only with `showThoughts` on).
+
+### Fixed
+- The clarification buttons from 2.25.344 were wired into the base `TelegramInterface` text
+  handler, which production never runs (`TelegramDashboard` registers its own handlers). They
+  now live in `TelegramDashboard`; the base interface is back to its previous state.
+
+## [2.25.344] - 2026-09-24
+
+### Added
+- **Clarifying questions resume the task** (`src/core/clarifications.js`). When ReAct needs to
+  ask the user something, the task (query and steps so far) is parked for 10 minutes and the
+  user's next message is taken as the answer: the same task resumes with it, instead of starting
+  over as a new command. "cancel"/"never mind" drops it. Keyed by user, so it works the same over
+  Telegram, the web UI, the OpenAI-compatible endpoint and MCP. ReAct may offer up to four likely
+  answers, which Telegram shows as buttons.
+
+### Fixed
+- A ReAct clarifying question was discarded: the agent replied "Unable to complete the task."
+  and the question never reached the user.
+
+## [2.25.343] - 2026-09-24
+
+### Added
+- **Reasoning reuses what worked before** (`src/services/reasoning/toolCatalog.js`). ReAct and
+  Plan-Execute now look up similar past tasks that succeeded *and used a tool*
+  (`thoughtStore.findSimilarReasoning`, which had no callers) and show them as worked examples.
+- **Relevant-tool selection for reasoning.** The plugins expose ~1,170 commands, too many for
+  every step's prompt. The vector intent index picks the plugins relevant to the task; those get
+  full command lists, the rest a one-line catalog, and ReAct can call `describe_tool` for any
+  other plugin's commands.
+
+### Fixed
+- **ReAct and Plan-Execute ran with zero tools.** Both read `apiManager.plugins`, which does not
+  exist (the map is `apis`); production logged "ReActAgent initialized with 0 tools" on every
+  boot, so reasoning could only answer from the model. Tools are now read live from `apis`.
+  Plugins that can move funds or sign transactions (`contractCommands`, `cryptoMonitor`,
+  `walletProfiler`, `tokenProfiler`, `chainlink`, `mindswarm`) are never offered to reasoning;
+  `REASONING_EXCLUDED_PLUGINS` adds more.
+- Reasoning tool calls go through `apiManager.executeAPI` (plugin timeout, call stats) and are
+  no longer retried: ReAct replayed failed commands up to twice, repeating any side effect.
+
+## [2.25.342] - 2026-09-24
+
+### Added
+- **Searchable conversation history** (`src/models/Transcript.js`, `memoryManager`,
+  `chathistory` plugin). Every exchange that passes through `storeConversation` is also written
+  verbatim to a `transcripts` collection (not to Memory, which stays curated knowledge), without
+  delaying the reply, and expires after `TRANSCRIPT_RETENTION_DAYS` (default 180). The
+  `chathistory` plugin answers "what did we say about X" (`search`, full-text, with the adjacent
+  question or answer attached) and `recent`. The follow-up buffer is restored from the
+  transcript at boot, so a restart no longer makes the agent forget the last half hour.
+
+### Fixed
+- The follow-up buffer keyed Telegram users by a numeric id and everything else by string, so a
+  restored or cross-path buffer was never found. Keys are now always strings.
+
+## [2.25.341] - 2026-09-24
+
+### Added
+- **MCP server endpoint** (`src/services/mcp/mcpServer.js`, `POST /mcp/server`). The server side
+  was a stub; it now speaks MCP over Streamable HTTP (stateless) so Claude Code, Cursor or Claude
+  Desktop can use the agent. Authenticated with an MCP token (`Authorization: Bearer mcp_…`,
+  created under `/mcp/api/tokens`), re-validated on every request. Rather than hundreds of
+  plugin commands, a client sees `search_tools` (find commands by keyword/plugin), `call_tool`
+  (run one, with the token's allow/deny/category checks and schema validation) and `ask_agent`
+  (a natural-language request through the full agent; unrestricted tokens only). A token
+  narrowed to specific tools also gets those tools directly.
+
+### Fixed
+- The MCP server singleton was created by the web routes before the agent existed, and later
+  callers got that same agent-less instance, so the exposed tool list was always empty. The
+  agent is now attached on first availability.
+- MCP tool calls invoked `apiManager.execute(plugin, …)`, which does not exist; they now use
+  `executeAPI(plugin, 'execute', …)`, gaining the plugin timeout and call stats.
+
+## [2.25.340] - 2026-09-24
+
+### Added
+- **OpenAI-compatible chat endpoint** (`src/interfaces/web/openaiCompat.js`): `GET /v1/models`
+  and `POST /v1/chat/completions` (with `stream: true` SSE). Any OpenAI-style client — Home
+  Assistant Assist, Open WebUI, phone chat apps, the openai SDK — can use the agent as its model;
+  requests go through `processNaturalLanguage`, so they get plugins, memory and routing, not a
+  bare LLM. Earlier turns are passed as conversation context; each client gets its own
+  follow-up buffer (`openai:<key name>`). Media results are described in text and their temp
+  files removed. Auth accepts the standard `Authorization: Bearer <api key>` (re-presented as an
+  API key) as well as a JWT.
+
+## [2.25.339] - 2026-09-24
+
+### Added
+- **Auxiliary model for background LLM calls** (`providerManager.generateAux`). Set
+  `<PROVIDER>_AUX_MODEL` (e.g. `OPENROUTER_AUX_MODEL`) and memory analysis plus the 20 intent
+  parameter extractors run on that cheaper model. It stays on the current provider and overrides
+  only the model per call, so the provider selection and lock are never touched, and the
+  provider-specific slug never reaches the fallback chain. Unset, cooling down or failing, it
+  falls through to the ordinary `generateResponse` path. The main intent classifier, the Govee
+  classifier and email composition deliberately stay on the main model.
+
+## [2.25.338] - 2026-09-24
+
+### Added
+- **Home Assistant plugin** (`src/api/plugins/homeassistant.js`). Talks to HA's REST API with a
+  long-lived token (`HASS_URL`, `HASS_TOKEN`, or stored credentials): `list_entities` (by domain
+  or search words), `get_state`, `call_service` (any domain/service with service data), and
+  `turn_on`/`turn_off`/`toggle`. Entities can be named by id or friendly name; an ambiguous name
+  lists the candidates rather than guessing. Scenes and scripts route to their own `turn_on`.
+  States are cached 30 s and invalidated by any service call. Complements the MQTT service,
+  which only discovers HA devices and cannot call services. Registers disabled until configured.
+
+## [2.25.337] - 2026-09-24
+
+### Added
+- **Word and Excel documents in the knowledge base** (`src/services/rag/documentLoader.js`).
+  `DocxLoader` extracts paragraph text with mammoth; `XlsxLoader` renders each worksheet as CSV
+  (one document per sheet, empty sheets skipped, 5,000-row cap flagged as `truncated`). Shared,
+  inline, rich-text and boolean cells are decoded; formulas yield their cached values. The
+  workbook is read directly with jszip + xml2js, so no spreadsheet dependency was added. Both
+  are registered in `createLoader` and the directory loader.
+
+## [2.25.336] - 2026-09-23
+
+### Added
+- **Paid audio transcription** (`src/api/external/routes/transcribe.js`). `POST /api/external/transcribe`
+  takes a multipart `file`; `POST /api/external/transcribe/url` takes JSON `{ url }` and fetches it
+  with the yt-dlp plugin; `GET /api/external/transcribe/pricing` is free. Pricing is **2 credits
+  per started minute** (min 2), **+5 for a URL**, **max 60 minutes**. The length is measured with
+  ffprobe before any charge, with a 0.5 s grace for container padding, so over-limit or
+  non-media requests cost nothing. Accepts every common audio/video format (34 extensions), by
+  MIME or extension, and **validates by probing**: only a real container with an audio track
+  proceeds, and playlist/indirection formats (HLS, concat) are refused so ffmpeg cannot be made
+  to read other files on the host. Audio is normalised to mono 16 kHz Ogg/Opus (~0.18 MB/min),
+  keeping 60 minutes under the transcription API's 25 MB limit without chunking. URL downloads
+  use a unique output name, because the plugin shares identical in-flight downloads.
+  `X-Max-Credits` lets a reseller cap the charge to what it collected. Whisper, 2 concurrent / 6
+  queued. Tested end to end through the gateway: upload, URL, budget refusal, partial refund,
+  below-minimum and over-limit.
+
 ## [2.25.335] - 2026-09-23
 
 ### Fixed

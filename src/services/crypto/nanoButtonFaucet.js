@@ -95,6 +95,8 @@ class NanoButtonFaucet {
 
             // Launch in non-headless mode on the virtual display
             browser = await launchBrowser({
+                // Own profile: Chromium cannot share a user-data-dir with the scraper's browser
+                userDataDir: '/var/tmp/puppeteer-profile-faucet',
                 headless: false,
                 executablePath: '/usr/bin/chromium',
                 args: [

@@ -73,6 +73,7 @@ Configure via `.env`: `LANAGENT_AUTO_UPDATE` (default `true`), `LANAGENT_AUTO_UP
 **Infrastructure & IoT**
 - 108+ modular plugins, auto-expanded by the Plugin Development service (MCP tool versioning/rollback)
 - MQTT broker + Event Engine (Home Assistant discovery, no AI in the hot path)
+- OpenAI-compatible `/v1/chat/completions` endpoint and an MCP server (`/mcp/server`): use the agent as the model in Home Assistant Assist, Open WebUI or Claude Code
 - Dual VPN: WireGuard inbound (gateway path) + ExpressVPN outbound (IP masking), with watchdogs
 - UPS monitoring (NUT), Eufy cameras, Bluetooth control, Govee smart home
 
@@ -80,6 +81,7 @@ Configure via `.env`: `LANAGENT_AUTO_UPDATE` (default `true`), `LANAGENT_AUTO_UP
 - Persistent memory (MongoDB + LanceDB vector search) with AI relevance filtering and dedup
 - RAG: document loaders, smart splitters, retrieval strategies, knowledge plugin
 - Reasoning patterns (ReAct, Plan-and-Execute), structured output validation (Ajv)
+- Skills learned from its own successful multi-step tasks; searchable conversation history
 - Sub-agent orchestrator for domain-specific autonomous tasks
 
 **Avatars & Visualization**

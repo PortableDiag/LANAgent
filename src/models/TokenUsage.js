@@ -289,4 +289,120 @@ tokenUsageSchema.statics.getProviderComparison = async function() {
   }
 };
 
+/**
+ * Get an aggregated usage report across selectable dimensions.
+ * @param {Object} options - Report filters and grouping options.
+ * @param {Date|string} [options.startDate] - Inclusive report start date.
+ * @param {Date|string} [options.endDate] - Exclusive report end date.
+ * @param {String} [options.provider] - Provider filter.
+ * @param {String} [options.model] - Model filter.
+ * @param {String} [options.userId] - User filter.
+ * @param {String} [options.requestType] - Request type filter.
+ * @param {Array<String>} [options.groupBy=['provider','model']] - Dimensions to group by.
+ * @returns {Promise<Array>} Usage metrics grouped by the requested dimensions.
+ */
+tokenUsageSchema.statics.getUsageReport = async function({
+  startDate,
+  endDate,
+  provider,
+  model,
+  userId,
+  requestType,
+  groupBy = ['provider', 'model']
+} = {}) {
+  const allowedDimensions = new Set([
+    'provider',
+    'model',
+    'userId',
+    'requestType',
+    'day',
+    'week',
+    'month'
+  ]);
+
+  if (!Array.isArray(groupBy) || groupBy.length === 0) {
+    throw new TypeError('groupBy must be a non-empty array');
+  }
+
+  const invalidDimensions = groupBy.filter(dimension => !allowedDimensions.has(dimension));
+  if (invalidDimensions.length > 0) {
+    throw new RangeError(`Unsupported groupBy dimension(s): ${invalidDimensions.join(', ')}`);
+  }
+
+  const match = {};
+  if (provider !== undefined) match.provider = provider;
+  if (model !== undefined) match.model = model;
+  if (userId !== undefined) match.userId = userId;
+  if (requestType !== undefined) match.requestType = requestType;
+
+  if (startDate !== undefined || endDate !== undefined) {
+    const createdAt = {};
+    if (startDate !== undefined) {
+      const parsedStartDate = new Date(startDate);
+      if (Number.isNaN(parsedStartDate.getTime())) {
+        throw new TypeError('startDate must be a valid date');
+      }
+      createdAt.$gte = parsedStartDate;
+    }
+    if (endDate !== undefined) {
+      const parsedEndDate = new Date(endDate);
+      if (Number.isNaN(parsedEndDate.getTime())) {
+        throw new TypeError('endDate must be a valid date');
+      }
+      createdAt.$lt = parsedEndDate;
+    }
+    match.createdAt = createdAt;
+  }
+
+  const groupId = {};
+  for (const dimension of groupBy) {
+    if (dimension === 'day' || dimension === 'week' || dimension === 'month') {
+      groupId[dimension] = {
+        $dateTrunc: {
+          date: '$createdAt',
+          unit: dimension,
+          timezone: 'UTC'
+        }
+      };
+    } else {
+      groupId[dimension] = `$${dimension}`;
+    }
+  }
+
+  try {
+    return await retryOperation(() => this.aggregate([
+      { $match: match },
+      {
+        $group: {
+          _id: groupId,
+          requests: { $sum: 1 },
+          promptTokens: { $sum: '$promptTokens' },
+          completionTokens: { $sum: '$completionTokens' },
+          totalTokens: { $sum: '$totalTokens' },
+          cost: { $sum: '$cost' },
+          averageResponseTime: { $avg: '$responseTime' },
+          errors: {
+            $sum: {
+              $cond: [{ $eq: ['$success', false] }, 1, 0]
+            }
+          }
+        }
+      },
+      { $sort: { _id: 1 } }
+    ]), { retries: 3 });
+  } catch (error) {
+    logger.error('Error fetching usage report', {
+      startDate,
+      endDate,
+      provider,
+      model,
+      userId,
+      requestType,
+      groupBy,
+      error
+    });
+    throw error;
+  }
+};
+
 export const TokenUsage = mongoose.model('TokenUsage', tokenUsageSchema);

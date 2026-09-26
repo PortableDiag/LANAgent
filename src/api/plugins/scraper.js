@@ -831,13 +831,22 @@ export default class ScraperPlugin extends BasePlugin {
   // error: Connection closed" until the process restarts — which is what wedged
   // the gov-site scrapes (all four failing in the same second). Check liveness,
   // not just null, and recycle a dead handle.
+  //
+  // Single-flight: concurrent scrapes that all find no live browser share ONE
+  // launch. Each used to launch its own Chromium on the same profile dir; the
+  // second collided on the profile lock and the scrape failed with "Failed to
+  // launch the browser process!" (paid scrapes, 2026-08-21 → 2026-09-25).
   async _ensureBrowser() {
     const alive = this.browser && (this.browser.connected ?? this.browser.isConnected?.());
-    if (!alive) {
-      if (this.browser) { try { await this.browser.close(); } catch { /* already dead */ } }
-      this.browser = await launchBrowser();
+    if (alive) return this.browser;
+    if (!this._browserLaunch) {
+      this._browserLaunch = (async () => {
+        if (this.browser) { try { await this.browser.close(); } catch { /* already dead */ } }
+        this.browser = await launchBrowser();
+        return this.browser;
+      })().finally(() => { this._browserLaunch = null; });
     }
-    return this.browser;
+    return this._browserLaunch;
   }
 
   // Live ISOLATED browser reserved for screenshots, separate from the scrape
@@ -848,22 +857,30 @@ export default class ScraperPlugin extends BasePlugin {
   // contract as _ensureBrowser — a non-null-but-dead handle gets relaunched.
   async _ensureScreenshotBrowser() {
     const alive = this.ssBrowser && (this.ssBrowser.connected ?? this.ssBrowser.isConnected?.());
-    if (!alive) {
-      if (this.ssBrowser) { try { await this.ssBrowser.close(); } catch { /* already dead */ } }
-      // headless:'new' — render off-display. The default non-headless-on-Xvfb
-      // path (for live-nav anti-detection) puts every browser on the single :99
-      // X display, so concurrent rasters serialize on one compositor (a tall
-      // screenshot ballooned to 175s under load). This browser only rasters
-      // pre-fetched setContent HTML — no live bot wall — so true headless is both
-      // safe and far faster. Distinct profile dir — two Chromium processes can't
-      // share one user-data-dir.
-      this.ssBrowser = await launchBrowser({
-        // DISK-backed (/var/tmp), not the /tmp RAM tmpfs — the profile cache grows
-        // unbounded and a full tmpfs takes the box down (see stealthBrowser.js).
-        headless: 'new',
-        userDataDir: process.env.RENDER_SCREENSHOT_PROFILE_DIR || '/var/tmp/puppeteer-profile-ss'
-      });
+    if (alive) return this.ssBrowser;
+    // Single-flight, as _ensureBrowser.
+    if (!this._ssBrowserLaunch) {
+      this._ssBrowserLaunch = this._launchScreenshotBrowser()
+        .finally(() => { this._ssBrowserLaunch = null; });
     }
+    return this._ssBrowserLaunch;
+  }
+
+  async _launchScreenshotBrowser() {
+    if (this.ssBrowser) { try { await this.ssBrowser.close(); } catch { /* already dead */ } }
+    // headless:'new' — render off-display. The default non-headless-on-Xvfb
+    // path (for live-nav anti-detection) puts every browser on the single :99
+    // X display, so concurrent rasters serialize on one compositor (a tall
+    // screenshot ballooned to 175s under load). This browser only rasters
+    // pre-fetched setContent HTML — no live bot wall — so true headless is both
+    // safe and far faster. Distinct profile dir — two Chromium processes can't
+    // share one user-data-dir.
+    this.ssBrowser = await launchBrowser({
+      // DISK-backed (/var/tmp), not the /tmp RAM tmpfs — the profile cache grows
+      // unbounded and a full tmpfs takes the box down (see stealthBrowser.js).
+      headless: 'new',
+      userDataDir: process.env.RENDER_SCREENSHOT_PROFILE_DIR || '/var/tmp/puppeteer-profile-ss'
+    });
     return this.ssBrowser;
   }
 

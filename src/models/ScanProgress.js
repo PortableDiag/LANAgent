@@ -125,14 +125,15 @@ ScanProgressSchema.index({ priority: 1, createdAt: 1 });
 
 /**
  * Get scan progress summary for a specific scan ID
- * @param {string} scanId - The ID of the scan to summarize
+ * @param {string} scanId - The scan SESSION id (matched against sessionScanId; each
+ *   row's own scanId is a per-file/chunk key and would select at most one row)
  * @returns {Object} Summary of scan progress including completion status, processing times, and bug detection rates
  */
 ScanProgressSchema.statics.getScanProgressSummary = async function(scanId) {
   const pipeline = [
     {
       $match: {
-        scanId: scanId
+        sessionScanId: scanId
       }
     },
     {
@@ -320,14 +321,14 @@ ScanProgressSchema.statics.getScansByPriority = async function(priority) {
 
 /**
  * Get priority statistics for a specific scan ID
- * @param {string} scanId - The ID of the scan to analyze
+ * @param {string} scanId - The scan SESSION id (matched against sessionScanId)
  * @returns {Object} Statistics about priority distribution
  */
 ScanProgressSchema.statics.getPriorityStats = async function(scanId) {
   const pipeline = [
     {
       $match: {
-        scanId: scanId
+        sessionScanId: scanId
       }
     },
     {

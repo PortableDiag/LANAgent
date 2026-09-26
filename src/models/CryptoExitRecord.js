@@ -91,6 +91,135 @@ cryptoExitRecordSchema.methods.edgeAt = function (horizon) {
 };
 
 /**
+ * Aggregate exit quality across token, network, regime, trigger, exit completion, and
+ * time-bucket dimensions. Horizon samples are excluded when their recorded timestamp is
+ * materially later than the horizon they claim to represent.
+ */
+cryptoExitRecordSchema.statics.analyzeSegments = async function (opts = {}) {
+    const bucket = opts.bucket || 'day';
+    const allowedBuckets = new Set(['hour', 'day', 'week', 'month']);
+    if (!allowedBuckets.has(bucket)) {
+        throw new RangeError(`Unsupported bucket: ${bucket}`);
+    }
+
+    const match = {};
+    if (opts.tokenSymbol) match.tokenSymbol = opts.tokenSymbol;
+    if (opts.network) match.network = opts.network;
+    if (opts.regimeAtExit) match.regimeAtExit = opts.regimeAtExit;
+    if (opts.trigger) match.trigger = opts.trigger;
+    if (opts.fullExit !== undefined) match.fullExit = Boolean(opts.fullExit);
+    if (opts.since || opts.until) {
+        match.exitedAt = {};
+        if (opts.since) match.exitedAt.$gte = new Date(opts.since);
+        if (opts.until) match.exitedAt.$lte = new Date(opts.until);
+    }
+
+    // $group accumulators must be flat, one per field — so each horizon gets three
+    // top-level accumulators (h1h_sampled, …) that $project folds back into `horizons`.
+    // Same honesty rule as sampleIsHonest(): a missing/null sample time is trusted.
+    const horizonStats = {};
+    const horizonProject = {};
+    for (const [horizon, milliseconds] of Object.entries(HORIZON_MS)) {
+        const price = `$priceAfter${horizon}`;
+        const sampledAt = { $ifNull: [`$priceAfter${horizon}At`, null] };
+        const honest = {
+            $and: [
+                { $gt: [price, 0] },
+                { $gt: ['$exitPrice', 0] },
+                {
+                    $or: [
+                        { $eq: [sampledAt, null] },
+                        {
+                            $lte: [
+                                sampledAt,
+                                { $add: ['$exitedAt', milliseconds + Math.max(milliseconds * 0.5, 20 * 60e3)] }
+                            ]
+                        }
+                    ]
+                }
+            ]
+        };
+        const edge = { $multiply: [{ $divide: [{ $subtract: ['$exitPrice', price] }, '$exitPrice'] }, 100] };
+        horizonStats[`h${horizon}_sampled`] = { $sum: { $cond: [honest, 1, 0] } };
+        horizonStats[`h${horizon}_edgeSum`] = { $sum: { $cond: [honest, edge, 0] } };
+        horizonStats[`h${horizon}_vindicated`] = { $sum: { $cond: [{ $and: [honest, { $gt: [edge, 0] }] }, 1, 0] } };
+        horizonProject[horizon] = {
+            sampled: `$h${horizon}_sampled`,
+            edgeSum: `$h${horizon}_edgeSum`,
+            vindicated: `$h${horizon}_vindicated`
+        };
+    }
+
+    const rows = await this.aggregate([
+        { $match: match },
+        {
+            $group: {
+                _id: {
+                    tokenSymbol: '$tokenSymbol',
+                    network: '$network',
+                    regimeAtExit: '$regimeAtExit',
+                    trigger: '$trigger',
+                    fullExit: '$fullExit',
+                    bucket: { $dateTrunc: { date: '$exitedAt', unit: bucket } }
+                },
+                fills: { $sum: 1 },
+                wins: { $sum: { $cond: [{ $gt: ['$pnl', 0] }, 1, 0] } },
+                losses: { $sum: { $cond: [{ $lt: ['$pnl', 0] }, 1, 0] } },
+                grossWin: { $sum: { $cond: [{ $gt: ['$pnl', 0] }, '$pnl', 0] } },
+                grossLoss: { $sum: { $cond: [{ $lt: ['$pnl', 0] }, { $abs: '$pnl' }, 0] } },
+                netPnl: { $sum: { $ifNull: ['$pnl', 0] } },
+                gas: { $sum: { $ifNull: ['$gasCostUsd', 0] } },
+                ...horizonStats
+            }
+        },
+        {
+            $project: {
+                _id: 0,
+                tokenSymbol: '$_id.tokenSymbol',
+                network: '$_id.network',
+                regimeAtExit: '$_id.regimeAtExit',
+                trigger: '$_id.trigger',
+                fullExit: '$_id.fullExit',
+                bucket: '$_id.bucket',
+                fills: 1,
+                wins: 1,
+                losses: 1,
+                winRatePct: {
+                    $cond: [
+                        { $gt: [{ $add: ['$wins', '$losses'] }, 0] },
+                        { $multiply: [{ $divide: ['$wins', { $add: ['$wins', '$losses'] }] }, 100] },
+                        null
+                    ]
+                },
+                netPnl: 1,
+                // pnl is already net of gas (TokenTraderStrategy.recordSell subtracts it), so
+                // gas is reported for visibility only — subtracting it again would double-count.
+                gasUsd: '$gas',
+                avgWin: { $cond: [{ $gt: ['$wins', 0] }, { $divide: ['$grossWin', '$wins'] }, null] },
+                avgLoss: { $cond: [{ $gt: ['$losses', 0] }, { $divide: ['$grossLoss', '$losses'] }, null] },
+                expectancy: { $cond: [{ $gt: ['$fills', 0] }, { $divide: ['$netPnl', '$fills'] }, null] },
+                horizons: horizonProject
+            }
+        },
+        { $match: { $expr: { $gte: ['$fills', opts.minSamples === undefined ? 1 : Number(opts.minSamples)] } } },
+        { $sort: { 'bucket': 1, fills: -1 } }
+    ]);
+
+    return rows.map(row => {
+        for (const key of ['netPnl', 'gasUsd', 'avgWin', 'avgLoss', 'expectancy', 'winRatePct']) {
+            if (row[key] !== null && row[key] !== undefined) row[key] = Number(row[key].toFixed(4));
+        }
+        for (const horizon of Object.values(row.horizons)) {
+            horizon.avgEdgePct = horizon.sampled ? Number((horizon.edgeSum / horizon.sampled).toFixed(4)) : null;
+            horizon.vindicatedPct = horizon.sampled ? Number(((horizon.vindicated / horizon.sampled) * 100).toFixed(2)) : null;
+            delete horizon.edgeSum;
+            delete horizon.vindicated;
+        }
+        return row;
+    });
+};
+
+/**
  * Aggregate exit quality by trigger. This is the report the retune decision needs:
  * for each trigger, how often it fired, what it booked, and whether price was lower
  * (vindicated) or higher (whipsawed) at each horizon.

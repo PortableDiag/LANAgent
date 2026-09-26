@@ -113,6 +113,98 @@ runtimeErrorSchema.methods.isRecent = function(hours = 24) {
 // Add cache property to class (in constructor)
 runtimeErrorSchema.statics.cache = new NodeCache({ stdTTL: 300, checkperiod: 60 }); // 5 min TTL
 
+/**
+ * Atomically record an occurrence of a runtime error.
+ *
+ * Repeated occurrences with the same fingerprint update one document and
+ * increment its occurrence count without creating duplicate records.
+ *
+ * @param {Object} occurrence - Runtime error occurrence data.
+ * @returns {Promise<Object>} The updated runtime error document.
+ */
+runtimeErrorSchema.statics.recordOccurrence = async function({
+  fingerprint,
+  type = 'runtime',
+  severity = 'medium',
+  message,
+  file,
+  line,
+  timestamp = new Date(),
+  context,
+  pattern,
+  source = 'log_scanner',
+  data,
+  category,
+  correlationId
+}) {
+  if (!fingerprint) {
+    throw new Error('A fingerprint is required to record a runtime error occurrence');
+  }
+
+  if (!message || !file) {
+    // Update validators do not enforce `required` on an upsert, so an insert
+    // without these would create a record the schema says cannot exist.
+    throw new Error('message and file are required to record a runtime error occurrence');
+  }
+
+  const occurrenceTimestamp = new Date(timestamp);
+  // $setOnInsert must not name any path that $set or $inc also touch — MongoDB
+  // rejects the whole update with a path conflict. fingerprint comes from the
+  // filter on insert, and $inc on a missing field starts occurrences at 1.
+  const initialFields = {
+    firstSeen: occurrenceTimestamp
+  };
+
+  const mutableMetadata = {
+    lastSeen: occurrenceTimestamp,
+    timestamp: occurrenceTimestamp,
+    type,
+    severity,
+    message,
+    file,
+    line,
+    context,
+    pattern,
+    source,
+    data,
+    category,
+    correlationId
+  };
+
+  Object.keys(mutableMetadata).forEach((key) => {
+    if (mutableMetadata[key] === undefined) {
+      delete mutableMetadata[key];
+    }
+  });
+
+  try {
+    const updatedError = await this.findOneAndUpdate(
+      { fingerprint },
+      {
+        $inc: { occurrences: 1 },
+        $set: mutableMetadata,
+        $setOnInsert: initialFields
+      },
+      {
+        upsert: true,
+        new: true,
+        setDefaultsOnInsert: true,
+        runValidators: true
+      }
+    );
+
+    const cacheKeys = this.cache.keys();
+    cacheKeys
+      .filter((key) => key.startsWith('errorTrends-'))
+      .forEach((key) => this.cache.del(key));
+
+    return updatedError;
+  } catch (error) {
+    logger.error('Error recording runtime error occurrence:', error);
+    throw error;
+  }
+};
+
 // Static method to get error trends with caching and retry logic
 runtimeErrorSchema.statics.getErrorTrends = async function(days = 7) {
   const cacheKey = `errorTrends-${days}`;

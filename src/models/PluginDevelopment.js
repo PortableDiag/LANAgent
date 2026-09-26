@@ -209,7 +209,7 @@ pluginDevelopmentSchema.methods.getVersionHistory = function() {
  * Compare two versions and return the differences.
  * @param {String} version1 - The first version number.
  * @param {String} version2 - The second version number.
- * @returns {Object} Differences between the two versions.
+ * @returns {Object} Differences between the versions.
  */
 pluginDevelopmentSchema.methods.compareVersions = function(version1, version2) {
   try {
@@ -284,6 +284,92 @@ pluginDevelopmentSchema.methods.generateChangelog = function() {
   } catch (error) {
     logger.error('Error generating changelog:', error);
     throw new Error('Failed to generate changelog');
+  }
+};
+
+/**
+ * Assess whether this plugin development record is ready for release or publication.
+ * Uses only fields already stored on the document and does not mutate the record.
+ *
+ * @param {Object} options - Optional assessment settings.
+ * @param {number} options.minimumEvaluationScore - Minimum acceptable score.
+ * @param {boolean} options.rejectionFeedbackResolved - Explicitly acknowledge resolved feedback.
+ * @returns {Object} Structured release-readiness assessment.
+ */
+pluginDevelopmentSchema.methods.assessReleaseReadiness = function(options = {}) {
+  try {
+    const minimumEvaluationScore = Number.isFinite(options.minimumEvaluationScore)
+      ? options.minimumEvaluationScore
+      : 0;
+    const details = this.apiDetails || {};
+    const evaluation = details.evaluation || {};
+    const feedback = this.rejectionFeedback;
+    const hasRejectionFeedback = Boolean(
+      feedback && (
+        (Array.isArray(feedback.rejectionReasons) && feedback.rejectionReasons.length > 0) ||
+        (Array.isArray(feedback.suggestions) && feedback.suggestions.length > 0) ||
+        (Array.isArray(feedback.comments) && feedback.comments.length > 0) ||
+        feedback.prNumber || feedback.closedAt
+      )
+    );
+    const checks = [];
+    const blockingIssues = [];
+    const warnings = [];
+
+    const addCheck = (name, passed, message, blocking = true) => {
+      checks.push({ name, passed, message, blocking });
+      if (!passed) {
+        (blocking ? blockingIssues : warnings).push(message);
+      }
+    };
+
+    addCheck('completedStatus', this.status === 'completed',
+      'Plugin development status must be completed.');
+    addCheck('apiMetadata', Boolean(
+      typeof this.api === 'string' && this.api.trim() &&
+      typeof details.name === 'string' && details.name.trim() &&
+      typeof details.description === 'string' && details.description.trim()
+    ), 'API identifier, name, and description are required.');
+    addCheck('documentation', typeof details.documentation === 'string' && details.documentation.trim().length > 0,
+      'API documentation is required.');
+    addCheck('pluginCode', typeof this.pluginCode === 'string' && this.pluginCode.trim().length > 0,
+      'Plugin code is required.');
+    addCheck('testCode', typeof this.testCode === 'string' && this.testCode.trim().length > 0,
+      'Test code is required.');
+    addCheck('evaluationScore', typeof evaluation.score === 'number' &&
+      Number.isFinite(evaluation.score) &&
+      evaluation.score >= minimumEvaluationScore,
+      `Evaluation score must be at least ${minimumEvaluationScore}.`);
+    addCheck('semanticVersion', typeof this.version === 'string' &&
+      /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/.test(this.version),
+      'Version must use semantic version format.');
+    addCheck('rejectionFeedback', !hasRejectionFeedback || options.rejectionFeedbackResolved === true,
+      'Unresolved rejection feedback must be addressed before release.');
+
+    if (!details.category) {
+      warnings.push('API category is not recorded.');
+      checks.push({ name: 'category', passed: false, message: 'API category is not recorded.', blocking: false });
+    }
+
+    return {
+      ready: blockingIssues.length === 0,
+      blockingIssues,
+      warnings,
+      checks
+    };
+  } catch (error) {
+    logger.error('Error assessing release readiness:', error);
+    return {
+      ready: false,
+      blockingIssues: ['Release-readiness assessment failed.'],
+      warnings: [],
+      checks: [{
+        name: 'assessment',
+        passed: false,
+        message: error.message || 'Unable to assess release readiness.',
+        blocking: true
+      }]
+    };
   }
 };
 

@@ -569,8 +569,20 @@ export class DocumentIntelligencePlugin extends BasePlugin {
   }
 
   calculateClassificationConfidence(content, category) {
-    // Mock confidence calculation
-    return Math.random() * 0.3 + 0.7; // 70-100%
+    // Share of the category's keyword signals (the ones classifyDocumentType tests)
+    // present in the text. This used to be Math.random() * 0.3 + 0.7, which the paid
+    // /documents endpoint returned to customers as if it were a measurement.
+    const signals = {
+      receipt: ['receipt', 'total', '$'],
+      invoice: ['invoice', 'bill to', 'due date'],
+      business_card: ['phone', 'email'],
+      identity_document: ['name', 'date of birth'],
+      contract: ['contract', 'agreement']
+    }[category];
+    if (!signals) return 0.3; // 'other': no rule matched
+    const text = String(content || '').toLowerCase();
+    const hits = signals.filter(s => text.includes(s)).length;
+    return Math.round((0.5 + 0.5 * hits / signals.length) * 100) / 100;
   }
 
   generateTags(content, category) {

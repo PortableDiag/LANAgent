@@ -61,6 +61,26 @@ export default class GroqPlugin extends BasePlugin {
           'what are my usage statistics',
           'give me a cost breakdown of my API usage'
         ]
+      },
+      {
+        command: 'configure_fallback_chain',
+        description: 'Configure model fallback chains for improved reliability',
+        usage: 'configure_fallback_chain({ fallbackChain: { "primary-model": ["fallback1", "fallback2"] } })',
+        examples: [
+          'set up fallback models for llama3',
+          'configure model fallback chains',
+          'add backup models for primary models'
+        ]
+      },
+      {
+        command: 'get_fallback_model',
+        description: 'Get the fallback model for a given primary model',
+        usage: 'get_fallback_model({ primaryModel: "llama3-8b-8192" })',
+        examples: [
+          'what is the fallback for llama3-8b-8192',
+          'get fallback model for primary model',
+          'show me the backup model for mistral'
+        ]
       }
     ];
 
@@ -68,6 +88,7 @@ export default class GroqPlugin extends BasePlugin {
     this.config = {
       apiKey: null,
       baseUrl: 'https://api.groq.com/openai/v1',
+      fallbackChain: {} // New configuration for model fallback chains
     };
 
     // Usage tracking. Prompt and completion tokens are kept apart because they are
@@ -159,6 +180,10 @@ export default class GroqPlugin extends BasePlugin {
           return await this.chatCompletion(data);
         case 'get_usage_stats':
           return await this.getUsageStats();
+        case 'configure_fallback_chain':
+          return await this.configureFallbackChain(data);
+        case 'get_fallback_model':
+          return await this.getFallbackModel(data);
         default:
           throw new Error(`Unknown action: ${action}`);
       }
@@ -257,6 +282,15 @@ export default class GroqPlugin extends BasePlugin {
         data: response.data
       };
     } catch (error) {
+      // Walk the primary model's configured fallback list in order. Each model is
+      // tried at most once, so a cyclic chain (A -> B, B -> A) cannot recurse forever.
+      // An auth failure is not model-specific — every fallback would fail the same way.
+      const next = error.response?.status === 401 ? null : this.nextFallback(params);
+      if (next) {
+        this.logger.info(`Retrying generate_completion with fallback model: ${next.model}`);
+        return await this.generateCompletion(next);
+      }
+
       throw new Error(`Completion generation failed: ${error.response?.data?.error?.message || error.message}`);
     }
   }
@@ -296,8 +330,94 @@ export default class GroqPlugin extends BasePlugin {
         data: response.data
       };
     } catch (error) {
+      // Walk the primary model's configured fallback list in order. Each model is
+      // tried at most once, so a cyclic chain (A -> B, B -> A) cannot recurse forever.
+      // An auth failure is not model-specific — every fallback would fail the same way.
+      const next = error.response?.status === 401 ? null : this.nextFallback(params);
+      if (next) {
+        this.logger.info(`Retrying chat_completion with fallback model: ${next.model}`);
+        return await this.chatCompletion(next);
+      }
+
       throw new Error(`Chat completion failed: ${error.response?.data?.error?.message || error.message}`);
     }
+  }
+
+  /**
+   * Configure model fallback chains
+   * @param {Object} params - Configuration parameters
+   * @param {Object} params.fallbackChain - Object mapping model names to arrays of fallback models
+   */
+  async configureFallbackChain(params) {
+    this.validateParams(params, {
+      fallbackChain: { required: true, type: 'object' }
+    });
+
+    for (const [primary, fallbacks] of Object.entries(params.fallbackChain)) {
+      if (!Array.isArray(fallbacks) || !fallbacks.every(m => typeof m === 'string' && m)) {
+        throw new Error(`fallbackChain["${primary}"] must be an array of model names`);
+      }
+    }
+
+    this.config.fallbackChain = params.fallbackChain;
+    
+    // Save to cache
+    const { apiKey, ...configToCache } = this.config;
+    await PluginSettings.setCached(this.name, 'config', configToCache);
+    
+    return {
+      success: true,
+      message: 'Fallback chain configured successfully',
+      data: this.config.fallbackChain
+    };
+  }
+
+  /**
+   * Get fallback model for a primary model
+   * @param {Object} params - Parameters
+   * @param {string} params.primaryModel - Primary model name
+   */
+  async getFallbackModel(params) {
+    this.validateParams(params, {
+      primaryModel: { required: true, type: 'string' }
+    });
+
+    const fallbackModel = this.getFallbackModelSync(params.primaryModel);
+    
+    return {
+      success: true,
+      data: {
+        primaryModel: params.primaryModel,
+        fallbackModel: fallbackModel
+      }
+    };
+  }
+
+  /**
+   * Synchronous helper to get fallback model
+   * @param {string} primaryModel - Primary model name
+   * @returns {string|null} Fallback model name or null if none configured
+   */
+  getFallbackModelSync(primaryModel) {
+    const fallbacks = (this.config.fallbackChain || {})[primaryModel];
+    if (Array.isArray(fallbacks) && fallbacks.length > 0) {
+      return fallbacks[0]; // Return the first fallback model
+    }
+    return null;
+  }
+
+  /**
+   * Next params to retry with after a failed call, or null when the chain is exhausted.
+   * The chain is the ORIGINAL primary model's list; models already tried are skipped.
+   */
+  nextFallback(params) {
+    const primary = params._fallbackPrimary || params.model;
+    const tried = params._fallbackTried || [params.model];
+    const chain = (this.config.fallbackChain || {})[primary];
+    if (!Array.isArray(chain)) return null;
+    const model = chain.find(m => typeof m === 'string' && m && !tried.includes(m));
+    if (!model) return null;
+    return { ...params, model, _fallbackPrimary: primary, _fallbackTried: [...tried, model] };
   }
 
   /**

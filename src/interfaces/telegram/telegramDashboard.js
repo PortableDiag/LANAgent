@@ -11,6 +11,8 @@ export class TelegramDashboard extends TelegramInterface {
   constructor(agent) {
     super(agent);
     this.authorizedUserId = process.env.TELEGRAM_USER_ID; // Add missing property
+    // Suggested answers for the open clarifying question, per chat (see sendClarification)
+    this.clarifyOptions = new Map();
     this.dashboardState = {
       currentView: "main", 
       refreshInterval: null,
@@ -1510,6 +1512,9 @@ export class TelegramDashboard extends TelegramInterface {
           } else if (response.type === 'media_group' && response.media) {
             // Handle multiple media files (album)
             await ctx.replyWithMediaGroup(response.media);
+          } else if (response.type === 'text' && response.clarification?.options?.length) {
+            // A reasoning task is waiting on the owner's answer: offer likely answers as buttons
+            await this.sendClarification(ctx, response);
           } else {
             // Handle text response
             const replyContent = response.content || response.response || response.message || "I processed your request but couldn't generate a response.";
@@ -1717,7 +1722,48 @@ export class TelegramDashboard extends TelegramInterface {
     });
   }
 
+  /**
+   * Send a clarifying question with its suggested answers as inline buttons. The owner can
+   * also just type an answer; either way the agent resumes the waiting task.
+   */
+  async sendClarification(ctx, response) {
+    const options = response.clarification.options.slice(0, 4);
+    this.clarifyOptions.set(String(ctx.chat.id), options);
+    const keyboard = Markup.inlineKeyboard(options.map((opt, i) => [Markup.button.callback(opt, `clarify_${i}`)]));
+    await ctx.reply(`❓ ${response.content}`, { reply_markup: keyboard.reply_markup });
+  }
+
   setupCallbackHandlers() {
+    // Clarification answer buttons: the chosen option is the owner's answer to the pending
+    // reasoning question, so it goes back through processNaturalLanguage like typed text.
+    this.bot.action(/^clarify_(\d+)$/, async (ctx) => {
+      ctx.answerCbQuery().catch(() => {});
+      const options = this.clarifyOptions.get(String(ctx.chat.id));
+      const choice = options?.[Number(ctx.match[1])];
+      await ctx.editMessageReplyMarkup(undefined).catch(() => {});
+      if (!choice || !ctx.isMaster) {
+        return ctx.reply('That question has expired. Please ask again.');
+      }
+      this.clarifyOptions.delete(String(ctx.chat.id));
+      await ctx.reply(`➡️ ${choice}`);
+      try {
+        const response = await this.agent.processNaturalLanguage(choice, {
+          platform: 'telegram',
+          userId: ctx.from.id.toString(),
+          userName: ctx.from.username || ctx.from.first_name,
+          isMaster: true
+        });
+        if (response?.clarification?.options?.length) {
+          await this.sendClarification(ctx, response);
+        } else {
+          await this.sendLargeMessage(ctx, response?.content || 'Done.');
+        }
+      } catch (error) {
+        logger.error('Clarification answer failed:', error);
+        await ctx.reply(`❌ ${error.message}`);
+      }
+    });
+
     // Dashboard callbacks
     this.bot.action('refresh_dashboard', async (ctx) => {
       try {

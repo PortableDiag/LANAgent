@@ -187,6 +187,24 @@ class MqttService extends EventEmitter {
   }
 
   /**
+   * Check a client's topic access against its user's ACL on an internal broker.
+   * A user with no ACL rules keeps unrestricted access, as before ACLs were enforced.
+   *
+   * @param {Object} broker - MqttBroker document
+   * @param {Object} client - Aedes client (carries mqttUsername once authenticated)
+   * @param {String} topic - Topic name (publish) or filter (subscribe)
+   * @param {String} operation - 'read' or 'write'
+   * @returns {Boolean}
+   */
+  isTopicAuthorized(broker, client, topic, operation) {
+    const username = client?.mqttUsername;
+    const user = broker.brokerSettings?.allowedUsers?.find(u => u.username === username);
+    if (!user) return false;
+    if (!user.acl || user.acl.length === 0) return true;
+    return broker.authorizeTopicAccess(username, topic, operation).authorized;
+  }
+
+  /**
    * Start the internal Aedes broker
    */
   async startInternalBroker(config) {
@@ -210,6 +228,7 @@ class MqttService extends EventEmitter {
         this.aedes.authenticate = (client, username, password, callback) => {
           const user = settings.allowedUsers?.find(u => u.username === username);
           if (user && user.password === password?.toString()) {
+            client.mqttUsername = username;
             callback(null, true);
           } else {
             logger.warn(`MQTT auth failed for user: ${username}`);
@@ -219,13 +238,22 @@ class MqttService extends EventEmitter {
 
         // Set up authorization
         this.aedes.authorizePublish = (client, packet, callback) => {
-          // TODO: Implement ACL checking
-          callback(null);
+          if (this.isTopicAuthorized(config, client, packet.topic, 'write')) {
+            callback(null);
+          } else {
+            logger.warn(`MQTT publish denied for ${client?.mqttUsername || client?.id} on ${packet.topic}`);
+            callback(new Error('Publish not authorized'));
+          }
         };
 
         this.aedes.authorizeSubscribe = (client, sub, callback) => {
-          // TODO: Implement ACL checking
-          callback(null, sub);
+          if (this.isTopicAuthorized(config, client, sub.topic, 'read')) {
+            callback(null, sub);
+          } else {
+            logger.warn(`MQTT subscribe denied for ${client?.mqttUsername || client?.id} on ${sub.topic}`);
+            // A null subscription is refused with SUBACK 0x80, the client stays connected
+            callback(null, null);
+          }
         };
       }
 

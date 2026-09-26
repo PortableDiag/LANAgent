@@ -564,6 +564,46 @@ export class ProviderManager extends EventEmitter {
     }
   }
 
+  /**
+   * The cheaper model background work should use on this provider, if one is set:
+   * `<PROVIDER>_AUX_MODEL` (e.g. OPENROUTER_AUX_MODEL). Null means "use the main model".
+   */
+  getAuxModel(providerName) {
+    if (!providerName) return null;
+    const envKey = `${String(providerName).toUpperCase().replace(/[^A-Z0-9]/g, '_')}_AUX_MODEL`;
+    return process.env[envKey]?.trim() || null;
+  }
+
+  /**
+   * Generate with the auxiliary (cheap) model, for background work that does not need the
+   * main model: memory analysis, intent classification, summaries.
+   *
+   * Stays on the CURRENT provider and overrides only the model for this one call, so it never
+   * touches the provider selection or the lock. The aux model id is provider-specific, which is
+   * why it is not passed through generateResponse: the fallback chain would hand an OpenRouter
+   * slug to providers that do not know it. Any failure — no aux model configured, provider
+   * cooling down, aux call erroring — falls through to the ordinary generateResponse path with
+   * the caller's original options, so the worst case is today's behaviour.
+   */
+  async generateAux(prompt, options = {}) {
+    if (options.model) return this.generateResponse(prompt, options);
+
+    const provider = await this.getCurrentProvider();
+    const providerName = this.providerNameOf(provider);
+    const auxModel = this.getAuxModel(providerName);
+    if (!auxModel || this.isCoolingDown(providerName)) {
+      return this.generateResponse(prompt, options);
+    }
+
+    try {
+      logger.info(`🤖 Aux generation on ${providerName}, model: ${auxModel}${options.auxTask ? ` (${options.auxTask})` : ''}`);
+      return await retryOperation(() => provider.generateResponse(prompt, { ...options, model: auxModel }), { retries: 1 });
+    } catch (error) {
+      logger.warn(`Aux model ${auxModel} on ${providerName} failed (${error.message}); using the main model`);
+      return this.generateResponse(prompt, options);
+    }
+  }
+
   async generateEmbedding(text) {
     // HuggingFace FIRST, deliberately. Memory embeddings were benched onto
     // sentence-transformers/all-MiniLM-L6-v2 on 2026-08-29 and have served every

@@ -1,4 +1,6 @@
 import mongoose from 'mongoose';
+import { retryOperation } from '../utils/retryUtils.js';
+import { logger } from '../utils/logger.js';
 
 /**
  * NetworkDevice Schema - Persistent storage for discovered network devices
@@ -157,6 +159,57 @@ NetworkDeviceSchema.index({ category: 1, deviceType: 1 });
 NetworkDeviceSchema.index({ 'services.port': 1, 'services.protocol': 1 });
 NetworkDeviceSchema.index({ 'stats.uptimePercentage': 1 });
 
+const normalizeMac = (mac) => {
+  if (typeof mac !== 'string') return null;
+
+  const hexadecimal = mac.replace(/[^a-f0-9]/gi, '').toUpperCase();
+  if (hexadecimal.length !== 12 || !/^[A-F0-9]{12}$/.test(hexadecimal)) {
+    return null;
+  }
+
+  return hexadecimal.match(/.{2}/g).join(':');
+};
+
+const retryDatabaseOperation = (operation) => retryOperation(operation, { retries: 3 });
+
+const mergeUnique = (first = [], second = []) => {
+  const values = [...first, ...second];
+  const seen = new Set();
+
+  return values.filter((value) => {
+    const key = typeof value === 'object' && value !== null
+      ? JSON.stringify(value)
+      : String(value);
+
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+};
+
+const mergeServices = (first = [], second = []) => {
+  const merged = [...first];
+
+  for (const service of second) {
+    const existing = merged.find(
+      (item) => item.port === service.port && item.protocol === service.protocol
+    );
+
+    if (!existing) {
+      merged.push(service);
+      continue;
+    }
+
+    existing.service = existing.service || service.service;
+    existing.version = existing.version || service.version;
+    if (!existing.lastSeen || (service.lastSeen && service.lastSeen > existing.lastSeen)) {
+      existing.lastSeen = service.lastSeen;
+    }
+  }
+
+  return merged;
+};
+
 // Methods
 NetworkDeviceSchema.methods.markOnline = function(responseTime = null) {
   const wasOffline = !this.online;
@@ -252,17 +305,22 @@ NetworkDeviceSchema.methods.markAsRetired = function(days = 90) {
 
 // Statics
 NetworkDeviceSchema.statics.findOrCreateByIP = async function(ip, data = {}) {
-  let device = await this.findOne({ ip });
+  if (!ip || typeof ip !== 'string') {
+    throw new TypeError('A valid IP address is required');
+  }
+
+  const normalizedMac = normalizeMac(data.mac);
+  let device = await retryDatabaseOperation(() => this.findOne({ ip }));
 
   if (!device) {
     device = new this({
       ip,
-      dateDiscovered: new Date(),
-      ...data
+      ...data,
+      ...(normalizedMac ? { mac: normalizedMac } : {}),
+      dateDiscovered: new Date()
     });
   } else {
-    // Update with new data
-    if (data.mac && !device.mac) device.mac = data.mac;
+    if (normalizedMac && !device.mac) device.mac = normalizedMac;
     if (data.hostname && !device.hostname) device.hostname = data.hostname;
     if (data.vendor && !device.vendor) device.vendor = data.vendor;
 
@@ -270,13 +328,134 @@ NetworkDeviceSchema.statics.findOrCreateByIP = async function(ip, data = {}) {
     device.stats.timesDiscovered = (device.stats.timesDiscovered || 0) + 1;
   }
 
-  await device.save();
+  await retryDatabaseOperation(() => device.save());
   return device;
 };
 
+/**
+ * Find or create a device using stable MAC identity before falling back to IP.
+ * Known devices retain previous addresses in bounded metadata for DHCP changes.
+ * @param {{ip: string, mac?: string, data?: object}} identity
+ * @returns {Promise<import('mongoose').Document>}
+ */
+NetworkDeviceSchema.statics.findOrCreateByIdentity = async function({ ip, mac, data = {} } = {}) {
+  if (!ip || typeof ip !== 'string') {
+    throw new TypeError('A valid IP address is required');
+  }
+
+  const normalizedMac = normalizeMac(mac || data.mac);
+  let device = normalizedMac
+    ? await retryDatabaseOperation(() => this.findOne({ mac: normalizedMac }))
+    : null;
+
+  if (!device) {
+    device = await retryDatabaseOperation(() => this.findOne({ ip }));
+  }
+
+  if (!device) {
+    device = new this({
+      ...data,
+      ip,
+      ...(normalizedMac ? { mac: normalizedMac } : {}),
+      dateDiscovered: new Date(),
+      lastSeen: new Date()
+    });
+  } else {
+    if (normalizedMac && !device.mac) device.mac = normalizedMac;
+
+    if (device.ip !== ip) {
+      // metadata is a Map path with no default: records written by the network
+      // scan never set it, so it is undefined on most existing documents.
+      if (!device.metadata) device.metadata = new Map();
+      const previousIps = device.metadata?.get('previousIps') || [];
+      device.metadata.set(
+        'previousIps',
+        mergeUnique(previousIps, [device.ip]).slice(-20)
+      );
+      device.ip = ip;
+    }
+
+    if (data.hostname && !device.hostname) device.hostname = data.hostname;
+    if (data.vendor && !device.vendor) device.vendor = data.vendor;
+    if (data.subnet) device.subnet = data.subnet;
+    if (data.gateway) device.gateway = data.gateway;
+
+    device.lastSeen = new Date();
+    device.stats.timesDiscovered = (device.stats.timesDiscovered || 0) + 1;
+  }
+
+  await retryDatabaseOperation(() => device.save());
+  return device;
+};
+
+/**
+ * Consolidate two duplicate device records into the target record.
+ * User-defined settings and target identity are retained where possible.
+ * @param {string|mongoose.Types.ObjectId} sourceId - Record to absorb
+ * @param {string|mongoose.Types.ObjectId} targetId - Record to retain
+ * @returns {Promise<import('mongoose').Document>}
+ */
+NetworkDeviceSchema.statics.mergeDevices = async function(sourceId, targetId) {
+  if (!sourceId || !targetId || String(sourceId) === String(targetId)) {
+    throw new TypeError('Distinct sourceId and targetId values are required');
+  }
+
+  const [source, target] = await retryDatabaseOperation(() => Promise.all([
+    this.findById(sourceId),
+    this.findById(targetId)
+  ]));
+
+  if (!source || !target) {
+    throw new Error('Both source and target devices must exist');
+  }
+
+  target.tags = mergeUnique(target.tags, source.tags);
+  target.services = mergeServices(target.services, source.services);
+  target.openPorts = mergeUnique(target.openPorts, source.openPorts);
+  target.statusHistory = mergeUnique(target.statusHistory, source.statusHistory)
+    .sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp))
+    .slice(-100);
+
+  target.alertOnOffline = Boolean(target.alertOnOffline || source.alertOnOffline);
+  target.alertOnOnline = Boolean(target.alertOnOnline || source.alertOnOnline);
+  target.monitor = Boolean(target.monitor || source.monitor);
+  target.stats.timesDiscovered =
+    (target.stats.timesDiscovered || 0) + (source.stats.timesDiscovered || 0);
+
+  const previousIps = [
+    ...(target.metadata?.get('previousIps') || []),
+    ...(source.metadata?.get('previousIps') || []),
+    source.ip
+  ].filter(Boolean);
+
+  if (target.ip) {
+    if (!target.metadata) target.metadata = new Map();
+    target.metadata.set('previousIps', mergeUnique(previousIps, []).filter(ip => ip !== target.ip).slice(-20));
+  }
+
+  if (!target.mac && source.mac) target.mac = source.mac;
+  if (!target.hostname && source.hostname) target.hostname = source.hostname;
+  if (!target.vendor && source.vendor) target.vendor = source.vendor;
+  if (!target.name && source.name) target.name = source.name;
+  if (!target.notes && source.notes) target.notes = source.notes;
+
+  if (source.lastSeen && (!target.lastSeen || source.lastSeen > target.lastSeen)) {
+    target.lastSeen = source.lastSeen;
+  }
+  if (source.lastOnline && (!target.lastOnline || source.lastOnline > target.lastOnline)) {
+    target.lastOnline = source.lastOnline;
+  }
+
+  await retryDatabaseOperation(() => target.save());
+  await retryDatabaseOperation(() => this.deleteOne({ _id: source._id }));
+
+  logger.info(`Merged network device ${sourceId} into ${targetId}`);
+  return target;
+};
+
 NetworkDeviceSchema.statics.findByMAC = function(mac) {
-  const normalizedMAC = mac.toUpperCase().replace(/[:-]/g, ':');
-  return this.findOne({ mac: normalizedMAC });
+  const normalizedMAC = normalizeMac(mac);
+  return normalizedMAC ? this.findOne({ mac: normalizedMAC }) : this.findOne({ _id: null });
 };
 
 NetworkDeviceSchema.statics.getOnlineDevices = function() {

@@ -553,6 +553,87 @@ Live in-memory snapshot of download-token usage (tokens within their TTL window)
 
 ---
 
+## Recent Updates (September 26, 2026)
+
+Sync covering 2.25.336–2.25.374.
+
+### v2.25.336 — Paid audio transcription
+
+Speech to text, billed **per started minute of audio** (v2.25.336). The length is measured
+before anything is charged, so a request over the limit, or a file that isn't real media,
+costs nothing.
+
+| | |
+|---|---|
+| Price | **2 credits per started minute** ($0.02/min), minimum 2 |
+| URL mode | **+5 credits** for fetching the media |
+| Limit | **60 minutes** per request (max 120 credits, 125 by URL) |
+| Upload size | 100 MB through `api.lanagent.net` (500 MB direct to an agent) |
+| Engine | Whisper (auto language detection) |
+
+**Endpoints (gateway):**
+
+- `POST /transcribe`: multipart field `file`.
+- `POST /transcribe/url`: JSON `{ "url": "https://…" }`. Takes anything the yt-dlp plugin can fetch
+  (YouTube, TikTok, SoundCloud, X, …). The length is checked from metadata first, so an over-limit
+  video is never downloaded.
+- `GET /api/external/transcribe/pricing`: free. Returns the numbers above plus the accepted formats.
+
+**Formats.** MP3, WAV, FLAC, M4A/AAC, OGG/Opus, WebM, MKV/MKA, MOV/MP4/M4V, AVI, WMA/WMV, AIFF,
+AMR, 3GP, CAF, MPEG/TS, FLV, WavPack, AC3, MP2. A video's soundtrack is transcribed. Files are
+accepted by `audio/*`/`video/*` MIME or a known extension, then **validated by probing**. Only a
+real media container with an audio track proceeds. Playlist or indirection formats (HLS, concat)
+are refused.
+
+```json
+POST /transcribe  (multipart: file=@memo.m4a)
+→ { "success": true, "text": "…", "durationSeconds": 7.8, "minutesBilled": 1,
+    "creditsCharged": 2, "creditsRemaining": 38, "source": "upload" }
+```
+
+### v2.25.340 — OpenAI-compatible chat endpoint
+
+Any OpenAI-style client (Home Assistant Assist, Open WebUI, the `openai` SDK) can use the agent as its model.
+Requests run through the full agent (plugins, memory, routing).
+
+| Method | Path | Notes |
+|---|---|---|
+| GET | `/v1/models` | One model, id = the agent name (lowercase) |
+| POST | `/v1/chat/completions` | `{ messages, stream? }`; earlier turns are passed as context; `stream: true` returns SSE |
+
+Auth: `Authorization: Bearer <api key>` (standard OpenAI client header; re-presented as `X-API-Key`), or a JWT.
+
+```bash
+curl -s http://<agent>/v1/chat/completions -H "Authorization: Bearer $LANAGENT_API_KEY" \
+  -H 'Content-Type: application/json' -d '{"messages":[{"role":"user","content":"how much disk is free?"}]}'
+```
+
+### v2.25.341 — MCP server endpoint
+
+`POST /mcp/server` — MCP over Streamable HTTP (stateless) for Claude Code, Cursor, Claude Desktop. Auth:
+`Authorization: Bearer mcp_…` (tokens from `POST /mcp/api/tokens`). Tools: `search_tools` (find plugin commands),
+`call_tool` (run one, subject to the token's allow/deny/category rules), `ask_agent` (natural-language request;
+unrestricted tokens only). Tokens restricted to specific tools also see those tools directly.
+
+```bash
+claude mcp add --transport http lanagent http://<agent>/mcp/server --header "Authorization: Bearer mcp_..."
+```
+
+### v2.25.338–346 — New plugins
+
+| Plugin | Commands | Notes |
+|---|---|---|
+| `homeassistant` | `list_entities`, `get_state`, `call_service`, `turn_on`, `turn_off`, `toggle` | Needs `HASS_URL` + `HASS_TOKEN` |
+| `chathistory` | `search`, `recent` | Full-text search over the conversation transcript |
+| `skills` | `list`, `view`, `create`, `delete` | SKILL.md procedures under `data/skills/` |
+
+### v2.25.367–374 — Fixes
+
+- The internal MQTT broker enforces each user's topic ACL when `requireAuth` is on.
+- Weak intent matches (below 0.6 similarity) go to AI intent detection instead of running a plugin action; a matched command is no longer answered as a chat follow-up.
+- Concurrent scrapes share one browser launch instead of failing with "Failed to launch the browser process!".
+- `walletProfiler`: BSC history falls back to Moralis where Etherscan's free tier refuses the chain; transaction count comes from RPC; `network` defaults to `bsc`; EIP-7702 delegated wallets are no longer reported as contracts.
+
 ## Recent Updates (September 23, 2026)
 
 ### v2.25.328 — sync covering 2.25.295–2.25.328

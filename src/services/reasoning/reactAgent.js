@@ -1,7 +1,8 @@
 import { logger } from '../../utils/logger.js';
 import { EventEmitter } from 'events';
-import { retryOperation } from '../../utils/retryUtils.js';
 import NodeCache from 'node-cache';
+import { listTools, selectRelevantTools, formatToolsForPrompt, executeTool, findPastExamples, DESCRIBE_TOOL } from './toolCatalog.js';
+import { getSkillsService, learnSkillFromTask } from '../skills/skillsService.js';
 
 /**
  * ReActAgent - Implements the ReAct (Reasoning + Acting) pattern
@@ -38,59 +39,29 @@ export class ReActAgent extends EventEmitter {
   }
 
   /**
-   * Refresh the list of available tools from plugins
+   * Refresh the list of available tools from plugins. The catalog is read live on every
+   * run; this snapshot only serves getState() and the startup log.
    */
   async refreshTools() {
-    this.tools = [];
-    this.toolMap.clear();
-
-    if (!this.agent.apiManager) {
-      logger.warn('APIManager not available for ReActAgent');
-      return;
-    }
-
-    // Get all enabled plugins
-    const plugins = this.agent.apiManager.plugins;
-    if (!plugins) return;
-
-    for (const [name, plugin] of plugins) {
-      if (!plugin.enabled) continue;
-
-      // Create tool entry from plugin
-      const tool = {
-        name: name,
-        description: plugin.description || `${name} plugin`,
-        commands: plugin.commands || [],
-        parameters: this.extractParameters(plugin)
-      };
-
-      this.tools.push(tool);
-      this.toolMap.set(name, plugin);
-    }
-  }
-
-  /**
-   * Extract parameter information from plugin commands
-   */
-  extractParameters(plugin) {
-    const params = [];
-    if (plugin.commands) {
-      for (const cmd of plugin.commands) {
-        params.push({
-          action: cmd.command,
-          description: cmd.description,
-          usage: cmd.usage
-        });
-      }
-    }
-    return params;
+    this.tools = listTools(this.agent);
+    this.toolMap = new Map(this.tools.map(t => [t.name, t]));
   }
 
   /**
    * Run the ReAct loop for a given query
    */
   async run(query, context = {}) {
-    const thoughts = [];
+    // Resuming after a clarification: keep the earlier steps and add the user's answer
+    const resume = context.resume;
+    const thoughts = resume?.thoughts ? [...resume.thoughts] : [];
+    if (resume) {
+      thoughts.push({
+        type: 'observation',
+        content: `You asked the user: "${resume.question}". The user answered: "${resume.answer}"`,
+        iteration: 0,
+        timestamp: new Date()
+      });
+    }
     let iteration = 0;
     const startTime = Date.now();
 
@@ -98,12 +69,22 @@ export class ReActAgent extends EventEmitter {
     this.emit('start', { query, context });
 
     try {
+      // Tools and worked examples are chosen once per task: the plugins relevant to it get
+      // full command lists, and similar tasks that succeeded before are shown as examples.
+      await this.refreshTools();
+      const relevant = await selectRelevantTools(this.agent, query, { available: this.tools });
+      const pastExamples = await findPastExamples(this.thoughtStore, query);
+      if (pastExamples) logger.info('ReAct: reusing similar past reasoning as examples');
+      const skills = await getSkillsService().promptFor(query).catch(() => '');
+      if (skills) logger.info('ReAct: following a matching skill');
+      const guidance = { relevant, pastExamples, skills };
+
       while (iteration < this.maxIterations) {
         iteration++;
         logger.info(`ReAct iteration ${iteration}/${this.maxIterations}`);
 
         // Step 1: THOUGHT - Reason about current state
-        const thought = await this.think(query, thoughts, context);
+        const thought = await this.think(query, thoughts, context, guidance);
         thoughts.push({ type: 'thought', content: thought, iteration, timestamp: new Date() });
         this.emit('thought', { iteration, thought });
 
@@ -126,6 +107,9 @@ export class ReActAgent extends EventEmitter {
             await this.thoughtStore.saveThoughtChain(query, thoughts, result);
           }
 
+          // Turn a multi-step success into a reusable skill (best effort, not awaited)
+          learnSkillFromTask({ providerManager: this.agent.providerManager, query, thoughts, answer: result.answer });
+
           this.emit('complete', result);
           return result;
         }
@@ -136,6 +120,7 @@ export class ReActAgent extends EventEmitter {
             success: false,
             needsClarification: true,
             clarificationQuestion: thought.clarificationQuestion,
+            clarificationOptions: thought.clarificationOptions,
             thoughts,
             iterations: iteration,
             duration: Date.now() - startTime
@@ -148,8 +133,9 @@ export class ReActAgent extends EventEmitter {
           thoughts.push({ type: 'action', content: action, iteration, timestamp: new Date() });
           this.emit('action', { iteration, action });
 
-          if (this.showThoughts && context.showThinking) {
-            await context.showThinking(`🔧 Action: ${action.tool}.${action.command}`);
+          // Tool steps are always reported (briefly); full thoughts only with showThoughts
+          if (context.showThinking) {
+            await context.showThinking(`🔧 ${action.tool}.${action.command}`);
           }
 
           // Step 3: OBSERVATION - Execute and observe result
@@ -208,8 +194,8 @@ export class ReActAgent extends EventEmitter {
   /**
    * Generate a thought based on current state
    */
-  async think(query, history, context) {
-    const prompt = this.buildThinkingPrompt(query, history);
+  async think(query, history, context, guidance = {}) {
+    const prompt = this.buildThinkingPrompt(query, history, guidance);
 
     try {
       const response = await this.agent.providerManager.generateResponse(prompt, {
@@ -231,12 +217,9 @@ export class ReActAgent extends EventEmitter {
   /**
    * Build the prompt for the thinking step
    */
-  buildThinkingPrompt(query, history) {
-    // Format tool descriptions, prioritized by past performance
-    const toolDescriptions = this.getPrioritizedTools().map(tool => {
-      const commands = tool.parameters.map(p => `  - ${p.action}: ${p.description}`).join('\n');
-      return `**${tool.name}**: ${tool.description}\n${commands}`;
-    }).join('\n\n');
+  buildThinkingPrompt(query, history, { relevant = [], pastExamples = '', skills = '' } = {}) {
+    // Relevant tools in full, the rest as a catalog ranked by past performance
+    const toolDescriptions = formatToolsForPrompt(this.tools, relevant, this.getPrioritizedTools());
 
     // Format history
     const historyText = history.length > 0
@@ -260,7 +243,7 @@ export class ReActAgent extends EventEmitter {
 ## Available Tools:
 ${toolDescriptions}
 
-## Previous Steps:
+${skills ? `## Skills (known procedures for this kind of task; follow them where they apply):\n${skills}\n\n` : ''}${pastExamples ? `## Similar Tasks That Worked Before:\n${pastExamples}\n\n` : ''}## Previous Steps:
 ${historyText}
 
 ## Current Task:
@@ -282,10 +265,11 @@ Respond in this JSON format:
   },
   "finalAnswer": "Your final answer if you're done (omit if not ready)",
   "needsClarification": false,
-  "clarificationQuestion": "Question to ask if needed (omit if not needed)"
+  "clarificationQuestion": "Question to ask if needed (omit if not needed)",
+  "clarificationOptions": ["Up to 4 short likely answers, if the question has obvious choices (omit otherwise)"]
 }
 
-Only include "action" if you need to use a tool.
+Only include "action" if you need to use a tool. To see the commands of a tool listed only by name, use {"tool": "${DESCRIBE_TOOL}", "command": "describe", "params": {"name": "<tool>"}}.
 Only include "finalAnswer" if you have completed the task.
 Respond with valid JSON only.`;
   }
@@ -299,12 +283,16 @@ Respond with valid JSON only.`;
       const jsonMatch = response.match(/\{[\s\S]*\}/);
       if (jsonMatch) {
         const parsed = JSON.parse(jsonMatch[0]);
+        const options = Array.isArray(parsed.clarificationOptions)
+          ? parsed.clarificationOptions.filter(o => typeof o === 'string' && o.trim()).map(o => o.trim().substring(0, 60)).slice(0, 4)
+          : [];
         return {
           reasoning: parsed.reasoning || '',
           action: parsed.action || null,
           finalAnswer: parsed.finalAnswer || null,
-          needsClarification: parsed.needsClarification || false,
-          clarificationQuestion: parsed.clarificationQuestion || null
+          needsClarification: (parsed.needsClarification && !!parsed.clarificationQuestion) || false,
+          clarificationQuestion: parsed.clarificationQuestion || null,
+          clarificationOptions: options
         };
       }
 
@@ -329,58 +317,17 @@ Respond with valid JSON only.`;
   }
 
   /**
-   * Execute an action using the appropriate plugin
-   * Includes retry logic for transient failures (network issues, timeouts)
+   * Execute an action using the appropriate plugin.
+   * Not retried: a plugin command can have side effects that must not be repeated.
    */
   async executeAction(action, context) {
     const { tool, command, params } = action;
-
-    try {
-      const plugin = this.toolMap.get(tool);
-      if (!plugin) {
-        return { error: `Tool '${tool}' not found` };
-      }
-
-      // Execute the plugin action with retry logic for transient failures
-      const result = await retryOperation(
-        async () => plugin.execute({
-          action: command,
-          ...params
-        }),
-        {
-          retries: 2,
-          minTimeout: 1000,
-          maxTimeout: 5000,
-          onRetry: (error, attempt) => {
-            logger.warn(`ReAct plugin execution retry ${attempt} for ${tool}.${command}: ${error.message}`);
-          }
-        }
-      );
-
-      this.updateToolPerformance(tool, true);
-
-      return {
-        success: true,
-        tool,
-        command,
-        result
-      };
-    } catch (error) {
-      logger.error(`ReAct action execution error (${tool}.${command}):`, error, {
-        tool,
-        command,
-        params
-      });
-
-      this.updateToolPerformance(tool, false);
-
-      return {
-        success: false,
-        tool,
-        command,
-        error: error.message
-      };
+    const outcome = await executeTool(this.agent, tool, command, params || {});
+    if (tool !== DESCRIBE_TOOL) this.updateToolPerformance(tool, outcome.success);
+    if (!outcome.success) {
+      logger.warn(`ReAct action ${tool}.${command} failed: ${outcome.error || 'plugin reported failure'}`);
     }
+    return { success: outcome.success, tool, command, ...(outcome.error ? { error: outcome.error } : { result: outcome.result }) };
   }
 
   /**

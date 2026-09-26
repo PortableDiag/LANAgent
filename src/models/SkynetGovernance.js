@@ -15,6 +15,18 @@ const skynetVoteSchema = new mongoose.Schema({
   voteType: { type: String, enum: ['standard', 'quadratic'], default: 'standard' }
 }, { _id: false });
 
+const governancePolicySchema = new mongoose.Schema({
+  // Minimum participating voting weight required to satisfy quorum.
+  quorumWeight: { type: Number, default: 0, min: 0 },
+  // Minimum number of unique voters required to satisfy quorum.
+  quorumVoterCount: { type: Number, default: 0, min: 0 },
+  // Votes-for ratio among non-abstaining votes must EXCEED this. Strictly greater, so the
+  // 0.5 default is the original rule (votesFor > votesAgainst): a tie is rejected.
+  approvalThreshold: { type: Number, default: 0.5, min: 0, max: 1 },
+  // Minimum number of milliseconds a proposal must remain open.
+  minVotingDuration: { type: Number, default: 0, min: 0 }
+}, { _id: false });
+
 const skynetGovernanceSchema = new mongoose.Schema({
   proposalId: {
     type: String,
@@ -65,7 +77,12 @@ const skynetGovernanceSchema = new mongoose.Schema({
     default: false
   },
   // Quadratic voting configuration
-  isQuadratic: { type: Boolean, default: false }
+  isQuadratic: { type: Boolean, default: false },
+  // Optional governance rules. Defaults preserve the original majority-vote behavior.
+  governancePolicy: {
+    type: governancePolicySchema,
+    default: () => ({})
+  }
 }, {
   timestamps: true
 });
@@ -77,6 +94,91 @@ skynetGovernanceSchema.index({ status: 1 });
 
 skynetGovernanceSchema.statics.getActiveProposals = function() {
   return this.find({ status: 'active', votingEndsAt: { $gt: new Date() } }).sort({ createdAt: -1 });
+};
+
+/**
+ * Validate and normalize governance policy values.
+ */
+skynetGovernanceSchema.statics.validateGovernancePolicy = function(policy = {}) {
+  if (policy === null || typeof policy !== 'object' || Array.isArray(policy)) {
+    throw new TypeError('Governance policy must be an object');
+  }
+
+  const normalized = {
+    quorumWeight: policy.quorumWeight ?? 0,
+    quorumVoterCount: policy.quorumVoterCount ?? 0,
+    approvalThreshold: policy.approvalThreshold ?? 0.5,
+    minVotingDuration: policy.minVotingDuration ?? 0
+  };
+
+  if (!Number.isFinite(normalized.quorumWeight) || normalized.quorumWeight < 0) {
+    throw new RangeError('quorumWeight must be a non-negative finite number');
+  }
+  if (!Number.isInteger(normalized.quorumVoterCount) || normalized.quorumVoterCount < 0) {
+    throw new RangeError('quorumVoterCount must be a non-negative integer');
+  }
+  if (!Number.isFinite(normalized.approvalThreshold)
+    || normalized.approvalThreshold < 0
+    || normalized.approvalThreshold > 1) {
+    throw new RangeError('approvalThreshold must be between 0 and 1');
+  }
+  if (!Number.isFinite(normalized.minVotingDuration) || normalized.minVotingDuration < 0) {
+    throw new RangeError('minVotingDuration must be a non-negative finite number');
+  }
+
+  return normalized;
+};
+
+/**
+ * Evaluate quorum, turnout, approval, and the outcome currently supported by a proposal.
+ */
+skynetGovernanceSchema.statics.evaluateProposal = async function(proposalOrId) {
+  let proposal = proposalOrId;
+  if (typeof proposalOrId === 'string') {
+    proposal = await this.findOne({ proposalId: proposalOrId }).lean();
+  } else if (proposalOrId && typeof proposalOrId.toObject === 'function') {
+    proposal = proposalOrId.toObject();
+  }
+
+  if (!proposal) {
+    throw new Error('Proposal not found');
+  }
+
+  const policy = this.validateGovernancePolicy(proposal.governancePolicy || {});
+  const votes = Array.isArray(proposal.votes) ? proposal.votes : [];
+  const votesFor = Number(proposal.votesFor) || 0;
+  const votesAgainst = Number(proposal.votesAgainst) || 0;
+  const votesAbstain = Number(proposal.votesAbstain) || 0;
+  const turnoutWeight = votesFor + votesAgainst + votesAbstain;
+  const countedWeight = votesFor + votesAgainst;
+  const voterCount = new Set(votes.map(vote => vote.voterFingerprint).filter(Boolean)).size;
+  const approvalRatio = countedWeight > 0 ? votesFor / countedWeight : 0;
+  const quorumByWeight = turnoutWeight >= policy.quorumWeight;
+  const quorumByVoterCount = voterCount >= policy.quorumVoterCount;
+  const quorumMet = quorumByWeight && quorumByVoterCount;
+  const approvalMet = countedWeight > 0 && approvalRatio > policy.approvalThreshold;
+  const proposedOutcome = quorumMet && approvalMet ? 'passed' : 'rejected';
+
+  return {
+    proposalId: proposal.proposalId,
+    quorumMet,
+    quorumByWeight,
+    quorumByVoterCount,
+    quorumWeight: policy.quorumWeight,
+    quorumVoterCount: policy.quorumVoterCount,
+    voterCount,
+    turnoutWeight,
+    turnout: {
+      weight: turnoutWeight,
+      voterCount,
+      participationWeight: turnoutWeight
+    },
+    approvalRatio,
+    approvalThreshold: policy.approvalThreshold,
+    approvalMet,
+    proposedOutcome,
+    status: proposal.status
+  };
 };
 
 /**
@@ -134,7 +236,21 @@ skynetGovernanceSchema.methods.getResults = function() {
  */
 skynetGovernanceSchema.methods.finalize = async function() {
   try {
-    if (this.votesFor > this.votesAgainst) {
+    const now = new Date();
+    const policy = this.constructor.validateGovernancePolicy(this.governancePolicy || {});
+    const createdAt = this.createdAt ? new Date(this.createdAt) : now;
+    const minimumEnd = new Date(createdAt.getTime() + policy.minVotingDuration);
+
+    if (now < minimumEnd && now < new Date(this.votingEndsAt)) {
+      throw new Error(`Proposal ${this.proposalId} has not reached its minimum voting duration`);
+    }
+
+    const evaluation = await this.constructor.evaluateProposal(this);
+    const votingEnded = now >= new Date(this.votingEndsAt);
+
+    if (!evaluation.quorumMet) {
+      this.status = votingEnded ? 'expired' : 'rejected';
+    } else if (evaluation.approvalMet) {
       this.status = 'passed';
     } else {
       this.status = 'rejected';

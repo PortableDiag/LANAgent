@@ -157,7 +157,7 @@ export class MultiUserSupport {
         { retries: 2, context: 'processGuestMessage', minTimeout: 1000 }
       );
 
-      await ctx.reply(response.text || response);
+      await ctx.reply(response?.text || response?.content || String(response));
 
       // Log successful interaction
       logger.info(`Guest response sent to ${userName} (${userId})`);

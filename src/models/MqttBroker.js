@@ -128,6 +128,130 @@ mqttBrokerSchema.index({ type: 1 });
 mqttBrokerSchema.index({ enabled: 1 });
 
 /**
+ * Check whether an MQTT topic filter is syntactically valid.
+ * Wildcards may only occupy an entire level, and '#' must be the final level.
+ *
+ * @param {String} filter - MQTT topic name or topic filter
+ * @param {Boolean} allowWildcards - Whether '+' and '#' are permitted
+ * @returns {Boolean} Whether the filter is valid
+ */
+function isValidMqttFilter(filter, allowWildcards = true) {
+  if (typeof filter !== 'string' || filter.length === 0 || filter.includes('\u0000')) {
+    return false;
+  }
+
+  const levels = filter.split('/');
+  for (let index = 0; index < levels.length; index += 1) {
+    const level = levels[index];
+
+    if (level.includes('+') && (level !== '+' || !allowWildcards)) {
+      return false;
+    }
+    if (level.includes('#') && (level !== '#' || !allowWildcards || index !== levels.length - 1)) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+/**
+ * Determine whether an ACL filter covers a requested MQTT topic or subscription.
+ *
+ * @param {String} aclFilter - Filter from the ACL rule
+ * @param {String} requestedFilter - Topic or subscription being authorized
+ * @returns {Boolean} Whether the ACL grants coverage
+ */
+function mqttFilterMatches(aclFilter, requestedFilter) {
+  if (!isValidMqttFilter(aclFilter) || !isValidMqttFilter(requestedFilter)) {
+    return false;
+  }
+
+  const aclLevels = aclFilter.split('/');
+  const requestedLevels = requestedFilter.split('/');
+
+  // MQTT 4.7.2: wildcards at the first level never match topics beginning with '$'.
+  if (requestedLevels[0].startsWith('$') && (aclLevels[0] === '+' || aclLevels[0] === '#')) {
+    return false;
+  }
+
+  for (let index = 0; index < aclLevels.length; index += 1) {
+    const aclLevel = aclLevels[index];
+    const requestedLevel = requestedLevels[index];
+
+    if (aclLevel === '#') {
+      return true;
+    }
+    if (requestedLevel === undefined) {
+      return false;
+    }
+    // A requested wildcard is a SUBSCRIPTION to everything at that level, so it is
+    // only covered by an ACL wildcard at least as broad: '+' by '+' (or '#'),
+    // '#' only by '#'. Letting a requested '+' match a literal ACL level would let
+    // an ACL for 'a/b/c' authorise a subscription to 'a/+/c'.
+    if (requestedLevel === '#') {
+      return false;
+    }
+    if (requestedLevel === '+') {
+      if (aclLevel === '+') continue;
+      return false;
+    }
+    if (aclLevel === '+' || aclLevel === requestedLevel) {
+      continue;
+    }
+    return false;
+  }
+
+  return aclLevels.length === requestedLevels.length;
+}
+
+/**
+ * Authorize a user's access to an MQTT topic.
+ * Password handling intentionally remains outside this method.
+ *
+ * @param {String} username - Internal broker username
+ * @param {String} topic - MQTT topic name or subscription filter
+ * @param {String} operation - 'read' for subscribe or 'write' for publish
+ * @returns {{authorized: Boolean, matchedRule: Object|null}} Authorization result
+ */
+mqttBrokerSchema.methods.authorizeTopicAccess = function(username, topic, operation) {
+  const result = { authorized: false, matchedRule: null };
+
+  if (this.type !== 'internal' ||
+      typeof username !== 'string' ||
+      !username ||
+      !['read', 'write'].includes(operation) ||
+      // Publish targets a topic NAME — wildcards are only legal in subscriptions.
+      !isValidMqttFilter(topic, operation === 'read')) {
+    return result;
+  }
+
+  const user = (this.brokerSettings?.allowedUsers || [])
+    .find(allowedUser => allowedUser?.username === username);
+
+  if (!user) {
+    return result;
+  }
+
+  const rule = (user.acl || []).find(candidate => {
+    if (!candidate || !mqttFilterMatches(candidate.topic, topic)) {
+      return false;
+    }
+    return candidate.permissions === operation || candidate.permissions === 'readwrite';
+  });
+
+  if (rule) {
+    result.authorized = true;
+    result.matchedRule = {
+      topic: rule.topic,
+      permissions: rule.permissions
+    };
+  }
+
+  return result;
+};
+
+/**
  * Add a new subscription to the broker
  * @param {Object} subscription - The subscription object containing topic, qos, and handler
  */

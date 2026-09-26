@@ -20,6 +20,7 @@ import { escapeMarkdown } from '../utils/markdown.js';
 import { getProvider, PROVIDER_TYPES } from './gitHosting/index.js';
 import { GitHostingSettings } from '../models/GitHostingSettings.js';
 import { deniedAutonomousTargetReason } from './featureClassifier.js';
+import { buildCodeContext } from './selfModContext.js';
 import {
   buildFileOutline,
   renderOutline,
@@ -102,8 +103,20 @@ const AUTO_APPROVE_SETTING_KEY = 'featureRequests.autoApprove';
 // the call can never produce: the model emits a truncated stub and validation
 // rejects it as CODE_REMOVED. Keep these three in one place so the preflight in
 // applyAICapabilityUpgrade and the sizing in generateAICodeUpgrade cannot drift.
-const UPGRADE_OUTPUT_CAP = 32000;
-const UPGRADE_REASONING_HEADROOM = 6000;
+//
+// Sized for a reasoning model (openai/gpt-5.6-luna: 128K max output). Generation
+// used to run at reasoning_effort 'minimal' inside a 32K cap with 6K of headroom —
+// the model was told to write a whole file without thinking, and the PR stream
+// showed it (2026-09-25: 34 PRs, none mergeable as written). The headroom now
+// funds UPGRADE_REASONING_EFFORT; the cap rose with it so the largest whole-file
+// target grew (17.3K -> 21.3K tokens) rather than shrank.
+const UPGRADE_OUTPUT_CAP = 48000;
+const UPGRADE_REASONING_HEADROOM = 16000;
+// SELFMOD_REASONING_EFFORT overrides ('low' | 'medium' | 'high').
+const UPGRADE_REASONING_EFFORT = process.env.SELFMOD_REASONING_EFFORT || 'medium';
+// A model that finds no change it can make correctly answers with exactly this,
+// instead of being pushed (with rising temperature) into inventing one.
+const NO_SAFE_CHANGE = 'NO_SAFE_CHANGE';
 const UPGRADE_SIZE_MULTIPLIER = 1.5;
 const UPGRADE_TOKENS_PER_CHAR = 1 / 3.5;
 
@@ -1922,13 +1935,27 @@ Pick the single most relevant existing file that should be enhanced.`;
 
         logger.info(`✅ Applied AI capability upgrade to ${repoFile}`);
 
-        // Best-effort: also generate or update a matching test file in the same
-        // branch so the PR ships code + test together. Failures here log a
-        // warning but DO NOT fail the upgrade — the code change is still valid
-        // on its own.
+        // Generate or update a matching test file in the same branch and RUN it
+        // (before 2026-09-25 nothing executed these, and reviewers kept finding PRs
+        // whose own test could not pass). Outcomes:
+        //   - passes                  -> committed with the change
+        //   - found a bug in the change (TEST_GATE_FAILED) -> no PR: the change does
+        //     not do what it claims
+        //   - still fails after a repair, or could not be generated -> the PR opens
+        //     WITHOUT the test and says so, so the feature is not lost over its test
         try {
           await this.generateOrUpdateTestForUpgrade(improvement, targetFile, modifiedCode);
         } catch (testGenErr) {
+          if (testGenErr.code === 'TEST_GATE_FAILED') {
+            logger.error(`❌ ${testGenErr.message} - aborting PR creation`);
+            throw testGenErr;
+          }
+          if (testGenErr.code === 'TEST_UNVERIFIED') {
+            improvement.reviewWarnings = [
+              ...(improvement.reviewWarnings || []),
+              `No test shipped: ${testGenErr.message}`
+            ];
+          }
           logger.warn(`Test-file generation skipped: ${testGenErr.message}`);
         }
       } else {
@@ -1950,6 +1977,27 @@ Pick the single most relevant existing file that should be enhanced.`;
    * exists at that path it is appended-to via AI; otherwise a new stub is
    * created. The result is syntax-checked and committed on the same branch.
    */
+  /**
+   * CODEBASE CONTEXT block for a generation prompt (see selfModContext.js), cached
+   * per target so the retry attempts of one generation reuse it. `content` may be
+   * null, in which case the target is read from disk. Never throws.
+   */
+  async codeContextFor(targetFile, content) {
+    if (!targetFile) return '';
+    try {
+      const abs = path.isAbsolute(targetFile) ? targetFile : path.join(this.developmentPath, targetFile);
+      const src = content ?? await fs.readFile(abs, 'utf8');
+      const key = `${abs}:${src.length}`;
+      if (this._codeContextCache?.key === key) return this._codeContextCache.value;
+      const value = await buildCodeContext({ repoRoot: this.developmentPath, targetFile: abs, content: src });
+      this._codeContextCache = { key, value };
+      return value;
+    } catch (err) {
+      logger.debug(`Code context unavailable for ${targetFile}: ${err.message}`);
+      return '';
+    }
+  }
+
   async generateOrUpdateTestForUpgrade(improvement, targetFile, modifiedCode) {
     if (!targetFile) return;
     const base = path.basename(targetFile, path.extname(targetFile));
@@ -1963,10 +2011,25 @@ Pick the single most relevant existing file that should be enhanced.`;
       // doesn't exist — we'll create one
     }
 
-    // Truncate modifiedCode in the prompt so we don't blow the token budget on
-    // a large file. The AI just needs the *new* behavior to test, and the
-    // description is usually enough; the code is a tie-breaker.
-    const codeForPrompt = (modifiedCode || '').slice(0, 6000);
+    // The test writer used to see the first 6,000 chars of the new code with a 4K
+    // budget and no reasoning funding, and nothing ever RAN what it wrote — so PRs
+    // shipped tests that could not import, used Jest APIs, stubbed methods the code
+    // never calls, or asserted the PR's own bug. It now sees the whole file (up to a
+    // generous cap), the same codebase context as the generator, and its output is
+    // executed before a PR can open.
+    const CODE_CAP = 60000;
+    const codeForPrompt = (modifiedCode || '').length > CODE_CAP
+      ? modifiedCode.slice(0, CODE_CAP) + '\n// … (truncated)'
+      : (modifiedCode || '');
+    const codeContext = await this.codeContextFor(targetFile, modifiedCode);
+    const importPath = path.relative(path.dirname(testAbsPath), path.join(this.developmentPath, targetFile)).split(path.sep).join('/');
+
+    const rules = `TEST RULES (a test that breaks these is rejected):
+- Only 'node:test' and 'node:assert/strict' plus the module under test (import it as '${importPath.startsWith('.') ? importPath : './' + importPath}'). No Jest APIs (no mock.fn().mockResolvedValue, no jest.*), no supertest, no node-mocks-http, no tests/mocks/.
+- No network, no live MongoDB, no real AI calls. Stub by assigning over the real methods the code calls (e.g. Model.find = () => ({ lean: async () => rows })) and restore them in a finally block. Only stub methods that the code under test ACTUALLY calls.
+- Stub data must have the shape production really has — use the fields shown in CODEBASE CONTEXT, not invented ones.
+- Assert the behaviour the change DESCRIPTION promises. Never weaken, loosen or delete an existing assertion, test or comment.
+- Return ONLY JavaScript — no markdown fences, no prose.`;
 
     const prompt = existingTest
       ? `You are updating an existing test file for a capability upgrade.
@@ -1975,7 +2038,9 @@ CHANGE DESCRIPTION: ${improvement.description}
 TYPE: ${improvement.type}
 TARGET FILE: ${targetFile}
 
-NEW CODE (truncated to 6000 chars):
+${codeContext}
+
+NEW CODE:
 \`\`\`
 ${codeForPrompt}
 \`\`\`
@@ -1985,61 +2050,136 @@ EXISTING TEST FILE (${testRelPath}):
 ${existingTest}
 \`\`\`
 
-Output the COMPLETE updated test file. Add one new test case covering the new behavior described above. Keep all existing tests intact. Use the same test framework as the existing file (detect from imports). Return ONLY JavaScript — no markdown fences, no prose.`
+${rules}
+
+Output the COMPLETE updated test file: every existing test kept exactly, plus focused test case(s) for the new behaviour.`
       : `You are creating a new test file for a capability upgrade.
 
 CHANGE DESCRIPTION: ${improvement.description}
 TYPE: ${improvement.type}
 TARGET FILE: ${targetFile}
 
-NEW CODE (truncated to 6000 chars):
+${codeContext}
+
+NEW CODE:
 \`\`\`
 ${codeForPrompt}
 \`\`\`
 
-Create a minimal Node test file at ${testRelPath} using node:test (built-in test runner) and node:assert/strict. Include one focused test case that exercises the new behavior described above. Import the target via relative path. Stub external dependencies as needed. Keep under 80 lines. Return ONLY JavaScript — no markdown fences, no prose.`;
+${rules}
 
-    let response;
-    try {
-      response = await this.agent.providerManager.generateResponse(prompt, {
-        maxTokens: 4000,
-        temperature: 0.2
-      });
-    } catch (aiErr) {
-      throw new Error(`AI test generation failed: ${aiErr.message}`);
-    }
+Create ${testRelPath} with focused test case(s) that exercise the new behaviour. Keep it under 120 lines.`;
 
-    let testCode = response?.content || response?.text || response?.message || '';
-    const fenced = testCode.match(/```(?:javascript|js)?\s*([\s\S]*?)```/i);
-    if (fenced) testCode = fenced[1];
-    testCode = testCode.trim();
+    const askForTest = async (text) => {
+      let response;
+      try {
+        response = await this.agent.providerManager.generateResponse(text, {
+          maxTokens: 16000,
+          temperature: 0.2,
+          additionalParams: { reasoning_effort: 'low' }
+        });
+      } catch (aiErr) {
+        throw new Error(`AI test generation failed: ${aiErr.message}`);
+      }
+      let out = response?.content || response?.text || response?.message || '';
+      const fenced = out.match(/```(?:javascript|js)?\s*([\s\S]*?)```/i);
+      if (fenced) out = fenced[1];
+      return out.trim();
+    };
 
-    if (!testCode || testCode.length < 100) {
-      throw new Error(`AI returned empty or too-short test (${testCode.length} chars)`);
-    }
-    if (!/(test|describe|it)\s*\(/.test(testCode)) {
-      throw new Error('AI did not produce recognizable test calls (test/describe/it)');
-    }
-    if (!testCode.endsWith('\n')) testCode += '\n';
-
-    await fs.mkdir(path.dirname(testAbsPath), { recursive: true });
-    await fs.writeFile(testAbsPath, testCode);
-
-    // Syntax-check; if the test is malformed, roll back the file and bail.
-    try {
-      execSync(`node --check "${testAbsPath}"`, { timeout: 10000, stdio: 'pipe' });
-    } catch (syntaxErr) {
+    const restore = async () => {
       try {
         if (existingTest === null) await fs.unlink(testAbsPath);
         else await fs.writeFile(testAbsPath, existingTest);
       } catch { /* best-effort rollback */ }
-      const stderr = syntaxErr.stderr?.toString() || syntaxErr.message;
-      throw new Error(`Generated test failed syntax check: ${stderr.slice(0, 300)}`);
+    };
+
+    // Write, syntax-check and RUN one candidate. Returns null on pass, else the
+    // failure text. Test infrastructure failures (bad shape) throw.
+    const tryCandidate = async (testCode) => {
+      if (!testCode || testCode.length < 100) {
+        throw new Error(`AI returned empty or too-short test (${testCode.length} chars)`);
+      }
+      if (!/(test|describe|it)\s*\(/.test(testCode)) {
+        throw new Error('AI did not produce recognizable test calls (test/describe/it)');
+      }
+      if (!testCode.endsWith('\n')) testCode += '\n';
+      await fs.mkdir(path.dirname(testAbsPath), { recursive: true });
+      await fs.writeFile(testAbsPath, testCode);
+      try {
+        execSync(`node --check "${testAbsPath}"`, { timeout: 10000, stdio: 'pipe' });
+      } catch (syntaxErr) {
+        return `SyntaxError: ${(syntaxErr.stderr?.toString() || syntaxErr.message).slice(0, 1500)}`;
+      }
+      try {
+        // NODE_TEST_CONTEXT is stripped: a child `node --test` that inherits it from
+        // an enclosing test runner reports as a subtest and exits 0 even on failure.
+        const { NODE_TEST_CONTEXT, ...parentEnv } = process.env;
+        execSync(`node --test --test-force-exit "${testRelPath}"`, {
+          cwd: this.developmentPath, timeout: 120000, stdio: 'pipe', env: { ...parentEnv, NODE_ENV: 'test' }
+        });
+        return null;
+      } catch (runErr) {
+        const out = `${runErr.stdout?.toString() || ''}\n${runErr.stderr?.toString() || ''}`.trim() || runErr.message;
+        return out.slice(-4000);
+      }
+    };
+
+    let candidate = await askForTest(prompt);
+    let failure;
+    try {
+      failure = await tryCandidate(candidate);
+    } catch (shapeErr) {
+      await restore();
+      throw shapeErr;
+    }
+
+    if (failure) {
+      // One repair round with the real failure. The failing test may be wrong — or
+      // it may have caught a real bug in the new code, in which case the PR must not
+      // open with the test "fixed" to agree with the bug.
+      logger.warn(`Generated test failed its first run — one repair attempt: ${failure.split('\n').slice(-6).join(' | ').slice(0, 400)}`);
+      const repair = await askForTest(`${prompt}
+
+YOUR PREVIOUS TEST FILE:
+\`\`\`
+${candidate}
+\`\`\`
+
+IT FAILED WHEN RUN WITH node --test:
+\`\`\`
+${failure}
+\`\`\`
+
+If the failure is a mistake in the TEST (wrong stub, wrong import, wrong expectation about unchanged behaviour), output the corrected complete test file.
+If the failure shows a real BUG in NEW CODE (it does not do what the DESCRIPTION promises, or it breaks existing behaviour), output exactly CODE_BUG: followed by one line naming the bug. Do NOT weaken the test to make a buggy change pass.`);
+      if (/^CODE_BUG:/.test(repair)) {
+        await restore();
+        const err = new Error(`TEST_GATE_FAILED: generated test found a bug in the change — ${repair.slice(9, 400).trim()}`);
+        err.code = 'TEST_GATE_FAILED';
+        throw err;
+      }
+      candidate = repair;
+      try {
+        failure = await tryCandidate(candidate);
+      } catch (shapeErr) {
+        await restore();
+        throw shapeErr;
+      }
+      if (failure) {
+        // The TEST could not be made to pass, but nothing showed the CHANGE is
+        // wrong. Losing the feature over its test would throttle self-improvement,
+        // so the PR still opens — without the test, and flagged for the reviewer.
+        await restore();
+        const err = new Error(`TEST_UNVERIFIED: generated test still fails after one repair — ${failure.split('\n').filter(Boolean).slice(-4).join(' | ').slice(0, 400)}`);
+        err.code = 'TEST_UNVERIFIED';
+        throw err;
+      }
     }
 
     await this.git.add(testRelPath);
     await this.git.commit(`test: ${existingTest ? 'extend' : 'add'} ${base} test for ${improvement.type}`);
-    logger.info(`✅ ${existingTest ? 'Updated' : 'Created'} test file: ${testRelPath}`);
+    logger.info(`✅ ${existingTest ? 'Updated' : 'Created'} test file: ${testRelPath} (passes)`);
   }
 
   /**
@@ -2224,7 +2364,9 @@ OUTPUT REQUIREMENTS:
         
       } catch (error) {
         logger.error(`❌ Attempt ${attempt} failed: ${error.message}`);
-        if (attempt === maxRetries) throw error;
+        // A decline is an answer, not a flake: retrying at a higher temperature is
+        // exactly how a model gets pushed into fabricating a feature.
+        if (error.code === NO_SAFE_CHANGE || attempt === maxRetries) throw error;
       }
     }
     
@@ -2262,11 +2404,17 @@ OUTPUT REQUIREMENTS:
         // thinking. 'minimal' is more aggressive than 'low' — caps reasoning
         // hard so the visible code-output isn't starved. Non-reasoning
         // providers ignore the param.
-        additionalParams: { reasoning_effort: 'minimal' }
+        additionalParams: { reasoning_effort: UPGRADE_REASONING_EFFORT }
       });
 
       // Clean the response of any markdown formatting
       let code = response.content.trim();
+      if (code === NO_SAFE_CHANGE || code.startsWith(NO_SAFE_CHANGE + '\n')) {
+        const err = new Error(`${NO_SAFE_CHANGE}: the model found no change it could make correctly` +
+          (code.length > NO_SAFE_CHANGE.length ? ` — ${code.slice(NO_SAFE_CHANGE.length).trim().slice(0, 300)}` : ''));
+        err.code = NO_SAFE_CHANGE;
+        throw err;
+      }
       
       // Remove markdown code blocks if present
       if (code.startsWith('```')) {
@@ -2419,8 +2567,13 @@ OUTPUT REQUIREMENTS:
         // in the whole-file path.
         maxTokens: Math.min(UPGRADE_OUTPUT_CAP, 10000 + UPGRADE_REASONING_HEADROOM),
         temperature: attempt === 1 ? 0.1 : 0.2,
-        additionalParams: { reasoning_effort: 'minimal' }
+        additionalParams: { reasoning_effort: UPGRADE_REASONING_EFFORT }
       });
+      if ((response?.content || '').trim().startsWith(NO_SAFE_CHANGE)) {
+        const err = new Error(`${NO_SAFE_CHANGE}: the model found no change it could make correctly`);
+        err.code = NO_SAFE_CHANGE;
+        throw err;
+      }
 
       try {
         const blocks = parseSearchReplaceBlocks(response?.content || '');
@@ -2518,6 +2671,7 @@ Rules:
     const specificInstructions = this.getSpecificInstructions(improvement.type, attempt);
     const githubContext = await this.buildGithubContext(improvement);
 
+    const codeContext = await this.codeContextFor(targetFile, null);
     const excerptText = excerpts
       .map(e => `=== EXCERPT: lines ${e.startLine}-${e.endLine} of ${targetFile} ===\n${e.text}\n=== END EXCERPT ===`)
       .join('\n\n');
@@ -2533,6 +2687,8 @@ UPGRADE DETAILS:
 ${lastError ? `\nPREVIOUS ATTEMPT FAILED WITH:\n${lastError.message}\nFix that problem and resend ALL blocks.\n` : ''}
 ${specificInstructions}
 ${githubContext}
+
+${codeContext}
 
 FILE EXCERPTS (the ONLY parts of the file you may edit):
 ${excerptText}
@@ -2550,7 +2706,7 @@ BLOCK RULES (violations make the edit unappliable):
 3. Keep SEARCH sections under 30 lines. Use several small blocks rather than one big one.
 4. To ADD code, SEARCH for the exact lines it goes next to and REPLACE with those same lines plus the new code.
 5. To add an import, anchor a block on the existing import lines shown in the first excerpt.
-6. Only edit within the excerpts. If the change cannot be made there, output a single block whose REPLACE equals its SEARCH.
+6. Only edit within the excerpts. If the change cannot be made correctly there, output exactly ${NO_SAFE_CHANGE} and nothing else.
 7. Whole lines only - never start or end a SEARCH mid-line.
 
 CODE RULES:
@@ -2570,6 +2726,7 @@ Respond with the blocks only - no explanations, no markdown fences.`;
     const exampleChanges = this.getExampleChanges(improvement.type);
     const antiPatterns = this.getAntiPatterns();
     const githubContext = await this.buildGithubContext(improvement);
+    const codeContext = await this.codeContextFor(improvement.targetFile || improvement.file, originalCode);
 
     return `You are an expert software engineer implementing a capability upgrade for LANAgent.
 
@@ -2578,7 +2735,7 @@ UPGRADE DETAILS:
 - Description: ${improvement.description}
 - Implementation: ${improvement.implementation || 'AI-determined implementation'}
 - File: ${improvement.targetFile || improvement.file}
-- Attempt: ${attempt}/3 ${attempt > 1 ? '(RETRY - previous attempts generated no changes)' : ''}
+- Attempt: ${attempt}/3 ${attempt > 1 ? '(RETRY - the previous attempt returned no usable change)' : ''}
 
 ${specificInstructions}
 ${githubContext}
@@ -2587,6 +2744,8 @@ EXAMPLE OF EXPECTED CHANGES:
 ${exampleChanges}
 
 ${antiPatterns}
+
+${codeContext}
 
 CURRENT CODE:
 ${originalCode}
@@ -2724,7 +2883,7 @@ NEVER OUTPUT NON-CODE CONTENT:
 - First line must be an import statement, comment, or code declaration
 
 CRITICAL REQUIREMENTS:
-1. You MUST make actual, meaningful code changes - DO NOT return identical code
+1. Make a real, meaningful change that is CORRECT against the CODEBASE CONTEXT above: every field you read must be one something writes, every method you call must exist on the module you call it on. If no change meets these rules, output exactly ${NO_SAFE_CHANGE} (optionally followed by one line saying why) instead of code. Declining is a valid answer; a fabricated feature is not
 2. Add concrete functionality as described in the upgrade type
 3. Follow existing code patterns and conventions
 4. Add proper error handling where appropriate

@@ -18,6 +18,9 @@ const scanCache = new NodeCache({
     useClones: false
 });
 
+// Track database requests currently being resolved so identical misses share one query.
+const inFlightRequests = new Map();
+
 // Cache statistics
 let stats = {
     hits: 0,
@@ -63,6 +66,12 @@ export async function getCachedCount(ScanProgress, sessionScanId, status = null)
 
     stats.misses++;
 
+    const existingRequest = inFlightRequests.get(cacheKey);
+    if (existingRequest) {
+        logger.debug(`ScanProgress request COALESCED: ${cacheKey}`);
+        return existingRequest;
+    }
+
     // Build query
     const query = { sessionScanId };
     if (status) {
@@ -70,14 +79,32 @@ export async function getCachedCount(ScanProgress, sessionScanId, status = null)
     }
 
     // Fetch from database
-    const count = await retryOperation(() => ScanProgress.countDocuments(query));
+    let request;
+    request = (async () => {
+        try {
+            const count = await retryOperation(
+                () => ScanProgress.countDocuments(query),
+                { retries: 3 }
+            );
 
-    // Cache the result
-    scanCache.set(cacheKey, count);
-    stats.sets++;
-    logger.debug(`ScanProgress cache SET: ${cacheKey} = ${count}`);
+            // Cache the result — unless the session was invalidated while this
+            // query was in flight (the result may predate that write).
+            if (inFlightRequests.get(cacheKey) === request) {
+                scanCache.set(cacheKey, count);
+                stats.sets++;
+                logger.debug(`ScanProgress cache SET: ${cacheKey} = ${count}`);
+            }
 
-    return count;
+            return count;
+        } finally {
+            if (inFlightRequests.get(cacheKey) === request) {
+                inFlightRequests.delete(cacheKey);
+            }
+        }
+    })();
+
+    inFlightRequests.set(cacheKey, request);
+    return request;
 }
 
 /**
@@ -100,18 +127,42 @@ export async function getCachedPendingEntries(ScanProgress, sessionScanId) {
 
     stats.misses++;
 
+    const existingRequest = inFlightRequests.get(cacheKey);
+    if (existingRequest) {
+        logger.debug(`ScanProgress request COALESCED: ${cacheKey}`);
+        return existingRequest;
+    }
+
     // Fetch from database
-    const entries = await retryOperation(() => ScanProgress.find({
-        sessionScanId,
-        status: 'pending'
-    }).sort({ fileSize: 1 }));
+    let request;
+    request = (async () => {
+        try {
+            const entries = await retryOperation(
+                () => ScanProgress.find({
+                    sessionScanId,
+                    status: 'pending'
+                }).sort({ fileSize: 1 }),
+                { retries: 3 }
+            );
 
-    // Cache the result
-    scanCache.set(cacheKey, entries);
-    stats.sets++;
-    logger.debug(`ScanProgress cache SET: ${cacheKey} (${entries.length} entries)`);
+            // Cache the result — unless the session was invalidated while this
+            // query was in flight (the result may predate that write).
+            if (inFlightRequests.get(cacheKey) === request) {
+                scanCache.set(cacheKey, entries);
+                stats.sets++;
+                logger.debug(`ScanProgress cache SET: ${cacheKey} (${entries.length} entries)`);
+            }
 
-    return entries;
+            return entries;
+        } finally {
+            if (inFlightRequests.get(cacheKey) === request) {
+                inFlightRequests.delete(cacheKey);
+            }
+        }
+    })();
+
+    inFlightRequests.set(cacheKey, request);
+    return request;
 }
 
 /**
@@ -133,6 +184,12 @@ export function invalidateSessionCache(sessionScanId) {
     // Batch delete keys
     const deletedCount = scanCache.del(keysToDelete);
 
+    // Detach in-flight queries so later callers re-query and the stale result
+    // is not written back into the cache.
+    for (const key of keysToDelete) {
+        inFlightRequests.delete(key);
+    }
+
     if (deletedCount > 0) {
         stats.invalidations += deletedCount;
         logger.debug(`ScanProgress cache INVALIDATED: ${deletedCount} keys for session ${sessionScanId}`);
@@ -148,7 +205,10 @@ export function invalidateSessionCache(sessionScanId) {
  * @returns {Promise<UpdateResult>} - Update result
  */
 export async function updateOneWithCacheInvalidation(ScanProgress, filter, update) {
-    const result = await retryOperation(() => ScanProgress.updateOne(filter, update));
+    const result = await retryOperation(
+        () => ScanProgress.updateOne(filter, update),
+        { retries: 3 }
+    );
 
     // Invalidate cache if we know the sessionScanId
     if (filter.sessionScanId) {
@@ -168,6 +228,7 @@ export function getCacheStats() {
     return {
         ...stats,
         keys: scanCache.keys().length,
+        inFlight: inFlightRequests.size,
         nodeCache: cacheStats,
         hitRate: stats.hits + stats.misses > 0
             ? ((stats.hits / (stats.hits + stats.misses)) * 100).toFixed(1) + '%'

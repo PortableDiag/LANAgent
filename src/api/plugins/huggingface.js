@@ -657,7 +657,10 @@ export default class HuggingFacePlugin extends BasePlugin {
     const label = top?.label || 'unknown';
     const score = top?.score;
     const scoreStr = score != null ? ` (${(score * 100).toFixed(1)}%)` : '';
-    const isSpam = label.toLowerCase().includes('spam') && !label.toLowerCase().includes('not');
+    // Binary classifiers such as the default mrm8488/bert-tiny-finetuned-sms-spam-detection
+    // report LABEL_0 (ham) / LABEL_1 (spam) rather than a word, so a label test for "spam"
+    // alone could never return true.
+    const isSpam = label === 'LABEL_1' || (label.toLowerCase().includes('spam') && !label.toLowerCase().includes('not'));
 
     return {
       success: true,
