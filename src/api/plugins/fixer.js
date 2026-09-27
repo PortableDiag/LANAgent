@@ -87,6 +87,7 @@ export default class FixerPlugin extends BasePlugin {
 
     this.initialized = false;
     this.cache = new NodeCache({ stdTTL: this.config.cacheDuration, checkperiod: 60 });
+    this.inFlightRequests = new Map();
   }
 
   async initialize() {
@@ -188,9 +189,26 @@ export default class FixerPlugin extends BasePlugin {
     if (cached !== undefined) {
       return cached;
     }
-    const data = await fetchFunc();
-    this.cache.set(key, data);
-    return data;
+
+    const inFlightRequest = this.inFlightRequests.get(key);
+    if (inFlightRequest) {
+      return inFlightRequest;
+    }
+
+    const request = Promise.resolve()
+      .then(() => fetchFunc())
+      .then(data => {
+        this.cache.set(key, data);
+        return data;
+      })
+      .finally(() => {
+        if (this.inFlightRequests.get(key) === request) {
+          this.inFlightRequests.delete(key);
+        }
+      });
+
+    this.inFlightRequests.set(key, request);
+    return request;
   }
 
   async getLatestRates({ base }) {
@@ -391,6 +409,7 @@ export default class FixerPlugin extends BasePlugin {
   async cleanup() {
     this.logger.info(`Cleaning up ${this.name} plugin...`);
     this.cache.flushAll();
+    this.inFlightRequests.clear();
     await PluginSettings.clearCache(this.name);
     this.initialized = false;
   }

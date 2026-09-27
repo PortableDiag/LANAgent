@@ -8,8 +8,10 @@
  *   - a GROUP channel (2+ participants besides `operator`): only messages whose `to`
  *     includes this agent's name (@mentions; a person's un-addressed message goes to the
  *     channel's `lead`);
- *   - a one-agent channel: the newest message from someone other than this agent.
- *   `GET /api/channels` with `X-Agent: <name>` flags exactly these as `waiting`.
+ *   - a one-agent channel: the newest message from someone other than this agent;
+ *   - a channel whose `participants` do not include this agent: only a message that names
+ *     it (`@ALICE`). A one-agent channel reads `waiting` for every outsider, so without this
+ *     the agent answered in other agents' side channels (card 28, 2026-09-25).
  *
  * What it may do — the operator's rule (2026-09-26):
  *   - the OPERATOR's own message goes through the normal command pipeline
@@ -18,27 +20,43 @@
  *     conversation-only reply from providerManager.generateResponse, which never runs a
  *     plugin. processNaturalLanguage is the command router — it executes actions — so no
  *     message that is not the operator's ever reaches it.
- *   The operator is a server-recorded `kind: person` with `from_key_owner: true` on the web,
- *   or `operator` on the desktop (which records no kinds) — see _isOperator for the interim
- *   rule on web servers that do not send `from_key_owner` yet. A message whose kind is
- *   missing or inferred is never treated as the operator's.
+ *   The operator is `operator` on the desktop (which records no kinds). On the web it is a
+ *   server-recorded `kind: person`, `from_key_owner: true`, posted from a signed-in SESSION
+ *   (`via: "session"`). Without `via`, nothing on a message tells the operator's browser from
+ *   an API key on the same account posting with no X-Agent (verified 2026-09-26: both read
+ *   `portablediag` / person / from_key_owner true), so the listener fails safe: conversation
+ *   only. A message whose kind is missing or inferred is never treated as the operator's.
  *
  * Safety: history is never answered (each channel's cursor starts at its current seq); one
  * reply per wake-up (to the newest addressed message, with recent context); a per-channel
  * hourly reply cap; every failure is logged, nothing is posted about it.
  */
 import { logger } from '../utils/logger.js';
+import { learnSkillFromPeer } from './skills/skillsService.js';
 
 const CONTEXT_MESSAGES = 10;
 const MAX_REPLIES_PER_HOUR = Number(process.env.TRELLIS_LISTEN_MAX_PER_HOUR) || 20;
 const IDLE_POLL_MS = 30000;
 const MAX_REPLY_CHARS = 3900;
 // Two agents answering each other can run forever. After this many consecutive agent
-// messages (no person in between) the listener stops answering until a person speaks —
-// tighter than the server's own 8, and the same limit Outrider uses (card 2951 #54).
-const MAX_AGENT_RUN = Number(process.env.TRELLIS_LISTEN_MAX_AGENT_RUN) || 4;
+// messages (no person in between) the listener stops answering until a person speaks.
+// The server's own limit (8, core v0.203.8). It was 4, tighter than the channel, and that
+// dropped a legitimate hand-off: the operator asked "@agents can you help Alice", and the
+// fifth agent message — Outrider's recipe, addressed to Alice — went unanswered (2026-09-26).
+const MAX_AGENT_RUN = Number(process.env.TRELLIS_LISTEN_MAX_AGENT_RUN) || 8;
+// A quiet gap this long starts a new run, as on the servers (web 0.58 / core v0.203.8):
+// a loop runs seconds apart, async coordination minutes or hours apart.
+const RUN_GAP_MS = 600000;
 // The model answers with exactly this when there is nothing worth saying ("thanks", "ok").
 const NO_REPLY = 'NO_REPLY';
+// A channel whose handling throws (card deleted, server error on its /channel read) is
+// retried with exponential backoff instead of on every wake-up, so one broken card does
+// not re-fetch and re-log each cycle while the other channels are served normally.
+const CHANNEL_FAILURE_BACKOFF_MS = Math.max(1000, Number(process.env.TRELLIS_LISTEN_FAILURE_BACKOFF_MS) || 30000);
+const CHANNEL_FAILURE_BACKOFF_MAX_MS = Math.max(
+  CHANNEL_FAILURE_BACKOFF_MS,
+  Number(process.env.TRELLIS_LISTEN_FAILURE_BACKOFF_MAX_MS) || 900000
+);
 
 export class TrellisChannelListener {
   /** @param {object} plugin - the trellis-notes plugin instance (transport + helpers) */
@@ -48,8 +66,9 @@ export class TrellisChannelListener {
     this.running = false;
     this.cursors = new Map();      // `${doc}:${card}` → last seq handled
     this.replyTimes = new Map();   // `${doc}:${card}` → [timestamps]
+    this.failures = new Map();     // `${doc}:${card}` → { count, nextRetryAt } after a throw
     this.rev = 0;
-    this.owner = null;             // web: names that identify the key owner
+    this.warnedNoVia = false;      // logged once: web messages carry no `via` yet
     this.primed = false;           // true after the first full cycle since start
   }
 
@@ -94,6 +113,7 @@ export class TrellisChannelListener {
 
   async _cycle() {
     const docs = this.plugin.resolvedMode === 'web' ? await this.plugin._followedDocuments() : [null];
+    const seen = new Set();
     for (const doc of docs) {
       const work = async () => {
         const data = await this.plugin._call('get', '/api/channels');
@@ -101,6 +121,7 @@ export class TrellisChannelListener {
         for (const row of rows) {
           const card = row.card ?? row.cid ?? row.id;
           const key = `${doc?.id || 'desktop'}:${card}`;
+          seen.add(key);
           if (!this.cursors.has(key)) {
             const seq = Number(row.seq) || 0;
             // At start-up every channel is new: record where each stands and answer none
@@ -111,15 +132,32 @@ export class TrellisChannelListener {
             if (!this.primed || !row.waiting) { this.cursors.set(key, seq); continue; }
             this.cursors.set(key, Math.max(0, seq - 1));
           }
-          if (!row.waiting) continue;
-          await this._handleChannel(doc, card, key).catch(err =>
-            logger.warn(`[trellis-listen] channel ${key} failed: ${err.message}`));
+          if (!row.waiting) { this.failures.delete(key); continue; }
+          const failed = this.failures.get(key);
+          if (failed && Date.now() < failed.nextRetryAt) continue;
+          try {
+            await this._handleChannel(doc, card, key);
+            this.failures.delete(key);
+          } catch (err) {
+            this._recordFailure(key, err);
+          }
         }
       };
       if (doc) await this.plugin._runInDocument(doc, work);
       else await work();
     }
+    // Backoff state only — cursors and reply caps are kept for channels that drop out of
+    // the listing: forgetting a cursor would re-answer a returning channel's newest
+    // message, and forgetting reply times would reset the hourly cap.
+    for (const key of this.failures.keys()) if (!seen.has(key)) this.failures.delete(key);
     this.primed = true;
+  }
+
+  _recordFailure(key, err) {
+    const count = (this.failures.get(key)?.count || 0) + 1;
+    const delay = Math.min(CHANNEL_FAILURE_BACKOFF_MAX_MS, CHANNEL_FAILURE_BACKOFF_MS * 2 ** (count - 1));
+    this.failures.set(key, { count, nextRetryAt: Date.now() + delay });
+    logger.warn(`[trellis-listen] channel ${key} failed (${count} in a row): ${err?.message || err}; retrying in ${Math.round(delay / 1000)}s`);
   }
 
   async _handleChannel(doc, card, key) {
@@ -128,13 +166,17 @@ export class TrellisChannelListener {
     const messages = Array.isArray(data) ? data : (data.messages || []);
     const me = this.name.toLowerCase();
     const group = !!data.group;
+    const participants = Array.isArray(data.participants) ? data.participants.map(p => String(p).toLowerCase()) : null;
+    const member = !participants || participants.includes(me);
+    const mentionsMe = new RegExp(`(^|[^\\w@.])@${escapeRegExp(this.name)}(?![\\w@])`, 'i');
 
     const fresh = messages.filter(m => (Number(m.seq) || 0) > since);
     const addressed = fresh.filter(m => {
       const from = String(m.from || '').toLowerCase();
       if (from === me) return false;
-      if (group) return Array.isArray(m.to) && m.to.some(n => String(n).toLowerCase() === me);
-      return true;
+      if (Array.isArray(m.to) && m.to.some(n => String(n).toLowerCase() === me)) return true;
+      if (!member) return mentionsMe.test(String(m.text || ''));
+      return !group;
     });
 
     const maxSeq = messages.reduce((a, m) => Math.max(a, Number(m.seq) || 0), since);
@@ -147,22 +189,47 @@ export class TrellisChannelListener {
 
     const target = addressed[addressed.length - 1];
 
-    // Loop guard: count the agent messages at the end of the conversation up to the target.
+    // Loop guard: count the agent messages at the end of the conversation up to the target,
+    // stopping at a person or at a quiet gap. An unparseable time counts as no gap.
     let run = 0;
-    for (const m of messages.filter(x => (Number(x.seq) || 0) <= (Number(target.seq) || 0)).reverse()) {
+    const upTo = messages.filter(x => (Number(x.seq) || 0) <= (Number(target.seq) || 0));
+    for (let i = upTo.length - 1; i >= 0; i--) {
+      const m = upTo[i];
       if (m.kind === 'person' || String(m.from || '').toLowerCase() === 'operator') break;
       run++;
+      const gap = i > 0 ? Date.parse(m.at) - Date.parse(upTo[i - 1].at) : NaN;
+      if (gap >= RUN_GAP_MS) break;
     }
     if (run > MAX_AGENT_RUN) {
       logger.info(`[trellis-listen] ${key}: ${run} agent messages in a row — waiting for a person before answering again`);
       this.cursors.set(key, maxSeq);
       return;
     }
-    const fromOperator = await this._isOperator(target, doc);
+    const fromOperator = await this._isOperator(target);
     const context = messages.filter(m => (Number(m.seq) || 0) <= (Number(target.seq) || 0)).slice(-CONTEXT_MESSAGES);
-    const reply = fromOperator
+    let reply = fromOperator
       ? await this._operatorReply(target, context, doc, card)
       : await this._conversationReply(target, context, data);
+
+    // Another agent teaching a procedure: keep it as a pending skill (the operator approves
+    // it before it is used) and say so, so the teacher knows it landed.
+    if (!fromOperator && (target.kind === 'agent' || target.kind === 'builtin')) {
+      const skill = await learnSkillFromPeer({
+        providerManager: this.agent.providerManager,
+        text: target.text,
+        from: target.from,
+        context: context.map(c => `${c.from}: ${String(c.text || '').slice(0, 600)}`).join('\n')
+      });
+      if (skill) {
+        const active = skill.meta?.status === 'active';
+        const note = active
+          ? `Saved your steps as a skill, \`${skill.name}\` — I'll use it from now on.`
+          : `Saved your steps as a skill, \`${skill.name}\` — pending until my operator approves it.`;
+        reply = reply ? `${reply}\n\n${note}` : `Thanks, ${target.from}. ${note}`;
+        logger.info(`[trellis-listen] learned pending skill ${skill.name} from ${target.from}`);
+        await this._askOperatorToApprove(skill, target.from, card);
+      }
+    }
 
     this.cursors.set(key, maxSeq);
     if (!reply) return;
@@ -176,54 +243,44 @@ export class TrellisChannelListener {
   /**
    * Is this message the operator's own? Only then may it make the agent act.
    *   - desktop: `operator` (the desktop records no kinds; its only person is the operator).
-   *   - web: a server-recorded `kind: person` AND the server's `from_key_owner: true` (written
-   *     by the account that owns this key). Both are needed: every agent key on the owner's
-   *     account — this agent's own included — is also from_key_owner, but posts as `agent`.
-   *   - web servers that do not send `from_key_owner` yet: names are not unique across
-   *     accounts, so a collaborator in a shared document could use the owner's name. Until
-   *     the server records it, a person counts as the operator only in a document the key
-   *     owner owns that nobody else can write to — and if the grants cannot be read, it does
-   *     not count (fail safe: conversation only). Advice from TrellisWebAgent, #49.
+   *   - web: `kind: person` AND `from_key_owner: true` AND `via: "session"`. `from_key_owner`
+   *     alone is not enough: it is true for every key on the operator's account, and a key
+   *     that sends no X-Agent is recorded as `kind: person` under the owner's name — the same
+   *     as the operator typing in the browser. Only a signed-in session is the person — or,
+   *     since web v0.65.0, `via: "telegram"`: the operator's own Telegram chat, linked once by a
+   *     signed-in confirm and bound to one chat and one Telegram user. The operator accepted it
+   *     as their word for the bridge (2951 #91, 2026-09-27); the same rule applies here.
+   *     `via: "api"` never counts, bound connector keys included.
+   *   - web without `via` on messages: fail safe, conversation only.
    */
-  async _isOperator(m, doc) {
+  async _isOperator(m) {
     const from = String(m.from || '').toLowerCase();
     if (this.plugin.resolvedMode === 'desktop') return from === 'operator';
-    if (m.kind !== 'person') return false;
-    if ('from_key_owner' in m) return m.from_key_owner === true;
-    if (!this.owner) {
-      const me = await this.plugin._request('get', '/api/me', null, 5000).catch(() => null);
-      this.owner = new Set([me?.display_name, me?.email, me?.email ? String(me.email).split('@')[0] : null]
-        .filter(Boolean).map(v => String(v).toLowerCase()));
+    if (m.kind !== 'person' || m.from_key_owner !== true) return false;
+    if ('via' in m) return m.via === 'session' || m.via === 'telegram';
+    if (!this.warnedNoVia) {
+      this.warnedNoVia = true;
+      logger.warn('[trellis-listen] this Trellis server does not mark channel messages with `via`, so the operator\'s browser cannot be told from an API key on the same account — Trellis messages get conversation replies only, no commands');
     }
-    if (!this.owner.has(from)) return false;
-    return await this._soleWriter(doc);
+    return false;
   }
 
-  /** True only if the key owner owns `doc` and no grant lets anyone else write. Cached 10 min. */
-  async _soleWriter(doc) {
-    if (!doc?.id) return false;
-    const hit = this.soleWriterCache?.get(doc.id);
-    if (hit && Date.now() - hit.at < 600000) return hit.value;
-    let value = false;
-    try {
-      const docs = await this.plugin._listWebDocuments();
-      const d = docs.find(x => x.id === doc.id);
-      if (d?.access === 'owner') {
-        const g = await this.plugin._request('get', `/api/documents/${encodeURIComponent(doc.id)}/grants`, null, 8000);
-        const grants = Array.isArray(g) ? g : (g?.grants || []);
-        value = !grants.some(x => x && x.role !== 'viewer' && x.role !== 'read' && x.access !== 'read');
-      }
-    } catch (err) {
-      logger.info(`[trellis-listen] cannot confirm ${doc.id} has no other writers (${err.message}) — not treating anyone as the operator there`);
-      value = false;
-    }
-    (this.soleWriterCache ||= new Map()).set(doc.id, { value, at: Date.now() });
-    return value;
+  /**
+   * The request without its addressing: "@Alice", "@agents", "@all", "@everyone". The mention
+   * says who the message is for; left in, it dilutes intent matching ("@agents I meant to say
+   * find and post a picture…" scored 0.589 against the image-card action and missed).
+   */
+  _stripAddressing(text) {
+    const names = [this.name, 'agents', 'all', 'everyone'].map(n => escapeRegExp(n)).join('|');
+    return String(text || '')
+      .replace(new RegExp(`(^|[^\\w@.])@(?:${names})(?![\\w@])[,:]?`, 'gi'), '$1')
+      .replace(/\s{2,}/g, ' ')
+      .trim() || String(text || '');
   }
 
   async _operatorReply(m, context, doc, card) {
     try {
-      const result = await this.agent.processNaturalLanguage(String(m.text || ''), {
+      const result = await this.agent.processNaturalLanguage(this._stripAddressing(m.text), {
         // The operator's own user id, so a Trellis request and a Telegram one are one
         // conversation with the same person.
         userId: this._ownerUserId(),
@@ -262,6 +319,37 @@ export class TrellisChannelListener {
     } catch (err) {
       logger.warn(`[trellis-listen] conversation reply failed: ${err.message}`);
       return null;
+    }
+  }
+
+  /**
+   * Tell the operator on Telegram, with Approve / Reject / Approve-all buttons (handled in
+   * telegramDashboard.js). Best effort: without Telegram, "approve skill <name>" still works.
+   */
+  async _askOperatorToApprove(skill, from, card) {
+    try {
+      const tg = this.agent?.interfaces?.get?.('telegram');
+      if (!tg?.sendNotification) return;
+      const { getSkillsService } = await import('./skills/skillsService.js');
+      const active = skill.meta?.status === 'active';
+      const fits = `skill_ok:${skill.name}`.length <= 64;
+      let keyboard, text;
+      if (active) {
+        // Auto-approval is on: say so, and offer the undo.
+        keyboard = fits ? [[{ text: '🗑 Reject', callback_data: `skill_no:${skill.name}` }], [{ text: '⏸ Turn off auto-approve', callback_data: 'skill_auto_off' }]] : [[{ text: '⏸ Turn off auto-approve', callback_data: 'skill_auto_off' }]];
+        text = `🧠 ${from} taught me a skill in Trellis (card ${card}):\n\n${skill.name} — ${skill.description}\n\nAuto-approved (auto-approve is on): I'll use it from now on.`;
+      } else {
+        const waiting = (await getSkillsService().pending()).length;
+        keyboard = [
+          fits ? [{ text: '✅ Approve', callback_data: `skill_ok:${skill.name}` }, { text: '🗑 Reject', callback_data: `skill_no:${skill.name}` }] : [],
+          [{ text: `✅ Approve all pending (${waiting})`, callback_data: 'skill_ok_all' }],
+          [{ text: '⚙️ Always auto-approve', callback_data: 'skill_auto_on' }]
+        ].filter(r => r.length);
+        text = `🧠 ${from} taught me a skill in Trellis (card ${card}):\n\n${skill.name} — ${skill.description}\n\nIt is pending: I won't use it until you approve it.`;
+      }
+      await tg.sendNotification(text, { parse_mode: undefined, reply_markup: { inline_keyboard: keyboard } });
+    } catch (err) {
+      logger.debug(`[trellis-listen] could not ask for skill approval on Telegram: ${err.message}`);
     }
   }
 
@@ -311,3 +399,4 @@ function textOf(result) {
 }
 
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+const escapeRegExp = (t) => String(t).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');

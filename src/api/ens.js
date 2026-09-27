@@ -8,6 +8,111 @@ const router = express.Router();
 const cache = new NodeCache({ stdTTL: 120, checkperiod: 60 });
 let initialized = false;
 
+const MAX_BATCH_SIZE = 50;
+const BATCH_CONCURRENCY = 4;
+
+/**
+ * Normalize an ENS name to the bare label used by ensService and cache keys.
+ *
+ * @param {string} name ENS name
+ * @returns {string} normalized ENS name
+ */
+function normalizeEnsName(name) {
+    if (typeof name !== 'string') {
+        throw validationError('Name must be a string');
+    }
+
+    // ensService takes the bare .eth label ("alice"), so accept "alice.eth" too.
+    const normalized = name.trim().toLowerCase().replace(/\.eth$/, '');
+    if (normalized.length < 3) {
+        throw validationError('Name must be at least 3 characters');
+    }
+
+    return normalized;
+}
+
+function validationError(message) {
+    const error = new Error(message);
+    error.statusCode = 400;
+    return error;
+}
+
+/**
+ * Execute bounded ENS lookups while preserving per-name results.
+ *
+ * @param {Array<unknown>} names requested names
+ * @param {'available'|'expiry'} lookupType lookup operation to perform
+ * @returns {Promise<Array<object>>} per-name results
+ */
+async function executeBatchLookup(names, lookupType) {
+    const results = [];
+    const uniqueNames = [];
+    const seen = new Set();
+
+    for (const inputName of names) {
+        try {
+            const name = normalizeEnsName(inputName);
+            if (seen.has(name)) continue;
+            seen.add(name);
+            uniqueNames.push(name);
+        } catch (error) {
+            results.push({
+                name: inputName,
+                success: false,
+                error: error.message
+            });
+        }
+    }
+
+    const resolvedResults = new Map();
+    let nextIndex = 0;
+
+    const worker = async () => {
+        while (nextIndex < uniqueNames.length) {
+            const index = nextIndex++;
+            const name = uniqueNames[index];
+            const cacheKey = `ens_${lookupType}_${name}`;
+
+            try {
+                let result;
+                let cached = false;
+
+                if (cache.has(cacheKey)) {
+                    result = cache.get(cacheKey);
+                    cached = true;
+                } else {
+                    result = lookupType === 'available'
+                        ? await ensService.checkAvailability(name)
+                        : await ensService.getExpiry(name);
+                    cache.set(cacheKey, result);
+                }
+
+                resolvedResults.set(name, {
+                    name,
+                    success: true,
+                    data: result,
+                    ...(cached ? { cached: true } : {})
+                });
+            } catch (error) {
+                resolvedResults.set(name, {
+                    name,
+                    success: false,
+                    error: error.message
+                });
+            }
+        }
+    };
+
+    const workerCount = Math.min(BATCH_CONCURRENCY, uniqueNames.length);
+    await Promise.all(Array.from({ length: workerCount }, () => worker()));
+
+    for (const name of uniqueNames) {
+        results.push(resolvedResults.get(name));
+    }
+
+    return results;
+}
+
 router.use(authenticateToken);
 
 router.use(async (req, res, next) => {
@@ -38,22 +143,65 @@ router.get('/status', async (req, res) => {
     }
 });
 
+// POST /api/ens/available/batch — check availability of multiple .eth names
+router.post('/available/batch', async (req, res) => {
+    try {
+        const { names } = req.body || {};
+        if (!Array.isArray(names)) {
+            return res.status(400).json({ success: false, error: 'Names must be an array' });
+        }
+        if (names.length > MAX_BATCH_SIZE) {
+            return res.status(400).json({
+                success: false,
+                error: `A maximum of ${MAX_BATCH_SIZE} names may be checked per request`
+            });
+        }
+
+        const results = await executeBatchLookup(names, 'available');
+        res.json({ success: true, data: results });
+    } catch (error) {
+        logger.error('Failed to check ENS availability batch:', error);
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
 // GET /api/ens/available/:name — check if a .eth name is available
 router.get('/available/:name', async (req, res) => {
     try {
-        const { name } = req.params;
-        if (!name || name.length < 3) {
-            return res.status(400).json({ success: false, error: 'Name must be at least 3 characters' });
+        const name = normalizeEnsName(req.params.name);
+        const key = `ens_available_${name}`;
+        if (cache.has(key)) {
+            return res.json({ success: true, data: cache.get(key), cached: true });
         }
-        const key = `ens_available_${name.toLowerCase()}`;
-        const cached = cache.get(key);
-        if (cached) return res.json({ success: true, data: cached, cached: true });
 
-        const result = await ensService.checkAvailability(name.toLowerCase());
+        const result = await ensService.checkAvailability(name);
         cache.set(key, result);
         res.json({ success: true, data: result });
     } catch (error) {
         logger.error('Failed to check ENS availability:', error);
+        res.status(error.statusCode || 500)
+            .json({ success: false, error: error.message });
+    }
+});
+
+// POST /api/ens/expiry/batch — check expiry of multiple .eth names
+router.post('/expiry/batch', async (req, res) => {
+    try {
+        const { names } = req.body || {};
+        if (!Array.isArray(names)) {
+            return res.status(400).json({ success: false, error: 'Names must be an array' });
+        }
+        if (names.length > MAX_BATCH_SIZE) {
+            return res.status(400).json({
+                success: false,
+                error: `A maximum of ${MAX_BATCH_SIZE} names may be checked per request`
+            });
+        }
+
+        const results = await executeBatchLookup(names, 'expiry');
+        res.json({ success: true, data: results });
+    } catch (error) {
+        logger.error('Failed to check ENS expiry batch:', error);
         res.status(500).json({ success: false, error: error.message });
     }
 });
@@ -61,17 +209,19 @@ router.get('/available/:name', async (req, res) => {
 // GET /api/ens/expiry/:name — check expiry of a .eth name
 router.get('/expiry/:name', async (req, res) => {
     try {
-        const name = req.params.name.toLowerCase();
+        const name = normalizeEnsName(req.params.name);
         const key = `ens_expiry_${name}`;
-        const cached = cache.get(key);
-        if (cached) return res.json({ success: true, data: cached, cached: true });
+        if (cache.has(key)) {
+            return res.json({ success: true, data: cache.get(key), cached: true });
+        }
 
         const result = await ensService.getExpiry(name);
         cache.set(key, result);
         res.json({ success: true, data: result });
     } catch (error) {
         logger.error('Failed to check ENS expiry:', error);
-        res.status(500).json({ success: false, error: error.message });
+        res.status(error.statusCode || 500)
+            .json({ success: false, error: error.message });
     }
 });
 

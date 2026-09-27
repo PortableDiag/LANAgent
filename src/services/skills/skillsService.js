@@ -1,5 +1,6 @@
 import fs from 'fs/promises';
 import path from 'path';
+import { fileURLToPath } from 'url';
 import { logger } from '../../utils/logger.js';
 import { DATA_PATH } from '../../utils/paths.js';
 import { embeddingService } from '../embeddingService.js';
@@ -19,9 +20,16 @@ import { embeddingService } from '../embeddingService.js';
  * written by hand, dropped in from elsewhere (the format is an open standard), created
  * through the `skills` plugin, or drafted by the agent itself after a multi-step task
  * succeeds (SKILLS_AUTO_LEARN, on by default).
+ *
+ * A skill another AGENT teaches (learnSkillFromPeer) is saved with `status: pending` and is
+ * not used until the operator approves it: a procedure from a peer is instructions from
+ * outside, and a matched skill is put into the prompt of the operator's own requests.
  */
 
 export const SKILLS_DIR = process.env.SKILLS_PATH || path.join(DATA_PATH, 'skills');
+// Skills that ship with the code (repo `skills/`), read-only and always active. A skill of the
+// same name in SKILLS_DIR overrides the bundled one, so an operator can tailor any of them.
+export const BUNDLED_SKILLS_DIR = fileURLToPath(new URL('../../../skills/', import.meta.url));
 const NAME_RE = /^[a-z0-9]+(-[a-z0-9]+)*$/;
 const MAX_BODY = 20000;
 const RESCAN_MS = 60 * 1000;
@@ -64,8 +72,10 @@ const STOP = new Set(['the', 'a', 'an', 'to', 'of', 'and', 'or', 'in', 'on', 'fo
 const words = (t) => String(t).toLowerCase().split(/[^a-z0-9]+/).filter(w => w.length > 2 && !STOP.has(w));
 
 export class SkillsService {
-  constructor({ dir = SKILLS_DIR, embed = (t) => embeddingService.generateEmbedding(t) } = {}) {
-    this.dir = dir;
+  constructor({ dir, bundledDir, embed = (t) => embeddingService.generateEmbedding(t) } = {}) {
+    this.dir = dir || SKILLS_DIR;
+    // An instance pointed at its own dir (tests, tools) sees only that dir unless told otherwise.
+    this.bundledDir = bundledDir !== undefined ? bundledDir : (dir ? null : BUNDLED_SKILLS_DIR);
     this.embed = embed;
     this.skills = new Map();
     this.scannedAt = 0;
@@ -75,15 +85,25 @@ export class SkillsService {
   async scan(force = false) {
     if (!force && Date.now() - this.scannedAt < RESCAN_MS) return this.skills;
     const found = new Map();
+    // bundled first, so a same-named skill in the instance's own dir replaces it
+    for (const [root, bundled] of [[this.bundledDir, true], [this.dir, false]]) {
+      if (root) await this._scanDir(root, bundled, found);
+    }
+    this.skills = found;
+    this.scannedAt = Date.now();
+    return found;
+  }
+
+  async _scanDir(root, bundled, found) {
     let entries = [];
     try {
-      entries = await fs.readdir(this.dir, { withFileTypes: true });
+      entries = await fs.readdir(root, { withFileTypes: true });
     } catch (error) {
       if (error.code !== 'ENOENT') logger.warn(`Skills directory unreadable: ${error.message}`);
     }
     for (const entry of entries) {
       if (!entry.isDirectory()) continue;
-      const file = path.join(this.dir, entry.name, 'SKILL.md');
+      const file = path.join(root, entry.name, 'SKILL.md');
       try {
         const parsed = parseSkill(await fs.readFile(file, 'utf8'));
         if (!parsed?.meta.name || !parsed.meta.description) {
@@ -95,20 +115,52 @@ export class SkillsService {
           description: parsed.meta.description,
           body: parsed.body.substring(0, MAX_BODY),
           meta: parsed.meta,
-          path: file
+          path: file,
+          bundled
         });
       } catch (error) {
         if (error.code !== 'ENOENT') logger.warn(`Skipping ${file}: ${error.message}`);
       }
     }
-    this.skills = found;
-    this.scannedAt = Date.now();
-    return found;
   }
 
   async list() {
     await this.scan();
-    return [...this.skills.values()].map(({ name, description, meta }) => ({ name, description, source: meta.source || 'manual' }));
+    return [...this.skills.values()].map(({ name, description, meta, bundled }) => ({
+      name, description, source: meta.source || (bundled ? 'bundled' : 'manual'), status: bundled ? 'active' : (meta.status || 'active'),
+      ...(bundled ? { bundled: true } : {}),
+      ...(meta.taught_by ? { taughtBy: meta.taught_by } : {})
+    }));
+  }
+
+  /** Skills waiting for the operator's approval. */
+  async pending() {
+    return (await this.list()).filter(s => s.status === 'pending');
+  }
+
+  /** Approve every pending skill at once. Returns the names approved. */
+  async approveAll() {
+    const names = (await this.pending()).map(s => s.name);
+    for (const n of names) await this.approve(n);
+    return names;
+  }
+
+  /** Throw away a PENDING skill (a rejected peer-taught one). Active skills use remove(). */
+  async reject(name) {
+    const skill = await this.get(name);
+    if (!skill || (skill.meta?.status || 'active') !== 'pending') return false;
+    return this.remove(name);
+  }
+
+  /** Make a pending skill usable (operator approval of a peer-taught skill). */
+  async approve(name) {
+    const skill = await this.get(name);
+    if (!skill) return null;
+    const { name: _n, description: _d, status: _s, ...extra } = skill.meta;
+    await fs.writeFile(skill.path, renderSkill({ name: skill.name, description: skill.description, body: skill.body, extra: { ...extra, status: 'active' } }), 'utf8');
+    await this.scan(true);
+    logger.info(`Skill approved: ${skill.name}`);
+    return this.skills.get(skill.name);
   }
 
   async get(name) {
@@ -130,7 +182,8 @@ export class SkillsService {
    */
   async match(query, { limit = 2, minSimilarity = Number(process.env.SKILLS_MIN_SIMILARITY) || 0.5 } = {}) {
     await this.scan();
-    const skills = [...this.skills.values()];
+    // Pending skills (taught by another agent, not yet approved) are never used.
+    const skills = [...this.skills.values()].filter(s => (s.meta?.status || 'active') !== 'pending');
     if (!skills.length || !query) return [];
     try {
       const q = await this.embed(query);
@@ -167,7 +220,8 @@ export class SkillsService {
     const file = path.join(dir, 'SKILL.md');
     if (!overwrite) {
       const exists = await fs.access(file).then(() => true, () => false);
-      if (exists) throw new Error(`Skill "${slug}" already exists`);
+      // a learned skill must not silently shadow a bundled one of the same name
+      if (exists || (await this.scan(), this.skills.get(slug)?.bundled)) throw new Error(`Skill "${slug}" already exists`);
     }
     await fs.mkdir(dir, { recursive: true });
     await fs.writeFile(file, renderSkill({ name: slug, description, body: String(body).substring(0, MAX_BODY), extra }), 'utf8');
@@ -179,6 +233,7 @@ export class SkillsService {
   async remove(name) {
     const skill = await this.get(name);
     if (!skill) return false;
+    if (skill.bundled) throw new Error(`"${name}" ships with LANAgent and cannot be deleted; save a skill of the same name to replace it`);
     await fs.rm(path.dirname(skill.path), { recursive: true, force: true });
     this.embeddings.delete(name);
     await this.scan(true);
@@ -225,6 +280,63 @@ Generalise the steps (no one-off values unless they are always the same). If the
     return await service.create({ ...draft, extra: { source: 'auto', learned_from: String(query).substring(0, 200) } });
   } catch (error) {
     logger.debug(`Skill learning skipped: ${error.message}`);
+    return null;
+  }
+}
+
+const AUTO_APPROVE_KEY = 'skills.autoApprovePeer';
+
+/**
+ * Whether skills other agents teach are used at once (operator's choice, off by default).
+ * SKILLS_AUTO_APPROVE in .env wins; otherwise the saved setting (SystemSettings).
+ */
+export async function getAutoApprove() {
+  const env = String(process.env.SKILLS_AUTO_APPROVE || '').toLowerCase();
+  if (env === 'true' || env === 'false') return { enabled: env === 'true', source: 'env' };
+  try {
+    const { SystemSettings } = await import('../../models/SystemSettings.js');
+    return { enabled: (await SystemSettings.getSetting(AUTO_APPROVE_KEY, false)) === true, source: 'setting' };
+  } catch {
+    return { enabled: false, source: 'default' };
+  }
+}
+
+export async function setAutoApprove(enabled) {
+  const { SystemSettings } = await import('../../models/SystemSettings.js');
+  await SystemSettings.setSetting(AUTO_APPROVE_KEY, !!enabled, 'Use skills other agents teach without asking the operator first', 'skills');
+  logger.info(`Skill auto-approval ${enabled ? 'ON' : 'OFF'}`);
+  return getAutoApprove();
+}
+
+/**
+ * Save a procedure another agent taught in a channel as a PENDING skill (unused until the
+ * operator approves it). Returns the saved skill, or null when the message teaches nothing
+ * reusable. Uses the auxiliary model. Never throws.
+ */
+export async function learnSkillFromPeer({ providerManager, service = getSkillsService(), text, from, context = '' }) {
+  try {
+    if (String(process.env.SKILLS_AUTO_LEARN || 'true').toLowerCase() === 'false') return null;
+    if (!providerManager || !text || String(text).length < 120) return null;
+    const prompt = `Another AI agent (${from}) sent this message to you in a shared channel. Decide whether it teaches a REUSABLE procedure: concrete steps for a kind of task, that you could follow next time.
+
+Recent conversation, for context:
+${String(context).substring(0, 2500)}
+
+Message from ${from}:
+${String(text).substring(0, 5000)}
+
+Return JSON only:
+{"name": "short-kebab-case-name", "description": "One sentence: what the procedure does and when to use it", "body": "Markdown: when to use it, numbered steps, pitfalls mentioned"}
+Write it in your own words for an agent with its OWN tools; keep API routes and field names exactly as given. If the message is chat, thanks, a status report or anything else that is not a procedure, return {"skip": true}.`;
+    const response = await (providerManager.generateAux || providerManager.generateResponse).call(providerManager, prompt, { maxTokens: 900, temperature: 0.2, auxTask: 'skill-learning' });
+    const json = String(response?.content || '').match(/\{[\s\S]*\}/);
+    if (!json) return null;
+    const draft = JSON.parse(json[0]);
+    if (draft.skip || !draft.name || !draft.description || !draft.body) return null;
+    const auto = (await getAutoApprove()).enabled;
+    return await service.create({ ...draft, overwrite: false, extra: { source: 'peer', taught_by: String(from).substring(0, 80), status: auto ? 'active' : 'pending', ...(auto ? { auto_approved: 'true' } : {}) } });
+  } catch (error) {
+    logger.debug(`Peer skill learning skipped: ${error.message}`);
     return null;
   }
 }

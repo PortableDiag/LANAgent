@@ -13,10 +13,12 @@
  * backend can be preferred or disabled without a code change.
  */
 import NodeCache from 'node-cache';
-import { BraveSearchProvider, YandexSearchProvider } from './searchProviders.js';
+import { BraveSearchProvider, YandexSearchProvider, SearxngSearchProvider, DuckDuckGoSearchProvider } from './searchProviders.js';
 import { logger } from '../../utils/logger.js';
 
-const DEFAULT_ORDER = ['brave', 'yandex'];
+// Keyed APIs first (ranked, stable), then a self-hosted SearXNG, then keyless DuckDuckGo so an
+// install with no search key still has search. DUCKDUCKGO_SEARCH=off removes the last one.
+const DEFAULT_ORDER = ['brave', 'yandex', 'searxng', 'duckduckgo'];
 
 class WebSearchService {
   constructor(env = process.env) {
@@ -24,19 +26,24 @@ class WebSearchService {
     // 10 minutes: long enough to absorb a retry storm, short enough that "news"
     // style queries are not served stale.
     this.cache = new NodeCache({ stdTTL: 600, maxKeys: 500 });
-    this.providers = [new BraveSearchProvider(env), new YandexSearchProvider(env)];
+    this.providers = [new BraveSearchProvider(env), new YandexSearchProvider(env),
+      new SearxngSearchProvider(env), new DuckDuckGoSearchProvider(env)];
   }
 
-  /** Backends with credentials present, in configured preference order. */
-  configuredProviders() {
+  /**
+   * Backends with credentials present, in configured preference order.
+   * tier 'keyed' = configured backends only, 'keyless' = the no-key fallback only, 'all' = both.
+   */
+  configuredProviders(tier = 'all') {
     const order = (this.env.WEB_SEARCH_PROVIDER_ORDER || DEFAULT_ORDER.join(','))
       .split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
     const byName = new Map(this.providers.map(p => [p.name, p]));
-    return order.map(n => byName.get(n)).filter(p => p && p.isConfigured());
+    return order.map(n => byName.get(n)).filter(p => p && p.isConfigured() &&
+      (tier === 'all' || (tier === 'keyless') === Boolean(p.keyless)));
   }
 
-  isAvailable() {
-    return this.configuredProviders().length > 0;
+  isAvailable(tier = 'all') {
+    return this.configuredProviders(tier).length > 0;
   }
 
   /**
@@ -46,25 +53,26 @@ class WebSearchService {
    */
   unavailableReason() {
     const names = this.providers.map(p => p.name).join(', ');
-    return `no search backend is configured (set BRAVE_SEARCH_API_KEY, or YANDEX_SEARCH_API_KEY + YANDEX_SEARCH_FOLDER_ID; available backends: ${names})`;
+    return `no search backend is configured (set BRAVE_SEARCH_API_KEY, YANDEX_SEARCH_API_KEY + YANDEX_SEARCH_FOLDER_ID or SEARXNG_URL, or leave DUCKDUCKGO_SEARCH on; available backends: ${names})`;
   }
 
   /**
    * @param {string} query
-   * @param {{count?:number, timeoutMs?:number, noCache?:boolean}} [opts]
+   * @param {{count?:number, timeoutMs?:number, noCache?:boolean, tier?:'all'|'keyed'|'keyless'}} [opts]
    * @returns {Promise<{success:boolean, provider?:string, results?:Array, error?:string, cached?:boolean}>}
    */
   async search(query, opts = {}) {
     const q = String(query ?? '').trim();
     if (!q) return { success: false, error: 'Search query is required' };
 
-    const available = this.configuredProviders();
+    const tier = opts.tier || 'all';
+    const available = this.configuredProviders(tier);
     if (available.length === 0) {
       return { success: false, error: `Web search unavailable: ${this.unavailableReason()}` };
     }
 
     const count = Math.min(Math.max(parseInt(opts.count, 10) || 10, 1), 20);
-    const cacheKey = `${q}::${count}`;
+    const cacheKey = `${q}::${count}::${tier}`;
     if (!opts.noCache) {
       const hit = this.cache.get(cacheKey);
       if (hit) return { ...hit, cached: true };

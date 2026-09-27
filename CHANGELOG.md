@@ -2,6 +2,67 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.395] - 2026-09-27
+
+### Added
+- **Expired-lock keeper.** A daily job (`skynet-poke-expired-locks`) returns staking positions whose lock has ended to 1×, using the diamond's new `stakersPage`/`pokeLock` functions. It skips diamonds that don't have them.
+- **Trellis operator's Telegram chat.** Messages from the operator's linked Telegram chat (`via: telegram`, Trellis web v0.65.0) count as the operator.
+- **From the self-improvement PR queue:**
+  - NASA picture-of-the-day history (a date, a range, or random).
+  - Batch ENS availability and expiry lookups.
+  - SSH session reports in a chosen timezone.
+  - Chat-history summaries.
+  - Cron previews with timezone, count and start time.
+  - Per-action lists in the paid-service catalog.
+  - A VirusTotal scan on the multi-file upload routes.
+  - One vector-store write per document.
+  - Per-channel backoff in the Trellis listener.
+  - Cancellation support in the ReAct loop.
+  - Indirect imports in the self-modification context.
+  - Concurrent Fixer requests share one call.
+
+### Fixed
+- **Graceful shutdown.** A stop signal now runs the agent's cleanup, capped at 9 s so it stays within PM2's kill timeout.
+- **Database reconnects.** Callers waiting on a reconnect in progress now get its real result, not success.
+- Expired clarification requests are pruned.
+
+## [2.25.394] - 2026-09-26
+
+### Added
+- **Six keyless plugins** (no API keys needed):
+  - `feeds`: read RSS/Atom feeds, find a site's feeds, and watch feeds for new posts. Watches can filter by keyword; the first check only records existing posts. New items arrive as a Telegram alert.
+  - `priceWatch`: read a product page's price and watch it. Alerts fire at a target price (once, re-armed when the price goes back above it) or on a percentage move. The price comes from JSON-LD, meta tags or microdata. The scraper plugin's tiers are tried when a shop refuses a plain request. A price read only from page text is marked low confidence.
+  - `maps`: OpenStreetMap geocode, reverse geocode, car/bike/foot routes with directions, nearby places, distances, and time zones. Nominatim is paced to 1 request/second and cached. Nearby search falls back from Overpass to Nominatim when Overpass is busy.
+  - `research`: arXiv search, paper lookup and latest-by-category, plus Reddit posts, search and threads. arXiv's API is paced to 1 request/3 s and falls back to OpenAlex's index of arXiv. Reddit is read through RSS because its JSON endpoints refuse unauthenticated servers.
+  - `domainIntel`: passive domain intelligence. Covers subdomains from Certificate Transparency logs (crt.sh, then CertSpotter), DNS over HTTPS with SPF/DMARC, the live TLS certificate, registration via RDAP, and a combined report.
+  - `office`: create Word, Excel and PowerPoint files:
+    - `.docx` from markdown: headings, lists, tables, bold, italic, code.
+    - `.xlsx` from rows, CSV, records or several sheets; cells starting with `=` become formulas.
+    - `.pptx` from a slide list or an outline.
+    - Content is drafted by AI when only a topic is given.
+
+    It also reads `.docx`/`.xlsx`/`.pptx` back as text and edits them (find/replace in docx and pptx, set cells in xlsx), saving a copy unless asked to overwrite. Files are delivered to the chat and kept in `workspace/documents`.
+  - Requests in plain words work: when intent detection picks one of these actions but not its arguments, the plugin extracts them from the request using the command's own usage line. "What time is it in Tokyo" gives `place: "Tokyo"`, not the whole sentence.
+  - The watches share one Agenda job (`web-watch-check`, every 15 minutes; each watch has its own interval) and one collection (`WebWatch`). URLs supplied by callers must resolve to public addresses on every redirect.
+- **Keyless web search.** New backends: a self-hosted SearXNG (`SEARXNG_URL`), tried with the keyed APIs, and DuckDuckGo (lite page, on by default).
+  - Order: keyed APIs, then the AI provider's own search tool, then DuckDuckGo. An instance that searched through its provider keeps doing so.
+  - Search now also works with no key and a provider that cannot search. `DUCKDUCKGO_SEARCH=off` removes it.
+- **Bundled skills.** Skills in the repo's `skills/` folder load for every instance and are always active. They cannot be deleted, and a learned skill cannot take their name; a skill of the same name saved on purpose replaces one.
+  - 13 ship. Nine are adapted from Hermes Agent (Nous Research, MIT) to LANAgent's own plugin actions: humanizer, email-inbox-triage, document-to-action-items, meeting-action-items, weekly-review-planning, grounded-citations, youtube-content, systematic-debugging, test-driven-development.
+  - Four are new and use the plugins above: competitor-news-monitor, domain-recon-report, literature-review, trip-planning.
+
+### Fixed
+- **Email plugin commands.** It advertised `check`, `search`, `reply`, `getFolder`, `delete` and `forward`, but its own validator refused every one. It now advertises the actions that run (`getEmails`, `searchEmails`, `replyToEmail`), and the old names still work as aliases. `delete` and `forward` were never implemented and are no longer offered.
+
+- **AI-content detection billing.** The paid plugin route charged a flat 5 credits for every `aiDetector` call, while the catalog lists text 5, image 5, audio 8 and video 10.
+  - The route now charges those prices. The auto `detect` action is priced by what it will analyse (file extension or MIME type), and the catalog entry lists the per-action prices.
+  - Reported by TrellisWebAgent.
+- **Parameter extraction for commands with only a usage line.** The agent's extractor showed the model "Unknown" parameters for any command that declares only a `usage` line, which is most of them. The model invented names (`sort_by` for `sort`) that the plugin ignored. It now gets the usage line and is told to use its argument names.
+- A reporting test used fixed snapshot dates that aged out of its 30-day window; they are now relative to today.
+
+### Dependencies
+- Added `docx`, `exceljs` and `pptxgenjs`.
+
 ## [2.25.393] - 2026-09-26
 
 ### Security

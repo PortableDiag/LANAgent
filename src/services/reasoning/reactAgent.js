@@ -23,6 +23,8 @@ export class ReActAgent extends EventEmitter {
     this.thoughtTimeout = options.thoughtTimeout || 30000; // 30 seconds per thought
     this.showThoughts = options.showThoughts || false;
     this.thoughtStore = options.thoughtStore || null;
+    this.executionBudget = options.executionBudget || options.budget || {};
+    this.activeRun = null;
 
     // Build tool descriptions from available plugins
     this.tools = [];
@@ -48,6 +50,86 @@ export class ReActAgent extends EventEmitter {
   }
 
   /**
+   * Create a bounded promise that observes cooperative cancellation.
+   */
+  async _boundedOperation(operation, timeoutMs, signal, label) {
+    if (signal?.aborted) {
+      throw this._terminationError('cancelled', 'Execution was cancelled');
+    }
+
+    let timer;
+    let abortHandler;
+    const timeout = Number.isFinite(timeoutMs) && timeoutMs > 0
+      ? new Promise((_, reject) => {
+          timer = setTimeout(() => {
+            reject(this._terminationError('budgetExceeded', `${label} exceeded its ${timeoutMs}ms limit`));
+          }, timeoutMs);
+        })
+      : null;
+    const cancellation = signal
+      ? new Promise((_, reject) => {
+          abortHandler = () => reject(this._terminationError('cancelled', 'Execution was cancelled'));
+          signal.addEventListener('abort', abortHandler, { once: true });
+        })
+      : null;
+
+    try {
+      const promises = [operation()];
+      if (timeout) promises.push(timeout);
+      if (cancellation) promises.push(cancellation);
+      return await Promise.race(promises);
+    } finally {
+      if (timer) clearTimeout(timer);
+      if (signal && abortHandler) signal.removeEventListener('abort', abortHandler);
+    }
+  }
+
+  /**
+   * Construct an internal termination error with machine-readable metadata.
+   */
+  _terminationError(type, reason) {
+    const error = new Error(reason);
+    error.terminationType = type;
+    return error;
+  }
+
+  /**
+   * Check whether the current run may continue.
+   */
+  _checkBudget(run) {
+    if (run.signal?.aborted) {
+      throw this._terminationError('cancelled', 'Execution was cancelled');
+    }
+
+    const elapsed = Date.now() - run.startTime;
+    if (run.budget.timeoutMs !== undefined && elapsed >= run.budget.timeoutMs) {
+      throw this._terminationError('budgetExceeded', `Execution exceeded its ${run.budget.timeoutMs}ms time budget`);
+    }
+
+    if (run.budget.maxToolCalls !== undefined && run.toolCalls >= run.budget.maxToolCalls) {
+      throw this._terminationError('budgetExceeded', `Maximum tool-call budget of ${run.budget.maxToolCalls} was reached`);
+    }
+  }
+
+  /**
+   * Return a structured result for a cancelled or budget-limited run.
+   */
+  _terminationResult(error, thoughts, iteration, startTime) {
+    const cancelled = error.terminationType === 'cancelled';
+    const result = {
+      success: false,
+      ...(cancelled ? { cancelled: true } : { budgetExceeded: true }),
+      reason: error.message,
+      error: error.message,
+      thoughts,
+      iterations: iteration,
+      duration: Date.now() - startTime
+    };
+    this.emit(cancelled ? 'cancelled' : 'budgetExceeded', result);
+    return result;
+  }
+
+  /**
    * Run the ReAct loop for a given query
    */
   async run(query, context = {}) {
@@ -62,13 +144,27 @@ export class ReActAgent extends EventEmitter {
         timestamp: new Date()
       });
     }
+
+    const signal = context.signal || context.abortSignal;
+    const budget = { ...this.executionBudget, ...(context.budget || context.executionBudget || {}) };
+    const run = {
+      signal,
+      budget,
+      startTime: Date.now(),
+      toolCalls: 0,
+      iteration: 0
+    };
+    this.activeRun = run;
+
     let iteration = 0;
-    const startTime = Date.now();
+    const startTime = run.startTime;
 
     logger.info(`ReActAgent starting with query: ${query.substring(0, 100)}...`);
-    this.emit('start', { query, context });
+    this.emit('start', { query, context, budget });
 
     try {
+      this._checkBudget(run);
+
       // Tools and worked examples are chosen once per task: the plugins relevant to it get
       // full command lists, and similar tasks that succeeded before are shown as examples.
       await this.refreshTools();
@@ -80,11 +176,21 @@ export class ReActAgent extends EventEmitter {
       const guidance = { relevant, pastExamples, skills };
 
       while (iteration < this.maxIterations) {
+        this._checkBudget(run);
         iteration++;
+        run.iteration = iteration;
         logger.info(`ReAct iteration ${iteration}/${this.maxIterations}`);
 
         // Step 1: THOUGHT - Reason about current state
-        const thought = await this.think(query, thoughts, context, guidance);
+        const thought = await this._boundedOperation(
+          () => this.think(query, thoughts, { ...context, signal }, guidance),
+          // Only an explicit per-step budget bounds a thought. thoughtTimeout (30 s) was
+          // never enforced and sits far below the provider's own retry budget, so racing
+          // it would abort slow-but-healthy providers.
+          budget.maxActionDurationMs,
+          signal,
+          'Thinking'
+        );
         thoughts.push({ type: 'thought', content: thought, iteration, timestamp: new Date() });
         this.emit('thought', { iteration, thought });
 
@@ -129,6 +235,7 @@ export class ReActAgent extends EventEmitter {
 
         // Step 2: ACTION - Decide what tool to use
         if (thought.action && thought.action.tool) {
+          this._checkBudget(run);
           const action = thought.action;
           thoughts.push({ type: 'action', content: action, iteration, timestamp: new Date() });
           this.emit('action', { iteration, action });
@@ -139,7 +246,13 @@ export class ReActAgent extends EventEmitter {
           }
 
           // Step 3: OBSERVATION - Execute and observe result
-          const observation = await this.executeAction(action, context);
+          run.toolCalls++;
+          const observation = await this._boundedOperation(
+            () => this.executeAction(action, { ...context, signal }),
+            budget.maxActionDurationMs,
+            signal,
+            `Action ${action.tool}.${action.command}`
+          );
           thoughts.push({ type: 'observation', content: observation, iteration, timestamp: new Date() });
           this.emit('observation', { iteration, observation });
 
@@ -156,6 +269,7 @@ export class ReActAgent extends EventEmitter {
       const result = {
         success: false,
         error: 'Max iterations reached without finding an answer',
+        reason: 'Max iterations reached without finding an answer',
         thoughts,
         iterations: iteration,
         duration: Date.now() - startTime
@@ -169,6 +283,10 @@ export class ReActAgent extends EventEmitter {
       return result;
 
     } catch (error) {
+      if (error.terminationType === 'cancelled' || error.terminationType === 'budgetExceeded') {
+        return this._terminationResult(error, thoughts, iteration, startTime);
+      }
+
       logger.error('ReActAgent error:', error, {
         state: this.getState(),
         query,
@@ -188,6 +306,8 @@ export class ReActAgent extends EventEmitter {
         this.emit('error', { error, result });
       }
       return result;
+    } finally {
+      if (this.activeRun === run) this.activeRun = null;
     }
   }
 
@@ -198,6 +318,8 @@ export class ReActAgent extends EventEmitter {
     const prompt = this.buildThinkingPrompt(query, history, guidance);
 
     try {
+      // No retry wrapper here: generateResponse already retries and fails over, and its
+      // wall-clock budget is longer than any fixed per-thought race could safely be.
       const response = await this.agent.providerManager.generateResponse(prompt, {
         maxTokens: 1000,
         temperature: 0.3
@@ -387,11 +509,19 @@ Respond with valid JSON only.`;
    * Get the current state of the agent
    */
   getState() {
+    const run = this.activeRun;
     return {
       maxIterations: this.maxIterations,
       showThoughts: this.showThoughts,
       toolCount: this.tools.length,
-      tools: this.tools.map(t => t.name)
+      tools: this.tools.map(t => t.name),
+      activeBudget: run ? { ...run.budget } : null,
+      cancellation: {
+        active: !!run,
+        cancelled: !!run?.signal?.aborted,
+        toolCalls: run?.toolCalls || 0,
+        elapsedMs: run ? Date.now() - run.startTime : 0
+      }
     };
   }
 
@@ -407,6 +537,12 @@ Respond with valid JSON only.`;
     }
     if (config.thoughtTimeout !== undefined) {
       this.thoughtTimeout = config.thoughtTimeout;
+    }
+    if (config.executionBudget !== undefined) {
+      this.executionBudget = { ...config.executionBudget };
+    }
+    if (config.budget !== undefined) {
+      this.executionBudget = { ...config.budget };
     }
   }
 }

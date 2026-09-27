@@ -34,7 +34,7 @@ logger.info('Loading environment from: ' + envPath);
 logger.info('Environment loaded, TELEGRAM_BOT_TOKEN exists: ' + !!process.env.TELEGRAM_BOT_TOKEN);
 
 // Import and setup global error handlers
-import { setupGlobalErrorHandlers } from './utils/errorHandlers.js';
+import { setupGlobalErrorHandlers, registerShutdownHandler } from './utils/errorHandlers.js';
 setupGlobalErrorHandlers();
 
 /**
@@ -63,12 +63,9 @@ async function start() {
       .then(({ fsCleanupOrphanSessions }) => fsCleanupOrphanSessions())
       .catch(() => {});
     
-    // Graceful shutdown
-    process.on('SIGTERM', async () => {
-      logger.info('SIGTERM received, shutting down gracefully...');
-      await agent.stop();
-      process.exit(0);
-    });
+    // Graceful shutdown: SIGTERM/SIGINT (errorHandlers.js) run this, bounded to fit
+    // PM2's kill_timeout, then flush Sentry and exit.
+    registerShutdownHandler('agent', () => agent.stop());
     
   } catch (error) {
     logger.error('Failed to start agent:', error);

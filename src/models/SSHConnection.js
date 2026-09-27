@@ -65,6 +65,90 @@ const sessionTimeoutCache = new NodeCache({ stdTTL: 0, checkperiod: 600 });
 const sessionLogsCache = new NodeCache({ stdTTL: 300, checkperiod: 60 });
 
 /**
+ * Create the date formatting context used by session analytics.
+ *
+ * @param {Object} options - Analytics formatting options
+ * @param {string} [options.timezone] - IANA timezone identifier
+ * @param {string} [options.locale] - BCP 47 locale identifier
+ * @returns {Object} Date formatting context
+ */
+function createAnalyticsDateContext(options = {}) {
+  const resolved = Intl.DateTimeFormat().resolvedOptions();
+  // en-US by default: the report keys were always en-US formatted, keep them stable.
+  const locale = options.locale || 'en-US';
+  const timezone = options.timezone || resolved.timeZone;
+
+  return {
+    locale,
+    timezone,
+    dateFormatter: new Intl.DateTimeFormat(locale, {
+      timeZone: timezone
+    }),
+    weekdayFormatter: new Intl.DateTimeFormat(locale, {
+      timeZone: timezone,
+      weekday: 'long'
+    }),
+    partsFormatter: new Intl.DateTimeFormat('en-US', {
+      timeZone: timezone,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      hourCycle: 'h23'
+    }),
+    utcDateFormatter: new Intl.DateTimeFormat(locale, {
+      timeZone: 'UTC'
+    })
+  };
+}
+
+/**
+ * Extract calendar and clock values in the requested timezone.
+ *
+ * @param {Date|string|number} value - Date value
+ * @param {Object} context - Date formatting context
+ * @returns {Object} Localized date parts
+ */
+function getAnalyticsDateParts(value, context) {
+  const parts = context.partsFormatter.formatToParts(new Date(value));
+  const values = {};
+
+  for (const part of parts) {
+    if (part.type !== 'literal') {
+      values[part.type] = Number(part.value);
+    }
+  }
+
+  return values;
+}
+
+/**
+ * Format an analytics trend bucket using the requested timezone.
+ *
+ * @param {Date|string|number} value - Date value
+ * @param {string} aggregationLevel - Aggregation level
+ * @param {Object} context - Date formatting context
+ * @returns {string} Trend bucket key
+ */
+function getTrendBucket(value, aggregationLevel, context) {
+  const date = new Date(value);
+  const parts = getAnalyticsDateParts(date, context);
+
+  if (aggregationLevel === 'hourly') {
+    return `${context.dateFormatter.format(date)} ${String(parts.hour).padStart(2, '0')}:00`;
+  }
+
+  if (aggregationLevel === 'weekly') {
+    const localDate = new Date(Date.UTC(parts.year, parts.month - 1, parts.day));
+    const daysSinceSunday = localDate.getUTCDay();
+    localDate.setUTCDate(localDate.getUTCDate() - daysSinceSunday);
+    return context.utcDateFormatter.format(localDate);
+  }
+
+  return context.dateFormatter.format(date);
+}
+
+/**
  * Start a new session log entry with timeout management
  */
 sshConnectionSchema.methods.startSession = async function(maxDuration) {
@@ -129,9 +213,17 @@ sshConnectionSchema.methods.logSessionError = function(errorMessage) {
 
 /**
  * Generate a session analytics report
+ * @param {Object} [options] - Analytics formatting options
+ * @param {string} [options.timezone] - IANA timezone identifier
+ * @param {string} [options.locale] - BCP 47 locale identifier
+ * @param {string} [options.aggregationLevel='daily'] - Trend aggregation level: hourly, daily, or weekly
  * @returns {Object} - Summary report of session analytics
  */
-sshConnectionSchema.methods.generateSessionReport = function() {
+sshConnectionSchema.methods.generateSessionReport = function(options = {}) {
+  const {
+    aggregationLevel = 'daily'
+  } = options || {};
+  const dateContext = createAnalyticsDateContext(options || {});
   const totalSessions = this.sessionLogs.length;
   const completedSessions = this.sessionLogs.filter(log => log.endTime).length;
   const totalDuration = this.sessionLogs.reduce((acc, log) => acc + (log.duration || 0), 0);
@@ -141,7 +233,7 @@ sshConnectionSchema.methods.generateSessionReport = function() {
 
   const usagePatterns = this.sessionLogs.reduce((patterns, log) => {
     if (log.startTime) {
-      const day = new Date(log.startTime).toLocaleDateString('en-US', { weekday: 'long' });
+      const day = dateContext.weekdayFormatter.format(new Date(log.startTime));
       patterns[day] = (patterns[day] || 0) + 1;
     }
     return patterns;
@@ -149,16 +241,16 @@ sshConnectionSchema.methods.generateSessionReport = function() {
 
   const peakUsageTimes = this.sessionLogs.reduce((times, log) => {
     if (log.startTime) {
-      const hour = new Date(log.startTime).getHours();
+      const { hour } = getAnalyticsDateParts(log.startTime, dateContext);
       times[hour] = (times[hour] || 0) + 1;
     }
     return times;
   }, {});
 
   const errorTrends = this.sessionLogs.reduce((trends, log) => {
-    if (log.error) {
-      const day = new Date(log.startTime).toLocaleDateString('en-US');
-      trends[day] = (trends[day] || 0) + 1;
+    if (log.error && log.startTime) {
+      const key = getTrendBucket(log.startTime, aggregationLevel, dateContext);
+      trends[key] = (trends[key] || 0) + 1;
     }
     return trends;
   }, {});
@@ -178,10 +270,28 @@ sshConnectionSchema.methods.generateSessionReport = function() {
  * Generate a session analytics report with filtering capabilities
  * @param {Date} startDate - Start date for filtering
  * @param {Date} endDate - End date for filtering
- * @param {string} aggregationLevel - Aggregation level: hourly, daily, or weekly
+ * @param {string|Object} [aggregationLevel='daily'] - Aggregation level or analytics options
+ * @param {Object} [options] - Analytics formatting options
+ * @param {string} [options.timezone] - IANA timezone identifier
+ * @param {string} [options.locale] - BCP 47 locale identifier
+ * @param {string} [options.aggregationLevel='daily'] - Aggregation level: hourly, daily, or weekly
  * @returns {Object} - Filtered and aggregated session analytics report
  */
-sshConnectionSchema.methods.generateFilteredSessionReport = function(startDate, endDate, aggregationLevel) {
+sshConnectionSchema.methods.generateFilteredSessionReport = function(
+  startDate,
+  endDate,
+  aggregationLevel = 'daily',
+  options = {}
+) {
+  const reportOptions = aggregationLevel && typeof aggregationLevel === 'object'
+    ? aggregationLevel
+    : {
+        ...(options || {}),
+        aggregationLevel
+      };
+  const selectedAggregationLevel = reportOptions.aggregationLevel || 'daily';
+  const dateContext = createAnalyticsDateContext(reportOptions);
+
   // Filter logs by date range
   const filteredLogs = this.sessionLogs.filter(log => {
     const logStartTime = new Date(log.startTime);
@@ -204,32 +314,18 @@ sshConnectionSchema.methods.generateFilteredSessionReport = function(startDate, 
   filteredLogs.forEach(log => {
     if (log.startTime) {
       const logDate = new Date(log.startTime);
-      
+
       // Usage patterns by day of week
-      const day = logDate.toLocaleDateString('en-US', { weekday: 'long' });
+      const day = dateContext.weekdayFormatter.format(logDate);
       usagePatterns[day] = (usagePatterns[day] || 0) + 1;
-      
+
       // Peak usage times by hour
-      const hour = logDate.getHours();
+      const { hour } = getAnalyticsDateParts(logDate, dateContext);
       peakUsageTimes[hour] = (peakUsageTimes[hour] || 0) + 1;
-      
+
       // Error trends
       if (log.error) {
-        let key;
-        switch (aggregationLevel) {
-          case 'hourly':
-            key = logDate.toLocaleDateString('en-US') + ' ' + hour + ':00';
-            break;
-          case 'weekly':
-            const weekStart = new Date(logDate);
-            weekStart.setDate(logDate.getDate() - logDate.getDay());
-            key = weekStart.toLocaleDateString('en-US');
-            break;
-          case 'daily':
-          default:
-            key = logDate.toLocaleDateString('en-US');
-            break;
-        }
+        const key = getTrendBucket(logDate, selectedAggregationLevel, dateContext);
         errorTrends[key] = (errorTrends[key] || 0) + 1;
       }
     }

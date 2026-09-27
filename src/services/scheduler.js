@@ -1433,6 +1433,19 @@ Respond with ONLY the rephrased message, no explanation:`;
       }
     });
 
+    // Expired lock tiers back to 1x (SkynetDiamond audit 2026-09-26, M-1) — daily keeper
+    this.agenda.define('skynet-poke-expired-locks', async () => {
+      try {
+        const stakingService = (await import('../services/crypto/skynetStakingService.js')).default;
+        if (!stakingService.isAvailable()) await stakingService.initialize();
+        const r = await stakingService.pokeExpiredLocks();
+        if (r.poked) logger.info(`Expired-lock keeper: poked ${r.poked} of ${r.due} position(s)`);
+        else if (r.skipped) logger.debug(`Expired-lock keeper skipped: ${r.skipped}`);
+      } catch (error) {
+        logger.error('Expired-lock keeper error:', error);
+      }
+    });
+
     // Skynet staking auto-claim — daily check for pending rewards
     this.agenda.define('skynet-staking-autoclaim', async (job) => {
       try {
@@ -2850,6 +2863,7 @@ Respond with ONLY the rephrased message, no explanation:`;
 
     // Skynet staking auto-claim - daily at 6 AM
     await this.agenda.every('0 6 * * *', 'skynet-staking-autoclaim');
+    await this.agenda.every('20 5 * * *', 'skynet-poke-expired-locks');
 
     // Skynet LP staking auto-claim - daily at 6:30 AM
     await this.agenda.every('30 6 * * *', 'skynet-lp-staking-autoclaim');

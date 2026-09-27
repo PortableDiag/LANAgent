@@ -197,6 +197,88 @@ export async function scanWithVirusTotal(req, res, next) {
   }
 }
 
+/**
+ * Scan multi-file uploads (upload.array) with VirusTotal hash lookups — the
+ * array counterpart of scanWithVirusTotal. Same fail-open policy: no plugin, a
+ * failed lookup, or a file over the 32MB free-API limit lets the request through.
+ * Any malicious hit rejects the whole batch and deletes every uploaded file.
+ *
+ * The VirusTotal plugin spaces lookups 15s apart (free-tier limit), so a 20-file
+ * batch scanned in full would hold a paid request for ~5 minutes. Lookups share a
+ * total budget; files the budget doesn't reach are passed through unscanned,
+ * exactly as a failed lookup would be. Identical files are looked up once.
+ */
+const VT_ARRAY_SCAN_BUDGET_MS = 45000;
+
+export async function scanWithVirusTotalArray(req, res, next) {
+  if (!Array.isArray(req.files) || req.files.length === 0) return next();
+
+  const vtPlugin = req.app.locals.agent?.apiManager?.apis?.get('virustotal');
+  if (!vtPlugin) {
+    logger.debug('VirusTotal plugin not available, skipping array scan');
+    return next();
+  }
+
+  const maxScanSize = 32 * 1024 * 1024;
+  const deadline = Date.now() + VT_ARRAY_SCAN_BUDGET_MS;
+  const verdictByHash = new Map();
+  const maliciousFiles = [];
+  let unscanned = 0;
+
+  for (const file of req.files) {
+    if (file.size > maxScanSize) {
+      logger.info(`Skipping VT scan for ${file.filename} (${file.size} bytes > 32MB limit)`);
+      unscanned++;
+      continue;
+    }
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) {
+      unscanned++;
+      continue;
+    }
+
+    try {
+      const fileData = await fs.readFile(file.path);
+      const hash = crypto.createHash('sha256').update(fileData).digest('hex');
+
+      if (!verdictByHash.has(hash)) {
+        let timer;
+        const result = await Promise.race([
+          vtPlugin.execute({ action: 'scanHash', hash }),
+          new Promise((_, reject) => {
+            timer = setTimeout(() => reject(new Error('scan budget exhausted')), remaining);
+          })
+        ]).finally(() => clearTimeout(timer));
+        verdictByHash.set(hash, Boolean(result?.success && result.malicious));
+      }
+
+      if (verdictByHash.get(hash)) {
+        maliciousFiles.push(file.originalname);
+        logger.warn(`VirusTotal flagged file as malicious: ${file.filename} (hash: ${hash})`);
+      }
+    } catch (error) {
+      // Don't block on VT scan failure — log and continue
+      logger.warn(`VirusTotal scan failed for ${file.filename}, proceeding:`, error.message);
+      unscanned++;
+    }
+  }
+
+  if (unscanned > 0) {
+    logger.info(`VirusTotal array scan: ${unscanned}/${req.files.length} file(s) passed unscanned`);
+  }
+
+  if (maliciousFiles.length > 0) {
+    await Promise.all(req.files.map(f => fs.unlink(f.path).catch(() => {})));
+    return res.status(400).json({
+      success: false,
+      error: 'One or more files were flagged as potentially malicious',
+      maliciousFiles
+    });
+  }
+
+  next();
+}
+
 // Auto-cleanup old uploads
 function startCleanupInterval() {
   setInterval(async () => {

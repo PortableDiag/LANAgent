@@ -2735,7 +2735,12 @@ The user wants to perform the action: ${intentResult.action} (${intentResult.met
 Plugin: ${intentResult.plugin}
 
 Expected parameters:
-${actionInfo ? JSON.stringify(actionInfo.params || actionInfo.parameters, null, 2) : 'Unknown - extract based on the action type'}
+${actionInfo ? (actionInfo.params || actionInfo.parameters
+  ? JSON.stringify(actionInfo.params || actionInfo.parameters, null, 2)
+  // Most commands declare only a usage line; its argument names are the ones the plugin reads
+  // (without it the model invented names — sort_by for sort — that the plugin ignored).
+  : actionInfo.usage ? `Use exactly the argument names in this call shape: ${actionInfo.usage}` : 'Unknown - extract based on the action type')
+  : 'Unknown - extract based on the action type'}
 
 Examples of this action:
 ${intentResult.metadata?.intentExamples ? JSON.stringify(intentResult.metadata.intentExamples) : 'None available'}

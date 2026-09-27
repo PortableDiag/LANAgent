@@ -38,6 +38,30 @@ export default class SkillsPlugin extends BasePlugin {
         description: 'Delete a skill',
         usage: 'delete({ name: "old-skill" })',
         examples: ['delete the old-skill skill', 'forget the backup skill']
+      },
+      {
+        command: 'approve',
+        description: 'Approve a pending skill (one another agent taught) so it is used from now on',
+        usage: 'approve({ name: "post-image-card" })',
+        examples: ['approve the skill', 'approve skill post-image-card', 'yes use the skill that outrider taught you']
+      },
+      {
+        command: 'approveAll',
+        description: 'Approve every pending skill (all the ones other agents taught) at once',
+        usage: 'approveAll',
+        examples: ['approve all skills', 'approve all pending skills', 'accept every skill the agents taught you']
+      },
+      {
+        command: 'setAutoApprove',
+        description: 'Turn automatic approval of skills other agents teach on or off (off by default); turning it on also approves any already pending',
+        usage: 'setAutoApprove({ enabled: true })',
+        examples: ['turn on auto approve skills', 'auto approve skills from other agents', 'turn off skill auto approval', 'stop auto approving skills', 'is skill auto approve on']
+      },
+      {
+        command: 'reject',
+        description: 'Reject (delete) a pending skill another agent taught',
+        usage: 'reject({ name: "post-image-card" })',
+        examples: ['reject skill post-image-card', 'discard that pending skill', 'do not use the skill outrider taught']
       }
     ];
   }
@@ -56,7 +80,7 @@ export default class SkillsPlugin extends BasePlugin {
     });
     const service = this.service || getSkillsService();
 
-    if (params.needsParameterExtraction && this.agent.providerManager && action !== 'list') {
+    if (params.needsParameterExtraction && this.agent.providerManager && action !== 'list' && action !== 'approveAll' && action !== 'setAutoApprove') {
       Object.assign(data, await this.extractParameters(params.originalInput || params.input, action));
     }
 
@@ -69,7 +93,7 @@ export default class SkillsPlugin extends BasePlugin {
             success: true,
             count: skills.length,
             skills,
-            result: `${skills.length} skill(s):\n` + skills.map(s => `• ${s.name}${s.source === 'auto' ? ' (learned)' : ''}: ${s.description}`).join('\n')
+            result: `${skills.length} skill(s):\n` + skills.map(s => `• ${s.name}${s.status === 'pending' ? ` (PENDING — taught by ${s.taughtBy || 'another agent'}; "approve skill ${s.name}" to use it)` : s.source === 'auto' ? ' (learned)' : ''}: ${s.description}`).join('\n')
           };
         }
         case 'view': {
@@ -81,6 +105,34 @@ export default class SkillsPlugin extends BasePlugin {
         case 'create': {
           const skill = await service.create({ name: data.name, description: data.description, body: data.body, overwrite: data.overwrite === true });
           return { success: true, result: `Saved skill "${skill.name}". It will be used for requests like: ${skill.description}` };
+        }
+        case 'approve': {
+          this.validateParams(data, { name: { required: true, type: 'string' } });
+          const skill = await service.approve(data.name);
+          return skill ? { success: true, result: `Approved skill "${skill.name}" — I'll use it for: ${skill.description}` } : { success: false, error: `No skill named "${data.name}"` };
+        }
+        case 'approveAll': {
+          const names = await service.approveAll();
+          return names.length
+            ? { success: true, approved: names, result: `Approved ${names.length} skill(s): ${names.join(', ')}.` }
+            : { success: true, approved: [], result: 'No skills are waiting for approval.' };
+        }
+        case 'setAutoApprove': {
+          const { setAutoApprove, getAutoApprove } = await import('../../services/skills/skillsService.js');
+          if (data.enabled === undefined || data.enabled === null) {
+            const cur = await getAutoApprove();
+            return { success: true, enabled: cur.enabled, result: `Skill auto-approval is ${cur.enabled ? 'ON' : 'OFF'}${cur.source === 'env' ? ' (set by SKILLS_AUTO_APPROVE in .env)' : ''}.` };
+          }
+          const on = data.enabled === true || /^(true|on|yes|1|enable)/i.test(String(data.enabled));
+          const state = await setAutoApprove(on);
+          const approved = on ? await service.approveAll() : [];
+          const envNote = state.source === 'env' ? ' Note: SKILLS_AUTO_APPROVE in .env overrides this setting.' : '';
+          return { success: true, enabled: on, approved, result: `Skill auto-approval is now ${on ? 'ON — skills other agents teach are used at once; you are still told, with a Reject button' : 'OFF — new skills from other agents wait for your approval'}.${approved.length ? ` Approved the ${approved.length} already pending: ${approved.join(', ')}.` : ''}${envNote}` };
+        }
+        case 'reject': {
+          this.validateParams(data, { name: { required: true, type: 'string' } });
+          const removed = await service.reject(data.name);
+          return removed ? { success: true, result: `Rejected and removed the pending skill "${data.name}".` } : { success: false, error: `No pending skill named "${data.name}"` };
         }
         case 'delete': {
           this.validateParams(data, { name: { required: true, type: 'string' } });

@@ -3,6 +3,92 @@ import NodeCache from 'node-cache';
 import { logger } from '../../utils/logger.js';
 import cronParser from 'cron-parser';
 
+const MAX_PREVIEW_COUNT = 20;
+
+/**
+ * Validate and normalize cron preview options.
+ *
+ * @param {object} options Preview options supplied by the caller.
+ * @param {number} defaultCount Number of occurrences to generate by default.
+ * @returns {{ timezone?: string, parserTimezone?: string, count: number, startDate: Date|null, startAt: string|null, cacheOptions: object }}
+ */
+function normalizeCronOptions(options = {}, defaultCount = 5) {
+  if (!options || typeof options !== 'object' || Array.isArray(options)) {
+    throw new Error('Cron options must be an object');
+  }
+
+  let timezone;
+  if (options.timezone !== undefined && options.timezone !== null) {
+    if (typeof options.timezone !== 'string' || !options.timezone.trim()) {
+      throw new Error('Timezone must be a valid IANA timezone string');
+    }
+
+    timezone = options.timezone.trim();
+
+    try {
+      new Intl.DateTimeFormat('en-US', { timeZone: timezone }).format();
+    } catch {
+      throw new Error(`Invalid timezone: ${timezone}`);
+    }
+  }
+
+  let count = defaultCount;
+  if (options.count !== undefined && options.count !== null) {
+    const numericCount = typeof options.count === 'number'
+      ? options.count
+      : Number(options.count);
+
+    if (!Number.isInteger(numericCount) || numericCount < 1) {
+      throw new Error('Count must be a positive integer');
+    }
+
+    if (numericCount > MAX_PREVIEW_COUNT) {
+      throw new Error(`Count cannot exceed ${MAX_PREVIEW_COUNT}`);
+    }
+
+    count = numericCount;
+  }
+
+  let startDate = null;
+  let startAt = null;
+  if (options.startAt !== undefined && options.startAt !== null) {
+    if (
+      typeof options.startAt !== 'string' &&
+      typeof options.startAt !== 'number' &&
+      !(options.startAt instanceof Date)
+    ) {
+      throw new Error('startAt must be a valid date or ISO date string');
+    }
+
+    startDate = options.startAt instanceof Date
+      ? new Date(options.startAt.getTime())
+      : new Date(options.startAt);
+
+    if (Number.isNaN(startDate.getTime())) {
+      throw new Error('startAt must be a valid date or ISO date string');
+    }
+
+    startAt = startDate.toISOString();
+  }
+
+  const effectiveTimezone = timezone ||
+    Intl.DateTimeFormat().resolvedOptions().timeZone ||
+    'UTC';
+
+  return {
+    timezone: effectiveTimezone,
+    parserTimezone: timezone,
+    count,
+    startDate,
+    startAt,
+    cacheOptions: {
+      timezone: timezone || null,
+      count,
+      startAt
+    }
+  };
+}
+
 export default class SchedulerPlugin extends BasePlugin {
   constructor(agent) {
     super(agent);
@@ -13,12 +99,12 @@ export default class SchedulerPlugin extends BasePlugin {
       {
         command: 'parseCron',
         description: 'Parse and explain a cron expression',
-        usage: 'parseCron [expression]'
+        usage: 'parseCron [expression] [timezone] [count] [startAt]'
       },
       {
         command: 'nextRun',
         description: 'Get next scheduled run time for a cron expression',
-        usage: 'nextRun [expression]'
+        usage: 'nextRun [expression] [timezone] [count] [startAt]'
       },
       {
         command: 'listScheduledTasks',
@@ -35,15 +121,24 @@ export default class SchedulerPlugin extends BasePlugin {
   }
 
   async execute(params) {
-    const { action, expression, taskId } = params;
+    const {
+      action,
+      expression,
+      taskId,
+      timezone,
+      count,
+      startAt
+    } = params;
 
     try {
+      const cronOptions = { timezone, count, startAt };
+
       switch (action) {
         case 'parseCron':
-          return await this.parseCronExpression(expression);
+          return await this.parseCronExpression(expression, cronOptions);
 
         case 'nextRun':
-          return await this.getNextRunTime(expression);
+          return await this.getNextRunTime(expression, cronOptions);
 
         case 'listScheduledTasks':
           return await this.listScheduledTasks();
@@ -66,58 +161,101 @@ export default class SchedulerPlugin extends BasePlugin {
     }
   }
 
-  async parseCronExpression(expression) {
+  async parseCronExpression(expression, options = {}) {
     if (!expression) {
       throw new Error('Cron expression is required');
     }
 
-    const cacheKey = `cron_parse_${expression}`;
-    const cached = this.cache.get(cacheKey);
+    const normalizedOptions = normalizeCronOptions(options, 5);
+    // Only a fixed startAt gives a reproducible preview; a "from now" preview cached for the
+    // 30-minute TTL would report run times that have already passed.
+    const cacheKey = normalizedOptions.startAt
+      ? `cron_parse_${expression}_${JSON.stringify(normalizedOptions.cacheOptions)}`
+      : null;
+    const cached = cacheKey ? this.cache.get(cacheKey) : undefined;
     if (cached) {
       return cached;
     }
 
+    const calculationStart = normalizedOptions.startDate || new Date();
+
     try {
-      const interval = cronParser.parseExpression(expression);
+      const parserOptions = {
+        currentDate: calculationStart
+      };
+
+      if (normalizedOptions.parserTimezone) {
+        parserOptions.tz = normalizedOptions.parserTimezone;
+      }
+
+      const interval = cronParser.parseExpression(expression, parserOptions);
       const result = {
         success: true,
         expression,
         description: this.describeCron(expression),
+        timezone: normalizedOptions.timezone,
+        calculationStartTime: calculationStart.toISOString(),
         nextRuns: []
       };
 
-      for (let i = 0; i < 5; i++) {
+      for (let i = 0; i < normalizedOptions.count; i++) {
         result.nextRuns.push(interval.next().toISOString());
       }
 
-      this.cache.set(cacheKey, result);
+      if (cacheKey) this.cache.set(cacheKey, result);
       return result;
     } catch (err) {
       throw new Error(`Invalid cron expression: ${err.message}`);
     }
   }
 
-  async getNextRunTime(expression) {
+  async getNextRunTime(expression, options = {}) {
     if (!expression) {
       throw new Error('Cron expression is required');
     }
 
-    const cacheKey = `cron_next_${expression}`;
-    const cached = this.cache.get(cacheKey);
+    const normalizedOptions = normalizeCronOptions(options, 1);
+    // Only a fixed startAt gives a reproducible preview; a "from now" preview cached for the
+    // 30-minute TTL would report run times that have already passed.
+    const cacheKey = normalizedOptions.startAt
+      ? `cron_next_${expression}_${JSON.stringify(normalizedOptions.cacheOptions)}`
+      : null;
+    const cached = cacheKey ? this.cache.get(cacheKey) : undefined;
     if (cached) {
       return cached;
     }
 
+    const calculationStart = normalizedOptions.startDate || new Date();
+
     try {
-      const interval = cronParser.parseExpression(expression);
-      const nextRun = interval.next().toISOString();
+      const parserOptions = {
+        currentDate: calculationStart
+      };
+
+      if (normalizedOptions.parserTimezone) {
+        parserOptions.tz = normalizedOptions.parserTimezone;
+      }
+
+      const interval = cronParser.parseExpression(expression, parserOptions);
+      const nextRuns = [];
+
+      for (let i = 0; i < normalizedOptions.count; i++) {
+        nextRuns.push(interval.next().toISOString());
+      }
+
       const result = {
         success: true,
         expression,
-        nextRun
+        nextRun: nextRuns[0],
+        timezone: normalizedOptions.timezone,
+        calculationStartTime: calculationStart.toISOString()
       };
 
-      this.cache.set(cacheKey, result);
+      if (normalizedOptions.count > 1) {
+        result.nextRuns = nextRuns;
+      }
+
+      if (cacheKey) this.cache.set(cacheKey, result);
       return result;
     } catch (err) {
       throw new Error(`Invalid cron expression: ${err.message}`);

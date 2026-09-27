@@ -16,6 +16,11 @@ export class ClarificationStore {
   }
 
   park(userId, { query, thoughts = [], question }) {
+    // An unanswered question is only dropped when that user writes again, so a user who
+    // never returns would leave their entry forever. Sweep expired entries on each park —
+    // no timer needed, and the map stays bounded by the users active within one TTL.
+    const now = Date.now();
+    for (const [key, entry] of this.pending) if (now >= entry.expires) this.pending.delete(key);
     this.pending.set(String(userId || 'default'), { query, thoughts, question, expires: Date.now() + this.ttlMs });
   }
 

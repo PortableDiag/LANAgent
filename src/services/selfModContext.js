@@ -27,6 +27,8 @@ const execFileAsync = promisify(execFile);
 
 const PER_MODULE_CHARS = 1800;
 const DEFAULT_MAX_CHARS = 14000;
+const DEFAULT_MAX_DEPTH = 2;      // 1 = direct imports only
+const DEFAULT_MAX_INDIRECT = 12;  // modules listed beyond the direct imports
 const KEYWORDS = new Set(['if', 'for', 'while', 'switch', 'catch', 'return', 'function', 'constructor', 'super', 'new', 'typeof', 'await']);
 
 /**
@@ -133,9 +135,14 @@ const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
  * @param {string} opts.targetFile - Target path (absolute or repo-relative)
  * @param {string} opts.content - Current contents of the target
  * @param {number} [opts.maxChars] - Overall size cap
+ * @param {number} [opts.maxDepth] - Import depth to list (1 = direct imports only)
+ * @param {number} [opts.maxIndirect] - Cap on modules listed beyond the direct imports
  * @returns {Promise<string>} The block, or '' if nothing could be gathered
  */
-export async function buildCodeContext({ repoRoot, targetFile, content, maxChars = DEFAULT_MAX_CHARS }) {
+export async function buildCodeContext({
+  repoRoot, targetFile, content, maxChars = DEFAULT_MAX_CHARS,
+  maxDepth = DEFAULT_MAX_DEPTH, maxIndirect = DEFAULT_MAX_INDIRECT
+}) {
   if (!repoRoot || !targetFile || typeof content !== 'string') return '';
   const targetAbs = path.isAbsolute(targetFile) ? targetFile : path.join(repoRoot, targetFile);
   const targetRel = path.relative(repoRoot, targetAbs);
@@ -143,6 +150,8 @@ export async function buildCodeContext({ repoRoot, targetFile, content, maxChars
 
   // 1. The real API of what the target imports.
   const apiParts = [];
+  const visited = new Set([targetAbs]);
+  let frontier = [];
   for (const spec of relativeImports(content)) {
     let abs = path.resolve(path.dirname(targetAbs), spec);
     if (!path.extname(abs)) abs += '.js';
@@ -151,8 +160,35 @@ export async function buildCodeContext({ repoRoot, targetFile, content, maxChars
       apiParts.push(`${spec}: FILE DOES NOT EXIST — do not import it`);
       continue;
     }
+    if (visited.has(abs)) continue;
+    visited.add(abs);
+    frontier.push({ abs, src });
     const surface = extractApiSurface(src).slice(0, PER_MODULE_CHARS);
     if (surface) apiParts.push(`${path.relative(repoRoot, abs)}:\n${surface}`);
+  }
+
+  // What those modules import in turn (breadth-first, bounded). A field the target reads
+  // off a return value often comes from one level further down. Built here, but appended
+  // LAST below: the block is truncated from the end, so this section is the first to go
+  // and never displaces the importer or collection-writer facts.
+  const indirectParts = [];
+  for (let depth = 2; depth <= maxDepth && frontier.length; depth++) {
+    const next = [];
+    for (const { abs: from, src: fromSrc } of frontier) {
+      for (const spec of relativeImports(fromSrc)) {
+        if (indirectParts.length >= maxIndirect) break;
+        let abs = path.resolve(path.dirname(from), spec);
+        if (!path.extname(abs)) abs += '.js';
+        if (visited.has(abs)) continue;
+        visited.add(abs);
+        let src;
+        try { src = await fs.readFile(abs, 'utf8'); } catch { continue; }
+        next.push({ abs, src });
+        const surface = extractApiSurface(src).slice(0, PER_MODULE_CHARS);
+        if (surface) indirectParts.push(`  [depth ${depth}] ${path.relative(repoRoot, abs)}:\n${surface}`);
+      }
+    }
+    frontier = next;
   }
   if (apiParts.length) {
     sections.push('MODULES THIS FILE IMPORTS — their actual API. Call nothing on them that is not listed here or already used in CURRENT CODE:\n' + apiParts.join('\n\n'));
@@ -185,6 +221,10 @@ export async function buildCodeContext({ repoRoot, targetFile, content, maxChars
     sections.push(writeText
       ? `WHERE ${modelName} DOCUMENTS ARE WRITTEN — the fields below are the ones production data actually has. Do not read fields nothing writes:\n${writeText}`
       : `NOTHING in src/ writes ${modelName} documents outside this file (no create/update/insert found). A new reader here would only ever see what this file writes — do not add analytics over fields nothing sets.`);
+  }
+
+  if (indirectParts.length) {
+    sections.push('MODULES REACHED THROUGH THOSE IMPORTS — for checking what the direct imports return; the target should still call only its direct imports:\n' + indirectParts.join('\n\n'));
   }
 
   if (!sections.length) return '';

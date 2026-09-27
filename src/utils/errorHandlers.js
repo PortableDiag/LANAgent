@@ -49,10 +49,89 @@ if (process.env.SENTRY_DSN) {
   logger.debug('Sentry DSN not configured, error reporting disabled');
 }
 
+// Cleanup run once on the way out, newest registration first (a service registered
+// after its dependencies stops before them).
+const shutdownHandlers = new Map();
+let shutdownPromise = null;
+let globalHandlersInstalled = false;
+
+// Signal shutdowns must finish inside PM2's kill_timeout (10 s in ecosystem.config.cjs),
+// after which PM2 sends SIGKILL and nothing is flushed.
+const signalShutdownMs = () => Number(process.env.SHUTDOWN_TIMEOUT_MS) || 9000;
+
+/**
+ * Register cleanup to run when the process shuts down (SIGTERM, SIGINT, or a fatal error).
+ * Registering a name again replaces the earlier handler.
+ * @param {string} name
+ * @param {Function} handler - sync or async
+ * @returns {Function} unregister
+ */
+export function registerShutdownHandler(name, handler) {
+  if (typeof name !== 'string' || !name.trim()) throw new TypeError('Shutdown handler name must be a non-empty string');
+  if (typeof handler !== 'function') throw new TypeError(`Shutdown handler "${name}" must be a function`);
+  if (shutdownPromise) {
+    logger.warn(`Shutdown handler "${name}" registered after shutdown started; ignored`);
+    return () => {};
+  }
+  shutdownHandlers.delete(name);
+  shutdownHandlers.set(name, handler);
+  return () => { if (shutdownHandlers.get(name) === handler) shutdownHandlers.delete(name); };
+}
+
+/**
+ * Run the registered cleanup (bounded by deadlineMs overall), flush Sentry, then exit.
+ * Idempotent: a second signal or a fatal error during shutdown joins the first one.
+ * @param {number} exitCode
+ * @param {{deadlineMs?: number}} [options]
+ * @returns {Promise<void>}
+ */
+export function shutdown(exitCode = 0, { deadlineMs = signalShutdownMs() } = {}) {
+  if (shutdownPromise) return shutdownPromise;
+  shutdownPromise = (async () => {
+    const endAt = Date.now() + Math.max(0, deadlineMs);
+    const handlers = [...shutdownHandlers.entries()].reverse();
+    shutdownHandlers.clear();
+    for (const [name, handler] of handlers) {
+      const remaining = endAt - Date.now();
+      if (remaining <= 0) {
+        logger.error(`Shutdown deadline reached; skipped "${name}" and any handlers after it`);
+        break;
+      }
+      let timer;
+      try {
+        await Promise.race([
+          Promise.resolve().then(() => handler()),
+          new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('deadline exceeded')), remaining); })
+        ]);
+      } catch (error) {
+        logger.error(`Shutdown handler "${name}" failed: ${error?.message || error}`);
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+    if (sentryEnabled) {
+      try { await Sentry.flush(Math.max(500, endAt - Date.now())); } catch { /* exiting anyway */ }
+    }
+  })().catch(error => logger.error('Shutdown failed:', error))
+    .finally(() => process.exit(exitCode));
+  return shutdownPromise;
+}
+
 /**
  * Setup global error handlers with better recovery
  */
 export function setupGlobalErrorHandlers() {
+  if (globalHandlersInstalled) return;
+  globalHandlersInstalled = true;
+
+  // Termination signals run the registered cleanup (index.js registers agent.stop).
+  for (const signal of ['SIGTERM', 'SIGINT']) {
+    process.on(signal, () => {
+      logger.info(`${signal} received, shutting down gracefully...`);
+      shutdown(0);
+    });
+  }
+
   // Handle uncaught exceptions - log but don't exit immediately
   process.on('uncaughtException', (error, origin) => {
     logger.error('Uncaught Exception:', {
@@ -69,11 +148,10 @@ export function setupGlobalErrorHandlers() {
       });
     }
     
-    // Give time to flush logs and Sentry before exit
+    // Give time to flush logs and Sentry before exit — the same window as before, now
+    // also offered to the registered cleanup (state may be corrupt, so keep it short).
     const flushTimeout = sentryEnabled ? 2000 : 1000;
-    setTimeout(() => {
-      process.exit(1);
-    }, flushTimeout);
+    shutdown(1, { deadlineMs: flushTimeout });
   });
 
   // Handle unhandled promise rejections - track and warn
@@ -106,7 +184,7 @@ export function setupGlobalErrorHandlers() {
     // Monitor if rejections accumulate
     if (unhandledRejections.size > 10) {
       logger.fatal('Too many unhandled rejections, exiting...');
-      setTimeout(() => process.exit(1), 1000);
+      shutdown(1, { deadlineMs: 1000 });
     }
   });
 

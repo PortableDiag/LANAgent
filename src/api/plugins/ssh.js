@@ -632,6 +632,31 @@ export default class SSHPlugin extends BasePlugin {
   }
 
   /**
+   * Validate optional report timezone/locale. Returns { options } or { error }.
+   * An unknown IANA zone or locale would otherwise throw a RangeError inside the model.
+   */
+  _reportFormatOptions(data) {
+    const options = {};
+    if (data?.timezone) {
+      try {
+        new Intl.DateTimeFormat('en-US', { timeZone: data.timezone });
+      } catch {
+        return { error: `Invalid timezone: ${data.timezone} (use an IANA name like America/New_York)` };
+      }
+      options.timezone = data.timezone;
+    }
+    if (data?.locale) {
+      try {
+        new Intl.DateTimeFormat(data.locale);
+      } catch {
+        return { error: `Invalid locale: ${data.locale}` };
+      }
+      options.locale = data.locale;
+    }
+    return { options };
+  }
+
+  /**
    * Session report for a single saved SSH connection.
    * Wraps the SSHConnection model's `generateSessionReport()` method.
    *
@@ -647,7 +672,15 @@ export default class SSHPlugin extends BasePlugin {
     if (typeof conn.generateSessionReport !== 'function') {
       return { success: false, error: 'generateSessionReport not available on SSHConnection model' };
     }
-    return { success: true, connectionId: id, report: conn.generateSessionReport() };
+    const fmt = this._reportFormatOptions(data);
+    if (fmt.error) return { success: false, error: fmt.error };
+    const aggregationLevel = ['hourly', 'daily', 'weekly'].includes(data?.aggregationLevel)
+      ? data.aggregationLevel : 'daily';
+    return {
+      success: true,
+      connectionId: id,
+      report: conn.generateSessionReport({ ...fmt.options, aggregationLevel })
+    };
   }
 
   /**
@@ -657,7 +690,8 @@ export default class SSHPlugin extends BasePlugin {
    * SSHConnection model with the supplied date range + aggregation level.
    *
    * @param {{ connectionId?: string, id?: string, startDate?: string|Date,
-   *           endDate?: string|Date, aggregationLevel?: 'hourly'|'daily'|'weekly' }} data
+   *           endDate?: string|Date, aggregationLevel?: 'hourly'|'daily'|'weekly',
+   *           timezone?: string, locale?: string }} data  timezone = IANA name for day/hour buckets
    * @returns {Promise<{ success: boolean, analytics?: object, error?: string }>}
    */
   async getSessionAnalytics(data) {
@@ -683,11 +717,19 @@ export default class SSHPlugin extends BasePlugin {
     const aggregationLevel = ['hourly', 'daily', 'weekly'].includes(data?.aggregationLevel)
       ? data.aggregationLevel : 'daily';
 
-    const analytics = conn.generateFilteredSessionReport(startDate, endDate, aggregationLevel);
+    const fmt = this._reportFormatOptions(data);
+    if (fmt.error) return { success: false, error: fmt.error };
+
+    const analytics = conn.generateFilteredSessionReport(startDate, endDate, aggregationLevel, fmt.options);
     return {
       success: true,
       connectionId: id,
-      window: { startDate: startDate.toISOString(), endDate: endDate.toISOString(), aggregationLevel },
+      window: {
+        startDate: startDate.toISOString(),
+        endDate: endDate.toISOString(),
+        aggregationLevel,
+        timezone: fmt.options.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone
+      },
       analytics
     };
   }

@@ -95,29 +95,46 @@ export default class WebSearchPlugin extends BasePlugin {
 
     logger.info(`Web search for: ${query}${preferredProvider ? ` (preferred: ${preferredProvider})` : ''}`);
 
-    // Direct search APIs first. They return ranked results with no model in the
-    // loop, so the AI provider lock is irrelevant to them — which is the only
-    // way search works at all while spend is pinned to a provider with no search
-    // tool. The LLM path below stays as the fallback for when no backend key is
-    // configured, and is still the only path that returns prose.
-    if (webSearchService.isAvailable()) {
-      const direct = await webSearchService.search(query);
-      if (direct.success) {
-        return {
-          success: true,
-          query,
-          provider: direct.provider,
-          results: direct.results,
-          cached: direct.cached === true,
-          // Callers that expect prose get a readable rendering of the same data
-          // rather than a shape change.
-          result: direct.results.length
-            ? direct.results.map((r, i) => `${i + 1}. ${r.title}\n   ${r.url}\n   ${r.snippet}`).join('\n\n')
-            : 'No results found.'
-        };
-      }
-      logger.warn(`Direct search backends failed, falling back to the model path: ${direct.error}`);
+    // Order: keyed search APIs, then the model's own search tool, then keyless DuckDuckGo.
+    // Direct APIs return ranked results with no model in the loop, so the AI provider lock is
+    // irrelevant to them. The model path is the only one that returns prose. The keyless
+    // backend is last so an instance that searched through its AI provider keeps doing so; it
+    // answers when neither of the others can (no key, and a lock or provider with no search).
+    const direct = await this._directSearch(query, 'keyed');
+    if (direct) return direct;
+
+    const viaModel = await this._modelSearch(query, preferredProvider);
+    if (viaModel.success) return viaModel;
+
+    const keyless = await this._directSearch(query, 'keyless');
+    if (keyless) return keyless;
+    return viaModel;
+  }
+
+  /** A direct search-API answer in the plugin's result shape, or null. */
+  async _directSearch(query, tier) {
+    if (!webSearchService.isAvailable(tier)) return null;
+    const direct = await webSearchService.search(query, { tier });
+    if (!direct.success) {
+      logger.warn(`Direct search (${tier}) failed: ${direct.error}`);
+      return null;
     }
+    return {
+      success: true,
+      query,
+      provider: direct.provider,
+      results: direct.results,
+      cached: direct.cached === true,
+      // Callers that expect prose get a readable rendering of the same data
+      // rather than a shape change.
+      result: direct.results.length
+        ? direct.results.map((r, i) => `${i + 1}. ${r.title}\n   ${r.url}\n   ${r.snippet}`).join('\n\n')
+        : 'No results found.'
+    };
+  }
+
+  /** Search through the AI provider's web-search tool (Anthropic/OpenAI/OpenRouter). */
+  async _modelSearch(query, preferredProvider) {
 
     const providerManager = this.agent?.providerManager;
     if (!providerManager) {

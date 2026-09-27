@@ -23,6 +23,7 @@
  */
 import axios from 'axios';
 import { parseStringPromise } from 'xml2js';
+import * as cheerio from 'cheerio';
 import { logger } from '../../utils/logger.js';
 
 const DEFAULT_TIMEOUT_MS = 12000;
@@ -137,6 +138,112 @@ class YandexSearchProvider {
 }
 
 /**
+ * SearXNG — a self-hosted metasearch instance (SEARXNG_URL, e.g. http://192.0.2.10:8888).
+ * `GET /search?q=&format=json` answers `{ results: [{ title, url, content }] }`. The instance
+ * must have `json` enabled under `search.formats` in its settings.yml, or it answers 403.
+ * No key: whoever runs the instance controls it.
+ */
+class SearxngSearchProvider {
+  constructor(env = process.env) {
+    this.name = 'searxng';
+    this.baseUrl = (env.SEARXNG_URL || '').replace(/\/+$/, '') || null;
+  }
+
+  isConfigured() {
+    return Boolean(this.baseUrl);
+  }
+
+  async search(query, opts = {}) {
+    const started = Date.now();
+    const count = Math.min(Math.max(parseInt(opts.count, 10) || DEFAULT_COUNT, 1), 20);
+    const res = await axios.get(`${this.baseUrl}/search`, {
+      params: { q: query, format: 'json' },
+      headers: { Accept: 'application/json' },
+      timeout: opts.timeoutMs || DEFAULT_TIMEOUT_MS,
+      validateStatus: () => true
+    });
+    if (res.status === 403) throw new Error('searxng: HTTP 403 (enable the json format in the instance settings)');
+    if (res.status !== 200) throw new Error(`searxng: HTTP ${res.status}`);
+    const results = (res.data?.results || []).map(r => ({
+      title: stripTags(r.title) || r.url,
+      url: r.url,
+      snippet: stripTags(r.content)
+    })).filter(r => r.url).slice(0, count);
+    return { provider: this.name, results, tookMs: Date.now() - started };
+  }
+}
+
+/**
+ * DuckDuckGo, keyless — the last resort so search works on an install with no search key.
+ *
+ * Uses the lite page (`GET https://lite.duckduckgo.com/lite/?q=`). Verified 2026-09-26 from
+ * the dev box and from ALICE's VPN exit: 200 with ten `a.result-link` rows, each followed by a
+ * `td.result-snippet`. The `html.duckduckgo.com` POST form answered an "anomaly" (bot) page
+ * from the same box, so it is not used. Links arrive wrapped as
+ * `//duckduckgo.com/l/?uddg=<encoded target>`; ads go through `/y.js` and are dropped.
+ * Scraping a results page is fragile by nature: zero parsed rows on a page that is not a
+ * genuine "no results" page is reported as a failure, never as an empty answer.
+ */
+class DuckDuckGoSearchProvider {
+  constructor(env = process.env) {
+    this.name = 'duckduckgo';
+    // Keyless: callers try it only after every keyed backend AND the model's own search tool.
+    this.keyless = true;
+    this.disabled = /^(0|false|off)$/i.test(env.DUCKDUCKGO_SEARCH || '');
+  }
+
+  isConfigured() {
+    return !this.disabled;
+  }
+
+  async search(query, opts = {}) {
+    const started = Date.now();
+    const count = Math.min(Math.max(parseInt(opts.count, 10) || DEFAULT_COUNT, 1), 20);
+    const res = await axios.get('https://lite.duckduckgo.com/lite/', {
+      params: { q: query },
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0',
+        'Accept-Language': 'en-US,en;q=0.9',
+        Accept: 'text/html'
+      },
+      timeout: opts.timeoutMs || DEFAULT_TIMEOUT_MS,
+      responseType: 'text',
+      validateStatus: () => true
+    });
+    if (res.status !== 200) throw new Error(`duckduckgo: HTTP ${res.status}`);
+    const html = String(res.data || '');
+    const results = parseDuckDuckGoLite(html).slice(0, count);
+    if (!results.length && !/No results\.|No more results/i.test(html)) {
+      throw new Error(/anomaly/i.test(html) ? 'duckduckgo: refused as automated traffic' : 'duckduckgo: could not read the results page');
+    }
+    return { provider: this.name, results, tookMs: Date.now() - started };
+  }
+}
+
+/** Rows of the DuckDuckGo lite results page. Exported for tests. */
+function parseDuckDuckGoLite(html) {
+  const $ = cheerio.load(html);
+  const out = [];
+  $('a.result-link').each((_, a) => {
+    const href = $(a).attr('href') || '';
+    let url = href;
+    try {
+      const u = new URL(href, 'https://duckduckgo.com');
+      if (u.hostname.endsWith('duckduckgo.com')) {
+        if (u.pathname.startsWith('/y.js')) return; // ad
+        url = u.searchParams.get('uddg') || '';
+      } else {
+        url = u.toString();
+      }
+    } catch { return; }
+    if (!/^https?:\/\//i.test(url)) return;
+    const snippet = $(a).closest('tr').nextAll('tr').find('td.result-snippet').first().text();
+    out.push({ title: stripTags($(a).text()) || url, url, snippet: stripTags(snippet) });
+  });
+  return out;
+}
+
+/**
  * Pull `<doc>` entries out of a Yandex result document.
  *
  * Kept tolerant on purpose: the passage text arrives as `<passages><passage>`
@@ -211,4 +318,5 @@ function stripTags(s) {
   return String(s ?? '').replace(/<[^>]*>/g, '').replace(/\s+/g, ' ').trim();
 }
 
-export { BraveSearchProvider, YandexSearchProvider, parseYandexXml, stripTags };
+export { BraveSearchProvider, YandexSearchProvider, SearxngSearchProvider, DuckDuckGoSearchProvider,
+  parseYandexXml, parseDuckDuckGoLite, stripTags };

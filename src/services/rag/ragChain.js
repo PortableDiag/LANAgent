@@ -175,9 +175,15 @@ export class RAGChain {
 
   /**
    * Store document chunks in the vector store
+   *
+   * Embeds every chunk first, then writes the vector rows in one batched
+   * addDocuments() call when the store supports it (one LanceDB write per ingest
+   * instead of one per chunk). If the batch write fails, falls back to per-record
+   * writes so one bad row doesn't drop the whole document. memoryManager entries
+   * and the returned list cover only rows that were actually written.
    */
   async storeChunks(chunks, additionalMetadata = {}) {
-    const stored = [];
+    const pending = [];
 
     for (const chunk of chunks) {
       try {
@@ -192,7 +198,6 @@ export class RAGChain {
         // Create unique ID for the chunk
         const id = `rag_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
 
-        // Store in vector store
         const record = {
           id,
           vector: embedding,
@@ -202,29 +207,50 @@ export class RAGChain {
           ...additionalMetadata,
           ingestedAt: new Date().toISOString()
         };
+        pending.push({ chunk, id, embedding, record });
+      } catch (error) {
+        logger.warn('Failed to store chunk:', error.message);
+      }
+    }
 
-        // Use vectorStore.addIntent or similar method
-        if (this.vectorStore.addDocument) {
-          await this.vectorStore.addDocument(record);
-        } else if (this.vectorStore.addIntent) {
-          // Adapt to existing intent-based storage
-          await this.vectorStore.addIntent({
-            id,
-            embedding,
-            metadata: {
-              name: chunk.metadata.source || 'Unknown',
-              description: chunk.pageContent.substring(0, 200),
-              plugin: 'knowledge',
-              action: 'retrieve',
-              category: 'rag_document',
-              type: 'document_chunk',
-              examples: [],
-              enabled: true,
-              ...chunk.metadata,
-              ...additionalMetadata,
-              fullContent: chunk.pageContent
-            }
-          });
+    // Write vectors: batched when available, per-record otherwise.
+    let written = new Set();
+    if (pending.length && typeof this.vectorStore.addDocuments === 'function') {
+      try {
+        await this.vectorStore.addDocuments(pending.map(p => p.record));
+        written = new Set(pending.map(p => p.id));
+      } catch (error) {
+        logger.warn(`Batch vector write failed, retrying per chunk: ${error.message}`);
+      }
+    }
+
+    const stored = [];
+    for (const { chunk, id, embedding, record } of pending) {
+      try {
+        if (!written.has(id)) {
+          // Use vectorStore.addIntent or similar method
+          if (this.vectorStore.addDocument) {
+            await this.vectorStore.addDocument(record);
+          } else if (this.vectorStore.addIntent) {
+            // Adapt to existing intent-based storage
+            await this.vectorStore.addIntent({
+              id,
+              embedding,
+              metadata: {
+                name: chunk.metadata.source || 'Unknown',
+                description: chunk.pageContent.substring(0, 200),
+                plugin: 'knowledge',
+                action: 'retrieve',
+                category: 'rag_document',
+                type: 'document_chunk',
+                examples: [],
+                enabled: true,
+                ...chunk.metadata,
+                ...additionalMetadata,
+                fullContent: chunk.pageContent
+              }
+            });
+          }
         }
 
         // Also store in memory manager if available (for persistence)

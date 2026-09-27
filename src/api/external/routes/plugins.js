@@ -95,6 +95,22 @@ const BLOCKED_ACTIONS = new Set([
   'upgrade', 'showVersion', 'status', 'health', 'listFormats'
 ]);
 
+/**
+ * Commands a paid caller may actually invoke on a plugin instance: drops
+ * BLOCKED_ACTIONS and anything marked offerAsService: false. Shared by the
+ * service listing here and the catalog so neither advertises a refused action.
+ */
+export function offeredCommands(instance) {
+  if (!Array.isArray(instance?.commands)) return [];
+  return instance.commands.filter(cmd => {
+    const name = cmd?.command || cmd?.name;
+    if (typeof name !== 'string' || !name) return false;
+    if (BLOCKED_ACTIONS.has(name)) return false;
+    if (cmd.offerAsService === false) return false;
+    return true;
+  });
+}
+
 // Credit costs by plugin (1 credit ≈ $0.01 USD) — exported for catalog
 // These map to the SERVICE_USD_TIERS in p2p.js
 export const PLUGIN_CREDIT_COSTS = {
@@ -116,6 +132,40 @@ export const PLUGIN_CREDIT_COSTS = {
   contractAudit: 5,  // $0.05 — smart contract security audit
   imageTools: 2      // $0.02 — image processing (optimize, resize, crop, convert, watermark)
 };
+
+/**
+ * Per-action prices where one flat plugin price would not match the catalog. aiDetector is
+ * listed in catalog.js ('ai-content-detection') as text 5 / image 5 / audio 8 / video 10, but
+ * this route charged 5 for all four (TrellisWebAgent, 2754 #165, 2026-09-26).
+ */
+const MEDIA_EXT = {
+  image: ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'tiff'],
+  video: ['mp4', 'avi', 'mov', 'mkv', 'webm', 'flv'],
+  audio: ['mp3', 'wav', 'ogg', 'flac', 'aac', 'm4a', 'wma']
+};
+const AI_DETECTION_COSTS = { text: 5, image: 5, audio: 8, video: 10 };
+
+/** What aiDetector's auto `detect` will treat the input as — the same routing its autoDetect uses. */
+export function aiDetectKind(params = {}) {
+  const mime = String(params.mimeType || params.mime || '').toLowerCase();
+  for (const k of ['image', 'video', 'audio']) if (mime.startsWith(`${k}/`)) return k;
+  const input = String(params.url || params.text || params.content || params.query || '');
+  if (/^https?:\/\//i.test(input)) {
+    const ext = input.split('?')[0].split('.').pop().toLowerCase();
+    for (const [k, list] of Object.entries(MEDIA_EXT)) if (list.includes(ext)) return k;
+  }
+  return 'text';
+}
+
+/** Credits for one call of plugin/action with these (already guarded) params. */
+export function actionCreditCost(plugin, action, params = {}) {
+  if (plugin === 'aiDetector') {
+    const kind = { detectText: 'text', detectImage: 'image', detectAudio: 'audio', detectVideo: 'video' }[action]
+      || (action === 'detect' ? aiDetectKind(params) : null);
+    if (kind) return AI_DETECTION_COSTS[kind];
+  }
+  return PLUGIN_CREDIT_COSTS[plugin] || 3;
+}
 
 /**
  * Generic plugin execution route.
@@ -153,7 +203,7 @@ router.post('/:plugin/:action',
     }
 
     // Get credit cost
-    const creditCost = PLUGIN_CREDIT_COSTS[plugin] || 3;
+    const creditCost = actionCreditCost(plugin, action, params);
 
     // Debit credits
     try {
@@ -320,13 +370,7 @@ router.get('/', async (req, res) => {
     });
     if (creds.some(c => c.required) && !hasRequiredCreds) continue;
 
-    const commands = instance.commands
-      .filter(cmd => {
-        const name = cmd.command || cmd.name;
-        if (BLOCKED_ACTIONS.has(name)) return false;
-        if (cmd.offerAsService === false) return false;
-        return true;
-      })
+    const commands = offeredCommands(instance)
       .map(cmd => ({
         action: cmd.command || cmd.name,
         description: cmd.description,

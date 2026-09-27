@@ -17,6 +17,11 @@ export default class NASAPlugin extends BasePlugin {
         usage: 'apod'
       },
       {
+        command: 'apodHistory',
+        description: 'Get a historical, ranged, or bounded multi-day APOD query',
+        usage: 'apodHistory [date|startDate/endDate|count] [thumbs]'
+      },
+      {
         command: 'marsRoverPhotos',
         description: 'Get photos from Mars Rover (supports batch sols)',
         usage: 'marsRoverPhotos [roverName] [sols] (sols can be a single number or array)'
@@ -61,6 +66,7 @@ export default class NASAPlugin extends BasePlugin {
     this.baseUrl = 'https://api.nasa.gov/';
     this.adsBaseUrl = 'https://api.adsabs.harvard.edu/v1/search/query';
     this.cache = new NodeCache({ stdTTL: 3600 });
+    this.apodMaxDays = Number.parseInt(process.env.NASA_APOD_MAX_DAYS, 10) || 30;
   }
 
   async initialize() {
@@ -77,12 +83,28 @@ export default class NASAPlugin extends BasePlugin {
   }
 
   async execute(params) {
-    const { action, roverName, sol, sols, startDate, endDate, lat, lon, query } = params;
+    const {
+      action,
+      roverName,
+      sol,
+      sols,
+      startDate,
+      endDate,
+      date,
+      count,
+      thumbs,
+      lat,
+      lon,
+      query
+    } = params;
 
     try {
       switch (action) {
         case 'apod':
           return await this.getApod();
+
+        case 'apodHistory':
+          return await this.getApodHistory({ date, startDate, endDate, count, thumbs });
 
         case 'marsRoverPhotos':
           return await this.getMarsRoverPhotos(roverName, sols || (sol !== undefined ? [sol] : undefined));
@@ -143,6 +165,144 @@ export default class NASAPlugin extends BasePlugin {
     } catch (error) {
       logger.error('Error fetching APOD:', error.message);
       return { success: false, error: 'Failed to fetch Astronomy Picture of the Day' };
+    }
+  }
+
+  /**
+   * Fetches historical or multi-day Astronomy Pictures of the Day.
+   * Exactly one selection mode is accepted: a single date, a start/end range,
+   * or a bounded count. Every dated response is cached independently.
+   *
+   * @param {Object} options - APOD selection and response options.
+   * @param {string} [options.date] - A single date in YYYY-MM-DD format.
+   * @param {string} [options.startDate] - Range start in YYYY-MM-DD format.
+   * @param {string} [options.endDate] - Range end in YYYY-MM-DD format.
+   * @param {number|string} [options.count] - Number of recent APODs to fetch.
+   * @param {boolean|string} [options.thumbs] - Include video thumbnail URLs.
+   * @returns {Promise<Object>} A result containing an array of APOD items.
+   */
+  async getApodHistory({ date, startDate, endDate, count, thumbs } = {}) {
+    if (!this.apiKey) {
+      return { success: false, error: 'API key not configured' };
+    }
+
+    const hasDate = date !== undefined && date !== null && date !== '';
+    const hasRange = (startDate !== undefined && startDate !== null && startDate !== '')
+      || (endDate !== undefined && endDate !== null && endDate !== '');
+    const hasCount = count !== undefined && count !== null && count !== '';
+
+    if ([hasDate, hasRange, hasCount].filter(Boolean).length !== 1) {
+      return {
+        success: false,
+        error: 'Specify exactly one APOD selection mode: date, startDate/endDate, or count'
+      };
+    }
+
+    const datePattern = /^\d{4}-\d{2}-\d{2}$/;
+    const parseDate = (value, fieldName) => {
+      if (typeof value !== 'string' || !datePattern.test(value)) {
+        throw new Error(`${fieldName} must use YYYY-MM-DD format`);
+      }
+      const parsed = new Date(`${value}T00:00:00Z`);
+      if (Number.isNaN(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== value) {
+        throw new Error(`${fieldName} is not a valid calendar date`);
+      }
+      return parsed;
+    };
+
+    const includeThumbs = thumbs === true || thumbs === 'true' || thumbs === 1 || thumbs === '1';
+    const maxDays = Number.parseInt(
+      this.getConfig('apodMaxDays', this.apodMaxDays),
+      10
+    ) || this.apodMaxDays;
+
+    try {
+      let requestParams;
+      let requestContext;
+      let cacheKey;
+
+      if (hasDate) {
+        parseDate(date, 'date');
+        requestParams = { date, thumbs: includeThumbs, api_key: this.apiKey };
+        requestContext = `apodHistory_${date}`;
+        cacheKey = `apod_${date}_${includeThumbs}`;
+      } else if (hasRange) {
+        if (!startDate || !endDate) {
+          return {
+            success: false,
+            error: 'Both startDate and endDate are required for a ranged APOD query'
+          };
+        }
+
+        const start = parseDate(startDate, 'startDate');
+        const end = parseDate(endDate, 'endDate');
+        const days = Math.floor((end.getTime() - start.getTime()) / 86400000) + 1;
+
+        if (days <= 0) {
+          return { success: false, error: 'startDate must be before or equal to endDate' };
+        }
+        if (days > maxDays) {
+          return {
+            success: false,
+            error: `Date range too large (${days} days). Maximum is ${maxDays} days.`
+          };
+        }
+
+        requestParams = {
+          start_date: startDate,
+          end_date: endDate,
+          thumbs: includeThumbs,
+          api_key: this.apiKey
+        };
+        requestContext = `apodHistory_${startDate}_${endDate}`;
+        cacheKey = `apodHistory_${startDate}_${endDate}_${includeThumbs}`;
+      } else {
+        const numericCount = Number(count);
+        if (!Number.isInteger(numericCount) || numericCount < 1) {
+          return { success: false, error: 'count must be a positive integer' };
+        }
+        if (numericCount > maxDays) {
+          return {
+            success: false,
+            error: `count is too large (${numericCount}). Maximum is ${maxDays}.`
+          };
+        }
+
+        requestParams = {
+          count: numericCount,
+          thumbs: includeThumbs,
+          api_key: this.apiKey
+        };
+        requestContext = `apodHistory_count_${numericCount}`;
+        cacheKey = null;
+      }
+
+      // count mode asks NASA for RANDOM entries, so it must not be served from cache
+      // (a cached set would repeat the same "random" picks for the cache TTL).
+      const cachedQuery = cacheKey ? this.cache.get(cacheKey) : undefined;
+      if (cachedQuery) {
+        logger.info('Returning cached APOD history data');
+        return { success: true, data: Array.isArray(cachedQuery) ? cachedQuery : [cachedQuery] };
+      }
+
+      logger.info('Fetching APOD history data');
+      const response = await retryOperation(
+        () => axios.get(`${this.baseUrl}planetary/apod`, { params: requestParams }),
+        { retries: 3, context: requestContext }
+      );
+
+      const items = Array.isArray(response.data) ? response.data : [response.data];
+      for (const item of items) {
+        if (item && item.date) {
+          this.cache.set(`apod_${item.date}_${includeThumbs}`, item);
+        }
+      }
+      if (cacheKey) this.cache.set(cacheKey, items);
+
+      return { success: true, data: items };
+    } catch (error) {
+      logger.error('Error fetching APOD history:', error.message);
+      return { success: false, error: error.message };
     }
   }
 

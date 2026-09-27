@@ -3,16 +3,45 @@ import { logger } from './logger.js';
 import { retryOperation, isRetryableError } from './retryUtils.js';
 
 // Connection state tracking
-let isConnecting = false;
+// The in-flight attempt; concurrent callers share it (and its failure) instead of polling.
+let connectionPromise = null;
 let reconnectAttempts = 0;
 const MAX_RECONNECT_ATTEMPTS = 10;
 const RECONNECT_BASE_INTERVAL = 1000; // 1 second base for exponential backoff
 const RECONNECT_MAX_INTERVAL = 30000; // 30 second max backoff
 const CIRCUIT_BREAKER_THRESHOLD = 5; // Number of failures before circuit breaker trips
 const CIRCUIT_BREAKER_COOLDOWN = 30000; // 30 seconds cooldown period
+const DEFAULT_DATABASE_WAIT_TIMEOUT = 30000;
 
 let circuitBreakerOpen = false;
 let circuitBreakerTimer = null;
+
+class DatabaseTimeoutError extends Error {
+  constructor(timeoutMs) {
+    super(`Timed out waiting for MongoDB connection after ${timeoutMs}ms.`);
+    this.name = 'DatabaseTimeoutError';
+    this.code = 'DATABASE_CONNECTION_TIMEOUT';
+    this.timeoutMs = timeoutMs;
+  }
+}
+
+class DatabaseCancellationError extends Error {
+  constructor() {
+    super('Waiting for MongoDB connection was cancelled.');
+    this.name = 'DatabaseCancellationError';
+    this.code = 'DATABASE_CONNECTION_CANCELLED';
+  }
+}
+
+class DatabaseUnavailableError extends Error {
+  constructor() {
+    super('MongoDB connection is not active and reconnecting was not allowed.');
+    this.name = 'DatabaseUnavailableError';
+    this.code = 'DATABASE_CONNECTION_UNAVAILABLE';
+  }
+}
+
+export { DatabaseTimeoutError, DatabaseCancellationError, DatabaseUnavailableError };
 
 /**
  * Establish connection to MongoDB database with error handling and auto-reconnect
@@ -31,18 +60,10 @@ export async function connectDatabase() {
     logger.debug('MongoDB already connected');
     return mongoose.connection;
   }
-  
-  if (isConnecting) {
+
+  if (connectionPromise) {
     logger.debug('MongoDB connection already in progress');
-    // Wait for current connection attempt
-    return new Promise((resolve) => {
-      const checkInterval = setInterval(() => {
-        if (!isConnecting) {
-          clearInterval(checkInterval);
-          resolve(mongoose.connection);
-        }
-      }, 100);
-    });
+    return connectionPromise;
   }
 
   if (circuitBreakerOpen) {
@@ -50,8 +71,35 @@ export async function connectDatabase() {
     throw new Error('Circuit breaker is open. Please try again later.');
   }
 
-  isConnecting = true;
-  
+  const activeConnectionPromise = establishDatabaseConnection();
+  connectionPromise = activeConnectionPromise;
+
+  // Clear the shared promise after settlement so a later caller can start
+  // a fresh connection attempt when the current attempt has failed.
+  activeConnectionPromise.then(
+    () => {
+      if (connectionPromise === activeConnectionPromise) {
+        connectionPromise = null;
+      }
+    },
+    () => {
+      if (connectionPromise === activeConnectionPromise) {
+        connectionPromise = null;
+      }
+    }
+  );
+
+  return activeConnectionPromise;
+}
+
+/**
+ * Perform a connection attempt and handle bounded automatic reconnection.
+ *
+ * @async
+ * @returns {Promise<mongoose.Connection>} The established MongoDB connection
+ * @throws {Error} When connection fails after max attempts
+ */
+async function establishDatabaseConnection() {
   try {
     const uri = process.env.MONGODB_URI || 'mongodb://localhost:27017/lanagent';
 
@@ -70,7 +118,6 @@ export async function connectDatabase() {
     return mongoose.connection;
   } catch (error) {
     logger.error('Failed to connect to MongoDB:', error);
-    isConnecting = false;
 
     if (isRetryableError(error)) {
       reconnectAttempts++;
@@ -80,19 +127,105 @@ export async function connectDatabase() {
     }
 
     // Attempt reconnection with exponential backoff
-    if (reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
+    if (reconnectAttempts < MAX_RECONNECT_ATTEMPTS && !circuitBreakerOpen) {
       const backoffDelay = Math.min(RECONNECT_BASE_INTERVAL * Math.pow(2, reconnectAttempts), RECONNECT_MAX_INTERVAL);
       logger.info(`Attempting to reconnect to MongoDB (attempt ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS}) in ${backoffDelay}ms...`);
 
       await new Promise(resolve => setTimeout(resolve, backoffDelay));
-      return connectDatabase(); // Recursive retry
+      return establishDatabaseConnection();
     } else {
       logger.error('Max reconnection attempts reached. MongoDB connection failed.');
       throw error;
     }
-  } finally {
-    isConnecting = false;
   }
+}
+
+/**
+ * Wait for an active MongoDB connection without polling indefinitely.
+ *
+ * An already-connected database is returned immediately. If a connection is
+ * already being established, callers share that in-flight promise. Otherwise,
+ * a connection attempt is started unless `allowReconnect` is false.
+ *
+ * @async
+ * @param {Object} options Wait options
+ * @param {number} [options.timeoutMs=30000] Maximum time to wait in milliseconds
+ * @param {AbortSignal} [options.signal] Optional signal used to cancel waiting
+ * @param {boolean} [options.allowReconnect=true] Whether to start a connection attempt
+ * @returns {Promise<mongoose.Connection>} The active MongoDB connection
+ * @throws {DatabaseTimeoutError} When the timeout expires
+ * @throws {DatabaseCancellationError} When the signal aborts
+ * @throws {DatabaseUnavailableError} When no connection exists and reconnecting is disabled
+ */
+export async function waitForDatabase({
+  timeoutMs = DEFAULT_DATABASE_WAIT_TIMEOUT,
+  signal,
+  allowReconnect = true
+} = {}) {
+  if (mongoose.connection.readyState === 1) {
+    return mongoose.connection;
+  }
+
+  if (signal?.aborted) {
+    throw new DatabaseCancellationError();
+  }
+
+  if (!Number.isFinite(timeoutMs) || timeoutMs < 0) {
+    throw new TypeError('timeoutMs must be a finite, non-negative number.');
+  }
+
+  let activePromise = connectionPromise;
+
+  if (!activePromise) {
+    if (!allowReconnect) {
+      throw new DatabaseUnavailableError();
+    }
+
+    activePromise = connectDatabase();
+  }
+
+  return new Promise((resolve, reject) => {
+    let timer = null;
+    let settled = false;
+
+    const cleanup = () => {
+      if (timer !== null) {
+        clearTimeout(timer);
+        timer = null;
+      }
+
+      if (signal) {
+        signal.removeEventListener('abort', onAbort);
+      }
+    };
+
+    const settle = (callback, value) => {
+      if (settled) {
+        return;
+      }
+
+      settled = true;
+      cleanup();
+      callback(value);
+    };
+
+    const onAbort = () => {
+      settle(reject, new DatabaseCancellationError());
+    };
+
+    if (signal) {
+      signal.addEventListener('abort', onAbort, { once: true });
+    }
+
+    timer = setTimeout(() => {
+      settle(reject, new DatabaseTimeoutError(timeoutMs));
+    }, timeoutMs);
+
+    activePromise.then(
+      connection => settle(resolve, connection),
+      error => settle(reject, error)
+    );
+  });
 }
 
 /**
@@ -105,6 +238,7 @@ function openCircuitBreaker() {
   circuitBreakerTimer = setTimeout(() => {
     circuitBreakerOpen = false;
     reconnectAttempts = 0;
+    circuitBreakerTimer = null;
     logger.info('Circuit breaker closed. Connection attempts can resume.');
   }, CIRCUIT_BREAKER_COOLDOWN);
 }
@@ -117,13 +251,13 @@ function setupConnectionHandlers() {
   mongoose.connection.removeAllListeners('error');
   mongoose.connection.removeAllListeners('disconnected');
   mongoose.connection.removeAllListeners('reconnected');
-  
+
   // Handle connection errors
   mongoose.connection.on('error', (err) => {
     logger.error('MongoDB connection error:', err);
-    
+
     // Attempt reconnection on error
-    if (mongoose.connection.readyState === 0) {
+    if (mongoose.connection.readyState === 0 && !connectionPromise) {
       const backoffDelay = Math.min(RECONNECT_BASE_INTERVAL * Math.pow(2, reconnectAttempts), RECONNECT_MAX_INTERVAL);
       setTimeout(() => {
         logger.info('Attempting to reconnect after error...');
@@ -133,7 +267,7 @@ function setupConnectionHandlers() {
       }, backoffDelay);
     }
   });
-  
+
   // Handle disconnection
   mongoose.connection.on('disconnected', () => {
     logger.warn('MongoDB disconnected');
@@ -147,7 +281,7 @@ function setupConnectionHandlers() {
       });
     }, backoffDelay);
   });
-  
+
   // Log successful reconnection
   mongoose.connection.on('reconnected', () => {
     logger.info('MongoDB reconnected successfully');

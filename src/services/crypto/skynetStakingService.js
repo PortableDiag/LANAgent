@@ -61,6 +61,17 @@ const STAKING_ABI = [
   'function isPaused() external view returns (bool)'
 ];
 
+// Keeper views/actions added by the 2026-09-26 audit fixes (M-1): a lock's multiplier ends with
+// the lock, lazily, so someone has to poke positions whose lock expired.
+const LOCK_KEEPER_ABI = [
+  'function stakersPage(uint256 start, uint256 count) view returns (address[] page, uint256 total)',
+  'function lpStakersPage(uint256 start, uint256 count) view returns (address[] page, uint256 total)',
+  'function getStakeInfo(address) view returns (uint256 amount, uint256 effectiveBalance, uint256 tierId, uint256 lockExpiry, bool locked, uint256 stakedAt)',
+  'function getLPStakeInfo(address) view returns (uint256 amount, uint256 effectiveBalance, uint256 tierId, uint256 lockExpiry, bool locked, uint256 stakedAt)',
+  'function pokeLock(address account)',
+  'function pokeLPLock(address account)'
+];
+
 const ERC20_APPROVE_ABI = [
   'function approve(address spender, uint256 amount) returns (bool)',
   'function allowance(address owner, address spender) view returns (uint256)',
@@ -95,6 +106,55 @@ class SkynetStakingService {
 
   isAvailable() {
     return !!this.stakingAddress;
+  }
+
+  /**
+   * Drop expired locks back to 1x (audit 2026-09-26, M-1). Until a position is poked (or its
+   * owner touches it), it keeps earning at its old multiplier after the lock ends, so the
+   * overpayment is bounded by how often this runs (daily). Only sends a transaction for a
+   * position that is actually expired and still above tier 0; a diamond without the keeper
+   * functions (before the upgrade) is skipped, not an error.
+   */
+  async pokeExpiredLocks({ maxPokes = 20, pageSize = 200 } = {}) {
+    if (!this.isAvailable()) return { skipped: 'no staking contract configured' };
+    const { ethers } = await import('ethers');
+    const provider = await contractServiceWrapper.getProvider(this.network);
+    const view = new ethers.Contract(this.stakingAddress, LOCK_KEEPER_ABI, provider);
+    try {
+      await view.stakersPage(0, 1);
+    } catch {
+      return { skipped: 'diamond has no stakersPage (keeper functions not deployed yet)' };
+    }
+    const now = BigInt(Math.floor(Date.now() / 1000));
+    const due = [];
+    for (const [pageFn, infoFn, pokeFn] of [['stakersPage', 'getStakeInfo', 'pokeLock'], ['lpStakersPage', 'getLPStakeInfo', 'pokeLPLock']]) {
+      let start = 0n, total = 1n;
+      while (start < total) {
+        const [page, t] = await view[pageFn](start, pageSize);
+        total = t;
+        for (const addr of page) {
+          const info = await view[infoFn](addr);
+          if (info.amount > 0n && info.tierId > 0n && info.lockExpiry > 0n && info.lockExpiry <= now) due.push({ addr, pokeFn });
+        }
+        start += BigInt(pageSize);
+        if (!page.length) break;
+      }
+    }
+    if (!due.length) return { checked: true, poked: 0 };
+    const signer = await contractServiceWrapper.getSigner(this.network);
+    const keeper = new ethers.Contract(this.stakingAddress, LOCK_KEEPER_ABI, signer);
+    const poked = [];
+    for (const { addr, pokeFn } of due.slice(0, maxPokes)) {
+      try {
+        const tx = await keeper[pokeFn](addr);
+        await tx.wait();
+        poked.push({ addr, pokeFn, tx: tx.hash });
+        logger.info(`Poked expired ${pokeFn === 'pokeLock' ? 'stake' : 'LP'} lock of ${addr}: ${tx.hash}`);
+      } catch (err) {
+        logger.warn(`${pokeFn}(${addr}) failed: ${err.shortMessage || err.message}`);
+      }
+    }
+    return { checked: true, due: due.length, poked: poked.length, details: poked };
   }
 
   /**

@@ -6,7 +6,7 @@ import crypto from 'crypto';
 import { externalAuthMiddleware } from '../middleware/externalAuth.js';
 import { paymentMiddleware } from '../middleware/payment.js';
 import { hybridAuth } from '../middleware/hybridAuth.js';
-import { upload, validateMagicBytes, validateMagicBytesArray, scanWithVirusTotal } from '../middleware/fileUpload.js';
+import { upload, validateMagicBytes, validateMagicBytesArray, scanWithVirusTotal, scanWithVirusTotalArray } from '../middleware/fileUpload.js';
 import { logger } from '../../../utils/logger.js';
 import { safePromiseAll } from '../../../utils/errorHandlers.js';
 import { assertPublicUrl } from '../../../utils/publicUrl.js';
@@ -127,6 +127,7 @@ router.post('/process/batch',
   paymentMiddleware('document-processing'),
   upload.array('files', 10),
   validateMagicBytesArray,
+  scanWithVirusTotalArray,
   async (req, res) => {
     const { operation = 'ocr', language = 'eng', outputFormat = 'json' } = req.body;
 

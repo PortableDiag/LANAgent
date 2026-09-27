@@ -55,19 +55,21 @@ export default class EmailPlugin extends BasePlugin {
         examples: ['add jim to the family group', 'put sarah in my friends list', 'remove william from the work group', 'jim is family']
       },
       {
-        command: 'check',
-        description: 'Check for new emails',
-        usage: 'check({ folder: "INBOX", limit: 10, unreadOnly: true })'
+        command: 'getEmails',
+        description: 'Check for new emails, or list the emails in a folder (INBOX, Sent, …)',
+        usage: 'getEmails({ folder: "INBOX", limit: 10, unreadOnly: true })',
+        examples: ['check my email', 'any new emails', 'show my unread mail', 'list the emails in my sent folder']
       },
       {
-        command: 'search',
-        description: 'Search emails',
-        usage: 'search({ query: "from:user@example.com", folder: "INBOX", limit: 20 })'
+        command: 'searchEmails',
+        description: 'Search emails by sender, recipient, subject, text or date',
+        usage: 'searchEmails({ from: "user@example.com", subject: "invoice", since: "2026-09-01", limit: 20 })',
+        examples: ['find emails from jim', 'search my email for the invoice', 'emails about the lease since last week']
       },
       {
-        command: 'reply',
+        command: 'replyToEmail',
         description: 'Reply to an email',
-        usage: 'reply({ messageId: "msg123", text: "Reply message" })'
+        usage: 'replyToEmail({ originalMessageId: "<msg123@example.com>", to: "user@example.com", text: "Reply message" })'
       },
       {
         command: 'schedule',
@@ -83,21 +85,6 @@ export default class EmailPlugin extends BasePlugin {
         command: 'listContacts',
         description: 'List all email contacts',
         usage: 'listContacts()'
-      },
-      {
-        command: 'getFolder',
-        description: 'Get emails from a specific folder',
-        usage: 'getFolder({ folder: "Sent", limit: 10 })'
-      },
-      {
-        command: 'delete',
-        description: 'Delete an email',
-        usage: 'delete({ messageId: "msg123" })'
-      },
-      {
-        command: 'forward',
-        description: 'Forward an email',
-        usage: 'forward({ messageId: "msg123", to: "another@example.com", comment: "FYI" })'
       },
       {
         command: 'listScheduled',
@@ -269,6 +256,13 @@ export default class EmailPlugin extends BasePlugin {
   }
 
   async execute(params) {
+    // Names this plugin once advertised without implementing; kept as aliases so a request
+    // matched to them (an older intent index, another agent) still runs.
+    const ALIASES = { check: 'getEmails', getFolder: 'getEmails', search: 'searchEmails', reply: 'replyToEmail' };
+    if (ALIASES[params?.action]) {
+      params = { ...params, action: ALIASES[params.action] };
+      if (params.action === 'replyToEmail' && !params.originalMessageId && params.messageId) params.originalMessageId = params.messageId;
+    }
     const { action, ...data } = params;
     
     this.validateParams(params, {

@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import ExternalServiceConfig from '../../../models/ExternalServiceConfig.js';
-import { ALLOWED_PLUGINS, PLUGIN_CREDIT_COSTS } from './plugins.js';
+import { ALLOWED_PLUGINS, PLUGIN_CREDIT_COSTS, actionCreditCost, offeredCommands } from './plugins.js';
 import { logger } from '../../../utils/logger.js';
 import NodeCache from 'node-cache';
 import { retryOperation } from '../../../utils/retryUtils.js';
@@ -96,7 +96,8 @@ function parseSortSpec(sortParam, allowed) {
 
 const CATALOG_ALLOWED_FIELDS = [
   'serviceId', 'name', 'description', 'creditCost', 'price', 'currency',
-  'rateLimit', 'estimatedTime', 'inputFormat', 'outputFormat', 'endpoint', 'type'
+  'rateLimit', 'estimatedTime', 'inputFormat', 'outputFormat', 'endpoint', 'type',
+  'actionCosts', 'actions'
 ];
 const CATALOG_SORT_FIELDS = ['name', 'price', 'serviceId'];
 
@@ -140,12 +141,24 @@ router.get('/', async (req, res) => {
 
           const instance = pluginEntry.instance || pluginEntry;
           const creditCost = PLUGIN_CREDIT_COSTS[pluginName] || 1;
+          // Actions priced apart from the plugin's base price (what the route actually charges).
+          // Only actions a paid caller can invoke (blocked / offerAsService:false excluded).
+          const actionCosts = {};
+          const actions = [];
+          for (const c of offeredCommands(instance)) {
+            const name = c.command || c.name;
+            const cost = actionCreditCost(pluginName, name);
+            if (cost !== creditCost) actionCosts[name] = cost;
+            actions.push({ name, ...(c.description ? { description: c.description } : {}), creditCost: cost });
+          }
 
           enrichedServices.push({
             serviceId: `plugin-${pluginName}`,
             name: instance.description || pluginName,
             description: instance.description || '',
             creditCost,
+            ...(Object.keys(actionCosts).length ? { actionCosts } : {}),
+            ...(actions.length ? { actions } : {}),
             endpoint: `/api/external/service/${pluginName}/:action`,
             type: 'plugin'
           });
