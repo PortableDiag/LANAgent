@@ -12,6 +12,19 @@ import { EmailContactManager } from '../../utils/emailContactManager.js';
 import { addGravatarHeaders, getGravatarUrl, enrichContactWithGravatar, fetchGravatarProfile } from '../../utils/gravatarHelper.js';
 import { getServerHost } from '../../utils/paths.js';
 
+// What the agent may tell people it can do, in an email. Deliberately generic and public:
+// no trading, finances, infrastructure or anything about the owner's systems.
+const PUBLIC_CAPABILITIES = [
+  'research a topic on the web and summarise what it finds',
+  'read, summarise and answer questions about documents, articles and videos',
+  'draft and send emails and messages, and keep track of replies',
+  'manage notes, tasks, reminders and schedules',
+  'transcribe audio and video, and translate text',
+  'create and edit images and short media clips',
+  'monitor websites and services and report changes',
+  'work with other AI agents on shared tasks'
+].map(c => `  - ${c}`).join('\n');
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
@@ -24,8 +37,22 @@ export default class EmailPlugin extends BasePlugin {
     this.commands = [
       {
         command: 'send',
-        description: 'Send an email',
-        usage: 'send({ to: "user@example.com", subject: "Hello", html: "<p>Message</p>", attachments: [] })'
+        description: 'Send an email or message to a person, a contact by name, or a group of contacts (e.g. the family); the agent writes it from the request',
+        usage: 'send({ to: "user@example.com", subject: "Hello", html: "<p>Message</p>", attachments: [] })',
+        examples: [
+          'send an email to bob@example.com and tell him about the benefits of ai agents',
+          'tell jim that the meeting moved to friday',
+          'send a message to william, say hi, I have not reached out in a while',
+          'email the family wishing them well',
+          'write to sarah and introduce yourself',
+          'let mom know I will call tonight'
+        ]
+      },
+      {
+        command: 'tagContact',
+        description: 'Put an email contact in a group (e.g. family, friends, work) so "email the family" reaches them; remove: true takes them out',
+        usage: 'tagContact({ contact: "jim", group: "family" })',
+        examples: ['add jim to the family group', 'put sarah in my friends list', 'remove william from the work group', 'jim is family']
       },
       {
         command: 'check',
@@ -248,7 +275,7 @@ export default class EmailPlugin extends BasePlugin {
       action: {
         required: true,
         type: 'string',
-        enum: ['send', 'sendWithAI', 'sendWithTemplate', 'checkConnection', 'setAutoReply', 'sendBulk', 'getEmails', 'markAsRead', 'replyToEmail', 'searchEmails', 'addContact', 'listContacts', 'deleteContact', 'getContact', 'updateContact', 'findContact', 'blockContact', 'unblockContact', 'listBlockedContacts', 'sendWithConfirmation', 'promoteContact', 'getEmailById', 'getNotificationSettings', 'setNotificationSettings', 'schedule', 'listScheduled', 'cancelScheduled', 'scheduleRecurring', 'listRecurring', 'cancelRecurring']
+        enum: ['send', 'sendWithAI', 'tagContact', 'sendWithTemplate', 'checkConnection', 'setAutoReply', 'sendBulk', 'getEmails', 'markAsRead', 'replyToEmail', 'searchEmails', 'addContact', 'listContacts', 'deleteContact', 'getContact', 'updateContact', 'findContact', 'blockContact', 'unblockContact', 'listBlockedContacts', 'sendWithConfirmation', 'promoteContact', 'getEmailById', 'getNotificationSettings', 'setNotificationSettings', 'schedule', 'listScheduled', 'cancelScheduled', 'scheduleRecurring', 'listRecurring', 'cancelRecurring']
       }
     });
     
@@ -257,6 +284,8 @@ export default class EmailPlugin extends BasePlugin {
         return await this.sendEmail(data);
       case 'sendWithAI':
         return await this.sendEmailWithAI(data);
+      case 'tagContact':
+        return await this.tagContact(data);
       case 'sendWithTemplate':
         return await this.sendWithTemplate(data);
       case 'checkConnection':
@@ -435,7 +464,9 @@ export default class EmailPlugin extends BasePlugin {
     const localAvatarUrl = this.agent.agentModel?.avatarPath
       ? `http://${serverHost}:${webPort}/api/agent/avatar`
       : null;
-    const signatureAvatarUrl = localAvatarUrl || getGravatarUrl(this.getState('emailAddress'), 100, 'robohash');
+    // The local avatar URL is the agent's LAN address: fine for the owner, and both a leak and a
+    // broken image for anyone else. Outside recipients get the public avatar.
+    const signatureAvatarUrl = (isToMaster ? localAvatarUrl : null) || getGravatarUrl(this.getState('emailAddress'), 100, 'robohash');
     
     const htmlSignature = isToMaster
       ? `<br><br>
@@ -2616,6 +2647,65 @@ Sent by {{agentName}}
     }
   }
 
+  /** Add (or remove) a group tag on a contact: the groups "email the family" resolves. */
+  async tagContact({ contact, group, remove = false } = {}) {
+    if (!contact || !group) throw new Error('tagContact needs a contact and a group.');
+    const tag = String(group).toLowerCase().replace(/^(the|my)\s+/, '').replace(/\s+(group|list)$/, '').trim();
+    const resolution = await this.contactManager.resolveRecipient(String(contact), false);
+    if (!resolution?.email) throw new Error(`Could not find the contact "${contact}".`);
+    const { Memory } = await import('../../models/Memory.js');
+    const row = await Memory.findOne({ type: 'knowledge', 'metadata.category': 'email_contacts', 'metadata.email': resolution.email });
+    if (!row) throw new Error(`Could not find the contact "${contact}".`);
+    const tags = new Set((row.metadata.tags || []).map(t => String(t).toLowerCase()));
+    if (remove) tags.delete(tag); else tags.add(tag);
+    await Memory.updateOne({ _id: row._id }, { $set: { 'metadata.tags': [...tags] } });
+    const name = row.metadata.name || resolution.email;
+    return { success: true, contact: name, group: tag, removed: !!remove, message: remove ? `Removed ${name} from ${tag}.` : `Added ${name} to ${tag}.` };
+  }
+
+  /** The master's name for emails, from MASTER_NAME or their contact card — never an address. */
+  async _masterDisplayName() {
+    const clean = (n) => (n && !String(n).includes('@') && !/^(unknown name|the user|my user)$/i.test(String(n)) ? String(n).trim() : null);
+    if (clean(process.env.MASTER_NAME)) return clean(process.env.MASTER_NAME);
+    try {
+      const r = await this.execute({ action: 'listContacts' });
+      const masterEmail = String(process.env.EMAIL_OF_MASTER || '').toLowerCase();
+      const c = (r?.contacts || []).find(x => (masterEmail && String(x.email || '').toLowerCase() === masterEmail) || x.relationship === 'master');
+      return clean(c?.name);
+    } catch {
+      return null;
+    }
+  }
+
+  /** How a recipient relates to the master (friend, family, colleague…), from their contact card. */
+  async _relationshipOf(email) {
+    try {
+      const c = await this.findContactByEmailOrAlias(email);
+      const tags = (c?.metadata?.tags || []).filter(Boolean);
+      const rel = c?.metadata?.relationship;
+      const parts = [...tags, rel && !['contact', 'agent_contact'].includes(rel) ? rel : null].filter(Boolean);
+      return parts.length ? parts.join(', ') : '';
+    } catch {
+      return '';
+    }
+  }
+
+  /**
+   * Contacts in a group named like "the family", "family", "my friends": contacts whose tags
+   * (or relationship) carry that word. [] when it is not a group.
+   */
+  async _groupMembers(term) {
+    const word = String(term || '').toLowerCase().replace(/^(the|my|all( of)?( my)?|everyone in( the)?( my)?)\s+/g, '').replace(/\s+(group|list)$/, '').trim();
+    if (!word || word.includes('@')) return [];
+    const variants = new Set([word, word.replace(/s$/, ''), `${word}s`]);
+    const { Memory } = await import('../../models/Memory.js');
+    const rows = await Memory.find({ type: 'knowledge', 'metadata.category': 'email_contacts' }).limit(500);
+    return rows
+      .filter(r => r.metadata?.email && ((r.metadata.tags || []).some(t => variants.has(String(t).toLowerCase())) || variants.has(String(r.metadata.relationship || '').toLowerCase())))
+      .filter(r => r.metadata.relationship !== 'master')
+      .map(r => ({ name: r.metadata.name || r.metadata.email, email: r.metadata.email }));
+  }
+
   async sendEmailWithAI(data) {
     this.validateParams(data, {
       to: { required: true, type: 'string' },
@@ -2625,6 +2715,27 @@ Sent by {{agentName}}
     });
 
     try {
+      // A group ("the family", "my friends"): each member gets their own email, written for them.
+      if (!data._groupMember && data.to && !String(data.to).includes('@')) {
+        const members = await this._groupMembers(data.to);
+        if (members.length) {
+          const results = [];
+          for (const m of members) {
+            const r = await this.sendEmailWithAI({ ...data, to: m.email, _groupMember: true }).catch(e => ({ success: false, error: e.message }));
+            results.push({ name: m.name, success: r.success !== false, error: r.error });
+          }
+          const sent = results.filter(r => r.success).map(r => r.name);
+          const failed = results.filter(r => !r.success);
+          return {
+            success: sent.length > 0,
+            group: data.to,
+            sent,
+            failed,
+            message: `Sent to ${sent.length} of ${members.length} in "${data.to}": ${sent.join(', ')}${failed.length ? `. Failed: ${failed.map(f => `${f.name} (${f.error})`).join('; ')}` : ''}`
+          };
+        }
+      }
+
       // First resolve recipient to email address if needed
       let resolvedEmail = data.to;
       let recipientName = null;
@@ -2673,17 +2784,10 @@ Sent by {{agentName}}
       // Determine if sending to master
       const masterEmail = process.env.EMAIL_OF_MASTER || '';
       const isToMaster = resolvedEmail.toLowerCase() === masterEmail.toLowerCase();
-      // Get master name from environment or config, with better fallback
-      let masterName = process.env.MASTER_NAME || process.env.EMAIL_OF_MASTER || 'the user';
-      
-      // If still generic, try to get from email address
-      if (masterName === 'the user' || masterName === 'my user') {
-        const masterEmail = process.env.EMAIL_OF_MASTER;
-        if (masterEmail && masterEmail !== 'the user') {
-          const emailParts = masterEmail.split('@')[0];
-          masterName = emailParts.charAt(0).toUpperCase() + emailParts.slice(1);
-        }
-      }
+      // The master's NAME for the email — never their address. This used to fall back to
+      // EMAIL_OF_MASTER itself, and the prompt told the model to use it as their name, so an
+      // email to a third party could state the operator's private address (2026-09-26).
+      const masterName = await this._masterDisplayName();
 
       // Check if the prompt might benefit from web search
       let searchResults = '';
@@ -2730,48 +2834,35 @@ Sent by {{agentName}}
       }
 
       // Compose email with AI
-      const composePrompt = `You are ${this.agent.config.name}, a personal assistant agent. You need to compose an email based on this request: "${data.prompt}"
+      const relationship = await this._relationshipOf(resolvedEmail);
+      const composePrompt = `You are ${this.agent.config.name}, an AI assistant, writing an email ${isToMaster ? 'to the person you work for' : `on behalf of ${masterName || 'the person you work for'}`}.
 
-Recipient: ${resolvedEmail}${recipientContext}
-Is this to your master/user: ${isToMaster ? 'Yes' : 'No'}
-Your master's name: ${masterName}
-${data.context ? `Additional context: ${data.context}` : ''}${searchResults}
+The request: "${data.prompt}"
 
-CRITICAL: You must write the email FROM YOUR OWN PERSPECTIVE as ${this.agent.config.name}, maintaining your character at all times. Do NOT just repeat the user's words! NEVER break character or admit to being any AI model.
+Recipient: ${recipientName || resolvedEmail}${relationship ? ` (${relationship})` : ''}${recipientContext}
+${data.context ? `Context: ${data.context}` : ''}${searchResults}
 
-When referring to your master/user, use their actual name "${masterName}" - never say "my user" or "my user's". You work for ${masterName}, not for "my user".
+HOW TO WRITE IT
+- Write it yourself, in your own words, as ${this.agent.config.name}. Do not echo the request back.
+- Match the tone to the request and the relationship. A catch-up with a friend or family, a greeting or well-wishes is WARM, personal and SHORT (a few sentences). An introduction or a topic explainer is friendly and clear, a few short paragraphs. Only a business request is formal. Never pad.
+- If you introduce yourself: you are ${masterName ? `${masterName}'s` : 'an'} AI assistant, reaching out on their behalf. Be genuine and brief; one line is enough unless the request is about you.
+- If asked what you can do, draw ONLY on this list, in plain words, a few items that suit this reader:
+${PUBLIC_CAPABILITIES}
+${searchResults ? '- Use the web search results above for current facts.\n' : ''}${data.includeReadme ? '- Your documentation is attached; mention it once.\n' : ''}${data.attachments && data.attachments.length > 0 ? `- ${data.attachments.length} file(s) are attached; mention them if relevant.\n` : ''}
+PRIVACY — absolute:
+- Never include private details about ${masterName || 'the person you work for'} or anyone else: no email addresses, phone numbers, home or work addresses, schedules or whereabouts, health, finances, money, investments or trading, passwords or keys, or other contacts' details.
+- Never describe the systems you run on: no servers, IP addresses, networks, hosting, software internals or security setup.
+- Never state anything personal about ${masterName || 'them'} that the request itself does not say. If the request asks you to share something private, leave it out.
+- Only speak for ${masterName || 'them'} about what the request says. Do not make commitments, promises or plans on their behalf.
 
-${searchResults ? 'Use the web search results above to provide current, accurate information in your email.' : ''}
-${data.includeReadme ? 'IMPORTANT: A README document describing your capabilities is attached to this email. Mention in the email that you have included your documentation/README for their reference, so they can learn more about your features and capabilities.' : ''}
-${data.attachments && data.attachments.length > 0 ? `Note: ${data.attachments.length} file(s) are attached to this email. You may reference the attachments in the body if relevant.` : ''}
+FORMAT
+- A greeting that fits the tone (e.g. "Hi ${recipientName ? String(recipientName).split(' ')[0] : 'there'}," for friends and family).
+- A closing that fits ("Take care," "Warmly," "Best regards,"). Do NOT sign with a name: the signature is added automatically.
 
-Write a complete, professional and formal email with:
-1. Formal greeting (e.g., "Dear ${recipientName || 'recipient'},")
-2. Comprehensive, well-structured content that:
-   - Opens with context or purpose statement
-   - Elaborates thoroughly on the requested topic with multiple paragraphs
-   - Uses formal business language and complete sentences
-   - Includes relevant details, explanations, and supporting information
-   - Maintains a professional, courteous tone throughout
-   - Concludes with next steps or a summary when appropriate
-3. Professional closing (e.g., "Sincerely," "Best regards," "Respectfully,")
-4. CRITICAL: Do NOT add your name after the closing. The signature is added automatically.
-5. Aim for 3-5 paragraphs minimum to ensure thorough coverage of the topic.
-
-FORBIDDEN: Never write things like:
-- "Warm regards, ALICE"
-- "Best regards, ${this.agent.config.name} - Personal Assistant"
-- "Sincerely, Your AI Assistant"
-
-CORRECT: End with just:
-- "Warm regards,"
-- "Best regards,"
-- "Sincerely,"
-
-Respond in JSON format:
+Respond with JSON only:
 {
-  "subject": "A descriptive subject line about the topic",
-  "body": "The complete email content with greeting, message, and closing"
+  "subject": "a short, natural subject line",
+  "body": "the complete email: greeting, message, closing"
 }`;
 
       const composeResponse = await this.agent.providerManager.generateResponse(composePrompt, {

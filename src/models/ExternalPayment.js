@@ -66,7 +66,11 @@ const externalPaymentSchema = new mongoose.Schema({
   creditsIssued: { type: Number, default: null },
   bonusCredits: { type: Number, default: 0 },
   promotion: { type: String, default: null },
-  usdValue: { type: Number, default: null }
+  usdValue: { type: Number, default: null },
+  // Credit purchases: the wallet the money came from, and how the claimant proved it was theirs
+  // ('account-is-payer' | 'signature' | 'unproven-warn' during the transition)
+  payer: { type: String, default: null },
+  payerProof: { type: String, default: null }
 }, {
   timestamps: true
 });

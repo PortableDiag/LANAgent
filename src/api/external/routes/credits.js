@@ -6,6 +6,7 @@ import { retryOperation } from '../../../utils/retryUtils.js';
 import ExternalCreditBalance from '../../../models/ExternalCreditBalance.js';
 import ExternalPayment from '../../../models/ExternalPayment.js';
 import { creditAuth } from '../middleware/creditAuth.js';
+import { buildClaimMessage, payerProofMode } from '../creditClaim.js';
 
 const router = Router();
 
@@ -292,6 +293,18 @@ async function getRecipientAddress() {
 }
 
 /**
+ * GET /api/external/credits/claim-message?txHash=&currency=
+ * The exact text a paying wallet signs to claim a payment for this account (payerSignature).
+ */
+router.get('/claim-message', creditAuth(true), async (req, res) => {
+  const txHash = String(req.query.txHash || '');
+  if (!/^0x[0-9a-fA-F]{64}$/.test(txHash)) return res.status(400).json({ success: false, error: 'txHash required' });
+  const recipient = await getRecipientAddress();
+  if (!recipient) return res.status(500).json({ success: false, error: 'Payment recipient not configured' });
+  res.json({ success: true, message: buildClaimMessage({ chain: 'bsc', txHash, recipient, apiKey: req.headers['x-api-key'] || '' }), sign: 'personal_sign with the wallet that paid' });
+});
+
+/**
  * POST /api/external/credits/purchase
  * Purchase credits with BNB or SKYNET on-chain transaction
  */
@@ -362,39 +375,72 @@ router.post('/purchase', creditAuth(true), async (req, res) => {
 
     let amountPaid;
     let pricePerUnit;
+    let payer;   // the wallet the money came from — see the payer check below
 
     if (normalizedCurrency === 'BNB') {
       // Verify recipient for BNB native transfer
       if (tx.to?.toLowerCase() !== recipient.toLowerCase()) {
         return res.status(400).json({ success: false, error: 'Transaction recipient does not match' });
       }
+      payer = String(tx.from || '').toLowerCase();
 
       amountPaid = parseFloat(ethers.formatEther(tx.value));
       const bnbPrice = await getBnbPriceUsd();
       pricePerUnit = bnbPrice;
 
     } else {
-      // SKYNET: parse Transfer event logs
-      const transferLog = receipt.logs.find(log => {
-        return log.address?.toLowerCase() === SKYNET_TOKEN.toLowerCase()
+      // SKYNET: parse Transfer event logs — the one TO this agent, not merely the first
+      // SKYNET transfer in the transaction.
+      const topicAddr = (t) => ('0x' + String(t).slice(26)).toLowerCase();
+      const skynetTransfers = receipt.logs.filter(log =>
+        log.address?.toLowerCase() === SKYNET_TOKEN.toLowerCase()
           && log.topics[0] === ERC20_TRANSFER_TOPIC
-          && log.topics.length >= 3;
-      });
+          && log.topics.length >= 3);
 
-      if (!transferLog) {
+      if (!skynetTransfers.length) {
         return res.status(400).json({ success: false, error: 'No SKYNET transfer found in transaction' });
       }
 
-      // Decode recipient from topics[2]
-      const logRecipient = '0x' + transferLog.topics[2].slice(26);
-      if (logRecipient.toLowerCase() !== recipient.toLowerCase()) {
+      const transferLog = skynetTransfers.find(log => topicAddr(log.topics[2]) === recipient.toLowerCase());
+      if (!transferLog) {
         return res.status(400).json({ success: false, error: 'SKYNET transfer recipient does not match' });
       }
+      payer = topicAddr(transferLog.topics[1]);
 
       // Decode amount (SKYNET is 18 decimals)
       amountPaid = parseFloat(ethers.formatEther(transferLog.data));
       const skynetPrice = await getSkynetPriceUsd();
       pricePerUnit = skynetPrice;
+    }
+
+    // === WHO PAID ===
+    // A confirmed payment is public, so without this anyone watching the chain could claim a
+    // buyer's payment first. Accepted: the account IS the paying wallet (wallet login), or the
+    // claim carries payerSignature — the paying wallet's personal_sign over buildClaimMessage
+    // (see creditClaim.js). Measured 2026-09-26: every purchase on record came from the gateway,
+    // which logs in with an API key and pays from its own wallet, so it signs.
+    const claimant = String(req.wallet || '').toLowerCase();
+    let proof = null;
+    if (payer && claimant === payer) {
+      proof = 'account-is-payer';
+    } else if (req.body.payerSignature) {
+      const message = buildClaimMessage({ chain: 'bsc', txHash, recipient, apiKey: req.headers['x-api-key'] || '' });
+      let signer = null;
+      try { signer = ethers.verifyMessage(message, String(req.body.payerSignature)).toLowerCase(); } catch { signer = null; }
+      if (signer !== payer) {
+        logger.warn(`Credit claim ${txHash} refused: payerSignature is from ${signer || 'nobody'}, the payment from ${payer}`);
+        return res.status(403).json({ success: false, error: 'payerSignature was not made by the wallet that paid' });
+      }
+      proof = 'signature';
+    } else if (payerProofMode() === 'enforce') {
+      logger.warn(`Credit claim ${txHash} refused: paid by ${payer}, claimed by ${claimant}, no payerSignature`);
+      return res.status(403).json({
+        success: false,
+        error: 'This payment came from a different wallet than your account. Claim it with payerSignature: the paying wallet\'s signature of the claim message (see /api/external/credits/claim-message).'
+      });
+    } else {
+      logger.warn(`Credit claim ${txHash} UNPROVEN (transition mode): paid by ${payer}, claimed by ${claimant}. It will be refused once CREDIT_PAYER_PROOF is enforce.`);
+      proof = 'unproven-warn';
     }
 
     // Calculate credits: (amountPaid * pricePerUnit) / 0.01
@@ -432,7 +478,9 @@ router.post('/purchase', creditAuth(true), async (req, res) => {
       consumedAt: new Date(),
       currency: normalizedCurrency,
       creditsIssued: credits,
-      usdValue
+      usdValue,
+      payer,
+      payerProof: proof
     });
 
     // Add credits to account

@@ -2873,20 +2873,22 @@ Return ONLY a valid JSON object with the extracted parameters, nothing else.`;
           // Special handling for email - if it's a send action and has a prompt-like text, use sendWithAI
           let finalAction = intentResult.action;
           if (intentResult.plugin === 'email' && intentResult.action === 'send') {
-            // Check if the text looks like a prompt for AI generation
-            const text = finalParams.text || '';
-            const looksLikePrompt = text.length < 100 && !text.includes('\n\n') && 
-              (text.includes('about') || text.includes('regarding') || text.includes('that') || 
-               text.includes('saying') || text.includes('telling') || text.includes('explaining'));
+            // The agent writes the message unless the operator gave the exact words: quoted
+            // text, or "exactly" / "verbatim" / "word for word". It used to write only when the
+            // extracted text happened to contain "about", "that", "saying"…, so "send a message to
+            // william, say hi" could go out as the literal words "say hi".
+            const text = String(finalParams.text || '');
+            const verbatim = /["“][^"”]{3,}["”]/.test(input) || /\b(exactly|verbatim|word for word|as written)\b/i.test(input);
+            const looksLikePrompt = !verbatim;
             
             if (looksLikePrompt || finalParams.useAI) {
               // Convert to sendWithAI format
               finalAction = 'sendWithAI';
               finalParams = {
                 to: finalParams.to,
-                prompt: finalParams.text || input,
+                prompt: input,
                 subject: finalParams.subject,
-                context: `User's original request: ${input}`
+                context: text && text !== input ? `Gist extracted from the request: ${text}` : undefined
               };
               logger.info('Converting email send to sendWithAI for better content generation');
             }

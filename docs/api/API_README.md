@@ -557,6 +557,28 @@ Live in-memory snapshot of download-token usage (tokens within their TTL window)
 
 Sync covering 2.25.375–2.25.390.
 
+### v2.25.392–393 — Credit purchases prove who paid
+
+`POST /api/external/credits/purchase` accepts a claim when the account IS the paying wallet, or when
+the body carries `payerSignature`: the paying wallet's `personal_sign` over the claim message.
+`GET /api/external/credits/claim-message?txHash=` returns the exact text:
+
+```
+LANAgent credit purchase
+chain: bsc
+tx: <tx hash, lowercase>
+to: <this agent's payment address, lowercase>
+key: <first 16 hex of sha256(your API key)>
+```
+
+A claim with neither is refused with **403** (`CREDIT_PAYER_PROOF=warn` only logs it).
+
+### v2.25.391 — Emails on the operator's behalf
+
+Tone follows the request, privacy rules are enforced, capabilities come from a fixed public list, and
+contact groups work (`tagContact`, "email the family"). People the agent emailed in the last 30 days
+get conversation-only replies.
+
 ### v2.25.390 — Paid plugin route: parameter guard
 
 `POST /api/external/service/:plugin/:action` now passes each service only what it needs:

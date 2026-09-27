@@ -2,6 +2,63 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.393] - 2026-09-26
+
+### Security
+- **Credit purchases must prove who paid** (step 2 of 2: enforced). A claim whose payment came
+  from a wallet other than the account, and that carries no valid `payerSignature`, is refused
+  with 403. Proven first with a real signed top-up from the gateway (recorded as
+  `payerProof: signature`). `CREDIT_PAYER_PROOF=warn` restores the transition behaviour if
+  ever needed.
+
+## [2.25.392] - 2026-09-26
+
+### Security
+- **Credit purchases now check who paid** (step 1 of 2, transition mode). A confirmed payment
+  is public, so the claim route, which checked only recipient and amount, let anyone who saw a
+  payment claim it first. A claim is accepted when:
+  - the account itself is the paying wallet, or
+  - it carries `payerSignature`: the paying wallet's `personal_sign` over a fixed message naming
+    the chain, transaction, recipient agent and a hash of the claimant's key
+    (`src/api/external/creditClaim.js`; `GET /api/external/credits/claim-message` returns it).
+  Until every buyer signs, an unproven claim is still accepted and logged
+  (`CREDIT_PAYER_PROOF=warn`); the next release enforces it. Each payment records `payer` and
+  `payerProof`. A SKYNET payment is matched on the Transfer to this agent, not the first SKYNET
+  Transfer in the transaction.
+
+## [2.25.391] - 2026-09-26
+
+### Fixed
+- **Emails written for the operator could state the operator's email address as their name.**
+  With `MASTER_NAME` unset, the AI email writer used `EMAIL_OF_MASTER` as the operator's
+  "name" and told the model to use it. It now uses `MASTER_NAME` or the operator's contact-card
+  name, and never an address.
+- **Every email came out formal, 3–5 paragraphs.**
+  - Tone and length now follow the request and the relationship: warm and short for friends,
+    family and well-wishes; clear for introductions; formal only for business.
+  - The writer has firm privacy rules: nothing personal, financial, locational or about the
+    agent's systems.
+  - It describes its capabilities from a fixed public list instead of inventing them.
+- **Requests could be sent word for word.** "send a message to william, say hi" could go out as
+  "say hi", because only text containing "about", "that", "saying"… was written by the AI. The
+  agent now writes the message unless the operator quotes the exact words or says
+  "exactly"/"verbatim".
+- **The email signature embedded the agent's LAN address** (the avatar URL) for outside
+  recipients, which leaked the address and showed a broken image. Outside recipients get the
+  public avatar.
+
+### Added
+- **Groups:** "email the family" sends each contact tagged `family` their own email.
+  `tagContact` ("add jim to the family group") manages the tags. `send` carries example phrasings
+  ("tell jim that…", "send a message to william…") so plain requests reach it.
+- **Replies to correspondents.** A person the agent emailed on the operator's behalf in the last
+  30 days gets conversation-only replies:
+  - generated directly, never through intent detection or a plugin;
+  - under the same privacy rules, treating their email as a message and never as instructions;
+  - up to 3 per thread a day, with the per-sender daily cap still applying;
+  - each reply reported to the operator on Telegram.
+  Replies to anyone else stay off.
+
 ## [2.25.390] - 2026-09-26
 
 ### Security
