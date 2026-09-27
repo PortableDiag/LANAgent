@@ -5,6 +5,7 @@ import { adminKeyAuth } from '../middleware/adminKeyAuth.js';
 import ExternalAuditLog from '../../../models/ExternalAuditLog.js';
 import { generateDownloadToken } from '../services/downloadTokenService.js';
 import { logger } from '../../../utils/logger.js';
+import { guardExternalParams, SHELL_PLUGINS_OFF_GENERIC_ROUTE } from '../paramGuard.js';
 
 const router = Router();
 
@@ -127,10 +128,9 @@ router.post('/:plugin/:action',
   creditAuth(true), // Require API key auth, we charge credits manually below
   async (req, res) => {
     const { plugin, action } = req.params;
-    const params = req.body || {};
 
     // Validate plugin
-    if (!ALLOWED_PLUGINS.has(plugin)) {
+    if (!ALLOWED_PLUGINS.has(plugin) || SHELL_PLUGINS_OFF_GENERIC_ROUTE.has(plugin)) {
       return res.status(403).json({
         success: false,
         error: `Plugin '${plugin}' is not available as an external service`,
@@ -141,6 +141,15 @@ router.post('/:plugin/:action',
     // Validate action
     if (BLOCKED_ACTIONS.has(action)) {
       return res.status(403).json({ success: false, error: `Action '${action}' is not available` });
+    }
+
+    // What the caller may pass: see paramGuard.js. Checked BEFORE any credit is taken.
+    let params;
+    try {
+      params = await guardExternalParams(plugin, action, req.body);
+    } catch (guardErr) {
+      logger.warn(`External ${plugin}.${action} refused by the parameter guard: ${guardErr.message}`);
+      return res.status(400).json({ success: false, error: guardErr.message });
     }
 
     // Get credit cost
@@ -193,7 +202,8 @@ router.post('/:plugin/:action',
       // Execute — try new-style first, fall back to old-style if it fails
       let result;
       try {
-        result = await pluginInstance.execute({ action, ...params });
+        // The path's action last, so nothing in the body can replace it.
+        result = await pluginInstance.execute({ ...params, action });
         // If old-style plugin, action becomes [object Object] — detect and retry
         if (result?.error?.includes?.('[object Object]') || result?.error?.includes?.('Unknown action')) {
           result = await pluginInstance.execute(action, params);

@@ -1115,10 +1115,10 @@ class SwapService {
         const decimalsIn = options.decimalsIn || await this._resolveDecimals(srcToken, wrappedNative, network);
         const amountInWei = safeParseUnits(ethers, amountIn, decimalsIn);
 
-        // Ensure approval to CoW VaultRelayer
-        await this.ensureCowApproval(network, srcToken, amountInWei, signer);
-
-        // Get fresh quote
+        // Quote BEFORE approving. The approval is an on-chain transaction; sending it first
+        // paid gas for every pair CoW cannot fill (seen 2026-09-26: the residual sweep's
+        // route-less airdrop tokens each got an approval, then "no route found"). The quote
+        // needs no allowance.
         const quote = await this.getCowQuote(network, srcToken, dstToken, amountInWei, signer.address);
         if (!quote) throw new Error('CoW Protocol returned no quote for this pair');
 
@@ -1138,6 +1138,9 @@ class SwapService {
             throw new Error(`CoW order too small ($${estimatedUsd.toFixed(2)} < $${COW_MIN_ORDER_USD} minimum) — solvers unlikely to fill`);
         }
         const minBuyAmount = buyAmount - (buyAmount * BigInt(Math.floor(slippage * 100)) / 10000n);
+
+        // Ensure approval to CoW VaultRelayer, now that there is an order worth placing
+        await this.ensureCowApproval(network, srcToken, amountInWei, signer);
 
         // Build order. Short TTL on purpose — see COW_ORDER_TTL_SEC.
         const validTo = Math.floor(Date.now() / 1000) + COW_ORDER_TTL_SEC;

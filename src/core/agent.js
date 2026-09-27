@@ -887,6 +887,17 @@ export class Agent extends EventEmitter {
 
   // Natural language processing. `systemPrompt` is only used for a conversation-only
   // (guest) context — see core/guestGuard.js.
+  /**
+   * The Trellis channel a request came from, as a prompt block ('' otherwise). Other agents'
+   * messages are in the channel, not in this agent's own conversation buffer, so without it
+   * "did you post yours?" in the middle of a task is a question about nothing.
+   */
+  _channelContext(context = {}) {
+    const recent = context.trellis?.recent;
+    if (!recent) return '';
+    return `\nThis came from a shared Trellis channel (card ${context.trellis.card}). The conversation there, oldest first — the operator's requests, other agents' messages and your own earlier replies (signed ${this.config?.name || 'ALICE'}):\n${String(recent).slice(-4000)}\n`;
+  }
+
   async processNaturalLanguage(input, context = {}, systemPrompt = null) {
     // Anyone who is not the operator gets a model reply and nothing else: this router runs
     // plugins, and the guest path's restrictions used to be ignored here.
@@ -990,7 +1001,7 @@ export class Agent extends EventEmitter {
 
             const agentName = this.config?.name || process.env.AGENT_NAME || 'LANAgent';
             const followUpPrompt = `You are ${agentName}, an autonomous AI agent. The user is continuing a conversation with you. Respond naturally based on context.
-
+${this._channelContext(context)}
 Recent conversation:
 ${conversationCtx}
 User: ${input}
@@ -1169,7 +1180,13 @@ Respond conversationally — elaborate, clarify, or answer based on what was jus
               );
               return response;
               
-            case 'clarify':
+            case 'clarify': {
+              // From a Trellis channel the conversation usually says what was meant
+              // ("was unable to complete the task" right after the task): answer from it
+              // as a question below rather than asking the operator to repeat themselves.
+              if (context.trellis?.recent) {
+                logger.info('Clarify skipped: the Trellis channel conversation gives the context');
+              } else {
               const clarifyResponse = { 
                 type: 'text', 
                 content: "I need more information to help you. Could you please clarify what you'd like me to do? For example:\n" +
@@ -1181,7 +1198,9 @@ Respond conversationally — elaborate, clarify, or answer based on what was jus
               };
               await this.memoryManager.storeConversation(context.userId, input, clarifyResponse.content, context);
               return clarifyResponse;
-              
+              }
+            }
+            // falls through — a Trellis clarify is answered as a question with the channel's context
             case 'query':
               // Process as general AI query using the active AI provider
               // Recall relevant knowledge memories for context
@@ -1202,9 +1221,10 @@ Respond conversationally — elaborate, clarify, or answer based on what was jus
                 logger.debug('Memory recall for query failed:', err.message);
               }
 
-              // Include memory context in the AI query
-              const contextualInput = queryMemoryContext ?
-                `${queryMemoryContext}\nUser's question: ${input}` :
+              // Include memory context — and, from a Trellis channel, the conversation there
+              const channelCtx = this._channelContext(context);
+              const contextualInput = (queryMemoryContext || channelCtx) ?
+                `${channelCtx}${queryMemoryContext}\nUser's question: ${input}` :
                 input;
 
               let queryResponse;
@@ -3607,6 +3627,13 @@ Return ONLY a valid JSON object with the extracted parameters, nothing else.`;
       // Add user preferences if available
       if (Object.keys(preferences).length > 0) {
         systemPrompt += `User preferences: ${safeJsonStringify(preferences)}\n\n`;
+      }
+
+      // A request from a Trellis channel: the conversation it was asked in. Without it,
+      // "@Alice where is your card?" right after a task in the same channel was answered
+      // with no idea which card (2026-09-26).
+      if (context.trellis?.recent) {
+        systemPrompt += `This request came from a shared Trellis channel (card ${context.trellis.card}). Recent messages there, oldest first — earlier requests to you and your own earlier replies are in here:\n${String(context.trellis.recent).slice(-4000)}\n\n`;
       }
 
       // Skills (SKILL.md procedures) that match the question

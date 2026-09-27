@@ -10,6 +10,7 @@ import swapService from './swapService.js';
 import { strategyRegistry } from './strategies/StrategyRegistry.js';
 import { PluginSettings } from '../../models/PluginSettings.js';
 import { encrypt, decrypt } from '../../utils/encryption.js';
+import { alchemyAvailable, alchemyTokenBalances } from '../../utils/alchemy.js';
 
 const logger = baseLogger.child({ service: 'token-scanner' });
 
@@ -497,6 +498,41 @@ class TokenScanner {
     }
 
     /**
+     * Discover tokens the wallet holds via Alchemy (ALCHEMY_API_KEY). One balance
+     * call per network per deep scan; each token not already known goes through
+     * analyzeToken, the same scam analysis explorer-found tokens get. Covers BSC,
+     * where the free explorer tier no longer answers. Tokens found here reach the
+     * residual sweep like any other; system tokens (SKYNET) are exempt there.
+     */
+    async scanViaAlchemy(network) {
+        const results = { newTokens: [], scamTokens: [], safeTokens: [] };
+        if (!this.walletAddress || !alchemyAvailable(network)) return results;
+
+        const held = await alchemyTokenBalances(network, this.walletAddress);
+        if (!held) return results;
+        logger.info(`[TokenScanner] Alchemy found ${held.length} held token contracts on ${network}`);
+
+        const provider = await contractServiceWrapper.getProvider(network);
+        if (!provider) return results;
+
+        for (const { contractAddress } of held) {
+            if (this.knownTokens.has(`${network}:${contractAddress}`)) continue;
+            try {
+                const tokenInfo = await this.analyzeToken(contractAddress, network, provider);
+                if (tokenInfo && parseFloat(tokenInfo.balance || '0') > 0) {
+                    results.newTokens.push(tokenInfo);
+                    if (tokenInfo.isSafe) results.safeTokens.push(tokenInfo);
+                    else if (tokenInfo.isScam) results.scamTokens.push(tokenInfo);
+                }
+            } catch (err) {
+                logger.debug(`Alchemy scan: failed to analyze ${contractAddress}: ${err.message}`);
+            }
+        }
+        logger.info(`[TokenScanner] Alchemy scan ${network} complete: ${results.newTokens.length} new with balance (${results.safeTokens.length} safe, ${results.scamTokens.length} scam)`);
+        return results;
+    }
+
+    /**
      * Start periodic token scanning
      */
     startScanning(intervalMs = 300000) { // Default 5 minutes
@@ -785,6 +821,15 @@ class TokenScanner {
                 } catch (err) {
                     logger.warn(`Deep scan: Moralis scan failed for ${network}: ${err.message}`);
                 }
+            }
+
+            // Step 0b: Alchemy — every token currently held, including chains the free
+            // explorer tier refuses (BSC)
+            try {
+                const alchemyResults = await this.scanViaAlchemy(network);
+                foundTokens += alchemyResults.newTokens.length;
+            } catch (err) {
+                logger.warn(`Deep scan: Alchemy scan failed for ${network}: ${err.message}`);
             }
 
             // Step 1: Explorer API — fetch ALL tokens ever sent to wallet (most comprehensive)

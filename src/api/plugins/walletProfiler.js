@@ -4,14 +4,15 @@ import NodeCache from 'node-cache';
 import { PluginSettings } from '../../models/PluginSettings.js';
 import { decrypt } from '../../utils/encryption.js';
 import { isTransientRpcError as isTransientRpcErrorShared } from '../../utils/rpcErrorClassifier.js';
+import { alchemyRpc, alchemyTokenBalances } from '../../utils/alchemy.js';
 
 // Etherscan V2 unified API — single key works for all chains via chainid param.
 // V1 hosts (api.bscscan.com etc.) are deprecated and return NOTOK.
 const ETHERSCAN_V2_URL = 'https://api.etherscan.io/v2/api';
 // Etherscan's free V2 tier refuses some chains outright (BSC: "Free API access is
 // not supported for this chain"), which made every BSC profile read as a wallet
-// with no history. Moralis serves both chains and is the fallback.
-const MORALIS_URL = 'https://deep-index.moralis.io/api/v2.2';
+// with no history. Alchemy (ALCHEMY_API_KEY, pay-as-you-go) is the fallback, and
+// only the fallback: Ethereum stays on the free explorer.
 const apiKeyCache = new NodeCache({ stdTTL: 300 });
 
 let ethersLib = null;
@@ -37,11 +38,11 @@ const NETWORK_CONFIG = {
             'https://rpc.ankr.com/bsc',
             'https://1rpc.io/bnb'
         ].filter(Boolean),
+        network: 'bsc',
         chainId: 56,
         nativeSymbol: 'BNB',
         explorerKeySlot: 'bsc',
         legacyEnvKey: 'BSCSCAN_API_KEY',
-        moralisChain: 'bsc',
         goPlusChainId: '56'
     },
     ethereum: {
@@ -53,10 +54,10 @@ const NETWORK_CONFIG = {
             'https://1rpc.io/eth',
             'https://eth.drpc.org'
         ].filter(Boolean),
+        network: 'ethereum',
         chainId: 1,
         nativeSymbol: 'ETH',
         explorerKeySlot: 'eth',
-        moralisChain: 'eth',
         goPlusChainId: '1'
     }
 };
@@ -259,44 +260,35 @@ export default class WalletProfilerPlugin extends BasePlugin {
         }
     }
 
-    async _getMoralisKey() {
-        const hit = apiKeyCache.get('moralis');
-        if (hit !== undefined) return hit;
-        let key = '';
-        try {
-            const stored = await PluginSettings.getCached('crypto', 'moralis_api_key');
-            if (stored) key = decrypt(stored) || '';
-        } catch (err) {
-            this.logger.debug(`Moralis key lookup failed: ${err.message}`);
-        }
-        if (!key) key = process.env.MORALIS_API_KEY || '';
-        apiKeyCache.set('moralis', key);
-        return key;
-    }
-
-    async _moralisGet(path, params) {
-        const apiKey = await this._getMoralisKey();
-        if (!apiKey) return null;
-        try {
-            const { data } = await axios.get(`${MORALIS_URL}${path}`, {
-                params, headers: { 'X-API-Key': apiKey }, timeout: 20000
-            });
-            return data;
-        } catch (error) {
-            this.logger.warn(`Moralis request failed: ${error.message}`);
-            return null;
-        }
-    }
-
-    // Moralis native tx -> the explorer's txlist shape the rest of this file reads.
-    _fromMoralisTx(tx) {
+    // Alchemy asset transfer -> the explorer's txlist shape the rest of this file reads.
+    _fromAlchemyTransfer(t) {
+        let value = '0';
+        try { value = BigInt(t.rawContract?.value || '0x0').toString(); } catch { /* keep 0 */ }
         return {
-            hash: tx.hash,
-            from: tx.from_address,
-            to: tx.to_address,
-            value: tx.value,
-            timeStamp: String(Math.floor(Date.parse(tx.block_timestamp) / 1000))
+            hash: t.hash,
+            from: t.from,
+            to: t.to,
+            value,
+            blockNumber: parseInt(t.blockNum, 16),
+            timeStamp: String(Math.floor(Date.parse(t.metadata?.blockTimestamp) / 1000))
         };
+    }
+
+    // Native transfers sent AND received, oldest or newest first. Alchemy filters by
+    // one side per call, so both sides are fetched and merged.
+    async _alchemyTransfers(network, address, order, maxCount) {
+        const base = { fromBlock: '0x0', category: ['external'], order, withMetadata: true, excludeZeroValue: false, maxCount: '0x' + maxCount.toString(16) };
+        const [sent, received] = await Promise.all([
+            alchemyRpc(network, 'alchemy_getAssetTransfers', [{ ...base, fromAddress: address }]),
+            alchemyRpc(network, 'alchemy_getAssetTransfers', [{ ...base, toAddress: address }])
+        ]);
+        if (!sent && !received) return null;
+        const seen = new Set();
+        const all = [...(sent?.transfers || []), ...(received?.transfers || [])]
+            .filter(t => !seen.has(t.hash) && seen.add(t.hash))
+            .map(t => this._fromAlchemyTransfer(t))
+            .sort((a, b) => order === 'asc' ? a.blockNumber - b.blockNumber : b.blockNumber - a.blockNumber);
+        return { txs: all.slice(0, maxCount), more: !!(sent?.pageKey || received?.pageKey) };
     }
 
     /**
@@ -324,19 +316,13 @@ export default class WalletProfilerPlugin extends BasePlugin {
                 if (Array.isArray(newest?.result)) latestTx = newest.result[0] || null;
             }
         } else {
-            const oldest = await this._moralisGet(`/${address}`, {
-                chain: networkCfg.moralisChain, order: 'ASC', limit: 100
-            });
-            if (Array.isArray(oldest?.result)) {
-                txs = oldest.result.map(tx => this._fromMoralisTx(tx));
-                source = 'moralis';
-                if (oldest.cursor) {
-                    const newest = await this._moralisGet(`/${address}`, {
-                        chain: networkCfg.moralisChain, order: 'DESC', limit: 1
-                    });
-                    if (Array.isArray(newest?.result) && newest.result[0]) {
-                        latestTx = this._fromMoralisTx(newest.result[0]);
-                    }
+            const oldest = await this._alchemyTransfers(networkCfg.network, address, 'asc', 100);
+            if (oldest) {
+                txs = oldest.txs;
+                source = 'alchemy';
+                if (oldest.more) {
+                    const newest = await this._alchemyTransfers(networkCfg.network, address, 'desc', 1);
+                    latestTx = newest?.txs[0] || null;
                 }
             }
         }
@@ -356,21 +342,24 @@ export default class WalletProfilerPlugin extends BasePlugin {
         return { txs, latestTx, totalCount, source };
     }
 
-    // Tokens the wallet holds, from Moralis, in the shape tokens() returns.
-    async _getMoralisTokens(networkCfg, address) {
-        const data = await this._moralisGet(`/wallets/${address}/tokens`, { chain: networkCfg.moralisChain });
-        if (!Array.isArray(data?.result)) return null;
-        return data.result
-            .filter(t => !t.native_token)
-            .map(t => ({
-                contractAddress: t.token_address,
-                symbol: t.symbol || 'UNKNOWN',
-                name: t.name || 'Unknown Token',
-                decimals: parseInt(t.decimals) || 18,
-                balance: parseFloat(t.balance_formatted),
-                possibleSpam: !!t.possible_spam
-            }))
-            .filter(t => t.balance > 0);
+    // Tokens the wallet holds, from Alchemy, in the shape tokens() returns. Metadata
+    // costs a call per token, so only the first `withMetadata` get names/decimals.
+    async _getAlchemyTokens(networkCfg, address, withMetadata = 20) {
+        const held = await alchemyTokenBalances(networkCfg.network, address);
+        if (!held) return null;
+        const { ethers } = ethersLib;
+        const described = await Promise.all(held.slice(0, withMetadata).map(async (t) => {
+            const meta = await alchemyRpc(networkCfg.network, 'alchemy_getTokenMetadata', [t.contractAddress]);
+            const decimals = Number.isInteger(meta?.decimals) ? meta.decimals : 18;
+            return {
+                contractAddress: t.contractAddress,
+                symbol: meta?.symbol || 'UNKNOWN',
+                name: meta?.name || 'Unknown Token',
+                decimals,
+                balance: parseFloat(ethers.formatUnits(t.rawBalance, decimals))
+            };
+        }));
+        return { tokens: described.filter(t => t.balance > 0), totalHeld: held.length };
     }
 
     // ── Commands ───────────────────────────────────────────────────────
@@ -408,7 +397,7 @@ export default class WalletProfilerPlugin extends BasePlugin {
             walletAgeDays = Math.floor((Date.now() - parseInt(txHistory.txs[0].timeStamp) * 1000) / 86400000);
         }
 
-        // Token count from explorer, else Moralis holdings; null = unknown
+        // Token count from explorer, else Alchemy holdings; null = unknown
         let tokenCount = null;
         const tokenData = await this._explorerGet(networkCfg, {
             module: 'account',
@@ -424,7 +413,7 @@ export default class WalletProfilerPlugin extends BasePlugin {
             const uniqueTokens = new Set(tokenData.result.map(t => t.contractAddress.toLowerCase()));
             tokenCount = uniqueTokens.size;
         } else {
-            const held = await this._getMoralisTokens(networkCfg, address);
+            const held = await alchemyTokenBalances(networkCfg.network, address);
             if (held) tokenCount = held.length;
         }
 
@@ -482,12 +471,12 @@ export default class WalletProfilerPlugin extends BasePlugin {
         });
 
         if (!tokenData || !Array.isArray(tokenData.result)) {
-            const held = await this._getMoralisTokens(networkCfg, address);
+            const held = await this._getAlchemyTokens(networkCfg, address);
             if (!held) {
                 return { success: false, address, network, error: `Token data is unavailable for ${network} right now` };
             }
-            held.sort((a, b) => b.balance - a.balance);
-            const result = { success: true, address, network, tokenCount: held.length, tokens: held, source: 'moralis' };
+            held.tokens.sort((a, b) => b.balance - a.balance);
+            const result = { success: true, address, network, tokenCount: held.totalHeld, tokens: held.tokens, source: 'alchemy' };
             profileCache.set(cacheKey, result);
             return result;
         }

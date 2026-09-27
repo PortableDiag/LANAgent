@@ -230,6 +230,11 @@ export default class HuggingFacePlugin extends BasePlugin {
    * Call HuggingFace Inference API
    */
   async callInference(model, payload, options = {}) {
+    // The model id goes into the URL path, next to the owner's bearer token: an id with "..",
+    // "?" or "#" would send that token somewhere else.
+    if (!/^[A-Za-z0-9][\w.-]{0,95}(\/[A-Za-z0-9][\w.-]{0,95})?$/.test(String(model || '')) || String(model).includes('..')) {
+      throw new Error(`Invalid HuggingFace model id: ${String(model).slice(0, 80)}`);
+    }
     const url = `${this.config.inferenceUrl}/${model}`;
     const timeout = options.timeout || 30000;
 

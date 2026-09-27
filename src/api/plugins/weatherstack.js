@@ -178,7 +178,7 @@ export default class WeatherstackPlugin extends BasePlugin {
     });
 
     try {
-      const url = `${this.config.baseUrl}/current?access_key=${this.config.apiKey}&query=${location}`;
+      const url = `${this.config.baseUrl}/current?access_key=${this.config.apiKey}&query=${encodeURIComponent(location)}`;
       const response = await retryOperation(() => axios.get(url), { retries: 3, context: 'getCurrentWeather' });
 
       const data = response.data;
@@ -220,7 +220,7 @@ export default class WeatherstackPlugin extends BasePlugin {
     });
 
     try {
-      const url = `${this.config.baseUrl}/historical?access_key=${this.config.apiKey}&query=${location}&historical_date=${date}`;
+      const url = `${this.config.baseUrl}/historical?access_key=${this.config.apiKey}&query=${encodeURIComponent(location)}&historical_date=${encodeURIComponent(date)}`;
       const response = await retryOperation(() => axios.get(url), { retries: 3, context: 'getHistoricalWeather' });
 
       const data = response.data;
@@ -244,7 +244,7 @@ export default class WeatherstackPlugin extends BasePlugin {
     });
 
     try {
-      const url = `${this.config.baseUrl}/forecast?access_key=${this.config.apiKey}&query=${location}&forecast_days=${days}`;
+      const url = `${this.config.baseUrl}/forecast?access_key=${this.config.apiKey}&query=${encodeURIComponent(location)}&forecast_days=${encodeURIComponent(days)}`;
       const response = await retryOperation(() => axios.get(url), { retries: 3, context: 'getWeatherForecast' });
 
       const data = response.data;

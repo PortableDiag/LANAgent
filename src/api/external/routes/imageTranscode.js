@@ -21,6 +21,7 @@ import { creditAuth } from '../middleware/creditAuth.js';
 import { creditDebit } from '../middleware/creditDebit.js';
 import { logger } from '../../../utils/logger.js';
 import { ConcurrencyLimiter } from '../../../utils/concurrencyLimiter.js';
+import { assertPublicUrl } from '../../../utils/publicUrl.js';
 
 const router = Router();
 
@@ -122,7 +123,11 @@ router.post('/',
     if (req.file?.buffer) params._buffer = req.file.buffer;
     else if (body.image) params.image = body.image;
     else if (body.base64) params.base64 = body.base64;
-    else if (body.url) params.url = body.url;
+    else if (body.url) {
+      // Fetched by the agent for a paying caller: public addresses only.
+      try { params.url = await assertPublicUrl(body.url, 'url'); }
+      catch (e) { return res.status(400).json({ success: false, targetError: true, error: e.message }); }
+    }
     else {
       return res.status(400).json({
         success: false, targetError: true,

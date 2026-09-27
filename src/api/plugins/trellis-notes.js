@@ -28,10 +28,13 @@
  * pipeline. Keep the command examples in this file about notes/baskets/agenda and
  * away from words like model, mesh, avatar or generate.
  *
- * DELIBERATELY READ-MOSTLY. There is no delete action of any kind — not for cards,
- * not for baskets. Plugin actions are reachable by fuzzy vector-matched intent, and
- * a mis-matched phrase must never be able to destroy the operator's notes. Edits are
- * additive: `appendNote` uses the server's append route, it does not replace.
+ * DELETING IS GUARDED, NOT ABSENT (since v2.25.380, operator's call). Plugin actions are
+ * reachable by fuzzy vector-matched intent, so a mis-matched phrase must never be able to
+ * destroy the operator's notes: deleteCard / deleteBasket take the id AND the title repeated
+ * back, reach only the document's trash (restorable 30 days, restoreFromTrash), and the
+ * intent matcher holds delete, remove and share actions to its top threshold. Nothing clears a
+ * channel. The full action set beyond notes/tasks/channels is in
+ * src/services/trellis/trellisExtras.js.
  *
  * Credentials: TRELLIS_API_KEY (web keys look like tk_…; mint one while signed in,
  *              POST /api/keys — or in Settings → Plugins → trellis-notes).
@@ -53,6 +56,7 @@ import axios from 'axios';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { PluginSettings } from '../../models/PluginSettings.js';
 import { TrellisChannelListener } from '../../services/trellisChannelListener.js';
+import { EXTRA_COMMANDS, EXTRA_ACTIONS, installTrellisExtras } from '../../services/trellis/trellisExtras.js';
 
 const DEFAULT_BASE_URL = 'https://trellis-cards.com';
 const MAX_BODY_CHARS = 1200;   // truncate card bodies so results stay context-cheap
@@ -69,6 +73,22 @@ const DOC_CARD_RE = /^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{
 // The document one action runs against. Carried per call rather than on the instance,
 // so two actions in flight against different documents cannot cross.
 const docContext = new AsyncLocalStorage();
+
+// The AI parameter extractor names things its own way ({cardId: 121} for {card: 121}), and a
+// renamed parameter silently becomes "no card given". Accept the usual spellings.
+const PARAM_ALIASES = {
+  card: ['cardId', 'card_id', 'cardID'],
+  basket: ['basketId', 'basket_id', 'basketID', 'node', 'nodeId', 'node_id'],
+  confirmTitle: ['confirm_title', 'title_confirmation']
+};
+function normalizeParamAliases(data) {
+  for (const [name, aliases] of Object.entries(PARAM_ALIASES)) {
+    if (data[name] !== undefined && data[name] !== null && data[name] !== '') continue;
+    const hit = aliases.find(a => data[a] !== undefined && data[a] !== null && data[a] !== '');
+    if (hit) data[name] = data[hit];
+  }
+  for (const list of Object.values(PARAM_ALIASES)) for (const a of list) delete data[a];
+}
 
 export default class TrellisNotesPlugin extends BasePlugin {
   constructor(agent) {
@@ -181,7 +201,7 @@ export default class TrellisNotesPlugin extends BasePlugin {
       {
         command: 'replyChannel',
         description: 'Post a reply in a channel card, signed as this agent',
-        usage: 'replyChannel({ card: 2119, text: "Done — deployed v2.25.352." })  // or card: "<document-uuid>:2119"',
+        usage: 'replyChannel({ card: 2119, text: "Done — deployed v2.25.352.", files: ["/path/report.pdf"] })  // files optional; card may be "<document-uuid>:2119"',
         examples: ['reply in the trellis channel', 'answer the operator in the channel', 'post in the notes channel']
       },
       {
@@ -195,7 +215,9 @@ export default class TrellisNotesPlugin extends BasePlugin {
         description: 'Return a sanitized snapshot of this plugin\'s current configuration (credentials redacted)',
         usage: 'getPluginConfig',
         examples: ['getPluginConfig', 'show trellis notes plugin config']
-      }
+      },
+      // Files, editing, finding, layout, delete/restore: src/services/trellis/trellisExtras.js
+      ...EXTRA_COMMANDS
     ];
 
     this.config = {
@@ -277,6 +299,7 @@ export default class TrellisNotesPlugin extends BasePlugin {
         action: { required: true, type: 'string', enum: this.commands.map(c => c.command) }
       });
 
+      normalizeParamAliases(data);
       return await this._inDocument(data, () => this._dispatch(action, data));
     } catch (error) {
       this.logger.error(`${action} failed:`, error);
@@ -333,6 +356,7 @@ export default class TrellisNotesPlugin extends BasePlugin {
         case 'listAgents':      return await this.listAgents();
         case 'getPluginConfig': return this.getPluginConfig();
         default:
+          if (EXTRA_ACTIONS.has(action)) return await this[action](data);
           throw new Error(`Unknown action: ${action}`);
       }
   }
@@ -377,9 +401,14 @@ export default class TrellisNotesPlugin extends BasePlugin {
           : 'Trellis rejected the API key (401). Update it in Settings → Plugins → trellis-notes.');
       }
       if (response.status === 403) {
-        throw new Error(web
+        // The desktop answers 403 both when the Agent API is off and when a basket-confined
+        // token reaches outside its basket; the server's own text says which.
+        const err = new Error(web || serverError
           ? `Trellis refused this call for this key (403)${serverError ? `: ${serverError}` : ''} — a key scoped to a document or basket cannot reach outside it.`
           : 'The Trellis Agent API is disabled — no key is set in the app (Tools → Settings → Agent API).');
+        err.status = 403;
+        err.serverError = serverError || null;
+        throw err;
       }
       if (response.status >= 400) {
         const err = new Error(serverError || (response.status === 404 ? `Not found: ${path}` : `Trellis returned HTTP ${response.status}`));
@@ -579,15 +608,27 @@ export default class TrellisNotesPlugin extends BasePlugin {
 
   /** Accept a node id or a node title (case-insensitive); never guess between two matches. */
   async _resolveNode(ref, { allowDefault = false, nodes = null } = {}) {
+    const given = !(ref === undefined || ref === null || ref === '');
     let target = ref;
-    if ((target === undefined || target === null || target === '') && allowDefault) {
-      target = this.config.defaultBasket;
+    if (!given && allowDefault) target = this.config.defaultBasket;
+
+    const list = nodes || await this._flatTree();
+
+    // No basket named: the configured default — and when that is unset or does not exist
+    // here (ALICE's was "ALICE", a desktop basket, after it moved to the web), the key's only
+    // top-level basket if it reaches exactly one.
+    if (!given && allowDefault) {
+      const roots = list.filter(n => n.depth === 0);
+      const soleRoot = roots.length === 1 ? roots[0] : null;
+      if (target === undefined || target === null || target === '') {
+        if (soleRoot) return soleRoot;
+      } else if (soleRoot) {
+        try { return await this._resolveNode(target, { nodes: list }); } catch { return soleRoot; }
+      }
     }
     if (target === undefined || target === null || target === '') {
       throw new Error('No basket given, and no defaultBasket is configured for this plugin.');
     }
-
-    const list = nodes || await this._flatTree();
 
     if (typeof target === 'number' || /^\d+$/.test(String(target))) {
       const id = Number(target);
@@ -1023,7 +1064,12 @@ export default class TrellisNotesPlugin extends BasePlugin {
     try {
       raw = await this._call('get', '/api/agents');
     } catch (error) {
-      if (error.status !== 404) throw error;   // a server without the route: nothing known
+      // The desktop (v0.201.2+) refuses the unfiltered listing to a basket-confined token,
+      // because it reads every channel in the document, and its 403 names the route that
+      // works: `GET /api/agents?project=<basket>`. Take that basket and ask again.
+      const project = error.status === 403 && /[?&]project=(\d+)/.exec(error.serverError || '')?.[1];
+      if (project) raw = await this._call('get', '/api/agents', { query: { project: Number(project) } });
+      else if (error.status !== 404) throw error;   // a server without the route: nothing known
     }
     // On the web a person's message carries their display name or email local part
     // ("portablediag"), not "operator"; the key's owner, from /api/me, is the operator.
@@ -1178,18 +1224,36 @@ export default class TrellisNotesPlugin extends BasePlugin {
         from: m.from ?? m.agent ?? m.author ?? null,
         ...(Array.isArray(m.to) ? { to: m.to } : {}),
         ...this._senderKind(m, agents),
+        // Web v0.58+: posted by the same account as this key; v0.59+: signed by a key
+        // bound to that agent name. Absent when the server did not record it.
+        ...('from_key_owner' in m ? { fromKeyOwner: m.from_key_owner } : {}),
+        ...(m.agent_verified ? { agentVerified: true } : {}),
+        // Web v0.59.3+: how it was posted (`session` = a signed-in person, `api` = a key,
+        // `internal` = a built-in agent) and, for `api`, the key's label (own account only).
+        ...(m.via ? { via: m.via } : {}),
+        ...(m.key_label ? { keyLabel: m.key_label } : {}),
+        // Web v0.59.2+: the tools a built-in agent's reply actually ran. A claimed action
+        // whose tool is not listed did not happen (built-in models invent them).
+        ...(Array.isArray(m.tools) ? { toolsRan: m.tools } : {}),
+        // Files in the message: kind "image" → downloadFile kind "inline", "file" → kind "file".
+        ...(Array.isArray(m.files) && m.files.length ? { files: m.files } : {}),
         at: m.at ?? m.time ?? m.ts ?? null,
         text: this._trim(m.text ?? m.body ?? '')
       }))
     };
   }
 
-  async replyChannel({ card, text } = {}) {
+  async replyChannel({ card, text, files = null } = {}) {
     if (!(typeof card === 'number' || /^\d+$/.test(String(card ?? '')))) {
       throw new Error('replyChannel needs the channel card id.');
     }
-    if (!text || !String(text).trim()) throw new Error('replyChannel needs text.');
-    const data = await this._call('post', `/api/cards/${Number(card)}/say`, { body: { text: String(text).trim() } });
+    const paths = Array.isArray(files) ? files : (files ? [files] : []);
+    if ((!text || !String(text).trim()) && !paths.length) throw new Error('replyChannel needs text or files.');
+    // Files travel in the message itself: {name, data_base64}, up to 40 MB each.
+    const attached = [];
+    for (const p of paths) attached.push(await this._readLocalFile(p));
+    const body = { text: String(text || '').trim(), ...(attached.length ? { files: attached } : {}) };
+    const data = await this._call('post', `/api/cards/${Number(card)}/say`, { body, timeoutMs: attached.length ? 120000 : null });
     const doc = this.resolvedMode === 'web' ? this._currentDoc() : null;
     return { success: true, card: Number(card), document: doc?.name ?? null, seq: data?.seq ?? null, as: this._agentName() };
   }
@@ -1352,3 +1416,5 @@ export default class TrellisNotesPlugin extends BasePlugin {
     `;
   }
 }
+
+installTrellisExtras(TrellisNotesPlugin);

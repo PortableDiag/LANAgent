@@ -553,6 +553,31 @@ Live in-memory snapshot of download-token usage (tokens within their TTL window)
 
 ---
 
+## Recent Updates (September 27, 2026)
+
+Sync covering 2.25.375–2.25.390.
+
+### v2.25.390 — Paid plugin route: parameter guard
+
+`POST /api/external/service/:plugin/:action` now passes each service only what it needs:
+- the action comes from the path only;
+- `_`-prefixed and local-path fields (`path`, `output`, `proxy`, cookie files, …) are dropped;
+- URL fields must be public http(s);
+- `ytdlp` accepts an allowlist of typed fields per action;
+- `ffmpeg` is not on the generic route (use `/api/external/transcode`);
+- a HuggingFace `model` must be `owner/name`.
+
+A refused request returns **400** before any credit is taken. The documents route's `fileUrl`
+and image-transcode's `url` must also be public.
+
+### v2.25.380–389 — Trellis plugin covers the full Trellis API
+
+41 new `trellis-notes` actions: files and pictures (list, read, download, transcribe, attach,
+OCR, files in channel replies), editing, tag/property queries, layout and admin, image cards from
+a description (`createImageCard`), and guarded delete to the document's trash. Skills other
+agents teach are saved pending approval (`skills approve` / `approveAll` / `reject`, or an
+auto-approve toggle).
+
 ## Recent Updates (September 26, 2026)
 
 Sync covering 2.25.336–2.25.374.

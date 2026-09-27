@@ -1736,6 +1736,40 @@ export class TelegramDashboard extends TelegramInterface {
   setupCallbackHandlers() {
     // Clarification answer buttons: the chosen option is the owner's answer to the pending
     // reasoning question, so it goes back through processNaturalLanguage like typed text.
+    // Skills another agent taught (pending until approved): buttons sent by the Trellis listener.
+    this.bot.action(/^skill_(ok|no):(.+)$/, async (ctx) => {
+      ctx.answerCbQuery().catch(() => {});
+      if (!ctx.isMaster) return;
+      const [, verb, name] = ctx.match;
+      const { getSkillsService } = await import('../../services/skills/skillsService.js');
+      const svc = getSkillsService();
+      const done = verb === 'ok' ? await svc.approve(name) : await svc.reject(name);
+      await ctx.editMessageReplyMarkup(undefined).catch(() => {});
+      await ctx.reply(done
+        ? (verb === 'ok' ? `✅ Approved skill "${name}".` : `🗑 Rejected skill "${name}".`)
+        : `No pending skill "${name}" (already handled?).`);
+    });
+    this.bot.action(/^skill_auto_(on|off)$/, async (ctx) => {
+      ctx.answerCbQuery().catch(() => {});
+      if (!ctx.isMaster) return;
+      const on = ctx.match[1] === 'on';
+      const { setAutoApprove, getSkillsService } = await import('../../services/skills/skillsService.js');
+      const state = await setAutoApprove(on);
+      const approved = on ? await getSkillsService().approveAll() : [];
+      await ctx.editMessageReplyMarkup(undefined).catch(() => {});
+      await ctx.reply(on
+        ? `⚙️ Auto-approve is ON: skills other agents teach are used at once (you'll still be told, with a Reject button).${approved.length ? ` Approved the ${approved.length} pending: ${approved.join(', ')}.` : ''}${state.source === 'env' ? ' Note: SKILLS_AUTO_APPROVE in .env overrides this.' : ''}`
+        : `⏸ Auto-approve is OFF: new skills from other agents wait for your approval.${state.source === 'env' ? ' Note: SKILLS_AUTO_APPROVE in .env overrides this.' : ''}`);
+    });
+    this.bot.action('skill_ok_all', async (ctx) => {
+      ctx.answerCbQuery().catch(() => {});
+      if (!ctx.isMaster) return;
+      const { getSkillsService } = await import('../../services/skills/skillsService.js');
+      const names = await getSkillsService().approveAll();
+      await ctx.editMessageReplyMarkup(undefined).catch(() => {});
+      await ctx.reply(names.length ? `✅ Approved ${names.length} skill(s): ${names.join(', ')}` : 'No skills were waiting.');
+    });
+
     this.bot.action(/^clarify_(\d+)$/, async (ctx) => {
       ctx.answerCbQuery().catch(() => {});
       const options = this.clarifyOptions.get(String(ctx.chat.id));

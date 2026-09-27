@@ -2,6 +2,220 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.390] - 2026-09-26
+
+### Security
+- **The paid external plugin route passes each service only the parameters it needs.**
+  `POST /api/external/service/:plugin/:action` handed the request body to the plugin as-is.
+  Reported by a partner agent. New `src/api/external/paramGuard.js`, checked
+  before any credit is taken:
+  - The action always comes from the path. A body `action` used to replace it and skip the
+    blocked-actions list.
+  - `_`-prefixed internal fields and every field naming a local file, directory, proxy or
+    cookie jar are dropped.
+  - URL fields must be http(s) to a public address (`src/utils/publicUrl.js`).
+  - `ytdlp` accepts only an allowlist of typed fields per action.
+  - `ffmpeg` is off the generic route (the dedicated transcode route stays).
+  - A HuggingFace `model` must be an `owner/name` id; `callInference` refuses any other form
+    too, since the id sits in a URL next to the owner's token.
+- **Documents route:** `fileUrl` must be public and is fetched without redirects, and
+  `fileExtension` can no longer steer the temp file outside the temp directory.
+- **Image transcode:** a `url` source must be public.
+- **weatherstack:** location, date and days are URL-encoded; they shared a URL with the access
+  key.
+
+## [2.25.389] - 2026-09-26
+
+### Added
+- **Auto-approve skills that other agents teach: an operator toggle, off by default.**
+  - When on, a taught skill is saved active and used at once. The operator is still told on
+    Telegram, with a **Reject** button and a **Turn off auto-approve** button.
+  - Turning it on also approves anything already pending.
+  - Flip it by message ("turn on auto approve skills", "is skill auto approve on"), with the
+    **⚙️ Always auto-approve** button on an approval message, or with `SKILLS_AUTO_APPROVE`
+    in `.env`, which overrides the saved setting (`skills.autoApprovePeer`).
+
+## [2.25.388] - 2026-09-26
+
+### Fixed
+- **The agent lost the thread of a Trellis conversation.** "@Alice did you post yours?"
+  got "which post do you mean?", and "@Alice was unable to complete the task…" got the canned
+  "I need more information…". The channel's recent messages had reached only one reply path.
+  Now:
+  - They are included wherever the agent answers conversationally: questions, follow-ups and
+    chat.
+  - A request that would have been answered "please clarify" is answered from the channel's
+    context instead.
+- **Channel addressing no longer dilutes intent matching.** `@Alice`, `@agents`, `@all` and
+  `@everyone` are removed from the request before it is matched. "@agents I meant to say find
+  and post a picture of a blue frog as an image card" scored 0.589 against the image-card
+  action, missed, and went to a multi-step plan that could not post.
+
+## [2.25.387] - 2026-09-26
+
+### Added
+- **Approve skills in one tap.** When another agent teaches a skill in Trellis, the operator
+  gets a Telegram message with **Approve**, **Reject** and **Approve all pending (N)** buttons
+  (master user only). New `skills` commands: `approveAll` ("approve all skills") and `reject`
+  ("reject skill <name>", which removes a pending skill only).
+
+## [2.25.386] - 2026-09-26
+
+### Fixed
+- `deleteCard`'s title confirmation compares against the title line a person sees. On image
+  and checklist cards Trellis stores `key:: value` properties as extra title lines, so the check
+  had demanded the whole multi-line title.
+
+## [2.25.385] - 2026-09-26
+
+### Fixed
+- `createImageCard`'s picture search drops filler words ("a cool frog picture" searches for
+  "frog") and prefers files named for the subject over book scans and maps. The first live run
+  had posted an 1873 magazine page.
+
+## [2.25.384] - 2026-09-26
+
+### Fixed
+- `createImageCard` reads the search from the parameter names the AI extractor uses
+  (`description`, `search`, `subject`, `topic`, `prompt`, `keywords`) as well as `query`, and
+  an image URL from `imageUrl`. "find a cool frog picture and make an image card" matched the
+  action and then failed for want of a `query`.
+
+## [2.25.383] - 2026-09-26
+
+### Added
+- **`trellis-notes` `createImageCard`: an image card from a description, a URL or a file.**
+  Asked in a Trellis channel to "find a cool frog picture and make an image card", the agent
+  searched three times, created nothing, and reported success: it had no way to make an image
+  card. The action does it in one step:
+  - finds a freely licensed picture on Wikimedia Commons, or fetches an image URL (public
+    addresses only), or uploads a local file;
+  - posts it as an image card;
+  - records `source::` and `credit::` (author, licence) on the card.
+- **Skills taught by other agents.** When an agent addressed to this one in a channel explains
+  a procedure, it is saved as a skill with `status: pending`, and the reply says so. A pending
+  skill is never used until the operator approves it (`skills approve`, "approve skill <name>"),
+  because it is instructions from outside that would be put into the prompts of the operator's
+  own requests. `skills list` shows pending skills and who taught them.
+
+### Fixed
+- **The Trellis listener ignored a legitimate hand-off.** Its own loop limit was 4 agent
+  messages in a row, tighter than the channel's 8. After the operator asked "@agents can you
+  help Alice", the fifth agent message, another agent's step-by-step recipe addressed to this
+  one, went unanswered. The limit is now the server's 8.
+- **Requests from a Trellis channel now carry the channel's recent messages** into the chat
+  prompt, so a follow-up like "where is your card?" is answered in context.
+- **A default basket that does not exist no longer breaks every action that relies on it.**
+  If the configured default is unset or missing (one instance's still named a desktop basket after it moved
+  to the web) and the key reaches one top-level basket, that basket is used.
+
+## [2.25.382] - 2026-09-26
+
+### Fixed
+- **`trellis-notes` accepts the parameter names the AI extractor actually uses.** A natural-
+  language request ("tick off gamma on trellis checklist card 121") arrived as `{cardId: 121}`
+  and the plugin, reading `card`, reported no card. `cardId`/`card_id`, `basketId`/`basket_id`/
+  `nodeId` and `confirm_title` are now read as `card`, `basket` and `confirmTitle`.
+
+## [2.25.381] - 2026-09-26
+
+### Fixed
+- `trellis-notes` `findByTag` and `queryNotes` returned an empty list with a correct count:
+  results come back as `hits`.
+- `restoreFromTrash` restores by the deletion `batch` that `listTrash` shows (the server's
+  body), not by card id. Both are document-owner routes; a basket-scoped key deletes to the
+  trash and the owner restores it (the Trash in the app, or an owner key).
+
+## [2.25.380] - 2026-09-26
+
+### Added
+- **`trellis-notes` covers the rest of the Trellis API** (new module
+  `src/services/trellis/trellisExtras.js`, 41 actions):
+  - **Files and pictures:** `listFiles`, `readFile` (PDF/text, free), `downloadFile`,
+    `transcribeFile`, `attachFile`, `addImage`, `ocrImage`. `replyChannel` takes `files`, and
+    `readChannel` lists the files in each message. Uploads come only from the agent's temp,
+    uploads, workspace and downloads directories, never its data directory.
+  - **Editing:** `editCard`, `addChecklistItem`, `setChecklistItem` (by line id or text),
+    `setProperty`, `editTable` (table ops), `moveCard`, `duplicateCard`, `renameBasket`,
+    `moveBasket`.
+  - **Finding:** `listTags`, `findByTag`, `queryNotes` (tag AND property AND text),
+    `listProperties`, `cardLinks` (backlinks, mentions, shareable link), `listClaims`,
+    `claimChannel`.
+  - **Layout and admin:** `groupCards`, `dockCard`, `arrangeBasket`, `foldBasket`,
+    `listTemplates`, `applyTemplate`, `exportNotes`, `clipPage`, `generateImage`,
+    `listShares`, `shareNotes` (needs `confirm: true`), `unshareNotes`.
+  - **Delete and restore:** `deleteCard`, `deleteBasket`, `removeChecklistItem`,
+    `removeFile`, `listTrash`, `restoreFromTrash`.
+
+### Changed
+- **Deleting in Trellis is guarded, not absent.** A card or basket is deleted only by its
+  id with its exact title repeated back, and only to the document's trash (restorable for
+  30 days). A file needs its name repeated back.
+- The intent matcher now needs 0.7 similarity for any `delete*`, `remove*`, `share*` or
+  `unshare*` action from any plugin, as it already did for restart/shutdown.
+
+## [2.25.379] - 2026-09-26
+
+### Added
+- **`trellis-notes` `readChannel` shows how each message was posted** (trellis-web 0.59.2+):
+  - `via`: `session` for a signed-in person, `api` for a key, `internal` for a built-in agent;
+  - `keyLabel` for a key's own account;
+  - `toolsRan`: the tools a built-in agent's reply actually called. A built-in reply that claims
+    an action whose tool is not listed did not happen, and the built-in models have been seen
+    inventing them.
+
+## [2.25.378] - 2026-09-26
+
+### Fixed
+- **The CoW fallback sent an approval transaction before knowing CoW could fill the order.**
+  `executeCowSwap` approved the VaultRelayer and then asked for a quote, so every pair CoW
+  could not route (and every order under the minimum) still paid for an on-chain approval.
+  Seen with the residual sweep's route-less airdrop tokens: an approval each, then "no route
+  found". It now quotes and applies the minimum-order check first, and approves only an order
+  it will place. Trade outcomes are unchanged.
+
+## [2.25.377] - 2026-09-26
+
+### Security
+- **A Trellis message is the operator's only when it came from a signed-in session.** On
+  trellis-web an API key that sends no `X-Agent` is recorded exactly like the operator typing
+  in the browser (`kind: person`, owner's name, `from_key_owner: true`), and `from_key_owner`
+  is true for every key on the owner's account. So any such key could have its message run
+  through the command router. The listener now also requires `via: "session"` on the message.
+  Until the server sends `via`, Trellis messages get conversation replies only; operator
+  commands come back on their own once it does. The old sole-writer fallback, which had the
+  same gap, is removed.
+
+### Fixed
+- **The Trellis listener answered in other agents' side channels.** A one-agent channel reads
+  `waiting` for every outsider, so the listener replied in channels it was not a participant
+  of. It now answers there only when named (`@<agent name>`).
+- **The listener's loop guard now resets after 10 quiet minutes**, as the Trellis servers do. A
+  loop runs seconds apart; slow coordination between agents is no longer cut off.
+- **`trellis-notes` on the desktop:** a basket-confined token's 403 on `GET /api/agents` is
+  retried with the basket the server names (`?project=`), instead of failing on every refresh.
+  A desktop 403 now shows the server's reason, not only "Agent API is disabled".
+- `readChannel` returns `fromKeyOwner` and `agentVerified` when the server records them.
+
+## [2.25.376] - 2026-09-26
+
+### Changed
+- **The token scanner finds every token the wallet holds on BSC.** Etherscan's free tier no
+  longer serves BSC, so discovery there was limited to tokens already on the scanner's list. The
+  deep scan now asks Alchemy (`ALCHEMY_API_KEY`) for the wallet's held tokens, one call per page
+  per network per deep scan, and runs each new one through the existing scam analysis. Tokens it
+  finds reach the residual sweep like any other, so tokens sent to the agent are liquidated.
+  System tokens remain exempt from the sweep, deposit handling and auto-sell.
+
+## [2.25.375] - 2026-09-26
+
+### Changed
+- **Wallet profiles use Alchemy where the free explorer refuses a chain.** When Etherscan's free
+  tier refuses a chain (BSC), BSC wallet history, first and latest transaction, wallet age and
+  token holdings now come from Alchemy's Transfers and Token APIs (`ALCHEMY_API_KEY`), replacing
+  the Moralis fallback. Ethereum stays on the free explorer, so Alchemy is called only when it
+  is needed. New helper `src/utils/alchemy.js`.
+
 ## [2.25.374] - 2026-09-26
 
 ### Fixed

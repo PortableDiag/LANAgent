@@ -9,6 +9,7 @@ import { hybridAuth } from '../middleware/hybridAuth.js';
 import { upload, validateMagicBytes, validateMagicBytesArray, scanWithVirusTotal } from '../middleware/fileUpload.js';
 import { logger } from '../../../utils/logger.js';
 import { safePromiseAll } from '../../../utils/errorHandlers.js';
+import { assertPublicUrl } from '../../../utils/publicUrl.js';
 
 const router = Router();
 
@@ -16,11 +17,13 @@ const router = Router();
  * Write base64 or URL content to a temp file for processing
  */
 async function resolveFileInput(body) {
-  // Determine file extension from URL or explicit parameter
-  let ext = body.fileExtension || '';
+  // Determine file extension from URL or explicit parameter. It becomes part of a temp file
+  // name, so it is an extension or nothing ("/../../x" would write outside the temp dir).
+  const safeExt = (e) => (/^\.[A-Za-z0-9]{1,8}$/.test(String(e || '')) ? String(e) : '');
+  let ext = safeExt(body.fileExtension);
   if (!ext && body.fileUrl) {
     const urlPath = new URL(body.fileUrl).pathname;
-    ext = path.extname(urlPath) || '';
+    ext = safeExt(path.extname(urlPath));
   }
   if (!ext && body.contentType) {
     const mimeMap = { 'application/pdf': '.pdf', 'image/png': '.png', 'image/jpeg': '.jpg', 'image/tiff': '.tiff' };
@@ -33,8 +36,11 @@ async function resolveFileInput(body) {
     return tmpPath;
   }
   if (body.fileUrl) {
+    // A paying caller's URL: public addresses only, and no redirects (a public URL could
+    // redirect to the agent's LAN).
+    const fileUrl = await assertPublicUrl(body.fileUrl, 'fileUrl');
     const axios = (await import('axios')).default;
-    const resp = await axios.get(body.fileUrl, { responseType: 'arraybuffer', timeout: 30000, maxContentLength: 50 * 1024 * 1024 });
+    const resp = await axios.get(fileUrl, { responseType: 'arraybuffer', timeout: 30000, maxContentLength: 50 * 1024 * 1024, maxRedirects: 0 });
     // Try to get extension from Content-Type if not from URL
     if (!ext && resp.headers['content-type']) {
       const ct = resp.headers['content-type'].split(';')[0].trim();
