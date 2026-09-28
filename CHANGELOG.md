@@ -28,6 +28,11 @@ All notable changes to LANAgent will be documented in this file.
 - **No agent ever announced its ERC-8004 identity to peers.** The capabilities reply loaded the Agent model through a default export that does not exist, and the error was swallowed. Genesis could not be recognised until this was fixed.
 - **Paid on-chain jobs could never run.** Every job handler imported a module that does not exist, and used action names the plugins do not have. They now call the real plugins. Job inputs are taken only as a public URL or an upload: a client can no longer name a file on the server or a LAN address.
 - **Strategy evolution could not file feature requests** (wrong import).
+- **The token safety score counted what it could not check as safe.** An unverified contract comes back from GoPlus with every check empty. Those empty checks passed, an empty owner read as "renounced", and pool liquidity was never read. A mass-airdropped token with $0.00007 of liquidity, which ALICE had just reported to the scammer registry, scored 90/100 SAFE.
+  - Unknown honeypot status and unknown ownership now cost points.
+  - Liquidity comes from GoPlus's pool list. Near-zero liquidity (−25) and a mass airdrop with no market (−20) are penalised.
+  - A token in the scammer registry scores 0 and is labelled as reported.
+  - The audit shows unknowns as unknown.
 - **Peers already online looked offline after a restart.** The registry reports only peers that arrive later, so an agent did not exchange capabilities with peers already connected until they reconnected. It now lists them on every registration.
 - **The "Auto-install from trusted peers" and "Allow peers to request my plugins" switches did nothing.** Plugins from trusted peers installed even with auto-install off, and plugin sharing could not be turned off. Both switches now work.
 - **Knowledge packs kept memories they said they were skipping.** A memory still holding a key after sanitizing was logged as skipped but packed anyway. It is now left out.

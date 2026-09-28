@@ -124,13 +124,17 @@ export default class TokenProfilerPlugin extends BasePlugin {
     try {
       const data = await this.fetchTokenData(address, network);
 
-      const isHoneypot = data.is_honeypot === '1';
+      // null = GoPlus could not tell (unverified source), not "no"
+      const known = (v) => v === '0' || v === '1';
+      const isHoneypot = known(data.is_honeypot) ? data.is_honeypot === '1' : null;
       const buyTax = parseFloat(data.buy_tax || '0') * 100;
       const sellTax = parseFloat(data.sell_tax || '0') * 100;
       const isOpenSource = data.is_open_source === '1';
       const ownerAddress = data.owner_address || '';
-      const ownershipRenounced = ownerAddress === '' || ownerAddress === '0x0000000000000000000000000000000000000000' || ownerAddress === '0x000000000000000000000000000000000000dead';
-      const isMintable = data.is_mintable === '1';
+      const ownershipRenounced = ownerAddress === ''
+        ? (isOpenSource ? true : null)
+        : ['0x0000000000000000000000000000000000000000', '0x000000000000000000000000000000000000dead'].includes(ownerAddress.toLowerCase());
+      const isMintable = known(data.is_mintable) ? data.is_mintable === '1' : null;
       const canTakeBackOwnership = data.can_take_back_ownership === '1';
       const isProxy = data.is_proxy === '1';
       const holderCount = parseInt(data.holder_count || '0', 10);
@@ -147,13 +151,16 @@ export default class TokenProfilerPlugin extends BasePlugin {
       // Token age approximation from transfer_count if available
       const transferCount = parseInt(data.transfer_count || '0', 10);
 
-      const safetyScore = this.calculateScore(data);
+      const flaggedInRegistry = await this.isRegistryFlagged(address);
+      const safetyScore = this.calculateScore(data, { flaggedInRegistry });
 
       return {
         success: true,
         token: address,
         network,
         audit: {
+          flaggedInRegistry,
+          rating: TokenProfilerPlugin.rating(safetyScore, flaggedInRegistry),
           contractVerified: isOpenSource,
           ownershipRenounced,
           ownerAddress: ownerAddress || 'none',
@@ -275,7 +282,8 @@ export default class TokenProfilerPlugin extends BasePlugin {
   async score({ address, network }) {
     try {
       const data = await this.fetchTokenData(address, network);
-      const safetyScore = this.calculateScore(data);
+      const flaggedInRegistry = await this.isRegistryFlagged(address);
+      const safetyScore = this.calculateScore(data, { flaggedInRegistry });
 
       return {
         success: true,
@@ -283,10 +291,9 @@ export default class TokenProfilerPlugin extends BasePlugin {
         network,
         safetyScore: safetyScore.total,
         breakdown: safetyScore.breakdown,
-        rating: safetyScore.total >= 80 ? 'SAFE' :
-                safetyScore.total >= 60 ? 'CAUTION' :
-                safetyScore.total >= 40 ? 'RISKY' :
-                'DANGEROUS'
+        rating: TokenProfilerPlugin.rating(safetyScore, flaggedInRegistry),
+        contractVerified: data.is_open_source === '1',
+        flaggedInRegistry
       };
     } catch (error) {
       this.logger.error(`Score calculation failed for ${address}: ${error.message}`);
@@ -370,8 +377,9 @@ export default class TokenProfilerPlugin extends BasePlugin {
    */
   getLiquidityInfo(data) {
     const lpHolders = data.lp_holders || [];
+    const pools = Array.isArray(data.dex) ? data.dex : [];
     let locked = false;
-    let totalLiquidityUsd = 0;
+    let lpUsd = 0;
 
     for (const lp of lpHolders) {
       if (lp.is_locked === 1) {
@@ -379,16 +387,25 @@ export default class TokenProfilerPlugin extends BasePlugin {
       }
       // GoPlus sometimes provides value in USD
       if (lp.value) {
-        totalLiquidityUsd += parseFloat(lp.value || '0');
+        lpUsd += parseFloat(lp.value || '0');
       }
     }
+
+    // GoPlus lists each DEX pool with its liquidity in USD. This was never read, so a pool
+    // holding $0.00007 was not "low liquidity" (2026-09-27, an airdropped token scored 90).
+    let dexUsd = 0;
+    for (const pool of pools) dexUsd += parseFloat(pool.liquidity || '0') || 0;
+
+    const known = lpUsd > 0 || pools.length > 0;
+    const usd = lpUsd > 0 ? lpUsd : dexUsd;
 
     // Fallback: use lp_total_supply if no USD value
     const lpTotalSupply = data.lp_total_supply || '0';
 
     return {
       locked,
-      amount: totalLiquidityUsd > 0 ? `$${totalLiquidityUsd.toFixed(2)}` : `${lpTotalSupply} LP tokens`
+      usd: known ? usd : null,
+      amount: known ? `$${usd.toFixed(2)}` : `${lpTotalSupply} LP tokens`
     };
   }
 
@@ -404,80 +421,76 @@ export default class TokenProfilerPlugin extends BasePlugin {
    *   Low liquidity (<$1000): -10 pts
    *   Mintable:              -10 pts
    */
-  calculateScore(data) {
+  calculateScore(data, { flaggedInRegistry = false } = {}) {
     let total = 100;
     const breakdown = {};
+    const penalize = (key, points, applies) => {
+      breakdown[key] = applies ? -points : 0;
+      if (applies) total -= points;
+    };
+    // GoPlus answers "0"/"1" for what it could check and nothing for what it could not (an
+    // unverified contract comes back with every field empty). Unknown is not safe.
+    const isOpenSource = data.is_open_source === '1';
 
-    // Honeypot check (-30)
-    const isHoneypot = data.is_honeypot === '1';
-    if (isHoneypot) {
-      total -= 30;
-      breakdown.honeypot = -30;
-    } else {
-      breakdown.honeypot = 0;
-    }
+    // Honeypot: confirmed (-30), or unknown (-15)
+    penalize('honeypot', 30, data.is_honeypot === '1');
+    penalize('honeypotUnknown', 15, data.is_honeypot !== '1' && data.is_honeypot !== '0');
 
     // Tax check (-15)
     const buyTax = parseFloat(data.buy_tax || '0') * 100;
     const sellTax = parseFloat(data.sell_tax || '0') * 100;
-    const maxTax = Math.max(buyTax, sellTax);
-    if (maxTax > 10) {
-      total -= 15;
-      breakdown.highTax = -15;
-    } else {
-      breakdown.highTax = 0;
-    }
+    penalize('highTax', 15, Math.max(buyTax, sellTax) > 10);
 
     // Open source check (-10)
-    const isOpenSource = data.is_open_source === '1';
-    if (!isOpenSource) {
-      total -= 10;
-      breakdown.notOpenSource = -10;
-    } else {
-      breakdown.notOpenSource = 0;
-    }
+    penalize('notOpenSource', 10, !isOpenSource);
 
-    // Ownership check (-10)
-    const ownerAddress = data.owner_address || '';
-    const ownershipRenounced = ownerAddress === '' ||
-      ownerAddress === '0x0000000000000000000000000000000000000000' ||
-      ownerAddress === '0x000000000000000000000000000000000000dead';
-    if (!ownershipRenounced) {
-      total -= 10;
-      breakdown.ownershipNotRenounced = -10;
-    } else {
-      breakdown.ownershipNotRenounced = 0;
-    }
+    // Ownership (-10). An empty owner means "no owner function" only when GoPlus could read
+    // the source; for an unverified contract it means nobody knows.
+    const ownerAddress = String(data.owner_address || '').toLowerCase();
+    const renounced = ownerAddress === '0x0000000000000000000000000000000000000000' ||
+      ownerAddress === '0x000000000000000000000000000000000000dead' ||
+      (ownerAddress === '' && isOpenSource);
+    penalize('ownershipNotRenounced', 10, ownerAddress !== '' && !renounced);
+    penalize('ownershipUnknown', 10, ownerAddress === '' && !isOpenSource);
 
     // Top holder concentration (-15)
-    const topHolderPct = this.getTopHolderConcentration(data.holders);
-    if (topHolderPct > 50) {
-      total -= 15;
-      breakdown.topHolderConcentration = -15;
-    } else {
-      breakdown.topHolderConcentration = 0;
-    }
+    penalize('topHolderConcentration', 15, this.getTopHolderConcentration(data.holders) > 50);
 
-    // Liquidity check (-10)
-    const liquidityInfo = this.getLiquidityInfo(data);
-    // Only penalize if we have USD data and it is below threshold
-    const usdMatch = liquidityInfo.amount.match(/^\$([0-9.]+)/);
-    if (usdMatch && parseFloat(usdMatch[1]) < 1000) {
-      total -= 10;
-      breakdown.lowLiquidity = -10;
-    } else {
-      breakdown.lowLiquidity = 0;
-    }
+    // Liquidity: none to speak of (-25) or low (-10)
+    const liquidity = this.getLiquidityInfo(data);
+    penalize('noMarket', 25, liquidity.usd !== null && liquidity.usd < 10);
+    penalize('lowLiquidity', 10, liquidity.usd !== null && liquidity.usd >= 10 && liquidity.usd < 1000);
+
+    // Sent to a crowd with nothing to sell into: the shape of an airdrop lure (-20)
+    const holders = parseInt(data.holder_count || '0', 10);
+    penalize('massAirdropNoMarket', 20, holders >= 10000 && liquidity.usd !== null && liquidity.usd < 100);
 
     // Mintable check (-10)
-    const isMintable = data.is_mintable === '1';
-    if (isMintable) {
-      total -= 10;
-      breakdown.mintable = -10;
-    } else {
-      breakdown.mintable = 0;
+    penalize('mintable', 10, data.is_mintable === '1');
+
+    // Reported in the on-chain scammer registry: that is the verdict
+    if (flaggedInRegistry) {
+      breakdown.scammerRegistry = -Math.max(total, 0);
+      total = 0;
     }
 
     return { total: Math.max(total, 0), breakdown };
+  }
+
+  /** Rating label for a score; a registry hit is named as such. */
+  static rating(safetyScore, flaggedInRegistry = false) {
+    if (flaggedInRegistry) return 'SCAM (reported in the scammer registry)';
+    const t = safetyScore.total;
+    return t >= 80 ? 'SAFE' : t >= 60 ? 'CAUTION' : t >= 40 ? 'RISKY' : 'DANGEROUS';
+  }
+
+  /** Our synced copy of the on-chain scammer registry (no network call). */
+  async isRegistryFlagged(address) {
+    try {
+      const registry = (await import('../../services/crypto/scammerRegistryService.js')).default;
+      return registry.isAddressFlagged(address);
+    } catch {
+      return false;
+    }
   }
 }
