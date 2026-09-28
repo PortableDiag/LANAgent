@@ -655,6 +655,20 @@ export class Agent extends EventEmitter {
         }
       }
 
+      // Paid on-chain jobs: this agent works for clients who fund jobs naming it on the
+      // SkynetDiamond CommerceFacet. On unless agentic_commerce.enabled is false; the service
+      // only spends gas on jobs verified on-chain as funded and profitable, and cannot pay out.
+      try {
+        const agenticCommerceService = (await import('../services/crypto/agenticCommerceService.js')).default;
+        agenticCommerceService.setAgent(this);
+        if (await agenticCommerceService.initialize()) {
+          this.services.set('agenticCommerce', agenticCommerceService);
+          logger.info('✓ Paid on-chain jobs enabled');
+        }
+      } catch (error) {
+        logger.warn(`Paid on-chain jobs not started: ${error.message}`);
+      }
+
       // Initialize P2P Federation service (opt-in via SystemSettings or env var)
       {
         const { SystemSettings } = await import('../models/SystemSettings.js');

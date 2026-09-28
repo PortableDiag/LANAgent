@@ -16,6 +16,16 @@ All notable changes to LANAgent will be documented in this file.
 - **The trust score counts staked SKYNET.** Stake earns up to 25 points on a log scale: 10k SKYNET earns 0 and 10M earns 25. Held SKYNET now earns up to 5 (was 20), and a verified ERC-8004 identity 15.
 - **The genesis agent is trusted by default** on every agent. It is recognised as the peer whose proven wallet owns ERC-8004 agent #2930. The peer list shows a genesis badge, whether each peer's wallet is proven, and its stake.
 
+### Added
+- **Paid on-chain jobs are on, and they are safe for the wallet.** The agent earns BNB for YouTube, scrape, transcode, image and document jobs that clients fund on the SkynetDiamond.
+  - **Nothing can pay out:** the agent signs only `submitJob` and `completeJob`, which carry no value and need no approvals. The old client-side `fundJob`/`createJob` are removed.
+  - **No gas before payment:** the client creates and funds the job itself. The agent no longer creates jobs for any caller, which used to put the gas on the agent.
+  - **Work starts only after an on-chain check** that the job is funded in BNB, at or above the price, names the agent as provider and evaluator, and has time left before the client could refund.
+  - **Every job pays for itself:** the net pay must cover the gas twice, and a daily cap bounds the rest.
+  - **No wasted gas:** transactions are rehearsed before sending, and failed work spends nothing.
+  - **Results go to the client only**, by wallet signature. The operator views now need the admin key.
+  - The service was never started before, and pointed at an old contract.
+
 ### Security
 - **Peers must prove their wallet.** A peer signs a wallet proof tied to its P2P identity before any balance, stake, Sentinel badge or ERC-8004 identity counts toward its reputation. Balances are read from our configured SKYNET contract, not one the peer names. An ERC-8004 identity counts only when the proven wallet owns it.
 - **Genesis-only messages are honoured only from the proven genesis agent.** These are email leases, ENS subnames, the welcome package and their payment requests. Automatic payment is further limited to SKYNET, paid to genesis's proven wallet, under `p2p.maxAutoPaySkynet` (default 1000); anything else waits for the operator.
@@ -26,7 +36,7 @@ All notable changes to LANAgent will be documented in this file.
 ### Fixed
 - **Agents dropped every message from a peer that had restarted.** Replay protection compared bare sequence numbers, and a restarted agent counted from 1 again. Everything it sent was refused as a replay until the receiver restarted too; ALICE and DELTA exchanged nothing for a day this way. Messages are now ordered by their signed timestamp as well as their number, within a 10-minute window. The counter also starts from the clock, so older peers accept a restarted agent.
 - **No agent ever announced its ERC-8004 identity to peers.** The capabilities reply loaded the Agent model through a default export that does not exist, and the error was swallowed. Genesis could not be recognised until this was fixed.
-- **Paid on-chain jobs could never run.** Every job handler imported a module that does not exist, and used action names the plugins do not have. They now call the real plugins. Job inputs are taken only as a public URL or an upload: a client can no longer name a file on the server or a LAN address.
+- **Paid on-chain jobs could never run.** Every job handler imported a module that does not exist, and used action names the plugins do not have. They now call the real plugins. Job inputs are taken only as a public URL or an upload: a client can no longer name a file on the server or a LAN address. Identical results no longer collide: the facet refuses a reused deliverable hash, so the job ID is now part of the hash.
 - **Strategy evolution could not file feature requests** (wrong import).
 - **The token safety score counted what it could not check as safe.** An unverified contract comes back from GoPlus with every check empty. Those empty checks passed, an empty owner read as "renounced", and pool liquidity was never read. A mass-airdropped token with $0.00007 of liquidity, which ALICE had just reported to the scammer registry, scored 90/100 SAFE.
   - Unknown honeypot status and unknown ownership now cost points.

@@ -27,7 +27,15 @@ const agenticCommerceJobSchema = new mongoose.Schema({
     revenueTracked: { type: Boolean, default: false },
     hookAddress: { type: String, default: '' },
     errorMessage: { type: String, default: '' },
-    priority: { type: String, enum: ['high', 'medium', 'low'], default: 'medium' }
+    priority: { type: String, enum: ['high', 'medium', 'low'], default: 'medium' },
+    // Execution lock and retry count (a failed execution spends no gas; two tries, then left
+    // for the client to refund at expiry)
+    executing: { type: Boolean, default: false },
+    attempts: { type: Number, default: 0 },
+    // Local paths of file deliverables. NEVER returned to a client: they download by index
+    // with a signature from the job's on-chain client.
+    deliverableFiles: { type: [{ path: String, name: String }], default: [], select: false },
+    paramsHash: { type: String, default: '' }
 }, { timestamps: true });
 
 agenticCommerceJobSchema.index({ client: 1 });
