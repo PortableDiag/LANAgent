@@ -117,6 +117,21 @@ const p2pPeerSchema = new mongoose.Schema({
     rateLimit: mongoose.Schema.Types.Mixed
   }],
 
+  // Wallet proof (peerIdentity.js). Balance, stake, Sentinel and ERC-8004 only count for a
+  // wallet the peer has proven it controls.
+  walletVerified: { type: Boolean, default: false },
+  provenWallet: { type: String, default: null },
+  walletVerifiedAt: { type: Date, default: null },
+  walletProofError: { type: String, default: '' },
+
+  // The genesis agent: proven owner of ERC-8004 agent GENESIS_AGENT_ID. Trusted by default.
+  isGenesis: { type: Boolean, default: false },
+
+  // SKYNET staked in the staking contract by the proven wallet
+  skynetStaked: { type: Number, default: 0 },
+  skynetStakeEffective: { type: Number, default: 0 },
+  skynetStakeVerifiedAt: { type: Date, default: null },
+
   // Reputation staking (Phase 4)
   skynetBalance: {
     type: Number,
@@ -193,7 +208,7 @@ p2pPeerSchema.statics.findByFingerprint = function(fingerprint) {
  * Get all trusted peers
  */
 p2pPeerSchema.statics.getTrustedPeers = function() {
-  return this.find({ trustLevel: 'trusted' });
+  return this.find({ $or: [{ trustLevel: 'trusted' }, { isGenesis: true }] });
 };
 
 /**
@@ -214,12 +229,14 @@ p2pPeerSchema.statics.resetOnlineStatus = async function() {
  * Calculate trust score based on multiple factors (0-100)
  *
  * Factors:
- * - Manual trust level: +30 (trusted)
- * - ERC-8004 verified: +20
- * - SKYNET token balance: up to +20 (log scale, caps at 1M tokens)
- * - Sentinel tokens (scammer reporting): up to +15 (+5 per token, caps at 3)
+ * - Trust: +25 if the operator marked the peer trusted OR it is the genesis agent
+ * - ERC-8004 identity owned by the proven wallet: +15
+ * - SKYNET staked by the proven wallet: up to +25 (log scale, 10k -> 0, 10M -> 25)
+ * - SKYNET held by the proven wallet: up to +5 (same scale)
+ * - Sentinel tokens (scammer reporting): up to +10 (+5 per token)
  * - Longevity (time since first seen): up to +10 (caps at 30 days)
  * - Activity (transfer count): up to +10 (caps at 50 transfers)
+ * Nothing on-chain counts until the peer proves the wallet (walletVerified).
  */
 p2pPeerSchema.methods.calculateTrustScore = function() {
   // Single source of truth for the weights lives in getTrustScoreBreakdown(); this
@@ -228,44 +245,35 @@ p2pPeerSchema.methods.calculateTrustScore = function() {
   return this.trustScore;
 };
 
+/** Trusted for auto-install purposes: marked trusted by the operator, or the genesis agent. */
+p2pPeerSchema.methods.isTrusted = function() {
+  return this.trustLevel === 'trusted' || this.isGenesis === true;
+};
+
 /**
  * Get detailed breakdown of trust score components (0-100 total).
  * The weights here ARE the trust-score formula — calculateTrustScore() persists
  * this breakdown's total. Change a weight here and nowhere else.
  */
 p2pPeerSchema.methods.getTrustScoreBreakdown = function() {
+  const curve = (amount, max) => {
+    if (!(amount > 0)) return 0;
+    return Math.round(Math.max(0, Math.min(1, Math.log10(amount / 1e4) / 3)) * max);
+  };
+  const proven = this.walletVerified === true;
   const breakdown = {
-    manualTrust: 0,
-    erc8004Verification: 0,
+    manualTrust: this.trustLevel === 'trusted' ? 25 : 0,
+    genesis: this.isGenesis ? 25 : 0,
+    erc8004Verification: proven && this.erc8004?.verified ? 15 : 0,
+    stake: proven ? curve(this.skynetStakeEffective, 25) : 0,
     tokenBalances: {
-      skynet: 0,
-      sentinel: 0
+      skynet: proven && this.skynetBalanceVerified ? curve(this.skynetBalance, 5) : 0,
+      sentinel: proven && this.sentinelBalanceVerified && this.sentinelBalance > 0 ? Math.min(10, this.sentinelBalance * 5) : 0
     },
     longevity: 0,
     activity: 0,
     total: 0
   };
-
-  // Manual trust: 30 points
-  if (this.trustLevel === 'trusted') {
-    breakdown.manualTrust = 30;
-  }
-
-  // ERC-8004 identity: 20 points
-  if (this.erc8004?.verified) {
-    breakdown.erc8004Verification = 20;
-  }
-
-  // SKYNET balance: up to 20 points (log scale)
-  if (this.skynetBalance > 0) {
-    const balanceScore = Math.min(20, (Math.log10(Math.max(1, this.skynetBalance)) / 6) * 20);
-    breakdown.tokenBalances.skynet = Math.round(balanceScore);
-  }
-
-  // Sentinel tokens: up to 15 points (+5 per verified token, caps at 3 tokens)
-  if (this.sentinelBalance > 0 && this.sentinelBalanceVerified) {
-    breakdown.tokenBalances.sentinel = Math.min(15, this.sentinelBalance * 5);
-  }
 
   // Longevity: up to 10 points (linear, caps at 30 days)
   if (this.firstSeen) {
@@ -276,10 +284,11 @@ p2pPeerSchema.methods.getTrustScoreBreakdown = function() {
   // Activity: up to 10 points (linear, caps at 50 transfers)
   breakdown.activity = Math.min(10, Math.round((this.transferCount / 50) * 10));
 
-  // Calculate total
-  breakdown.total = Math.min(100, 
-    breakdown.manualTrust +
+  // Manual trust and genesis are the same 25 points, not additive
+  breakdown.total = Math.min(100,
+    Math.max(breakdown.manualTrust, breakdown.genesis) +
     breakdown.erc8004Verification +
+    breakdown.stake +
     breakdown.tokenBalances.skynet +
     breakdown.tokenBalances.sentinel +
     breakdown.longevity +
@@ -314,6 +323,18 @@ p2pPeerSchema.statics.getPeerReputationReport = async function(peerId) {
     trustScoreBreakdown: trustBreakdown,
     connectionStability: stabilityMetrics,
     erc8004Verification: peer.erc8004,
+    isGenesis: peer.isGenesis === true,
+    wallet: {
+      address: peer.provenWallet || peer.skynetWallet || null,
+      verified: peer.walletVerified === true,
+      verifiedAt: peer.walletVerifiedAt,
+      error: peer.walletProofError || ''
+    },
+    stake: {
+      amount: peer.skynetStaked || 0,
+      effective: peer.skynetStakeEffective || 0,
+      verifiedAt: peer.skynetStakeVerifiedAt
+    },
     tokenBalances: {
       skynet: {
         balance: peer.skynetBalance,

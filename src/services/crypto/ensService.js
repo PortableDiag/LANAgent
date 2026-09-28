@@ -854,26 +854,16 @@ class ENSService {
   }
 
   /**
-   * Find a genesis peer that can provide ENS subnames.
-   * Looks for peers with ens_provider capability or ERC-8004 verified genesis agent.
+   * Find the genesis peer (it provides ENS subnames). Only a peer PROVEN to be genesis counts:
+   * its wallet signed a proof and owns ERC-8004 agent GENESIS_AGENT_ID (see
+   * p2p/peerIdentity.js). An announced `ens_provider` capability or a claimed agent id is not
+   * evidence; anyone can announce either. Online peers first.
    */
   async findGenesisENSProvider(p2pService) {
     try {
       const { peerManager } = await import('../p2p/peerManager.js');
-      const peers = await peerManager.getAllPeers();
-
-      for (const peer of peers) {
-        // Check for ens_provider capability
-        if (peer.capabilities?.some(c => c.name === 'ens_provider')) {
-          return peer;
-        }
-        // Fallback: check for verified ERC-8004 genesis agent (#2930)
-        if (peer.erc8004?.verified && peer.erc8004?.agentId === 2930) {
-          return peer;
-        }
-      }
-
-      return null;
+      const peers = (await peerManager.getAllPeers()).filter(p => p.isGenesis === true);
+      return peers.find(p => p.isOnline) || peers[0] || null;
     } catch {
       return null;
     }

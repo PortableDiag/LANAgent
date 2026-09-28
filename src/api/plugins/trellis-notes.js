@@ -708,6 +708,17 @@ export default class TrellisNotesPlugin extends BasePlugin {
     return s.length > MAX_BODY_CHARS ? `${s.slice(0, MAX_BODY_CHARS)}\n… [${s.length - MAX_BODY_CHARS} more chars]` : s;
   }
 
+  /** Render table rows ({text} cells or plain strings) as a Markdown table. */
+  _tableMarkdown(rows, header) {
+    const cell = c => String(typeof c === 'string' ? c : (c?.text ?? '')).replace(/\|/g, '\\|').replace(/\n/g, ' ');
+    const lines = rows.map(r => `| ${(r || []).map(cell).join(' | ')} |`);
+    if (header && lines.length) {
+      const cols = (rows[0] || []).length || 1;
+      lines.splice(1, 0, `|${' --- |'.repeat(cols)}`);
+    }
+    return lines.join('\n');
+  }
+
   _summarizeCard(card, { full = false } = {}) {
     const out = {
       id: card.id,
@@ -719,7 +730,13 @@ export default class TrellisNotesPlugin extends BasePlugin {
       out.items = items.map(i => `${i.done ? '[x]' : '[ ]'} ${i.text}`);
       out.progress = `${items.filter(i => i.done).length}/${items.length}`;
     } else if (card.kind === 'table') {
-      out.rows = (card.rows || []).length;
+      // A table has no body. Reporting only the row count made every table look
+      // empty to the agent (the "copies the title" shape flagged on relay 2754
+      // #168). Cells are {text, bg, fg}; `header` marks the first row.
+      const rows = card.rows || [];
+      out.rows = rows.length;
+      out.table = this._trim(this._tableMarkdown(full ? rows : rows.slice(0, 6), card.header)
+        + (!full && rows.length > 6 ? `\n… ${rows.length - 6} more row(s)` : ''));
     } else {
       out.body = full ? String(card.body || '') : this._trim(card.body);
     }

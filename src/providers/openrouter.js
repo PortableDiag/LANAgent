@@ -576,23 +576,224 @@ export class OpenRouterProvider extends BaseProvider {
     }
   }
 
-  // OpenRouter is a chat-completions gateway only — it serves no embeddings,
-  // audio or speech endpoint. Returning null (rather than throwing) matches the
-  // other partial providers, so allowedProviders() can route those capabilities
-  // elsewhere without treating this provider as broken.
+  // Embeddings stay unimplemented on purpose even though OpenRouter now serves
+  // /embeddings: the vector stores are built at a fixed width by the embedding
+  // provider they were created with, so switching providers means a full reindex.
+  // Returning null lets allowedProviders() route embeddings elsewhere.
   async generateEmbedding(text) {
-    logger.warn("OpenRouter does not support embeddings");
+    logger.warn("OpenRouter embeddings are not wired in (vector width is fixed per store)");
     return null;
   }
 
-  async transcribeAudio(audioBuffer) {
-    logger.warn("OpenRouter does not support audio transcription");
-    return null;
+  _apiKey() {
+    return this.config.apiKey || process.env.OPENROUTER_API_KEY;
   }
 
+  _authHeaders(json = true) {
+    const headers = { Authorization: `Bearer ${this._apiKey()}` };
+    if (json) headers["Content-Type"] = "application/json";
+    return headers;
+  }
+
+  /** input_audio.format for a buffer, from its magic bytes. */
+  static detectAudioFormat(buf) {
+    if (!buf || buf.length < 12) return "wav";
+    const ascii = (a, b) => buf.toString("latin1", a, b);
+    if (ascii(0, 4) === "RIFF") return "wav";
+    if (ascii(0, 4) === "OggS") return "ogg";
+    if (ascii(0, 4) === "fLaC") return "flac";
+    if (ascii(4, 8) === "ftyp") return "m4a";
+    if (buf[0] === 0x1a && buf[1] === 0x45 && buf[2] === 0xdf && buf[3] === 0xa3) return "webm";
+    if (ascii(0, 3) === "ID3" || (buf[0] === 0xff && (buf[1] & 0xe0) === 0xe0)) {
+      // ADTS AAC also starts 0xFFF; layer bits 00 distinguish it from MPEG audio
+      return (buf[1] & 0x06) === 0 && buf[0] === 0xff ? "aac" : "mp3";
+    }
+    return "wav";
+  }
+
+  /**
+   * Speech-to-text via /audio/transcriptions. Model: options.model, then
+   * OPENROUTER_TRANSCRIPTION_MODEL, then openai/gpt-transcribe.
+   */
+  async transcribeAudio(audioBuffer, options = {}) {
+    const startTime = Date.now();
+    const model = options.model || process.env.OPENROUTER_TRANSCRIPTION_MODEL || "openai/gpt-transcribe";
+    try {
+      const format = options.format || OpenRouterProvider.detectAudioFormat(audioBuffer);
+      const { data } = await axios.post(`${BASE_URL}/audio/transcriptions`, {
+        model,
+        input_audio: { data: Buffer.from(audioBuffer).toString("base64"), format },
+        ...(options.language ? { language: options.language } : {})
+      }, { headers: this._authHeaders(), timeout: this.requestTimeoutMs });
+
+      const text = data?.text || "";
+      await this.updateMetrics(Date.now() - startTime, {
+        prompt_tokens: 0,
+        total_tokens: 0,
+        model,
+        requestType: "audio",
+        directCost: Number(data?.usage?.cost) || 0,
+        metadata: { seconds: data?.usage?.seconds, format }
+      });
+      return text;
+    } catch (error) {
+      this.metrics.errors++;
+      logger.error(`OpenRouter transcribeAudio error (${model}): ${error.response?.data?.error?.message || error.message}`);
+      throw error;
+    }
+  }
+
+  /**
+   * Text-to-speech via /audio/speech. OpenRouter returns only mp3 or pcm, and
+   * most models require an explicit voice (see the catalog's supported_voices).
+   * Returns a Buffer, like the other providers' generateSpeech.
+   */
   async generateSpeech(text, options = {}) {
-    logger.warn("OpenRouter does not support speech generation");
-    return null;
+    const startTime = Date.now();
+    const model = options.model || process.env.OPENROUTER_TTS_MODEL || "microsoft/mai-voice-2-flash";
+    try {
+      const body = {
+        model,
+        input: text,
+        response_format: options.format === "pcm" ? "pcm" : "mp3"
+      };
+      if (options.voice) body.voice = options.voice;
+      if (options.speed) body.speed = options.speed;
+      const res = await axios.post(`${BASE_URL}/audio/speech`, body, {
+        headers: this._authHeaders(),
+        responseType: "arraybuffer",
+        timeout: this.requestTimeoutMs
+      });
+      const buffer = Buffer.from(res.data);
+      // TTSService records its own usage row (one per request, priced per
+      // character from the catalog) and passes recordUsage:false so the call is
+      // not counted twice. Direct callers get a row here.
+      if (options.recordUsage !== false) {
+        await this.updateMetrics(Date.now() - startTime, {
+          prompt_tokens: 0,
+          total_tokens: 0,
+          model,
+          requestType: "tts",
+          directCost: Number.isFinite(options.pricePerChar) ? options.pricePerChar * text.length : 0,
+          metadata: { voice: options.voice, generationId: res.headers?.["x-generation-id"] }
+        });
+      }
+      return buffer;
+    } catch (error) {
+      this.metrics.errors++;
+      let detail = error.message;
+      if (error.response?.data) {
+        try { detail = JSON.parse(Buffer.from(error.response.data).toString()).error?.message || detail; } catch {}
+      }
+      logger.error(`OpenRouter generateSpeech error (${model}): ${detail}`);
+      throw new Error(`OpenRouter TTS failed: ${detail}`);
+    }
+  }
+
+  /** Image generation via the dedicated /images API. */
+  async generateImage(prompt, options = {}) {
+    const startTime = Date.now();
+    const model = options.model || "google/gemini-3.1-flash-image";
+    try {
+      const body = { model, prompt, n: 1 };
+      if (options.aspectRatio) body.aspect_ratio = options.aspectRatio;
+      if (options.resolution) body.resolution = options.resolution;
+      if (options.quality && options.quality !== "auto") body.quality = options.quality;
+      const { data } = await axios.post(`${BASE_URL}/images`, body, {
+        headers: this._authHeaders(),
+        timeout: Math.max(this.requestTimeoutMs, 180000)
+      });
+      const images = (data?.data || [])
+        .filter(img => img.b64_json)
+        .map(img => ({ buffer: Buffer.from(img.b64_json, "base64"), mimeType: img.media_type || "image/png" }));
+      if (images.length === 0) throw new Error("OpenRouter returned no image");
+
+      const cost = Number(data?.usage?.cost) || 0;
+      await this.updateMetrics(Date.now() - startTime, {
+        prompt_tokens: 0,
+        total_tokens: 0,
+        model,
+        requestType: "image",
+        directCost: cost
+      });
+      logger.info(`OpenRouter image generated with ${model} (${images[0].buffer.length} bytes), cost: $${cost.toFixed(4)}`);
+      return { success: true, images, model, cost };
+    } catch (error) {
+      this.metrics.errors++;
+      const detail = error.response?.data?.error?.message || error.message;
+      logger.error(`OpenRouter generateImage error (${model}): ${detail}`);
+      throw new Error(`OpenRouter image generation failed: ${detail}`);
+    }
+  }
+
+  /**
+   * Video generation is asynchronous: this submits the job and returns its id,
+   * the same contract as OpenAI's Sora path, so VideoGenerationService.pollJobStatus
+   * drives it through getVideoStatus()/downloadVideo().
+   */
+  async generateVideo(prompt, options = {}) {
+    const model = options.model || "alibaba/wan-2.7";
+    try {
+      const body = { model, prompt };
+      const duration = parseInt(options.duration, 10);
+      if (Number.isFinite(duration)) body.duration = duration;
+      if (options.resolution) body.resolution = options.resolution;
+      if (options.aspectRatio) body.aspect_ratio = options.aspectRatio;
+      if (typeof options.generateAudio === "boolean") body.generate_audio = options.generateAudio;
+      const { data } = await axios.post(`${BASE_URL}/videos`, body, {
+        headers: this._authHeaders(),
+        timeout: 60000
+      });
+      if (!data?.id) throw new Error("OpenRouter returned no job id");
+      logger.info(`OpenRouter video job ${data.id} submitted with ${model}`);
+      return { success: true, jobId: data.id, status: data.status || "pending", model };
+    } catch (error) {
+      this.metrics.errors++;
+      const detail = error.response?.data?.error?.message || error.message;
+      logger.error(`OpenRouter generateVideo error (${model}): ${detail}`);
+      throw new Error(`OpenRouter video generation failed: ${detail}`);
+    }
+  }
+
+  async getVideoStatus(jobId) {
+    const { data } = await axios.get(`${BASE_URL}/videos/${encodeURIComponent(jobId)}`, {
+      headers: this._authHeaders(false),
+      timeout: 30000
+    });
+    const completed = data?.status === "completed";
+    // Status is polled repeatedly (and again from the web status route), so the
+    // job's cost is recorded once per job id, not once per poll.
+    this._videoCostRecorded ??= new Set();
+    if (completed && !this._videoCostRecorded.has(jobId)) {
+      this._videoCostRecorded.add(jobId);
+      if (this._videoCostRecorded.size > 500) this._videoCostRecorded.clear();
+      await this.updateMetrics(0, {
+        prompt_tokens: 0,
+        total_tokens: 0,
+        model: data.model || "openrouter-video",
+        requestType: "video",
+        directCost: Number(data?.usage?.cost) || 0,
+        metadata: { jobId }
+      });
+    }
+    return {
+      success: true,
+      jobId,
+      status: data?.status,
+      progress: data?.progress ?? null,
+      url: completed ? (data.unsigned_urls?.[0] || `${BASE_URL}/videos/${encodeURIComponent(jobId)}/content?index=0`) : null,
+      error: data?.error || null,
+      cost: data?.usage?.cost ?? null
+    };
+  }
+
+  async downloadVideo(url) {
+    const res = await axios.get(url, {
+      headers: this._authHeaders(false),
+      responseType: "arraybuffer",
+      timeout: 300000
+    });
+    return Buffer.from(res.data);
   }
 
   /**
@@ -629,8 +830,10 @@ export class OpenRouterProvider extends BaseProvider {
       webSearch: true,
       vision: true,
       embeddings: false,
-      transcription: false,
-      speech: false
+      transcription: true,
+      speech: true,
+      image: true,
+      video: true
     };
   }
 

@@ -6,6 +6,7 @@ import { peerManager } from './peerManager.js';
 import { messageHandler } from './messageHandler.js';
 import PluginSharing from './pluginSharing.js';
 import KnowledgePackSharing from './knowledgePackSharing.js';
+import SkillSharing from './skillSharing.js';
 import SkynetServiceExecutor from './skynetServiceExecutor.js';
 import SkynetEconomy from './skynetEconomy.js';
 
@@ -21,6 +22,7 @@ class P2PService extends EventEmitter {
     this.agent = agent;
     this.pluginSharing = new PluginSharing(agent);
     this.knowledgePackSharing = new KnowledgePackSharing(agent);
+    this.skillSharing = new SkillSharing({ agent });
     this.skynetServiceExecutor = new SkynetServiceExecutor(agent);
     this.skynetEconomy = new SkynetEconomy(agent);
     this.initialized = false;
@@ -47,6 +49,13 @@ class P2PService extends EventEmitter {
       messageHandler.setKnowledgePackSharing(this.knowledgePackSharing);
       messageHandler.setSkynetServiceExecutor(this.skynetServiceExecutor);
       messageHandler.setSkynetEconomy(this.skynetEconomy);
+      messageHandler.setSkillSharing(this.skillSharing);
+      this.skillSharing.start(this.sendMessage.bind(this));
+      // Knowledge packs install their skills through the same trust rule, and paid packs are
+      // released only after the on-chain payment is verified.
+      this.knowledgePackSharing.skillSharing = this.skillSharing;
+      this.knowledgePackSharing.verifyPayment = (txHash, amount, fp, id) =>
+        this.skynetServiceExecutor.verifyPayment(txHash, amount, fp, id);
 
       // Get our capabilities hash
       const capabilities = await this.pluginSharing.getLocalCapabilities();
@@ -147,24 +156,21 @@ class P2PService extends EventEmitter {
       this.emit('disconnected');
     });
 
-    registryClient.on('peer_online', async ({ fingerprint, capabilities_hash }) => {
-      await peerManager.markOnline(fingerprint, capabilities_hash);
-      this.emit('peer_online', { fingerprint });
+    registryClient.on('peer_online', (peer) => this._onPeerOnline(peer));
 
-      const peer = await peerManager.getPeer(fingerprint);
-      if (peer) {
-        // Known peer — try encrypted capabilities exchange
-        const sent = await this.sendMessage(fingerprint, { type: 'capabilities_request' });
-        if (!sent) {
-          // Encrypted send failed — peer likely restarted with new keys
-          // Re-introduce via cleartext to exchange new keys
-          logger.info(`P2P encrypted send failed to ${fingerprint.slice(0, 8)}... — re-introducing`);
-          this._sendIntroduction(fingerprint);
+    // peer_online only fires for peers that arrive AFTER we register, so peers already online
+    // when we (re)connect were never marked online or asked for capabilities: after a restart
+    // we saw them as offline until THEY reconnected. List them on every registration.
+    registryClient.on('registered', async ({ peersOnline }) => {
+      if (!peersOnline) return;
+      try {
+        const peers = await registryClient.listPeers();
+        logger.info(`P2P ${peers.length} peer(s) already online — exchanging capabilities`);
+        for (const peer of peers) {
+          if (peer?.fingerprint) await this._onPeerOnline(peer);
         }
-      } else {
-        // Unknown peer — send cleartext introduction with our public keys
-        logger.info(`P2P auto-introducing to new peer: ${fingerprint.slice(0, 8)}...`);
-        this._sendIntroduction(fingerprint);
+      } catch (err) {
+        logger.warn(`P2P could not list online peers: ${err.message}`);
       }
     });
 
@@ -190,6 +196,35 @@ class P2PService extends EventEmitter {
         this.emit('error', error);
       }
     });
+  }
+
+  /**
+   * A peer is online: mark it, then exchange capabilities (encrypted when we know its keys,
+   * a cleartext introduction otherwise).
+   */
+  async _onPeerOnline({ fingerprint, capabilities_hash }) {
+    try {
+      await peerManager.markOnline(fingerprint, capabilities_hash);
+      this.emit('peer_online', { fingerprint });
+
+      const peer = await peerManager.getPeer(fingerprint);
+      if (peer) {
+        // Known peer — try encrypted capabilities exchange
+        const sent = await this.sendMessage(fingerprint, { type: 'capabilities_request' });
+        if (!sent) {
+          // Encrypted send failed — peer likely restarted with new keys
+          // Re-introduce via cleartext to exchange new keys
+          logger.info(`P2P encrypted send failed to ${fingerprint.slice(0, 8)}... — re-introducing`);
+          this._sendIntroduction(fingerprint);
+        }
+      } else {
+        // Unknown peer — send cleartext introduction with our public keys
+        logger.info(`P2P auto-introducing to new peer: ${fingerprint.slice(0, 8)}...`);
+        this._sendIntroduction(fingerprint);
+      }
+    } catch (err) {
+      logger.warn(`P2P peer_online handling failed for ${String(fingerprint).slice(0, 8)}...: ${err.message}`);
+    }
   }
 
   /**
@@ -414,7 +449,13 @@ class P2PService extends EventEmitter {
    * @param {'untrusted'|'trusted'} level
    */
   async setTrustLevel(fingerprint, level) {
-    return peerManager.setTrustLevel(fingerprint, level);
+    const peer = await peerManager.setTrustLevel(fingerprint, level);
+    // A newly trusted peer gets our skills now, not at its next reconnect
+    if (level === 'trusted' && peer?.isOnline) {
+      this.skillSharing.syncWithPeer(fingerprint, this.sendMessage.bind(this)).catch(err =>
+        logger.debug(`P2P skill sync after trusting ${fingerprint.slice(0, 8)}... failed: ${err.message}`));
+    }
+    return peer;
   }
 
   /**
@@ -730,6 +771,7 @@ class P2PService extends EventEmitter {
     peerManager.shutdown();
     this.pluginSharing.shutdown();
     this.knowledgePackSharing.shutdown();
+    this.skillSharing.stop();
     cryptoManager.shutdown();
 
     try {

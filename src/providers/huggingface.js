@@ -423,13 +423,14 @@ export class HuggingFaceProvider extends BaseProvider {
     }
   }
 
-  async transcribeAudio(audioBuffer) {
+  async transcribeAudio(audioBuffer, options = {}) {
     const startTime = Date.now();
+    const asrModel = options.model || this.models.whisper;
     
     try {
       // HuggingFace automatic speech recognition
       const result = await this.client.automaticSpeechRecognition({
-        model: this.models.whisper,
+        model: asrModel,
         data: audioBuffer
       });
 
@@ -440,7 +441,7 @@ export class HuggingFaceProvider extends BaseProvider {
       await this.updateMetrics(responseTime, {
         prompt_tokens: estimatedTokens,
         total_tokens: estimatedTokens,
-        model: this.models.whisper,
+        model: asrModel,
         requestType: 'audio'
       });
 

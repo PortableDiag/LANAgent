@@ -295,11 +295,39 @@ const agentSchema = new mongoose.Schema({
     provider: {
       type: String,
       default: 'openai',
-      enum: ['openai', 'huggingface']
+      enum: ['openai', 'huggingface', 'openrouter']
     },
     model: {
       type: String,
       default: 'gpt-4o-mini-tts'
+    },
+    // Speech-to-text for voice notes, the web mic and paid transcription.
+    // 'auto' keeps the built-in order (and the provider lock); a named provider
+    // is tried first with `model`, the others remain as fallbacks.
+    transcription: {
+      provider: {
+        type: String,
+        default: 'auto',
+        enum: ['auto', 'openai', 'huggingface', 'openrouter']
+      },
+      model: {
+        type: String,
+        default: ''
+      }
+    },
+    // Saved voice presets, switchable in one click (Voice page) or by chat
+    // ("switch to the Ara voice"). Each one is a complete TTS selection.
+    profiles: {
+      type: [{
+        _id: false,
+        name: { type: String, required: true },
+        provider: { type: String, enum: ['openai', 'huggingface', 'openrouter'] },
+        model: String,
+        voice: String,
+        speed: Number,
+        format: String
+      }],
+      default: []
     },
     voice: {
       type: String,
@@ -344,8 +372,14 @@ const agentSchema = new mongoose.Schema({
       },
       provider: {
         type: String,
-        enum: ['openai', 'huggingface'],
+        enum: ['openai', 'huggingface', 'openrouter'],
         default: 'openai'
+      },
+      openrouter: {
+        model: { type: String, default: 'google/gemini-3.1-flash-image' },
+        aspectRatio: { type: String, default: '1:1' },
+        resolution: { type: String, default: '' },
+        quality: { type: String, default: 'auto' }
       },
       openai: {
         model: {
@@ -383,8 +417,15 @@ const agentSchema = new mongoose.Schema({
       },
       provider: {
         type: String,
-        enum: ['modelslab', 'openai', 'huggingface'],
+        enum: ['modelslab', 'openai', 'huggingface', 'openrouter'],
         default: 'modelslab'
+      },
+      openrouter: {
+        model: { type: String, default: 'alibaba/wan-2.7' },
+        duration: { type: String, default: '5' },
+        resolution: { type: String, default: '720p' },
+        aspectRatio: { type: String, default: '16:9' },
+        generateAudio: { type: Boolean, default: true }
       },
       modelslab: {
         model: {

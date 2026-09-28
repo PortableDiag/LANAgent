@@ -260,6 +260,16 @@ class LANAgentDashboard {
             });
         }
         
+        // Speech-to-text provider change -> refresh model suggestions
+        const sttProvider = document.getElementById('stt-provider');
+        if (sttProvider) {
+            sttProvider.addEventListener('change', (e) => {
+                const sttModel = document.getElementById('stt-model');
+                if (sttModel) sttModel.value = '';
+                this.updateSttModelSuggestions(e.target.value);
+            });
+        }
+
         // Model change handler
         const voiceModel = document.getElementById('voice-model');
         if (voiceModel) {
@@ -269,6 +279,11 @@ class LANAgentDashboard {
                     this.updateVoiceOptions(provider.value, e.target.value);
                 }
             });
+        }
+
+        const saveVoicePresetBtn = document.getElementById('btn-save-voice-preset');
+        if (saveVoicePresetBtn) {
+            saveVoicePresetBtn.addEventListener('click', () => this.saveVoicePreset());
         }
 
         const saveVoiceSettings = document.getElementById('save-voice-settings');
@@ -1509,6 +1524,75 @@ class LANAgentDashboard {
         }
     }
 
+    /**
+     * Live model list from /api/media/catalog (source: openrouter|huggingface,
+     * type: image|video|speech|transcription). Cached for the page's lifetime;
+     * an unreachable catalog yields [] and the saved value stays in the field.
+     */
+    async loadMediaCatalog(source, type) {
+        this._mediaCatalog = this._mediaCatalog || {};
+        const key = `${source}:${type}`;
+        if (!this._mediaCatalog[key]) {
+            this._mediaCatalog[key] = this.apiGet(`/api/media/catalog?source=${source}&type=${type}`)
+                .then(r => (r && r.success ? r.models : []))
+                .catch(() => []);
+        }
+        return this._mediaCatalog[key];
+    }
+
+    /** Fill a <datalist> with catalog models, keeping any static options first. */
+    async fillModelDatalist(datalistId, source, type) {
+        const list = document.getElementById(datalistId);
+        if (!list) return [];
+        const models = await this.loadMediaCatalog(source, type);
+        const existing = new Set(Array.from(list.options).map(o => o.value));
+        models.forEach(m => {
+            if (existing.has(m.id)) return;
+            const option = document.createElement('option');
+            option.value = m.id;
+            option.textContent = m.name && m.name !== m.id ? m.name : (m.likes ? `${m.likes} likes` : m.id);
+            list.appendChild(option);
+        });
+        return models;
+    }
+
+    /** Replace a <select>'s options, keeping `selected` if it is still offered. */
+    setSelectOptions(selectId, values, selected, labelFn = v => String(v)) {
+        const select = document.getElementById(selectId);
+        if (!select || !Array.isArray(values) || values.length === 0) return;
+        select.innerHTML = '';
+        values.forEach(v => {
+            const option = document.createElement('option');
+            option.value = String(v);
+            option.textContent = labelFn(v);
+            select.appendChild(option);
+        });
+        const wanted = selected != null ? String(selected) : null;
+        select.value = wanted && values.map(String).includes(wanted) ? wanted : String(values[0]);
+    }
+
+    /** Constrain the OpenRouter video selects to what the chosen model supports. */
+    async updateVideoGenOpenRouterModelOptions(saved = {}) {
+        const modelId = document.getElementById('videogen-or-model')?.value?.trim();
+        const models = await this.loadMediaCatalog('openrouter', 'video');
+        const model = models.find(m => m.id === modelId);
+        const help = document.getElementById('videogen-or-model-help');
+        if (!model) {
+            if (help) help.textContent = modelId ? 'Not in the live catalog; sent as typed.' : 'Every video model OpenRouter currently routes (live list).';
+            return;
+        }
+        const cur = (id, fallback) => saved[id] ?? document.getElementById(id)?.value ?? fallback;
+        this.setSelectOptions('videogen-or-duration', model.durations, cur('videogen-or-duration'), v => `${v} seconds`);
+        this.setSelectOptions('videogen-or-resolution', model.resolutions, cur('videogen-or-resolution'));
+        this.setSelectOptions('videogen-or-aspect', model.aspectRatios, cur('videogen-or-aspect'));
+        const audio = document.getElementById('videogen-or-audio');
+        if (audio) audio.disabled = !model.generateAudio;
+        if (help) {
+            const price = model.pricing ? Object.entries(model.pricing).map(([k, v]) => `${k}: $${v}`).join(', ') : '';
+            help.textContent = `${model.name}${price ? ' — ' + price : ''}`;
+        }
+    }
+
     renderImageGenSettings(settings) {
         if (!settings) return;
 
@@ -1533,6 +1617,19 @@ class LANAgentDashboard {
             if (hfModel) hfModel.value = settings.huggingface.model || 'black-forest-labs/FLUX.1-schnell';
             if (hfSteps) hfSteps.value = settings.huggingface.numInferenceSteps || 5;
         }
+
+        const or = settings.openrouter || {};
+        const orModel = document.getElementById('imagegen-or-model');
+        if (orModel) orModel.value = or.model || 'google/gemini-3.1-flash-image';
+        const orAspect = document.getElementById('imagegen-or-aspect');
+        if (orAspect) orAspect.value = or.aspectRatio || '1:1';
+        const orRes = document.getElementById('imagegen-or-resolution');
+        if (orRes) orRes.value = or.resolution || '';
+        const orQuality = document.getElementById('imagegen-or-quality');
+        if (orQuality) orQuality.value = or.quality || 'auto';
+
+        this.fillModelDatalist('imagegen-hf-models', 'huggingface', 'image');
+        this.fillModelDatalist('imagegen-or-models', 'openrouter', 'image');
 
         // Show/hide provider options
         this.toggleImageGenProviderOptions(settings.provider || 'openai');
@@ -1579,6 +1676,20 @@ class LANAgentDashboard {
             if (hfModel) hfModel.value = settings.huggingface.model || 'Wan-AI/Wan2.1-T2V-14B';
         }
 
+        const or = settings.openrouter || {};
+        const orModel = document.getElementById('videogen-or-model');
+        if (orModel) orModel.value = or.model || 'alibaba/wan-2.7';
+        const orAudio = document.getElementById('videogen-or-audio');
+        if (orAudio) orAudio.checked = or.generateAudio !== false;
+
+        this.fillModelDatalist('videogen-hf-models', 'huggingface', 'video');
+        this.fillModelDatalist('videogen-or-models', 'openrouter', 'video').then(() =>
+            this.updateVideoGenOpenRouterModelOptions({
+                'videogen-or-duration': or.duration || '5',
+                'videogen-or-resolution': or.resolution || '720p',
+                'videogen-or-aspect': or.aspectRatio || '16:9'
+            }));
+
         // Show/hide provider options
         this.toggleVideoGenProviderOptions(settings.provider || 'modelslab');
     }
@@ -1589,6 +1700,8 @@ class LANAgentDashboard {
 
         if (openaiOptions) openaiOptions.style.display = provider === 'openai' ? 'block' : 'none';
         if (hfOptions) hfOptions.style.display = provider === 'huggingface' ? 'block' : 'none';
+        const orOptions = document.getElementById('imagegen-openrouter-options');
+        if (orOptions) orOptions.style.display = provider === 'openrouter' ? 'block' : 'none';
     }
 
     toggleVideoGenProviderOptions(provider) {
@@ -1599,6 +1712,8 @@ class LANAgentDashboard {
         if (modelslabOptions) modelslabOptions.style.display = provider === 'modelslab' ? 'block' : 'none';
         if (openaiOptions) openaiOptions.style.display = provider === 'openai' ? 'block' : 'none';
         if (hfOptions) hfOptions.style.display = provider === 'huggingface' ? 'block' : 'none';
+        const orOptions = document.getElementById('videogen-openrouter-options');
+        if (orOptions) orOptions.style.display = provider === 'openrouter' ? 'block' : 'none';
     }
 
     setupMediaGenListeners() {
@@ -1620,6 +1735,12 @@ class LANAgentDashboard {
             videogenProvider.addEventListener('change', (e) => {
                 this.toggleVideoGenProviderOptions(e.target.value);
             });
+        }
+
+        // OpenRouter video model change -> constrain duration/resolution/aspect
+        const videogenOrModel = document.getElementById('videogen-or-model');
+        if (videogenOrModel) {
+            videogenOrModel.addEventListener('change', () => this.updateVideoGenOpenRouterModelOptions());
         }
 
         // Save image settings button
@@ -1646,8 +1767,14 @@ class LANAgentDashboard {
                     quality: document.getElementById('imagegen-openai-quality')?.value || 'auto'
                 },
                 huggingface: {
-                    model: document.getElementById('imagegen-hf-model')?.value || 'black-forest-labs/FLUX.1-schnell',
+                    model: document.getElementById('imagegen-hf-model')?.value?.trim() || 'black-forest-labs/FLUX.1-schnell',
                     numInferenceSteps: parseInt(document.getElementById('imagegen-hf-steps')?.value) || 5
+                },
+                openrouter: {
+                    model: document.getElementById('imagegen-or-model')?.value?.trim() || 'google/gemini-3.1-flash-image',
+                    aspectRatio: document.getElementById('imagegen-or-aspect')?.value || '1:1',
+                    resolution: document.getElementById('imagegen-or-resolution')?.value || '',
+                    quality: document.getElementById('imagegen-or-quality')?.value || 'auto'
                 }
             };
 
@@ -1689,7 +1816,14 @@ class LANAgentDashboard {
                     quality: document.getElementById('videogen-openai-quality')?.value || 'standard'
                 },
                 huggingface: {
-                    model: document.getElementById('videogen-hf-model')?.value || 'Wan-AI/Wan2.1-T2V-14B'
+                    model: document.getElementById('videogen-hf-model')?.value?.trim() || 'Wan-AI/Wan2.1-T2V-14B'
+                },
+                openrouter: {
+                    model: document.getElementById('videogen-or-model')?.value?.trim() || 'alibaba/wan-2.7',
+                    duration: document.getElementById('videogen-or-duration')?.value || '5',
+                    resolution: document.getElementById('videogen-or-resolution')?.value || '720p',
+                    aspectRatio: document.getElementById('videogen-or-aspect')?.value || '16:9',
+                    generateAudio: document.getElementById('videogen-or-audio')?.checked ?? true
                 }
             };
 
@@ -7792,6 +7926,9 @@ class LANAgentDashboard {
             this.showNotification('Failed to load voice settings', 'error');
         }
 
+        // Saved voice presets (one-click switching)
+        this.loadVoicePresets();
+
         // Also load voice usage stats
         this.loadVoiceStats();
 
@@ -7813,6 +7950,13 @@ class LANAgentDashboard {
         document.getElementById('voice-speed').value = settings.speed || 1.0;
         document.getElementById('speed-value').textContent = `${settings.speed || 1.0}x`;
         document.getElementById('voice-instructions').value = settings.instructions || '';
+
+        const stt = settings.transcription || {};
+        const sttProvider = document.getElementById('stt-provider');
+        const sttModel = document.getElementById('stt-model');
+        if (sttProvider) sttProvider.value = stt.provider || 'auto';
+        if (sttModel) sttModel.value = stt.model || '';
+        this.updateSttModelSuggestions(stt.provider || 'auto');
         
         // Load models and voices for the current provider
         this.updateProviderOptions(provider, settings.model, settings.voice);
@@ -7980,8 +8124,20 @@ class LANAgentDashboard {
             const providersResponse = await this.apiGet('/api/voice/providers');
             if (!providersResponse.success) return;
             
-            const providerInfo = providersResponse.data[provider];
+            let providerInfo = providersResponse.data[provider];
             if (!providerInfo) return;
+
+            // HuggingFace and OpenRouter can use any speech model their live
+            // catalog lists; the static entries stay first as known-good picks.
+            if (provider === 'huggingface' || provider === 'openrouter') {
+                const live = await this.loadMediaCatalog(provider, 'speech');
+                const models = { ...(providerInfo.models || {}) };
+                live.forEach(m => {
+                    if (!models[m.id]) models[m.id] = { name: m.name || m.id };
+                });
+                if (selectedModel && !models[selectedModel]) models[selectedModel] = { name: selectedModel };
+                providerInfo = { ...providerInfo, models };
+            }
             
             // Update model dropdown
             const modelSelect = document.getElementById('voice-model');
@@ -8022,7 +8178,18 @@ class LANAgentDashboard {
             const voicesResponse = await this.apiGet('/api/voice/voices');
             if (!voicesResponse.success) return;
             
-            const voices = voicesResponse.data[provider] || {};
+            let voices = voicesResponse.data[provider] || {};
+            if (provider === 'openrouter') {
+                const live = await this.loadMediaCatalog('openrouter', 'speech');
+                const entry = live.find(m => m.id === model);
+                voices = {};
+                (entry?.voices || []).forEach(v => {
+                    voices[v] = { name: v, description: entry.name || model };
+                });
+                if (Object.keys(voices).length === 0) {
+                    voices.default = { name: 'Provider default', description: 'This model lists no voices' };
+                }
+            }
             const voiceSelection = document.querySelector('.voice-selection');
             const voicesGrid = voiceSelection.querySelector('.voices-grid');
             
@@ -8102,8 +8269,9 @@ class LANAgentDashboard {
                 });
             });
             
-            // Select default voice if none selected
-            if (!selectedVoice && Object.keys(voices).length > 0) {
+            // Select the first voice when none is selected, or when the saved voice
+            // is not offered here (e.g. an OpenAI voice after switching provider)
+            if (!document.querySelector('input[name="voice-choice"]:checked') && Object.keys(voices).length > 0) {
                 const firstVoice = document.querySelector('input[name="voice-choice"]');
                 if (firstVoice) firstVoice.checked = true;
             }
@@ -8122,6 +8290,114 @@ class LANAgentDashboard {
         }
     }
 
+    async loadVoicePresets() {
+        const container = document.getElementById('voice-presets');
+        if (!container) return;
+        try {
+            const response = await this.apiGet('/api/voice/profiles');
+            const profiles = response?.data?.profiles || [];
+            const active = response?.data?.active || null;
+            container.innerHTML = '';
+            if (profiles.length === 0) {
+                container.innerHTML = '<span class="help-text">No presets yet.</span>';
+                return;
+            }
+            profiles.forEach(p => {
+                const chip = document.createElement('div');
+                chip.className = 'voice-preset' + (p.name === active ? ' active' : '');
+                chip.title = `${p.provider} · ${p.model} · ${p.voice}`;
+
+                const nameBtn = document.createElement('button');
+                nameBtn.type = 'button';
+                nameBtn.className = 'voice-preset-name';
+                nameBtn.textContent = p.name;
+                nameBtn.addEventListener('click', () => this.switchVoicePreset(p.name));
+
+                const delBtn = document.createElement('button');
+                delBtn.type = 'button';
+                delBtn.className = 'voice-preset-delete';
+                delBtn.title = `Delete preset ${p.name}`;
+                delBtn.innerHTML = '&times;';
+                delBtn.addEventListener('click', () => this.deleteVoicePreset(p.name));
+
+                chip.append(nameBtn, delBtn);
+                container.appendChild(chip);
+            });
+        } catch (error) {
+            console.error('Failed to load voice presets:', error);
+            container.innerHTML = '<span class="help-text">Could not load presets.</span>';
+        }
+    }
+
+    async switchVoicePreset(name) {
+        try {
+            const response = await this.apiPost('/api/voice/profile/switch', { name });
+            if (response.success) {
+                this.showNotification(response.message || `Switched to ${name}`, 'success');
+                this.loadVoiceSettings();
+            } else {
+                this.showNotification(`Could not switch voice: ${response.error}`, 'error');
+            }
+        } catch (error) {
+            this.showNotification(`Could not switch voice: ${error.message}`, 'error');
+        }
+    }
+
+    async saveVoicePreset() {
+        const name = prompt('Name for this voice preset (e.g. "Tara"):');
+        if (!name || !name.trim()) return;
+        const payload = {
+            name: name.trim(),
+            provider: document.getElementById('voice-provider')?.value,
+            model: document.getElementById('voice-model')?.value,
+            voice: document.querySelector('input[name="voice-choice"]:checked')?.value,
+            speed: parseFloat(document.getElementById('voice-speed')?.value) || 1,
+            format: document.getElementById('voice-format')?.value || 'mp3'
+        };
+        try {
+            const response = await this.apiPost('/api/voice/profile', payload);
+            if (response.success) {
+                this.showNotification(response.message || 'Preset saved', 'success');
+                this.loadVoicePresets();
+            } else {
+                this.showNotification(`Could not save preset: ${response.error}`, 'error');
+            }
+        } catch (error) {
+            this.showNotification(`Could not save preset: ${error.message}`, 'error');
+        }
+    }
+
+    async deleteVoicePreset(name) {
+        if (!confirm(`Delete the voice preset "${name}"?`)) return;
+        try {
+            const response = await this.apiPost('/api/voice/profile/delete', { name });
+            if (response.success) this.loadVoicePresets();
+            else this.showNotification(`Could not delete preset: ${response.error}`, 'error');
+        } catch (error) {
+            this.showNotification(`Could not delete preset: ${error.message}`, 'error');
+        }
+    }
+
+    /** Suggest speech-to-text models for the chosen provider. */
+    async updateSttModelSuggestions(provider) {
+        const list = document.getElementById('stt-models');
+        const input = document.getElementById('stt-model');
+        if (!list) return;
+        list.innerHTML = '';
+        if (input) input.disabled = provider === 'auto';
+        if (provider === 'openai') {
+            ['whisper-1', 'gpt-4o-transcribe', 'gpt-4o-mini-transcribe'].forEach(id => {
+                const o = document.createElement('option');
+                o.value = id;
+                list.appendChild(o);
+            });
+            return;
+        }
+        if (provider === 'huggingface' || provider === 'openrouter') {
+            await this.fillModelDatalist('stt-models', provider, 'transcription');
+        }
+    }
+
     async saveVoiceSettings() {
         const settings = {
             enabled: document.getElementById('voice-enabled').checked,
@@ -8132,8 +8408,13 @@ class LANAgentDashboard {
             voice: document.querySelector('input[name="voice-choice"]:checked')?.value || 'nova',
             format: document.getElementById('voice-format').value,
             speed: parseFloat(document.getElementById('voice-speed').value),
-            instructions: document.getElementById('voice-instructions').value
+            instructions: document.getElementById('voice-instructions').value,
+            transcription: {
+                provider: document.getElementById('stt-provider')?.value || 'auto',
+                model: document.getElementById('stt-model')?.value?.trim() || ''
+            }
         };
+        if (settings.provider === 'openrouter' && settings.voice === 'default') delete settings.voice;
 
         try {
             const response = await this.apiPost('/api/voice/settings', settings);
@@ -11341,6 +11622,13 @@ class LANAgentDashboard {
             const kpWhitelist = el('p2p-setting-kp-topic-whitelist');
             if (kpWhitelist) kpWhitelist.value = (s.kpTopicWhitelist || []).join(', ');
 
+            const skillShare = el('p2p-setting-skill-share');
+            if (skillShare) skillShare.checked = s.skillShare !== false;
+            const skillEnv = el('p2p-setting-skill-share-env');
+            if (skillEnv) skillEnv.textContent = s.skillShareSource === 'env' ? 'Set by SKILLS_P2P_SHARE in .env, which overrides this switch.' : '';
+            const skillMin = el('p2p-setting-skill-min-score');
+            if (skillMin) skillMin.value = s.skillMinTrustScore ?? 50;
+
             const fpEl = el('p2p-setting-fingerprint');
             if (fpEl) fpEl.textContent = response.identity?.fingerprint || 'Not generated';
 
@@ -11359,7 +11647,9 @@ class LANAgentDashboard {
                 autoShare: document.getElementById('p2p-setting-auto-share')?.checked || false,
                 autoInstallTrusted: document.getElementById('p2p-setting-auto-install')?.checked || false,
                 kpAutoImport: document.getElementById('p2p-setting-kp-auto-import')?.checked || false,
-                kpTopicWhitelist: (document.getElementById('p2p-setting-kp-topic-whitelist')?.value || '').split(',').map(t => t.trim()).filter(Boolean)
+                kpTopicWhitelist: (document.getElementById('p2p-setting-kp-topic-whitelist')?.value || '').split(',').map(t => t.trim()).filter(Boolean),
+                skillShare: document.getElementById('p2p-setting-skill-share')?.checked !== false,
+                skillMinTrustScore: document.getElementById('p2p-setting-skill-min-score')?.value
             };
 
             if (settings.registryUrl && !settings.registryUrl.startsWith('wss://') && !settings.registryUrl.startsWith('ws://')) {
@@ -11462,7 +11752,7 @@ class LANAgentDashboard {
                         </div>
                         <div class="p2p-peer-actions">
                             ${peer.trustScore > 0 ? `<span class="badge" style="font-size:0.7rem;padding:2px 6px;background:${peer.trustScore >= 60 ? 'var(--accent-green)' : peer.trustScore >= 30 ? 'var(--accent-yellow)' : 'var(--bg-tertiary)'};color:${peer.trustScore >= 30 ? '#000' : 'var(--text-secondary)'};" title="Trust Score">${peer.trustScore}/100</span>` : ''}
-                            <span class="p2p-trust-badge trust-${peer.trustLevel}">${peer.trustLevel}</span>
+                            ${peer.isGenesis ? '<span class="p2p-trust-badge trust-trusted" title="Proven owner of the genesis ERC-8004 identity: trusted by default">genesis</span>' : `<span class="p2p-trust-badge trust-${peer.trustLevel}">${peer.trustLevel}</span>`}
                         </div>
                     </div>
                     <div class="p2p-peer-details">
@@ -11479,6 +11769,8 @@ class LANAgentDashboard {
                             <span class="value">${peer.lastSeen ? new Date(peer.lastSeen).toLocaleString() : 'Never'}</span>
                         </div>
                         ${peer.erc8004 ? `<div class="p2p-detail"><span class="label">ERC-8004:</span><span class="value p2p-nft-badge"><i class="fas fa-check-circle"></i> Verified (#${peer.erc8004.agentId})</span></div>` : ''}
+                        <div class="p2p-detail"><span class="label">Wallet:</span><span class="value">${peer.walletVerified ? '<i class="fas fa-check-circle" style="color:var(--accent-green);"></i> Proven' : '<span title="The peer has not signed a wallet proof, so no on-chain reputation counts">Not proven</span>'}</span></div>
+                        ${peer.skynetStaked > 0 ? `<div class="p2p-detail"><span class="label">Staked:</span><span class="value">${Number(peer.skynetStaked).toLocaleString()} SKYNET</span></div>` : ''}
                         ${peer.skynetBalance > 0 ? `<div class="p2p-detail"><span class="label">SKYNET:</span><span class="value">${Number(peer.skynetBalance).toLocaleString()} ${peer.skynetBalanceVerified ? '<i class="fas fa-check-circle" style="color:var(--accent-green);" title="On-chain verified"></i>' : ''}</span></div>` : ''}
                     </div>
                     <div class="p2p-peer-footer">
@@ -12056,13 +12348,23 @@ class LANAgentDashboard {
         if (filterTags.length) query.tags = filterTags;
         if (filterImportance) query.minImportance = filterImportance;
 
+        const skillsStr = document.getElementById('kp-create-skills')?.value?.trim() || '';
+        const skillNames = skillsStr ? skillsStr.split(',').map(t => t.trim()).filter(Boolean) : [];
+        const price = Math.max(0, parseInt(document.getElementById('kp-create-price')?.value) || 0);
+        const includeMemories = document.getElementById('kp-create-include-memories')?.checked !== false;
+        if (!includeMemories && !skillNames.length) {
+            this.showNotification('Include memories, skills, or both', 'error');
+            return;
+        }
+
         try {
             const response = await this.apiPost('/p2p/api/knowledge-packs', {
-                title, summary, topic, tags, query
+                title, summary, topic, tags, price, skillNames,
+                ...(includeMemories ? { query } : {})
             });
 
             if (response.success) {
-                this.showNotification(`Knowledge pack created with ${response.pack?.memoryCount || 0} memories`, 'success');
+                this.showNotification(`Knowledge pack created with ${response.pack?.memoryCount || 0} memories and ${response.pack?.skillCount || 0} skills`, 'success');
                 document.getElementById('kpCreateModal')?.classList.remove('active');
                 // Clear form
                 document.getElementById('kp-create-title').value = '';
@@ -12072,6 +12374,8 @@ class LANAgentDashboard {
                 document.getElementById('kp-create-filter-type').value = '';
                 document.getElementById('kp-create-filter-tags').value = '';
                 document.getElementById('kp-create-filter-importance').value = '';
+                document.getElementById('kp-create-skills').value = '';
+                document.getElementById('kp-create-price').value = '';
                 await this.loadKPMyPacks();
             } else {
                 this.showNotification('Failed: ' + (response.error || 'Unknown error'), 'error');

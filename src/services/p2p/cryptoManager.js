@@ -29,6 +29,9 @@ sessionKeyCache.on('expired', (key, value) => {
   }
 });
 
+// A signed message older (or further in the future) than this is refused as a replay.
+const REPLAY_WINDOW_MS = 10 * 60 * 1000;
+
 /**
  * CryptoManager handles Ed25519 identity, X25519 ECDH key exchange, and AES-256-GCM encryption.
  *
@@ -49,6 +52,7 @@ class CryptoManager {
     // dhPublicKey/dhPrivateKey: X25519 DER buffers (for ECDH encryption)
     this.peerSequences = new Map(); // fingerprint -> last seen seq
     this.outboundSeq = new Map(); // fingerprint -> next outbound seq
+    this.seqBase = Date.now() * 1000; // see getNextSeq
   }
 
   /**
@@ -314,25 +318,40 @@ class CryptoManager {
   }
 
   /**
-   * Check sequence number for replay protection
+   * Replay protection. A message is accepted when it is newer than the last one accepted
+   * from that peer, by its signed timestamp OR its sequence number, and (when it carries a
+   * timestamp) sent within the last REPLAY_WINDOW_MS. A replayed message has both an old
+   * timestamp and an old sequence number, so it fails.
+   *
+   * Sequence alone broke on every restart: a sender's counter started again at 1, and the
+   * receiver rejected everything from it as a "replay" until the RECEIVER restarted too
+   * (ALICE → DELTA was silent from 2026-09-26 to 09-27 this way). The timestamp covers a
+   * peer still on the old counter; getNextSeq() now also starts from the clock.
    * @param {string} peerFingerprint
    * @param {number} seq - Received sequence number
-   * @returns {boolean} Whether the sequence is valid (newer than last seen)
+   * @param {number} [ts] - The message's signed send time (ms)
+   * @param {number} [now]
+   * @returns {boolean}
    */
-  checkSequence(peerFingerprint, seq) {
-    const lastSeen = this.peerSequences.get(peerFingerprint) || 0;
-    if (seq <= lastSeen) return false;
-    this.peerSequences.set(peerFingerprint, seq);
+  checkSequence(peerFingerprint, seq, ts, now = Date.now()) {
+    const last = this.peerSequences.get(peerFingerprint) || { seq: 0, ts: 0 };
+    const hasTs = Number.isFinite(ts);
+    if (hasTs && Math.abs(now - ts) > REPLAY_WINDOW_MS) return false;
+    const newer = seq > last.seq || (hasTs && ts > last.ts);
+    if (!newer) return false;
+    this.peerSequences.set(peerFingerprint, { seq, ts: hasTs ? ts : last.ts });
     return true;
   }
 
   /**
-   * Get next outbound sequence number for a peer
+   * Get next outbound sequence number for a peer. The first one is the boot time in
+   * microseconds, so a restarted agent's numbers are still higher than any it sent before
+   * (peers running the older sequence-only check keep accepting it).
    * @param {string} peerFingerprint
    * @returns {number}
    */
   getNextSeq(peerFingerprint) {
-    const current = this.outboundSeq.get(peerFingerprint) || 0;
+    const current = this.outboundSeq.get(peerFingerprint) || this.seqBase;
     const next = current + 1;
     this.outboundSeq.set(peerFingerprint, next);
     return next;

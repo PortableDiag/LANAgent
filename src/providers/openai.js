@@ -397,14 +397,15 @@ export class OpenAIProvider extends BaseProvider {
     }
   }
 
-  async transcribeAudio(audioBuffer) {
+  async transcribeAudio(audioBuffer, options = {}) {
     const startTime = Date.now();
+    const whisperModel = options.model || this.models.whisper;
     
     try {
       const file = new File([audioBuffer], "audio.ogg", { type: "audio/ogg" });
       
       const transcription = await this.client.audio.transcriptions.create({
-        model: this.models.whisper,
+        model: whisperModel,
         file,
         response_format: "text"
       });
@@ -417,7 +418,7 @@ export class OpenAIProvider extends BaseProvider {
       await this.updateMetrics(responseTime, {
         prompt_tokens: estimatedTokens,
         total_tokens: estimatedTokens,
-        model: this.models.whisper,
+        model: whisperModel,
         requestType: 'audio'
       });
 

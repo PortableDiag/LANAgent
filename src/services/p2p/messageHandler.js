@@ -1,6 +1,7 @@
 import { logger } from '../../utils/logger.js';
 import { cryptoManager } from './cryptoManager.js';
 import { peerManager } from './peerManager.js';
+import { applyPeerIdentity, createWalletProof, DEFAULT_SKYNET_ERC20 } from './peerIdentity.js';
 
 /**
  * MessageHandler handles incoming decrypted messages by routing them to the appropriate handler
@@ -12,6 +13,7 @@ class MessageHandler {
     this.knowledgePackSharing = null; // Set after knowledgePackSharing is initialized
     this.skynetServiceExecutor = null; // Set after skynetServiceExecutor is initialized
     this.skynetEconomy = null; // Set after skynetEconomy is initialized
+    this.skillSharing = null; // Set after skillSharing is initialized
     this.handlers = new Map();
     this._registerHandlers();
   }
@@ -36,6 +38,9 @@ class MessageHandler {
     this.handlers.set('knowledge_pack_received', this._handleKnowledgePackReceived.bind(this));
     this.handlers.set('knowledge_pack_update', this._handleKnowledgePackUpdate.bind(this));
     this.handlers.set('knowledge_pack_payment_required', this._handleKnowledgePackPaymentRequired.bind(this));
+    this.handlers.set('skill_sync', this._handleSkillSync.bind(this));
+    this.handlers.set('skill_request', this._handleSkillRequest.bind(this));
+    this.handlers.set('skill_push', this._handleSkillPush.bind(this));
     this.handlers.set('ping', this._handlePing.bind(this));
     this.handlers.set('pong', this._handlePong.bind(this));
 
@@ -119,6 +124,45 @@ class MessageHandler {
   }
 
   /**
+   * Set the skill sharing module reference
+   * @param {object} skillSharing
+   */
+  setSkillSharing(skillSharing) {
+    this.skillSharing = skillSharing;
+  }
+
+  /**
+   * Messages only the genesis agent sends (ENS subnames, email leases, the welcome package,
+   * and the payment requests for them). Any registry peer can introduce itself and send
+   * these, so they are honoured only from the peer PROVEN to be genesis (peerIdentity.js).
+   * @returns {Promise<object|null>} the genesis peer, or null (message ignored)
+   */
+  async _fromGenesis(fromFingerprint, what) {
+    const peer = await peerManager.getPeer(fromFingerprint);
+    if (peer?.isGenesis) return peer;
+    logger.warn(`P2P SECURITY: ignoring ${what} from ${fromFingerprint.slice(0, 8)}... — only the proven genesis agent sends this`);
+    return null;
+  }
+
+  /**
+   * Whether a genesis payment request may be paid without asking: the token must be OUR
+   * configured SKYNET contract, the recipient genesis's proven wallet, and the amount under
+   * p2p.maxAutoPaySkynet. Anything else waits for the operator.
+   */
+  async _autoPayAllowed(genesisPeer, { amount, tokenAddress, recipientWallet }, what) {
+    const { SystemSettings } = await import('../../models/SystemSettings.js');
+    const skynet = await SystemSettings.getSetting('skynet_token_address', process.env.SKYNET_TOKEN_ADDRESS || DEFAULT_SKYNET_ERC20);
+    const cap = Number(await SystemSettings.getSetting('p2p.maxAutoPaySkynet', 1000));
+    const amt = Number(amount);
+    let reason = null;
+    if (String(tokenAddress || '').toLowerCase() !== String(skynet).toLowerCase()) reason = `token ${tokenAddress} is not SKYNET`;
+    else if (!genesisPeer.provenWallet || String(recipientWallet || '').toLowerCase() !== genesisPeer.provenWallet.toLowerCase()) reason = `recipient ${recipientWallet} is not genesis's proven wallet`;
+    else if (!(amt > 0) || amt > cap) reason = `amount ${amount} is outside 0..${cap} SKYNET (p2p.maxAutoPaySkynet)`;
+    if (reason) logger.warn(`P2P ${what}: not paying automatically — ${reason}`);
+    return !reason;
+  }
+
+  /**
    * Handle an incoming encrypted message from a peer
    * @param {string} fromFingerprint - Sender's fingerprint
    * @param {string} encryptedPayload - Base64 encoded encrypted envelope
@@ -153,7 +197,7 @@ class MessageHandler {
 
       // Check sequence number for replay protection
       if (message.seq !== undefined) {
-        if (!cryptoManager.checkSequence(fromFingerprint, message.seq)) {
+        if (!cryptoManager.checkSequence(fromFingerprint, message.seq, message.ts)) {
           logger.warn(`P2P replay detected from ${fromFingerprint.slice(0, 8)}...: seq=${message.seq}`);
           return false;
         }
@@ -246,10 +290,27 @@ class MessageHandler {
     const agentName = (process.env.AGENT_NAME || 'lanagent').toLowerCase();
     const ensName = `${agentName}.lanagent.eth`;
 
+    // Prove we control walletAddress: without this, peers give the wallet no reputation
+    // (balance, stake, ERC-8004 identity, genesis status).
+    let walletProof = null;
+    if (walletAddress) {
+      try {
+        const walletService = (await import('../crypto/walletService.js')).default;
+        walletProof = await createWalletProof({
+          fingerprint: cryptoManager.identity.fingerprint,
+          address: walletAddress,
+          sign: (msg) => walletService.signMessage(msg, 'bsc')
+        });
+      } catch (err) {
+        logger.warn(`P2P could not sign a wallet proof: ${err.message}`);
+      }
+    }
+
     await sendFn(fromFingerprint, {
       type: 'capabilities_response',
       capabilities,
       walletAddress,
+      walletProof,
       skynetTokenAddress,
       skynetBalance,
       erc8004,
@@ -262,116 +323,50 @@ class MessageHandler {
    * Handle capabilities response - store peer's capabilities
    */
   async _handleCapabilitiesResponse(fromFingerprint, message, sendFn) {
-    const { capabilities, walletAddress, skynetTokenAddress, skynetBalance, erc8004, ensProvider, ensName } = message;
+    const { capabilities, walletAddress, skynetTokenAddress, ensName } = message;
     if (Array.isArray(capabilities)) {
       await peerManager.updateCapabilities(fromFingerprint, capabilities);
       logger.info(`P2P received ${capabilities.length} capabilities from ${fromFingerprint.slice(0, 8)}...`);
     }
 
-    // Auto-trust the peer fork if they announced a valid ENS name
-    if (ensName && typeof ensName === 'string' && ensName.endsWith('.lanagent.eth')) {
+    // Prove the peer's wallet, then read its reputation on-chain (peerIdentity.js)
+    let peer = null;
+    try {
+      peer = await peerManager.getPeer(fromFingerprint);
+      if (peer) {
+        if (skynetTokenAddress) peer.skynetTokenAddress = skynetTokenAddress;
+        const wasGenesis = peer.isGenesis === true;
+        const identity = await applyPeerIdentity(peer, message, { fingerprint: fromFingerprint });
+        if (!identity.walletVerified && walletAddress) {
+          logger.info(`P2P peer ${fromFingerprint.slice(0, 8)}... wallet not proven (${identity.reason}); no on-chain reputation counted`);
+        }
+        if (identity.isGenesis && !wasGenesis) {
+          logger.info(`P2P peer ${peer.displayName || fromFingerprint.slice(0, 8)} is the genesis agent (proven owner of ERC-8004 #${peer.erc8004.agentId}) — trusted by default`);
+        }
+        peer.calculateTrustScore();
+        await peer.save();
+      }
+    } catch (err) {
+      logger.error(`Failed to save peer info: ${err.message}`);
+    }
+
+    // Auto-trust the peer fork on-chain, only when its ENS name resolves to its proven wallet
+    if (peer?.walletVerified && ensName && typeof ensName === 'string' && ensName.endsWith('.lanagent.eth')) {
       try {
         const trustRegistryService = (await import('../../services/crypto/trustRegistryService.js')).default;
         if (trustRegistryService._initialized) {
-          await trustRegistryService.autoTrustFork(ensName);
-          logger.info(`P2P auto-trusted fork: ${ensName} (${fromFingerprint.slice(0, 8)}...)`);
+          const r = await trustRegistryService.autoTrustFork(ensName, peer.provenWallet);
+          if (!r?.alreadyTrusted) logger.info(`P2P auto-trusted fork: ${ensName} (${fromFingerprint.slice(0, 8)}...)`);
         }
       } catch (err) {
         logger.debug(`P2P auto-trust fork skipped for ${ensName}: ${err.message}`);
       }
     }
 
-    // Store peer's wallet info and announced SKYNET balance
-    try {
-      const peer = await peerManager.getPeer(fromFingerprint);
-      if (peer) {
-        if (walletAddress) peer.skynetWallet = walletAddress;
-        if (skynetTokenAddress) peer.skynetTokenAddress = skynetTokenAddress;
-        if (skynetBalance !== undefined) peer.skynetBalance = skynetBalance || 0;
-
-        // Verify on-chain balance if peer announced one
-        if (walletAddress && skynetTokenAddress && skynetBalance > 0) {
-          try {
-            const contractService = (await import('../crypto/contractServiceWrapper.js')).default;
-            const provider = await contractService.getProvider('bsc');
-            const { ethers } = await import('ethers');
-            const token = new ethers.Contract(skynetTokenAddress, [
-              'function balanceOf(address) view returns (uint256)'
-            ], provider);
-            const onChainBal = await token.balanceOf(walletAddress);
-            const verified = parseFloat(ethers.formatUnits(onChainBal, 18));
-            // Accept if on-chain balance is at least 90% of announced
-            peer.skynetBalanceVerified = verified >= skynetBalance * 0.9;
-            peer.skynetBalance = verified;
-            peer.skynetBalanceVerifiedAt = new Date();
-          } catch (err) {
-            logger.debug(`Could not verify SKYNET balance for ${fromFingerprint.slice(0, 8)}...: ${err.message}`);
-          }
-        }
-
-        // Store and verify ERC-8004 identity info from peer on-chain
-        if (erc8004?.agentId != null) {
-          let onChainVerified = false;
-          try {
-            const contractService = (await import('../crypto/contractServiceWrapper.js')).default;
-            const provider = await contractService.getProvider('bsc');
-            const { ethers } = await import('ethers');
-            const registryAddr = '0x8004A169FB4a3325136EB29fA0ceB6D2e539a432';
-            const registry = new ethers.Contract(registryAddr, [
-              'function ownerOf(uint256 tokenId) external view returns (address)'
-            ], provider);
-            // Verify the agent ID exists on-chain (ownerOf won't revert for valid tokens)
-            const owner = await registry.ownerOf(erc8004.agentId);
-            // If peer announced a wallet, check it matches the on-chain owner
-            if (walletAddress && owner.toLowerCase() === walletAddress.toLowerCase()) {
-              onChainVerified = true;
-            } else if (owner !== ethers.ZeroAddress) {
-              // Agent ID exists on-chain even if wallet doesn't match exactly
-              onChainVerified = true;
-            }
-            logger.info(`ERC-8004 on-chain verify for ${fromFingerprint.slice(0, 8)}...: agentId=${erc8004.agentId}, owner=${owner.slice(0, 10)}..., verified=${onChainVerified}`);
-          } catch (err) {
-            logger.debug(`ERC-8004 on-chain verify failed for ${fromFingerprint.slice(0, 8)}...: ${err.message}`);
-          }
-          peer.erc8004 = {
-            agentId: erc8004.agentId,
-            verified: onChainVerified,
-            verifiedAt: onChainVerified ? new Date() : undefined
-          };
-        }
-
-        // Check Sentinel token balance (soulbound reputation badge from scammer reporting)
-        if (walletAddress) {
-          try {
-            const contractService = (await import('../crypto/contractServiceWrapper.js')).default;
-            const provider = await contractService.getProvider('bsc');
-            const { ethers } = await import('ethers');
-            const registryContract = new ethers.Contract(
-              '0xEa68dad9D44a51428206B4ECFE38147C7783b9e9',
-              ['function sentinelToken() external view returns (address)'],
-              provider
-            );
-            const sentinelAddr = await registryContract.sentinelToken();
-            const sentinel = new ethers.Contract(sentinelAddr, [
-              'function balanceOf(address) view returns (uint256)'
-            ], provider);
-            const bal = await sentinel.balanceOf(walletAddress);
-            peer.sentinelBalance = Number(bal);
-            peer.sentinelBalanceVerified = true;
-            if (peer.sentinelBalance > 0) {
-              logger.info(`Peer ${fromFingerprint.slice(0, 8)}... holds ${peer.sentinelBalance} SENTINEL token(s)`);
-            }
-          } catch (err) {
-            logger.debug(`Sentinel balance check failed for ${fromFingerprint.slice(0, 8)}...: ${err.message}`);
-          }
-        }
-
-        // Recalculate trust score
-        peer.calculateTrustScore();
-        await peer.save();
-      }
-    } catch (err) {
-      logger.error(`Failed to save peer info: ${err.message}`);
+    // Trust is current now: offer our skills if this peer qualifies
+    if (peer && this.skillSharing) {
+      this.skillSharing.syncWithPeer(fromFingerprint, sendFn).catch(err =>
+        logger.debug(`P2P skill sync with ${fromFingerprint.slice(0, 8)}... failed: ${err.message}`));
     }
   }
 
@@ -441,6 +436,20 @@ class MessageHandler {
    */
   async _handlePluginReceived(fromFingerprint, message, sendFn) {
     logger.info(`P2P peer ${fromFingerprint.slice(0, 8)}... confirmed plugin receipt: ${message.name}, verified: ${message.verified}`);
+  }
+
+  // ==================== Skill Sharing Handlers ====================
+
+  async _handleSkillSync(fromFingerprint, message, sendFn) {
+    if (this.skillSharing) await this.skillSharing.handleSync(fromFingerprint, message, sendFn);
+  }
+
+  async _handleSkillRequest(fromFingerprint, message, sendFn) {
+    if (this.skillSharing) await this.skillSharing.handleRequest(fromFingerprint, message, sendFn);
+  }
+
+  async _handleSkillPush(fromFingerprint, message, sendFn) {
+    if (this.skillSharing) await this.skillSharing.handlePush(fromFingerprint, message);
   }
 
   // ==================== Knowledge Pack Handlers ====================
@@ -690,6 +699,7 @@ class MessageHandler {
    * Handle email_lease_response — Fork receives result of email lease.
    */
   async _handleEmailLeaseResponse(fromFingerprint, message, sendFn) {
+    if (!(await this._fromGenesis(fromFingerprint, 'email_lease_response'))) return;
     const fp = fromFingerprint.slice(0, 8);
     if (message.success) {
       logger.info(`Email lease granted by ${fp}...: ${message.email} (lease: ${message.leaseId})`);
@@ -733,6 +743,8 @@ class MessageHandler {
   async _handleEmailLeasePaymentRequired(fromFingerprint, message, sendFn) {
     const { desiredUsername, amount, currency, tokenAddress, recipientWallet } = message;
     const fp = fromFingerprint.slice(0, 8);
+    const genesis = await this._fromGenesis(fromFingerprint, 'email_lease_payment_required');
+    if (!genesis) return;
     logger.info(`Email lease payment required from ${fp}...: ${amount} ${currency} for ${desiredUsername}@lanagent.net`);
 
     // Auto-pay if configured
@@ -740,7 +752,8 @@ class MessageHandler {
       const { SystemSettings } = await import('../../models/SystemSettings.js');
       const autoPay = await SystemSettings.getSetting('email.autoPayLease', true);
 
-      if (autoPay && tokenAddress && recipientWallet) {
+      if (autoPay && tokenAddress && recipientWallet
+          && await this._autoPayAllowed(genesis, { amount, tokenAddress, recipientWallet }, 'email lease payment')) {
         const { ethers } = await import('ethers');
         const contractService = (await import('../crypto/contractServiceWrapper.js')).default;
         const signer = await contractService.getSigner('bsc');
@@ -816,6 +829,7 @@ class MessageHandler {
    * Handle email_lease_revoke — Genesis notifies peer their lease was revoked.
    */
   async _handleEmailLeaseRevoke(fromFingerprint, message, sendFn) {
+    if (!(await this._fromGenesis(fromFingerprint, 'email_lease_revoke'))) return;
     const { leaseId, email, reason, revokedAt } = message;
     const fp = fromFingerprint.slice(0, 8);
     logger.warn(`Email lease revoked by ${fp}...: ${email} — ${reason}`);
@@ -863,6 +877,7 @@ class MessageHandler {
    * Handle welcome_package_response — Fork receives welcome package result.
    */
   async _handleWelcomePackageResponse(fromFingerprint, message, sendFn) {
+    if (!(await this._fromGenesis(fromFingerprint, 'welcome_package_response'))) return;
     logger.info(`Welcome package response from ${fromFingerprint.slice(0, 8)}...: success=${message.success}`);
     try {
       const { welcomePackage } = await import('./welcomePackage.js');
@@ -897,6 +912,7 @@ class MessageHandler {
    * Handle ens_subname_response — Fork receives result of subname creation.
    */
   async _handleENSSubnameResponse(fromFingerprint, message, sendFn) {
+    if (!(await this._fromGenesis(fromFingerprint, 'ens_subname_response'))) return;
     const fp = fromFingerprint.slice(0, 8);
     if (message.success) {
       logger.info(`ENS subname granted by ${fp}...: ${message.name} (tx: ${message.txHash})`);
@@ -962,6 +978,8 @@ class MessageHandler {
   async _handleENSSubnamePaymentRequired(fromFingerprint, message, sendFn) {
     const { label, amount, currency, tokenAddress, recipientWallet, baseName } = message;
     const fp = fromFingerprint.slice(0, 8);
+    const genesis = await this._fromGenesis(fromFingerprint, 'ens_subname_payment_required');
+    if (!genesis) return;
     logger.info(`ENS subname payment required from ${fp}...: ${amount} ${currency} for ${label}.${baseName}`);
 
     // Auto-pay if configured
@@ -969,7 +987,8 @@ class MessageHandler {
       const { SystemSettings } = await import('../../models/SystemSettings.js');
       const autoPay = await SystemSettings.getSetting('ens.autoPaySubname', true);
 
-      if (autoPay && tokenAddress && recipientWallet) {
+      if (autoPay && tokenAddress && recipientWallet
+          && await this._autoPayAllowed(genesis, { amount, tokenAddress, recipientWallet }, 'ENS subname payment')) {
         const ensService = (await import('../crypto/ensService.js')).default;
         const contractService = (await import('../crypto/contractServiceWrapper.js')).default;
         const ownerAddress = (await contractService.getSigner('bsc')).getAddress();

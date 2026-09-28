@@ -35,9 +35,27 @@ export class TTSService {
           'hexgrad/Kokoro-82M': { name: 'Kokoro-82M', description: 'High-quality multilingual TTS model' },
           'ResembleAI/chatterbox': { name: 'Chatterbox', description: 'Fast and natural TTS model' }
         }
+      },
+      openrouter: {
+        name: 'OpenRouter',
+        description: 'Any speech model OpenRouter routes; models and voices load live from its catalog',
+        requiresKey: 'OPENROUTER_API_KEY',
+        dynamic: true,
+        models: {
+          'microsoft/mai-voice-2-flash': { name: 'Microsoft MAI Voice 2 Flash', description: 'Natural, low cost' },
+          'hexgrad/kokoro-82m': { name: 'Kokoro 82M', description: 'Cheapest; many voices' },
+          'google/gemini-3.8-flash-tts': { name: 'Gemini 3.8 Flash TTS', description: 'Expressive (PCM output only)' }
+        }
       }
     };
     
+    // OpenRouter speech models cap input length, and a refusal is a bare
+    // "Provider returned 400". Orpheus measured 2026-09-27: 300 chars OK, 400
+    // refused, so every normal Telegram reply failed. Known caps start here;
+    // a 400 on an unknown model halves its limit and retries (learned below).
+    this.openRouterCharLimits = { 'canopylabs/orpheus-3b-0.1-ft': 280 };
+    this._learnedCharLimits = new Map();
+
     // Available voices by provider
     this.availableVoices = {
       openai: {
@@ -149,6 +167,8 @@ export class TTSService {
     let result;
     if (provider === 'huggingface') {
       result = await this.generateSpeechHuggingFace(text, options);
+    } else if (provider === 'openrouter') {
+      result = await this.generateSpeechOpenRouter(text, options);
     } else {
       result = await this.generateSpeechOpenAI(text, options);
     }
@@ -181,6 +201,114 @@ export class TTSService {
       logger.error('[TTS] Error playing through server speaker:', error.message);
       // Don't throw - this is a non-critical feature
     }
+  }
+
+  /**
+   * Speech through the OpenRouter provider. Voices are per model and come from
+   * the live catalog; a voice saved for another provider (e.g. "nova") is
+   * replaced with the model's first supported voice rather than sent and refused.
+   * OpenRouter returns only mp3 or pcm.
+   */
+  async generateSpeechOpenRouter(text, options = {}) {
+    const orProvider = this.agent?.providerManager?.providers?.get('openrouter');
+    if (!orProvider || typeof orProvider.generateSpeech !== 'function') {
+      throw new Error('OpenRouter provider not available (is OPENROUTER_API_KEY set?)');
+    }
+
+    const voiceSettings = await this.getVoiceSettings();
+    const model = options.model || voiceSettings.model || 'microsoft/mai-voice-2-flash';
+    const charLimit = this._learnedCharLimits.get(model) || this.openRouterCharLimits[model] || 3800;
+
+    if (text.length > charLimit) {
+      return this._generateOpenRouterChunks(text, { ...options, model }, charLimit);
+    }
+
+    const startTime = Date.now();
+    const speed = options.speed || voiceSettings.speed || 1.0;
+    const format = (options.format || voiceSettings.format) === 'pcm' ? 'pcm' : 'mp3';
+
+    let voice = options.voice || voiceSettings.voice;
+    // OpenRouter bills speech per input character at the catalog's prompt price
+    // (verified 2026-09-27: 37 chars x $0.000015 = the $0.000555 billed).
+    let pricePerChar = null;
+    try {
+      const { getMediaModels } = this._mediaCatalog || await import('./media/mediaCatalog.js');
+      const entry = (await getMediaModels('openrouter', 'speech')).find(m => m.id === model);
+      const supported = entry?.voices || [];
+      if (supported.length && !supported.includes(voice)) {
+        logger.info(`TTS: voice "${voice}" is not offered by ${model}; using ${supported[0]}`);
+        voice = supported[0];
+      }
+      const price = Number(entry?.pricing?.prompt);
+      if (Number.isFinite(price)) pricePerChar = price;
+    } catch (error) {
+      logger.debug(`TTS: OpenRouter catalog unavailable: ${error.message}`);
+    }
+
+    let buffer;
+    try {
+      buffer = await orProvider.generateSpeech(text, { model, voice, speed, format, recordUsage: false });
+    } catch (error) {
+      // An unknown input cap looks like a bare 400. Learn a smaller limit for
+      // this model and retry in chunks, down to a floor where length can no
+      // longer be the reason.
+      if (/\b400\b/.test(error.message) && text.length > 120) {
+        const learned = Math.max(120, Math.floor(text.length * 0.5));
+        this._learnedCharLimits.set(model, learned);
+        logger.warn(`TTS: ${model} refused ${text.length} chars; retrying in chunks of ≤${learned}`);
+        return this._generateOpenRouterChunks(text, { ...options, model, voice }, learned);
+      }
+      throw error;
+    }
+    const cost = pricePerChar !== null ? pricePerChar * text.length : this.calculateCost(model, text.length);
+    const duration = this.estimateDuration(text.length);
+    const responseTime = Date.now() - startTime;
+    await this.updateUsageStats(cost, responseTime, model, text.length, 'openrouter');
+    logger.info(`OpenRouter TTS generated ${buffer.length} bytes with ${model}/${voice} in ${responseTime}ms`);
+
+    return {
+      buffer,
+      format,
+      model,
+      voice,
+      cost,
+      duration,
+      responseTime,
+      size: buffer.length,
+      provider: 'openrouter'
+    };
+  }
+
+  /**
+   * Speak text longer than the model accepts: split at sentence (then word)
+   * boundaries, generate up to 3 chunks at a time (Orpheus takes ~13s per
+   * chunk, so sequential would make a long reply take minutes), and join the
+   * MP3s in order.
+   */
+  async _generateOpenRouterChunks(text, options, charLimit) {
+    const chunks = this.splitTextIntoChunks(text, charLimit);
+    logger.info(`TTS: ${options.model} — ${text.length} chars in ${chunks.length} chunk(s) of ≤${charLimit}`);
+    const results = new Array(chunks.length);
+    let next = 0;
+    const worker = async () => {
+      while (next < chunks.length) {
+        const i = next++;
+        results[i] = await this.generateSpeechOpenRouter(chunks[i], options);
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(3, chunks.length) }, worker));
+    const buffer = await this.concatenateAudioBuffers(results.map(r => r.buffer));
+    return {
+      buffer,
+      format: results[0]?.format || 'mp3',
+      model: options.model,
+      voice: results[0]?.voice,
+      cost: results.reduce((sum, r) => sum + (r.cost || 0), 0),
+      duration: this.estimateDuration(text.length),
+      size: buffer.length,
+      chunks: chunks.length,
+      provider: 'openrouter'
+    };
   }
 
   async generateSpeechOpenAI(text, options = {}) {
@@ -323,23 +451,39 @@ export class TTSService {
       }
 
       // Validate settings
+      if (settings.provider && !this.providers[settings.provider]) {
+        throw new Error('Invalid provider selection');
+      }
       const provider = settings.provider || this.agent.agentModel.voice?.provider || 'openai';
-      if (settings.voice && !this.availableVoices[provider]?.[settings.voice]) {
-        throw new Error(`Invalid voice selection for ${provider} provider`);
+      const looksLikeHubId = (id) => typeof id === 'string' && /^[\w.-]+\/[\w.:-]+$/.test(id);
+
+      if (provider === 'openai') {
+        if (settings.voice && !this.availableVoices.openai?.[settings.voice]) {
+          throw new Error('Invalid voice selection for openai provider');
+        }
+        if (settings.model && !this.providers.openai.models[settings.model]) {
+          throw new Error('Invalid model selection for OpenAI provider');
+        }
+      } else if (settings.model && !looksLikeHubId(settings.model)) {
+        // HuggingFace and OpenRouter accept any model their live catalog lists
+        throw new Error(`Invalid model id for ${provider}: expected "org/model"`);
       }
 
-      if (settings.model) {
-        // Validate model based on provider
-        if (provider === 'huggingface') {
-          const validHfModels = Object.keys(this.providers.huggingface.models);
-          if (!validHfModels.includes(settings.model)) {
-            throw new Error(`Invalid model selection for HuggingFace provider`);
-          }
-        } else {
-          const validOpenAIModels = Object.keys(this.providers.openai.models);
-          if (!validOpenAIModels.includes(settings.model)) {
-            throw new Error(`Invalid model selection for OpenAI provider`);
-          }
+      if (provider === 'openrouter' && settings.voice && settings.model) {
+        const { getOpenRouterVoices } = await import('./media/mediaCatalog.js');
+        const supported = await getOpenRouterVoices(settings.model);
+        if (supported.length && !supported.includes(settings.voice)) {
+          throw new Error(`Voice "${settings.voice}" is not offered by ${settings.model}`);
+        }
+      }
+
+      if (settings.transcription) {
+        const t = settings.transcription;
+        if (t.provider && !['auto', 'openai', 'huggingface', 'openrouter'].includes(t.provider)) {
+          throw new Error('Invalid transcription provider');
+        }
+        if (t.model && !looksLikeHubId(t.model) && t.provider !== 'openai') {
+          throw new Error('Invalid transcription model id: expected "org/model"');
         }
       }
 
@@ -347,18 +491,19 @@ export class TTSService {
         throw new Error('Speed must be between 0.25 and 4.0');
       }
 
-      // Update agent model
+      // Update agent model. Spread a PLAIN copy: spreading the Mongoose nested
+      // object drops nested paths (voice.transcription came through as undefined
+      // and failed validation), and merge transcription so a partial update
+      // keeps the other field.
+      const current = this.agent.agentModel.toObject?.().voice || {};
       this.agent.agentModel.voice = {
-        ...this.agent.agentModel.voice,
-        ...settings
+        ...current,
+        ...settings,
+        transcription: { ...(current.transcription || {}), ...(settings.transcription || {}) }
       };
 
-      // Validate provider if specified
-      if (settings.provider && !this.providers[settings.provider]) {
-        throw new Error('Invalid provider selection');
-      }
-
       await this.agent.agentModel.save();
+      this.agent.providerManager?.invalidateTranscriptionPreference?.();
       logger.info('Voice settings updated successfully');
 
       return true;
@@ -366,6 +511,83 @@ export class TTSService {
       logger.error('Error updating voice settings:', error);
       throw error;
     }
+  }
+
+  // ---- Voice presets (agentModel.voice.profiles) ----
+
+  getVoiceProfiles() {
+    return this.agent?.agentModel?.toObject?.().voice?.profiles || [];
+  }
+
+  /** Name of the preset matching the current provider/model/voice, or null. */
+  getActiveVoiceProfile() {
+    const v = this.agent?.agentModel?.toObject?.().voice || {};
+    return this.getVoiceProfiles().find(p =>
+      p.provider === v.provider && p.model === v.model && p.voice === v.voice)?.name || null;
+  }
+
+  /** Exact name first (case-insensitive), then a name or voice id containing the query. */
+  findVoiceProfile(query) {
+    const q = String(query || '').trim().toLowerCase();
+    if (!q) return null;
+    const profiles = this.getVoiceProfiles();
+    return profiles.find(p => p.name.toLowerCase() === q)
+      || profiles.find(p => p.name.toLowerCase().includes(q))
+      || profiles.find(p => q.includes(p.name.toLowerCase()))
+      || profiles.find(p => (p.voice || '').toLowerCase().includes(q))
+      || null;
+  }
+
+  async _saveProfiles(profiles) {
+    const current = this.agent.agentModel.toObject?.().voice || {};
+    this.agent.agentModel.voice = { ...current, profiles };
+    await this.agent.agentModel.save();
+  }
+
+  /**
+   * Create or replace a preset. Fields not given are taken from the current
+   * voice settings, so "save the current voice as X" needs only a name.
+   */
+  async saveVoiceProfile(name, fields = {}) {
+    const clean = String(name || '').trim();
+    if (!clean) throw new Error('Preset name is required');
+    if (clean.length > 40) throw new Error('Preset name is too long (40 characters max)');
+    const current = this.getVoiceSettings() || {};
+    const profile = {
+      name: clean,
+      provider: fields.provider || current.provider,
+      model: fields.model || current.model,
+      voice: fields.voice || current.voice,
+      speed: fields.speed ?? current.speed ?? 1,
+      format: fields.format || current.format || 'mp3'
+    };
+    if (!this.providers[profile.provider]) throw new Error(`Unknown provider: ${profile.provider}`);
+    const profiles = this.getVoiceProfiles().filter(p => p.name.toLowerCase() !== clean.toLowerCase());
+    profiles.push(profile);
+    await this._saveProfiles(profiles);
+    logger.info(`Voice preset saved: ${clean} (${profile.provider} ${profile.model} ${profile.voice})`);
+    return profile;
+  }
+
+  async deleteVoiceProfile(name) {
+    const target = this.findVoiceProfile(name);
+    if (!target) throw new Error(`No voice preset named "${name}"`);
+    await this._saveProfiles(this.getVoiceProfiles().filter(p => p.name !== target.name));
+    return target;
+  }
+
+  /** Make a preset the current voice. Goes through updateVoiceSettings' validation. */
+  async switchVoiceProfile(query) {
+    const profile = this.findVoiceProfile(query);
+    if (!profile) {
+      const names = this.getVoiceProfiles().map(p => p.name).join(', ') || 'none saved';
+      throw new Error(`No voice preset matches "${query}". Presets: ${names}`);
+    }
+    const { name, ...selection } = profile;
+    await this.updateVoiceSettings(Object.fromEntries(
+      Object.entries(selection).filter(([, v]) => v !== undefined && v !== null && v !== '')));
+    logger.info(`Switched to voice preset: ${name}`);
+    return profile;
   }
 
   async updateUsageStats(cost, responseTime, model, textLength, provider = null) {
@@ -713,8 +935,9 @@ export class TTSService {
     const chunks = [];
     let currentChunk = '';
     
-    // Split by sentences first
-    const sentences = text.match(/[^\.!?]+[\.!?]+/g) || [text];
+    // Split by sentences first. The trailing (|$) keeps a final fragment with no
+    // closing punctuation; the old pattern silently dropped it.
+    const sentences = text.match(/[^.!?]+(?:[.!?]+|$)/g) || [text];
     
     for (const sentence of sentences) {
       const trimmedSentence = sentence.trim();
@@ -764,19 +987,100 @@ export class TTSService {
     if (currentChunk.trim()) {
       chunks.push(currentChunk.trim());
     }
-    
-    return chunks.filter(chunk => chunk.length > 0);
+
+    // A single line longer than maxChars (a run-on sentence with no newline)
+    // is still oversized here; wrap it at word boundaries so every chunk fits.
+    const fitted = [];
+    for (const chunk of chunks) {
+      if (chunk.length <= maxChars) { fitted.push(chunk); continue; }
+      let line = '';
+      for (const word of chunk.split(/\s+/)) {
+        if (line && line.length + word.length + 1 > maxChars) { fitted.push(line); line = ''; }
+        line = line ? `${line} ${word}` : word.slice(0, maxChars);
+      }
+      if (line) fitted.push(line);
+    }
+
+    return fitted.filter(chunk => chunk.length > 0);
   }
 
   /**
    * Concatenate audio buffers (simple concatenation for MP3)
    */
+  async _joinAudioWithFfmpeg(buffers, { pauseSeconds = 0.25, timeoutMs = 60000 } = {}) {
+    const { spawn } = await import('child_process');
+    const os = await import('os');
+    const dir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'tts-join-'));
+    try {
+      const inputs = [];
+      for (let i = 0; i < buffers.length; i++) {
+        const file = path.join(dir, `c${i}.mp3`);
+        await fs.promises.writeFile(file, buffers[i]);
+        inputs.push('-i', file);
+      }
+      const trim = 'silenceremove=start_periods=1:start_duration=0:start_threshold=-45dB:start_silence=0.05';
+      const n = buffers.length;
+      const chains = buffers.map((_, i) => {
+        const steps = [];
+        if (i > 0) steps.push(trim);                                    // inner leading edge
+        if (i < n - 1) steps.push('areverse', trim, 'areverse', `apad=pad_dur=${pauseSeconds}`); // inner trailing edge
+        return `[${i}:a]${steps.length ? steps.join(',') : 'anull'}[a${i}]`;
+      });
+      const filter = `${chains.join(';')};${buffers.map((_, i) => `[a${i}]`).join('')}concat=n=${n}:v=0:a=1[out]`;
+      const outFile = path.join(dir, 'joined.mp3');
+      await new Promise((resolve, reject) => {
+        const proc = spawn('ffmpeg', ['-v', 'error', '-y', ...inputs, '-filter_complex', filter,
+          '-map', '[out]', '-c:a', 'libmp3lame', '-q:a', '3', outFile], { stdio: ['ignore', 'ignore', 'pipe'] });
+        let stderr = '';
+        const timer = setTimeout(() => { proc.kill('SIGKILL'); reject(new Error('ffmpeg timed out')); }, timeoutMs);
+        proc.stderr.on('data', d => { stderr += d; });
+        proc.on('error', err => { clearTimeout(timer); reject(err); });
+        proc.on('close', code => {
+          clearTimeout(timer);
+          code === 0 ? resolve() : reject(new Error(`ffmpeg exited ${code}: ${stderr.trim().slice(0, 200)}`));
+        });
+      });
+      const joined = await fs.promises.readFile(outFile);
+      if (!joined.length) throw new Error('ffmpeg produced an empty file');
+      return joined;
+    } finally {
+      await fs.promises.rm(dir, { recursive: true, force: true }).catch(() => {});
+    }
+  }
+
   async concatenateAudioBuffers(buffers) {
     if (buffers.length === 1) {
       return buffers[0];
     }
+
+    // Preferred join: decode with ffmpeg, trim the silence at the INNER edges of
+    // each chunk, put back one natural 0.25s pause, re-encode once. Orpheus
+    // chunks carry ~0.45s of silence at each end, so a byte join left ~0.9s of
+    // dead air plus a codec click at every seam (operator heard it 2026-09-27).
+    try {
+      return await this._joinAudioWithFfmpeg(buffers);
+    } catch (error) {
+      logger.warn(`TTS: ffmpeg join unavailable (${error.message}); falling back to a byte join`);
+    }
     
-    // Simple concatenation for MP3 files - they can be concatenated directly
+    // MP3 frames concatenate cleanly, but each chunk arrives as a whole file with
+    // its own ID3v2 header (and maybe an ID3v1 trailer). Left in, those sit
+    // mid-stream: decoders report "Invalid data found" at every join (seen
+    // 2026-09-27 on Orpheus chunks) and stricter players may stop there. Keep
+    // the first header and the last trailer, strip the rest.
+    buffers = buffers.map((buf, i) => {
+      let start = 0;
+      let end = buf.length;
+      if (i > 0 && buf.length > 10 && buf.toString('latin1', 0, 3) === 'ID3') {
+        const size = ((buf[6] & 0x7f) << 21) | ((buf[7] & 0x7f) << 14) | ((buf[8] & 0x7f) << 7) | (buf[9] & 0x7f);
+        start = Math.min(buf.length, 10 + size + ((buf[5] & 0x10) ? 10 : 0));
+      }
+      if (i < buffers.length - 1 && end - start > 128 && buf.toString('latin1', end - 128, end - 125) === 'TAG') {
+        end -= 128;
+      }
+      return buf.subarray(start, end);
+    });
+
     const totalLength = buffers.reduce((sum, buffer) => sum + buffer.length, 0);
     const result = Buffer.alloc(totalLength);
     

@@ -401,7 +401,8 @@
                                     <label for="imagegen-provider">Provider</label>
                                     <select id="imagegen-provider" class="form-control">
                                         <option value="openai">OpenAI (DALL-E / GPT-Image)</option>
-                                        <option value="huggingface">HuggingFace (FLUX)</option>
+                                        <option value="huggingface">HuggingFace (any Hub model)</option>
+                                        <option value="openrouter">OpenRouter (any image model)</option>
                                     </select>
                                 </div>
                             </div>
@@ -439,16 +440,60 @@
                                 <div class="form-row">
                                     <div class="form-group">
                                         <label for="imagegen-hf-model">Model</label>
-                                        <select id="imagegen-hf-model" class="form-control">
+                                        <input type="text" id="imagegen-hf-model" class="form-control" list="imagegen-hf-models" placeholder="org/model" value="black-forest-labs/FLUX.1-schnell">
+                                        <datalist id="imagegen-hf-models">
                                             <option value="black-forest-labs/FLUX.1-schnell">FLUX.1 Schnell (Fast)</option>
                                             <option value="black-forest-labs/FLUX.1-dev">FLUX.1 Dev</option>
                                             <option value="stabilityai/stable-diffusion-3-medium">Stable Diffusion 3 Medium</option>
                                             <option value="stabilityai/stable-diffusion-xl-base-1.0">SDXL 1.0</option>
-                                        </select>
+                                        </datalist>
+                                        <p class="help-text">Pick a suggestion or type any HuggingFace model with a live inference provider.</p>
                                     </div>
                                     <div class="form-group">
                                         <label for="imagegen-hf-steps">Inference Steps</label>
                                         <input type="number" id="imagegen-hf-steps" class="form-control" value="5" min="1" max="50">
+                                    </div>
+                                </div>
+                            </div>
+                            <div id="imagegen-openrouter-options" class="provider-options" style="display:none;">
+                                <div class="form-row">
+                                    <div class="form-group">
+                                        <label for="imagegen-or-model">Model</label>
+                                        <input type="text" id="imagegen-or-model" class="form-control" list="imagegen-or-models" placeholder="org/model" value="google/gemini-3.1-flash-image">
+                                        <datalist id="imagegen-or-models"></datalist>
+                                        <p class="help-text">Every image model OpenRouter currently routes (live list).</p>
+                                    </div>
+                                    <div class="form-group">
+                                        <label for="imagegen-or-aspect">Aspect Ratio</label>
+                                        <select id="imagegen-or-aspect" class="form-control">
+                                            <option value="1:1">1:1 (Square)</option>
+                                            <option value="16:9">16:9 (Landscape)</option>
+                                            <option value="9:16">9:16 (Portrait)</option>
+                                            <option value="4:3">4:3</option>
+                                            <option value="3:4">3:4</option>
+                                            <option value="3:2">3:2</option>
+                                            <option value="2:3">2:3</option>
+                                            <option value="auto">Auto</option>
+                                        </select>
+                                    </div>
+                                    <div class="form-group">
+                                        <label for="imagegen-or-resolution">Resolution</label>
+                                        <select id="imagegen-or-resolution" class="form-control">
+                                            <option value="">Model default</option>
+                                            <option value="512">512</option>
+                                            <option value="1K">1K</option>
+                                            <option value="2K">2K</option>
+                                            <option value="4K">4K</option>
+                                        </select>
+                                    </div>
+                                    <div class="form-group">
+                                        <label for="imagegen-or-quality">Quality</label>
+                                        <select id="imagegen-or-quality" class="form-control">
+                                            <option value="auto">Auto</option>
+                                            <option value="high">High</option>
+                                            <option value="medium">Medium</option>
+                                            <option value="low">Low</option>
+                                        </select>
                                     </div>
                                 </div>
                             </div>
@@ -495,7 +540,8 @@
                                     <select id="videogen-provider" class="form-control">
                                         <option value="modelslab">ModelsLab (Wan, no moderation)</option>
                                         <option value="openai">OpenAI (Sora)</option>
-                                        <option value="huggingface">HuggingFace (Wan)</option>
+                                        <option value="huggingface">HuggingFace (any Hub model)</option>
+                                        <option value="openrouter">OpenRouter (Veo, Kling, Wan, Seedance, ...)</option>
                                     </select>
                                 </div>
                             </div>
@@ -581,9 +627,47 @@
                                 <div class="form-row">
                                     <div class="form-group">
                                         <label for="videogen-hf-model">Model</label>
-                                        <select id="videogen-hf-model" class="form-control">
+                                        <input type="text" id="videogen-hf-model" class="form-control" list="videogen-hf-models" placeholder="org/model" value="Wan-AI/Wan2.1-T2V-14B">
+                                        <datalist id="videogen-hf-models">
                                             <option value="Wan-AI/Wan2.1-T2V-14B">Wan 2.1 T2V 14B</option>
+                                        </datalist>
+                                        <p class="help-text">Pick a suggestion or type any HuggingFace text-to-video model.</p>
+                                    </div>
+                                </div>
+                            </div>
+                            <div id="videogen-openrouter-options" class="provider-options" style="display:none;">
+                                <div class="form-row">
+                                    <div class="form-group">
+                                        <label for="videogen-or-model">Model</label>
+                                        <input type="text" id="videogen-or-model" class="form-control" list="videogen-or-models" placeholder="org/model" value="alibaba/wan-2.7">
+                                        <datalist id="videogen-or-models"></datalist>
+                                        <p class="help-text" id="videogen-or-model-help">Every video model OpenRouter currently routes (live list).</p>
+                                    </div>
+                                    <div class="form-group">
+                                        <label for="videogen-or-duration">Duration</label>
+                                        <select id="videogen-or-duration" class="form-control">
+                                            <option value="5" selected>5 seconds</option>
                                         </select>
+                                    </div>
+                                </div>
+                                <div class="form-row">
+                                    <div class="form-group">
+                                        <label for="videogen-or-resolution">Resolution</label>
+                                        <select id="videogen-or-resolution" class="form-control">
+                                            <option value="720p" selected>720p</option>
+                                        </select>
+                                    </div>
+                                    <div class="form-group">
+                                        <label for="videogen-or-aspect">Aspect Ratio</label>
+                                        <select id="videogen-or-aspect" class="form-control">
+                                            <option value="16:9" selected>16:9</option>
+                                        </select>
+                                    </div>
+                                    <div class="form-group">
+                                        <label for="videogen-or-audio">
+                                            <input type="checkbox" id="videogen-or-audio" checked>
+                                            Generate audio (when the model supports it)
+                                        </label>
                                     </div>
                                 </div>
                             </div>
@@ -6069,6 +6153,22 @@
                                         <input type="text" id="kp-create-tags" class="form-input" placeholder="e.g., tcp, routing, dns">
                                     </div>
                                     <div class="form-group">
+                                        <label for="kp-create-skills">Skills to include (comma-separated names)</label>
+                                        <input type="text" id="kp-create-skills" class="form-input" placeholder="e.g., rotate-vpn-exit, nightly-backup">
+                                        <p class="setting-description">Procedures this agent follows. Sent sanitized; the receiving agent uses them at once only if you are trusted there.</p>
+                                    </div>
+                                    <div class="form-group">
+                                        <label for="kp-create-price">Price in SKYNET (0 = free)</label>
+                                        <input type="number" id="kp-create-price" class="form-input" min="0" step="1" placeholder="0">
+                                        <p class="setting-description">A priced pack is sent only after the buyer's SKYNET payment is verified on-chain.</p>
+                                    </div>
+                                    <div class="form-group">
+                                        <label for="kp-create-include-memories">
+                                            <input type="checkbox" id="kp-create-include-memories" checked>
+                                            <span>Include memories</span>
+                                        </label>
+                                    </div>
+                                    <div class="form-group">
                                         <label>Memory Filter</label>
                                         <div class="form-group" style="margin-top:0.5rem;">
                                             <label for="kp-create-filter-type">Type</label>
@@ -6375,6 +6475,21 @@
                                                 <span>Auto-install from trusted peers</span>
                                             </label>
                                             <p class="setting-description">Automatically install plugins from peers marked as "trusted" without manual approval.</p>
+                                        </div>
+                                    </div>
+                                    <div class="settings-group">
+                                        <h4>Skill Sharing</h4>
+                                        <div class="form-group">
+                                            <label for="p2p-setting-skill-share">
+                                                <input type="checkbox" id="p2p-setting-skill-share" checked>
+                                                <span>Teach and learn skills with trusted agents</span>
+                                            </label>
+                                            <p class="setting-description">Skills this agent learns are taught to trusted peers, and theirs are learned here, so each skill is learned once across the network. Shared text is sanitized (IPs, paths, emails, keys removed). Skills from untrusted peers wait for your approval. <span id="p2p-setting-skill-share-env" class="text-warning"></span></p>
+                                        </div>
+                                        <div class="form-group">
+                                            <label for="p2p-setting-skill-min-score">Trust score to use a peer's skills without approval</label>
+                                            <input type="number" id="p2p-setting-skill-min-score" class="form-input" min="0" max="100" step="1" placeholder="50">
+                                            <p class="setting-description">The genesis agent and peers you mark trusted always qualify. For others, the score counts proven stake, identity, time on the network and activity (0-100).</p>
                                         </div>
                                     </div>
                                     <div class="settings-group">
@@ -7160,12 +7275,22 @@
                                     </button>
                                 </div>
 
+                                <div class="form-group voice-presets-group">
+                                    <label>Saved Voices:</label>
+                                    <div id="voice-presets" class="voice-presets"><span class="help-text">Loading…</span></div>
+                                    <button type="button" id="btn-save-voice-preset" class="btn btn-sm btn-outline">
+                                        <i class="fas fa-star"></i> Save current voice as preset
+                                    </button>
+                                    <p class="help-text">One click switches the agent's voice. You can also say "switch to the Ara voice" in chat or Telegram.</p>
+                                </div>
+
                                 <div class="form-row">
                                     <div class="form-group">
                                         <label for="voice-provider">TTS Provider:</label>
                                         <select id="voice-provider" class="form-control">
                                             <option value="openai">OpenAI</option>
                                             <option value="huggingface">HuggingFace</option>
+                                            <option value="openrouter">OpenRouter</option>
                                         </select>
                                     </div>
 
@@ -7189,6 +7314,24 @@
                                             <option value="wav">WAV</option>
                                             <option value="pcm">PCM</option>
                                         </select>
+                                    </div>
+                                </div>
+
+                                <div class="form-row">
+                                    <div class="form-group">
+                                        <label for="stt-provider">Speech-to-Text Provider:</label>
+                                        <select id="stt-provider" class="form-control">
+                                            <option value="auto">Auto (built-in order, follows the provider lock)</option>
+                                            <option value="openai">OpenAI</option>
+                                            <option value="huggingface">HuggingFace</option>
+                                            <option value="openrouter">OpenRouter</option>
+                                        </select>
+                                        <p class="help-text">Used for voice notes, the web microphone and paid transcription. A named provider goes first; the others stay as fallbacks.</p>
+                                    </div>
+                                    <div class="form-group">
+                                        <label for="stt-model">Speech-to-Text Model:</label>
+                                        <input type="text" id="stt-model" class="form-control" list="stt-models" placeholder="Provider default">
+                                        <datalist id="stt-models"></datalist>
                                     </div>
                                 </div>
 

@@ -632,14 +632,61 @@ export class ProviderManager extends EventEmitter {
     throw new Error("No provider available for embedding generation");
   }
 
-  async transcribeAudio(audioBuffer) {
-    const audioProviders = ["openai", "huggingface"];
-    
-    for (const providerName of await this.allowedProviders(audioProviders, 'transcription')) {
+  /**
+   * The speech-to-text choice saved in Voice settings (agent.voice.transcription),
+   * cached briefly because every voice note and paid transcription reads it.
+   */
+  async getTranscriptionPreference() {
+    const now = Date.now();
+    if (this._sttPref && now - this._sttPrefAt < 60000) return this._sttPref;
+    let pref = { provider: 'auto', model: '' };
+    try {
+      // Before Mongo connects (boot, unit tests) a query would sit in Mongoose's
+      // buffer for 10s on every transcription; use auto and do not cache it.
+      const mongoose = (await import('mongoose')).default;
+      if (mongoose.connection.readyState !== 1) return pref;
+      const { Agent } = await import('../models/Agent.js');
+      const doc = await Agent.findOne(
+        { name: process.env.AGENT_NAME || 'LANAgent' },
+        { 'voice.transcription': 1 }
+      ).lean();
+      pref = {
+        provider: doc?.voice?.transcription?.provider || 'auto',
+        model: doc?.voice?.transcription?.model || ''
+      };
+    } catch (error) {
+      logger.debug(`Transcription preference unavailable, using auto: ${error.message}`);
+    }
+    this._sttPref = pref;
+    this._sttPrefAt = now;
+    return pref;
+  }
+
+  invalidateTranscriptionPreference() {
+    this._sttPref = null;
+  }
+
+  async transcribeAudio(audioBuffer, options = {}) {
+    const audioProviders = ["openai", "openrouter", "huggingface"];
+    const pref = await this.getTranscriptionPreference();
+    const preferred = options.provider || (pref.provider !== 'auto' ? pref.provider : null);
+
+    // An explicit provider choice is the operator's decision about this one
+    // capability, so it goes first and the others remain as fallbacks. The
+    // provider lock governs only the automatic order.
+    const order = preferred && audioProviders.includes(preferred)
+      ? [preferred, ...audioProviders.filter(p => p !== preferred)]
+      : await this.allowedProviders(audioProviders, 'transcription');
+
+    for (const providerName of order) {
       const provider = this.providers.get(providerName);
       if (provider) {
+        const model = providerName === preferred ? (options.model || pref.model || '') : '';
         try {
-          const transcription = await retryOperation(() => provider.transcribeAudio(audioBuffer), { retries: 3 });
+          const transcription = await retryOperation(
+            () => provider.transcribeAudio(audioBuffer, model ? { model } : {}),
+            { retries: 3 }
+          );
           if (transcription) return transcription;
         } catch (error) {
           logger.warn(`Audio transcription failed with ${providerName}:`, error);
@@ -651,7 +698,7 @@ export class ProviderManager extends EventEmitter {
   }
 
   async generateSpeech(text, options = {}) {
-    const ttsProviders = ["openai", "huggingface"];
+    const ttsProviders = ["openai", "openrouter", "huggingface"];
     
     for (const providerName of await this.allowedProviders(ttsProviders, 'speech')) {
       const provider = this.providers.get(providerName);

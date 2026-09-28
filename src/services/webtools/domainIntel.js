@@ -145,3 +145,122 @@ export async function report(domainIn) {
   const [reg, dns, subs, cert] = await Promise.all([settle(registration(domain)), settle(dnsRecords(domain)), settle(subdomains(domain)), settle(certificate(domain))]);
   return { domain, registration: reg, dns, subdomains: subs, certificate: cert };
 }
+
+/**
+ * Derive a deterministic security posture from an existing report.
+ *
+ * A report object may be supplied directly to avoid any additional third-party
+ * calls. When a domain is supplied, this function obtains one report and only
+ * evaluates the collected data.
+ */
+export async function securityPosture(domainIn, options = {}) {
+  const supplied = domainIn && typeof domainIn === 'object' ? domainIn : null;
+  const data = supplied || await report(domainIn);
+  const domain = normaliseDomain(data.domain || domainIn);
+  const includeEvidence = options?.includeEvidence === true;
+  const findings = [];
+  const evidence = [];
+  let score = 100;
+
+  const addFinding = (id, title, severity, deduction, recommendation, value) => {
+    score -= deduction;
+    findings.push({ id, title, severity, recommendation });
+    if (includeEvidence) evidence.push({ id, value });
+  };
+
+  const cert = data.certificate && !data.certificate.error ? data.certificate : null;
+  if (!cert) {
+    addFinding('certificate-unavailable', 'HTTPS certificate could not be assessed', 'critical', 25, 'Serve the domain over HTTPS with a publicly trusted certificate.', data.certificate?.error || null);
+  } else {
+    const daysLeft = Number(cert.daysLeft);
+    if (cert.trusted !== true) {
+      addFinding('certificate-untrusted', 'The HTTPS certificate is not trusted by the TLS client', 'high', 15, 'Replace the certificate or correct the certificate chain and trust configuration.', { trusted: cert.trusted, trustError: cert.trustError || null });
+    } else if (includeEvidence) {
+      evidence.push({ id: 'certificate-trust', value: { trusted: true, issuer: cert.issuer || null } });
+    }
+    if (!Number.isFinite(daysLeft) || daysLeft < 0) {
+      addFinding('certificate-expired', 'The HTTPS certificate is expired or has no usable expiry information', 'critical', 20, 'Renew the certificate immediately and automate renewal before expiry.', { daysLeft: cert.daysLeft ?? null, validTo: cert.validTo || null });
+    } else if (daysLeft <= 30) {
+      addFinding('certificate-near-expiry', 'The HTTPS certificate expires within 30 days', 'high', 10, 'Renew the certificate and configure expiry monitoring.', { daysLeft, validTo: cert.validTo || null });
+    } else if (includeEvidence) {
+      // No "within 90 days" tier: Let's Encrypt and Cloudflare issue 90-day
+      // certificates (and lifetimes are shrinking), so it flagged every
+      // well-run site. Under 30 days is the signal that renewal is failing.
+      evidence.push({ id: 'certificate-lifetime', value: { daysLeft, validFrom: cert.validFrom || null, validTo: cert.validTo || null } });
+    }
+  }
+
+  const dns = data.dns && !data.dns.error ? data.dns : null;
+  const records = dns?.records || {};
+  const email = dns?.email || {};
+  const txt = Array.isArray(records.TXT) ? records.TXT : [];
+  const spf = email.spf || txt.find(value => /^v=spf1\b/i.test(String(value))) || null;
+  if (!spf) {
+    addFinding('spf-missing', 'No SPF policy was observed', 'high', 12, 'Publish an SPF TXT record listing authorized mail senders and keep it within DNS lookup limits.', null);
+  } else if (includeEvidence) {
+    evidence.push({ id: 'spf', value: spf });
+  }
+
+  const dmarc = email.dmarc || null;
+  const policy = dmarc?.match(/(?:^|;)\s*p\s*=\s*([^;]+)/i)?.[1]?.trim().toLowerCase() || null;
+  if (!dmarc) {
+    addFinding('dmarc-missing', 'No DMARC policy was observed', 'high', 15, 'Publish a DMARC record at _dmarc with reporting and an enforcement policy.', null);
+  } else if (policy === 'none') {
+    addFinding('dmarc-monitoring-only', 'DMARC is present but has no enforcement policy', 'medium', 10, 'Move DMARC from p=none to p=quarantine or p=reject after reviewing aggregate reports.', { record: dmarc, policy });
+  } else if (policy === 'quarantine') {
+    addFinding('dmarc-quarantine', 'DMARC provides partial enforcement only', 'low', 4, 'Use p=reject when legitimate sending sources have been validated.', { record: dmarc, policy });
+  } else if (policy !== 'reject') {
+    addFinding('dmarc-policy-invalid', 'DMARC is present without a recognized enforcement policy', 'medium', 10, 'Set an explicit DMARC policy of quarantine or reject.', { record: dmarc, policy });
+  } else if (includeEvidence) {
+    evidence.push({ id: 'dmarc', value: { record: dmarc, policy } });
+  }
+
+  const caa = Array.isArray(records.CAA) ? records.CAA.filter(value => !/^\(lookup failed:/i.test(String(value))) : [];
+  if (!caa.length) {
+    addFinding('caa-missing', 'No CAA record was observed', 'medium', 8, 'Publish CAA records restricting which certificate authorities may issue for the domain.', null);
+  } else if (includeEvidence) {
+    evidence.push({ id: 'caa', value: caa });
+  }
+
+  const registrationData = data.registration && !data.registration.error ? data.registration : null;
+  if (registrationData?.dnssec !== true) {
+    addFinding('dnssec-not-confirmed', registrationData?.dnssec === false ? 'RDAP reports that DNSSEC is not enabled' : 'DNSSEC status could not be confirmed from RDAP', 'medium', registrationData?.dnssec === false ? 10 : 6, 'Enable DNSSEC at the registrar and publish a valid DS record at the parent zone.', registrationData?.dnssec ?? null);
+  } else if (includeEvidence) {
+    evidence.push({ id: 'dnssec', value: true });
+  }
+
+  const wildcards = data.subdomains && !data.subdomains.error
+    ? [...new Set([...(data.subdomains.wildcards || []), ...(cert?.names || []).filter(name => String(name).startsWith('*.'))])].sort()
+    : [];
+  if (wildcards.length) {
+    addFinding('wildcard-certificates', 'Wildcard certificate names were observed in certificate data', 'medium', 5, 'Review wildcard coverage, restrict wildcard use to necessary zones, and isolate sensitive services onto explicit names.', wildcards);
+  } else if (includeEvidence) {
+    evidence.push({ id: 'wildcard-certificates', value: [] });
+  }
+
+  const lookupFailures = [];
+  for (const [type, values] of Object.entries(records)) {
+    if (Array.isArray(values) && values.some(value => /^\(lookup failed:/i.test(String(value)))) lookupFailures.push(type);
+  }
+  const hasAddress = ['A', 'AAAA', 'CNAME'].some(type => Array.isArray(records[type]) && records[type].length && !records[type].some(value => /^\(lookup failed:/i.test(String(value))));
+  if (!dns || lookupFailures.length || !hasAddress) {
+    addFinding('dns-data-inconsistent', 'DNS data is incomplete or contains failed lookups', 'high', 10, 'Correct DNS resolution failures and verify that the zone has an address or CNAME for the assessed domain.', {
+      lookupFailures: lookupFailures.sort(),
+      addressRecordObserved: hasAddress
+    });
+  } else if (includeEvidence) {
+    evidence.push({ id: 'dns-consistency', value: { lookupFailures: [], addressRecordObserved: true } });
+  }
+
+  score = Math.max(0, Math.min(100, score));
+  const severity = score >= 85 ? 'low' : score >= 70 ? 'moderate' : score >= 45 ? 'high' : 'critical';
+
+  return {
+    domain,
+    score,
+    severity,
+    findings,
+    evidence: includeEvidence ? evidence : [],
+    recommendations: [...new Set(findings.map(finding => finding.recommendation))]
+  };
+}

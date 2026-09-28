@@ -142,7 +142,10 @@ router.get('/api/peers', authenticateToken, async (req, res) => {
         erc8004: p.erc8004?.verified ? { agentId: p.erc8004.agentId, verified: true } : null,
         trustScore: p.trustScore || 0,
         skynetBalance: p.skynetBalance || 0,
-        skynetBalanceVerified: p.skynetBalanceVerified || false
+        skynetBalanceVerified: p.skynetBalanceVerified || false,
+        isGenesis: p.isGenesis === true,
+        walletVerified: p.walletVerified === true,
+        skynetStaked: p.walletVerified ? (p.skynetStakeEffective || 0) : 0
       }))
     });
   } catch (error) {
@@ -197,6 +200,11 @@ router.get('/api/peers/:fingerprint', authenticateToken, async (req, res) => {
       transferCount: peer?.transferCount || 0,
       skynetBalance: peer?.skynetBalance || 0,
       erc8004: peer?.erc8004 || null,
+      isGenesis: peer?.isGenesis === true,
+      wallet: peer ? { address: peer.provenWallet || peer.skynetWallet || null, verified: peer.walletVerified === true, error: peer.walletProofError || '' } : null,
+      skynetStaked: peer?.walletVerified ? (peer.skynetStakeEffective || 0) : 0,
+      trustScore: peer?.trustScore || 0,
+      trustScoreBreakdown: peer?.getTrustScoreBreakdown ? peer.getTrustScoreBreakdown() : null,
       capabilities
     });
   } catch (error) {
@@ -530,10 +538,15 @@ router.post('/api/knowledge-packs', authenticateToken, async (req, res) => {
     const p2p = getP2PService(req);
     if (!p2p) return res.status(503).json({ success: false, error: 'P2P not enabled' });
 
-    const { title, summary, topic, tags, version, query } = req.body;
+    const { title, summary, topic, tags, version, query, skillNames } = req.body;
     if (!title) return res.status(400).json({ success: false, error: 'Title is required' });
+    const price = req.body.price === undefined ? 0 : Number(req.body.price);
+    if (!Number.isFinite(price) || price < 0) return res.status(400).json({ success: false, error: 'Price must be a number of SKYNET, 0 or more' });
 
-    const pack = await p2p.createKnowledgePack({ title, summary, topic, tags, version, query });
+    const pack = await p2p.createKnowledgePack({
+      title, summary, topic, tags, version, query, price,
+      skillNames: Array.isArray(skillNames) ? skillNames : undefined
+    });
 
     res.json({
       success: true,
@@ -544,6 +557,8 @@ router.post('/api/knowledge-packs', authenticateToken, async (req, res) => {
         version: pack.version,
         topic: pack.topic,
         memoryCount: pack.manifest?.memoryCount || pack.memories?.length || 0,
+        skillCount: pack.manifest?.skillCount || pack.skills?.length || 0,
+        price: pack.price || 0,
         totalSize: pack.totalSize
       }
     });
@@ -705,6 +720,13 @@ router.get('/api/settings', authenticateToken, async (req, res) => {
       kpAutoImport: await SystemSettings.getSetting('knowledge_packs_auto_import', false),
       kpTopicWhitelist: await SystemSettings.getSetting('knowledge_packs_topic_whitelist', []),
     };
+    try {
+      const { getSkillSharing } = await import('../../services/skills/skillsService.js');
+      const sharing = await getSkillSharing();
+      settings.skillShare = sharing.enabled;
+      settings.skillShareSource = sharing.source;
+      settings.skillMinTrustScore = sharing.minTrustScore;
+    } catch { /* skills service unavailable */ }
 
     // Identity info
     const p2p = getP2PService(req);
@@ -727,7 +749,7 @@ router.get('/api/settings', authenticateToken, async (req, res) => {
 // Save P2P settings
 router.post('/api/settings', authenticateToken, async (req, res) => {
   try {
-    const { registryUrl, displayName, autoShare, autoInstallTrusted, kpAutoImport, kpTopicWhitelist } = req.body;
+    const { registryUrl, displayName, autoShare, autoInstallTrusted, kpAutoImport, kpTopicWhitelist, skillShare, skillMinTrustScore } = req.body;
 
     // Load existing settings to preserve identity data
     const existing = await PluginSettings.getCached(P2P_SETTINGS_PLUGIN, P2P_SETTINGS_KEY) || {};
@@ -748,6 +770,16 @@ router.post('/api/settings', authenticateToken, async (req, res) => {
     }
     if (Array.isArray(kpTopicWhitelist)) {
       await SystemSettings.setSetting('knowledge_packs_topic_whitelist', kpTopicWhitelist, 'Topic whitelist for auto-importing knowledge packs', 'p2p');
+    }
+
+    // Skill sharing between agents (skillsService: skills.p2pShare, skills.p2pMinTrustScore)
+    if (typeof skillShare === 'boolean' || skillMinTrustScore !== undefined) {
+      const { setSkillSharing } = await import('../../services/skills/skillsService.js');
+      const n = skillMinTrustScore === undefined || skillMinTrustScore === '' ? undefined : Number(skillMinTrustScore);
+      if (n !== undefined && (!Number.isFinite(n) || n < 0 || n > 100)) {
+        return res.status(400).json({ success: false, error: 'Skill trust score must be 0-100' });
+      }
+      await setSkillSharing({ enabled: typeof skillShare === 'boolean' ? skillShare : undefined, minTrustScore: n });
     }
 
     // Track if registry URL env change needs a restart

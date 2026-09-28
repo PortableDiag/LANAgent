@@ -1743,7 +1743,12 @@ export class TelegramDashboard extends TelegramInterface {
       const [, verb, name] = ctx.match;
       const { getSkillsService } = await import('../../services/skills/skillsService.js');
       const svc = getSkillsService();
-      const done = verb === 'ok' ? await svc.approve(name) : await svc.reject(name);
+      // Reject also removes an ACTIVE skill another agent taught (auto-approved, or taught by a
+      // trusted peer over P2P); a skill written locally is only ever deleted on request.
+      const skill = await svc.get(name);
+      const done = verb === 'ok'
+        ? await svc.approve(name)
+        : (skill?.meta?.source === 'peer' ? await svc.remove(name) : await svc.reject(name));
       await ctx.editMessageReplyMarkup(undefined).catch(() => {});
       await ctx.reply(done
         ? (verb === 'ok' ? `✅ Approved skill "${name}".` : `🗑 Rejected skill "${name}".`)
@@ -1760,6 +1765,17 @@ export class TelegramDashboard extends TelegramInterface {
       await ctx.reply(on
         ? `⚙️ Auto-approve is ON: skills other agents teach are used at once (you'll still be told, with a Reject button).${approved.length ? ` Approved the ${approved.length} pending: ${approved.join(', ')}.` : ''}${state.source === 'env' ? ' Note: SKILLS_AUTO_APPROVE in .env overrides this.' : ''}`
         : `⏸ Auto-approve is OFF: new skills from other agents wait for your approval.${state.source === 'env' ? ' Note: SKILLS_AUTO_APPROVE in .env overrides this.' : ''}`);
+    });
+    this.bot.action(/^skill_p2p_(on|off)$/, async (ctx) => {
+      ctx.answerCbQuery().catch(() => {});
+      if (!ctx.isMaster) return;
+      const on = ctx.match[1] === 'on';
+      const { setSkillSharing } = await import('../../services/skills/skillsService.js');
+      const state = await setSkillSharing({ enabled: on });
+      await ctx.editMessageReplyMarkup(undefined).catch(() => {});
+      await ctx.reply(on
+        ? '🔗 Skill sharing is ON: I teach and learn skills with trusted agents on the Skynet network.'
+        : `⏸ Skill sharing is OFF: I no longer teach or learn skills over the Skynet network.${state.source === 'env' ? ' Note: SKILLS_P2P_SHARE in .env overrides this.' : ''}`);
     });
     this.bot.action('skill_ok_all', async (ctx) => {
       ctx.answerCbQuery().catch(() => {});

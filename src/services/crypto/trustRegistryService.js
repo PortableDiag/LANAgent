@@ -290,7 +290,22 @@ class TrustRegistryService {
     /**
      * Auto-trust a P2P fork (Full trust, universal scope)
      */
-    async autoTrustFork(forkENS) {
+    /**
+     * Attest Full trust for a fork on-chain. A peer only ANNOUNCES its ENS name, so the name
+     * must resolve to the wallet the peer proved it controls (peerIdentity.js); otherwise any
+     * peer could claim `x.lanagent.eth` and have us pay gas to trust it. Skipped when the
+     * attestation already exists, so a reconnect does not send another transaction.
+     */
+    async autoTrustFork(forkENS, provenWallet) {
+        if (!provenWallet) throw new Error('peer has not proven a wallet');
+        const ethProvider = await contractServiceWrapper.getProvider('ethereum');
+        const resolved = await ethProvider.resolveName(forkENS);
+        if (!resolved || resolved.toLowerCase() !== String(provenWallet).toLowerCase()) {
+            throw new Error(`${forkENS} does not resolve to the peer's proven wallet`);
+        }
+        if ((await this.getTrustLevel(forkENS)) === 'Full') {
+            return { alreadyTrusted: true };
+        }
         logger.info(`Auto-trusting P2P fork: ${forkENS}`);
         const result = await this.setTrust(forkENS, 'Full', 'universal', 0);
 

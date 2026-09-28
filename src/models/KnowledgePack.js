@@ -76,6 +76,18 @@ const knowledgePackSchema = new mongoose.Schema({
     }
   }],
 
+  // Skills (SKILL.md procedures) carried by the pack. Installed through
+  // skillsService.installPeerSkill: active when the operator approved the pack or the sender
+  // is trusted, pending otherwise. Cleared after import like memories.
+  skills: [{
+    name: { type: String, required: true },
+    description: { type: String, required: true },
+    body: { type: String, required: true },
+    sha256: { type: String, required: true },
+    origin: { type: String, default: '' },
+    originName: { type: String, default: '' }
+  }],
+
   // Transfer tracking
   direction: {
     type: String,
@@ -109,6 +121,12 @@ const knowledgePackSchema = new mongoose.Schema({
 
   // Import results
   importResults: {
+    skills: {
+      total: { type: Number, default: 0 },
+      active: { type: Number, default: 0 },
+      pending: { type: Number, default: 0 },
+      skipped: { type: Number, default: 0 }
+    },
     total: { type: Number, default: 0 },
     imported: { type: Number, default: 0 },
     duplicates: { type: Number, default: 0 },

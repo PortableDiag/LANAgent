@@ -8,6 +8,21 @@ import { sanitizePluginSource, sanitizeManifest, validateSanitization } from './
 import { P2PTransfer } from '../../models/P2PTransfer.js';
 
 const CHUNK_SIZE = 65536; // 64KB per chunk
+
+/**
+ * The P2P settings panel (web UI → P2P → Settings) saves these under PluginSettings
+ * p2p-federation/settings. Until 2026-09-27 nothing read them: unticking "Auto-install from
+ * trusted peers" did not stop plugin code auto-installing.
+ */
+async function p2pSetting(key, fallback) {
+  try {
+    const { PluginSettings } = await import('../../models/PluginSettings.js');
+    const saved = await PluginSettings.getCached('p2p-federation', 'settings');
+    return saved?.[key] !== undefined ? saved[key] : fallback;
+  } catch {
+    return fallback;
+  }
+}
 const PLUGINS_DIR = path.resolve('src/api/plugins');
 
 /**
@@ -59,6 +74,7 @@ class PluginSharing {
    */
   async getShareablePluginList() {
     const plugins = [];
+    if ((await p2pSetting('autoShare', true)) === false) return plugins;
 
     try {
       const apiManager = this.agent?.services?.get('apiManager');
@@ -101,6 +117,10 @@ class PluginSharing {
    */
   async handlePluginRequest(peerFingerprint, pluginName, version, sendFn) {
     try {
+      if ((await p2pSetting('autoShare', true)) === false) {
+        logger.info(`P2P plugin request for ${pluginName} from ${peerFingerprint.slice(0, 8)}... refused: plugin sharing is off`);
+        return;
+      }
       const apiManager = this.agent?.services?.get('apiManager');
       const api = apiManager?.apis?.get(pluginName);
 
@@ -309,9 +329,11 @@ class PluginSharing {
       incoming.transfer.signatureVerified = signatureVerified;
       incoming.transfer.assembledSource = assembled.toString('utf8');
 
-      // Check trust level for auto-install
+      // Check trust level for auto-install. Plugins are executable code, so this needs the
+      // operator's explicit trust (not genesis-by-default or a trust score, which suffice for
+      // skills) and the "Auto-install from trusted peers" setting.
       const peer = await peerManager.getPeer(peerFingerprint);
-      if (peer?.trustLevel === 'trusted') {
+      if (peer?.trustLevel === 'trusted' && (await p2pSetting('autoInstallTrusted', true)) !== false) {
         incoming.transfer.status = 'approved';
         await incoming.transfer.save();
         await this._installPlugin(incoming.transfer);

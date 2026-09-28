@@ -522,12 +522,10 @@ class EmailLeaseService {
       const { peerManager } = await import('../p2p/peerManager.js');
       const peers = await peerManager.getAllPeers();
 
-      for (const peer of peers) {
-        if (peer.capabilities?.some(c => c.name === 'email_provider')) {
-          return peer;
-        }
-      }
-      return null;
+      // Only the proven genesis agent provides leases; an announced capability is not proof
+      // (see p2p/peerIdentity.js), and lease responses from anyone else are ignored.
+      const genesis = peers.filter(p => p.isGenesis === true && p.capabilities?.some(c => c.name === 'email_provider'));
+      return genesis.find(p => p.isOnline) || genesis[0] || null;
     } catch {
       return null;
     }

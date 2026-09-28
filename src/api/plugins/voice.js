@@ -47,18 +47,26 @@ export default class VoicePlugin extends BasePlugin {
       },
       {
         command: 'create-profile',
-        description: 'Create a voice profile with custom settings',
-        usage: 'create-profile({ name: "myProfile", voice: "nova", speed: 1.0, pitch: 1.0 })'
+        description: 'Save the current voice (or given provider/model/voice) as a named voice preset',
+        usage: 'create-profile({ name: "Tara" })',
+        examples: ['save the current voice as a preset named Morning', 'create a voice preset called Tara']
       },
       {
         command: 'switch-profile',
-        description: 'Switch to a different voice profile',
-        usage: 'switch-profile({ name: "myProfile" })'
+        description: 'Switch your speaking voice to a saved voice preset by name',
+        usage: 'switch-profile({ name: "Ara" })',
+        examples: ['switch to the Ara voice', 'use the Tara voice', 'change your voice to Graceful Lady', 'switch voice to nova']
       },
       {
         command: 'list-profiles',
-        description: 'List all voice profiles',
-        usage: 'list-profiles()'
+        description: 'List saved voice presets and which one is active',
+        usage: 'list-profiles()',
+        examples: ['what voices do you have saved', 'which voice presets are there', 'show my saved voices', 'list voice presets']
+      },
+      {
+        command: 'delete-profile',
+        description: 'Delete a saved voice preset',
+        usage: 'delete-profile({ name: "Ara" })'
       },
       {
         command: 'telegram-voice',
@@ -66,7 +74,7 @@ export default class VoicePlugin extends BasePlugin {
         usage: 'telegram-voice({ enabled: true, autoConvert: true })'
       }
     ];
-    this.voiceProfiles = {}; // Store voice profiles in memory for simplicity
+    // Voice presets are persisted by TTSService in agent.voice.profiles
   }
 
   getCommands() {
@@ -134,6 +142,9 @@ export default class VoicePlugin extends BasePlugin {
         
       case 'list-profiles':
         return this.listVoiceProfiles();
+
+      case 'delete-profile':
+        return this.deleteVoiceProfile(params);
         
       case 'telegram-voice':
         return this.configureTelegramVoice(params);
@@ -216,6 +227,18 @@ export default class VoicePlugin extends BasePlugin {
         path: '/profile/switch',
         handler: this.switchVoiceProfile.bind(this),
         description: 'Switch to a different voice profile'
+      },
+      {
+        method: 'GET',
+        path: '/profiles',
+        handler: this.listVoiceProfiles.bind(this),
+        description: 'List saved voice presets and the active one'
+      },
+      {
+        method: 'POST',
+        path: '/profile/delete',
+        handler: this.deleteVoiceProfile.bind(this),
+        description: 'Delete a saved voice preset'
       },
       {
         method: 'GET',
@@ -603,48 +626,60 @@ export default class VoicePlugin extends BasePlugin {
    * @param {string} data.name - The name of the profile
    * @param {Object} [data.settings] - The settings for the profile
    */
-  async createOrUpdateVoiceProfile(data) {
+  async createOrUpdateVoiceProfile(data = {}) {
     try {
-      const { name, settings } = data;
-      if (!name) {
-        throw new Error('Profile name is required');
+      const { name, settings, ...rest } = data;
+      // No name means there is nothing to save. The usual cause is a question
+      // like "what voices do you have saved?" routed here by the word "saved",
+      // so answer it with the list instead of an error.
+      if (!name || !String(name).trim()) {
+        const list = await this.listVoiceProfiles();
+        if (list.success) {
+          list.message += '. To save the current voice, give it a name: "save the current voice as a preset named Morning".';
+        }
+        return list;
       }
-      this.voiceProfiles[name] = settings || {};
+      const fields = { ...(settings || {}), ...rest };
+      delete fields.action;
+      const profile = await this.agent.ttsService.saveVoiceProfile(name, fields);
       return {
         success: true,
-        message: `Voice profile '${name}' created/updated successfully`
+        message: `Voice preset '${profile.name}' saved (${profile.provider} ${profile.model}, voice ${profile.voice})`,
+        data: profile
       };
     } catch (error) {
-      logger.error('Error creating/updating voice profile:', error);
-      return {
-        success: false,
-        error: error.message
-      };
+      logger.error('Error saving voice preset:', error);
+      return { success: false, error: error.message };
     }
   }
 
   /**
-   * Switch to a different voice profile
-   * @param {Object} data - The data for switching profiles
-   * @param {string} data.name - The name of the profile to switch to
+   * Switch to a saved voice preset (case-insensitive; partial names match)
+   * @param {Object} data
+   * @param {string} data.name - preset name, e.g. "Ara"
    */
-  async switchVoiceProfile(data) {
+  async switchVoiceProfile(data = {}) {
     try {
-      const { name } = data;
-      if (!name || !this.voiceProfiles[name]) {
-        throw new Error('Profile not found');
-      }
-      await this.agent.ttsService.updateVoiceSettings(this.voiceProfiles[name]);
+      const query = data.name || data.profile || data.voice || data.query;
+      const profile = await this.agent.ttsService.switchVoiceProfile(query);
       return {
         success: true,
-        message: `Switched to voice profile '${name}'`
+        message: `Switched to the ${profile.name} voice (${profile.model}, ${profile.voice})`,
+        data: profile
       };
     } catch (error) {
-      logger.error('Error switching voice profile:', error);
-      return {
-        success: false,
-        error: error.message
-      };
+      logger.error('Error switching voice preset:', error);
+      return { success: false, error: error.message };
+    }
+  }
+
+  async deleteVoiceProfile(data = {}) {
+    try {
+      const profile = await this.agent.ttsService.deleteVoiceProfile(data.name);
+      return { success: true, message: `Deleted voice preset '${profile.name}'` };
+    } catch (error) {
+      logger.error('Error deleting voice preset:', error);
+      return { success: false, error: error.message };
     }
   }
 
@@ -656,27 +691,22 @@ export default class VoicePlugin extends BasePlugin {
   }
 
   /**
-   * List all available voice profiles
+   * List saved voice presets and the active one
    */
   async listVoiceProfiles() {
     try {
-      const profiles = Object.entries(this.voiceProfiles).map(([name, settings]) => ({
-        name,
-        settings
-      }));
+      const profiles = this.agent.ttsService.getVoiceProfiles();
+      const active = this.agent.ttsService.getActiveVoiceProfile();
       return {
         success: true,
-        data: {
-          profiles,
-          count: profiles.length
-        }
+        message: profiles.length
+          ? `Voice presets: ${profiles.map(p => p.name + (p.name === active ? ' (active)' : '')).join(', ')}`
+          : 'No voice presets saved yet',
+        data: { profiles, active, count: profiles.length }
       };
     } catch (error) {
-      logger.error('Error listing voice profiles:', error);
-      return {
-        success: false,
-        error: error.message
-      };
+      logger.error('Error listing voice presets:', error);
+      return { success: false, error: error.message };
     }
   }
 

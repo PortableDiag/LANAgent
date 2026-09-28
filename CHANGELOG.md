@@ -2,6 +2,93 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.401] - 2026-09-27
+
+### Added
+- **Agents teach each other skills over the Skynet network, on by default.** When an agent learns or saves a skill, it teaches it to its trusted peers, so the others do not have to learn it again. Agents also swap missing skills each time they connect.
+  - "Trusted" means the genesis agent, a peer you marked trusted, or a peer with a trust score of 50 or more (adjustable).
+  - Skills from anyone else wait for your approval.
+  - Shared text is sanitized first: IPs, paths, emails and key-shaped strings are removed.
+  - A skill you wrote is never overwritten, and a peer skill you delete is not taught back.
+  - You get one Telegram message per batch, with Reject and "turn off skill sharing" buttons.
+  - Turn it off in Web UI → P2P → Settings → Skill Sharing, with "turn off skill sharing", or with `SKILLS_P2P_SHARE=false`.
+- **Knowledge packs can carry skills**, and a pack can be skills only. The pack form takes skill names and a SKYNET price. A pack's skills are used at once when you approved the pack or the sender is trusted; otherwise they wait for approval.
+- **The trust score counts staked SKYNET.** Stake earns up to 25 points on a log scale: 10k SKYNET earns 0 and 10M earns 25. Held SKYNET now earns up to 5 (was 20), and a verified ERC-8004 identity 15.
+- **The genesis agent is trusted by default** on every agent. It is recognised as the peer whose proven wallet owns ERC-8004 agent #2930. The peer list shows a genesis badge, whether each peer's wallet is proven, and its stake.
+
+### Security
+- **Peers must prove their wallet.** A peer signs a wallet proof tied to its P2P identity before any balance, stake, Sentinel badge or ERC-8004 identity counts toward its reputation. Balances are read from our configured SKYNET contract, not one the peer names. An ERC-8004 identity counts only when the proven wallet owns it.
+- **Genesis-only messages are honoured only from the proven genesis agent.** These are email leases, ENS subnames, the welcome package and their payment requests. Automatic payment is further limited to SKYNET, paid to genesis's proven wallet, under `p2p.maxAutoPaySkynet` (default 1000); anything else waits for the operator.
+- **A peer introduction must present a key that hashes to the fingerprint it claims**, so one peer can no longer take over another's record.
+- **Auto-trusting a fork on-chain requires its ENS name to resolve to its proven wallet**, and is skipped when the fork is already trusted, so reconnects no longer send repeat transactions.
+- **Paid knowledge packs are released only for a verified on-chain payment.** Before, any value passed as the payment transaction released the pack.
+
+### Fixed
+- **Agents dropped every message from a peer that had restarted.** Replay protection compared bare sequence numbers, and a restarted agent counted from 1 again. Everything it sent was refused as a replay until the receiver restarted too; ALICE and DELTA exchanged nothing for a day this way. Messages are now ordered by their signed timestamp as well as their number, within a 10-minute window. The counter also starts from the clock, so older peers accept a restarted agent.
+- **Peers already online looked offline after a restart.** The registry reports only peers that arrive later, so an agent did not exchange capabilities with peers already connected until they reconnected. It now lists them on every registration.
+- **The "Auto-install from trusted peers" and "Allow peers to request my plugins" switches did nothing.** Plugins from trusted peers installed even with auto-install off, and plugin sharing could not be turned off. Both switches now work.
+- **Knowledge packs kept memories they said they were skipping.** A memory still holding a key after sanitizing was logged as skipped but packed anyway. It is now left out.
+- **The Telegram Reject button did nothing on auto-approved skills.** It now removes an active skill another agent taught.
+
+## [2.25.400] - 2026-09-27
+
+### Added
+- **Skills are learned from multi-step tasks.** A successful multi-step chain can now become a reusable skill, as reasoning runs already could. It is never awaited and never delays the reply. The log records each decision: learned, already covered by a skill, or too one-off to keep.
+
+### Fixed
+- **Multi-step answers were missing their results.** A completed chain replied "SUCCESS, 2/2" and step names, without the certificate, records or whatever was asked. Each step's output now leads the reply, with a one-line status at the end.
+- **The multi-step planner invented actions.** It saw a hardcoded list of about 12 plugins, mostly without action names, so it made up calls such as `network.port` and could not see the other ~90 plugins. It now gets every enabled plugin's real actions.
+- **Invented actions reached plugins.** The pre-execution action check looked in the wrong registry and never ran. An invalid action is now refused before execution.
+- **Voice clips had dead air at the seams.** Joined speech chunks now have their inner silence trimmed and a natural 0.25 s pause, re-encoded as one file.
+
+## [2.25.399] - 2026-09-27
+
+### Fixed
+- **Voice replies failed with the Tara voice.** OpenRouter's Orpheus model refuses input over about 300 characters, so every normal-length reply came back "Provider returned 400" and no audio was sent. Long replies are now split into chunks the model accepts (280 characters for Orpheus), three generated at a time, and joined in order. A model that refuses an unknown length gets a smaller learned limit and is retried.
+- **Speech lost the end of the text.** The splitter dropped a final line with no closing punctuation, and could not split a long run-on sentence.
+- **Joined voice clips had broken seams.** Each chunk kept its own MP3 header in the middle of the stream; the extra headers are now removed.
+
+## [2.25.398] - 2026-09-27
+
+### Added
+- **Domain security score.** The domain intelligence plugin rates a domain's public security from 0 to 100 and lists fixes. It checks certificate trust and expiry, SPF, DMARC policy, CAA, DNSSEC, wildcard certificates and DNS health. Ask "score the domain security of example.com". From the self-improvement PR queue, repaired.
+- **Recipes from ingredients.** The recipe plugin finds dishes you can make from a list of ingredients, typed as a list or as "chicken, rice and broccoli". Needs a Spoonacular API key.
+
+### Fixed
+- **P2P bounty claims could be accepted twice.** Two peers claiming the same bounty at once could both be told they had it, and expired bounties could still be claimed. Claims are now decided in one atomic update.
+- **Web UI changes blocked self-updates.** The hourly self-update load-tested the browser's `app.js` in Node, where it always fails, so any UI change aborted every update. Browser files now get a syntax check only.
+- **Self-updates logged a false "restart failed".** The restart ran inside the process it was restarting. It now runs detached.
+
+### Removed
+- An unused self-diagnostics service (the agent runs the enhanced one).
+
+## [2.25.397] - 2026-09-27
+
+### Added
+- **Voice presets.** Saved voices appear as one-click buttons on the Voice page ("Save current voice as preset" adds one; × deletes it). They are stored with the agent, so they survive restarts.
+  - Chat and Telegram can switch voices by name: "switch to the Ara voice", "use the Tara voice". "What voices do you have saved?" lists the presets.
+  - The voice plugin's profile actions (`create-profile`, `switch-profile`, `list-profiles`, and the new `delete-profile`) use the stored presets. Before this, they kept presets in memory and lost them on every restart.
+
+### Fixed
+- **Voice settings could not be saved.** The speech-to-text field added in v2.25.396 made every save fail validation. The page showed the new values, but a restart reverted them.
+
+## [2.25.396] - 2026-09-27
+
+### Added
+- **OpenRouter for media: image, video, speech and transcription.** OpenRouter was chat-only here. It can now serve all four, so one key covers what OpenAI's key was used for.
+  - **Image:** any model on OpenRouter's image API, with aspect ratio, resolution and quality.
+  - **Video:** any OpenRouter video model (Veo, Kling, Wan, Seedance and others). Jobs run asynchronously and are polled and delivered like Sora jobs.
+  - **Speech (TTS):** any OpenRouter speech model, with that model's own voices.
+  - **Transcription:** any OpenRouter speech-to-text model. Voice notes, the web microphone and paid transcription all use it.
+- **Live model lists in Settings.** Image, video, TTS and transcription models load from OpenRouter's and HuggingFace's catalogs instead of fixed shortlists. HuggingFace fields accept any Hub model with a live inference provider. `GET /api/media/catalog` serves the lists and caches them for 6 hours.
+- **Speech-to-text setting.** Voice settings now choose the transcription provider and model. Auto keeps the built-in order and the provider lock. A named provider goes first, and the others stay as fallbacks.
+- **OpenRouter video options follow the model.** The duration, resolution and aspect-ratio choices update to match the selected model.
+
+### Fixed
+- **Image settings took effect only after a restart.** Saving now reloads the image service, as the video route already did.
+- **Video job status assumed OpenAI.** The status route and the background poller now use the provider that started the job.
+- **Generated images were always labelled PNG.** The real media type (WebP, JPEG, SVG) is kept.
+
 ## [2.25.395] - 2026-09-27
 
 ### Added

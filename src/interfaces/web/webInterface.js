@@ -4401,6 +4401,27 @@ export class WebInterface {
     // ======= MEDIA GENERATION ENDPOINTS =======
 
     // Get media generation settings (image + video)
+    // Live model catalogs for the media settings: ?source=openrouter|huggingface
+    // &type=image|video|speech|transcription. OpenRouter speech models carry
+    // their voices. Cached server-side for 6h; an unreachable catalog is [].
+    this.app.get('/api/media/catalog', authenticateToken, async (req, res) => {
+      try {
+        const { getMediaModels, MEDIA_TYPES } = await import('../../services/media/mediaCatalog.js');
+        const { source, type } = req.query;
+        if (!['openrouter', 'huggingface'].includes(source) || !MEDIA_TYPES.includes(type)) {
+          return res.status(400).json({
+            success: false,
+            error: `source must be openrouter|huggingface and type one of ${MEDIA_TYPES.join('|')}`
+          });
+        }
+        const models = await getMediaModels(source, type);
+        res.json({ success: true, source, type, models });
+      } catch (error) {
+        logger.error('Media catalog error:', error);
+        res.status(500).json({ success: false, error: error.message });
+      }
+    });
+
     this.app.get('/api/media/settings', authenticateToken, async (req, res) => {
       try {
         const { Agent } = await import('../../models/Agent.js');
@@ -4443,6 +4464,15 @@ export class WebInterface {
 
         agent.mediaGeneration.image = req.body;
         await agent.save();
+
+        // The service caches settings from initialize(); without a reload a saved
+        // provider/model only took effect after a restart.
+        try {
+          const imageService = (await import('../../services/media/imageGenerationService.js')).default;
+          if (imageService.initialized) await imageService.loadSettings();
+        } catch (reloadErr) {
+          logger.warn('Failed to reload image service after settings update:', reloadErr.message);
+        }
 
         logger.info('Image generation settings updated');
         res.json({ success: true, message: 'Image generation settings saved' });
@@ -4517,9 +4547,10 @@ export class WebInterface {
         if (result.success && result.images?.length > 0) {
           // Return base64 encoded image for web display
           const base64 = result.images[0].buffer.toString('base64');
+          const mimeType = result.images[0].mimeType || 'image/png';
           res.json({
             success: true,
-            image: `data:image/png;base64,${base64}`,
+            image: `data:${mimeType};base64,${base64}`,
             model: result.model
           });
         } else {
@@ -4577,13 +4608,13 @@ export class WebInterface {
       try {
         const { jobId } = req.params;
         const videoService = (await import('../../services/media/videoGenerationService.js')).default;
-        const openaiProvider = this.agent.providerManager?.providers?.get('openai');
+        const { name: jobProvider, instance: jobProviderInstance } = videoService.getJobProvider(jobId);
 
-        if (!openaiProvider) {
-          return res.status(503).json({ success: false, error: 'OpenAI provider not available' });
+        if (!jobProviderInstance) {
+          return res.status(503).json({ success: false, error: `${jobProvider} provider not available` });
         }
 
-        const status = await openaiProvider.getVideoStatus(jobId);
+        const status = await jobProviderInstance.getVideoStatus(jobId);
         res.json(status);
       } catch (error) {
         logger.error('Video status API error:', error);

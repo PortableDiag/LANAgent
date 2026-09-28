@@ -222,6 +222,7 @@ class RegistryClient extends EventEmitter {
     switch (msg.type) {
       case 'registered':
         logger.info(`P2P Registry: registered, ${msg.peers_online} peers online`);
+        this.emit('registered', { peersOnline: msg.peers_online });
         break;
 
       case 'heartbeat_ack':

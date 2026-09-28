@@ -5461,6 +5461,11 @@ ${newCapsBlock}${reviewFlagsBlock}
         const abs = path.join(this.productionPath, rel);
         try {
           await execAsync(`node --check ${JSON.stringify(abs)}`, { timeout: 30000 });
+          // Browser assets (the web UI's app.js and friends) run in the browser,
+          // not in Node: importing them always fails ("window is not defined"),
+          // so every UI change aborted the whole deploy (2026-09-27, app.js:18910).
+          // For them the syntax check is the whole test.
+          if (rel.startsWith('src/interfaces/web/public/')) continue;
           await execAsync(
             `node --input-type=module -e ${JSON.stringify(`await import(${JSON.stringify(abs)})`)}`,
             { timeout: 60000, cwd: this.productionPath }
@@ -5551,8 +5556,14 @@ ${newCapsBlock}${reviewFlagsBlock}
       }
 
       try {
+        // Detached, like the watchdog: `pm2 restart` kills THIS process, so an
+        // awaited exec always "failed" (every self-deploy logged "restart
+        // failed" while the restart in fact succeeded). Only a spawn error, such
+        // as pm2 missing from PATH, is a real failure.
         setTimeout(() => {
-          execAsync(`pm2 restart ${proc}`).catch(err => logger.error(`Deploy: restart failed: ${err.message}`));
+          const restarter = spawn('pm2', ['restart', proc], { detached: true, stdio: 'ignore' });
+          restarter.on('error', err => logger.error(`Deploy: restart failed: ${err.message}`));
+          restarter.unref();
         }, 2000);
         logger.info(`Deploy: restarting ${proc} in 2s to load the new code`);
       } catch (error) {

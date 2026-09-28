@@ -58,6 +58,12 @@ export default class SkillsPlugin extends BasePlugin {
         examples: ['turn on auto approve skills', 'auto approve skills from other agents', 'turn off skill auto approval', 'stop auto approving skills', 'is skill auto approve on']
       },
       {
+        command: 'setSharing',
+        description: 'Turn skill sharing with other agents on the Skynet P2P network on or off (on by default), or set the trust score a peer needs for its skills to be used without approval',
+        usage: 'setSharing({ enabled: false })  or  setSharing({ minTrustScore: 60 })',
+        examples: ['turn off skill sharing', 'stop sharing skills with other agents', 'turn on skill sharing', 'is skill sharing on', 'set the skill sharing trust score to 60']
+      },
+      {
         command: 'reject',
         description: 'Reject (delete) a pending skill another agent taught',
         usage: 'reject({ name: "post-image-card" })',
@@ -93,7 +99,7 @@ export default class SkillsPlugin extends BasePlugin {
             success: true,
             count: skills.length,
             skills,
-            result: `${skills.length} skill(s):\n` + skills.map(s => `• ${s.name}${s.status === 'pending' ? ` (PENDING — taught by ${s.taughtBy || 'another agent'}; "approve skill ${s.name}" to use it)` : s.source === 'auto' ? ' (learned)' : ''}: ${s.description}`).join('\n')
+            result: `${skills.length} skill(s):\n` + skills.map(s => `• ${s.name}${s.status === 'pending' ? ` (PENDING — taught by ${s.taughtBy || 'another agent'}; "approve skill ${s.name}" to use it)` : s.source === 'auto' ? ' (learned)' : s.source === 'peer' ? ` (taught by ${s.taughtBy || 'another agent'})` : ''}: ${s.description}`).join('\n')
           };
         }
         case 'view': {
@@ -128,6 +134,26 @@ export default class SkillsPlugin extends BasePlugin {
           const approved = on ? await service.approveAll() : [];
           const envNote = state.source === 'env' ? ' Note: SKILLS_AUTO_APPROVE in .env overrides this setting.' : '';
           return { success: true, enabled: on, approved, result: `Skill auto-approval is now ${on ? 'ON — skills other agents teach are used at once; you are still told, with a Reject button' : 'OFF — new skills from other agents wait for your approval'}.${approved.length ? ` Approved the ${approved.length} already pending: ${approved.join(', ')}.` : ''}${envNote}` };
+        }
+        case 'setSharing': {
+          const { setSkillSharing, getSkillSharing } = await import('../../services/skills/skillsService.js');
+          const hasEnabled = data.enabled !== undefined && data.enabled !== null && data.enabled !== '';
+          const hasScore = data.minTrustScore !== undefined && data.minTrustScore !== null && data.minTrustScore !== '';
+          const state = (hasEnabled || hasScore)
+            ? await setSkillSharing({
+              enabled: hasEnabled ? (data.enabled === true || /^(true|on|yes|1|enable)/i.test(String(data.enabled))) : undefined,
+              minTrustScore: hasScore ? Number(data.minTrustScore) : undefined
+            })
+            : await getSkillSharing();
+          const envNote = state.source === 'env' ? ' (SKILLS_P2P_SHARE in .env sets this and overrides the switch)' : '';
+          return {
+            success: true,
+            enabled: state.enabled,
+            minTrustScore: state.minTrustScore,
+            result: state.enabled
+              ? `Skill sharing is ON${envNote}: I teach my skills to trusted agents on the Skynet network and use theirs. Trusted = the genesis agent, peers you mark trusted, or a trust score of ${state.minTrustScore}+; skills from anyone else wait for your approval.`
+              : `Skill sharing is OFF${envNote}: I neither teach nor learn skills over the Skynet network.`
+          };
         }
         case 'reject': {
           this.validateParams(data, { name: { required: true, type: 'string' } });

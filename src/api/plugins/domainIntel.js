@@ -1,6 +1,6 @@
 import { BasePlugin } from '../core/basePlugin.js';
 import { extractParams } from '../../services/webtools/extractParams.js';
-import { subdomains, dnsRecords, certificate, registration, report } from '../../services/webtools/domainIntel.js';
+import { subdomains, dnsRecords, certificate, registration, report, securityPosture } from '../../services/webtools/domainIntel.js';
 
 /** Passive domain intelligence from public records: subdomains, DNS, certificate, registration. */
 export default class DomainIntelPlugin extends BasePlugin {
@@ -19,7 +19,9 @@ export default class DomainIntelPlugin extends BasePlugin {
       { command: 'registration', description: 'Domain registration from RDAP: registrar, created and expiry dates, status, nameservers, DNSSEC',
         usage: 'registration({ domain: "example.com" })', examples: ['who is the registrar of example.com', 'when does this domain expire', 'is this domain registered'] },
       { command: 'report', description: 'Everything at once: registration, DNS, subdomains and certificate for a domain',
-        usage: 'report({ domain: "example.com" })', examples: ['give me a full report on example.com', 'investigate this domain', 'domain intel on this website'] }
+        usage: 'report({ domain: "example.com" })', examples: ['give me a full report on example.com', 'investigate this domain', 'domain intel on this website'] },
+      { command: 'securityPosture', description: 'Score a domain\'s public security posture (0-100): certificate trust and expiry, SPF, DMARC policy, CAA, DNSSEC, wildcard certificates, DNS health — with fixes',
+        usage: 'securityPosture({ domain: "example.com", includeEvidence: false })', examples: ['how secure is example.com', 'security posture of this domain', 'check the email and certificate security of lanagent.net', 'score the domain security of example.com'] }
     ];
   }
 
@@ -53,8 +55,13 @@ export default class DomainIntelPlugin extends BasePlugin {
           const cert = r.certificate.error ? `Certificate: ${r.certificate.error}` : `Certificate by ${r.certificate.issuer}, ${r.certificate.daysLeft} days left${r.certificate.trusted ? '' : ' (untrusted)'}`;
           return { success: true, ...r, result: `${r.domain}\n${reg}\n${dns}\n${cert}\n${subs}` };
         }
+        case 'securityPosture': {
+          const r = await securityPosture(domain, { includeEvidence: p.includeEvidence === true });
+          const lines = r.findings.map(f => `- [${f.severity}] ${f.title} → ${f.recommendation}`);
+          return { success: true, ...r, result: `${r.domain}: security score ${r.score}/100 (risk ${r.severity})\n${lines.join('\n') || 'No findings: every checked control is in place.'}` };
+        }
         default:
-          return { success: false, error: `Unknown action '${action}'. Use: subdomains, dns, certificate, registration, report` };
+          return { success: false, error: `Unknown action '${action}'. Use: subdomains, dns, certificate, registration, report, securityPosture` };
       }
     } catch (error) {
       this.logger.warn(`domainIntel ${action} failed: ${error.message}`);

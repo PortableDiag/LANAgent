@@ -524,15 +524,8 @@ class WelcomePackage {
         genesisPeer = await ensService.findGenesisENSProvider(null);
       } catch {}
 
-      if (!genesisPeer) {
-        // Fallback: find peer with email_provider capability
-        try {
-          const peers = await peerManager.getAllPeers();
-          genesisPeer = peers.find(p =>
-            p.isOnline && p.capabilities?.some(c => c.name === 'email_provider' || c.name === 'ens_provider')
-          );
-        } catch {}
-      }
+      // No capability-based fallback: an announced email_provider/ens_provider capability is
+      // not proof of being genesis (see p2p/peerIdentity.js).
 
       if (!genesisPeer) {
         logger.warn('Welcome package: no genesis peer found — will retry in 10 minutes');

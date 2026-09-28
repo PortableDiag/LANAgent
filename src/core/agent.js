@@ -37,7 +37,7 @@ import mqttService from '../services/mqtt/mqttService.js';
 import eventEngine from '../services/mqtt/eventEngine.js';
 import { ReActAgent, PlanExecuteAgent, ThoughtStore } from '../services/reasoning/index.js';
 import { ClarificationStore, resumePendingClarification, renderReasoningResult } from './clarifications.js';
-import { getSkillsService } from '../services/skills/skillsService.js';
+import { getSkillsService, learnSkillFromTask, chainToThoughts } from '../services/skills/skillsService.js';
 import { setGlobalAgent } from './agentAccessor.js';
 import { getServerHost } from '../utils/paths.js';
 import { exec } from 'child_process';
@@ -1079,6 +1079,18 @@ Respond conversationally — elaborate, clarify, or answer based on what was jus
             }
 
             const chainResult = await this.pluginChainProcessor.executeChain(complexAnalysis.steps, context);
+
+            // A successful chain can become a reusable skill, as ReAct runs already do.
+            // Best effort and not awaited: learning must never delay or break the reply.
+            if (chainResult.success) {
+              learnSkillFromTask({
+                providerManager: this.providerManager,
+                query: input,
+                thoughts: chainToThoughts(complexAnalysis.steps, chainResult.results),
+                answer: chainResult.summary,
+                minSteps: 2
+              }).catch(() => {});
+            }
 
             await this.memoryManager.storeConversation(
               context.userId,
@@ -7046,15 +7058,15 @@ Respond naturally as if you're telling someone about your recent improvements. D
     logger.info(`[video-poll] Starting background poll for job ${jobId}`);
     try {
       const videoService = (await import('../services/media/videoGenerationService.js')).default;
-      const openaiProvider = this.providerManager.providers.get('openai');
+      const { name: jobProvider, instance: jobProviderInstance } = videoService.getJobProvider(jobId);
 
-      if (!openaiProvider) {
-        logger.error('[video-poll] OpenAI provider not available for video polling');
+      if (!jobProviderInstance) {
+        logger.error(`[video-poll] ${jobProvider} provider not available for video polling`);
         return;
       }
 
-      logger.info(`[video-poll] Polling job ${jobId} with OpenAI provider...`);
-      const result = await videoService.pollJobStatus(jobId, openaiProvider);
+      logger.info(`[video-poll] Polling job ${jobId} with ${jobProvider} provider...`);
+      const result = await videoService.pollJobStatus(jobId, jobProviderInstance);
       logger.info(`[video-poll] Job ${jobId} poll result: success=${result.success}, hasBuffer=${!!result.video?.buffer}`);
 
       if (result.success && result.video?.buffer) {

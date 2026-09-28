@@ -35,14 +35,24 @@ class PeerManager {
    * @returns {Promise<P2PPeer>}
    */
   async getOrCreatePeer(fingerprint, signPublicKey, dhPublicKey) {
-    let peer = await P2PPeer.findByFingerprint(fingerprint);
-
     // Normalize keys to base64 strings for comparison (may arrive as Buffer or string)
     const signKeyStr = Buffer.isBuffer(signPublicKey) ? signPublicKey.toString('base64') : signPublicKey;
     const dhKeyStr = Buffer.isBuffer(dhPublicKey) ? dhPublicKey.toString('base64') : dhPublicKey;
 
+    // A fingerprint IS the hash of the signing key. The registry does not authenticate who
+    // registers a fingerprint, so an introduction whose key does not hash to the fingerprint
+    // it claims is someone else trying to take over that peer's record (and its trust).
+    const { cryptoManager } = await import('./cryptoManager.js');
+    if (cryptoManager.computeFingerprint(Buffer.from(String(signKeyStr), 'base64')) !== fingerprint) {
+      throw new Error(`P2P SECURITY: signing key does not match fingerprint ${String(fingerprint).slice(0, 8)}...`);
+    }
+
+    let peer = await P2PPeer.findByFingerprint(fingerprint);
+
     if (peer) {
       // TOFU: Check if signing public key changed (peer restarted with new identity)
+      // Unreachable for a different key since the fingerprint check above; kept for keys
+      // re-encoded differently (same bytes, different base64 padding).
       if (peer.signPublicKey !== signKeyStr) {
         logger.warn(`P2P signing key changed for ${fingerprint.slice(0, 8)}... — peer likely restarted. Re-keying.`);
         peer.signPublicKey = signKeyStr;
@@ -96,6 +106,7 @@ class PeerManager {
     if (!peer) throw new Error(`Unknown peer: ${fingerprint}`);
 
     peer.trustLevel = level;
+    peer.calculateTrustScore?.(); // manual trust is part of the score
     await peer.save();
 
     this.updatePeerGroup(peer);

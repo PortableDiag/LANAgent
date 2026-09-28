@@ -1,3 +1,5 @@
+import crypto from 'crypto';
+import { EventEmitter } from 'events';
 import fs from 'fs/promises';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -21,16 +23,25 @@ import { embeddingService } from '../embeddingService.js';
  * through the `skills` plugin, or drafted by the agent itself after a multi-step task
  * succeeds (SKILLS_AUTO_LEARN, on by default).
  *
- * A skill another AGENT teaches (learnSkillFromPeer) is saved with `status: pending` and is
- * not used until the operator approves it: a procedure from a peer is instructions from
- * outside, and a matched skill is put into the prompt of the operator's own requests.
+ * A skill another AGENT teaches in a Trellis channel (learnSkillFromPeer) is saved with
+ * `status: pending` and is not used until the operator approves it (or skills.autoApprovePeer
+ * is on): a procedure from a peer is instructions from outside, and a matched skill is put
+ * into the prompt of the operator's own requests.
+ *
+ * Over the Skynet P2P network agents teach each other directly (p2p/skillSharing.js, on by
+ * default, `skills.p2pShare`). installPeerSkill() is the one way such a skill is saved: active
+ * when the sender is trusted (peerSkillsTrusted), pending otherwise.
  */
+
+/** Emits 'activated' {name, source} whenever a skill becomes usable (p2p sharing listens). */
+export const skillEvents = new EventEmitter();
 
 export const SKILLS_DIR = process.env.SKILLS_PATH || path.join(DATA_PATH, 'skills');
 // Skills that ship with the code (repo `skills/`), read-only and always active. A skill of the
 // same name in SKILLS_DIR overrides the bundled one, so an operator can tailor any of them.
 export const BUNDLED_SKILLS_DIR = fileURLToPath(new URL('../../../skills/', import.meta.url));
 const NAME_RE = /^[a-z0-9]+(-[a-z0-9]+)*$/;
+const MAX_PENDING_PEER = 25;
 const MAX_BODY = 20000;
 const RESCAN_MS = 60 * 1000;
 
@@ -160,6 +171,7 @@ export class SkillsService {
     await fs.writeFile(skill.path, renderSkill({ name: skill.name, description: skill.description, body: skill.body, extra: { ...extra, status: 'active' } }), 'utf8');
     await this.scan(true);
     logger.info(`Skill approved: ${skill.name}`);
+    skillEvents.emit('activated', { name: skill.name, source: skill.meta?.source || 'manual' });
     return this.skills.get(skill.name);
   }
 
@@ -227,13 +239,35 @@ export class SkillsService {
     await fs.writeFile(file, renderSkill({ name: slug, description, body: String(body).substring(0, MAX_BODY), extra }), 'utf8');
     await this.scan(true);
     logger.info(`Skill saved: ${slug}${extra.source ? ` (${extra.source})` : ''}`);
-    return this.skills.get(slug);
+    const saved = this.skills.get(slug);
+    if (saved && (saved.meta?.status || 'active') === 'active') skillEvents.emit('activated', { name: slug, source: extra.source || 'manual' });
+    return saved;
+  }
+
+  /** Peer skills the operator rejected or deleted: {name, origin, at}. Never re-installed. */
+  async rejectedPeerSkills() {
+    try {
+      return JSON.parse(await fs.readFile(path.join(this.dir, '.p2p-rejected.json'), 'utf8'));
+    } catch {
+      return [];
+    }
+  }
+
+  async isPeerSkillRejected(name, origin = '') {
+    return (await this.rejectedPeerSkills()).some(r => r.name === name && (r.origin || '') === (origin || ''));
   }
 
   async remove(name) {
     const skill = await this.get(name);
     if (!skill) return false;
     if (skill.bundled) throw new Error(`"${name}" ships with LANAgent and cannot be deleted; save a skill of the same name to replace it`);
+    if (skill.meta?.source === 'peer') {
+      // Remember it, or the next P2P sync would teach it straight back
+      const list = (await this.rejectedPeerSkills()).filter(r => !(r.name === name && (r.origin || '') === (skill.meta.origin || '')));
+      list.push({ name, origin: skill.meta.origin || '', at: new Date().toISOString() });
+      await fs.mkdir(this.dir, { recursive: true });
+      await fs.writeFile(path.join(this.dir, '.p2p-rejected.json'), JSON.stringify(list.slice(-500), null, 2), 'utf8');
+    }
     await fs.rm(path.dirname(skill.path), { recursive: true, force: true });
     this.embeddings.delete(name);
     await this.scan(true);
@@ -255,12 +289,33 @@ export default getSkillsService;
  * (SKILLS_AUTO_LEARN=false), for short tasks, or when an existing skill already covers it.
  * Never throws: learning is best effort and must not affect the reply.
  */
+/**
+ * The plugin-chain path (agent.js → pluginChainProcessor.executeChain) records
+ * planned steps and per-step results instead of ReAct thoughts. Convert the
+ * steps that succeeded into the thought shape learnSkillFromTask reads, so
+ * multi-step chains can become skills too. Failed steps are left out: a skill
+ * should describe what worked.
+ */
+export function chainToThoughts(steps = [], results = []) {
+  return results
+    .map((r, i) => ({ r, step: steps[i] || {} }))
+    .filter(({ r }) => r && r.success)
+    .map(({ r, step }) => ({
+      type: 'action',
+      content: { tool: r.plugin || step.plugin, command: r.action || step.action, params: step.params || {} }
+    }));
+}
+
 export async function learnSkillFromTask({ providerManager, service = getSkillsService(), query, thoughts = [], answer = '', minSteps = 3 }) {
   try {
     if (String(process.env.SKILLS_AUTO_LEARN || 'true').toLowerCase() === 'false') return null;
     const steps = thoughts.filter(t => t.type === 'action').map(t => `${t.content.tool}.${t.content.command}(${JSON.stringify(t.content.params || {})})`);
     if (steps.length < minSteps || !providerManager) return null;
-    if ((await service.match(query, { limit: 1 })).length) return null;
+    const existing = await service.match(query, { limit: 1 });
+    if (existing.length) {
+      logger.info(`Skill learning: "${existing[0].name}" already covers this task`);
+      return null;
+    }
 
     const prompt = `A task was completed successfully in these steps. Write a reusable skill (procedure) for tasks like it.
 
@@ -276,8 +331,13 @@ Generalise the steps (no one-off values unless they are always the same). If the
     const json = String(response?.content || '').match(/\{[\s\S]*\}/);
     if (!json) return null;
     const draft = JSON.parse(json[0]);
-    if (draft.skip || !draft.name || !draft.description || !draft.body) return null;
-    return await service.create({ ...draft, extra: { source: 'auto', learned_from: String(query).substring(0, 200) } });
+    if (draft.skip || !draft.name || !draft.description || !draft.body) {
+      logger.info(`Skill learning: a ${steps.length}-step task was judged too one-off to keep`);
+      return null;
+    }
+    const created = await service.create({ ...draft, extra: { source: 'auto', learned_from: String(query).substring(0, 200) } });
+    if (created) logger.info(`Skill learned: ${draft.name} (from a ${steps.length}-step task)`);
+    return created;
   } catch (error) {
     logger.debug(`Skill learning skipped: ${error.message}`);
     return null;
@@ -338,5 +398,118 @@ Write it in your own words for an agent with its OWN tools; keep API routes and 
   } catch (error) {
     logger.debug(`Peer skill learning skipped: ${error.message}`);
     return null;
+  }
+}
+
+/**
+ * Hash of a skill's shared content. Description whitespace is flattened and the body trimmed
+ * the same way a SKILL.md round trip does, so a stored copy hashes like the one sent.
+ */
+export function skillHash({ name, description, body }) {
+  const d = String(description || '').replace(/\s*\n\s*/g, ' ').trim();
+  const b = String(body || '').trim();
+  return crypto.createHash('sha256').update(JSON.stringify([String(name), d, b])).digest('hex');
+}
+
+const P2P_SHARE_KEY = 'skills.p2pShare';
+const P2P_MIN_SCORE_KEY = 'skills.p2pMinTrustScore';
+export const DEFAULT_P2P_MIN_TRUST_SCORE = 50;
+
+/**
+ * Skill sharing between agents over the Skynet P2P network. ON by default, for new installs
+ * too: SKILLS_P2P_SHARE in .env wins, then the saved setting, then true.
+ */
+export async function getSkillSharing() {
+  let enabled = true;
+  let source = 'default';
+  let minTrustScore = DEFAULT_P2P_MIN_TRUST_SCORE;
+  try {
+    const { SystemSettings } = await import('../../models/SystemSettings.js');
+    const saved = await SystemSettings.getSetting(P2P_SHARE_KEY, null);
+    if (saved === true || saved === false) { enabled = saved; source = 'setting'; }
+    const min = Number(await SystemSettings.getSetting(P2P_MIN_SCORE_KEY, DEFAULT_P2P_MIN_TRUST_SCORE));
+    if (Number.isFinite(min)) minTrustScore = Math.max(0, Math.min(100, min));
+  } catch { /* defaults */ }
+  const env = String(process.env.SKILLS_P2P_SHARE || '').toLowerCase();
+  if (env === 'true' || env === 'false') { enabled = env === 'true'; source = 'env'; }
+  return { enabled, minTrustScore, source };
+}
+
+export async function setSkillSharing({ enabled, minTrustScore } = {}) {
+  const { SystemSettings } = await import('../../models/SystemSettings.js');
+  if (enabled !== undefined) {
+    await SystemSettings.setSetting(P2P_SHARE_KEY, !!enabled, 'Teach and learn skills with trusted agents on the Skynet P2P network', 'skills');
+    logger.info(`P2P skill sharing ${enabled ? 'ON' : 'OFF'}`);
+  }
+  if (minTrustScore !== undefined) {
+    const n = Number(minTrustScore);
+    if (!Number.isFinite(n) || n < 0 || n > 100) throw new Error('minTrustScore must be 0-100');
+    await SystemSettings.setSetting(P2P_MIN_SCORE_KEY, n, 'Trust score at which a peer\'s skills are used without approval', 'skills');
+  }
+  return getSkillSharing();
+}
+
+/** A peer whose skills are used at once: genesis, operator-trusted, or score >= the minimum. */
+export function peerSkillsTrusted(peer, minTrustScore = DEFAULT_P2P_MIN_TRUST_SCORE) {
+  if (!peer) return false;
+  const trusted = typeof peer.isTrusted === 'function' ? peer.isTrusted() : (peer.trustLevel === 'trusted' || peer.isGenesis === true);
+  return trusted || (Number(peer.trustScore) || 0) >= minTrustScore;
+}
+
+/**
+ * Save a skill another agent sent (P2P push or a knowledge pack). Never overwrites a skill
+ * written locally, a bundled one, or one of the same name from a different author.
+ * @param {object} opts
+ * @param {object} opts.skill   {name, description, body, sha256, origin, originName}
+ * @param {boolean} opts.trusted  sender passes peerSkillsTrusted → active; otherwise pending
+ * @param {{fingerprint: string, name: string}} opts.from
+ * @param {string} [opts.via]   'p2p' | 'knowledge_pack:<id>'
+ * @returns {Promise<{saved: boolean, status?: string, skill?: object, reason?: string}>}
+ */
+export async function installPeerSkill({ service = getSkillsService(), skill, trusted, from = {}, via = 'p2p' }) {
+  try {
+    if (!skill || typeof skill !== 'object') return { saved: false, reason: 'no skill' };
+    const { name, description, body, sha256 } = skill;
+    if (typeof name !== 'string' || name.length > 64 || !NAME_RE.test(name)) return { saved: false, reason: 'invalid name' };
+    if (typeof description !== 'string' || !description.trim() || description.length > 1024) return { saved: false, reason: 'invalid description' };
+    if (typeof body !== 'string' || !body.trim() || body.length > MAX_BODY) return { saved: false, reason: 'invalid body' };
+    if (sha256 !== skillHash({ name, description, body })) return { saved: false, reason: 'content does not match its hash' };
+    const origin = typeof skill.origin === 'string' && /^[0-9a-f]{8,64}$/.test(skill.origin) ? skill.origin : (from.fingerprint || '');
+
+    if (await service.isPeerSkillRejected?.(name, origin)) return { saved: false, reason: `"${name}" was rejected by the operator` };
+
+    const existing = await service.get(name);
+    if (existing) {
+      if (existing.bundled) return { saved: false, reason: `"${name}" is a bundled skill` };
+      if (existing.meta?.source !== 'peer') return { saved: false, reason: `a local skill is named "${name}"` };
+      if ((existing.meta?.origin || '') !== origin) return { saved: false, reason: `"${name}" from another author is already installed` };
+      if (existing.meta?.sha256 === sha256) return { saved: false };
+      if (!trusted) return { saved: false, reason: 'updates are only taken from trusted peers' };
+    } else if (!trusted) {
+      const pending = (await service.pending()).length;
+      if (pending >= MAX_PENDING_PEER) return { saved: false, reason: `${pending} skills already await approval` };
+    }
+
+    const status = trusted ? 'active' : 'pending';
+    const saved = await service.create({
+      name,
+      description: description.replace(/\s*\n\s*/g, ' ').trim(),
+      body: body.trim(),
+      overwrite: !!existing,
+      extra: {
+        source: 'peer',
+        taught_by: String(from.name || from.fingerprint || 'peer').substring(0, 80),
+        ...(from.fingerprint ? { peer_fingerprint: from.fingerprint } : {}),
+        origin,
+        ...(skill.originName ? { origin_name: String(skill.originName).substring(0, 80) } : {}),
+        sha256,
+        received_via: via,
+        status
+      }
+    });
+    return { saved: !!saved, status, skill: saved, updated: !!existing };
+  } catch (error) {
+    logger.warn(`Peer skill not saved: ${error.message}`);
+    return { saved: false, reason: error.message };
   }
 }
