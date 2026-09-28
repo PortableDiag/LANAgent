@@ -204,7 +204,7 @@ export default class SkillSharing {
     let text = `🧠 ${from} taught me ${items.length} skill(s) over the Skynet network:\n\n`;
     if (active.length) text += `In use now:\n${active.slice(0, 15).map(line).join('\n')}${active.length > 15 ? `\n…and ${active.length - 15} more` : ''}\n\n`;
     if (pending.length) text += `Waiting for your approval:\n${pending.slice(0, 15).map(line).join('\n')}${pending.length > 15 ? `\n…and ${pending.length - 15} more` : ''}\n\n`;
-    text += 'Skills come in automatically only from the genesis agent, peers you trust, and peers with a high trust score.';
+    text += 'Skills come in automatically only from the genesis agent, peers you trust, and peers with a high trust score. Skill sharing can be turned off in the web UI (P2P → Settings) or by asking me.';
     const keyboard = [];
     if (items.length === 1 && `skill_ok:${items[0].name}`.length <= 64) {
       keyboard.push(pending.length
@@ -213,8 +213,9 @@ export default class SkillSharing {
     } else if (pending.length) {
       keyboard.push([{ text: `✅ Approve all pending (${pending.length})`, callback_data: 'skill_ok_all' }]);
     }
-    keyboard.push([{ text: '⏸ Turn off skill sharing', callback_data: 'skill_p2p_off' }]);
-    await tg.sendNotification(text, { parse_mode: undefined, reply_markup: { inline_keyboard: keyboard } });
+    // No "turn off sharing" button here: it sat under the skill list and was nearly pressed by
+    // accident (2026-09-27). Sharing is switched off in Web UI → P2P → Settings or by asking.
+    await tg.sendNotification(text, { parse_mode: undefined, ...(keyboard.length ? { reply_markup: { inline_keyboard: keyboard } } : {}) });
     return true;
   }
 
