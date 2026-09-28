@@ -411,7 +411,7 @@ class StrategyEvolutionService {
      */
     async createFeatureRequest(recommendation) {
         try {
-            const FeatureRequest = (await import('../../models/FeatureRequest.js')).default;
+            const { FeatureRequest } = await import('../../models/FeatureRequest.js');
 
             const request = new FeatureRequest({
                 title: recommendation.title,

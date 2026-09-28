@@ -462,36 +462,113 @@ class AgenticCommerceService {
 
     // --- Service Execution Handlers ---
 
+    /** The agent, for its plugins (set by the jobs route from req.app.locals.agent). */
+    setAgent(agent) {
+        if (agent) this.agent = agent;
+    }
+
+    /**
+     * A loaded, enabled plugin instance. Until 2026-09-27 every job handler imported
+     * `../../api/pluginManager.js`, which does not exist, so every paid job failed on execution.
+     */
+    _plugin(name) {
+        const apis = this.agent?.apiManager?.apis || this.agent?.services?.get?.('apiManager')?.apis;
+        const entry = apis?.get(name);
+        const plugin = entry?.instance || entry;
+        if (!plugin || entry?.enabled === false || typeof plugin.execute !== 'function') {
+            throw new Error(`${name} is not available on this agent`);
+        }
+        return plugin;
+    }
+
+    static _ok(result, what) {
+        if (!result?.success) throw new Error(result?.error || `${what} failed`);
+        return result;
+    }
+
+    /**
+     * A job's input file. Job parameters come from a paying CLIENT, so a local path is never
+     * accepted (a client could name the agent's .env); only fileBase64 or a public fileUrl,
+     * fetched without redirects, as the paid document route does.
+     */
+    async _jobInputFile(params = {}) {
+        const fs = await import('fs/promises');
+        const path = await import('path');
+        const os = await import('os');
+        const crypto = await import('crypto');
+        const safeExt = (e) => (/^\.[A-Za-z0-9]{1,8}$/.test(String(e || '')) ? String(e) : '');
+        let ext = safeExt(params.fileExtension);
+        let data;
+        if (params.fileBase64) {
+            data = Buffer.from(String(params.fileBase64), 'base64');
+        } else if (params.fileUrl) {
+            const { assertPublicUrl } = await import('../../utils/publicUrl.js');
+            const url = await assertPublicUrl(params.fileUrl, 'fileUrl');
+            if (!ext) ext = safeExt(path.extname(new URL(url).pathname));
+            const axios = (await import('axios')).default;
+            const resp = await axios.get(url, { responseType: 'arraybuffer', timeout: 30000, maxContentLength: 50 * 1024 * 1024, maxRedirects: 0 });
+            data = Buffer.from(resp.data);
+        } else {
+            throw new Error('Provide the input as fileUrl (public http/https) or fileBase64');
+        }
+        if (data.length > 50 * 1024 * 1024) throw new Error('Input file is over 50 MB');
+        const file = path.join(os.tmpdir(), `job-${crypto.randomBytes(8).toString('hex')}${ext}`);
+        await fs.writeFile(file, data);
+        return file;
+    }
+
     async _executeYoutubeJob(job) {
-        // Delegate to existing youtube/ytdlp plugin
-        const pluginManager = (await import('../../api/pluginManager.js')).default;
-        const action = job.serviceType === 'youtube-audio' ? 'audio' : 'video';
-        const result = await pluginManager.executePlugin('ytdlp', action, job.serviceParams);
-        return { type: 'file', ...result };
+        const p = job.serviceParams || {};
+        const { assertPublicUrl } = await import('../../utils/publicUrl.js');
+        const url = await assertPublicUrl(p.url, 'url');
+        const audio = job.serviceType === 'youtube-audio';
+        const result = await this._plugin('ytdlp').execute(audio
+            ? { action: 'audio', url, format: 'mp3' }
+            : { action: 'download', url, ...(p.format ? { format: p.format } : {}), ...(p.quality ? { quality: p.quality } : {}) });
+        return { type: 'file', ...AgenticCommerceService._ok(result, 'Download') };
     }
 
     async _executeScrapeJob(job) {
-        const pluginManager = (await import('../../api/pluginManager.js')).default;
-        const result = await pluginManager.executePlugin('scraper', 'scrape', job.serviceParams);
-        return { type: 'json', ...result };
+        const p = job.serviceParams || {};
+        const { assertPublicUrl } = await import('../../utils/publicUrl.js');
+        const url = await assertPublicUrl(p.url, 'url');
+        const result = await this._plugin('scraper').execute({ action: 'scrape', url });
+        return { type: 'json', ...AgenticCommerceService._ok(result, 'Scrape') };
     }
 
     async _executeTranscodeJob(job) {
-        const pluginManager = (await import('../../api/pluginManager.js')).default;
-        const result = await pluginManager.executePlugin('ffmpeg', 'transcode', job.serviceParams);
-        return { type: 'file', ...result };
+        const p = job.serviceParams || {};
+        const format = String(p.format || p.targetFormat || 'mp4').toLowerCase();
+        if (!/^[a-z0-9]{2,5}$/.test(format)) throw new Error(`Unsupported format "${format}"`);
+        const input = await this._jobInputFile(p);
+        const path = await import('path');
+        const output = input.replace(/(\.[A-Za-z0-9]+)?$/, `-out.${format}`);
+        const result = await this._plugin('ffmpeg').execute({ action: 'convert', input, output, format, options: {} });
+        return { type: 'file', ...AgenticCommerceService._ok(result, 'Transcode'), file: { path: output, name: path.basename(output) } };
     }
 
     async _executeImageGenJob(job) {
-        const pluginManager = (await import('../../api/pluginManager.js')).default;
-        const result = await pluginManager.executePlugin('image-generation', 'generate', job.serviceParams);
-        return { type: 'file', ...result };
+        const p = job.serviceParams || {};
+        if (!p.prompt || typeof p.prompt !== 'string') throw new Error('prompt is required');
+        const imageService = (await import('../media/imageGenerationService.js')).default;
+        if (!imageService.initialized) {
+            if (!this.agent?.providerManager) throw new Error('Image generation is not available yet');
+            await imageService.initialize(this.agent.providerManager);
+        }
+        const result = await imageService.generate(p.prompt.substring(0, 4000), {
+            ...(p.size ? { size: p.size } : {}), ...(p.style ? { style: p.style } : {})
+        });
+        return { type: 'file', ...AgenticCommerceService._ok(result, 'Image generation') };
     }
 
     async _executeDocumentJob(job) {
-        const pluginManager = (await import('../../api/pluginManager.js')).default;
-        const result = await pluginManager.executePlugin('document-intelligence', 'process', job.serviceParams);
-        return { type: 'json', ...result };
+        const p = job.serviceParams || {};
+        const filePath = await this._jobInputFile(p);
+        const action = p.operation === 'extract' ? 'extractStructuredData' : 'processDocument';
+        const result = await this._plugin('documentIntelligence').execute({
+            action, filePath, ...(p.language ? { language: p.language } : {}), ...(p.outputFormat ? { outputFormat: p.outputFormat } : {})
+        });
+        return { type: 'json', ...AgenticCommerceService._ok(result, 'Document processing') };
     }
 
     // --- Revenue Tracking ---

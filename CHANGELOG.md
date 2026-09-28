@@ -25,6 +25,9 @@ All notable changes to LANAgent will be documented in this file.
 
 ### Fixed
 - **Agents dropped every message from a peer that had restarted.** Replay protection compared bare sequence numbers, and a restarted agent counted from 1 again. Everything it sent was refused as a replay until the receiver restarted too; ALICE and DELTA exchanged nothing for a day this way. Messages are now ordered by their signed timestamp as well as their number, within a 10-minute window. The counter also starts from the clock, so older peers accept a restarted agent.
+- **No agent ever announced its ERC-8004 identity to peers.** The capabilities reply loaded the Agent model through a default export that does not exist, and the error was swallowed. Genesis could not be recognised until this was fixed.
+- **Paid on-chain jobs could never run.** Every job handler imported a module that does not exist, and used action names the plugins do not have. They now call the real plugins. Job inputs are taken only as a public URL or an upload: a client can no longer name a file on the server or a LAN address.
+- **Strategy evolution could not file feature requests** (wrong import).
 - **Peers already online looked offline after a restart.** The registry reports only peers that arrive later, so an agent did not exchange capabilities with peers already connected until they reconnected. It now lists them on every registration.
 - **The "Auto-install from trusted peers" and "Allow peers to request my plugins" switches did nothing.** Plugins from trusted peers installed even with auto-install off, and plugin sharing could not be turned off. Both switches now work.
 - **Knowledge packs kept memories they said they were skipping.** A memory still holding a key after sanitizing was logged as skipped but packed anyway. It is now left out.

@@ -279,7 +279,7 @@ class MessageHandler {
     // Include ERC-8004 identity info if minted
     let erc8004 = null;
     try {
-      const Agent = (await import('../../models/Agent.js')).default;
+      const { Agent } = await import('../../models/Agent.js');
       const agentModel = await Agent.findOne({ name: process.env.AGENT_NAME || 'LANAgent' });
       if (agentModel?.erc8004?.agentId != null && agentModel.erc8004.status === 'active') {
         erc8004 = { agentId: agentModel.erc8004.agentId, verified: true };

@@ -6,6 +6,12 @@ import agenticCommerceService from '../../../services/crypto/agenticCommerceServ
 import rateLimit from 'express-rate-limit';
 
 const router = Router();
+
+// The job handlers run the agent's plugins; give the service the agent on every request.
+router.use((req, res, next) => {
+    agenticCommerceService.setAgent(req.app.locals.agent);
+    next();
+});
 // Idempotency cache — 1h TTL. Repeated POST /create or /:jobId/fund with the
 // same Idempotency-Key returns the cached response instead of re-running.
 const idempotencyCache = new NodeCache({ stdTTL: 3600, checkperiod: 600 });
