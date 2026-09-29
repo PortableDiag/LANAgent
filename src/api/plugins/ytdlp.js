@@ -677,6 +677,7 @@ export default class YtDlpPlugin extends BasePlugin {
       // expand into a playlist. --playlist-items caps the item count without the
       // non-zero exit --max-downloads would give us on every successful download.
       command += ` --no-playlist --playlist-items 1`;
+      command += this._downloadGuards();
 
       // Add URL
       command += ` "${url}"`;
@@ -701,8 +702,12 @@ export default class YtDlpPlugin extends BasePlugin {
           logger.info(`Downloading media: ${command}`);
 
           // Use execAsync to capture all output
-          const { stdout, stderr } = await execAsync(command, { maxBuffer: 50 * 1024 * 1024 });
+          const { stdout, stderr } = await execAsync(this._bounded(command), { maxBuffer: 50 * 1024 * 1024 });
           const outText = stdout + '\n' + stderr;
+          if (YtDlpPlugin.wasLiveSkipped(outText)) {
+            logger.info(`[ytdlp] ${url} is a live broadcast — not downloading`);
+            return YtDlpPlugin.liveResult();
+          }
 
           // Extract filename from output - check multiple patterns:
           // 1. Merged file: [Merger] Merging formats into "path/file.mp4"
@@ -776,7 +781,11 @@ export default class YtDlpPlugin extends BasePlugin {
 
         } catch (error) {
           const detail = `${error.stderr || ''}\n${error.message || ''}`;
-          const recoverable = /Requested format is not available|Only images are available|player.?client|Failed to extract|nsig|unable to download video data|HTTP Error 403/i.test(detail);
+          if (YtDlpPlugin.wasLiveSkipped(`${error.stdout || ''}\n${detail}`)) return YtDlpPlugin.liveResult();
+          // A stopped download (time limit, kill, restart) is not a client problem: retrying it
+          // on the next player client just starts the same download again.
+          const stopped = YtDlpPlugin.wasStopped(error);
+          const recoverable = !stopped && /Requested format is not available|Only images are available|player.?client|Failed to extract|nsig|unable to download video data|HTTP Error 403/i.test(detail);
 
           // Try the next client before giving up on YouTube.
           if (isYouTube && recoverable && i < clients.length - 1) {
@@ -1103,12 +1112,17 @@ export default class YtDlpPlugin extends BasePlugin {
     
     // Add metadata
     command += ` --embed-metadata --embed-thumbnail`;
-    
+    command += this._downloadGuards();
+
     command += ` "${url}"`;
-    
+
     try {
       logger.info(`Downloading audio: ${command}`);
-      const { stdout, stderr } = await execAsync(command);
+      const { stdout, stderr } = await execAsync(this._bounded(command));
+      if (YtDlpPlugin.wasLiveSkipped(`${stdout}\n${stderr}`)) {
+        logger.info(`[ytdlp] ${url} is a live broadcast — not downloading audio`);
+        return YtDlpPlugin.liveResult();
+      }
       
       // Extract filename from output (check both stdout and stderr)
       // Handle multiple yt-dlp output formats:
@@ -1367,6 +1381,43 @@ export default class YtDlpPlugin extends BasePlugin {
    * issuance. chrome-131 fingerprints close enough to FlareSolverr's Chrome
    * 142 that Rumble accepts the cookie; chrome-99/110/116/133 all 403.
    */
+  /**
+   * A live stream never finishes downloading: yt-dlp records the broadcast until it ends,
+   * so the job can never complete while the file grows without bound. A 2026-09-28 bot
+   * request recorded a YouTube live stream for 6+ minutes, and each kill was retried on the
+   * next player client; a 722 MB live-stream .part from 2026-08-04 was still on disk. yt-dlp
+   * skips live media with --match-filter (no extra request); a hard time limit backs it up.
+   */
+  _downloadGuards() {
+    return ' --match-filter "!is_live"';
+  }
+
+  /** Run a download command under a hard time limit (SIGINT first so yt-dlp stops ffmpeg). */
+  _bounded(command) {
+    const secs = Math.max(60, Number(process.env.YTDLP_DOWNLOAD_TIMEOUT_SEC) || 1800);
+    return `timeout -s INT -k 60 ${secs} ${command}`;
+  }
+
+  /** yt-dlp skipped the URL because it is a live broadcast. */
+  static wasLiveSkipped(outText) {
+    // Filtered by --match-filter, or YouTube refusing a 24/7 stream's recording before the
+    // filter runs ("This live stream recording is not available"), or an upcoming premiere.
+    return /does not pass filter \(!is_live\)|This live stream recording is not available|This live event will begin/i.test(String(outText || ''));
+  }
+
+  /** The download was stopped (time limit, kill, restart) rather than failing on its own. */
+  static wasStopped(error) {
+    return error?.code === 124 || error?.code === 130 || error?.code === 137 || error?.code === 143 || Boolean(error?.signal);
+  }
+
+  static liveResult() {
+    return {
+      success: false,
+      live: true,
+      error: 'That is a live stream that is still broadcasting, so it cannot be downloaded yet. Try again after the broadcast ends.'
+    };
+  }
+
   _buildBaseCommand(data = {}) {
     let cmd = this.ytdlpBase;
     if (data._cookieFile) {

@@ -932,77 +932,57 @@ export class TTSService {
    * Split text into chunks at sentence boundaries, respecting character limit
    */
   splitTextIntoChunks(text, maxChars = 3800) {
-    const chunks = [];
-    let currentChunk = '';
-    
-    // Split by sentences first. The trailing (|$) keeps a final fragment with no
-    // closing punctuation; the old pattern silently dropped it.
-    const sentences = text.match(/[^.!?]+(?:[.!?]+|$)/g) || [text];
-    
+    // Each chunk is voiced separately, so every boundary is a potential audible seam:
+    // intonation resets and the voice restarts. Two things made them worse (operator,
+    // 2026-09-28):
+    //  - the old greedy packing filled a chunk to the limit and left a tiny tail (288 chars
+    //    became 280 + 8), and an 8-char fragment spoken alone sounds nothing like the rest;
+    //  - it split after EVERY ".", cutting "v2.25", "gpt-5.6" or "e.g." mid-word.
+    // Now: split only at real sentence ends (punctuation followed by whitespace), then at
+    // clauses, then words; and pack the fewest chunks with the most even sizes.
+    const clean = String(text || '').replace(/[ \t]+/g, ' ').trim();
+    if (!clean) return [];
+    if (clean.length <= maxChars) return [clean];
+
+    const pieces = [];
+    const sentences = clean.split(/(?<=[.!?…]["')\]]?)\s+|\n+/).map(x => x.trim()).filter(Boolean);
     for (const sentence of sentences) {
-      const trimmedSentence = sentence.trim();
-      
-      // If a single sentence is too long, split by paragraphs/lines
-      if (trimmedSentence.length > maxChars) {
-        // First, save any current chunk
-        if (currentChunk.trim()) {
-          chunks.push(currentChunk.trim());
-          currentChunk = '';
+      if (sentence.length <= maxChars) { pieces.push(sentence); continue; }
+      // An over-long sentence: break at clauses, then at words
+      for (const clause of sentence.split(/(?<=[,;:—–])\s+/)) {
+        if (clause.length <= maxChars) { pieces.push(clause); continue; }
+        let line = '';
+        for (const word of clause.split(/\s+/)) {
+          if (line && line.length + word.length + 1 > maxChars) { pieces.push(line); line = ''; }
+          line = line ? `${line} ${word}` : word.slice(0, maxChars);
         }
-        
-        // Split long sentence by paragraphs/lines
-        const lines = trimmedSentence.split(/\n+/);
-        let lineChunk = '';
-        
-        for (const line of lines) {
-          if (lineChunk.length + line.length > maxChars) {
-            if (lineChunk.trim()) {
-              chunks.push(lineChunk.trim());
-            }
-            lineChunk = line + ' ';
-          } else {
-            lineChunk += line + ' ';
-          }
-        }
-        
-        if (lineChunk.trim()) {
-          currentChunk = lineChunk;
-        }
-      } else {
-        // Normal sentence processing
-        if (currentChunk.length + trimmedSentence.length > maxChars) {
-          // Current chunk would be too big, save it and start new one
-          if (currentChunk.trim()) {
-            chunks.push(currentChunk.trim());
-          }
-          currentChunk = trimmedSentence + ' ';
-        } else {
-          // Add sentence to current chunk
-          currentChunk += trimmedSentence + ' ';
-        }
+        if (line) pieces.push(line);
       }
     }
-    
-    // Don't forget the last chunk
-    if (currentChunk.trim()) {
-      chunks.push(currentChunk.trim());
-    }
 
-    // A single line longer than maxChars (a run-on sentence with no newline)
-    // is still oversized here; wrap it at word boundaries so every chunk fits.
-    const fitted = [];
-    for (const chunk of chunks) {
-      if (chunk.length <= maxChars) { fitted.push(chunk); continue; }
-      let line = '';
-      for (const word of chunk.split(/\s+/)) {
-        if (line && line.length + word.length + 1 > maxChars) { fitted.push(line); line = ''; }
-        line = line ? `${line} ${word}` : word.slice(0, maxChars);
+    // Greedy packing under `cap`; the smallest cap that still needs no more chunks than
+    // packing at the limit gives the most even split.
+    const pack = (cap) => {
+      const out = [];
+      let cur = '';
+      for (const piece of pieces) {
+        if (cur && cur.length + 1 + piece.length > cap) { out.push(cur); cur = ''; }
+        cur = cur ? `${cur} ${piece}` : piece;
       }
-      if (line) fitted.push(line);
+      if (cur) out.push(cur);
+      return out;
+    };
+    const best = pack(maxChars);
+    const longest = Math.max(...pieces.map(x => x.length));
+    let lo = Math.max(longest, Math.ceil(clean.length / best.length));
+    let hi = maxChars;
+    while (lo < hi) {
+      const mid = Math.floor((lo + hi) / 2);
+      if (pack(mid).length <= best.length) hi = mid; else lo = mid + 1;
     }
-
-    return fitted.filter(chunk => chunk.length > 0);
+    return pack(lo);
   }
+
 
   /**
    * Concatenate audio buffers (simple concatenation for MP3)
@@ -1020,11 +1000,16 @@ export class TTSService {
       }
       const trim = 'silenceremove=start_periods=1:start_duration=0:start_threshold=-45dB:start_silence=0.05';
       const n = buffers.length;
+      // Every chunk is voiced separately, so chunks come back at different loudness and the
+      // cut at each inner edge can click. Normalize each to the same loudness, then a short
+      // fade in/out at the inner edges before the pause (operator still heard seams 2026-09-28
+      // with trim + pause alone).
+      const level = 'loudnorm=I=-18:TP=-2:LRA=11,aresample=24000,aformat=channel_layouts=mono';
       const chains = buffers.map((_, i) => {
-        const steps = [];
-        if (i > 0) steps.push(trim);                                    // inner leading edge
-        if (i < n - 1) steps.push('areverse', trim, 'areverse', `apad=pad_dur=${pauseSeconds}`); // inner trailing edge
-        return `[${i}:a]${steps.length ? steps.join(',') : 'anull'}[a${i}]`;
+        const steps = [level];
+        if (i > 0) steps.push(trim, 'afade=t=in:st=0:d=0.02');                    // inner leading edge
+        if (i < n - 1) steps.push('areverse', trim, 'afade=t=in:st=0:d=0.03', 'areverse', `apad=pad_dur=${pauseSeconds}`); // inner trailing edge
+        return `[${i}:a]${steps.join(',')}[a${i}]`;
       });
       const filter = `${chains.join(';')};${buffers.map((_, i) => `[a${i}]`).join('')}concat=n=${n}:v=0:a=1[out]`;
       const outFile = path.join(dir, 'joined.mp3');

@@ -1257,7 +1257,7 @@ Respond conversationally — elaborate, clarify, or answer based on what was jus
               if (context.onStreamChunk) {
                 queryResponse = await this.providerManager.generateStreamingResponse(
                   contextualInput,
-                  { maxTokens: 500, temperature: 0.7, systemPrompt: this.getSystemPrompt() },
+                  { maxTokens: 500, temperature: 0.7, systemPrompt: this.getSystemPrompt(), signal: context.abortSignal },
                   context.onStreamChunk
                 );
               } else {
@@ -3688,7 +3688,7 @@ Return ONLY a valid JSON object with the extracted parameters, nothing else.`;
         if (context.onStreamChunk) {
           aiResponse = await this.providerManager.generateStreamingResponse(
             contextualQuery,
-            { systemPrompt, temperature: 0.7, maxTokens: 1000 },
+            { systemPrompt, temperature: 0.7, maxTokens: 1000, signal: context.abortSignal },
             context.onStreamChunk
           );
         } else {

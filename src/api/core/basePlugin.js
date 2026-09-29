@@ -432,6 +432,26 @@ export class BasePlugin extends EventEmitter {
    * ]);
    * // Returns: { apiKey: 'decrypted-value', secretKey: 'from-env-or-null' }
    */
+  /**
+   * The REQUIRED credentials this plugin declares but cannot find (stored or env). Empty when
+   * it has everything, declares none, or sets `worksWithoutCredentials` (a real keyless mode).
+   * Used by the loader: a plugin that swallows its credential error in initialize() ("limited
+   * functionality") still cannot do anything, and was offered to the planner anyway.
+   * @returns {Promise<string[]>}
+   */
+  async missingRequiredCredentials() {
+    if (this.worksWithoutCredentials) return [];
+    const defs = Array.isArray(this.requiredCredentials) ? this.requiredCredentials.filter(d => d?.required) : [];
+    if (!defs.length) return [];
+    try {
+      await this.loadCredentials(defs);
+      return [];
+    } catch (error) {
+      const m = /Missing required credentials: (.*)$/.exec(error?.message || '');
+      return m ? m[1].split(/,\s*/).filter(Boolean) : [];
+    }
+  }
+
   async loadCredentials(credentialDefs) {
     const credentials = {};
     const missing = [];

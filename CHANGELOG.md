@@ -2,6 +2,45 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.410] - 2026-09-28
+
+### Added
+- **The agent teaches its skills to other agents in Trellis channels.** Until now it could only learn from them there.
+  - **When asked:** an agent that asks how to do something the agent has a skill for ("how do you triage an inbox?", "send me your humanizer skill") gets the skill.
+  - **Listing:** "what skills do you have?" lists them.
+  - **Offers:** when an agent describes a problem one of its skills clearly solves, the agent offers the skill once and sends it only if that agent says yes.
+  - **What is sent:** a short summary, with the skill attached as a standard `SKILL.md` file. Another LANAgent installs it exactly (the file carries a checksum, and a changed file is refused). Any other agent can read it.
+  - **What is shared:** only active skills not marked `share: false`, with IPs, paths, emails and key-shaped strings removed.
+  - **Limits:** 5 teachings and 2 offers per channel per day; an offer is never repeated for the same version of a skill.
+  - **Controls:** turn it off with "stop teaching skills in trellis", `SKILLS_TRELLIS_TEACH=false`, or `SKILLS_TRELLIS_OFFER=false` for offers alone.
+- **"Teach the humanizer skill to <agent> in channel card <id>"**: the operator can send any skill to an agent in a channel (trellis-notes `teachSkill`).
+- **Skills sent as files are installed directly.** A SKILL.md another agent attaches in a channel is saved exactly as sent, waiting for approval as before. It no longer goes through a model rewrite.
+- **Telegram answers stream in, with a Stop button.** While the agent works, Telegram's own "Thinking…" placeholder shows the current step (for example "🔧 web search"). The answer then writes itself into the chat as it is generated. Press Stop to end it early: generation is cancelled, and what was written so far is kept as a message marked "⏹ Stopped". The bot no longer sends a "🤔 Thinking..." message and deletes it again, so there is no extra notification. On a chat where Telegram cannot show a live preview, the old status message is used instead.
+- **Colored buttons in Telegram.** Approve and confirm buttons are green; deny, cancel and reject buttons are red. This applies to every keyboard the bot sends.
+- **The Telegram bot shows "typing…" while it works.** The indicator appears as soon as a request takes longer than a moment and stays on until the answer arrives, however many steps the request takes. Sending a photo, file, video or voice message shows the matching "sending…" status instead, and voice replies show "recording voice…" for the whole time they take. Quick replies and menu taps show nothing, so no indicator is left on screen after they finish.
+
+### Changed
+- **Skills other agents teach in Trellis channels are used at once by default.** Auto-approve is now on out of the box, and you still get a Telegram message with a Reject button for each one. An install where auto-approve was turned off keeps that choice, and `SKILLS_AUTO_APPROVE=false` still turns it off. Skills offered by untrusted peers on the Skynet P2P network still always wait for your approval.
+- **Telegram replies stream into a normal message.** The first words arrive as a regular reply, which notifies like any other. The rest is filled in by editing that message, and the finished reply is formatted in place. Native Telegram drafts left a large blank area under the reply in some Telegram apps until the chat was reopened, so they are now opt-in (`TELEGRAM_STREAM_TRANSPORT=draft`; `off` turns streaming off). A red "⏹ Stop" button sits on the streaming message; pressing it ends the answer and keeps what was written.
+- **The Telegram bot no longer freezes while it works.** Telegram updates were handled one batch at a time, so a slow request (a long answer, a video download) held back every button tap and message until it finished. Messages in the same chat are still handled in order, but button taps, including Stop, now act immediately.
+
+### Fixed
+- **Picture searches respect "not".** "A frog that is not blue, red or green" searched Wikimedia Commons for every word, colours included. Short words like "is" and "or" also matched inside unrelated file names, so a photo of a carousel salmon came back. Ruled-out words are now excluded from the search, and a file must be named for the subject.
+- **The agent no longer tries plugins it has no API key for.** Some plugins, Unsplash among them, caught their own "missing API key" error and stayed switched on "with limited functionality". The planner offered them like any other plugin, so "find me a picture of a frog" went to Unsplash with no key configured and the whole task failed at step 1, although a keyless route (Wikimedia Commons, via the Trellis image card) was available.
+  - A plugin missing a required credential is now disabled with the reason, like plugins that already failed at start-up.
+  - The planner and intent detection no longer offer it, and a saved intent match to a disabled plugin falls back to the AI.
+  - Adding the key in Settings switches it back on. Saving only some of the keys leaves it off.
+- **The task planner can see every plugin action.** It listed only the first 20 actions of each plugin, so most of a large plugin's actions (trellis-notes has 50+) were invisible to it. It then improvised multi-step chains that failed.
+- **Skill descriptions containing quotes survive being saved and read back.** The SKILL.md reader now decodes quoted values the way the writer encodes them.
+- **Live streams are no longer downloaded forever.** A YouTube link to a broadcast still in progress was recorded until the broadcast ended: the request never completed while the file kept growing, and when the download was stopped the agent retried it with each YouTube client in turn. Live broadcasts are now declined with a clear message ("try again after the broadcast ends"). Every video and audio download also has a hard time limit (`YTDLP_DOWNLOAD_TIMEOUT_SEC`, default 30 minutes). A download that was stopped is no longer retried as if a client had failed.
+- **Fewer seams in long voice replies.** Text is split only at real sentence ends, so version numbers and names like "2.25.405" stay whole. It is also split evenly, so no tiny fragment is spoken on its own. Each piece is set to the same loudness, and the joins fade in and out instead of cutting.
+- **Faster, cheaper replies.** The two classification prompts sent before every answer put the user's message first, which prevented the provider from caching the ~50k tokens of fixed instructions and caused a full-price cache miss on every message. The message now goes last.
+- **Greetings no longer pull in unrelated skills.** A skill is used only when it scores clearly above the others (`SKILLS_MIN_LIFT`, default 0.05). With the current embedding model every skill scored about 0.72 against "Hello?", so the old fixed cutoff attached two unrelated procedures to the prompt.
+- **Stopping a streamed answer does not re-run it.** A cancelled stream used to count as a provider failure and was retried as a normal request. OpenRouter, OpenAI and Anthropic streams can now be cancelled, and they return the text written so far.
+- **Streaming failures in Telegram are now logged.** A rejected live preview was logged only at debug level, so a streaming failure could not be seen in the logs.
+- **Database reconnects back off during an outage.** While MongoDB was unreachable, the agent retried about once a second indefinitely. Each failure now doubles the wait, up to 30 seconds, and the agent still waits for the database to return rather than exiting. A bad `MONGODB_URI` or rejected credentials now fail at once with a clear message, since retrying cannot fix them.
+- **Scrape VPN rotation no longer discards a working exit.** A status read that briefly showed "disconnected" right after a confirmed exit switch made the switch count as failed. The scrape then gave up its last rotation, or moved to another exit and interrupted a working tunnel. The agent now re-checks for up to 10 seconds before declaring the switch failed.
+
 ## [2.25.401] - 2026-09-27
 
 ### Added

@@ -76,18 +76,38 @@ export async function fetchPublicImage(url) {
  */
 const FILLER = new Set(['a', 'an', 'the', 'of', 'some', 'any', 'me', 'my', 'find', 'get', 'show', 'cool', 'nice', 'good',
   'great', 'beautiful', 'awesome', 'pretty', 'cute', 'picture', 'pictures', 'photo', 'photos', 'image', 'images', 'pic',
-  'pics', 'card', 'with', 'it', 'and', 'make', 'post']);
+  'pics', 'card', 'with', 'it', 'and', 'make', 'post', 'that', 'which', 'who', 'is', 'are', 'was', 'be', 'or', 'nor',
+  'but', 'in', 'on', 'for', 'to', 'please', 'one', 'real', 'actual']);
+const NEGATION = new Set(['not', 'no', 'without', 'except', 'excluding', 'never', 'isnt', 'arent', 'non']);
+
+/**
+ * Split an image request into what to look for and what to keep out:
+ * "frog that is not blue, red, or green" → { include: ['frog'], exclude: ['blue','red','green'] }.
+ * Before this every word was searched for, so the colours the user ruled out were matched,
+ * and "is"/"or" matched inside unrelated titles (a carousel salmon came back, 2026-09-28).
+ */
+export function parseImageQuery(query) {
+  const words = String(query).toLowerCase().replace(/n't\b/g, 'nt').split(/[^a-z0-9]+/).filter(Boolean);
+  const include = []; const exclude = [];
+  let negating = false;
+  for (const w of words) {
+    if (NEGATION.has(w)) { negating = true; continue; }
+    if (FILLER.has(w)) continue;
+    (negating ? exclude : include).push(w);
+  }
+  return { include: [...new Set(include)], exclude: [...new Set(exclude)].filter(w => !include.includes(w)) };
+}
 
 export async function findCommonsImage(query) {
   // "a cool frog picture" searches Commons for "frog": filler words match book scans and
-  // diagrams whose descriptions happen to contain them.
-  const terms = String(query).toLowerCase().split(/[^a-z0-9]+/).filter(w => w && !FILLER.has(w));
+  // diagrams whose descriptions happen to contain them. Excluded words become -terms.
+  const { include: terms, exclude } = parseImageQuery(query);
   const q = terms.join(' ') || String(query);
   const res = await axios.get('https://commons.wikimedia.org/w/api.php', {
     timeout: 20000, headers: { 'User-Agent': UA },
     params: {
       action: 'query', format: 'json', generator: 'search', gsrnamespace: 6,
-      gsrsearch: `${q} filetype:bitmap`, gsrlimit: 30,
+      gsrsearch: `${q}${exclude.map(w => ` -${w}`).join('')} filetype:bitmap`, gsrlimit: 30,
       prop: 'imageinfo', iiprop: 'url|mime|size|extmetadata', iiurlwidth: 1280
     }
   });
@@ -98,8 +118,12 @@ export async function findCommonsImage(query) {
   if (!pages.length) throw new Error(`No freely licensed picture found on Wikimedia Commons for "${q}".`);
   // Prefer files whose NAME carries the subject (a photo of a frog is usually named for it);
   // scans of old books and maps often match only in their long descriptions.
-  const named = pages.filter(p => terms.some(t => p.title.toLowerCase().includes(t)) && !/\(\d{4}\)|book|page|map|scan|diagram|plate/i.test(p.title));
-  const pool = named.length ? named : pages;
+  // Whole words: a substring test let "is"/"or" match inside "Historic".
+  const words = (t) => new Set(t.toLowerCase().replace(/^file:/, '').split(/[^a-z0-9]+/).filter(Boolean));
+  const clean = pages.filter(p => { const w = words(p.title); return !exclude.some(x => w.has(x)); });
+  const named = clean.filter(p => { const w = words(p.title); return terms.length && terms.every(t => w.has(t) || w.has(`${t}s`)); }
+    ).filter(p => !/\(\d{4}\)|book|page|map|scan|diagram|plate/i.test(p.title));
+  const pool = named.length ? named : (clean.length ? clean : pages);
   const pick = pool[Math.floor(Math.random() * Math.min(5, pool.length))];
   const meta = pick.info.extmetadata || {};
   const strip = (h) => String(h || '').replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim();
@@ -204,6 +228,9 @@ export const EXTRA_COMMANDS = [
     usage: 'removeFile({ card: 1391, index: 0, kind: "file", confirmName: "old.pdf" })', examples: ['remove the attachment from the trellis card', 'delete that picture from the trellis note'] },
   { command: 'listTrash', description: 'What was deleted from the Trellis document in the last 30 days (web)',
     usage: 'listTrash', examples: ['what is in the trellis trash', 'show deleted trellis cards'] },
+  // skills
+  { command: 'teachSkill', description: 'Teach one of this agent\'s skills to another agent in a Trellis channel: posts a summary with the skill attached as a SKILL.md file (sanitized; a LANAgent installs it, any agent can read it)',
+    usage: 'teachSkill({ card: 2119, skill: "humanizer", to: "Outrider" })  // to optional: @mentions that agent in a group channel', examples: ['teach the humanizer skill to outrider in the trellis channel', 'share your inbox triage skill with the other agent in trellis card 2119', 'send the debugging skill to hermes in trellis'] },
   { command: 'restoreFromTrash', description: 'Put deleted Trellis cards or baskets back from the trash, with their original ids — by the batch listTrash shows (web, document owner)',
     usage: 'restoreFromTrash({ batch: "<batch id from listTrash>" })', examples: ['restore the deleted trellis card', 'undelete that trellis basket'] }
 ];
@@ -284,6 +311,23 @@ const helpers = {
 // ---------------------------------------------------------------- actions (mixed in)
 
 const actions = {
+  async teachSkill({ card, skill, to = null } = {}) {
+    if (!(typeof card === 'number' || /^\d+$/.test(String(card ?? '')))) throw new Error('teachSkill needs the channel card id.');
+    if (!skill || !String(skill).trim()) throw new Error('teachSkill needs the skill name (see: list skills).');
+    const { SkillTeacher } = await import('../skills/skillTeaching.js');
+    const teacher = new SkillTeacher({ providerManager: this.agent?.providerManager, teacher: this._agentName() });
+    const recipient = to ? String(to).replace(/^@/, '').trim() : null;
+    const msg = await teacher.teachOnRequest({ card: Number(card), skillName: String(skill).trim(), to: recipient });
+    const said = await this._call('post', `/api/cards/${Number(card)}/say`, { body: { text: msg.text, files: msg.files }, timeoutMs: 120000 });
+    return {
+      success: true,
+      card: Number(card),
+      skill: msg.skill,
+      seq: said?.seq ?? null,
+      result: `Taught \`${msg.skill}\` in Trellis card ${card}${recipient ? ` to @${recipient}` : ''} (SKILL.md attached).`
+    };
+  },
+
   // ---- files
   async listFiles(data) {
     const c = await this._card(data);

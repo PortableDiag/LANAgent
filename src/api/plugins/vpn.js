@@ -529,6 +529,20 @@ export class VPNPlugin extends BasePlugin {
 
       await this.updateConnectionState();
 
+      // The poll above already confirmed the tunnel. A single `get connectionstate`
+      // read moments after an exit switch can transiently disagree (2026-09-28:
+      // "switched to usa-new-jersey-2", then 2s later "failed" on the same healthy
+      // tunnel — the scrape discarded its last rotation). Re-poll briefly before
+      // calling a confirmed connection a failure.
+      if (!this.connectionState.connected) {
+        logger.warn('VPN state read disagreed with the confirmed connection — re-polling');
+        try {
+          await this.waitForConnection(10000);
+        } catch {
+          // Genuinely down — fall through to the failure below.
+        }
+      }
+
       if (this.connectionState.connected) {
         logger.info(`VPN connected successfully to ${this.connectionState.currentLocation}`);
         this.startHealthMonitoring();

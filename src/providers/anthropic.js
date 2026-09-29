@@ -251,6 +251,8 @@ export class AnthropicProvider extends BaseProvider {
 
   async generateStreamingResponse(prompt, options = {}, onChunk) {
     const startTime = Date.now();
+    let fullContent = '';
+    const servedModel = options.model || this.models.chat;
     try {
       const systemPrompt = options.systemPrompt || "You are Claude, a helpful AI assistant.";
       const requestParams = {
@@ -261,8 +263,8 @@ export class AnthropicProvider extends BaseProvider {
         messages: options.messages || [{ role: "user", content: prompt }]
       };
 
-      const stream = this.client.messages.stream(requestParams);
-      let fullContent = '';
+      const stream = this.client.messages.stream(requestParams,
+        options.signal ? { signal: options.signal } : undefined);
 
       stream.on('text', (text) => {
         fullContent += text;
@@ -282,6 +284,11 @@ export class AnthropicProvider extends BaseProvider {
         provider: this.name
       };
     } catch (error) {
+      // Stopped by the user (Telegram Stop button): hand back what was written so far.
+      if (options.signal?.aborted) {
+        logger.info(`Anthropic stream stopped by the caller after ${fullContent.length} chars`);
+        return { content: fullContent, model: servedModel, provider: this.name, aborted: true };
+      }
       this.metrics.errors++;
       logger.error("Anthropic generateStreamingResponse error:", error);
       throw error;

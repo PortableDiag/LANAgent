@@ -50,20 +50,20 @@ class SkynetEconomy {
    */
   async handleBountyClaim(fromFingerprint, message, sendFn) {
     const { bountyId } = message;
-    const bounty = await SkynetBounty.findOne({ bountyId, isLocal: true });
-    if (!bounty || bounty.status !== 'open') {
+    // One atomic update decides the claim. The old read-check-save let two
+    // peers claiming at the same moment both be told "accepted", and it never
+    // checked expiry. A null here means taken, expired, not ours, or unknown.
+    const bounty = typeof bountyId === 'string' && bountyId
+      ? await SkynetBounty.claimBounty(bountyId, fromFingerprint)
+      : null;
+    if (!bounty) {
       return sendFn(fromFingerprint, {
         type: 'bounty_claim_response',
         bountyId,
         accepted: false,
-        reason: 'Bounty not found or already claimed'
+        reason: 'Bounty not found, expired, or already claimed'
       });
     }
-
-    bounty.status = 'claimed';
-    bounty.claimerFingerprint = fromFingerprint;
-    bounty.claimedAt = new Date();
-    await bounty.save();
 
     logger.info(`Skynet bounty ${bountyId} claimed by ${fromFingerprint.slice(0, 8)}...`);
     await sendFn(fromFingerprint, {

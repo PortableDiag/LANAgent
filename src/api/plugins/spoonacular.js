@@ -28,6 +28,17 @@ export default class SpoonacularPlugin extends BasePlugin {
         ]
       },
       {
+        command: 'findRecipesByIngredients',
+        description: 'Find recipes that can be made with a list of available ingredients',
+        usage: 'findRecipesByIngredients({ ingredients: ["tomato", "basil", "pasta"], number: 5, ranking: 1, ignorePantry: false })',
+        examples: [
+          'find recipes using chicken, rice, and broccoli',
+          'what can I make with eggs and potatoes?',
+          'show meals from my pantry ingredients',
+          'find recipes using only the ingredients I have'
+        ]
+      },
+      {
         command: 'getRecipeInformation',
         description: 'Get detailed information about a specific recipe including ingredients and instructions',
         usage: 'getRecipeInformation({ id: 12345 })',
@@ -125,6 +136,8 @@ export default class SpoonacularPlugin extends BasePlugin {
       switch (action) {
         case 'searchRecipes':
           return await this.searchRecipes(data);
+        case 'findRecipesByIngredients':
+          return await this.findRecipesByIngredients(data);
         case 'getRecipeInformation':
           return await this.getRecipeInformation(data);
         case 'autocompleteRecipeSearch':
@@ -197,6 +210,97 @@ export default class SpoonacularPlugin extends BasePlugin {
     const response = await retryOperation(() => axios.get(url, config), { 
       retries: 3, 
       context: 'Spoonacular searchRecipes' 
+    });
+
+    this.cache.set(cacheKey, response.data);
+    return { success: true, data: response.data };
+  }
+
+  /**
+   * Find recipes using a bounded, normalized list of available ingredients.
+   */
+  async findRecipesByIngredients(params) {
+    // Chat extraction usually yields "chicken, rice, broccoli" rather than an
+    // array; accept that form (and a single ingredient) before validating.
+    if (typeof params.ingredients === 'string') {
+      params = { ...params, ingredients: params.ingredients.split(/,|\band\b/i).map(s => s.trim()).filter(Boolean) };
+    }
+    if (typeof params.number === 'string' && params.number.trim() !== '') {
+      params = { ...params, number: Number(params.number) };
+    }
+    this.validateParams(params, {
+      ingredients: { required: true, type: 'array' },
+      number: { required: false, type: 'number', default: 5 },
+      ranking: { required: false, type: 'number', default: 1 },
+      ignorePantry: { required: false, type: 'boolean', default: false }
+    });
+
+    if (!Array.isArray(params.ingredients) || params.ingredients.length === 0) {
+      throw new Error('ingredients must be a non-empty array');
+    }
+
+    if (params.ingredients.length > 20) {
+      throw new Error('ingredients cannot contain more than 20 items');
+    }
+
+    const ingredients = params.ingredients.map((ingredient) => {
+      if (typeof ingredient !== 'string') {
+        throw new Error('each ingredient must be a string');
+      }
+
+      const normalizedIngredient = ingredient.trim().replace(/\s+/g, ' ');
+      if (!normalizedIngredient) {
+        throw new Error('ingredients cannot contain empty values');
+      }
+      if (normalizedIngredient.length > 100) {
+        throw new Error('each ingredient cannot exceed 100 characters');
+      }
+
+      return normalizedIngredient.toLowerCase();
+    });
+
+    const uniqueIngredients = [...new Set(ingredients)].sort();
+
+    const number = params.number ?? 5;
+    if (!Number.isInteger(number) || number < 1 || number > 100) {
+      throw new Error('number must be an integer between 1 and 100');
+    }
+
+    const ranking = params.ranking ?? 1;
+    if (!Number.isInteger(ranking) || ![1, 2].includes(ranking)) {
+      throw new Error('ranking must be either 1 or 2');
+    }
+
+    const ignorePantry = params.ignorePantry ?? false;
+    if (typeof ignorePantry !== 'boolean') {
+      throw new Error('ignorePantry must be a boolean');
+    }
+
+    if (!this.config.apiKey) {
+      throw new Error('API key not configured');
+    }
+
+    const ingredientList = uniqueIngredients.join(',');
+    const cacheKey = `ingredients_${ingredientList}_${number}_${ranking}_${ignorePantry}`;
+    const cached = this.cache.get(cacheKey);
+    if (cached) {
+      return { success: true, data: cached };
+    }
+
+    const url = `${this.config.baseUrl}/recipes/findByIngredients`;
+    const config = {
+      params: {
+        apiKey: this.config.apiKey,
+        ingredients: ingredientList,
+        number,
+        ranking,
+        ignorePantry
+      }
+    };
+
+    const response = await retryOperation(() => axios.get(url, config), {
+      retries: 3,
+      context: 'Spoonacular findRecipesByIngredients'
     });
 
     this.cache.set(cacheKey, response.data);

@@ -215,6 +215,8 @@ export class OpenAIProvider extends BaseProvider {
 
   async generateStreamingResponse(prompt, options = {}, onChunk) {
     const startTime = Date.now();
+    let fullContent = '';
+    let servedModel = options.model || this.models.chat;
     try {
       const messages = options.messages || [
         { role: "system", content: options.systemPrompt || "You are a helpful AI assistant." },
@@ -232,8 +234,8 @@ export class OpenAIProvider extends BaseProvider {
         delete completionParams.reasoning_effort;
       }
 
-      const stream = await this.client.chat.completions.create(completionParams);
-      let fullContent = '';
+      const stream = await this.client.chat.completions.create(completionParams,
+        options.signal ? { signal: options.signal } : undefined);
 
       for await (const chunk of stream) {
         const delta = chunk.choices[0]?.delta?.content || '';
@@ -250,6 +252,11 @@ export class OpenAIProvider extends BaseProvider {
 
       return { content: fullContent, model, provider: this.name };
     } catch (error) {
+      // Stopped by the user (Telegram Stop button): hand back what was written so far.
+      if (options.signal?.aborted) {
+        logger.info(`OpenAI stream stopped by the caller after ${fullContent.length} chars`);
+        return { content: fullContent, model: servedModel, provider: this.name, aborted: true };
+      }
       this.metrics.errors++;
       logger.error("OpenAI generateStreamingResponse error:", error);
       throw error;

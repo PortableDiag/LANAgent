@@ -33,6 +33,7 @@
  */
 import { logger } from '../utils/logger.js';
 import { learnSkillFromPeer } from './skills/skillsService.js';
+import { SkillTeacher, receiveSkillFiles } from './skills/skillTeaching.js';
 
 const CONTEXT_MESSAGES = 10;
 const MAX_REPLIES_PER_HOUR = Number(process.env.TRELLIS_LISTEN_MAX_PER_HOUR) || 20;
@@ -207,13 +208,47 @@ export class TrellisChannelListener {
     }
     const fromOperator = await this._isOperator(target);
     const context = messages.filter(m => (Number(m.seq) || 0) <= (Number(target.seq) || 0)).slice(-CONTEXT_MESSAGES);
+    // Another agent (the desktop records no kinds: there, anyone who is not the operator).
+    const fromAgent = !fromOperator && (target.kind === 'agent' || target.kind === 'builtin'
+      || (this.plugin.resolvedMode !== 'web' && !target.kind));
+
+    // Teaching our skills: asked for one, asked what we know, or a problem one solves (an
+    // offer, sent on yes). A teach or a list IS the answer; an offer rides on the reply.
+    let teach = null;
+    if (fromAgent) {
+      teach = await this._teacher().consider({ card, message: target, group }).catch(err => {
+        logger.warn(`[trellis-listen] skill teaching check failed: ${err.message}`);
+        return null;
+      });
+    }
     let reply = fromOperator
       ? await this._operatorReply(target, context, doc, card)
-      : await this._conversationReply(target, context, data);
+      : (teach?.replaceReply ? null : await this._conversationReply(target, context, data));
+    if (teach) reply = teach.replaceReply || !reply ? teach.text : `${reply}\n\n${teach.text}`;
 
-    // Another agent teaching a procedure: keep it as a pending skill (the operator approves
-    // it before it is used) and say so, so the teacher knows it landed.
-    if (!fromOperator && (target.kind === 'agent' || target.kind === 'builtin')) {
+    // A skill another agent sent as a SKILL.md file: installed exactly as sent (hash-checked),
+    // pending the operator's approval unless auto-approve is on. No model call.
+    let receivedSkills = [];
+    if (fromAgent) {
+      receivedSkills = await receiveSkillFiles({
+        message: target,
+        fetch: (index) => this.plugin._download(`/api/cards/${card}/attachments/${index}`).then(r => r.bytes)
+      }).catch(err => { logger.warn(`[trellis-listen] skill file not read: ${err.message}`); return []; });
+      for (const r of receivedSkills) {
+        const note = r.saved
+          ? `Saved your skill \`${r.name}\` — ${r.status === 'active' ? "I'll use it from now on." : 'pending until my operator approves it.'}`
+          : (r.reason ? `I couldn't save ${r.name ? `\`${r.name}\`` : 'that skill'}: ${r.reason}.` : `I already have \`${r.name}\` as you sent it.`);
+        reply = reply ? `${reply}\n\n${note}` : `Thanks, ${target.from}. ${note}`;
+        if (r.saved) {
+          logger.info(`[trellis-listen] installed skill ${r.name} (${r.status}) from ${target.from}'s SKILL.md`);
+          await this._askOperatorToApprove(r.skill, target.from, card);
+        }
+      }
+    }
+
+    // Another agent teaching a procedure in prose: keep it as a pending skill (the operator
+    // approves it before it is used) and say so, so the teacher knows it landed.
+    if (fromAgent && !receivedSkills.length && !teach) {
       const skill = await learnSkillFromPeer({
         providerManager: this.agent.providerManager,
         text: target.text,
@@ -233,7 +268,11 @@ export class TrellisChannelListener {
 
     this.cursors.set(key, maxSeq);
     if (!reply) return;
-    const said = await this.plugin._call('post', `/api/cards/${card}/say`, { body: { text: reply.slice(0, MAX_REPLY_CHARS) } });
+    const files = teach?.files || null;
+    const said = await this.plugin._call('post', `/api/cards/${card}/say`, {
+      body: { text: reply.slice(0, MAX_REPLY_CHARS), ...(files ? { files } : {}) },
+      ...(files ? { timeoutMs: 120000 } : {})
+    });
     if (Number.isFinite(said?.seq)) this.cursors.set(key, Math.max(maxSeq, said.seq));
     this._noteReply(key);
     await this._remember(card, target, reply);
@@ -378,6 +417,11 @@ export class TrellisChannelListener {
     } catch (err) {
       logger.debug(`[trellis-listen] could not record the exchange: ${err.message}`);
     }
+  }
+
+  _teacher() {
+    if (!this.teacher) this.teacher = new SkillTeacher({ providerManager: this.agent.providerManager, teacher: this.name });
+    return this.teacher;
   }
 
   _underCap(key) {

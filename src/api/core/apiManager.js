@@ -127,6 +127,33 @@ export class APIManager extends EventEmitter {
         }
       }
 
+      // A plugin that caught its own credential error ("limited functionality") initialized
+      // fine but still cannot do anything without the key. Registered enabled, the planner
+      // chose it (unsplash.searchPhotos for "find me a picture", 2026-09-28) and the whole
+      // task failed on step 1. Same treatment as a plugin that threw: disabled, with the
+      // reason, until credentials are added in Settings.
+      const missingCreds = typeof plugin.missingRequiredCredentials === 'function'
+        ? await plugin.missingRequiredCredentials().catch(() => [])
+        : [];
+      if (missingCreds.length) {
+        const reason = `Missing required credentials: ${missingCreds.join(', ')}`;
+        this.apis.set(plugin.name, {
+          instance: plugin,
+          filename: filename,
+          loaded: Date.now(),
+          enabled: false,
+          calls: 0,
+          errors: 0,
+          lastError: reason,
+          lastCall: null,
+          timeout: plugin.timeout || this.defaultTimeout,
+          error: reason,
+          disabledReason: 'missing_credentials'
+        });
+        pluginLogger.warn(`Plugin ${plugin.name} v${plugin.version} registered (disabled — ${reason}). Add credentials via Settings.`);
+        return;
+      }
+
       // Register the plugin
       this.apis.set(plugin.name, {
         instance: plugin,

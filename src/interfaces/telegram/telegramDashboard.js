@@ -4,6 +4,10 @@ import { message } from 'telegraf/filters';
 import { logger } from "../../utils/logger.js";
 import { getServerHost } from "../../utils/paths.js";
 import { MultiUserSupport } from './multiUserSupport.js';
+import { chatActionMiddleware } from './chatActionKeepalive.js';
+import { createReplyStream, handleStopUpdate, handleStopButton } from './draftStream.js';
+import { installConcurrentUpdates } from './updateDispatcher.js';
+import { installButtonStyles } from './buttonStyle.js';
 import { TelegramMediaGenerator } from '../../services/telegramMediaGenerator.js';
 import fs from 'fs/promises';
 
@@ -106,10 +110,21 @@ export class TelegramDashboard extends TelegramInterface {
     // video). The default aborted those mid-flight with a TimeoutError and the user
     // got nothing. 10 min gives big downloads room to finish.
     this.bot = new Telegraf(token, { handlerTimeout: 600000 });
+    // One slow request must not freeze the bot: per-chat order for messages, taps run at once
+    installConcurrentUpdates(this.bot);
     
     // Restore email conversations from database on startup
     await this.multiUserSupport.loadEmailConversationsFromDatabase();
     
+    // Stop button on a streaming reply. First in the chain: the update has a chat but no
+    // `from`, so the authorization middleware below would answer "Unable to identify user".
+    // It only aborts a stream in the chat it came from.
+    this.bot.use((ctx, next) => (handleStopUpdate(ctx.update) ? undefined : next()));
+
+    // Green/red approve and reject buttons, on every keyboard this bot sends
+    installButtonStyles(this.bot.telegram);
+    this.bot.use((ctx, next) => { installButtonStyles(ctx.telegram); return next(); });
+
     // Use session middleware
     this.bot.use(session());
 
@@ -143,6 +158,15 @@ export class TelegramDashboard extends TelegramInterface {
       
       return next();
     });
+
+    // ⏹ Stop on a streamed reply (runs while that request is still in progress)
+    this.bot.use(async (ctx, next) => {
+      if (!handleStopButton(ctx.callbackQuery?.data, ctx.chat?.id)) return next();
+      await ctx.answerCbQuery('Stopping…').catch(() => {});
+    });
+
+    // "typing…" / "sending photo…" for as long as a request is being worked on
+    this.bot.use(chatActionMiddleware());
 
     // Error handling
     this.bot.catch((err, ctx) => {
@@ -1258,92 +1282,39 @@ export class TelegramDashboard extends TelegramInterface {
       try {
         logger.info(`Telegram NL request from owner: "${text.substring(0, 200)}${text.length > 200 ? '...' : ''}"`);
 
-        // Send thinking message
-        const thinkingMsg = await ctx.reply('🤔 Thinking...');
-
-        // Streaming draft state
-        let streamingStarted = false;
-        const draftId = Math.floor(Math.random() * 2147483646) + 1;
-        let lastDraftTime = 0;
-        let draftInFlight = false;
-        const DRAFT_THROTTLE_MS = 300;
-
-        const onStreamChunk = async (chunk, fullText) => {
-          // First chunk — delete thinking message and switch to draft mode
-          if (!streamingStarted) {
-            streamingStarted = true;
-            try {
-              await ctx.telegram.deleteMessage(ctx.chat.id, thinkingMsg.message_id);
-            } catch (e) { /* already deleted */ }
-          }
-
-          const now = Date.now();
-          if (now - lastDraftTime < DRAFT_THROTTLE_MS || draftInFlight) return;
-
-          draftInFlight = true;
-          try {
-            await ctx.telegram.callApi('sendMessageDraft', {
-              chat_id: ctx.chat.id,
-              draft_id: draftId,
-              text: fullText.length > 4096 ? fullText.substring(0, 4093) + '...' : fullText
-            });
-            lastDraftTime = Date.now();
-          } catch (err) {
-            logger.debug('sendMessageDraft error:', err.message);
-          } finally {
-            draftInFlight = false;
-          }
-        };
+        // The answer streams in (edited message by default, native draft if configured), with Stop
+        const draft = await createReplyStream(ctx.telegram, ctx.chat.id, {
+          threadId: ctx.message?.message_thread_id
+        }).start();
 
         // Attach recently received file if within 5 minutes
         const recentFile = this._lastReceivedFile && (Date.now() - this._lastReceivedFile.receivedAt < 300000)
           ? this._lastReceivedFile : null;
 
-        const response = await this.agent.processNaturalLanguage(text, {
-          platform: 'telegram',
-          userId: ctx.from.id.toString(),
-          userName: ctx.from.username || ctx.from.first_name,
-          isMaster: true,
-          attachedFile: recentFile,
-          onStreamChunk,
-          showThinking: async (msg) => {
-            if (streamingStarted) return;
-            try {
-              if (msg !== thinkingMsg.text) {
-                await ctx.telegram.editMessageText(
-                  ctx.chat.id,
-                  thinkingMsg.message_id,
-                  null,
-                  msg
-                );
-              }
-            } catch (err) {
-              logger.debug('Could not update thinking message:', err.message);
-            }
+        let response;
+        try {
+          response = await this.agent.processNaturalLanguage(text, {
+            platform: 'telegram',
+            userId: ctx.from.id.toString(),
+            userName: ctx.from.username || ctx.from.first_name,
+            isMaster: true,
+            attachedFile: recentFile,
+            onStreamChunk: (delta, fullText) => draft.chunk(delta, fullText),
+            abortSignal: draft.signal,
+            showThinking: (msg) => draft.status(msg)
+          });
+
+          if (draft.stopped) {
+            // Keep what was written before Stop as a real message
+            const partial = String(response?.content || '').trim();
+            response = { ...(response || {}), type: 'text', content: partial ? `${partial}\n\n⏹ Stopped` : '⏹ Stopped' };
+          } else if (response?.content) {
+            await draft.complete(response.content);
           }
-        });
-
-        // Send one final draft flush with complete text
-        if (streamingStarted && response?.content) {
-          try {
-            const finalText = response.content.length > 4096
-              ? response.content.substring(0, 4093) + '...'
-              : response.content;
-            await ctx.telegram.callApi('sendMessageDraft', {
-              chat_id: ctx.chat.id,
-              draft_id: draftId,
-              text: finalText
-            });
-          } catch (e) { /* draft will clear when final message is sent */ }
+        } finally {
+          await draft.finish();
         }
 
-        // Delete thinking message if streaming never started
-        if (!streamingStarted) {
-          try {
-            await ctx.telegram.deleteMessage(ctx.chat.id, thinkingMsg.message_id);
-          } catch (e) { /* already deleted */ }
-        }
-        
         logger.info('TelegramDashboard received response:', {
           hasResponse: !!response,
           responseType: response?.type,
@@ -1522,8 +1493,12 @@ export class TelegramDashboard extends TelegramInterface {
             // Check if content has device info (which might have problematic characters)
             const isDeviceInfo = replyContent.includes('Connected devices:') && replyContent.includes('**Network Devices');
             
-            // For device info, don't use Markdown to avoid parsing errors
-            if (isDeviceInfo) {
+            // A streamed reply is already on screen: turn it into the final message
+            if (!isDeviceInfo && await draft.deliver(replyContent)) {
+              // delivered by editing the streamed message
+            } else if (isDeviceInfo) {
+              // For device info, don't use Markdown to avoid parsing errors
+              await draft.deliver('');
               await ctx.reply(replyContent);
             } else {
               // Use sendLargeMessage for handling messages that might exceed Telegram's limit

@@ -58,6 +58,12 @@ class ImageGenerationService {
                 model: 'black-forest-labs/FLUX.1-schnell',
                 numInferenceSteps: 5
             },
+            openrouter: {
+                model: 'google/gemini-3.1-flash-image',
+                aspectRatio: '1:1',
+                resolution: '',
+                quality: 'auto'
+            },
             idempotency: {
                 enabled: true,
                 ttlSeconds: DEFAULT_IDEMPOTENCY_TTL
@@ -177,6 +183,12 @@ class ImageGenerationService {
                 ...this.settings.huggingface,
                 ...options
             };
+        } else if (provider === 'openrouter') {
+            providerOptions = {
+                ...this.getDefaultSettings().openrouter,
+                ...(this.settings.openrouter || {}),
+                ...options
+            };
         } else {
             providerOptions = options;
         }
@@ -209,7 +221,7 @@ class ImageGenerationService {
             return null;
         }
 
-        for (const providerName of ['openai', 'huggingface']) {
+        for (const providerName of ['openai', 'openrouter', 'huggingface']) {
             const provider = this.providerManager.providers.get(providerName);
             if (provider && typeof provider.generateImage === 'function') {
                 return provider;

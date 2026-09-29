@@ -14249,3 +14249,12 @@ input[type="checkbox"]:not(.toggle-label input[type="checkbox"]) {
 .btn-warning:hover {
     filter: brightness(1.1);
 }
+
+/* Voice presets (Voice page) */
+.voice-presets { display: flex; flex-wrap: wrap; gap: 8px; margin: 6px 0 10px; }
+.voice-preset { display: inline-flex; align-items: center; border: 1px solid var(--border-color, #444); border-radius: 18px; overflow: hidden; }
+.voice-preset button { background: transparent; border: 0; color: inherit; padding: 6px 12px; cursor: pointer; font: inherit; }
+.voice-preset button.voice-preset-delete { padding: 6px 9px; opacity: 0.6; border-left: 1px solid var(--border-color, #444); }
+.voice-preset button.voice-preset-delete:hover { opacity: 1; }
+.voice-preset.active { border-color: var(--primary-color, #4a9eff); background: rgba(74, 158, 255, 0.15); }
+.voice-preset.active .voice-preset-name::before { content: "\2713  "; }

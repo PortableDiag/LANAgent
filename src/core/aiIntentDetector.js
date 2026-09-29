@@ -1799,9 +1799,10 @@ export class AIIntentDetector {
     // Log intent count for debugging
     logger.debug(`Building intent prompt with ${intentIds.length} total intents (IDs: ${Math.min(...intentIds.map(Number))}-${Math.max(...intentIds.map(Number))})`);
     
-    let prompt = `You are an intent classifier. Given a user query, select the best matching intent from the numbered list below.
-
-${conversationContext}User Query: "${userQuery}"
+    // The intent list and decision guide (~50k tokens) come FIRST and the per-message part
+    // LAST: a prompt cache only matches an identical prefix, and with the query up front every
+    // call was a full-price miss (52,634 uncached tokens to classify "Hello?", 2026-09-28).
+    let prompt = `You are an intent classifier. Given a user query (at the end), select the best matching intent from the numbered list below.
 
 Available Intents:
 `;
@@ -1908,6 +1909,8 @@ Decision Guide:
 - If the request is ambiguous or unclear, use intent 998 (Ask for clarification)
 - For general knowledge questions or conversations, use intent 999 (Process as query)
 - For simple greetings or small talk, use intent 0 (General conversation)
+
+${conversationContext}User Query: "${userQuery}"
 
 Number:`;
 

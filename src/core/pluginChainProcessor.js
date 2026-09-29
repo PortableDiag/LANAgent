@@ -40,6 +40,35 @@ export class PluginChainProcessor {
    * @param {Object} context - Context including userId for conversation history
    * @returns {Object} Analysis result with steps if multi-step task detected
    */
+  /**
+   * The planner's plugin list, built from the live registry. It used to be a
+   * hardcoded list of ~12 plugins, mostly without action names ("network:
+   * scanning, ping, port checks"), so the model invented actions such as
+   * network.port and could not see the other ~90 plugins at all (2026-09-27).
+   * Cached for 10 minutes: plugins rarely change while the agent runs.
+   */
+  buildPluginCatalog() {
+    if (this._catalogCache && Date.now() - this._catalogCache.at < 600000) return this._catalogCache.text;
+    const lines = [];
+    const apis = this.agent.apiManager?.apis;
+    if (apis && typeof apis.entries === 'function') {
+      for (const [name, info] of apis.entries()) {
+        if (!info?.enabled || !info.instance) continue;
+        const cmds = Array.isArray(info.instance.commands) ? info.instance.commands : [];
+        const actions = cmds.map(c => c.command || c.name).filter(a => typeof a === 'string' && /^[\w-]+$/.test(a));
+        if (!actions.length) continue;
+        const desc = String(info.instance.description || '').replace(/\s+/g, ' ').slice(0, 110);
+        // Every action: capping at 20 hid most of the big plugins (trellis-notes has 50+), so
+        // the planner could not see e.g. teachSkill and improvised a broken two-step chain
+        // (2026-09-28). The catalog sits in the stable, cacheable part of the prompt.
+        lines.push(`- ${name}: ${desc} (actions: ${actions.join(', ')})`);
+      }
+    }
+    const text = lines.sort().join('\n') || '- (plugin registry unavailable)';
+    this._catalogCache = { at: Date.now(), text };
+    return text;
+  }
+
   async analyzeComplexTask(input, context = {}) {
     try {
       logger.info(`Analyzing complex task: "${input}"`);
@@ -63,21 +92,17 @@ export class PluginChainProcessor {
         }
       }
 
-      const analysisPrompt = `Analyze this user request and determine if it requires multiple sequential steps using different tools/plugins:
+      // Stable instructions and catalog first, the request LAST: a prompt cache only
+      // matches an identical prefix, so a query up front made every call a full-price miss.
+      const analysisPrompt = `Analyze the user request given at the end and determine if it requires multiple sequential steps using different tools/plugins.
 
-"${input}"
-${conversationContext}
-Available plugins and their capabilities:
+Available plugins and their exact actions (use ONLY these plugin and action names):
+${this.buildPluginCatalog()}
+
+Details for plugins that need specific parameters:
 - websearch: Search web (action: "search"), crypto prices (action: "crypto"), stock prices (action: "stock"), weather (action: "weather")
-- ytdlp: Download videos/audio from YouTube and 1000+ sites
-- ffmpeg: Convert, compress, trim video/audio files
-- email: Send emails (use sendWithAI for AI-composed emails), manage contacts
-- tasks: Create, manage, complete tasks
-- git: Version control operations
-- system: System information, commands, reminders
 - scraper: Web scraping (action: "scrape"), screenshots (action: "screenshot"), PDF generation (action: "pdf")
-- network: Network scanning, ping, port checks
-- software: Install/uninstall packages
+- email: Send emails (use sendWithAI for AI-composed emails), manage contacts
 - calendar: Google Calendar via CalDAV - get today's events (action: "getToday"), get upcoming events (action: "getUpcoming", params: {days, limit}), search events (action: "searchEvents", params: {query, startDate}), get events in range (action: "getEvents", params: {startDate, endDate, limit}), create event (action: "createEvent", params: {title, start, end, description}), update event (action: "updateEvent", params: {eventId, updates}), delete event (action: "deleteEvent", params: {eventId}), check availability (action: "checkAvailability", params: {date, duration, startHour, endHour}), list calendars (action: "listCalendars"), status (action: "status"). For checking trips/plans use "searchEvents" or "getEvents" with a date range.
 - govee: Smart home device control - list ALL devices (action: "list"), device status (action: "status", params: {device}), power on/off/toggle (action: "power", params: {device, state}), brightness (action: "brightness", params: {device, level}), color (action: "color", params: {device, color}), temperature (action: "temperature", params: {device, kelvin}), scenes (action: "scene", params: {device, scene}), schedules (action: "schedules", params: {operation: "create"|"update"|"delete"|"list", device, time: "HH:MM", action: "on"|"off"|"color"|"brightness", value, repeat: "daily"|"weekdays"|"weekends"|"once"}). For schedule changes use action "schedules" with appropriate operation. IMPORTANT: For "list all devices" use action "list", NOT "status".
 
@@ -195,6 +220,9 @@ Example for "send me an email with bitcoin price":
     "useSharedData": true  // CRITICAL: Use the price from step 1
   }
 ]
+${conversationContext}
+User request:
+"${input}"
 
 Analyze the request:`;
 
@@ -453,7 +481,9 @@ Analyze the request:`;
       params.fromAI = true;
 
       // Validate action exists for the plugin before executing
-      const plugin = this.agent.plugins?.get(step.plugin);
+      // The real registry is apiManager; agent.plugins does not exist, so this
+      // check silently never ran and invented actions reached the plugin.
+      const plugin = this.agent.apiManager?.getPlugin?.(step.plugin) || this.agent.plugins?.get?.(step.plugin);
       if (plugin && plugin.commands && Array.isArray(plugin.commands)) {
         const validActions = plugin.commands.map(c => c.command || c.name).filter(Boolean);
         if (validActions.length > 0 && !validActions.includes(step.action)) {
@@ -553,33 +583,38 @@ Analyze the request:`;
    * @returns {string} Summary text
    */
   generateChainSummary(results, overallSuccess) {
+    // Lead with what each step FOUND. The old summary listed only step names and
+    // statuses, so a successful chain answered "SUCCESS, 2/2" and never showed
+    // the certificate, the DNS records or whatever was asked for (2026-09-27).
+    const MAX_STEP_CHARS = 1500;
+    const readable = (value) => {
+      if (value == null) return '';
+      if (typeof value === 'string') return value.trim();
+      if (typeof value.result === 'string') return value.result.trim();
+      if (typeof value.message === 'string' && Object.keys(value).length <= 3) return value.message.trim();
+      try {
+        return '```\n' + JSON.stringify(value, null, 2).slice(0, MAX_STEP_CHARS - 10) + '\n```';
+      } catch {
+        return String(value);
+      }
+    };
+    const clip = (text) => text.length > MAX_STEP_CHARS ? `${text.slice(0, MAX_STEP_CHARS)}\n… (truncated)` : text;
+
     const successful = results.filter(r => r.success).length;
-    const failed = results.length - successful;
-    
-    let summary = `**Multi-Step Task Execution Summary**\n\n`;
-    summary += `✅ **Overall Status:** ${overallSuccess ? 'SUCCESS' : 'PARTIAL/FAILED'}\n`;
-    summary += `📊 **Steps Completed:** ${successful}/${results.length} successful\n\n`;
-
-    if (failed > 0) {
-      summary += `❌ **Failed Steps:** ${failed}\n\n`;
-    }
-
-    summary += `**Step Details:**\n`;
-    results.forEach((result, index) => {
-      const status = result.success ? '✅' : '❌';
-      const time = result.executionTime ? ` (${result.executionTime}ms)` : '';
-      summary += `${status} **Step ${result.stepNumber}:** ${result.description}${time}\n`;
-      
-      if (!result.success && result.error) {
-        summary += `   ⚠️ *Error: ${result.error}*\n`;
+    let summary = '';
+    results.forEach((result) => {
+      summary += `**${result.success ? '✅' : '❌'} ${result.description || `Step ${result.stepNumber}`}**\n`;
+      if (result.success) {
+        const out = readable(result.result);
+        summary += out ? `${clip(out)}\n\n` : '_Done._\n\n';
+      } else {
+        summary += `⚠️ ${result.error || 'Step failed'}\n\n`;
       }
     });
 
     const totalTime = results.reduce((total, r) => total + (r.executionTime || 0), 0);
-    if (totalTime > 0) {
-      summary += `\n⏱️ **Total Execution Time:** ${totalTime}ms`;
-    }
-
+    const seconds = totalTime ? ` · ${(totalTime / 1000).toFixed(1)}s` : '';
+    summary += `${overallSuccess ? '✅' : '⚠️'} ${successful}/${results.length} steps completed${seconds}`;
     return summary;
   }
 

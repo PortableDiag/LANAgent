@@ -3254,6 +3254,17 @@ export class WebInterface {
             logger.warn(`Plugin ${pluginName} re-initialization after credential update:`, initError.message);
           }
         }
+        // Still missing a required credential (e.g. saved only one of two): keep it disabled
+        // with the reason, or the planner offers a plugin that cannot run.
+        if (pluginEntry && typeof plugin.missingRequiredCredentials === 'function') {
+          const stillMissing = await plugin.missingRequiredCredentials().catch(() => []);
+          if (stillMissing.length) {
+            const reason = `Missing required credentials: ${stillMissing.join(', ')}`;
+            Object.assign(pluginEntry, { enabled: false, error: reason, lastError: reason, disabledReason: 'missing_credentials' });
+          } else if (pluginEntry.disabledReason === 'missing_credentials') {
+            pluginEntry.disabledReason = null;
+          }
+        }
 
         logger.info(`Credentials saved for plugin ${pluginName}`);
         res.json({

@@ -59,7 +59,11 @@ export function parseSkill(text) {
       const block = [];
       while (i + 1 < lines.length && (/^\s+/.test(lines[i + 1]) || lines[i + 1] === '')) block.push(lines[++i].trim());
       value = value.startsWith('>') ? block.filter(Boolean).join(' ') : block.join('\n').trim();
-    } else if (/^(['"]).*\1$/.test(value)) {
+    } else if (/^".*"$/.test(value)) {
+      // renderSkill writes quoted values with JSON.stringify: decode its escapes (\" \\), or a
+      // description containing a quote would not survive a SKILL.md round trip.
+      try { value = JSON.parse(value); } catch { value = value.slice(1, -1); }
+    } else if (/^'.*'$/.test(value)) {
       value = value.slice(1, -1);
     }
     meta[m[1]] = value;
@@ -71,6 +75,20 @@ export function renderSkill({ name, description, body, extra = {} }) {
   const esc = (v) => (/[:#'"\n]/.test(String(v)) ? JSON.stringify(String(v).replace(/\n/g, ' ')) : String(v));
   const fm = [`name: ${name}`, `description: ${esc(description)}`, ...Object.entries(extra).map(([k, v]) => `${k}: ${esc(v)}`)];
   return `---\n${fm.join('\n')}\n---\n\n${String(body).trim()}\n`;
+}
+
+/**
+ * Does `score` stand out from the other skills' scores? It must beat their mean by `minLift`.
+ * Measured on ALICE (ada-002, 15 skills, 2026-09-28): real requests put the right skill
+ * 0.073-0.163 above the mean; greetings and off-topic requests top out at 0.031. A lift over
+ * the mean (not a z-score) lets two genuinely relevant skills both through: two high scores
+ * inflate the spread and would push each other under a z threshold.
+ * With fewer than 4 skills there is no distribution to judge, so it passes.
+ */
+export function standsOut(score, all, minLift) {
+  if (!minLift || all.length < 4) return true;
+  const mean = all.reduce((a, b) => a + b, 0) / all.length;
+  return score - mean >= minLift;
 }
 
 function cosine(a, b) {
@@ -192,18 +210,25 @@ export class SkillsService {
    * Skills relevant to a request, best first. Embedding similarity when available,
    * otherwise keyword overlap with the name and description.
    */
-  async match(query, { limit = 2, minSimilarity = Number(process.env.SKILLS_MIN_SIMILARITY) || 0.5 } = {}) {
+  async match(query, { limit = 2, minSimilarity = Number(process.env.SKILLS_MIN_SIMILARITY) || 0.5, minLift = Number(process.env.SKILLS_MIN_LIFT) || 0.05, withScores = false, skills: pool = null } = {}) {
     await this.scan();
     // Pending skills (taught by another agent, not yet approved) are never used.
-    const skills = [...this.skills.values()].filter(s => (s.meta?.status || 'active') !== 'pending');
+    const skills = (pool || [...this.skills.values()]).filter(s => (s.meta?.status || 'active') !== 'pending');
     if (!skills.length || !query) return [];
     try {
       const q = await this.embed(query);
       const scored = [];
       for (const s of skills) scored.push({ skill: s, score: cosine(q, await this.vectorFor(s)) });
-      const hits = scored.filter(x => x.score >= minSimilarity).sort((a, b) => b.score - a.score).slice(0, limit);
+      // ada-002 packs every pair into ~0.70-0.76, so an absolute cutoff let two unrelated skills
+      // into the prompt of every "Hello?". A real match stands out from the other skills.
+      const all = scored.map(y => y.score);
+      const mean = all.reduce((a, b) => a + b, 0) / (all.length || 1);
+      const hits = scored.filter(x => x.score >= minSimilarity && standsOut(x.score, all, minLift))
+        .sort((a, b) => b.score - a.score).slice(0, limit);
       if (hits.length) logger.info(`Skill match: ${hits.map(h => `${h.skill.name} (${h.score.toFixed(2)})`).join(', ')}`);
-      return hits.map(x => x.skill);
+      // withScores: the caller also gets how far each hit stands above the others (`lift`),
+      // e.g. to offer a skill to another agent only on a strong match.
+      return withScores ? hits.map(x => ({ skill: x.skill, score: x.score, lift: x.score - mean })) : hits.map(x => x.skill);
     } catch (error) {
       logger.debug(`Skill embedding match unavailable (${error.message}); using keywords`);
       const qw = new Set(words(query));
@@ -212,7 +237,7 @@ export class SkillsService {
         .filter(x => x.score >= 2)
         .sort((a, b) => b.score - a.score)
         .slice(0, limit)
-        .map(x => x.skill);
+        .map(x => (withScores ? { skill: x.skill, score: null, lift: null } : x.skill));
     }
   }
 
@@ -345,19 +370,25 @@ Generalise the steps (no one-off values unless they are always the same). If the
 }
 
 const AUTO_APPROVE_KEY = 'skills.autoApprovePeer';
+export const DEFAULT_AUTO_APPROVE = true;
 
 /**
- * Whether skills other agents teach are used at once (operator's choice, off by default).
- * SKILLS_AUTO_APPROVE in .env wins; otherwise the saved setting (SystemSettings).
+ * Whether skills other agents teach in Trellis channels are used at once. ON by default
+ * (operator, 2026-09-28: "make auto approve the default for all lanagent"); the operator is
+ * still told on Telegram with a Reject button. SKILLS_AUTO_APPROVE in .env wins, then the
+ * saved setting, then the default. Skills from UNTRUSTED Skynet P2P peers do not use this:
+ * they always wait for approval (peerSkillsTrusted decides there).
  */
 export async function getAutoApprove() {
   const env = String(process.env.SKILLS_AUTO_APPROVE || '').toLowerCase();
   if (env === 'true' || env === 'false') return { enabled: env === 'true', source: 'env' };
   try {
     const { SystemSettings } = await import('../../models/SystemSettings.js');
-    return { enabled: (await SystemSettings.getSetting(AUTO_APPROVE_KEY, false)) === true, source: 'setting' };
+    const v = await SystemSettings.getSetting(AUTO_APPROVE_KEY, null);
+    if (v === null || v === undefined) return { enabled: DEFAULT_AUTO_APPROVE, source: 'default' };
+    return { enabled: v === true || v === 'true', source: 'setting' };
   } catch {
-    return { enabled: false, source: 'default' };
+    return { enabled: DEFAULT_AUTO_APPROVE, source: 'default' };
   }
 }
 

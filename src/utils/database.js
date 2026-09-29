@@ -6,6 +6,7 @@ import { retryOperation, isRetryableError } from './retryUtils.js';
 // The in-flight attempt; concurrent callers share it (and its failure) instead of polling.
 let connectionPromise = null;
 let reconnectAttempts = 0;
+let failedConnectAttempts = 0; // every failed attempt, retryable or not — drives the backoff
 const MAX_RECONNECT_ATTEMPTS = 10;
 const RECONNECT_BASE_INTERVAL = 1000; // 1 second base for exponential backoff
 const RECONNECT_MAX_INTERVAL = 30000; // 30 second max backoff
@@ -15,6 +16,27 @@ const DEFAULT_DATABASE_WAIT_TIMEOUT = 30000;
 
 let circuitBreakerOpen = false;
 let circuitBreakerTimer = null;
+
+/**
+ * Connect errors that no amount of retrying fixes: an unparseable URI or rejected credentials.
+ * @param {Error} error
+ * @returns {boolean}
+ */
+export function isPermanentConnectError(error) {
+  if (!error) return false;
+  if (error.name === 'MongoParseError' || error.name === 'MongoAPIError') return true;
+  // 18 = AuthenticationFailed
+  return error.code === 18 || error.codeName === 'AuthenticationFailed';
+}
+
+/**
+ * Exponential reconnect backoff, capped at RECONNECT_MAX_INTERVAL.
+ * @param {number} failures Failed attempts so far
+ * @returns {number} Delay in ms
+ */
+export function connectBackoffDelay(failures) {
+  return Math.min(RECONNECT_BASE_INTERVAL * Math.pow(2, Math.max(0, failures)), RECONNECT_MAX_INTERVAL);
+}
 
 class DatabaseTimeoutError extends Error {
   constructor(timeoutMs) {
@@ -113,11 +135,24 @@ async function establishDatabaseConnection() {
 
     logger.info('MongoDB connected successfully');
     reconnectAttempts = 0; // Reset on successful connection
+    failedConnectAttempts = 0;
     setupConnectionHandlers();
 
     return mongoose.connection;
   } catch (error) {
     logger.error('Failed to connect to MongoDB:', error);
+
+    // A bad URI or rejected credentials cannot succeed on retry — fail loudly instead of
+    // looping. Everything else (mongod down arrives as a non-"retryable" server-selection
+    // error) keeps waiting: a boot-time throw crash-loops past PM2's max_restarts.
+    if (isPermanentConnectError(error)) {
+      logger.error('MongoDB connection error is not recoverable by retrying (check MONGODB_URI / credentials).');
+      throw error;
+    }
+
+    // Every failure grows the backoff, so a long outage settles at the 30s cap instead of
+    // retrying every second forever; only retryable errors count toward the give-up limit.
+    failedConnectAttempts++;
 
     if (isRetryableError(error)) {
       reconnectAttempts++;
@@ -128,8 +163,8 @@ async function establishDatabaseConnection() {
 
     // Attempt reconnection with exponential backoff
     if (reconnectAttempts < MAX_RECONNECT_ATTEMPTS && !circuitBreakerOpen) {
-      const backoffDelay = Math.min(RECONNECT_BASE_INTERVAL * Math.pow(2, reconnectAttempts), RECONNECT_MAX_INTERVAL);
-      logger.info(`Attempting to reconnect to MongoDB (attempt ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS}) in ${backoffDelay}ms...`);
+      const backoffDelay = connectBackoffDelay(failedConnectAttempts);
+      logger.info(`Attempting to reconnect to MongoDB (failure ${failedConnectAttempts}, retryable ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS}) in ${backoffDelay}ms...`);
 
       await new Promise(resolve => setTimeout(resolve, backoffDelay));
       return establishDatabaseConnection();
@@ -258,7 +293,7 @@ function setupConnectionHandlers() {
 
     // Attempt reconnection on error
     if (mongoose.connection.readyState === 0 && !connectionPromise) {
-      const backoffDelay = Math.min(RECONNECT_BASE_INTERVAL * Math.pow(2, reconnectAttempts), RECONNECT_MAX_INTERVAL);
+      const backoffDelay = connectBackoffDelay(failedConnectAttempts);
       setTimeout(() => {
         logger.info('Attempting to reconnect after error...');
         connectDatabase().catch(error => {
@@ -273,7 +308,7 @@ function setupConnectionHandlers() {
     logger.warn('MongoDB disconnected');
 
     // Attempt automatic reconnection with exponential backoff
-    const backoffDelay = Math.min(RECONNECT_BASE_INTERVAL * Math.pow(2, reconnectAttempts), RECONNECT_MAX_INTERVAL);
+    const backoffDelay = connectBackoffDelay(failedConnectAttempts);
     setTimeout(() => {
       logger.info('Attempting automatic reconnection...');
       connectDatabase().catch(error => {

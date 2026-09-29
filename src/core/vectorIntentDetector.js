@@ -120,6 +120,15 @@ export class VectorIntentDetector {
       logger.debug('Full metadata:', JSON.stringify(metadata, null, 2));
       
       logger.info(`Best match: ${metadata.name}, distance: ${distance}, similarity: ${similarity}`);
+
+      // The index persists across boots, so it can hold intents of a plugin that is now
+      // disabled (e.g. no API key). Routing to one fails the whole task; let AI detection,
+      // which only sees enabled plugins, choose instead.
+      const pluginEntry = metadata.plugin ? this.agent?.apiManager?.apis?.get?.(metadata.plugin) : null;
+      if (pluginEntry && !pluginEntry.enabled) {
+        logger.info(`Best match ${metadata.plugin}.${metadata.action || '?'} is disabled (${pluginEntry.disabledReason || pluginEntry.error || 'disabled'}), falling back to AI`);
+        return null;
+      }
       
       // Check if similarity meets threshold
       // Low-confidence matches fall back to AI intent detection for better accuracy.

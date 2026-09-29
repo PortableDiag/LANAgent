@@ -53,7 +53,7 @@ export default class SkillsPlugin extends BasePlugin {
       },
       {
         command: 'setAutoApprove',
-        description: 'Turn automatic approval of skills other agents teach on or off (off by default); turning it on also approves any already pending',
+        description: 'Turn automatic approval of skills other agents teach in Trellis channels on or off (on by default); turning it on also approves any already pending',
         usage: 'setAutoApprove({ enabled: true })',
         examples: ['turn on auto approve skills', 'auto approve skills from other agents', 'turn off skill auto approval', 'stop auto approving skills', 'is skill auto approve on']
       },
@@ -62,6 +62,12 @@ export default class SkillsPlugin extends BasePlugin {
         description: 'Turn skill sharing with other agents on the Skynet P2P network on or off (on by default), or set the trust score a peer needs for its skills to be used without approval',
         usage: 'setSharing({ enabled: false })  or  setSharing({ minTrustScore: 60 })',
         examples: ['turn off skill sharing', 'stop sharing skills with other agents', 'turn on skill sharing', 'is skill sharing on', 'set the skill sharing trust score to 60']
+      },
+      {
+        command: 'setTrellisTeaching',
+        description: 'Turn teaching skills to other agents in Trellis channels on or off (on by default): when an agent asks for a procedure it gets the skill as a SKILL.md, and an agent describing a problem a skill solves is offered it',
+        usage: 'setTrellisTeaching({ enabled: false })',
+        examples: ['stop teaching skills in trellis', 'turn off skill teaching in trellis channels', 'turn on trellis skill teaching', 'is trellis skill teaching on']
       },
       {
         command: 'reject',
@@ -153,6 +159,22 @@ export default class SkillsPlugin extends BasePlugin {
             result: state.enabled
               ? `Skill sharing is ON${envNote}: I teach my skills to trusted agents on the Skynet network and use theirs. Trusted = the genesis agent, peers you mark trusted, or a trust score of ${state.minTrustScore}+; skills from anyone else wait for your approval.`
               : `Skill sharing is OFF${envNote}: I neither teach nor learn skills over the Skynet network.`
+          };
+        }
+        case 'setTrellisTeaching': {
+          const { setTrellisTeaching, getTrellisTeaching } = await import('../../services/skills/skillTeaching.js');
+          const has = data.enabled !== undefined && data.enabled !== null && data.enabled !== '';
+          const state = has
+            ? await setTrellisTeaching(data.enabled === true || /^(true|on|yes|1|enable)/i.test(String(data.enabled)))
+            : await getTrellisTeaching();
+          const envNote = state.source === 'env' ? ' (SKILLS_TRELLIS_TEACH in .env sets this and overrides the switch)' : '';
+          return {
+            success: true,
+            enabled: state.enabled,
+            offers: state.offers,
+            result: state.enabled
+              ? `Trellis skill teaching is ON${envNote}: agents that ask for a procedure get my skill as a SKILL.md${state.offers ? ', and an agent describing a problem a skill solves is offered it (sent only if it says yes)' : ''}.`
+              : `Trellis skill teaching is OFF${envNote}: I don't send my skills to other agents in Trellis channels.`
           };
         }
         case 'reject': {

@@ -553,6 +553,50 @@ Live in-memory snapshot of download-token usage (tokens within their TTL window)
 
 ---
 
+## Recent Updates (September 28, 2026)
+
+Sync covering 2.25.402–2.25.410.
+
+### v2.25.410 — Skill auto-approve on by default
+
+Skills other agents teach in Trellis channels are active at once; the operator is told on
+Telegram with a Reject button. `SKILLS_AUTO_APPROVE=false`, or a saved "off" (`skills setAutoApprove`),
+keeps them pending. Skills from untrusted Skynet P2P peers always wait for approval.
+
+### v2.25.408 — Plugins without their required credentials are disabled
+
+A plugin whose declared required credentials cannot be found is registered **disabled** with
+`disabledReason: "missing_credentials"` (as plugins that failed at start-up already were), so the
+planner, intent detection and tools never choose it. Saving the credentials in Settings
+(`POST /api/plugins/:name/credentials`) enables it again, but only when every required one is present.
+A plugin with a real keyless mode sets `worksWithoutCredentials = true`.
+
+### v2.25.407 — Teaching skills in Trellis channels
+
+- `trellis-notes teachSkill({ card, skill, to? })` posts a skill in a channel: a short summary with
+  the skill attached as `<name>.SKILL.md` (front matter carries `sha256`).
+- `skills setTrellisTeaching({ enabled })` turns answering skill requests from other agents on or off
+  (on by default; `SKILLS_TRELLIS_TEACH`, offers alone `SKILLS_TRELLIS_OFFER`).
+- A `*.SKILL.md` another agent attaches to a message addressed to the agent is installed exactly as
+  sent; a hash mismatch is refused.
+
+### v2.25.406 — Live streams on the social download routes
+
+A YouTube link to a broadcast still in progress is refused within seconds with a clear
+message ("…still broadcasting… try again after the broadcast ends"), and the credits are refunded.
+Every video and audio download has a hard limit, `YTDLP_DOWNLOAD_TIMEOUT_SEC` (default 1800).
+
+### v2.25.403–405 — Telegram
+
+"typing…" and upload status while a request runs; replies stream by editing one message with a
+⏹ Stop button (`TELEGRAM_STREAM_TRANSPORT=edit|draft|off`, default `edit`); approve/deny buttons are
+coloured. Button taps are handled while a long request is still running.
+
+### Skill matching
+
+A skill is added to a prompt only when it scores clearly above the others: `SKILLS_MIN_LIFT`
+(default 0.05) over the mean similarity.
+
 ## Recent Updates (September 27, 2026)
 
 Sync covering 2.25.375–2.25.390.

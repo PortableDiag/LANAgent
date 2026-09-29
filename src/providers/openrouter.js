@@ -484,14 +484,16 @@ export class OpenRouterProvider extends BaseProvider {
 
   async generateStreamingResponse(prompt, options = {}, onChunk) {
     const startTime = Date.now();
+    let fullContent = "";
+    let servedModel = options.model || this.models.chat;
 
     try {
       const { model, params } = this._buildParams(prompt, options);
-      const stream = await this.client.chat.completions.create({ ...params, stream: true });
+      servedModel = model;
+      const stream = await this.client.chat.completions.create({ ...params, stream: true },
+        options.signal ? { signal: options.signal } : undefined);
 
-      let fullContent = "";
       let usage = null;
-      let servedModel = model;
 
       for await (const chunk of stream) {
         if (chunk.error) {
@@ -516,6 +518,11 @@ export class OpenRouterProvider extends BaseProvider {
 
       return { content: fullContent, model: servedModel, usage, provider: this.name };
     } catch (error) {
+      // Stopped by the user (Telegram Stop button): hand back what was written so far.
+      if (options.signal?.aborted) {
+        logger.info(`OpenRouter stream stopped by the caller after ${fullContent.length} chars`);
+        return { content: fullContent, model: servedModel, provider: this.name, aborted: true };
+      }
       this.metrics.errors++;
       logger.error("OpenRouter generateStreamingResponse error:", error);
       throw error;

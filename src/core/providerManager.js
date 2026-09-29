@@ -555,6 +555,10 @@ export class ProviderManager extends EventEmitter {
     try {
       return await provider.generateStreamingResponse(prompt, options, onChunk);
     } catch (error) {
+      // The caller stopped it (Telegram Stop): do not re-run the whole answer non-streaming.
+      if (options.signal?.aborted) {
+        return { content: '', provider: providerName, aborted: true };
+      }
       logger.error("Primary provider streaming failed, falling back to non-streaming:", error.message);
       const result = await this.generateResponse(prompt, options);
       if (onChunk) {

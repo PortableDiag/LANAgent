@@ -11,7 +11,8 @@ class VideoGenerationService {
         this.providerManager = null;
         this.settings = null;
         this.initialized = false;
-        this.pendingJobs = new Map(); // Track OpenAI async jobs
+        this.pendingJobs = new Map(); // Track async jobs (OpenAI, OpenRouter)
+        this.jobProviders = new Map(); // jobId -> provider; outlives pendingJobs for late status checks
         this.modelslabApiKey = null;
     }
 
@@ -92,6 +93,13 @@ class VideoGenerationService {
             },
             huggingface: {
                 model: 'Wan-AI/Wan2.1-T2V-14B'
+            },
+            openrouter: {
+                model: 'alibaba/wan-2.7',
+                duration: '5',
+                resolution: '720p',
+                aspectRatio: '16:9',
+                generateAudio: true
             }
         };
     }
@@ -151,6 +159,12 @@ class VideoGenerationService {
                 ...this.settings.huggingface,
                 ...options
             };
+        } else if (provider === 'openrouter') {
+            providerOptions = {
+                ...this.getDefaultSettings().openrouter,
+                ...(this.settings.openrouter || {}),
+                ...options
+            };
         } else {
             providerOptions = options;
         }
@@ -166,6 +180,10 @@ class VideoGenerationService {
 
             // For OpenAI, track the async job
             if (result.jobId) {
+                this.jobProviders.set(result.jobId, provider);
+                if (this.jobProviders.size > 200) {
+                    this.jobProviders.delete(this.jobProviders.keys().next().value);
+                }
                 this.pendingJobs.set(result.jobId, {
                     prompt,
                     provider,
@@ -350,7 +368,17 @@ class VideoGenerationService {
         return endpoint === 'text2video_ultra' ? 0.20 : 0.08;
     }
 
+    /** Provider that started an async job, so polling follows the right API. */
+    getJobProvider(jobId) {
+        const name = this.pendingJobs.get(jobId)?.provider || this.jobProviders.get(jobId) || 'openai';
+        return { name, instance: this.providerManager?.providers?.get(name) || null };
+    }
+
     async pollJobStatus(jobId, providerInstance, maxAttempts = 60, intervalMs = 10000) {
+        // OpenRouter routes to video models that routinely take 5-15 minutes
+        if (providerInstance?.name?.toLowerCase() === 'openrouter' && maxAttempts === 60) {
+            maxAttempts = 120;
+        }
         let attempts = 0;
 
         while (attempts < maxAttempts) {
@@ -408,8 +436,8 @@ class VideoGenerationService {
             return null;
         }
 
-        // Check OpenAI first, then HuggingFace
-        for (const providerName of ['openai', 'huggingface']) {
+        // Check OpenAI first, then OpenRouter, then HuggingFace
+        for (const providerName of ['openai', 'openrouter', 'huggingface']) {
             const provider = this.providerManager.providers.get(providerName);
             if (provider && typeof provider.generateVideo === 'function') {
                 return provider;

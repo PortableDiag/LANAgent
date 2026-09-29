@@ -94,6 +94,59 @@ skynetBountySchema.index({ posterFingerprint: 1 });
 skynetBountySchema.index({ category: 1 });
 skynetBountySchema.index({ difficulty: 1 });
 skynetBountySchema.index({ requiredSkills: 1 });
+skynetBountySchema.index({ bountyId: 1, status: 1, expiresAt: 1 });
+
+/**
+ * Atomically claim an open, non-expired bounty.
+ *
+ * MongoDB evaluates the complete predicate and update as one operation, so
+ * concurrent claimants cannot both transition the same bounty from open to
+ * claimed. A null result means another claimant won the race, or that the
+ * bounty was already closed or expired.
+ *
+ * @param {string} bountyId - Identifier of the bounty to claim
+ * @param {string} claimerFingerprint - Fingerprint of the claiming agent
+ * @returns {Promise<Object|null>} The updated bounty, or null when unavailable
+ */
+skynetBountySchema.statics.claimBounty = async function(bountyId, claimerFingerprint) {
+  if (typeof bountyId !== 'string' || bountyId.trim().length === 0) {
+    throw new TypeError('bountyId must be a non-empty string');
+  }
+
+  if (typeof claimerFingerprint !== 'string' || claimerFingerprint.trim().length === 0) {
+    throw new TypeError('claimerFingerprint must be a non-empty string');
+  }
+
+  const now = new Date();
+
+  try {
+    return await this.findOneAndUpdate(
+      {
+        bountyId,
+        // Only bounties this agent posted can be claimed from it; a peer's
+        // bounty that we mirrored must never be handed out by us.
+        isLocal: true,
+        status: 'open',
+        expiresAt: { $gt: now },
+        claimerFingerprint: null
+      },
+      {
+        $set: {
+          status: 'claimed',
+          claimerFingerprint,
+          claimedAt: now
+        }
+      },
+      {
+        new: true,
+        runValidators: true
+      }
+    ).exec();
+  } catch (error) {
+    logger.error('Error claiming bounty:', error);
+    throw new Error('Failed to claim bounty', { cause: error });
+  }
+};
 
 /**
  * Get open bounties with optional filtering by difficulty level
