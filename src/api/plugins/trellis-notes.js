@@ -57,6 +57,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import { PluginSettings } from '../../models/PluginSettings.js';
 import { TrellisChannelListener } from '../../services/trellisChannelListener.js';
 import { EXTRA_COMMANDS, EXTRA_ACTIONS, installTrellisExtras } from '../../services/trellis/trellisExtras.js';
+import { syncAllBasketSkills, SKILLS_SYNC_MS } from '../../services/trellis/trellisSkills.js';
 
 const DEFAULT_BASE_URL = 'https://trellis-cards.com';
 const MAX_BODY_CHARS = 1200;   // truncate card bodies so results stay context-cheap
@@ -164,9 +165,10 @@ export default class TrellisNotesPlugin extends BasePlugin {
       },
       {
         command: 'appendNote',
-        description: 'Append text to the end of an existing card — additive, never replaces what is there',
-        usage: 'appendNote({ basket: "LANAgent", card: "Message board", text: "..." })',
-        examples: ['append to my notes card', 'add a line to the message board', 'log this on the existing note']
+        description: 'Append text or a section to the end of an existing Trellis card (by card number or title) — additive, never replaces what is there',
+        usage: 'appendNote({ card: 176, text: "..." })  // or appendNote({ basket: "LANAgent", card: "Message board", text: "..." })',
+        examples: ['append to my notes card', 'add a line to the message board', 'log this on the existing note',
+          'append this line to Trellis card 177', 'add your section to trellis card 176', 'append a section to that trellis card']
       },
       {
         command: 'createBasket',
@@ -284,6 +286,16 @@ export default class TrellisNotesPlugin extends BasePlugin {
     if (process.env.TRELLIS_LISTEN === 'true' && this.credentials?.apiKey) {
       this.listener = new TrellisChannelListener(this);
       this.listener.start();
+    }
+
+    // Keep the document's shared Skills basket installed here (web). Off the boot path:
+    // first run a minute after start, then every TRELLIS_SKILLS_SYNC_MS.
+    if (this.credentials?.apiKey && process.env.TRELLIS_SKILLS_SYNC !== 'false') {
+      const run = () => syncAllBasketSkills(this).catch(err => this.logger.debug(`Skills basket sync: ${err.message}`));
+      this.skillsSyncStart = setTimeout(run, 60000);
+      this.skillsSyncTimer = setInterval(run, SKILLS_SYNC_MS);
+      this.skillsSyncStart.unref?.();
+      this.skillsSyncTimer.unref?.();
     }
     this.logger.info(`${this.name} plugin initialized successfully`);
   }
@@ -1320,6 +1332,8 @@ export default class TrellisNotesPlugin extends BasePlugin {
   async cleanup() {
     this.logger.info(`Cleaning up ${this.name} plugin...`);
     if (this.listener) { this.listener.stop(); this.listener = null; }
+    clearTimeout(this.skillsSyncStart);
+    clearInterval(this.skillsSyncTimer);
     this.initialized = false;
     this.reachable = false;
   }

@@ -45,6 +45,7 @@ import { promisify } from 'util';
 import { readFileSync, existsSync, mkdirSync, copyFileSync } from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { isActionConfirmation, resolveConfirmation, isDeferredRequest } from './confirmationResolver.js';
 
 const execAsync = promisify(exec);
 const __filename = fileURLToPath(import.meta.url);
@@ -981,6 +982,48 @@ export class Agent extends EventEmitter {
       const userId = context.userId || 'default';
       const userBuffer = this.memoryManager?._conversationBuffer?.get(String(userId)) || [];
 
+      // A go-ahead ("yes, take the action") approves something proposed earlier. Resolve it
+      // into that request and run it; the text-only follow-up below cannot act.
+      if (this.providerManager && !context.resolvedConfirmation && isActionConfirmation(input)) {
+        const conversation = context.trellis?.recent
+          || userBuffer.slice(-6).map(m => `${m.role === 'user' ? 'User' : 'You'}: ${m.content}`).join('\n');
+        if (conversation) {
+          try {
+            const request = await resolveConfirmation({
+              generate: (p, o) => this.providerManager.generateResponse(p, o), conversation, input
+            });
+            if (request) {
+              logger.info(`Go-ahead resolved to: "${request.slice(0, 200)}"`);
+              return await this.processNaturalLanguage(request, { ...context, resolvedConfirmation: true }, systemPrompt);
+            }
+          } catch (err) {
+            logger.warn(`Could not resolve the go-ahead: ${err.message}`);
+          }
+        }
+      }
+
+      // "Don't do it yet — just tell me what you'd write": draft it and stop. The go-ahead
+      // above then runs it. Without this the router executed the request at once.
+      if (this.providerManager && !context.resolvedConfirmation && isDeferredRequest(input)) {
+        try {
+          const agentName = this.config?.name || process.env.AGENT_NAME || 'LANAgent';
+          const draft = await this.providerManager.generateResponse(
+            `You are ${agentName}. The user wants to see what you would do before you do it.\n${this._channelContext(context)}\n` +
+            `Request: ${input}\n\nState exactly what you would do — the action, its target, and the full text you would write or send — ` +
+            `then say you will do it when they confirm. You have NOT done it; never say it is done.`,
+            { maxTokens: 900, temperature: 0.3, systemPrompt: this.getSystemPrompt() }
+          );
+          const content = (draft?.content || draft?.text || '').toString().trim();
+          if (content) {
+            await this.memoryManager?.storeConversation(userId, input, content, context);
+            logger.info('Deferred request: drafted, waiting for the go-ahead');
+            return { type: 'text', content };
+          }
+        } catch (err) {
+          logger.warn(`Could not draft the deferred request: ${err.message}`);
+        }
+      }
+
       if (this.providerManager && userBuffer.length >= 2) {
         try {
           const isShort = input.trim().split(/\s+/).length <= 10;
@@ -1020,7 +1063,8 @@ Recent conversation:
 ${conversationCtx}
 User: ${input}
 
-Respond conversationally — elaborate, clarify, or answer based on what was just discussed. Be natural, not robotic. Keep it concise.`;
+Respond conversationally — elaborate, clarify, or answer based on what was just discussed. Be natural, not robotic. Keep it concise.
+This reply is text only: you have not run any tool or taken any action in this turn. Never say you did, sent, wrote, appended, created, changed or completed anything now. If the user wants something done, say what you will do and ask them to state the request.`;
 
             const response = await this.providerManager.generateResponse(followUpPrompt, {
               maxTokens: 400, temperature: 0.7,

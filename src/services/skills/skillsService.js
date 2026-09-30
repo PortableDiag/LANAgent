@@ -282,12 +282,13 @@ export class SkillsService {
     return (await this.rejectedPeerSkills()).some(r => r.name === name && (r.origin || '') === (origin || ''));
   }
 
-  async remove(name) {
+  /** @param {{remember?: boolean}} [opts] remember:false — a sync dropping a skill, not the operator rejecting it */
+  async remove(name, { remember = true } = {}) {
     const skill = await this.get(name);
     if (!skill) return false;
     if (skill.bundled) throw new Error(`"${name}" ships with LANAgent and cannot be deleted; save a skill of the same name to replace it`);
-    if (skill.meta?.source === 'peer') {
-      // Remember it, or the next P2P sync would teach it straight back
+    if (remember && (skill.meta?.source === 'peer' || skill.meta?.source === 'trellis')) {
+      // Remember it, or the next P2P or Skills-basket sync would install it straight back
       const list = (await this.rejectedPeerSkills()).filter(r => !(r.name === name && (r.origin || '') === (skill.meta.origin || '')));
       list.push({ name, origin: skill.meta.origin || '', at: new Date().toISOString() });
       await fs.mkdir(this.dir, { recursive: true });

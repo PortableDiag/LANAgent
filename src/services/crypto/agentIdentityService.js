@@ -187,6 +187,11 @@ class AgentIdentityService {
   /**
    * Upload data to Pinata IPFS
    */
+  /** File names on IPFS are the agent's own ("delta-avatar.png"), never another agent's. */
+  _fileSlug(agentModel) {
+    return String(agentModel?.name || process.env.AGENT_NAME || 'agent').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'agent';
+  }
+
   async uploadToIPFS(data, filename, isFile = false) {
     const apiKey = process.env.PINATA_API_KEY;
     const secretKey = process.env.PINATA_SECRET_KEY;
@@ -251,8 +256,13 @@ class AgentIdentityService {
       avatarExists = true;
     } catch { /* no avatar file */ }
 
+    const slug = this._fileSlug(agentModel);
     if (!avatarExists) {
-      // Try alice.png in project root
+      // alice.png in the project root is ALICE's own picture: never another agent's identity.
+      if (slug !== 'alice') {
+        logger.warn('No avatar file found, skipping avatar upload');
+        return null;
+      }
       const alicePath = path.join(process.cwd(), 'alice.png');
       try {
         await fs.access(alicePath);
@@ -265,7 +275,7 @@ class AgentIdentityService {
       }
     }
 
-    const cid = await this.uploadToIPFS(fullPath, 'alice-avatar.png', true);
+    const cid = await this.uploadToIPFS(fullPath, `${slug}-avatar.png`, true);
     logger.info(`Avatar uploaded to IPFS: ${cid}`);
     return cid;
   }
@@ -299,7 +309,7 @@ class AgentIdentityService {
     }
 
     // Step 3: Upload registration file to IPFS
-    const registrationCID = await this.uploadToIPFS(registrationFile, 'alice-erc8004-registration.json');
+    const registrationCID = await this.uploadToIPFS(registrationFile, `${this._fileSlug(agentModel)}-erc8004-registration.json`);
     const agentURI = `ipfs://${registrationCID}`;
     logger.info(`Registration file uploaded to IPFS: ${registrationCID}`);
 
@@ -403,7 +413,7 @@ class AgentIdentityService {
     }
 
     // Upload new registration to IPFS
-    const registrationCID = await this.uploadToIPFS(registrationFile, 'alice-erc8004-registration.json');
+    const registrationCID = await this.uploadToIPFS(registrationFile, `${this._fileSlug(agentModel)}-erc8004-registration.json`);
     const newURI = `ipfs://${registrationCID}`;
 
     // Call setAgentURI on-chain

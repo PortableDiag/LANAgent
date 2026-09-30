@@ -2,6 +2,43 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.416] - 2026-09-29
+
+Sync covering 2.25.411–2.25.416.
+
+### Added
+- **A Skills page in the web UI.** Until now skills could only be managed by chatting with the agent. The new page (menu: Skills) has:
+  - **Settings:** switches for auto-approving skills other agents teach, P2P skill sharing (with its trust score), and teaching skills in Trellis channels.
+  - **Pending approval:** skills waiting for you, with Approve, Reject and Approve all.
+  - **Every skill:** shown with where it came from (built-in, yours, learned, from another agent, Trellis basket), with a filter, View (the full procedure), Delete and Publish (to the Trellis Skills basket).
+  - **Trellis Skills basket:** what the document shares, and a Sync now button.
+  - **New skill:** a form to write a skill by hand.
+- **Shared skills through the Trellis Skills basket.** A Trellis web document keeps a `Skills` basket that its agents share.
+  - **Publish:** "publish the humanizer skill to the trellis skills basket" posts one of the agent's own skills there. The skill is sanitized first and tagged for Trellis. Skills the agent learned from others are never published.
+  - **Install:** every 10 minutes the agent installs the basket's live skills, and it also does this on request ("sync skills from trellis"). Each skill is checked against the server's fingerprint, and one that fails the check is refused.
+  - **Trust:** a skill the document owner approved, or wrote themselves, is used at once. A skill another agent wrote follows the agent's own auto-approve setting, exactly like one taught in a channel.
+  - **Removal:** a skill that stops being live in the basket is removed. One you reject is not installed again. A basket skill never replaces a built-in, local or peer skill of the same name.
+  - "list trellis skills" shows the basket's contents with each skill's status.
+  - `TRELLIS_SKILLS_SYNC=false` turns the sync off, and `TRELLIS_SKILLS_SYNC_MS` sets its interval.
+- **A bundled skill for writing to shared Trellis cards** (`trellis-shared-card-writes`): append a labelled section, never rewrite someone else's, and report a write only after the server confirms it.
+
+### Changed
+- **The Dry plugin works with the new Dry (dry.ai).** dry.ai is a new site: the old one moved to dry-og.com and its API is gone, so every Dry action had been failing while status still said "connected".
+  - **Signing in:** the plugin now talks to the new Dry's API. The agent signs itself in: Dry emails a sign-in link to the agent's own mailbox, and the agent opens it and creates its own access token. You can also paste a token made under Agents & tokens.
+  - **Plain-language requests:** "remember…", "track my workouts", "what did I save about…" go through Dry's own assistant. It saves, finds and updates records itself; deletes wait for your confirmation.
+  - **Other actions:** list and create spaces (the owner is invited as admin), list and search records, build and edit live pages, upload files, export a space, add members. Any other Dry API tool can be called by name.
+- **Email search can return message bodies.** `searchEmails` takes `includeBody: true`, returning each message's text and HTML, not just its headers.
+- **The swap service's retry step is configurable.** Each retry widened the price tolerance by a fixed half point; callers can now pass `slippageStep`.
+
+### Fixed
+- **An agent's on-chain identity is named for that agent.** When an agent minted its ERC-8004 identity, its registration file and avatar were stored on IPFS under another agent's file names, and an agent with no avatar file of its own published the picture that ships in the repository. Files are now named after the agent minting, and an agent without an avatar mints without one.
+- **"Yes, take the action" now takes the action.** A short go-ahead names no action, so it was answered by a text-only reply that cannot act, and that reply could say "Done" when nothing had happened. A go-ahead is now resolved into the request it approves, from the recent conversation, and runs like any other command. The text-only follow-up reply is also told it has done nothing in that turn and must never claim it has.
+- **Agents in Trellis channels can ask the agent to write cards.** Another agent asking it to append its section to a card, or to add a card, used to get "only my operator can ask me to do that". Ordinary card writes in the same Trellis document now happen without the operator's approval, and the reply confirms only the writes that succeeded. Everything else another agent asks for (commands, spending, deleting, messages) is still refused.
+- **"Don't do it yet" is respected.** "Tell me what you would append, don't do it yet" or "just draft it, I'll confirm" used to run the action immediately. The agent now shows exactly what it would do and waits, and a following "yes" carries it out.
+- **Quoted text no longer steers which command runs.** A request to append a quoted line to a card listed cards instead of appending, because the quoted words were matched as part of the request. Quoted content is now left out when the agent decides what a message asks for.
+- **A sentence starting "I'm…" no longer renames you.** The check for "my name is" ignored capital letters, so "I'm thinking of having you append the line" was saved as your name and written into your contact record as a new owner contact. Names are now taken only from "my name is" or "call me" followed by a capitalised name.
+- **Image captions work again.** Hugging Face's free inference stopped serving its image-captioning model, so every caption request failed. When Hugging Face refuses the model, the agent now writes the caption with its own vision model.
+
 ## [2.25.410] - 2026-09-28
 
 ### Added

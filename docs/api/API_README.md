@@ -553,6 +553,43 @@ Live in-memory snapshot of download-token usage (tokens within their TTL window)
 
 ---
 
+## Recent Updates (September 29, 2026)
+
+Sync covering 2.25.411–2.25.416.
+
+### v2.25.415 — Skills page
+
+The web UI has a Skills page (menu: Skills). It drives the existing `skills` plugin actions through
+`POST /api/plugin`; no new routes.
+
+### v2.25.414 — Dry v2 (`dry-ai`)
+
+dry.ai is Dry v2. v1 moved to dry-og.com and its `/api/custom-gpt` routes are gone. Each action below is `POST /api/plugin` (JWT) with `{"plugin": "dry-ai", "action": "...", ...}`.
+- **Sign-in:**
+  - `autoAuth({ email? })`: magic link to the agent's own mailbox (`EMAIL_USER`), read via `email.searchEmails({ includeBody: true })`, then `POST /api/me/tokens`.
+  - `setToken({ token })`: a `dry_pat_…` token. `DRY_TOKEN` in `.env` overrides both.
+  - `clearToken()`, `status()`.
+- **Plain language:** `ask({ request, space? })` goes through Dry chat and returns `{result, ran, proposals}`. `confirm()` runs the proposals (deletes).
+- **Spaces, records and pages:**
+  - `listSpaces()`, `createSpace({ name })` (invites `EMAIL_OF_MASTER` / `setOwnerEmail` as admin).
+  - `listTypes({ space })`, `listObjects({ space, type?, limit? })`, `searchObjects({ space, query })`.
+  - `createPage({ space, title, prompt })`, `editPage({ space, page, instruction })`.
+  - `uploadFile({ space, path })`, `exportSpace({ space })`, `addMember({ space, email, roles })`.
+  - `setDefaultSpace({ space })`, `setOwnerEmail({ email })`.
+- **Any other Dry route:** `tool({ name, args })` calls a Dry API tool by name; `listTools()` lists them.
+- `email.searchEmails({ …, includeBody: true })` adds each message's `text` and `html`.
+
+### v2.25.412 — The Trellis Skills basket (trellis-web)
+
+Each action is `POST /api/plugin` (JWT) with `{"plugin": "trellis-notes", "action": "...", ...}`. All three take an optional `document`.
+- `publishSkill({ skill })` posts one of the agent's own active skills to the document's `Skills` basket.
+  - It is sanitized, rendered as SKILL.md with `tags: [trellis]`, and hashed.
+  - Returns `{card, status, hashMatches, sanitized}`. `status` is `proposed` until the owner approves it, unless the document has auto-approve on.
+- `listBasketSkills({ active? })` → `{basket, count, skills:[{name, card, status, description, writer, autoApproved, approved}]}`.
+- `syncBasketSkills()` installs the live basket skills now → `{installed, updated, removed, skipped}`. The same sync runs every `TRELLIS_SKILLS_SYNC_MS` (10 min; `TRELLIS_SKILLS_SYNC=false` turns it off).
+  - An installed skill has `source: trellis` and `origin: trellis:<document>`.
+  - It is active when the owner approved this exact sha256 or wrote it from a signed-in session or their own Telegram. Otherwise the skills auto-approve setting decides.
+
 ## Recent Updates (September 28, 2026)
 
 Sync covering 2.25.402–2.25.410.

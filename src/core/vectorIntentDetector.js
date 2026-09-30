@@ -79,8 +79,10 @@ export class VectorIntentDetector {
       }
 
       // Generate embedding for the input with retry logic
+      const query = intentQuery(input);
+      if (query !== input) logger.info(`Intent query without quoted content: "${query}"`);
       const embedding = await retryOperation(
-        () => embeddingService.generateEmbedding(input),
+        () => embeddingService.generateEmbedding(query),
         { retries: 3, context: 'embedding generation' }
       );
       logger.debug('Generated embedding for input');
@@ -245,37 +247,25 @@ export class VectorIntentDetector {
         }
       }
 
-      // Dry-ai post-match disambiguation for CRUD action confusion
+      // dry-ai (v2): saving, tracking, deleting and asking all go through Dry's own chat (ask),
+      // which proposes a delete for confirmation instead of running it. Only an upload and an
+      // explicit "create a space" need their own actions.
       if (metadata.plugin === 'dry-ai') {
-        const deleteWords = /\b(delete|remove|trash|destroy|get\s+rid\s+of)\b/i.test(input);
-        const createWords = /\b(create|make|set\s+up|build|new)\b/i.test(input);
-        const addWords = /\b(add|save|store|put|remember|log|record|track)\b/i.test(input);
-        const uploadWords = /\b(upload|send.*file|attach|file.*to)\b/i.test(input);
-        const listWords = /\b(list|show|what.*items|what.*in)\b/i.test(input);
-        const spaceTargetWords = /\b(to|in|into|on)\s+(my\s+|your\s+|the\s+)?\w+\s+(space|folder)\b/i.test(input);
-
-        // Upload intent misrouted to list/create/update
-        if (uploadWords && !listWords && metadata.action !== 'uploadFile') {
+        const uploadWords = /\b(upload|attach)\b/i.test(input);
+        const newSpace = /\b(create|make|build|set\s+up)\s+(a\s+)?(new\s+)?(dry\s+)?space\b/i.test(input);
+        const crud = ['createSpace', 'listObjects', 'searchObjects', 'createPage', 'editPage', 'uploadFile'];
+        if (uploadWords && metadata.action !== 'uploadFile') {
           logger.info(`Dry-ai safety: ${metadata.action} → uploadFile (upload words present)`);
           metadata.action = 'uploadFile';
           metadata.name = 'dry-ai uploadFile';
-          metadata.description = 'Upload a file to Dry.AI';
-        }
-        // "Add X to Y space" misrouted to createSpace — user wants to add an item, not create a space
-        // Only skip override if user explicitly wants to create/make a new space
-        else if (addWords && spaceTargetWords && metadata.action === 'createSpace'
-          && !/\b(create|make|build|set\s+up)\s+(a\s+)?(new\s+)?space\b/i.test(input)) {
-          logger.info(`Dry-ai safety: createSpace → createItem (add-to-space pattern detected)`);
-          metadata.action = 'createItem';
-          metadata.name = 'dry-ai createItem';
-          metadata.description = 'Create an item in a Dry.AI space';
-        }
-        // Delete intent misrouted to create/update
-        else if (deleteWords && !createWords && metadata.action !== 'deleteItem' && metadata.action !== 'deleteByQuery') {
-          logger.info(`Dry-ai safety: ${metadata.action} → deleteItem (delete words present)`);
-          metadata.action = 'deleteItem';
-          metadata.name = 'dry-ai deleteItem';
-          metadata.description = 'Delete an item, space, or app from Dry.AI';
+        } else if (metadata.action === 'createSpace' && !newSpace) {
+          logger.info('Dry-ai safety: createSpace → ask (no explicit new-space request)');
+          metadata.action = 'ask';
+          metadata.name = 'dry-ai ask';
+        } else if (/\b(delete|remove|trash|destroy|get\s+rid\s+of)\b/i.test(input) && crud.includes(metadata.action)) {
+          logger.info(`Dry-ai safety: ${metadata.action} → ask (a delete goes through Dry's confirm step)`);
+          metadata.action = 'ask';
+          metadata.name = 'dry-ai ask';
         }
       }
 
@@ -386,3 +376,25 @@ export class VectorIntentDetector {
 
 // Export singleton instance
 export const vectorIntentDetector = new VectorIntentDetector();
+
+/**
+ * The request with its quoted content replaced by "text". A quote is what to write or send,
+ * not what to do: "Append the line `go-ahead verified` to Trellis card 177" matched the
+ * verify-claims action over appendNote because of the word inside the quote (2026-09-29).
+ * Apostrophes ("don't") are not quotes: a single-quoted span must start and end at a word edge.
+ */
+export function intentQuery(input) {
+  const text = String(input ?? '');
+  // "Append the following section to card 176:\n\n## ALICE…" — the body after the lead
+  // line is content too, and a long one outweighs the request (it matched teachSkill).
+  const [lead, ...body] = text.split('\n');
+  const request = body.join('').trim() && lead.trim().split(/\s+/).length >= 3 ? lead : text;
+  const out = request
+    .replace(/`{3}[\s\S]*?`{3}|`[^`\n]+`/g, ' text ')
+    .replace(/"[^"\n]{2,}"|\u201c[^\u201d\n]{2,}\u201d|\u2018[^\u2019\n]{2,}\u2019/g, ' text ')
+    .replace(/(^|[\s(:])'[^'\n]{2,}'(?=[\s.,!?;:)]|$)/g, '$1 text ')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+  // Nothing but quotes (or a single word left): the quote was the request.
+  return out.split(' ').filter(w => w && w !== 'text').length >= 2 ? out : request;
+}

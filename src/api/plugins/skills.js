@@ -207,6 +207,197 @@ Message: "${input}"`;
     return safeJsonParse(response.content, {}) || {};
   }
 
+  getUIConfig() {
+    return {
+      menuItem: { id: 'skills', title: 'Skills', icon: 'fas fa-brain', order: 63, section: 'main' },
+      hasUI: true
+    };
+  }
+
+  getUIContent() {
+    return `
+      <style>
+        .sk-card { background: var(--card-bg); border-radius: 8px; padding: 1.25rem; margin-bottom: 1rem; }
+        .sk-row { display: flex; justify-content: space-between; align-items: flex-start; gap: 1rem; padding: .6rem 0; border-bottom: 1px solid rgba(128,128,128,.18); }
+        .sk-row:last-child { border-bottom: none; }
+        .sk-name { font-weight: 600; font-family: var(--font-mono, monospace); }
+        .sk-desc { opacity: .8; font-size: .9rem; margin-top: .2rem; }
+        .sk-badge { display: inline-block; font-size: .7rem; padding: .05rem .45rem; border-radius: 999px; margin-left: .4rem; border: 1px solid rgba(128,128,128,.4); opacity: .85; vertical-align: middle; }
+        .sk-badge.pending { border-color: #f59e0b; color: #f59e0b; }
+        .sk-actions { display: flex; gap: .4rem; flex-shrink: 0; flex-wrap: wrap; justify-content: flex-end; }
+        .sk-actions .btn { padding: .25rem .6rem; font-size: .8rem; }
+        .sk-body { white-space: pre-wrap; font-size: .85rem; background: rgba(128,128,128,.08); padding: .75rem; border-radius: 6px; margin-top: .5rem; max-height: 420px; overflow: auto; }
+        .sk-settings { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: .75rem 1.5rem; }
+        .sk-settings label { display: flex; gap: .5rem; align-items: center; }
+        .sk-muted { opacity: .65; font-size: .85rem; }
+        .sk-form input, .sk-form textarea { width: 100%; margin-bottom: .5rem; padding: .5rem; border-radius: 6px; }
+        .sk-filter { width: 100%; padding: .45rem; border-radius: 6px; margin-bottom: .5rem; }
+        .sk-err { color: #ef4444; }
+      </style>
+
+      <div class="plugin-header"><h2>Skills</h2></div>
+      <div class="plugin-content">
+        <div class="sk-card">
+          <h3>Settings</h3>
+          <div class="sk-settings">
+            <label><input type="checkbox" id="sk-auto"> Use skills other agents teach at once (auto-approve)</label>
+            <label><input type="checkbox" id="sk-share"> Share skills with trusted agents on the P2P network</label>
+            <label>Trust score to use a peer's skills without approval <input type="number" id="sk-score" min="0" max="100" style="width:5rem"></label>
+            <label><input type="checkbox" id="sk-teach"> Teach skills to agents that ask in Trellis channels</label>
+          </div>
+          <div id="sk-settings-note" class="sk-muted"></div>
+        </div>
+
+        <div class="sk-card" id="sk-pending-card" style="display:none">
+          <h3>Waiting for approval <button class="btn" id="sk-approve-all" style="float:right">Approve all</button></h3>
+          <div id="sk-pending"></div>
+        </div>
+
+        <div class="sk-card">
+          <h3>Skills <span id="sk-count" class="sk-muted"></span></h3>
+          <input class="sk-filter" id="sk-filter" placeholder="Filter by name or description">
+          <div id="sk-list" class="sk-muted">Loading…</div>
+        </div>
+
+        <div class="sk-card">
+          <h3>Trellis Skills basket</h3>
+          <div class="sk-muted">Skills shared in the Trellis document. Live ones are installed here automatically every 10 minutes.
+            <button class="btn" id="sk-sync" style="margin-left:.5rem">Sync now</button></div>
+          <div id="sk-basket" class="sk-muted" style="margin-top:.5rem">Loading…</div>
+        </div>
+
+        <div class="sk-card sk-form">
+          <h3>New skill</h3>
+          <input id="sk-new-name" placeholder="name (lowercase-with-hyphens)">
+          <input id="sk-new-desc" placeholder="One sentence: what it does and when to use it">
+          <textarea id="sk-new-body" rows="8" placeholder="The procedure, as markdown steps"></textarea>
+          <button class="btn" id="sk-create">Save skill</button>
+          <span id="sk-create-result" class="sk-muted" style="margin-left:.5rem"></span>
+        </div>
+      </div>
+
+      <script>
+        (function() {
+          const token = localStorage.getItem('lanagent_token');
+          const call = async (plugin, action, data = {}) => {
+            try {
+              const r = await fetch('/api/plugin', {
+                method: 'POST',
+                headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' },
+                body: JSON.stringify({ plugin, action, ...data })
+              });
+              const j = await r.json();
+              return (j && j.success === undefined && j.result && typeof j.result === 'object') ? j.result : j;
+            } catch (e) { return { success: false, error: e.message }; }
+          };
+          const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
+          const $ = id => document.getElementById(id);
+          const OWN = ['manual', 'auto', 'bundled', 'lanagent', 'hermes-agent'];
+          let all = [];
+
+          function badge(s) {
+            const b = [];
+            if (s.status === 'pending') b.push('<span class="sk-badge pending">pending</span>');
+            const src = s.bundled ? 'built-in' : s.source === 'auto' ? 'learned' : s.source === 'peer' ? 'from ' + (s.taughtBy || 'an agent')
+              : s.source === 'trellis' ? 'Trellis basket' : s.source === 'manual' ? 'yours' : s.source;
+            if (src) b.push('<span class="sk-badge">' + esc(src) + '</span>');
+            return b.join('');
+          }
+
+          function row(s, pending) {
+            const btns = pending
+              ? '<button class="btn" data-act="approve" data-n="' + esc(s.name) + '">Approve</button><button class="btn" data-act="reject" data-n="' + esc(s.name) + '">Reject</button>'
+              : '<button class="btn" data-act="view" data-n="' + esc(s.name) + '">View</button>' +
+                (OWN.includes(s.source) || s.bundled ? '<button class="btn" data-act="publish" data-n="' + esc(s.name) + '" title="Share in the Trellis Skills basket">Publish</button>' : '') +
+                (s.bundled ? '' : '<button class="btn" data-act="delete" data-n="' + esc(s.name) + '">Delete</button>');
+            return '<div class="sk-row" data-row="' + esc(s.name) + '"><div style="min-width:0;flex:1"><span class="sk-name">' + esc(s.name) + '</span>' + badge(s) +
+              '<div class="sk-desc">' + esc(s.description) + '</div><div class="sk-view"></div></div><div class="sk-actions">' + btns + '</div></div>';
+          }
+
+          function render() {
+            const q = $('sk-filter').value.trim().toLowerCase();
+            const active = all.filter(s => s.status !== 'pending' && (!q || (s.name + ' ' + s.description).toLowerCase().includes(q)));
+            const pending = all.filter(s => s.status === 'pending');
+            $('sk-count').textContent = '(' + all.length + ')';
+            $('sk-list').innerHTML = active.length ? active.map(s => row(s, false)).join('') : 'No skills match.';
+            $('sk-pending-card').style.display = pending.length ? '' : 'none';
+            $('sk-pending').innerHTML = pending.map(s => row(s, true)).join('');
+          }
+
+          async function loadSkills() {
+            const r = await call('skills', 'list');
+            if (!r || !r.success) { $('sk-list').innerHTML = '<span class="sk-err">' + esc((r && r.error) || 'Could not load skills') + '</span>'; return; }
+            all = (r.skills || []).sort((a, b) => a.name.localeCompare(b.name));
+            render();
+          }
+
+          async function loadSettings() {
+            const [a, sh, t] = await Promise.all([call('skills', 'setAutoApprove'), call('skills', 'setSharing'), call('skills', 'setTrellisTeaching')]);
+            if (a && a.success) $('sk-auto').checked = !!a.enabled;
+            if (sh && sh.success) { $('sk-share').checked = !!sh.enabled; $('sk-score').value = sh.minTrustScore ?? 50; }
+            if (t && t.success) $('sk-teach').checked = !!t.enabled;
+            const env = [a, sh, t].map(x => x && x.result).filter(x => /\.env/.test(x || ''));
+            $('sk-settings-note').textContent = env.length ? env.join(' ') : '';
+          }
+
+          async function loadBasket() {
+            const r = await call('trellis-notes', 'listBasketSkills');
+            const box = $('sk-basket');
+            if (!r || !r.success) { box.innerHTML = '<span class="sk-muted">' + esc((r && r.error) || 'Trellis is not configured') + '</span>'; return; }
+            if (!r.skills.length) { box.textContent = 'The basket is empty.'; return; }
+            box.innerHTML = r.skills.map(s => '<div class="sk-row"><div><span class="sk-name">' + esc(s.name) + '</span><span class="sk-badge' + (s.status === 'live' ? '' : ' pending') + '">' + esc(s.status) + '</span>' +
+              (s.writer ? '<span class="sk-badge">by ' + esc(s.writer) + '</span>' : '') + '<div class="sk-desc">' + esc(s.description) + '</div></div>' +
+              '<div class="sk-muted">card ' + esc(s.card) + '</div></div>').join('');
+          }
+
+          const toast = (msg, ok) => (window.app && window.app.showNotification) ? window.app.showNotification(msg, ok ? 'success' : 'error') : alert(msg);
+          const settle = (r, okMsg) => { toast(r && r.success ? (typeof r.result === 'string' ? r.result : okMsg) : ((r && r.error) || 'Failed'), r && r.success); return r && r.success; };
+
+          document.querySelector('.plugin-content').addEventListener('click', async (e) => {
+            const b = e.target.closest('button[data-act]');
+            if (!b) return;
+            const n = b.dataset.n, act = b.dataset.act;
+            if (act === 'view') {
+              const box = b.closest('.sk-row').querySelector('.sk-view');
+              if (box.innerHTML) { box.innerHTML = ''; return; }
+              const r = await call('skills', 'view', { name: n });
+              box.innerHTML = r && r.success ? '<div class="sk-body">' + esc(r.skill.body) + '</div>' : '<span class="sk-err">' + esc(r && r.error) + '</span>';
+              return;
+            }
+            if (act === 'delete' && !confirm('Delete the skill "' + n + '"?')) return;
+            if (act === 'reject' && !confirm('Reject and remove "' + n + '"?')) return;
+            if (act === 'publish' && !confirm('Publish "' + n + '" to the Trellis Skills basket? Other agents in the document can then use it.')) return;
+            b.disabled = true;
+            const r = act === 'publish' ? await call('trellis-notes', 'publishSkill', { skill: n }) : await call('skills', act, { name: n });
+            b.disabled = false;
+            if (settle(r, 'Done')) { await loadSkills(); if (act === 'publish') loadBasket(); }
+          });
+
+          $('sk-approve-all').addEventListener('click', async () => { if (settle(await call('skills', 'approveAll'), 'Approved')) loadSkills(); });
+          $('sk-filter').addEventListener('input', render);
+          $('sk-auto').addEventListener('change', async e => { settle(await call('skills', 'setAutoApprove', { enabled: e.target.checked }), 'Saved'); loadSkills(); loadSettings(); });
+          $('sk-share').addEventListener('change', async e => { settle(await call('skills', 'setSharing', { enabled: e.target.checked }), 'Saved'); loadSettings(); });
+          $('sk-score').addEventListener('change', async e => { settle(await call('skills', 'setSharing', { minTrustScore: Number(e.target.value) }), 'Saved'); loadSettings(); });
+          $('sk-teach').addEventListener('change', async e => { settle(await call('skills', 'setTrellisTeaching', { enabled: e.target.checked }), 'Saved'); loadSettings(); });
+          $('sk-sync').addEventListener('click', async e => {
+            e.target.disabled = true;
+            const r = await call('trellis-notes', 'syncBasketSkills');
+            e.target.disabled = false;
+            if (settle(r, 'Synced')) { loadSkills(); loadBasket(); }
+          });
+          $('sk-create').addEventListener('click', async () => {
+            const out = $('sk-create-result');
+            const r = await call('skills', 'create', { name: $('sk-new-name').value, description: $('sk-new-desc').value, body: $('sk-new-body').value });
+            out.innerHTML = r && r.success ? esc(r.result) : '<span class="sk-err">' + esc((r && r.error) || 'Failed') + '</span>';
+            if (r && r.success) { $('sk-new-name').value = $('sk-new-desc').value = $('sk-new-body').value = ''; loadSkills(); }
+          });
+
+          loadSettings(); loadSkills(); loadBasket();
+        })();
+      </script>
+    `;
+  }
+
   async getAICapabilities() {
     return { enabled: true, examples: this.commands.flatMap(cmd => cmd.examples || []) };
   }

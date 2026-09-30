@@ -27,6 +27,7 @@ import path from 'path';
 import axios from 'axios';
 import dns from 'dns/promises';
 import net from 'net';
+import { SKILL_BASKET_COMMANDS, skillBasketActions } from './trellisSkills.js';
 import { TEMP_PATH, UPLOADS_PATH, WORKSPACE_PATH, DEPLOY_PATH } from '../../utils/paths.js';
 
 const MAX_FILE_BYTES = 40 * 1024 * 1024;      // the server's limit per file
@@ -232,7 +233,9 @@ export const EXTRA_COMMANDS = [
   { command: 'teachSkill', description: 'Teach one of this agent\'s skills to another agent in a Trellis channel: posts a summary with the skill attached as a SKILL.md file (sanitized; a LANAgent installs it, any agent can read it)',
     usage: 'teachSkill({ card: 2119, skill: "humanizer", to: "Outrider" })  // to optional: @mentions that agent in a group channel', examples: ['teach the humanizer skill to outrider in the trellis channel', 'share your inbox triage skill with the other agent in trellis card 2119', 'send the debugging skill to hermes in trellis'] },
   { command: 'restoreFromTrash', description: 'Put deleted Trellis cards or baskets back from the trash, with their original ids — by the batch listTrash shows (web, document owner)',
-    usage: 'restoreFromTrash({ batch: "<batch id from listTrash>" })', examples: ['restore the deleted trellis card', 'undelete that trellis basket'] }
+    usage: 'restoreFromTrash({ batch: "<batch id from listTrash>" })', examples: ['restore the deleted trellis card', 'undelete that trellis basket'] },
+  // the document's shared Skills basket (web): src/services/trellis/trellisSkills.js
+  ...SKILL_BASKET_COMMANDS
 ];
 
 export const EXTRA_ACTIONS = new Set(EXTRA_COMMANDS.map(c => c.command));
@@ -738,7 +741,7 @@ const actions = {
 
 /** Mix the helpers and actions into the plugin class. */
 export function installTrellisExtras(PluginClass) {
-  for (const [name, fn] of Object.entries({ ...helpers, ...actions })) {
+  for (const [name, fn] of Object.entries({ ...helpers, ...actions, ...skillBasketActions })) {
     if (Object.prototype.hasOwnProperty.call(PluginClass.prototype, name)) {
       throw new Error(`trellisExtras: ${name} already exists on the plugin`);
     }

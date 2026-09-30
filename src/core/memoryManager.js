@@ -417,7 +417,10 @@ export class MemoryManager {
       // Removed: instruction, goal, routine, method, project (too broad — caught commands as knowledge).
       // The AI filter in aiAnalyzeForMemory handles subtle/ambiguous cases.
       const patterns = {
-        name: /(?:my name is|i'm|i am|call me)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)/i,
+        // Case-SENSITIVE name: with /i, [A-Z][a-z]+ matched any word, so "I'm thinking of
+        // having you append the line" renamed the master contact (2026-09-29). "I'm"/"I am"
+        // are dropped: "I'm Back", "I am Ready" are not names.
+        name: /(?:\b[Mm]y name is|\b[Cc]all me)\s+([A-Z][a-z]+(?: [A-Z][a-z]+){0,2})\b/,
         // Require "I like/love/hate X" at start or after punctuation — NOT inside questions
         preference: /(?:^|[.!?]\s+)i (?:prefer|like|love|enjoy|hate|dislike)\s+(.+?)(?=\.\s|!\s|$)/i,
         work: /i (?:work|job|profession|do for a living)(?:\s+(?:is|as|at|in))?\s+(.+?)(?=\.\s|!\s|$)/i,

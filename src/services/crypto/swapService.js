@@ -3023,7 +3023,9 @@ class SwapService {
             preferV3 = false,
             expectedOutputUsd = 0,
             outputTokenPriceUsd = 0,
-            urgent = false
+            urgent = false,
+            // How far each slippage retry widens the tolerance (percentage points).
+            slippageStep = 0.5
         } = options;
 
         // Check scammer registry — refuse to transact with flagged addresses
@@ -3539,7 +3541,7 @@ class SwapService {
                                 // First retry: same slippage (revert may be transient, not slippage)
                                 // Subsequent retries: increment slippage
                                 if (attempt > 0) {
-                                    currentSlippage = this._incrementSlippage(currentSlippage, hardCeiling);
+                                    currentSlippage = this._incrementSlippage(currentSlippage, hardCeiling, slippageStep);
                                 }
                                 if (currentSlippage <= hardCeiling) {
                                     logger.warn(`On-chain revert status=0 (attempt ${attempt}), retrying with ${currentSlippage.toFixed(1)}% slippage...`);
@@ -3570,7 +3572,7 @@ class SwapService {
                                 // First retry: same slippage (revert may be transient, not slippage)
                                 // Subsequent retries: increment slippage
                                 if (attempt > 0) {
-                                    currentSlippage = this._incrementSlippage(currentSlippage, hardCeiling);
+                                    currentSlippage = this._incrementSlippage(currentSlippage, hardCeiling, slippageStep);
                                 }
                                 if (currentSlippage <= hardCeiling) {
                                     logger.warn(`On-chain revert (attempt ${attempt}), retrying with ${currentSlippage.toFixed(1)}% slippage...`);
@@ -3616,7 +3618,7 @@ class SwapService {
                     const isNonRetryable = NON_RETRYABLE_PATTERNS.some(p => errorMsg.includes(p));
 
                     if (enableRetry && isSlippageError && !isNonRetryable && attempt < maxRetries) {
-                        currentSlippage = this._incrementSlippage(currentSlippage, hardCeiling);
+                        currentSlippage = this._incrementSlippage(currentSlippage, hardCeiling, slippageStep);
                         if (currentSlippage <= hardCeiling) {
                             logger.warn(`Swap attempt ${attempt} failed (slippage-related): ${errorMsg.substring(0, 100)}. Retrying with ${currentSlippage.toFixed(1)}% slippage...`);
                             await new Promise(r => setTimeout(r, 2000)); // Brief pause before retry
@@ -3641,8 +3643,9 @@ class SwapService {
     /**
      * Increment slippage by 0.5% for retry, capped at ceiling
      */
-    _incrementSlippage(current, ceiling) {
-        return Math.min(current + 0.5, ceiling + 0.1); // +0.1 to allow ceiling check
+    _incrementSlippage(current, ceiling, step = 0.5) {
+        const inc = Number(step) > 0 ? Number(step) : 0.5;
+        return Math.min(current + inc, ceiling + 0.1); // +0.1 to allow ceiling check
     }
 
     /**

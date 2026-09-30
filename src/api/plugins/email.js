@@ -1254,7 +1254,9 @@ Sent by {{agentName}}
       body,
       since,
       before,
-      limit = 20
+      limit = 20,
+      // Also return each message's text/html (parsed). Off by default: headers only is cheap.
+      includeBody = false
     } = data;
 
     await this.initializeImap();
@@ -1296,9 +1298,10 @@ Sent by {{agentName}}
           const emails = [];
 
           const f = this.imap.fetch(toFetch, {
-            bodies: 'HEADER.FIELDS (FROM TO SUBJECT DATE)',
+            bodies: includeBody ? '' : 'HEADER.FIELDS (FROM TO SUBJECT DATE)',
             struct: false
           });
+          const parsing = [];
 
           f.on('message', (msg, seqno) => {
             let email = { seqno };
@@ -1309,6 +1312,17 @@ Sent by {{agentName}}
                 buffer += chunk.toString('utf8');
               });
               stream.once('end', () => {
+                if (includeBody) {
+                  parsing.push(simpleParser(buffer).then(parsed => {
+                    email.from = parsed.from?.text || email.from;
+                    email.to = parsed.to?.text || email.to;
+                    email.subject = parsed.subject || email.subject;
+                    email.date = parsed.date || email.date;
+                    email.text = (parsed.text || '').substring(0, 20000);
+                    email.html = typeof parsed.html === 'string' ? parsed.html.substring(0, 50000) : '';
+                  }).catch(() => {}));
+                  return;
+                }
                 const lines = buffer.split('\r\n');
                 lines.forEach(line => {
                   if (line.startsWith('From: ')) email.from = line.substring(6);
@@ -1334,8 +1348,9 @@ Sent by {{agentName}}
             reject(err);
           });
 
-          f.once('end', () => {
+          f.once('end', async () => {
             this.imap.end();
+            await Promise.all(parsing);
             resolve({
               success: true,
               emails: emails,

@@ -490,7 +490,17 @@ export default class HuggingFacePlugin extends BasePlugin {
         throw new Error(`Model ${modelToUse} is loading. Try again in a few seconds.`);
       }
       if (result.status >= 400) {
-        throw new Error(result.data?.error || `HTTP ${result.status}`);
+        const reason = result.data?.error || `HTTP ${result.status}`;
+        // HF's free inference dropped image-to-text models ("Model not supported by provider
+        // hf-inference", 2026-09). Caption with the agent's own vision model instead.
+        const vision = this.agent?.providerManager;
+        if (vision?.analyzeImage) {
+          logger.info(`HuggingFace imageCaption: ${modelToUse} refused (${reason}); captioning with the agent's vision provider`);
+          const res = await vision.analyzeImage(Buffer.from(imageData), 'Write a one-sentence caption describing this image.');
+          const text = String((typeof res === 'string' ? res : res?.analysis || res?.content || res?.text) || '').trim();
+          if (text) return { success: true, result: text, model: 'agent-vision', task: 'imageCaption', fallbackFrom: modelToUse };
+        }
+        throw new Error(reason);
       }
 
       const caption = Array.isArray(result.data)
