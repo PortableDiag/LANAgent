@@ -161,6 +161,15 @@ class KnowledgePackSharing {
         { name: sk.name, description: sk.description, body: sk.body, meta: { origin: sk.origin || undefined, origin_name: sk.originName || undefined } },
         selfFp
       ));
+      // Every skill must pass the privacy audit (shareAudit.js), as in P2P skill sharing
+      const { getShareAudit } = await import('../skills/shareAudit.js');
+      for (const ps of packSkills) {
+        const r = await (this.shareAudit || getShareAudit()).audit(ps);
+        if (!(r.verdict === 'clear' || r.released)) {
+          logger.error(`P2P refusing to share pack ${packId}: skill "${ps.name}" did not pass the privacy audit (${r.findings.join('; ')})`);
+          return;
+        }
+      }
 
       // Build the payload
       const payload = {
@@ -808,13 +817,18 @@ Respond in exactly this JSON format:
         if (wantSkills.length > MAX_SKILLS_PER_PACK) throw new Error(`At most ${MAX_SKILLS_PER_PACK} skills per pack`);
         const service = this.skillsService || getSkillsService();
         const missing = [];
+        const privateSkills = [];
+        const { getShareAudit } = await import('../skills/shareAudit.js');
         for (const name of wantSkills) {
           const skill = await service.get(name);
           if (!skill || skill.bundled || (skill.meta?.status || 'active') !== 'active') { missing.push(name); continue; }
           const p = SkillSharing.payload(skill, cryptoManager.identity?.fingerprint || null);
+          const audit = await (this.shareAudit || getShareAudit()).audit(p);
+          if (!(audit.verdict === 'clear' || audit.released)) { privateSkills.push(`${name} (${audit.findings.join('; ')})`); continue; }
           packSkills.push({ name: p.name, description: p.description, body: p.body, sha256: p.sha256, origin: p.origin, originName: p.originName });
         }
         if (missing.length) throw new Error(`Not packable (unknown, bundled or pending): ${missing.join(', ')}`);
+        if (privateSkills.length) throw new Error(`Kept private by the skill privacy audit: ${privateSkills.join(', ')}. Release one with "release skill <name> for sharing" if it is safe.`);
       }
 
       if (!packMemories.length && !packSkills.length) {

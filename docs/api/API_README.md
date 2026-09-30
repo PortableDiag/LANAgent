@@ -565,6 +565,16 @@ Live in-memory snapshot of download-token usage (tokens within their TTL window)
 
 Sync covering 2.25.417–2.25.423.
 
+### v2.25.426 — Skill privacy audit before sharing (skills plugin)
+
+A skill is shared with other agents (P2P sync, requests, broadcasts, knowledge packs) only after its exact outgoing text passes a privacy audit. The verdict is keyed by the text's sha256, so any edit is audited again.
+- **Scan:** document/card UUIDs, wallet addresses, phone numbers, key-shaped strings, and this instance's own private terms (owner email, contact names/emails/phones, Trellis document ids, secret `.env` values). Any hit keeps the skill private.
+- **Review:** the side model lists private details, each with an exact quote. A skill is kept private only when a quoted detail really appears in it. An unreadable or failed review is not a pass.
+- A kept-private skill still works locally, and the operator gets a Telegram note.
+- `shareAudit({ name? })`: the latest verdict per skill, or audit one skill now.
+- `releaseForSharing({ name })`: an operator override for the skill's current content.
+- A skill whose origin is local (a Trellis basket, a URL) is sent with this agent as its origin. The local source id is never sent.
+
 ### v2.25.420 — Skill checks and trigger tests (skills plugin)
 
 - `evaluate({ name })` writes realistic requests that should use the skill and near-misses that shouldn't, runs them through the agent's own skill matcher, and returns `{ name, recall, falseTriggers, passRate, cases[{query, expected, triggered, pass}], result }`. It makes one side-model call.

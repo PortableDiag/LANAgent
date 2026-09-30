@@ -2,6 +2,14 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.426] - 2026-09-30
+
+### Added
+- **Skills pass a privacy audit before they are shared with other agents.** Learned skills are written from your own conversations, and the old sanitizer only removed generic shapes like emails, IPs and paths. Now the exact text a skill would be sent as is scanned for identifiers (document and card IDs, wallet addresses, phone numbers, key-shaped strings) and for this agent's own private terms: your email, your contacts' names, emails and phone numbers, your Trellis document IDs and secret settings. It is then reviewed by the side model, which must quote each private detail it finds; a skill is kept private only when that quote is really in it. A skill that doesn't pass still works locally, is never offered to peers or put in a knowledge pack, and you get a Telegram note saying why. "release skill <name> for sharing" overrides it for that exact content. Any edit is audited again. See which skills passed with "which skills are safe to share".
+
+### Fixed
+- **A skill from your Trellis basket was sent to peers with your Trellis document ID as its origin.** Receiving agents discarded it, but it left the instance. A skill from a local source (a Trellis basket, a link) is now sent with this agent as its author.
+
 ## [2.25.425] - 2026-09-30
 
 ### Fixed

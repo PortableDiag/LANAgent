@@ -106,6 +106,18 @@ export default class SkillsPlugin extends BasePlugin {
         examples: ['pin the backup skill', 'unpin that skill', 'keep that skill forever']
       },
       {
+        command: 'shareAudit',
+        description: 'Show which skills passed the privacy audit that runs before a skill is shared with other agents, and why any were kept private; with a name, audit that skill now',
+        usage: 'shareAudit({ name?: "backup" })',
+        examples: ['which skills are safe to share', 'why was that skill kept private', 'audit the backup skill for sharing', 'show the skill privacy audit']
+      },
+      {
+        command: 'releaseForSharing',
+        description: 'Share a skill the privacy audit kept private (operator override, for its current content only)',
+        usage: 'releaseForSharing({ name: "backup" })',
+        examples: ['release skill backup for sharing', 'share that skill anyway', 'the backup skill is fine to share']
+      },
+      {
         command: 'installFromUrl',
         description: 'Install a skill (SKILL.md) from GitHub or a URL; it waits for approval before it is used',
         usage: 'installFromUrl({ url: "https://github.com/owner/repo/tree/main/skills/some-skill" })',
@@ -152,7 +164,7 @@ export default class SkillsPlugin extends BasePlugin {
     });
     const service = this.service || getSkillsService();
 
-    if (params.needsParameterExtraction && this.agent.providerManager && !['list', 'approveAll', 'setAutoApprove', 'curate'].includes(action)) {
+    if (params.needsParameterExtraction && this.agent.providerManager && !['list', 'approveAll', 'setAutoApprove', 'curate', 'shareAudit'].includes(action)) {
       Object.assign(data, await this.extractParameters(params.originalInput || params.input, action));
     }
 
@@ -278,6 +290,31 @@ export default class SkillsPlugin extends BasePlugin {
           const on = data.pinned === undefined ? true : (data.pinned === true || /^(true|on|yes|1)/i.test(String(data.pinned)));
           await service.setPinned(data.name, on);
           return { success: true, pinned: on, result: on ? `Pinned "${data.name}": housekeeping will leave it alone.` : `Unpinned "${data.name}".` };
+        }
+        case 'shareAudit': {
+          const [{ getShareAudit }, { default: SkillSharing }] = await Promise.all([
+            import('../../services/skills/shareAudit.js'), import('../../services/p2p/skillSharing.js')]);
+          const audit = getShareAudit();
+          if (data.name) {
+            const skill = await service.get(data.name);
+            if (!skill) return { success: false, error: `No skill named "${data.name}"` };
+            const r = await audit.audit(SkillSharing.payload(skill));
+            const state = r.released ? 'released by the operator' : r.verdict === 'clear' ? 'cleared for sharing' : r.verdict === 'blocked' ? 'kept private' : 'not decided yet (the review failed; it retries)';
+            return { success: true, audit: r, result: `"${skill.name}": ${state}${r.findings?.length ? ` — ${r.findings.join('; ')}` : ''}` };
+          }
+          const all = await audit.list();
+          if (!all.length) return { success: true, audits: [], result: 'No skill has been audited for sharing yet.' };
+          const line = r => `${r.released ? '🔓' : r.verdict === 'clear' ? '✅' : r.verdict === 'blocked' ? '🔒' : '⏳'} ${r.name}${r.findings?.length && !r.released ? ` — ${r.findings.join('; ')}` : ''}`;
+          return { success: true, audits: all, result: `Skill sharing audit (latest per skill):\n${all.map(line).join('\n')}` };
+        }
+        case 'releaseForSharing': {
+          this.validateParams(data, { name: { required: true, type: 'string' } });
+          const [{ getShareAudit }, { default: SkillSharing }] = await Promise.all([
+            import('../../services/skills/shareAudit.js'), import('../../services/p2p/skillSharing.js')]);
+          const skill = await service.get(data.name);
+          if (!skill) return { success: false, error: `No skill named "${data.name}"` };
+          await getShareAudit().release(SkillSharing.payload(skill), 'operator');
+          return { success: true, result: `Released "${skill.name}" for sharing, for its current content. An edit will be audited again.` };
         }
         case 'installFromUrl': {
           const { installSkillFromUrl } = await import('../../services/skills/skillInstall.js');

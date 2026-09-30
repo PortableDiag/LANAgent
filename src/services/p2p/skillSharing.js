@@ -4,9 +4,11 @@ import { sanitizeString } from './sanitizer.js';
 import {
   getSkillsService, skillEvents, skillHash, getSkillSharing, peerSkillsTrusted, installPeerSkill
 } from '../skills/skillsService.js';
+import { getShareAudit } from '../skills/shareAudit.js';
 
 const MAX_OFFER = 200;           // skills listed in one skill_sync
 const MAX_REQUEST = 50;          // skills asked for in one skill_request
+const PEER_FINGERPRINT = /^[0-9a-f]{32}$/i;
 
 /**
  * Skill sharing over the Skynet P2P network (on by default; `skills.p2pShare`).
@@ -30,8 +32,11 @@ const MAX_REQUEST = 50;          // skills asked for in one skill_request
  * never overwritten by a peer's.
  */
 export default class SkillSharing {
-  constructor({ service = null, peers = peerManager, selfFingerprint = null, agent = null, notifyDelayMs = 20000 } = {}) {
+  constructor({ service = null, peers = peerManager, selfFingerprint = null, agent = null, notifyDelayMs = 20000, audit = null } = {}) {
     this._service = service;
+    this._audit = audit;
+    this._auditQueue = Promise.resolve();
+    this._queued = new Set();
     this.peers = peers;
     this._self = selfFingerprint;
     this.agent = agent;
@@ -64,18 +69,61 @@ export default class SkillSharing {
   static payload(skill, selfFingerprint = null) {
     const description = sanitizeString(String(skill.description));
     const body = sanitizeString(String(skill.body));
-    const origin = skill.meta?.origin || selfFingerprint || '';
-    const originName = skill.meta?.origin_name || (skill.meta?.origin ? '' : (process.env.AGENT_NAME || ''));
+    // origin names the skill's author for "newer version from the same author" matching, and
+    // only a peer fingerprint means anything to another agent. A local source such as
+    // "trellis:<document id>" is private (it carried the operator's document id to peers until
+    // 2026-09-30); a skill from anywhere but a peer is this agent's to teach.
+    const peerOrigin = PEER_FINGERPRINT.test(String(skill.meta?.origin || '')) ? skill.meta.origin : null;
+    const origin = peerOrigin || selfFingerprint || '';
+    const originName = peerOrigin ? sanitizeString(String(skill.meta?.origin_name || '')) : (process.env.AGENT_NAME || '');
     return { name: skill.name, description, body, sha256: skillHash({ name: skill.name, description, body }), origin, originName };
   }
 
-  /** Active, non-bundled skills not marked `share: false`. */
-  async shareable() {
+  get audit() {
+    return this._audit || getShareAudit();
+  }
+
+  /** Active, non-bundled skills not marked `share: false`: what COULD be shared. */
+  async _candidates() {
     await this.service.scan();
     return [...this.service.skills.values()].filter(s =>
       !s.bundled
       && (s.meta?.status || 'active') === 'active'
       && String(s.meta?.share ?? 'true').toLowerCase() !== 'false');
+  }
+
+  /**
+   * What MAY be shared: candidates whose exact outgoing payload passed the privacy audit
+   * (shareAudit.js) or was released by the operator. Every path out (sync offers, requests,
+   * broadcasts) reads this. A candidate without a verdict for its current content is queued
+   * for an audit and taught to peers once it clears.
+   */
+  async shareable() {
+    const self = await this._selfFingerprint();
+    const out = [];
+    for (const skill of await this._candidates()) {
+      const payload = SkillSharing.payload(skill, self);
+      if (await this.audit.cleared(payload)) out.push(skill);
+      else this._queueAudit(skill.name, payload);
+    }
+    return out;
+  }
+
+  _queueAudit(name, payload) {
+    if (this._queued.has(payload.sha256)) return;
+    this._queued.add(payload.sha256);
+    this._auditQueue = this._auditQueue.then(async () => {
+      try {
+        const known = await this.audit.recordFor(payload);
+        if (known && known.verdict !== 'error') return; // blocked stays blocked until released or edited
+        const r = await this.audit.audit(payload);
+        if (r.verdict === 'clear' && this.sendFn) await this.broadcast(name);
+      } catch (err) {
+        logger.warn(`Skill share audit of "${name}" failed: ${err.message}`);
+      } finally {
+        this._queued.delete(payload.sha256);
+      }
+    });
   }
 
   async _selfFingerprint() {
