@@ -2,6 +2,31 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.423] - 2026-09-30
+
+Sync covering 2.25.417–2.25.423.
+
+### Added
+- **The agent learns from your conversations as they happen.** After a reply, a background check on the cheaper side-model looks at the exchange. When you correct how the agent did something ("no, do it like this"), it updates the skill it used so the mistake doesn't come back. When you explain a procedure, it saves it as a new skill. When you mention a lasting preference, it adds it to your profile. Most exchanges change nothing, and the reply is never delayed or changed. A Telegram note says what it kept, with an Undo button. Set `SKILLS_BACKGROUND_REVIEW=false` to turn it off.
+- **Skills can be changed, and every change can be undone.** A skill can be updated in place by you or by the agent. Each change records who made it and why, and the last change can be rolled back. Changing a bundled skill saves your own version and leaves the original untouched.
+- **Skill housekeeping.** When idle, every few hours, the agent marks learned skills unused for 30 days as stale, archives those unused for 90 days, and merges two that do the same thing. Nothing is deleted: archived skills can be restored. Your own, bundled, Trellis-basket and pinned skills are left alone. Run it with "clean up your skills". Set `SKILLS_CURATOR=false` to turn it off.
+- **A profile of you in every conversation.** A short list of your lasting preferences and facts goes into every prompt. It starts from what the agent already remembered about you, grows as you mention preferences, and can be seen and edited on the Skills page ("About you") or with "what do you know about me" / "remember that I prefer…".
+- **Install a skill from a link.** "Install the skill at <GitHub link>" fetches a SKILL.md from GitHub (a file or folder link, or owner/repo/path) or any https link. It never replaces a skill you already have, and it follows the auto-approve setting: with auto-approve on it is used at once and Telegram says so, with a Reject button; with it off, Telegram asks, with Approve and Reject buttons.
+- **The Skills page shows how skills are used and lets you manage them:** use counts, last use, stale/pinned state, history with undo, pin and archive, a restore list, the "About you" profile, install from a link, and "Run housekeeping now".
+- **Skill checks and trigger tests.** Each skill shows tips when it breaks an agentskills.io guideline (description over 1024 characters or without "when to use it", body over 500 lines or 5,000 tokens, no steps, generic advice). "Test triggering" runs realistic requests that should use the skill, and near-misses that shouldn't, through the agent's own matcher and reports how often it chose correctly.
+- **Reactions.** The agent reacts to your Telegram messages (👀 while working, 👍 when sent, 🤷 if the request failed) and to Trellis channel messages it answers. Set `TELEGRAM_REACTIONS=false` or `TRELLIS_REACTIONS=false` to turn them off.
+- **A to-do list for long multi-step tasks.** The agent can keep its own to-do list while it works through a task step by step. It is shown to it at every step and in the progress message (`☑ done`, `▶ current`, `☐ upcoming`).
+
+### Changed
+- **Learned skills follow the agentskills.io best practices** wherever the agent writes one: learning from a task, from another agent, from a correction, or merging two skills. A correction adds a line to the skill's "Gotchas" section instead of rewriting it.
+- **Two bundled skills say what they are not for** (`email-inbox-triage`, `trellis-shared-card-writes`), after trigger tests showed them being picked for requests they don't handle.
+- **Plan-and-execute tasks show their plan as a checklist** in the progress message.
+- **The Trellis channel listener uses the server inbox on trellis-web 0.73 and later** (`GET /api/inbox`) instead of listing every channel on every pass. The operator-only rule for acting is unchanged. The desktop app keeps the channel-listing mode.
+
+### Fixed
+- **A plan redone after a failed step now runs the new plan** instead of repeating the old steps.
+- **The WireGuard tunnel stayed down for hours after the VPN reconnected.** The VPN client rebuilds its killswitch chain on every reconnect, deleting the exception that lets WireGuard traffic out, and `wg-quick` only adds it when the interface comes up. The watchdog now re-applies the repeat-safe `PostUp` rules from `wg0.conf` on every unhealthy check without restarting the interface.
+
 ## [2.25.416] - 2026-09-29
 
 Sync covering 2.25.411–2.25.416.

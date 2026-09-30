@@ -12,6 +12,14 @@ The LANAgent API gateway routes requests across available agents. 87+ paid servi
 
 **Also available at:** `https://scrape.lanagent.net` (alias, same service)
 
+### MCP endpoint (AI agents)
+
+The gateway is also an MCP server at `https://api.lanagent.net/mcp` (Streamable HTTP, stateless JSON; gateway `mcp.mjs` + `oauth.mjs`, v1.9.0+). Claude.ai/ChatGPT add it as a connector by URL (OAuth 2.1, the approval mints a `gsk_` key named `MCP: <client> (<date>)`); Claude Code, Cursor, Hermes and scripts send `Authorization: Bearer gsk_…` or `X-API-Key: gsk_…`.
+
+- Every tool calls the gateway's own REST route as the caller, so pricing and billing are the REST API's. Free tools: `catalog`, `credits_price`, `credits_balance`, `job_status`, `spending_limit`.
+- **Agent services appear automatically:** every action in the gateway's `GET /service/catalog` becomes a typed tool `svc_<plugin>_<action>`, its input schema parsed from the command's `usage` string. A new `offerAsService` action on an agent needs no gateway change (see `docs/ADDING_PAID_SERVICES.md`).
+- `GET /catalog` advertises it under `mcp`. Customer guide: https://lanagent.net/api/#mcp
+
 ### How It Works
 
 ### Two Ways to Get Credits
@@ -550,6 +558,31 @@ X-Admin-Key: <AGENT_ADMIN_KEY>
 ```
 
 Live in-memory snapshot of download-token usage (tokens within their TTL window); resets on agent restart.
+
+---
+
+## Recent Updates (September 30, 2026)
+
+Sync covering 2.25.417–2.25.423.
+
+### v2.25.420 — Skill checks and trigger tests (skills plugin)
+
+- `evaluate({ name })` writes realistic requests that should use the skill and near-misses that shouldn't, runs them through the agent's own skill matcher, and returns `{ name, recall, falseTriggers, passRate, cases[{query, expected, triggered, pass}], result }`. It makes one side-model call.
+- `list()` adds `warnings[]` to each skill: plain sentences from the agentskills.io limits (description over 1024 characters or without "when to use", body over 500 lines or 5,000 tokens, no steps, generic advice).
+- A correction now appends to the skill's `## Gotchas` section; the steps are replaced only when they were wrong.
+
+### v2.25.418 — Learning loop (skills plugin)
+
+Each action is `POST /api/plugin` (JWT) with `{"plugin": "skills", "action": "...", ...}`.
+- **Editing:**
+  - `update({ name, body?, description?, reason? })` edits a skill in place. A bundled skill gets an instance override.
+  - `history({ name })` lists the changes; `rollback({ name })` undoes the last one.
+- **Lifecycle:** `archive({ name })`, `restore({ name })` (for an archived skill), and `pin({ name, pinned })`. The curator never touches a pinned skill.
+- **Listing:** `list({ includeArchived? })` adds `uses`, `lastUsed`, `state` (active | stale) and `pinned` to each skill, plus `archived[]`.
+- **Installing:** `installFromUrl({ url })` accepts a GitHub file or folder link, `owner/repo/path`, or a raw https link. It follows the auto-approve setting (v2.25.422): active at once when it is on, pending otherwise. Either way the operator gets a Telegram notice with Reject (or Approve/Reject) buttons.
+- **Housekeeping:** `curate()` runs it now → `{stale, archived, merged, profile}`.
+- **Operator profile:** `profile()` reads it, `profile({ add })` adds a line, `profile({ set })` replaces it. It lives in `data/agent/USER.md` with its history in `USER.md.history.jsonl`, and goes into the system prompt as a frozen snapshot.
+- **Background review:** runs on the operator's turns and is logged as `[background-review] kept: …`. Settings: `SKILLS_BACKGROUND_REVIEW`, `SKILLS_REVIEW_MAX_PER_DAY`, `SKILLS_CURATOR`, `SKILLS_CURATOR_HOURS`, `SKILLS_STALE_DAYS`, `SKILLS_ARCHIVE_DAYS`.
 
 ---
 

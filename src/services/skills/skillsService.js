@@ -6,6 +6,7 @@ import { fileURLToPath } from 'url';
 import { logger } from '../../utils/logger.js';
 import { DATA_PATH } from '../../utils/paths.js';
 import { embeddingService } from '../embeddingService.js';
+import { SKILL_WRITING_RULES } from './skillQuality.js';
 
 /**
  * Skills: procedures written as markdown, in the agentskills.io SKILL.md format.
@@ -131,7 +132,7 @@ export class SkillsService {
       if (error.code !== 'ENOENT') logger.warn(`Skills directory unreadable: ${error.message}`);
     }
     for (const entry of entries) {
-      if (!entry.isDirectory()) continue;
+      if (!entry.isDirectory() || entry.name.startsWith('.')) continue;   // .archive, .history
       const file = path.join(root, entry.name, 'SKILL.md');
       try {
         const parsed = parseSkill(await fs.readFile(file, 'utf8'));
@@ -245,6 +246,7 @@ export class SkillsService {
   async promptFor(query, opts = {}) {
     const matched = await this.match(query, opts);
     if (!matched.length) return '';
+    this.recordUse(matched.map(m => m.name)).catch(() => {});
     return matched.map(s => `### Skill: ${s.name}\n${s.description}\n\n${s.body.substring(0, 4000)}`).join('\n\n');
   }
 
@@ -267,6 +269,154 @@ export class SkillsService {
     const saved = this.skills.get(slug);
     if (saved && (saved.meta?.status || 'active') === 'active') skillEvents.emit('activated', { name: slug, source: extra.source || 'manual' });
     return saved;
+  }
+
+  // ─── Lifecycle: usage, updates with history, archive, pin (after Hermes' curator) ───────
+  //
+  // Usage lives in a sidecar, never in SKILL.md: .usage.json {name: {uses, lastUsed, created,
+  // pinned, state}}. Every change to a skill's text appends {at, actor, reason, before, after}
+  // to .history/<name>.jsonl so any edit can be rolled back. Archiving moves the folder to
+  // .archive/ (recoverable); nothing here deletes a skill.
+
+  async _readJson(file, fallback) {
+    try { return JSON.parse(await fs.readFile(path.join(this.dir, file), 'utf8')); } catch { return fallback; }
+  }
+
+  async _writeJson(file, data) {
+    await fs.mkdir(this.dir, { recursive: true });
+    const target = path.join(this.dir, file);
+    const tmp = `${target}.${process.pid}.${Date.now()}.tmp`;
+    await fs.writeFile(tmp, JSON.stringify(data, null, 2), 'utf8');
+    await fs.rename(tmp, target);
+  }
+
+  /** Usage records by name. Serialised through one promise so concurrent bumps don't lose counts. */
+  async usage() { return this._readJson('.usage.json', {}); }
+
+  async _updateUsage(mutate) {
+    this._usageChain = (this._usageChain || Promise.resolve()).then(async () => {
+      const u = await this.usage();
+      mutate(u);
+      await this._writeJson('.usage.json', u);
+    }).catch(err => logger.debug(`Skill usage not saved: ${err.message}`));
+    return this._usageChain;
+  }
+
+  /** A skill was put in front of the model for a request. */
+  async recordUse(names) {
+    const now = new Date().toISOString();
+    return this._updateUsage(u => {
+      for (const n of names) {
+        const r = u[n] || { uses: 0, created: now };
+        r.uses = (r.uses || 0) + 1;
+        r.lastUsed = now;
+        if (r.state === 'stale') r.state = 'active';
+        u[n] = r;
+      }
+    });
+  }
+
+  async setPinned(name, pinned) {
+    if (!(await this.get(name))) throw new Error(`No skill named "${name}"`);
+    await this._updateUsage(u => { u[name] = { ...(u[name] || { uses: 0, created: new Date().toISOString() }), pinned: !!pinned }; });
+    return { name, pinned: !!pinned };
+  }
+
+  async _appendHistory(name, entry) {
+    const dir = path.join(this.dir, '.history');
+    await fs.mkdir(dir, { recursive: true });
+    await fs.appendFile(path.join(dir, `${name}.jsonl`), JSON.stringify({ at: new Date().toISOString(), ...entry }) + '\n', 'utf8');
+  }
+
+  /** The change history of a skill, newest first. */
+  async history(name, { limit = 20 } = {}) {
+    try {
+      const lines = (await fs.readFile(path.join(this.dir, '.history', `${name}.jsonl`), 'utf8')).trim().split('\n').filter(Boolean);
+      return lines.map(l => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean).reverse().slice(0, limit);
+    } catch { return []; }
+  }
+
+  /**
+   * Change a skill's description and/or body in place (a bundled skill gets an override in the
+   * instance's own directory; the shipped file is never touched). Returns the updated skill.
+   * @param {{actor?: string, reason?: string}} who - recorded in the history
+   */
+  async update(name, { description, body } = {}, { actor = 'operator', reason = '' } = {}) {
+    const skill = await this.get(name);
+    if (!skill) throw new Error(`No skill named "${name}"`);
+    const nextDescription = description !== undefined ? String(description).replace(/\s*\n\s*/g, ' ').trim() : skill.description;
+    const nextBody = body !== undefined ? String(body).trim().substring(0, MAX_BODY) : skill.body;
+    if (!nextDescription || nextDescription.length > 1024) throw new Error('A description (up to 1024 characters) is required');
+    if (!nextBody) throw new Error('A skill needs a body');
+    if (nextDescription === skill.description && nextBody === skill.body) return skill;
+    const { name: _n, description: _d, ...extra } = skill.meta || {};
+    const target = skill.bundled ? path.join(this.dir, skill.name, 'SKILL.md') : skill.path;
+    await fs.mkdir(path.dirname(target), { recursive: true });
+    await fs.writeFile(target, renderSkill({ name: skill.name, description: nextDescription, body: nextBody, extra: { ...extra, ...(skill.bundled ? { overrides: 'bundled' } : {}) } }), 'utf8');
+    await this._appendHistory(skill.name, {
+      actor, reason: String(reason).substring(0, 500), action: 'update',
+      before: { description: skill.description, body: skill.body }, after: { description: nextDescription, body: nextBody }
+    });
+    this.embeddings.delete(skill.name);
+    await this.scan(true);
+    logger.info(`Skill updated: ${skill.name} by ${actor}${reason ? ` (${reason.substring(0, 120)})` : ''}`);
+    return this.skills.get(skill.name);
+  }
+
+  /** Undo the most recent change to a skill's text. */
+  async rollback(name, { actor = 'operator' } = {}) {
+    const [last] = await this.history(name, { limit: 1 });
+    if (!last || last.action !== 'update' || !last.before) throw new Error(`"${name}" has no change to roll back`);
+    return this.update(name, last.before, { actor, reason: `rollback of the ${last.at} change` });
+  }
+
+  /** Move a skill out of use to .archive/ (recoverable with restore). Bundled skills can't be archived. */
+  async archive(name, { actor = 'operator', reason = '' } = {}) {
+    const skill = await this.get(name);
+    if (!skill) throw new Error(`No skill named "${name}"`);
+    if (skill.bundled) throw new Error(`"${name}" ships with LANAgent and cannot be archived; pin or override it instead`);
+    const dest = path.join(this.dir, '.archive', `${name}--${Date.now()}`);
+    await fs.mkdir(path.dirname(dest), { recursive: true });
+    await fs.rename(path.dirname(skill.path), dest);
+    await this._appendHistory(name, { actor, reason: String(reason).substring(0, 500), action: 'archive', archivedTo: path.basename(dest) });
+    await this._updateUsage(u => { u[name] = { ...(u[name] || {}), state: 'archived', archivedAt: new Date().toISOString() }; });
+    this.embeddings.delete(name);
+    await this.scan(true);
+    logger.info(`Skill archived: ${name} by ${actor}${reason ? ` (${reason.substring(0, 120)})` : ''}`);
+    return true;
+  }
+
+  /**
+   * Undo what the background review last did to a skill: roll back its last update, or archive a
+   * skill it created. Used by the Telegram "Undo" button on a learning notice.
+   */
+  async undoLearned(name, { actor = 'operator' } = {}) {
+    const skill = await this.get(name);
+    if (!skill) throw new Error(`No skill named "${name}"`);
+    const [last] = await this.history(name, { limit: 1 });
+    if (last?.action === 'update') { await this.rollback(name, { actor }); return { undone: 'update', name }; }
+    if (skill.meta?.learned_via === 'background-review') { await this.archive(name, { actor, reason: 'operator removed a learned skill' }); return { undone: 'create', name }; }
+    throw new Error(`Nothing learned to undo on "${name}"`);
+  }
+
+  /** Archived skills: [{name, folder, archivedAt}]. */
+  async archived() {
+    try {
+      const names = await fs.readdir(path.join(this.dir, '.archive'));
+      return names.map(f => ({ name: f.replace(/--\d+$/, ''), folder: f, archivedAt: new Date(Number(f.split('--').pop()) || 0).toISOString() }))
+        .sort((a, b) => b.archivedAt.localeCompare(a.archivedAt));
+    } catch { return []; }
+  }
+
+  async restore(name, { actor = 'operator' } = {}) {
+    const hit = (await this.archived()).find(a => a.name === name || a.folder === name);
+    if (!hit) throw new Error(`No archived skill "${name}"`);
+    if (await this.get(hit.name)) throw new Error(`A skill named "${hit.name}" is active; archive or rename it first`);
+    await fs.rename(path.join(this.dir, '.archive', hit.folder), path.join(this.dir, hit.name));
+    await this._appendHistory(hit.name, { actor, action: 'restore' });
+    await this._updateUsage(u => { u[hit.name] = { ...(u[hit.name] || {}), state: 'active', lastUsed: new Date().toISOString() }; });
+    await this.scan(true);
+    return this.skills.get(hit.name);
   }
 
   /** Peer skills the operator rejected or deleted: {name, origin, at}. Never re-installed. */
@@ -349,8 +499,10 @@ Task: ${query}
 Steps taken: ${steps.join('\n')}
 Outcome: ${String(answer).substring(0, 800)}
 
+${SKILL_WRITING_RULES}
+
 Return JSON only:
-{"name": "short-kebab-case-name", "description": "One sentence: what the skill does and when to use it", "body": "Markdown: when to use it, then numbered steps naming the tool.command calls and the parameters that matter, then pitfalls seen"}
+{"name": "short-kebab-case-name", "description": "Use this skill when ... (what the user wants, including phrasings that don't name it)", "body": "Markdown: numbered steps naming the tool.command calls and the parameters that matter, then a ## Gotchas section for anything that went wrong or was non-obvious"}
 Generalise the steps (no one-off values unless they are always the same). If the task is too one-off to reuse, return {"skip": true}.`;
 
     const response = await (providerManager.generateAux || providerManager.generateResponse).call(providerManager, prompt, { maxTokens: 900, temperature: 0.2, auxTask: 'skill-learning' });
@@ -417,8 +569,10 @@ ${String(context).substring(0, 2500)}
 Message from ${from}:
 ${String(text).substring(0, 5000)}
 
+${SKILL_WRITING_RULES}
+
 Return JSON only:
-{"name": "short-kebab-case-name", "description": "One sentence: what the procedure does and when to use it", "body": "Markdown: when to use it, numbered steps, pitfalls mentioned"}
+{"name": "short-kebab-case-name", "description": "Use this skill when ... (what the user wants)", "body": "Markdown: when to use it, numbered steps, pitfalls mentioned"}
 Write it in your own words for an agent with its OWN tools; keep API routes and field names exactly as given. If the message is chat, thanks, a status report or anything else that is not a procedure, return {"skip": true}.`;
     const response = await (providerManager.generateAux || providerManager.generateResponse).call(providerManager, prompt, { maxTokens: 900, temperature: 0.2, auxTask: 'skill-learning' });
     const json = String(response?.content || '').match(/\{[\s\S]*\}/);

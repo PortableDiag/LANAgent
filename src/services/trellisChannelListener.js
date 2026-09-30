@@ -95,6 +95,8 @@ export class TrellisChannelListener {
     while (this.running) {
       try {
         await this.plugin._ensureTarget();
+        if (this.inbox === undefined) await this._probeInbox();
+        if (this.inbox) { await this._inboxCycle(); continue; }
         await this._cycle();
         await this._waitForChange();
       } catch (err) {
@@ -102,6 +104,75 @@ export class TrellisChannelListener {
         await sleep(IDLE_POLL_MS);
       }
     }
+  }
+
+  /**
+   * trellis-web v0.73+ keeps each agent's read point on the server: GET /api/inbox answers only
+   * messages addressed to this agent that it has not read, across every channel, and long-polls.
+   * It replaces listing every channel and waiting on document changes. The inbox is only the
+   * wake-up: its entries carry no `via` / `from_key_owner`, so each card still goes through
+   * _handleChannel, which reads the whole channel and applies the operator-trust rule. The desktop
+   * (no inbox) keeps the channel-listing loop.
+   */
+  async _probeInbox() {
+    if (this.plugin.resolvedMode !== 'web') { this.inbox = false; return; }
+    try {
+      const docs = await this.plugin._followedDocuments();
+      const doc = docs[0];
+      const run = () => this.plugin._call('get', '/api/inbox', { query: { wait: 0 } });
+      await (doc ? this.plugin._runInDocument(doc, run) : run());
+      this.inbox = true;
+      const who = await (doc ? this.plugin._runInDocument(doc, () => this.plugin._call('get', '/api/whoami')) : this.plugin._call('get', '/api/whoami')).catch(() => null);
+      logger.info(`[trellis-listen] using the server inbox (web v0.73+)${who ? `; key scope ${JSON.stringify(who.scope || {})}, can ${JSON.stringify(who.can || {})}` : ''}`);
+    } catch (err) {
+      this.inbox = err.status === 404 ? false : undefined;   // 404: no inbox on this server; else retry later
+      if (this.inbox === false) logger.info('[trellis-listen] this server has no inbox; listing channels instead');
+      else await sleep(IDLE_POLL_MS);
+    }
+  }
+
+  async _inboxCycle() {
+    const docs = await this.plugin._followedDocuments();
+    this.inboxPrimed = this.inboxPrimed || new Set();
+    const wait = docs.length === 1 ? 25 : 0;
+    let handled = 0;
+    for (const doc of docs) {
+      await this.plugin._runInDocument(doc, async () => {
+        // First start: everything already waiting is history, never answered (as before).
+        if (!this.inboxPrimed.has(doc.id)) {
+          await this.plugin._call('post', '/api/inbox/read', { body: { all: true } });
+          this.inboxPrimed.add(doc.id);
+          return;
+        }
+        const data = await this.plugin._call('get', '/api/inbox', { query: { wait }, timeoutMs: (wait + 15) * 1000 });
+        const byCard = new Map();
+        this._inboxHadPending = (data?.inbox || []).length > 0;
+        for (const m of data?.inbox || []) {
+          const e = byCard.get(m.card) || { min: Infinity, max: 0 };
+          e.min = Math.min(e.min, Number(m.seq) || 0);
+          e.max = Math.max(e.max, Number(m.seq) || 0);
+          byCard.set(m.card, e);
+        }
+        for (const [card, { min, max }] of byCard) {
+          const key = `${doc.id}:${card}`;
+          const failed = this.failures.get(key);
+          if (failed && Date.now() < failed.nextRetryAt) continue;
+          this.cursors.set(key, Math.max(0, min - 1));
+          try {
+            await this._handleChannel(doc, card, key);
+            this.failures.delete(key);
+            await this.plugin._call('post', '/api/inbox/read', { body: { card, seq: max } });
+            handled++;
+          } catch (err) {
+            this._recordFailure(key, err);
+          }
+        }
+      });
+    }
+    // Nothing handled: after an empty long-poll go straight back; if messages are waiting but
+    // their cards are in backoff (or several documents are polled without wait), pause instead
+    // of spinning on an inbox that answers at once.
+    if (!handled && (wait === 0 || this._inboxHadPending)) await sleep(IDLE_POLL_MS / 2);
   }
 
   /** Long-poll until the document changes (~25 s), or sleep when that is not possible. */
@@ -212,6 +283,17 @@ export class TrellisChannelListener {
       return;
     }
     const fromOperator = await this._isOperator(target);
+    // 👀 while working on it, 👍 once answered (or when it needs no answer), 🤷 on failure.
+    const working = this._react(card, target.seq, '👀');
+    try {
+      await this._answer({ doc, card, key, target, messages, maxSeq, group, data, fromOperator, working });
+    } catch (err) {
+      this._settleReaction(card, target.seq, working, '🤷');
+      throw err;
+    }
+  }
+
+  async _answer({ doc, card, key, target, messages, maxSeq, group, data, fromOperator, working }) {
     const context = messages.filter(m => (Number(m.seq) || 0) <= (Number(target.seq) || 0)).slice(-CONTEXT_MESSAGES);
     // Another agent (the desktop records no kinds: there, anyone who is not the operator).
     const fromAgent = !fromOperator && (target.kind === 'agent' || target.kind === 'builtin'
@@ -272,7 +354,7 @@ export class TrellisChannelListener {
     }
 
     this.cursors.set(key, maxSeq);
-    if (!reply) return;
+    if (!reply) { this._settleReaction(card, target.seq, working, '👍'); return; }
     const files = teach?.files || null;
     const said = await this.plugin._call('post', `/api/cards/${card}/say`, {
       body: { text: reply.slice(0, MAX_REPLY_CHARS), ...(files ? { files } : {}) },
@@ -280,8 +362,42 @@ export class TrellisChannelListener {
     });
     if (Number.isFinite(said?.seq)) this.cursors.set(key, Math.max(maxSeq, said.seq));
     this._noteReply(key);
+    this._settleReaction(card, target.seq, working, '👍');
     await this._remember(card, target, reply);
     logger.info(`[trellis-listen] answered ${key} #${target.seq} from ${target.from} (${fromOperator ? 'operator — full' : 'conversation only'})`);
+  }
+
+  /**
+   * Channel reactions (trellis desktop v0.207 / web, agreed on relay 2754 #250–#253): one per
+   * author per emoji, added and removed explicitly; not a message, so nothing wakes or moves.
+   * Best effort: never awaited by the reply path, and a server without the route (404) pauses
+   * reactions for 10 minutes, so they start by themselves once the server has them.
+   * TRELLIS_REACTIONS=false turns them off.
+   */
+  _react(card, seq, emoji, { remove = false } = {}) {
+    if (String(process.env.TRELLIS_REACTIONS || 'true').toLowerCase() === 'false') return Promise.resolve(false);
+    if (!(Number(seq) > 0) || (this.reactionsPausedUntil || 0) > Date.now()) return Promise.resolve(false);
+    const route = `/api/cards/${card}/channel/${Number(seq)}/react`;
+    const call = remove
+      ? this.plugin._call('delete', route, { query: { emoji } })
+      : this.plugin._call('post', route, { body: { emoji } });
+    return call.then(() => true).catch(err => {
+      if (err.status === 404 && !remove) {
+        this.reactionsPausedUntil = Date.now() + 10 * 60000;
+        logger.debug('[trellis-listen] this server has no channel reactions yet; retrying in 10 minutes');
+      } else {
+        logger.debug(`[trellis-listen] reaction ${emoji} on ${card}#${seq} not set: ${err.message}`);
+      }
+      return false;
+    });
+  }
+
+  /** Replace the 👀 with the outcome once the 👀 call has finished (so it can't land last). */
+  _settleReaction(card, seq, working, emoji) {
+    Promise.resolve(working).then(added => {
+      const clear = added ? this._react(card, seq, '👀', { remove: true }) : Promise.resolve();
+      return clear.then(() => this._react(card, seq, emoji));
+    }).catch(() => {});
   }
 
   /**
@@ -411,30 +527,8 @@ export class TrellisChannelListener {
    * telegramDashboard.js). Best effort: without Telegram, "approve skill <name>" still works.
    */
   async _askOperatorToApprove(skill, from, card) {
-    try {
-      const tg = this.agent?.interfaces?.get?.('telegram');
-      if (!tg?.sendNotification) return;
-      const { getSkillsService } = await import('./skills/skillsService.js');
-      const active = skill.meta?.status === 'active';
-      const fits = `skill_ok:${skill.name}`.length <= 64;
-      let keyboard, text;
-      if (active) {
-        // Auto-approval is on: say so, and offer the undo.
-        keyboard = fits ? [[{ text: '🗑 Reject', callback_data: `skill_no:${skill.name}` }], [{ text: '⏸ Turn off auto-approve', callback_data: 'skill_auto_off' }]] : [[{ text: '⏸ Turn off auto-approve', callback_data: 'skill_auto_off' }]];
-        text = `🧠 ${from} taught me a skill in Trellis (card ${card}):\n\n${skill.name} — ${skill.description}\n\nAuto-approved (auto-approve is on): I'll use it from now on.`;
-      } else {
-        const waiting = (await getSkillsService().pending()).length;
-        keyboard = [
-          fits ? [{ text: '✅ Approve', callback_data: `skill_ok:${skill.name}` }, { text: '🗑 Reject', callback_data: `skill_no:${skill.name}` }] : [],
-          [{ text: `✅ Approve all pending (${waiting})`, callback_data: 'skill_ok_all' }],
-          [{ text: '⚙️ Always auto-approve', callback_data: 'skill_auto_on' }]
-        ].filter(r => r.length);
-        text = `🧠 ${from} taught me a skill in Trellis (card ${card}):\n\n${skill.name} — ${skill.description}\n\nIt is pending: I won't use it until you approve it.`;
-      }
-      await tg.sendNotification(text, { parse_mode: undefined, reply_markup: { inline_keyboard: keyboard } });
-    } catch (err) {
-      logger.debug(`[trellis-listen] could not ask for skill approval on Telegram: ${err.message}`);
-    }
+    const { sendSkillNotice } = await import('./skills/skillNotice.js');
+    return sendSkillNotice(this.agent, skill, `${from} taught me a skill in Trellis (card ${card})`);
   }
 
   /** The operator's user id in the agent's other interfaces (Telegram). */

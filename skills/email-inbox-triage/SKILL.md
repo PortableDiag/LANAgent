@@ -1,6 +1,6 @@
 ---
 name: email-inbox-triage
-description: Triage the inbox - sort recent emails into urgent, needs reply, action, waiting, reference and noise, and draft replies for approval - use when asked what emails need attention, to triage today's mail, find unanswered messages, or draft replies to anything urgent.
+description: Use this skill when the user wants an overview of what in their inbox needs attention - a triage or morning summary that ranks recent mail as urgent, needs reply, action, waiting, reference or noise, and lists what is still unanswered. Not for acting on a single message (sending, forwarding, deleting, marking read) or changing mail settings.
 source: hermes-agent
 license: MIT
 adapted_from: skills/email/email-inbox-triage/SKILL.md

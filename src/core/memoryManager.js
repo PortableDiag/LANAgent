@@ -391,6 +391,12 @@ export class MemoryManager {
     const filtered = buffer.filter(m => now - m.ts < 30 * 60 * 1000).slice(-10);
     this._conversationBuffer.set(uid, filtered);
 
+    // Background review of the operator's own turns (not guests, and not another agent's Trellis
+    // message recorded here under the operator's id — those carry `from`).
+    if (!metadata?.isGuest && metadata?.restrictions !== 'conversational_only' && !metadata?.from && this.agent?.backgroundReview) {
+      this.agent.backgroundReview.consider({ userId: uid, input: userContent, reply: agentContent, recent: filtered.slice(0, -2) });
+    }
+
     // Verbatim transcript (separate collection, TTL-expired). Not awaited: a slow write
     // must never delay a reply, and a failed one only costs searchable history.
     const iface = metadata.interface || 'unknown';

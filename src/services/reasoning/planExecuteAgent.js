@@ -2,6 +2,17 @@ import { logger } from '../../utils/logger.js';
 import { EventEmitter } from 'events';
 import { listTools, selectRelevantTools, formatToolsForPrompt, executeTool, findPastExamples } from './toolCatalog.js';
 import { getSkillsService } from '../skills/skillsService.js';
+import { TodoList } from './todoList.js';
+
+/** A plan as a to-do list: steps before `current` done, `current` in progress, the rest pending. */
+export function planChecklist(steps = [], current = -1) {
+  const list = new TodoList();
+  list.write(steps.map((s, i) => ({
+    text: s.description || `${s.tool}.${s.command}`,
+    status: i < current ? 'done' : i === current ? 'in_progress' : 'pending'
+  })));
+  return list;
+}
 
 /**
  * PlanExecuteAgent - Implements the Plan-and-Execute pattern
@@ -72,15 +83,17 @@ export class PlanExecuteAgent extends EventEmitter {
       }
 
       // Step 2: Execute each step
-      const sortedSteps = this.planner.sortStepsByPriority(plan.steps);
+      let sortedSteps = this.planner.sortStepsByPriority(plan.steps);
       for (let i = 0; i < sortedSteps.length; i++) {
         const step = sortedSteps[i];
         const stepNumber = i + 1;
 
         this.emit('stepStart', { stepNumber, step, totalSteps: sortedSteps.length });
 
-        if (this.showProgress && context.showThinking) {
-          await context.showThinking(`⏳ Step ${stepNumber}/${sortedSteps.length}: ${step.description}`);
+        // The plan is the task's to-do list: shown as a checklist with every step
+        if (context.showThinking) {
+          const checklist = planChecklist(sortedSteps, i).render();
+          await context.showThinking(`⏳ Step ${stepNumber}/${sortedSteps.length}${checklist ? `\n\n${checklist}` : `: ${step.description}`}`);
         }
 
         // Execute the step
@@ -107,7 +120,8 @@ export class PlanExecuteAgent extends EventEmitter {
             this.emit('planUpdated', { plan, replanCount });
 
             if (plan.steps && plan.steps.length > 0) {
-              // Reset loop to start with new plan
+              // Reset loop to start with new plan (the old step list used to keep running)
+              sortedSteps = this.planner.sortStepsByPriority(plan.steps);
               i = -1;
               results.length = 0; // Clear previous results
               continue;

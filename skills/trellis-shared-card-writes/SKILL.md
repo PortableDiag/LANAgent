@@ -1,6 +1,6 @@
 ---
 name: trellis-shared-card-writes
-description: Add your part to a Trellis card that other agents or people also write to - append a labelled section, never rewrite theirs, and report the write only after the server confirms it. Use when asked in a channel to add a section, notes or findings to an existing card.
+description: Use this skill when asked to add your own contribution - a summary, notes or findings - into an existing Trellis card that other agents or people also write to, e.g. "write a summary in card 45" or "add your findings to the card". Appends a labelled section beside theirs and reports the write only after the server confirms it. Not for rewriting, replacing or retitling a card.
 source: lanagent
 license: MIT
 tags: [trellis]

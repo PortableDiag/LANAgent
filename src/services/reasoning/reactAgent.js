@@ -3,6 +3,10 @@ import { EventEmitter } from 'events';
 import NodeCache from 'node-cache';
 import { listTools, selectRelevantTools, formatToolsForPrompt, executeTool, findPastExamples, DESCRIBE_TOOL } from './toolCatalog.js';
 import { getSkillsService, learnSkillFromTask } from '../skills/skillsService.js';
+import { TodoList, TODO_TOOL, TODO_TOOL_PROMPT, runTodoTool } from './todoList.js';
+
+// Steps spent only on the to-do list do not use up maxIterations, up to this many per run
+export const FREE_TODO_STEPS = 3;
 
 /**
  * ReActAgent - Implements the ReAct (Reasoning + Acting) pattern
@@ -145,6 +149,18 @@ export class ReActAgent extends EventEmitter {
       });
     }
 
+    // The task's own to-do list (per run, in memory), carried over a clarification pause
+    const todo = new TodoList();
+    ReActAgent.replayTodo(todo, thoughts);
+    const withTodo = r => (todo.empty ? r : { ...r, todo: todo.snapshot() });
+    // Progress line for the user, with the to-do list under it when there is one
+    const progress = async (line) => {
+      if (!context.showThinking) return;
+      const list = todo.render();
+      const text = [line, list].filter(Boolean).join('\n\n');
+      if (text) await context.showThinking(text);
+    };
+
     const signal = context.signal || context.abortSignal;
     const budget = { ...this.executionBudget, ...(context.budget || context.executionBudget || {}) };
     const run = {
@@ -152,7 +168,8 @@ export class ReActAgent extends EventEmitter {
       budget,
       startTime: Date.now(),
       toolCalls: 0,
-      iteration: 0
+      iteration: 0,
+      todo
     };
     this.activeRun = run;
 
@@ -173,13 +190,14 @@ export class ReActAgent extends EventEmitter {
       if (pastExamples) logger.info('ReAct: reusing similar past reasoning as examples');
       const skills = await getSkillsService().promptFor(query).catch(() => '');
       if (skills) logger.info('ReAct: following a matching skill');
-      const guidance = { relevant, pastExamples, skills };
+      const guidance = { relevant, pastExamples, skills, todo };
+      let freeTodoSteps = 0;
 
-      while (iteration < this.maxIterations) {
+      while (iteration < this.maxIterations + freeTodoSteps) {
         this._checkBudget(run);
         iteration++;
         run.iteration = iteration;
-        logger.info(`ReAct iteration ${iteration}/${this.maxIterations}`);
+        logger.info(`ReAct iteration ${iteration}/${this.maxIterations + freeTodoSteps}`);
 
         // Step 1: THOUGHT - Reason about current state
         const thought = await this._boundedOperation(
@@ -198,15 +216,22 @@ export class ReActAgent extends EventEmitter {
           await context.showThinking(`💭 Thinking: ${thought.reasoning?.substring(0, 100)}...`);
         }
 
+        // A to-do list sent alongside the step ("todo": [...]) is applied first
+        if (Array.isArray(thought.todo)) {
+          const before = todo.revision;
+          try { todo.write(thought.todo); } catch { /* malformed list: keep the old one */ }
+          if (todo.revision !== before && !thought.action?.tool && !thought.finalAnswer) await progress('');
+        }
+
         // Check if we have a final answer
         if (thought.finalAnswer) {
-          const result = {
+          const result = withTodo({
             success: true,
             answer: thought.finalAnswer,
             thoughts,
             iterations: iteration,
             duration: Date.now() - startTime
-          };
+          });
 
           // Store thought chain if thought store is available
           if (this.thoughtStore) {
@@ -222,7 +247,7 @@ export class ReActAgent extends EventEmitter {
 
         // Check if we need more information (clarification)
         if (thought.needsClarification) {
-          return {
+          return withTodo({
             success: false,
             needsClarification: true,
             clarificationQuestion: thought.clarificationQuestion,
@@ -230,7 +255,18 @@ export class ReActAgent extends EventEmitter {
             thoughts,
             iterations: iteration,
             duration: Date.now() - startTime
-          };
+          });
+        }
+
+        // The to-do tool is pure state on this run: no plugin, no tool-call budget
+        if (thought.action?.tool === TODO_TOOL) {
+          const before = todo.revision;
+          const observation = runTodoTool(todo, thought.action.params || {});
+          thoughts.push({ type: 'observation', content: observation, iteration, timestamp: new Date() });
+          this.emit('todo', { iteration, todo: observation.result });
+          if (todo.revision !== before) await progress('📝 To-do updated');
+          if (freeTodoSteps < FREE_TODO_STEPS) freeTodoSteps++;
+          continue;
         }
 
         // Step 2: ACTION - Decide what tool to use
@@ -241,9 +277,7 @@ export class ReActAgent extends EventEmitter {
           this.emit('action', { iteration, action });
 
           // Tool steps are always reported (briefly); full thoughts only with showThoughts
-          if (context.showThinking) {
-            await context.showThinking(`🔧 ${action.tool}.${action.command}`);
-          }
+          await progress(`🔧 ${action.tool}.${action.command}`);
 
           // Step 3: OBSERVATION - Execute and observe result
           run.toolCalls++;
@@ -266,14 +300,14 @@ export class ReActAgent extends EventEmitter {
       }
 
       // Max iterations reached
-      const result = {
+      const result = withTodo({
         success: false,
         error: 'Max iterations reached without finding an answer',
         reason: 'Max iterations reached without finding an answer',
         thoughts,
         iterations: iteration,
         duration: Date.now() - startTime
-      };
+      });
 
       if (this.thoughtStore) {
         await this.thoughtStore.saveThoughtChain(query, thoughts, result);
@@ -284,7 +318,7 @@ export class ReActAgent extends EventEmitter {
 
     } catch (error) {
       if (error.terminationType === 'cancelled' || error.terminationType === 'budgetExceeded') {
-        return this._terminationResult(error, thoughts, iteration, startTime);
+        return withTodo(this._terminationResult(error, thoughts, iteration, startTime));
       }
 
       logger.error('ReActAgent error:', error, {
@@ -309,6 +343,20 @@ export class ReActAgent extends EventEmitter {
     } finally {
       if (this.activeRun === run) this.activeRun = null;
     }
+  }
+
+  /**
+   * Rebuild a run's to-do list from earlier steps (a task resumed after a clarification):
+   * each "todo" sent with a thought is re-applied, each todo tool result restored.
+   */
+  static replayTodo(todo, thoughts = []) {
+    for (const t of thoughts) {
+      try {
+        if (t?.type === 'thought' && Array.isArray(t.content?.todo)) todo.write(t.content.todo);
+        else if (t?.type === 'observation' && t.content?.tool === TODO_TOOL && t.content.result) todo.restore(t.content.result);
+      } catch { /* a malformed old entry does not stop the resume */ }
+    }
+    return todo;
   }
 
   /**
@@ -339,7 +387,7 @@ export class ReActAgent extends EventEmitter {
   /**
    * Build the prompt for the thinking step
    */
-  buildThinkingPrompt(query, history, { relevant = [], pastExamples = '', skills = '' } = {}) {
+  buildThinkingPrompt(query, history, { relevant = [], pastExamples = '', skills = '', todo = null } = {}) {
     // Relevant tools in full, the rest as a catalog ranked by past performance
     const toolDescriptions = formatToolsForPrompt(this.tools, relevant, this.getPrioritizedTools());
 
@@ -352,6 +400,9 @@ export class ReActAgent extends EventEmitter {
             case 'action':
               return `Action: ${h.content.tool}.${h.content.command}(${JSON.stringify(h.content.params || {})})`;
             case 'observation':
+              if (h.content?.tool === TODO_TOOL) {
+                return `Observation: to-do list ${h.content.command === 'write' ? 'saved' : 'read'}${h.content.success === false ? ` (failed: ${h.content.error})` : ''}, revision ${h.content.result?.revision ?? 0} (current list shown below)`;
+              }
               const obs = typeof h.content === 'string' ? h.content : JSON.stringify(h.content);
               return `Observation: ${obs.substring(0, 500)}${obs.length > 500 ? '...' : ''}`;
             default:
@@ -365,10 +416,12 @@ export class ReActAgent extends EventEmitter {
 ## Available Tools:
 ${toolDescriptions}
 
+${TODO_TOOL_PROMPT}
+
 ${skills ? `## Skills (known procedures for this kind of task; follow them where they apply):\n${skills}\n\n` : ''}${pastExamples ? `## Similar Tasks That Worked Before:\n${pastExamples}\n\n` : ''}## Previous Steps:
 ${historyText}
 
-## Current Task:
+${todo && !todo.empty ? `## ${todo.promptBlock()}\nKeep it current: mark items done as you finish them.\n\n` : ''}## Current Task:
 ${query}
 
 ## Instructions:
@@ -388,11 +441,13 @@ Respond in this JSON format:
   "finalAnswer": "Your final answer if you're done (omit if not ready)",
   "needsClarification": false,
   "clarificationQuestion": "Question to ask if needed (omit if not needed)",
-  "clarificationOptions": ["Up to 4 short likely answers, if the question has obvious choices (omit otherwise)"]
+  "clarificationOptions": ["Up to 4 short likely answers, if the question has obvious choices (omit otherwise)"],
+  "todo": [{"text": "step", "status": "pending|in_progress|done"}]
 }
 
 Only include "action" if you need to use a tool. To see the commands of a tool listed only by name, use {"tool": "${DESCRIBE_TOOL}", "command": "describe", "params": {"name": "<tool>"}}.
 Only include "finalAnswer" if you have completed the task.
+Only include "todo" when your to-do list changes, and then send the whole list.
 Respond with valid JSON only.`;
   }
 
@@ -414,7 +469,8 @@ Respond with valid JSON only.`;
           finalAnswer: parsed.finalAnswer || null,
           needsClarification: (parsed.needsClarification && !!parsed.clarificationQuestion) || false,
           clarificationQuestion: parsed.clarificationQuestion || null,
-          clarificationOptions: options
+          clarificationOptions: options,
+          ...(Array.isArray(parsed.todo) ? { todo: parsed.todo } : {})
         };
       }
 

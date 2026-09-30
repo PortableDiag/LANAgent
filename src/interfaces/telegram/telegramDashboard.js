@@ -5,6 +5,7 @@ import { logger } from "../../utils/logger.js";
 import { getServerHost } from "../../utils/paths.js";
 import { MultiUserSupport } from './multiUserSupport.js';
 import { chatActionMiddleware } from './chatActionKeepalive.js';
+import { startReactionAck } from './reactionAck.js';
 import { createReplyStream, handleStopUpdate, handleStopButton } from './draftStream.js';
 import { installConcurrentUpdates } from './updateDispatcher.js';
 import { installButtonStyles } from './buttonStyle.js';
@@ -1278,6 +1279,9 @@ export class TelegramDashboard extends TelegramInterface {
         return;
       }
 
+      // 👀 on the operator's message now, 👍 / 🤷 when done (best effort, never awaited)
+      const ack = startReactionAck(ctx);
+
       // Process natural language input for master user
       try {
         logger.info(`Telegram NL request from owner: "${text.substring(0, 200)}${text.length > 200 ? '...' : ''}"`);
@@ -1332,6 +1336,7 @@ export class TelegramDashboard extends TelegramInterface {
         // Handle null response (e.g., when intent detection fails or no valid plugin)
         if (!response) {
           logger.warn('Received null response from agent, falling back to error message');
+          ack.fail();
           await ctx.reply("I couldn't process that request. Could you try rephrasing it?");
           return;
         }
@@ -1554,8 +1559,10 @@ export class TelegramDashboard extends TelegramInterface {
             }
           }
         }
+        ack.ok();
       } catch (error) {
         logger.error('Text processing error:', error);
+        ack.fail();
         await ctx.reply('❌ Sorry, I encountered an error processing your request.');
       }
     });
@@ -1598,6 +1605,7 @@ export class TelegramDashboard extends TelegramInterface {
         return;
       }
 
+      const ack = startReactionAck(ctx);
       const thinkingMsg = await ctx.reply('🎤 Processing voice message...');
 
       try {
@@ -1608,6 +1616,7 @@ export class TelegramDashboard extends TelegramInterface {
         // Check minimum duration
         if (duration < 1) {
           await ctx.telegram.deleteMessage(ctx.chat.id, thinkingMsg.message_id);
+          ack.fail();
           await ctx.reply('🎤 Voice message too short. Please try again with a longer message.');
           return;
         }
@@ -1619,6 +1628,7 @@ export class TelegramDashboard extends TelegramInterface {
         } catch (transcribeError) {
           logger.error('Transcription error:', transcribeError);
           await ctx.telegram.deleteMessage(ctx.chat.id, thinkingMsg.message_id);
+          ack.fail();
           await ctx.reply('🎤 Could not understand the audio. Please speak clearly and try again.');
           return;
         }
@@ -1626,6 +1636,7 @@ export class TelegramDashboard extends TelegramInterface {
         // Check for empty or invalid transcription
         if (!transcription || transcription.trim().length === 0) {
           await ctx.telegram.deleteMessage(ctx.chat.id, thinkingMsg.message_id);
+          ack.fail();
           await ctx.reply('🎤 No speech detected. Please try again.');
           return;
         }
@@ -1652,6 +1663,7 @@ export class TelegramDashboard extends TelegramInterface {
         // Handle null response
         if (!response) {
           logger.warn('Received null response from agent for voice message');
+          ack.fail();
           await ctx.reply("I couldn't process that request. Could you try again?");
           return;
         }
@@ -1687,8 +1699,10 @@ export class TelegramDashboard extends TelegramInterface {
             logger.error('Failed to generate voice response:', error);
           }
         }
+        ack.ok();
       } catch (error) {
         logger.error('Voice processing error:', error);
+        ack.fail();
         try {
           await ctx.telegram.deleteMessage(ctx.chat.id, thinkingMsg.message_id);
         } catch (e) { /* ignore */ }
@@ -1718,16 +1732,39 @@ export class TelegramDashboard extends TelegramInterface {
       const [, verb, name] = ctx.match;
       const { getSkillsService } = await import('../../services/skills/skillsService.js');
       const svc = getSkillsService();
-      // Reject also removes an ACTIVE skill another agent taught (auto-approved, or taught by a
-      // trusted peer over P2P); a skill written locally is only ever deleted on request.
+      // Reject also removes an ACTIVE skill that came from outside (another agent taught it, or
+      // it was installed from a link with auto-approve on); a skill written locally is only ever
+      // deleted on request.
       const skill = await svc.get(name);
       const done = verb === 'ok'
         ? await svc.approve(name)
-        : (skill?.meta?.source === 'peer' ? await svc.remove(name) : await svc.reject(name));
+        : (skill?.meta?.source === 'peer' || (skill?.meta?.source === 'url' && (skill?.meta?.status || 'active') === 'active') ? await svc.remove(name) : await svc.reject(name));
       await ctx.editMessageReplyMarkup(undefined).catch(() => {});
       await ctx.reply(done
         ? (verb === 'ok' ? `✅ Approved skill "${name}".` : `🗑 Rejected skill "${name}".`)
         : `No pending skill "${name}" (already handled?).`);
+    });
+    // Undo on a "learned a skill" notice: rolls back the last update, or archives a new skill
+    this.bot.action(/^skill_undo:(.+)$/, async (ctx) => {
+      ctx.answerCbQuery().catch(() => {});
+      if (!ctx.isMaster) return;
+      const name = ctx.match[1];
+      let text;
+      try {
+        const { getSkillsService } = await import('../../services/skills/skillsService.js');
+        const r = await getSkillsService().undoLearned(name, { actor: 'operator' });
+        const shown = r?.name || name;
+        text = r?.undone === 'update'
+          ? `↩️ Rolled back the last change to ${shown}`
+          : r?.undone === 'create'
+            ? `🗑 Removed the learned skill ${shown} (archived; restore it in web UI → Skills)`
+            : `Nothing to undo for ${shown}.`;
+      } catch (err) {
+        logger.warn(`[telegram] skill undo for ${name} failed: ${err.message}`);
+        text = `❌ Could not undo ${name}: ${err.message}`;
+      }
+      await ctx.editMessageReplyMarkup(undefined).catch(() => {});
+      await ctx.reply(text);
     });
     this.bot.action(/^skill_auto_(on|off)$/, async (ctx) => {
       ctx.answerCbQuery().catch(() => {});

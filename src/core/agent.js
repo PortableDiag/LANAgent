@@ -46,6 +46,9 @@ import { readFileSync, existsSync, mkdirSync, copyFileSync } from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { isActionConfirmation, resolveConfirmation, isDeferredRequest } from './confirmationResolver.js';
+import { BackgroundReview } from '../services/skills/backgroundReview.js';
+import { getUserProfile } from '../services/skills/userProfile.js';
+import { Curator, scheduleCurator } from '../services/skills/curator.js';
 
 const execAsync = promisify(exec);
 const __filename = fileURLToPath(import.meta.url);
@@ -131,6 +134,33 @@ export class Agent extends EventEmitter {
     // Initialize core components
     await this.providerManager.initialize();
     await this.memoryManager.initialize();
+
+    // Learning loop (after hermes-agent): the operator profile goes into the system prompt as a
+    // frozen snapshot, and each turn with the operator gets a background review that can fix a
+    // skill, learn a new one, or add to the profile. Neither blocks start-up or a reply.
+    this.userProfile = getUserProfile();
+    await this.userProfile.snapshot().catch(() => '');
+    this.backgroundReview = new BackgroundReview({
+      providerManager: this.providerManager,
+      profile: this.userProfile,
+      notify: (items) => this._learningNotice(items)
+    });
+    // Skill housekeeping when idle: stale/archive unused learned skills, merge duplicates, tidy
+    // the profile. "Idle" = no conversation in the last 15 minutes.
+    const { Memory: MemoryModel } = await import('../models/Memory.js');
+    this.curator = new Curator({
+      providerManager: this.providerManager,
+      profile: this.userProfile,
+      memoryModel: MemoryModel,
+      notify: (report) => this._curatorNotice(report)
+    });
+    scheduleCurator(this.curator, {
+      isIdle: () => {
+        let last = 0;
+        for (const buf of this.memoryManager?._conversationBuffer?.values() || []) for (const m of buf) last = Math.max(last, m.ts || 0);
+        return Date.now() - last > 15 * 60000;
+      }
+    });
 
     // RAG document vector store (separate table from the memory store).
     // Exposed as this.vectorStore for the Knowledge plugin; init failures
@@ -4715,6 +4745,13 @@ Return ONLY a valid JSON object with the extracted parameters, nothing else.`;
     }
     systemPrompt += `\n`;
 
+    // The operator profile: a frozen snapshot (refreshed at most daily), so this block does not
+    // change between requests and the prompt prefix stays cacheable.
+    const profileText = this.userProfile?.snapshotText;
+    if (profileText) {
+      systemPrompt += `👤 ABOUT YOUR OPERATOR (curated profile; follow these preferences):\n${profileText.slice(0, 2500)}\n\n`;
+    }
+
     // Interfaces
     systemPrompt += `📡 INTERFACES (How users reach you):\n`;
     systemPrompt += `1. Telegram Bot: Full natural language interface with dashboards and menus\n`;
@@ -5820,6 +5857,40 @@ Important:
   /**
    * Send notification through available interfaces
    */
+  /**
+   * Batched Telegram notice of what the background review kept, with an Undo button for a single
+   * skill change. Straight to Telegram (not notify()): a lesson learned is not worth an email.
+   */
+  async _learningNotice(items) {
+    this._learnQueue = (this._learnQueue || []).concat(items);
+    if (this._learnTimer) return;
+    this._learnTimer = setTimeout(async () => {
+      const queued = this._learnQueue.splice(0);
+      this._learnTimer = null;
+      const tg = this.interfaces?.get?.('telegram');
+      if (!queued.length || !tg?.sendNotification) return;
+      const line = (i) => i.kind === 'skill-update' ? `✏️ Updated skill ${i.name}${i.reason ? ` — ${String(i.reason).slice(0, 160)}` : ''}`
+        : i.kind === 'skill-create' ? `🆕 New skill ${i.name} — ${String(i.description || '').slice(0, 160)}`
+          : `👤 Noted about you: ${String(i.text).slice(0, 200)}`;
+      const skills = queued.filter(i => i.kind !== 'profile');
+      const keyboard = skills.length === 1 && `skill_undo:${skills[0].name}`.length <= 64
+        ? [[{ text: skills[0].kind === 'skill-update' ? '↩️ Undo' : '🗑 Remove', callback_data: `skill_undo:${skills[0].name}` }]] : [];
+      await tg.sendNotification(`🧠 Learned from our conversation:\n\n${queued.slice(0, 10).map(line).join('\n')}\n\nSee or change it in the web UI → Skills.`,
+        { parse_mode: undefined, ...(keyboard.length ? { reply_markup: { inline_keyboard: keyboard } } : {}) }).catch(() => {});
+    }, 60000);
+    this._learnTimer.unref?.();
+  }
+
+  async _curatorNotice(report) {
+    const tg = this.interfaces?.get?.('telegram');
+    if (!tg?.sendNotification) return;
+    const lines = [
+      ...report.merged.map(m => `🔗 Merged ${m.archived} into ${m.kept}`),
+      ...report.archived.map(n => `📦 Archived ${n} (unused for a long time)`)
+    ];
+    await tg.sendNotification(`🧹 Skill housekeeping:\n\n${lines.join('\n')}\n\nNothing is deleted: restore any of them in the web UI → Skills.`, { parse_mode: undefined }).catch(() => {});
+  }
+
   async notify(message, userId = null) {
     try {
       if (message && typeof message === 'object' && !Array.isArray(message)) {

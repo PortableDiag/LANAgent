@@ -6,6 +6,7 @@ import { promisify } from 'util';
 import { safeInterval } from '../utils/errorHandlers.js';
 import { selfModLock } from './selfModLock.js';
 import { verifyTrustedSender } from '../utils/emailSenderAuth.js';
+import { reassertPostUp } from '../utils/wireguardHooks.js';
 
 // The WireGuard peer this instance checks reachability against. Hardcoding a
 // tunnel address puts deployment topology in the source; it belongs in config.
@@ -1719,7 +1720,9 @@ Respond with ONLY the rephrased message, no explanation:`;
     // WireGuard tunnel watchdog — checks handshake age and peer reachability
     // every 2 minutes. Bounces wg0 (wg-quick down/up) when the tunnel looks
     // locally wedged. The PostUp hooks in wg0.conf re-add the static route and
-    // iptables exception for ExpressVPN coexistence automatically.
+    // iptables exception for ExpressVPN coexistence on `up`, and every unhealthy
+    // tick re-applies them in place, because a VPN reconnect deletes the
+    // exception without touching wg0.
     //
     // The bounce is a remedy for a LOCAL wedge only, and the logs say that is
     // rarely what is wrong: across the retained history the watchdog logged
@@ -1812,6 +1815,32 @@ Respond with ONLY the rephrased message, no explanation:`;
         if (!this._wgOutage) {
           this._wgOutage = { since: Date.now(), bounces: 0, holding: false };
           logger.warn(`WireGuard watchdog: tunnel unhealthy (${reason})`);
+        }
+
+        // Every unhealthy tick, holding or not: put back any PostUp rule an
+        // ExpressVPN reconnect deleted from its killswitch chain. This does not
+        // touch the interface, so it is safe to repeat. See wireguardHooks.js.
+        try {
+          const restored = await reassertPostUp();
+          if (restored.length) {
+            logger.warn(`WireGuard watchdog: re-applied missing PostUp rule(s): ${restored.join(' ; ')}`);
+            const deadline = Date.now() + WG_RECOVERY_WINDOW_MS;
+            while (Date.now() < deadline) {
+              const after = await wgProbe();
+              if (after.healthy) {
+                const secs = Math.round((Date.now() - this._wgOutage.since) / 1000);
+                logger.info(
+                  `WireGuard watchdog: tunnel recovered after re-applying PostUp rules ` +
+                  `(${secs}s outage, ${this._wgOutage.bounces} bounce(s), handshake ${after.handshakeAge}s old)`
+                );
+                this._wgOutage = null;
+                return;
+              }
+              await new Promise(r => setTimeout(r, 3000));
+            }
+          }
+        } catch (hookErr) {
+          logger.warn('WireGuard watchdog: could not re-apply PostUp rules:', hookErr.message);
         }
 
         // A bounce only helps a local wedge. Past WG_MAX_BOUNCES_PER_OUTAGE it is

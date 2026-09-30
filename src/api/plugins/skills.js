@@ -70,6 +70,66 @@ export default class SkillsPlugin extends BasePlugin {
         examples: ['stop teaching skills in trellis', 'turn off skill teaching in trellis channels', 'turn on trellis skill teaching', 'is trellis skill teaching on']
       },
       {
+        command: 'update',
+        description: 'Change a skill\'s steps or description in place (history kept; roll back with rollback)',
+        usage: 'update({ name: "send-report", body: "1. ...", description: "optional" })',
+        examples: ['update the send-report skill', 'change step 2 of the backup skill', 'fix the skill so it does X instead']
+      },
+      {
+        command: 'history',
+        description: 'Show the change history of a skill (who changed it, when, why)',
+        usage: 'history({ name: "send-report" })',
+        examples: ['how did the backup skill change', 'show the history of that skill', 'who changed the skill']
+      },
+      {
+        command: 'rollback',
+        description: 'Undo the most recent change to a skill',
+        usage: 'rollback({ name: "send-report" })',
+        examples: ['roll back the skill change', 'undo the last change to the backup skill', 'revert that skill']
+      },
+      {
+        command: 'archive',
+        description: 'Take a skill out of use (moved to the archive, restorable)',
+        usage: 'archive({ name: "old-skill" })',
+        examples: ['archive the blue frog skill', 'stop using that skill but keep it']
+      },
+      {
+        command: 'restore',
+        description: 'Bring an archived skill back into use',
+        usage: 'restore({ name: "old-skill" })',
+        examples: ['restore the archived skill', 'bring back the blue frog skill']
+      },
+      {
+        command: 'pin',
+        description: 'Pin or unpin a skill: the curator never archives, merges or marks a pinned skill stale',
+        usage: 'pin({ name: "backup", pinned: true })',
+        examples: ['pin the backup skill', 'unpin that skill', 'keep that skill forever']
+      },
+      {
+        command: 'installFromUrl',
+        description: 'Install a skill (SKILL.md) from GitHub or a URL; it waits for approval before it is used',
+        usage: 'installFromUrl({ url: "https://github.com/owner/repo/tree/main/skills/some-skill" })',
+        examples: ['install the skill from this github link', 'add this skill from github', 'install skill from url']
+      },
+      {
+        command: 'evaluate',
+        description: 'Test whether a skill is used for the right requests: realistic requests that should use it and near-misses that should not, run through the skill matcher',
+        usage: 'evaluate({ name: "humanizer" })',
+        examples: ['test whether the humanizer skill triggers correctly', 'does that skill get used when it should', 'evaluate the skill description']
+      },
+      {
+        command: 'curate',
+        description: 'Run skill housekeeping now: mark unused learned skills stale, archive long-unused ones, merge duplicates, tidy the profile',
+        usage: 'curate',
+        examples: ['clean up your skills', 'run skill housekeeping', 'curate your skills']
+      },
+      {
+        command: 'profile',
+        description: 'Show, add to, or replace the profile the agent keeps about its operator (it is part of every prompt)',
+        usage: 'profile()  |  profile({ add: "I prefer short answers" })  |  profile({ set: "- ...\\n- ..." })',
+        examples: ['what do you know about me', 'show my profile', 'remember that I prefer short answers', 'add to my profile']
+      },
+      {
         command: 'reject',
         description: 'Reject (delete) a pending skill another agent taught',
         usage: 'reject({ name: "post-image-card" })',
@@ -92,7 +152,7 @@ export default class SkillsPlugin extends BasePlugin {
     });
     const service = this.service || getSkillsService();
 
-    if (params.needsParameterExtraction && this.agent.providerManager && action !== 'list' && action !== 'approveAll' && action !== 'setAutoApprove') {
+    if (params.needsParameterExtraction && this.agent.providerManager && !['list', 'approveAll', 'setAutoApprove', 'curate'].includes(action)) {
       Object.assign(data, await this.extractParameters(params.originalInput || params.input, action));
     }
 
@@ -101,10 +161,20 @@ export default class SkillsPlugin extends BasePlugin {
         case 'list': {
           const skills = await service.list();
           if (!skills.length) return { success: true, count: 0, result: `No skills yet. Add one with "save this as a skill…" or drop a SKILL.md into ${SKILLS_DIR}.` };
+          const usage = await service.usage();
+          const { lintSkill } = await import('../../services/skills/skillQuality.js');
+          for (const sk of skills) {
+            const full = await service.get(sk.name);
+            sk.warnings = full ? lintSkill(full) : [];
+            const u = usage[sk.name] || {};
+            Object.assign(sk, { uses: u.uses || 0, lastUsed: u.lastUsed || null, state: u.state || 'active', pinned: !!u.pinned });
+          }
+          const archived = data.includeArchived ? await service.archived() : undefined;
           return {
             success: true,
             count: skills.length,
             skills,
+            ...(archived ? { archived } : {}),
             result: `${skills.length} skill(s):\n` + skills.map(s => `• ${s.name}${s.status === 'pending' ? ` (PENDING — taught by ${s.taughtBy || 'another agent'}; "approve skill ${s.name}" to use it)` : s.source === 'auto' ? ' (learned)' : s.source === 'peer' ? ` (taught by ${s.taughtBy || 'another agent'})` : ''}: ${s.description}`).join('\n')
           };
         }
@@ -177,6 +247,82 @@ export default class SkillsPlugin extends BasePlugin {
               : `Trellis skill teaching is OFF${envNote}: I don't send my skills to other agents in Trellis channels.`
           };
         }
+        case 'update': {
+          this.validateParams(data, { name: { required: true, type: 'string' } });
+          const skill = await service.update(data.name, { description: data.description, body: data.body }, { actor: 'operator', reason: data.reason || 'edited by the operator' });
+          return { success: true, result: `Updated skill "${skill.name}". Undo with "roll back the ${skill.name} skill".` };
+        }
+        case 'history': {
+          this.validateParams(data, { name: { required: true, type: 'string' } });
+          const h = await service.history(data.name, { limit: Number(data.limit) || 10 });
+          if (!h.length) return { success: true, history: [], result: `No recorded changes to "${data.name}".` };
+          return { success: true, history: h.map(e => ({ at: e.at, actor: e.actor, action: e.action, reason: e.reason })), result: h.map(e => `• ${e.at.slice(0, 16).replace('T', ' ')} ${e.action} by ${e.actor}${e.reason ? ` — ${e.reason}` : ''}`).join('\n') };
+        }
+        case 'rollback': {
+          this.validateParams(data, { name: { required: true, type: 'string' } });
+          const skill = await service.rollback(data.name, { actor: 'operator' });
+          return { success: true, result: `Rolled back the last change to "${skill.name}".` };
+        }
+        case 'archive': {
+          this.validateParams(data, { name: { required: true, type: 'string' } });
+          await service.archive(data.name, { actor: 'operator', reason: data.reason || '' });
+          return { success: true, result: `Archived "${data.name}". Restore it any time with "restore the ${data.name} skill".` };
+        }
+        case 'restore': {
+          this.validateParams(data, { name: { required: true, type: 'string' } });
+          const skill = await service.restore(data.name, { actor: 'operator' });
+          return { success: true, result: `Restored "${skill.name}".` };
+        }
+        case 'pin': {
+          this.validateParams(data, { name: { required: true, type: 'string' } });
+          const on = data.pinned === undefined ? true : (data.pinned === true || /^(true|on|yes|1)/i.test(String(data.pinned)));
+          await service.setPinned(data.name, on);
+          return { success: true, pinned: on, result: on ? `Pinned "${data.name}": housekeeping will leave it alone.` : `Unpinned "${data.name}".` };
+        }
+        case 'installFromUrl': {
+          const { installSkillFromUrl } = await import('../../services/skills/skillInstall.js');
+          const r = await installSkillFromUrl(data.url || data.source || data.link);
+          if (!r.installed) return { success: false, error: r.reason };
+          const { sendSkillNotice } = await import('../../services/skills/skillNotice.js');
+          const { skill, ...info } = r;
+          await sendSkillNotice(this.agent, skill || { name: r.name, description: r.description, meta: { status: r.status } }, `Installed a skill from a link (${r.source})`);
+          const state = r.status === 'active'
+            ? `It is active (auto-approve is on); Telegram has a Reject button if you don't want it.`
+            : `It is PENDING: I won't use it until you approve it (Telegram, "approve skill ${r.name}", or the Skills page).`;
+          return { success: true, ...info, result: `Installed "${r.name}" from ${r.source}${r.updated ? ' (updated)' : ''}. ${state} What it does: ${r.description}` };
+        }
+        case 'evaluate': {
+          this.validateParams(data, { name: { required: true, type: 'string' } });
+          const { evaluateTriggers } = await import('../../services/skills/skillQuality.js');
+          const r = await evaluateTriggers({ service, providerManager: this.agent?.providerManager, name: data.name });
+          const pct = (x) => (x === null ? 'n/a' : `${Math.round(x * 100)}%`);
+          const misses = r.cases.filter(c => !c.pass).slice(0, 6).map(c => `• ${c.expected ? 'missed' : 'wrongly used for'}: "${c.query.slice(0, 120)}"`).join('\n');
+          return { success: true, ...r, result: `${r.name}: used for ${pct(r.recall)} of the requests it should handle, and wrongly for ${r.falseTriggers} near-miss request(s); ${pct(r.passRate)} correct overall.${misses ? `\n${misses}` : ''}` };
+        }
+        case 'curate': {
+          if (!this.agent?.curator) return { success: false, error: 'The curator is not running on this agent' };
+          const r = await this.agent.curator.run();
+          const parts = [];
+          if (r.stale.length) parts.push(`marked stale: ${r.stale.join(', ')}`);
+          if (r.archived.length) parts.push(`archived: ${r.archived.join(', ')}`);
+          if (r.merged.length) parts.push(`merged: ${r.merged.map(m => `${m.archived} → ${m.kept}`).join(', ')}`);
+          if (r.profile?.changed) parts.push(`profile tidied (${r.profile.from} → ${r.profile.chars} characters)`);
+          return { success: true, report: r, result: parts.length ? `Housekeeping done — ${parts.join('; ')}.` : 'Housekeeping done — nothing needed changing.' };
+        }
+        case 'profile': {
+          const profile = this.agent?.userProfile || (await import('../../services/skills/userProfile.js')).getUserProfile();
+          if (data.set !== undefined) {
+            const text = await profile.set(String(data.set), 'operator');
+            return { success: true, profile: text, result: 'Profile replaced; it is used from the next message on.' };
+          }
+          if (data.add) {
+            const added = await profile.add([].concat(data.add), 'operator');
+            await profile.refreshSnapshot();
+            return { success: true, added, result: added.length ? `Added to your profile: ${added.join('; ')}` : 'That is already in your profile (or looked like a secret, which is never stored there).' };
+          }
+          const text = await profile.text();
+          return { success: true, profile: text, result: text ? `What I keep about you (part of every prompt):\n${text}` : 'Your profile is empty so far.' };
+        }
         case 'reject': {
           this.validateParams(data, { name: { required: true, type: 'string' } });
           const removed = await service.reject(data.name);
@@ -197,13 +343,17 @@ export default class SkillsPlugin extends BasePlugin {
   }
 
   async extractParameters(input, action) {
-    const prompt = action === 'create'
-      ? `The user wants to save a procedure as a reusable skill. From their message, produce JSON only:
-{"name": "short-kebab-case-name", "description": "one sentence: what it does and when to use it", "body": "the procedure as markdown numbered steps, in the user's words"}
-Message: "${input}"`
-      : `Extract the skill name the user refers to, as JSON only: {"name": "kebab-case-name"}
+    const prompts = {
+      create: `The user wants to save a procedure as a reusable skill. From their message, produce JSON only:
+{"name": "short-kebab-case-name", "description": "one sentence: what it does and when to use it", "body": "the procedure as markdown numbered steps, in the user's words"}`,
+      update: `The user wants to change an existing skill. Produce JSON only: {"name": "kebab-case skill name", "body": "the full new procedure as markdown steps if they gave one, else omit", "description": "new one-line description if they gave one, else omit", "reason": "what they want changed"}`,
+      installFromUrl: `Extract the link or owner/repo/path of the skill to install. JSON only: {"url": "..."}`,
+      profile: `The user is talking about the profile the agent keeps about them. JSON only: {"add": "the fact or preference to remember, in one short line"} if they want something remembered; {} if they only want to see it.`,
+      pin: `Extract the skill and whether to pin it. JSON only: {"name": "kebab-case-name", "pinned": true|false}`
+    };
+    const prompt = `${prompts[action] || 'Extract the skill name the user refers to, as JSON only: {"name": "kebab-case-name"}'}
 Message: "${input}"`;
-    const response = await this.agent.providerManager.generateAux(prompt, { maxTokens: action === 'create' ? 800 : 60, temperature: 0.2 });
+    const response = await this.agent.providerManager.generateAux(prompt, { maxTokens: ['create', 'update'].includes(action) ? 1200 : 120, temperature: 0.2 });
     return safeJsonParse(response.content, {}) || {};
   }
 
@@ -254,9 +404,30 @@ Message: "${input}"`;
         </div>
 
         <div class="sk-card">
-          <h3>Skills <span id="sk-count" class="sk-muted"></span></h3>
+          <h3>Skills <span id="sk-count" class="sk-muted"></span> <button class="btn" id="sk-curate" style="float:right">Run housekeeping now</button></h3>
+          <div class="sk-muted">Learned skills unused for 30 days go stale and are archived after 90 (restorable). Pin a skill to keep it as it is.</div>
           <input class="sk-filter" id="sk-filter" placeholder="Filter by name or description">
           <div id="sk-list" class="sk-muted">Loading…</div>
+        </div>
+
+        <div class="sk-card">
+          <h3>About you</h3>
+          <div class="sk-muted">What the agent keeps about you. It is part of every prompt, so keep it short. The agent adds to it when you mention a lasting preference; you can edit it freely.</div>
+          <textarea id="sk-profile" rows="6" style="width:100%;margin-top:.5rem;padding:.5rem;border-radius:6px" placeholder="- Prefers short answers"></textarea>
+          <button class="btn" id="sk-profile-save">Save</button> <span id="sk-profile-note" class="sk-muted"></span>
+        </div>
+
+        <div class="sk-card sk-form">
+          <h3>Install a skill from a link</h3>
+          <input id="sk-install-url" placeholder="GitHub link to a SKILL.md or its folder, owner/repo/path, or a raw https link">
+          <button class="btn" id="sk-install">Install</button>
+          <span id="sk-install-result" class="sk-muted" style="margin-left:.5rem"></span>
+          <div class="sk-muted">It waits for your approval before it is used.</div>
+        </div>
+
+        <div class="sk-card" id="sk-archived-card" style="display:none">
+          <h3>Archived</h3>
+          <div id="sk-archived"></div>
         </div>
 
         <div class="sk-card">
@@ -301,6 +472,10 @@ Message: "${input}"`;
             const src = s.bundled ? 'built-in' : s.source === 'auto' ? 'learned' : s.source === 'peer' ? 'from ' + (s.taughtBy || 'an agent')
               : s.source === 'trellis' ? 'Trellis basket' : s.source === 'manual' ? 'yours' : s.source;
             if (src) b.push('<span class="sk-badge">' + esc(src) + '</span>');
+            if (s.pinned) b.push('<span class="sk-badge">📌 pinned</span>');
+            if (s.state === 'stale') b.push('<span class="sk-badge pending">stale</span>');
+            if (s.uses !== undefined) b.push('<span class="sk-badge">used ' + esc(s.uses) + '×' + (s.lastUsed ? ', last ' + esc(String(s.lastUsed).slice(0, 10)) : '') + '</span>');
+            if (s.warnings && s.warnings.length) b.push('<span class="sk-badge pending" title="' + esc(s.warnings.join(' ')) + '">' + s.warnings.length + ' tip' + (s.warnings.length > 1 ? 's' : '') + '</span>');
             return b.join('');
           }
 
@@ -308,6 +483,10 @@ Message: "${input}"`;
             const btns = pending
               ? '<button class="btn" data-act="approve" data-n="' + esc(s.name) + '">Approve</button><button class="btn" data-act="reject" data-n="' + esc(s.name) + '">Reject</button>'
               : '<button class="btn" data-act="view" data-n="' + esc(s.name) + '">View</button>' +
+                '<button class="btn" data-act="history" data-n="' + esc(s.name) + '">History</button>' +
+                '<button class="btn" data-act="evaluate" data-n="' + esc(s.name) + '" title="Check it is used for the right requests">Test triggering</button>' +
+                '<button class="btn" data-act="pin" data-n="' + esc(s.name) + '" data-pinned="' + (s.pinned ? '1' : '') + '">' + (s.pinned ? 'Unpin' : 'Pin') + '</button>' +
+                (s.bundled ? '' : '<button class="btn" data-act="archive" data-n="' + esc(s.name) + '">Archive</button>') +
                 (OWN.includes(s.source) || s.bundled ? '<button class="btn" data-act="publish" data-n="' + esc(s.name) + '" title="Share in the Trellis Skills basket">Publish</button>' : '') +
                 (s.bundled ? '' : '<button class="btn" data-act="delete" data-n="' + esc(s.name) + '">Delete</button>');
             return '<div class="sk-row" data-row="' + esc(s.name) + '"><div style="min-width:0;flex:1"><span class="sk-name">' + esc(s.name) + '</span>' + badge(s) +
@@ -325,7 +504,10 @@ Message: "${input}"`;
           }
 
           async function loadSkills() {
-            const r = await call('skills', 'list');
+            const r = await call('skills', 'list', { includeArchived: true });
+            const arch = (r && r.archived) || [];
+            $('sk-archived-card').style.display = arch.length ? '' : 'none';
+            $('sk-archived').innerHTML = arch.map(a => '<div class="sk-row"><div><span class="sk-name">' + esc(a.name) + '</span><div class="sk-desc">archived ' + esc(String(a.archivedAt).slice(0, 10)) + '</div></div><div class="sk-actions"><button class="btn" data-act="restore" data-n="' + esc(a.folder) + '">Restore</button></div></div>').join('');
             if (!r || !r.success) { $('sk-list').innerHTML = '<span class="sk-err">' + esc((r && r.error) || 'Could not load skills') + '</span>'; return; }
             all = (r.skills || []).sort((a, b) => a.name.localeCompare(b.name));
             render();
@@ -364,6 +546,37 @@ Message: "${input}"`;
               box.innerHTML = r && r.success ? '<div class="sk-body">' + esc(r.skill.body) + '</div>' : '<span class="sk-err">' + esc(r && r.error) + '</span>';
               return;
             }
+            if (act === 'history') {
+              const box = b.closest('.sk-row').querySelector('.sk-view');
+              if (box.innerHTML) { box.innerHTML = ''; return; }
+              const r = await call('skills', 'history', { name: n });
+              const h = (r && r.history) || [];
+              box.innerHTML = h.length
+                ? '<div class="sk-body">' + h.map(e => esc(String(e.at).slice(0, 16).replace('T', ' ')) + '  ' + esc(e.action) + ' by ' + esc(e.actor) + (e.reason ? ' — ' + esc(e.reason) : '')).join('\\n') + '</div>' +
+                  (h[0].action === 'update' ? '<button class="btn" data-act="rollback" data-n="' + esc(n) + '">Undo the last change</button>' : '')
+                : '<div class="sk-muted">No recorded changes.</div>';
+              return;
+            }
+            if (act === 'evaluate') {
+              const box = b.closest('.sk-row').querySelector('.sk-view');
+              box.innerHTML = '<div class="sk-muted">Writing test requests and running them through the matcher…</div>';
+              b.disabled = true;
+              const r = await call('skills', 'evaluate', { name: n });
+              b.disabled = false;
+              if (!r || !r.success) { box.innerHTML = '<span class="sk-err">' + esc((r && r.error) || 'Failed') + '</span>'; return; }
+              const tips = (all.find(x => x.name === n) || {}).warnings || [];
+              box.innerHTML = '<div class="sk-body">' + esc(r.result) + (tips.length ? '\\n\\nTips:\\n' + tips.map(t => '• ' + esc(t)).join('\\n') : '') + '</div>';
+              return;
+            }
+            if (act === 'pin') {
+              b.disabled = true;
+              const r = await call('skills', 'pin', { name: n, pinned: !b.dataset.pinned });
+              b.disabled = false;
+              if (settle(r, 'Saved')) loadSkills();
+              return;
+            }
+            if (act === 'archive' && !confirm('Archive "' + n + '"? It stops being used; you can restore it later.')) return;
+            if (act === 'rollback' && !confirm('Undo the last change to "' + n + '"?')) return;
             if (act === 'delete' && !confirm('Delete the skill "' + n + '"?')) return;
             if (act === 'reject' && !confirm('Reject and remove "' + n + '"?')) return;
             if (act === 'publish' && !confirm('Publish "' + n + '" to the Trellis Skills basket? Other agents in the document can then use it.')) return;
@@ -392,7 +605,29 @@ Message: "${input}"`;
             if (r && r.success) { $('sk-new-name').value = $('sk-new-desc').value = $('sk-new-body').value = ''; loadSkills(); }
           });
 
-          loadSettings(); loadSkills(); loadBasket();
+          $('sk-curate').addEventListener('click', async e => {
+            e.target.disabled = true;
+            const r = await call('skills', 'curate');
+            e.target.disabled = false;
+            if (settle(r, 'Done')) loadSkills();
+          });
+          $('sk-install').addEventListener('click', async () => {
+            const out = $('sk-install-result');
+            out.textContent = 'Installing…';
+            const r = await call('skills', 'installFromUrl', { url: $('sk-install-url').value.trim() });
+            out.innerHTML = r && r.success ? esc(r.result) : '<span class="sk-err">' + esc((r && r.error) || 'Failed') + '</span>';
+            if (r && r.success) { $('sk-install-url').value = ''; loadSkills(); }
+          });
+          async function loadProfile() {
+            const r = await call('skills', 'profile');
+            if (r && r.success) $('sk-profile').value = r.profile || '';
+          }
+          $('sk-profile-save').addEventListener('click', async () => {
+            const r = await call('skills', 'profile', { set: $('sk-profile').value });
+            $('sk-profile-note').textContent = r && r.success ? 'Saved — used from the next message on.' : ((r && r.error) || 'Failed');
+          });
+
+          loadSettings(); loadSkills(); loadBasket(); loadProfile();
         })();
       </script>
     `;
