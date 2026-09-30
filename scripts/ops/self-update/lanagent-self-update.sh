@@ -107,11 +107,45 @@ if git merge-base --is-ancestor "$UP" "$PRE" 2>/dev/null; then
   exit 0
 fi
 
+# package.json/package-lock.json with their OWN version fields removed. Every
+# release bumps package.json's version; that is not a dependency change, and
+# treating it as one ran `npm install` on every update, which rewrote the
+# lockfile's version and left the tree dirty. A dirty lockfile then refuses the
+# fast-forward of any release that touches it, and the update stalls silently.
+deps_fingerprint() {  # $1 = a commit, or WORKTREE
+  node -e '
+    const { execSync } = require("child_process");
+    const fs = require("fs");
+    const read = (f) => process.argv[1] === "WORKTREE"
+      ? (fs.existsSync(f) ? fs.readFileSync(f, "utf8") : "")
+      : (() => { try { return execSync(`git show ${process.argv[1]}:${f}`, { encoding: "utf8", maxBuffer: 1 << 28, stdio: ["ignore", "pipe", "ignore"] }); } catch { return ""; } })();
+    const strip = (txt) => {
+      if (!txt) return "";
+      const j = JSON.parse(txt);
+      delete j.version;
+      if (j.packages && j.packages[""]) delete j.packages[""].version;
+      return JSON.stringify(j);
+    };
+    process.stdout.write(require("crypto").createHash("sha256")
+      .update(strip(read("package.json")) + "\0" + strip(read("package-lock.json"))).digest("hex"));
+  ' "$1" 2>/dev/null
+}
+
+# Put back a lockfile whose only local change is its own version field.
+restore_version_only_lock() {
+  git diff --quiet -- package-lock.json 2>/dev/null && return 0
+  if [ "$(deps_fingerprint WORKTREE)" = "$(deps_fingerprint HEAD)" ]; then
+    git checkout -- package-lock.json && log "restored package-lock.json (only its version field differed)"
+  fi
+}
+
 # Detect dependency changes across the transition BEFORE moving HEAD.
 DEPS_CHANGED=0
-if git diff --name-only "$PRE" "$UP" | grep -qE '^package(-lock)?\.json$'; then
+if git diff --name-only "$PRE" "$UP" | grep -qE '^package(-lock)?\.json$' \
+   && [ "$(deps_fingerprint "$PRE")" != "$(deps_fingerprint "$UP")" ]; then
   DEPS_CHANGED=1
 fi
+restore_version_only_lock
 
 # Untracked files that the update would START tracking. git will not overwrite an
 # untracked file on a fast-forward or a merge, so a single one (an instance-local
@@ -184,6 +218,7 @@ if [ "$DEPS_CHANGED" = "1" ]; then
   if ! npm install --legacy-peer-deps --no-audit --no-fund >>"$LOG" 2>&1; then
     log "ERROR: npm install failed"; rollback; exit 1
   fi
+  restore_version_only_lock
 fi
 
 # --- syntax check key boot files ---
