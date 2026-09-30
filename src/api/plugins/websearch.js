@@ -2,6 +2,34 @@ import { BasePlugin } from '../core/basePlugin.js';
 import axios from 'axios';
 import { logger } from '../../utils/logger.js';
 import webSearchService from '../../services/search/webSearchService.js';
+import * as cheerio from 'cheerio';
+
+// A paid call must answer inside the gateway's 60 s wait: the direct tiers go first and
+// the last-resort model search gets whatever is left of this budget.
+const EXTERNAL_SEARCH_BUDGET_MS = 55000;
+
+/** Items of a Google News RSS search feed. Exported for tests. */
+export function parseGoogleNewsRss(xml) {
+  const $ = cheerio.load(xml, { xmlMode: true });
+  const out = [];
+  $('item').each((_, el) => {
+    const item = $(el);
+    const title = item.children('title').first().text().trim();
+    const url = item.children('link').first().text().trim();
+    if (!title || !/^https?:\/\//.test(url)) return;
+    const source = item.children('source').first().text().trim();
+    const pub = item.children('pubDate').first().text().trim();
+    const at = pub ? new Date(pub) : null;
+    out.push({
+      // Google appends " - <publisher>" to each title; the publisher has its own field.
+      title: source && title.endsWith(` - ${source}`) ? title.slice(0, -(source.length + 3)) : title,
+      source,
+      url,
+      publishedAt: at && !isNaN(at) ? at.toISOString() : null
+    });
+  });
+  return out;
+}
 
 export default class WebSearchPlugin extends BasePlugin {
   constructor(agent) {
@@ -58,11 +86,12 @@ export default class WebSearchPlugin extends BasePlugin {
       ({ action, ...data } = params);
     }
     const { query, symbol, location, provider } = data;
+    const external = data._caller === 'external';
 
     try {
       switch(action) {
         case 'search':
-          return await this.webSearch(query, provider);
+          return await this.webSearch(query, provider, { external });
           
         case 'stock':
           return await this.getStockPrice(symbol);
@@ -88,12 +117,35 @@ export default class WebSearchPlugin extends BasePlugin {
     }
   }
 
-  async webSearch(query, preferredProvider = null) {
+  async webSearch(query, preferredProvider = null, { external = false } = {}) {
     if (!query) {
       return { success: false, error: 'Search query is required' };
     }
 
-    logger.info(`Web search for: ${query}${preferredProvider ? ` (preferred: ${preferredProvider})` : ''}`);
+    logger.info(`Web search for: ${query}${preferredProvider ? ` (preferred: ${preferredProvider})` : ''}${external ? ' (paid API)' : ''}`);
+
+    // A paid API caller wants ranked results with URLs, fast. The model path answers in
+    // prose and takes 20-60+ s, and the gateway gives up at 60 s: on 2026-09-30 two paid
+    // searches timed out on an instance with no search key, while DuckDuckGo answered the
+    // same query in about a second. So a paid call tries both direct tiers first, and the
+    // model only as a last resort inside a deadline the gateway can still wait for.
+    if (external) {
+      const started = Date.now();
+      const direct = await this._directSearch(query, 'keyed') || await this._directSearch(query, 'keyless');
+      if (direct) return direct;
+      const left = EXTERNAL_SEARCH_BUDGET_MS - (Date.now() - started);
+      if (left < 5000) return { success: false, error: 'Search backends did not answer in time' };
+      let timer;
+      const deadline = new Promise(resolve => {
+        timer = setTimeout(() => resolve({ success: false, error: `Search timed out after ${Math.round(left / 1000)}s` }), left);
+        timer.unref?.();
+      });
+      try {
+        return await Promise.race([this._modelSearch(query, preferredProvider), deadline]);
+      } finally {
+        clearTimeout(timer);
+      }
+    }
 
     // Order: keyed search APIs, then the model's own search tool, then keyless DuckDuckGo.
     // Direct APIs return ranked results with no model in the loop, so the AI provider lock is
@@ -244,6 +296,32 @@ export default class WebSearchPlugin extends BasePlugin {
           logger.warn('Failed to switch back to original provider:', e.message);
         }
       }
+    }
+  }
+
+  /** News from Google News' RSS search: no key, ranked by recency and relevance. */
+  async _googleNews(query) {
+    try {
+      logger.info(`Fetching news for: ${query} (Google News RSS)`);
+      const res = await axios.get('https://news.google.com/rss/search', {
+        params: { q: query, hl: 'en-US', gl: 'US', ceid: 'US:en' },
+        headers: { 'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0' },
+        timeout: 10000,
+        responseType: 'text'
+      });
+      const newsResults = parseGoogleNewsRss(String(res.data || '')).slice(0, 10);
+      if (!newsResults.length) {
+        return { success: true, result: `No news articles found for "${query}".`, data: [], source: 'google_news' };
+      }
+      const formattedResult = newsResults.map((a, i) =>
+        `**${i + 1}. ${a.title}**\n` +
+        `Source: ${a.source || 'unknown'}${a.publishedAt ? ` | ${new Date(a.publishedAt).toLocaleDateString()}` : ''}\n` +
+        `[Read more](${a.url})`
+      ).join('\n\n');
+      return { success: true, result: formattedResult, data: newsResults, source: 'google_news' };
+    } catch (error) {
+      logger.error('Google News RSS error:', error.message);
+      return { success: false, error: `Failed to fetch news: ${error.message}`, source: 'google_news' };
     }
   }
 
@@ -458,12 +536,9 @@ export default class WebSearchPlugin extends BasePlugin {
       };
     }
 
-    if (!this.newsApiKey) {
-      return {
-        success: false,
-        error: 'News API key is not configured. Please set NEWS_API_KEY environment variable.'
-      };
-    }
+    // Without a NewsAPI key (its free tier is licensed for development only), read
+    // Google News' public RSS search instead of failing every call.
+    if (!this.newsApiKey) return await this._googleNews(query);
 
     try {
       logger.info(`Fetching news for: ${query}`);
@@ -523,10 +598,8 @@ export default class WebSearchPlugin extends BasePlugin {
       }
       
       if (error.response?.status === 429) {
-        return {
-          success: false,
-          error: 'News API rate limit exceeded. Please try again later.'
-        };
+        logger.warn('NewsAPI rate limit reached — answering from Google News RSS');
+        return await this._googleNews(query);
       }
       
       return { 

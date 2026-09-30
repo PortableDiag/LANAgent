@@ -253,7 +253,9 @@ router.post('/:plugin/:action',
       let result;
       try {
         // The path's action last, so nothing in the body can replace it.
-        result = await pluginInstance.execute({ ...params, action });
+        // _caller last as well: a plugin can shape a paid answer (e.g. web search returns
+        // ranked results inside the gateway's deadline), and a body cannot fake the tag.
+        result = await pluginInstance.execute({ ...params, action, _caller: 'external' });
         // If old-style plugin, action becomes [object Object] — detect and retry
         if (result?.error?.includes?.('[object Object]') || result?.error?.includes?.('Unknown action')) {
           result = await pluginInstance.execute(action, params);

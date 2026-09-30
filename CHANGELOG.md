@@ -2,6 +2,12 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.425] - 2026-09-30
+
+### Fixed
+- **Paid web searches timed out.** Without a search API key, every paid `/service/websearch/search` call went through the AI model's search tool, which answers in prose and took 20 to 60+ seconds, past the gateway's 60-second limit. A paid call now tries the keyed search API, then DuckDuckGo, and returns ranked results with URLs in about a second. The model is the last resort, within the time the gateway can still wait for. The agent's own chat searches are unchanged.
+- **Paid news searches failed without a NewsAPI key** (its free tier is for development only). News now comes from Google News' public RSS search when no key is set, or when NewsAPI's rate limit is reached. Each result has a title, publisher, date and link.
+
 ## [2.25.424] - 2026-09-30
 
 ### Added
