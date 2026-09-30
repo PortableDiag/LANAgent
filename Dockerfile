@@ -49,8 +49,14 @@ ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true \
 WORKDIR /app
 
 # Install Node dependencies
-COPY package*.json ./
-RUN npm ci --legacy-peer-deps 2>/dev/null || npm install --legacy-peer-deps
+# Install from the lockfile alone. Every release bumps package.json's version, which
+# would invalidate this layer and reinstall every dependency on every update (about
+# 8 minutes on a 1-vCPU VPS). The manifest npm needs is rebuilt from the lockfile's
+# root entry, which only changes when a dependency does; package.json comes after.
+COPY package-lock.json ./
+RUN node -e "const r=require('./package-lock.json').packages[''];require('fs').writeFileSync('package.json',JSON.stringify({name:r.name,version:r.version,type:'module',license:r.license,engines:r.engines,dependencies:r.dependencies,devDependencies:r.devDependencies,optionalDependencies:r.optionalDependencies}))" \
+    && (npm ci --legacy-peer-deps 2>/dev/null || npm install --legacy-peer-deps)
+COPY package.json ./
 
 # Copy application source
 COPY src/ ./src/
