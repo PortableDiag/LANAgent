@@ -54,6 +54,8 @@ RUN npm ci --legacy-peer-deps 2>/dev/null || npm install --legacy-peer-deps
 
 # Copy application source
 COPY src/ ./src/
+# Bundled SKILL.md procedures (skillsService reads <app>/skills/)
+COPY skills/ ./skills/
 COPY scripts/ ./scripts/
 COPY ecosystem.config.cjs ./
 COPY .env.example ./
