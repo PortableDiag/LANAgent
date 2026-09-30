@@ -2,6 +2,21 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.424] - 2026-09-30
+
+### Added
+- **`install.sh --vps`: one agent on a public VPS in one command.** It installs Docker, adds 2 GB of swap on a box under 3 GB of RAM (the image build runs out of memory without it), and publishes the web UI and SSH interface on `127.0.0.1` only. Ports Docker publishes bypass ufw, so a firewall rule would not have protected them. The web UI and SSH-interface passwords are random. You reach the dashboard through an SSH tunnel (the command is printed), or with `--domain` through HTTPS. The agent stays on the Skynet P2P network, which needs no inbound port: it holds an outbound connection to the registry and every peer message is relayed through it. The installer waits for that connection and reports it. Example: `sudo bash scripts/setup/install.sh --vps --unattended --name MYAGENT --openrouter-key sk-or-...`.
+- **`--openrouter-key`** for unattended installs.
+- **Docker installs update themselves.** The hourly self-update now detects a Docker Compose install and rebuilds the image, with the same health check and rollback as PM2 installs. It no longer runs npm or node on the host.
+
+### Fixed
+- **Peer messages that arrived out of order were thrown away as replays.** Replay protection kept only the highest sequence number seen from a peer, so any message arriving after a newer one was refused. A skill sync sends several skills at once and the relay can reorder them: a new agent received 4 of the 6 skills it was sent, while the sender logged all 6 as taught. Replay protection is now a sliding window: a late message is accepted once and an exact repeat is still refused.
+- **An internet-facing install no longer uses the default web password.** With `--domain` (HTTPS through Caddy) or `--vps`, the web UI password is random instead of `lanagent`.
+- **A root unattended install on a VPS no longer defaults the web UI to port 80.**
+- **The Docker browser path.** A Docker install wrote the host's Chromium path into `.env`; on a host without Chromium that was empty and overrode the image's `/usr/bin/chromium`.
+- **`.env` is written with mode 600.**
+- **The Docker image includes the bundled skills.**
+
 ## [2.25.423] - 2026-09-30
 
 Sync covering 2.25.417–2.25.423.

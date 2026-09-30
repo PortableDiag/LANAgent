@@ -11,6 +11,12 @@ AI-powered autonomous agent framework for personal server management. Each insta
 git clone https://github.com/PortableDiag/LANAgent.git && cd LANAgent && bash scripts/setup/install.sh --docker
 ```
 
+**A VPS (one agent per server, 2 GB RAM recommended):**
+```bash
+git clone https://github.com/PortableDiag/LANAgent.git && cd LANAgent && sudo bash scripts/setup/install.sh --vps
+```
+Docker, the web UI on `127.0.0.1` only (reach it through an SSH tunnel, or add `--domain` for HTTPS), random passwords, and the Skynet P2P network, which needs no open port.
+
 **Native (Linux/macOS):**
 ```bash
 git clone https://github.com/PortableDiag/LANAgent.git && cd LANAgent && bash scripts/setup/install.sh

@@ -113,16 +113,19 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 DOCKER_MODE=false
 QUICK_MODE=false
 UNATTENDED=false
+VPS_MODE=false
+ORIG_ARGS=("$@")
 
 # Unattended mode pre-set values
 _NAME="" _PORT="" _SSH_PORT=""
-_ANTHROPIC_KEY="" _OPENAI_KEY="" _GITHUB_PAT=""
+_ANTHROPIC_KEY="" _OPENAI_KEY="" _OPENROUTER_KEY="" _GITHUB_PAT=""
 _P2P_URL="" _MONGO_URI="" _NO_P2P=false _NO_START=false _DOMAIN=""
 _OLLAMA_URL="" _LOCAL_AI=false
 
 while [[ $# -gt 0 ]]; do
     case $1 in
         --docker)       DOCKER_MODE=true ;;
+        --vps)          VPS_MODE=true; DOCKER_MODE=true ;;
         --quick)        QUICK_MODE=true ;;
         --unattended)   UNATTENDED=true; QUICK_MODE=true ;;
         --name)         _NAME="$2"; shift ;;
@@ -135,6 +138,8 @@ while [[ $# -gt 0 ]]; do
         --anthropic-key=*) _ANTHROPIC_KEY="${1#*=}" ;;
         --openai-key)   _OPENAI_KEY="$2"; shift ;;
         --openai-key=*) _OPENAI_KEY="${1#*=}" ;;
+        --openrouter-key) _OPENROUTER_KEY="$2"; shift ;;
+        --openrouter-key=*) _OPENROUTER_KEY="${1#*=}" ;;
         --github-pat)   _GITHUB_PAT="$2"; shift ;;
         --github-pat=*) _GITHUB_PAT="${1#*=}" ;;
         --p2p-url)      _P2P_URL="$2"; shift ;;
@@ -153,6 +158,9 @@ while [[ $# -gt 0 ]]; do
             echo ""
             echo "Modes:"
             echo "  --docker        Configure for Docker deployment"
+            echo "  --vps           One agent on a public VPS: Docker, web UI on 127.0.0.1 only"
+            echo "                  (SSH tunnel, or --domain for HTTPS), random passwords, swap"
+            echo "                  on small boxes; stays on the Skynet P2P network (outbound only)"
             echo "  --quick         Minimal setup (agent name + AI key only)"
             echo "  --unattended    Non-interactive install (requires --name + an AI key)"
             echo ""
@@ -162,6 +170,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --ssh-port PORT         SSH port (default: 2222)"
             echo "  --anthropic-key KEY     Anthropic API key"
             echo "  --openai-key KEY        OpenAI API key"
+            echo "  --openrouter-key KEY    OpenRouter API key"
             echo "  --github-pat TOKEN      GitHub PAT for self-modification + auto-fork"
             echo "  --p2p-url URL           Public URL for P2P (auto-detected if omitted)"
             echo "  --mongo-uri URI         MongoDB URI (default: mongodb://localhost:27017/agentname)"
@@ -178,6 +187,9 @@ while [[ $# -gt 0 ]]; do
             echo "  # Docker, fully automated"
             echo "  ./install.sh --unattended --docker --name MYAGENT --openai-key sk-proj-..."
             echo ""
+            echo "  # A VPS (run as root or with sudo)"
+            echo "  ./install.sh --vps --unattended --name MYAGENT --openrouter-key sk-or-..."
+            echo ""
             echo "  # Native, with GitHub self-mod"
             echo "  ./install.sh --unattended --name MYAGENT --openai-key sk-proj-... --github-pat ghp_..."
             exit 0
@@ -188,15 +200,36 @@ done
 
 # Validate unattended mode
 if [ "$UNATTENDED" = "true" ]; then
-    if [ -z "$_ANTHROPIC_KEY" ] && [ -z "$_OPENAI_KEY" ] && [ "$_LOCAL_AI" != "true" ]; then
-        fail "Unattended mode requires --anthropic-key, --openai-key, or --local-ai"
+    if [ -z "$_ANTHROPIC_KEY$_OPENAI_KEY$_OPENROUTER_KEY" ] && [ "$_LOCAL_AI" != "true" ]; then
+        fail "Unattended mode requires --anthropic-key, --openai-key, --openrouter-key, or --local-ai"
         exit 1
     fi
     _NAME="${_NAME:-LANAgent}"
     if [ -z "$_PORT" ]; then
-        _PORT=$( [ "$(id -u)" = "0" ] && echo "80" || echo "3000" )
+        # A VPS publishes on 127.0.0.1 behind a tunnel or Caddy, so port 80 buys nothing.
+        _PORT=$( [ "$(id -u)" = "0" ] && [ "$VPS_MODE" != "true" ] && echo "80" || echo "3000" )
     fi
     _SSH_PORT="${_SSH_PORT:-2222}"
+fi
+
+# ─── VPS prerequisites ───────────────────────────────────────────────
+# One agent per VPS. Docker, swap and the self-update timer need root; -E keeps
+# any keys passed through the environment. P2P needs NO inbound port: the agent
+# holds an outbound WebSocket to the registry and every peer message, skills
+# included, is relayed through it — so the localhost-only bind below costs
+# nothing on the Skynet network.
+if [ "$VPS_MODE" = "true" ]; then
+    if [ "$(id -u)" -ne 0 ]; then
+        exec sudo -E bash "$0" "${ORIG_ARGS[@]}"
+    fi
+    MEM_MB=$(awk '/MemTotal/ {print int($2/1024)}' /proc/meminfo)
+    SWAP_MB=$(awk '/SwapTotal/ {print int($2/1024)}' /proc/meminfo)
+    # The image build (Chromium, npm ci) runs out of memory on 1–2 GB without swap.
+    if [ "$MEM_MB" -lt 3000 ] && [ "$SWAP_MB" -lt 1000 ] && [ ! -e /swapfile ]; then
+        fallocate -l 2G /swapfile && chmod 600 /swapfile && mkswap /swapfile >/dev/null \
+            && swapon /swapfile && echo '/swapfile none swap sw 0 0' >> /etc/fstab \
+            && echo "Added 2 GB swap (${MEM_MB} MB RAM)"
+    fi
 fi
 
 # ─── Main ─────────────────────────────────────────────────────────────
@@ -587,6 +620,7 @@ install_ollama() {
 if [ "$UNATTENDED" = "true" ]; then
     ANTHROPIC_KEY="$_ANTHROPIC_KEY"
     OPENAI_KEY="$_OPENAI_KEY"
+    OPENROUTER_KEY="$_OPENROUTER_KEY"
     if [ "$_LOCAL_AI" = "true" ]; then
         OLLAMA_URL="${_OLLAMA_URL:-http://localhost:11434}"
         ENABLE_OLLAMA="true"
@@ -926,6 +960,8 @@ if [ "$UNATTENDED" = "true" ]; then
         P2P_DISPLAY_NAME="${AGENT_NAME}"
         if [ -n "$_P2P_URL" ]; then
             AGENT_SERVICE_URL="$_P2P_URL"
+        elif [ "$VPS_MODE" = "true" ]; then
+            AGENT_SERVICE_URL=""   # nothing listens publicly; P2P itself is outbound-only
         elif [ -n "$DETECTED_IP" ]; then
             AGENT_SERVICE_URL="http://${DETECTED_IP}:${AGENT_PORT}"
         fi
@@ -1081,7 +1117,14 @@ echo ""
 
 JWT_SECRET=$(generate_secret)
 ENCRYPTION_KEY=$(generate_secret)
-SSH_PASS=$(openssl rand -base64 12 2>/dev/null || echo "changeme$(date +%s)")
+SSH_PASS=$(openssl rand -hex 12 2>/dev/null || echo "changeme$(date +%s)")
+# The default password is fine on a LAN; anything reachable from the internet
+# (a VPS, or HTTPS through Caddy) gets a random one.
+WEB_UI_PASS="lanagent"
+if [ "$VPS_MODE" = "true" ] || [ "$SETUP_SSL" = "true" ]; then
+    WEB_UI_PASS=$(openssl rand -hex 12 2>/dev/null || generate_secret | head -c 24)
+fi
+[ "$VPS_MODE" = "true" ] && DOCKER_BIND_HOST="127.0.0.1"
 
 ok "JWT secret generated"
 ok "Encryption key generated"
@@ -1114,6 +1157,7 @@ AGENT_SSH_PORT=${AGENT_SSH_PORT}
 # AI Providers
 ANTHROPIC_API_KEY=${ANTHROPIC_KEY}
 OPENAI_API_KEY=${OPENAI_KEY}
+OPENROUTER_API_KEY=${OPENROUTER_KEY:-${_OPENROUTER_KEY}}
 ANTHROPIC_ENABLE_WEB_SEARCH=true
 
 # Local AI (Ollama) — free, private, runs on your hardware
@@ -1131,7 +1175,7 @@ EMAIL_OF_MASTER=${MASTER_EMAIL}
 # Security
 JWT_SECRET=${JWT_SECRET}
 ENCRYPTION_KEY=${ENCRYPTION_KEY}
-WEB_UI_PASSWORD=lanagent
+WEB_UI_PASSWORD=${WEB_UI_PASS}
 
 # SSH Interface
 SSH_USERNAME=lanagent
@@ -1145,7 +1189,7 @@ EXPRESSVPN_ENABLED=false
 
 # Browser (Puppeteer) — use system Chromium if available
 PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
-PUPPETEER_EXECUTABLE_PATH=$(command -v chromium 2>/dev/null || command -v chromium-browser 2>/dev/null || echo "")
+PUPPETEER_EXECUTABLE_PATH=$( [ "$DOCKER_MODE" = "true" ] && echo /usr/bin/chromium || command -v chromium 2>/dev/null || command -v chromium-browser 2>/dev/null || echo "")
 
 # Vector Intent
 ENABLE_VECTOR_INTENT=true
@@ -1199,7 +1243,8 @@ CRYPTO_PRIVATE_KEY=${CRYPTO_WALLET}
 ENVEOF
 fi
 
-ok ".env written"
+chmod 600 "$PROJECT_ROOT/.env"
+ok ".env written (mode 600)"
 
 # ═══════════════════════════════════════════════════
 # Configure Git Remotes
@@ -1260,6 +1305,8 @@ if [ "${LANAGENT_AUTO_UPDATE:-true}" = "false" ]; then
     info "Self-update disabled (LANAGENT_AUTO_UPDATE=false) — skipping timer install"
 elif command -v systemctl &>/dev/null && [ -f "$SELF_UPDATE_SVC" ]; then
     SU_USER="${RUN_AS_USER:-${SUDO_USER:-$(id -un)}}"
+    # Docker mode rebuilds the image, which needs the docker socket: run as root.
+    [ "$DOCKER_MODE" = "true" ] && SU_USER=root
     chmod +x "$PROJECT_ROOT/scripts/ops/self-update/lanagent-self-update.sh" 2>/dev/null
     if [ "$(id -u)" = "0" ] || [ -w /etc/systemd/system ]; then
         sed -e "s#@USER@#${SU_USER}#g" -e "s#@REPO@#${PROJECT_ROOT}#g" \
@@ -1478,13 +1525,29 @@ if [ "$DOCKER_MODE" = "true" ]; then
         if [ "$START_DOCKER" = "true" ]; then
             echo ""
             info "Building and starting containers..."
-            if docker compose up -d --build 2>/dev/null || docker-compose up -d --build 2>/dev/null; then
+            mkdir -p "$PROJECT_ROOT/logs"
+            if docker compose up -d --build >"$PROJECT_ROOT/logs/docker-build.log" 2>&1 \
+               || docker-compose up -d --build >>"$PROJECT_ROOT/logs/docker-build.log" 2>&1; then
                 echo ""
                 ok "Agent is starting!"
                 info "Web UI will be ready in ~3 minutes at ${BOLD}http://localhost:${AGENT_PORT}${NC}"
                 info "View logs: docker compose logs -f"
+                if [ "$VPS_MODE" = "true" ]; then
+                    info "Waiting for the Skynet P2P registry connection (up to 6 min)..."
+                    P2P_OK=false
+                    for _ in $(seq 1 72); do
+                        docker compose logs lanagent 2>/dev/null | grep -q "P2P Registry connected" && { P2P_OK=true; break; }
+                        sleep 5
+                    done
+                    if [ "$P2P_OK" = "true" ]; then
+                        ok "On the Skynet P2P network — peers can teach it skills"
+                    else
+                        warn "No P2P registry connection yet — check: docker compose logs lanagent | grep -i p2p"
+                    fi
+                fi
             else
-                warn "Docker start failed. Run manually: docker compose up -d"
+                tail -15 "$PROJECT_ROOT/logs/docker-build.log"
+                warn "Docker start failed (full output: logs/docker-build.log). Run manually: docker compose up -d --build"
             fi
         fi
     fi
@@ -1530,7 +1593,17 @@ else
 fi
 echo ""
 echo -e "  ${DIM}Web UI takes ~3 minutes to fully load on first start.${NC}"
-echo -e "  ${DIM}Login with password: lanagent (change in .env WEB_UI_PASSWORD)${NC}"
+if [ "$WEB_UI_PASS" = "lanagent" ]; then
+    echo -e "  ${DIM}Login with password: lanagent (change in .env WEB_UI_PASSWORD)${NC}"
+else
+    echo -e "  ${BOLD}Web UI password:${NC} ${WEB_UI_PASS}  ${DIM}(also in .env, mode 600)${NC}"
+fi
+if [ "$VPS_MODE" = "true" ] && [ "$SETUP_SSL" != "true" ]; then
+    echo ""
+    echo -e "  ${BOLD}The web UI listens on 127.0.0.1 only.${NC} From your own machine:"
+    echo -e "    ${CYAN}ssh -N -L ${AGENT_PORT}:127.0.0.1:${AGENT_PORT} root@${DETECTED_IP:-<this-vps-ip>}${NC}"
+    echo -e "  ${DIM}then open http://localhost:${AGENT_PORT}${NC}"
+fi
 echo ""
 
 if [ -n "$GIT_TOKEN" ]; then
@@ -1543,8 +1616,8 @@ if [ -n "$GIT_TOKEN" ]; then
 fi
 
 echo -e "  ${BOLD}Security Checklist:${NC}"
-echo -e "  ${DIM}1. Change the default web password in .env (WEB_UI_PASSWORD)${NC}"
-echo -e "  ${DIM}2. Restrict .env file permissions: chmod 600 .env${NC}"
+[ "$WEB_UI_PASS" = "lanagent" ] && echo -e "  ${DIM}1. Change the default web password in .env (WEB_UI_PASSWORD)${NC}"
+echo -e "  ${DIM}2. .env holds your keys and is mode 600 — keep it that way${NC}"
 echo -e "  ${DIM}3. Ensure MongoDB is not exposed to the internet (bind to localhost or use Docker)${NC}"
 echo -e "  ${DIM}4. If using a domain, the installer already set up HTTPS via Caddy${NC}"
 echo -e "  ${DIM}5. Your wallet private key is in .env — keep this file safe${NC}"

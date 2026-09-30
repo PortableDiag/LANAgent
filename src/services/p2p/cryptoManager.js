@@ -31,6 +31,8 @@ sessionKeyCache.on('expired', (key, value) => {
 
 // A signed message older (or further in the future) than this is refused as a replay.
 const REPLAY_WINDOW_MS = 10 * 60 * 1000;
+// How far behind the highest sequence number a late, unseen message is still accepted.
+const REPLAY_SEQ_WINDOW = 1024;
 
 /**
  * CryptoManager handles Ed25519 identity, X25519 ECDH key exchange, and AES-256-GCM encryption.
@@ -318,15 +320,20 @@ class CryptoManager {
   }
 
   /**
-   * Replay protection. A message is accepted when it is newer than the last one accepted
-   * from that peer, by its signed timestamp OR its sequence number, and (when it carries a
-   * timestamp) sent within the last REPLAY_WINDOW_MS. A replayed message has both an old
-   * timestamp and an old sequence number, so it fails.
+   * Replay protection: a sliding window over the sender's sequence numbers, as in
+   * IPsec/DTLS. A message is accepted when its number is above the highest seen from
+   * that peer, or within the last REPLAY_SEQ_WINDOW numbers and not seen yet. An exact
+   * repeat is refused. When it carries a signed timestamp it must also be within
+   * REPLAY_WINDOW_MS of now.
    *
-   * Sequence alone broke on every restart: a sender's counter started again at 1, and the
-   * receiver rejected everything from it as a "replay" until the RECEIVER restarted too
-   * (ALICE → DELTA was silent from 2026-09-26 to 09-27 this way). The timestamp covers a
-   * peer still on the old counter; getNextSeq() now also starts from the clock.
+   * Keeping only the highest number dropped every message that arrived after a newer
+   * one. A peer sends a skill sync's pushes concurrently and the registry relay can
+   * reorder them; on 2026-09-30 ALICE taught a new peer 6 skills and 2 were refused as
+   * "replays", with ALICE logging all 6 as taught.
+   *
+   * A number below the window with a NEWER timestamp is a sender that restarted onto a
+   * lower counter (ALICE → DELTA was silent 2026-09-26..27 this way): the window restarts
+   * from it. getNextSeq() also starts from the clock, so current senders never go lower.
    * @param {string} peerFingerprint
    * @param {number} seq - Received sequence number
    * @param {number} [ts] - The message's signed send time (ms)
@@ -334,12 +341,29 @@ class CryptoManager {
    * @returns {boolean}
    */
   checkSequence(peerFingerprint, seq, ts, now = Date.now()) {
-    const last = this.peerSequences.get(peerFingerprint) || { seq: 0, ts: 0 };
     const hasTs = Number.isFinite(ts);
     if (hasTs && Math.abs(now - ts) > REPLAY_WINDOW_MS) return false;
-    const newer = seq > last.seq || (hasTs && ts > last.ts);
-    if (!newer) return false;
-    this.peerSequences.set(peerFingerprint, { seq, ts: hasTs ? ts : last.ts });
+    let st = this.peerSequences.get(peerFingerprint);
+    if (!st) {
+      st = { seq: 0, ts: 0, seen: new Set() };
+      this.peerSequences.set(peerFingerprint, st);
+    }
+    if (seq > st.seq) {
+      st.seq = seq;
+    } else if (seq > st.seq - REPLAY_SEQ_WINDOW) {
+      if (st.seen.has(seq)) return false;
+    } else if (hasTs && ts > st.ts) {
+      st.seq = seq;
+      st.seen.clear();
+    } else {
+      return false;
+    }
+    st.seen.add(seq);
+    if (hasTs && ts > st.ts) st.ts = ts;
+    if (st.seen.size > REPLAY_SEQ_WINDOW * 1.25) {
+      const floor = st.seq - REPLAY_SEQ_WINDOW;
+      for (const n of st.seen) if (n <= floor) st.seen.delete(n);
+    }
     return true;
   }
 

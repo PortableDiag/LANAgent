@@ -14,5 +14,6 @@ WorkingDirectory=@REPO@
 Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 # Keep going even if a single run exits non-zero; the next timer tick retries.
 ExecStart=@REPO@/scripts/ops/self-update/lanagent-self-update.sh
-# The updater restarts the app via pm2/systemd itself; give it room to health-poll.
-TimeoutStartSec=600
+# The updater restarts the app via pm2/systemd/docker itself; give it room to
+# rebuild an image on a small VPS and then health-poll.
+TimeoutStartSec=1800

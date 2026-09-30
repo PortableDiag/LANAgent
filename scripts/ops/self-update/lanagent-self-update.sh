@@ -69,6 +69,19 @@ PM2_APP="${PM2_APP_NAME:-lan-agent}"
 LOG="$REPO/logs/self-update.log"
 LOCK="/tmp/lanagent-self-update.lock"
 
+# Docker Compose install (install.sh --docker / --vps): the agent runs in the
+# `lanagent` service and its code is baked into the image, so an update is a
+# rebuild. The host may have no Node at all, so npm and node --check are left
+# to the image build. Set LANAGENT_DOCKER=true|false to override detection.
+DOCKER_MODE="${LANAGENT_DOCKER:-auto}"
+if [ "$DOCKER_MODE" = "auto" ]; then
+  DOCKER_MODE=false
+  if [ -f "$REPO/docker-compose.yml" ] && command -v docker >/dev/null 2>&1 \
+     && [ -n "$(docker compose ps -q lanagent 2>/dev/null)" ]; then
+    DOCKER_MODE=true
+  fi
+fi
+
 mkdir -p "$REPO/logs" 2>/dev/null || true
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOG" >/dev/null; }
 
@@ -134,15 +147,18 @@ deps_fingerprint() {  # $1 = a commit, or WORKTREE
 # Put back a lockfile whose only local change is its own version field.
 restore_version_only_lock() {
   git diff --quiet -- package-lock.json 2>/dev/null && return 0
-  if [ "$(deps_fingerprint WORKTREE)" = "$(deps_fingerprint HEAD)" ]; then
+  local now head
+  now="$(deps_fingerprint WORKTREE)"; head="$(deps_fingerprint HEAD)"
+  if [ -n "$now" ] && [ "$now" = "$head" ]; then
     git checkout -- package-lock.json && log "restored package-lock.json (only its version field differed)"
   fi
 }
 
 # Detect dependency changes across the transition BEFORE moving HEAD.
 DEPS_CHANGED=0
+# An empty fingerprint (no node on this host) counts as changed.
 if git diff --name-only "$PRE" "$UP" | grep -qE '^package(-lock)?\.json$' \
-   && [ "$(deps_fingerprint "$PRE")" != "$(deps_fingerprint "$UP")" ]; then
+   && { [ -z "$(deps_fingerprint "$PRE")" ] || [ "$(deps_fingerprint "$PRE")" != "$(deps_fingerprint "$UP")" ]; }; then
   DEPS_CHANGED=1
 fi
 restore_version_only_lock
@@ -180,7 +196,7 @@ rollback() {
   log "rolling back to $(git rev-parse --short "$PRE")"
   git reset --hard "$PRE" >>"$LOG" 2>&1
   restore_displaced
-  [ "$DEPS_CHANGED" = "1" ] && npm install --legacy-peer-deps --no-audit --no-fund >>"$LOG" 2>&1
+  [ "$DEPS_CHANGED" = "1" ] && [ "$DOCKER_MODE" != "true" ] && npm install --legacy-peer-deps --no-audit --no-fund >>"$LOG" 2>&1
 }
 
 # --- apply the update per strategy ---
@@ -213,7 +229,7 @@ case "$STRATEGY" in
 esac
 
 # --- dependencies ---
-if [ "$DEPS_CHANGED" = "1" ]; then
+if [ "$DEPS_CHANGED" = "1" ] && [ "$DOCKER_MODE" != "true" ]; then
   log "package json changed — npm install"
   if ! npm install --legacy-peer-deps --no-audit --no-fund >>"$LOG" 2>&1; then
     log "ERROR: npm install failed"; rollback; exit 1
@@ -224,6 +240,7 @@ fi
 # --- syntax check key boot files ---
 for f in src/index.js src/core/agent.js; do
   [ -f "$f" ] || continue
+  [ "$DOCKER_MODE" = "true" ] && break
   if ! node --check "$f" 2>>"$LOG"; then
     log "ERROR: syntax check failed for $f"; rollback; exit 1
   fi
@@ -231,7 +248,11 @@ done
 
 # --- restart the agent (pm2 if managing it, else a systemd service, else npm start) ---
 restart_agent() {
-  if command -v pm2 >/dev/null 2>&1 && pm2 describe "$PM2_APP" >/dev/null 2>&1; then
+  if [ "$DOCKER_MODE" = "true" ]; then
+    log "docker: rebuilding and restarting the lanagent service"
+    docker compose up -d --build lanagent >>"$LOG" 2>&1 || { log "ERROR: docker compose build/up failed"; return 1; }
+    docker image prune -f >>"$LOG" 2>&1 || true
+  elif command -v pm2 >/dev/null 2>&1 && pm2 describe "$PM2_APP" >/dev/null 2>&1; then
     pm2 restart "$PM2_APP" >>"$LOG" 2>&1
   elif [ -n "${LANAGENT_SYSTEMD_SERVICE:-}" ]; then
     sudo systemctl restart "$LANAGENT_SYSTEMD_SERVICE" >>"$LOG" 2>&1
@@ -240,7 +261,15 @@ restart_agent() {
     return 1
   fi
 }
-restart_agent || { log "SUCCESS (no auto-restart): now at $(git rev-parse --short HEAD)"; exit 0; }
+if ! restart_agent; then
+  if [ "$DOCKER_MODE" = "true" ]; then
+    rollback
+    restart_agent || true
+    exit 1
+  fi
+  log "SUCCESS (no auto-restart): now at $(git rev-parse --short HEAD)"
+  exit 0
+fi
 
 # --- adaptive health poll: 30s grace, then every 10s up to ~4 min ---
 sleep 30
