@@ -48,24 +48,12 @@ class AgentIdentityService {
   /**
    * Generate the ERC-8004 registration file JSON
    */
-  async generateRegistrationFile() {
-    const agentModel = await Agent.findOne({ name: process.env.AGENT_NAME || 'LANAgent' });
-    if (!agentModel) throw new Error('Agent model not found');
-
-    // Read version from package.json
-    let version = '1.0.0';
-    try {
-      const pkgPath = path.join(process.cwd(), 'package.json');
-      const pkgJson = JSON.parse(await fs.readFile(pkgPath, 'utf8'));
-      version = pkgJson.version;
-    } catch { /* ignore */ }
-
-    // Build avatar URI
-    let avatarURI = '/api/agent/avatar';
-    if (agentModel.erc8004?.ipfs?.avatarCID) {
-      avatarURI = `ipfs://${agentModel.erc8004.ipfs.avatarCID}`;
-    }
-
+  /**
+   * What the agent offers: enabled External Services (legacy routes) AND approved plugin
+   * services (generic plugin proxy). The mint and the staleness check both use this, so a
+   * freshly minted identity is not reported stale (the check used to ignore plugins).
+   */
+  async _collectServices() {
     // Capabilities are derived from enabled External Services (legacy routes)
     // AND approved plugin services (generic plugin proxy).
     // Internal plugins like agentstats, backupStrategy, ssh, etc. are private
@@ -127,6 +115,29 @@ class AgentIdentityService {
     } catch (e) {
       logger.debug('Could not load plugin services for registration:', e.message);
     }
+
+    return { capabilities, externalServices };
+  }
+
+  async generateRegistrationFile() {
+    const agentModel = await Agent.findOne({ name: process.env.AGENT_NAME || 'LANAgent' });
+    if (!agentModel) throw new Error('Agent model not found');
+
+    // Read version from package.json
+    let version = '1.0.0';
+    try {
+      const pkgPath = path.join(process.cwd(), 'package.json');
+      const pkgJson = JSON.parse(await fs.readFile(pkgPath, 'utf8'));
+      version = pkgJson.version;
+    } catch { /* ignore */ }
+
+    // Build avatar URI
+    let avatarURI = '/api/agent/avatar';
+    if (agentModel.erc8004?.ipfs?.avatarCID) {
+      avatarURI = `ipfs://${agentModel.erc8004.ipfs.avatarCID}`;
+    }
+
+    const { capabilities, externalServices } = await this._collectServices();
 
     const capabilitiesHash = this.computeCapabilitiesHash(capabilities);
 
@@ -504,13 +515,7 @@ class AgentIdentityService {
     let isStale = false;
     if (erc8004.capabilitiesHash) {
       try {
-        const ExternalServiceConfig = (await import('../../models/ExternalServiceConfig.js')).default;
-        const configs = await ExternalServiceConfig.find({ enabled: true }).lean();
-        const capabilities = configs.map(s => ({
-          name: s.name,
-          version: '1.0.0',
-          enabled: true
-        }));
+        const { capabilities } = await this._collectServices();
         const currentHash = this.computeCapabilitiesHash(capabilities);
         isStale = currentHash !== erc8004.capabilitiesHash;
       } catch (e) {
