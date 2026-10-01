@@ -477,7 +477,8 @@ export class TrellisChannelListener {
 
   /**
    * Is this message the operator's own? Only then may it make the agent act.
-   *   - desktop: `operator` (the desktop records no kinds; its only person is the operator).
+   *   - desktop: since v0.211.4, kind:person + via:session (a keyed caller with no X-Agent is also
+   *     written `operator`); older desktops record no kinds, so `operator` there.
    *   - web: `kind: person` AND `from_key_owner: true` AND `via: "session"`. `from_key_owner`
    *     alone is not enough: it is true for every key on the operator's account, and a key
    *     that sends no X-Agent is recorded as `kind: person` under the owner's name — the same
@@ -490,7 +491,13 @@ export class TrellisChannelListener {
    */
   async _isOperator(m) {
     const from = String(m.from || '').toLowerCase();
-    if (this.plugin.resolvedMode === 'desktop') return from === 'operator';
+    // Desktop v0.211.4+ records kind/via like the web (2003 #8). There a keyed caller with no
+    // X-Agent is also written "operator", so only the app's own compose row (via: session)
+    // counts. Messages from older desktops carry neither field.
+    if (this.plugin.resolvedMode === 'desktop') {
+      if ('via' in m) return m.kind === 'person' && m.via === 'session';
+      return from === 'operator';
+    }
     if (m.kind !== 'person' || m.from_key_owner !== true) return false;
     if ('via' in m) return m.via === 'session' || m.via === 'telegram';
     if (!this.warnedNoVia) {

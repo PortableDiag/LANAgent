@@ -2,6 +2,11 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.433] - 2026-10-01
+
+### Security
+- **Trellis desktop: a keyed caller could pass as the operator.** The desktop app writes a message sent with an API key and no `X-Agent` as `operator`, the same name as the operator typing in the app, so the channel listener treated both as the operator. Desktop v0.211.4 records `kind` and `via` on each message, as trellis-web does. Where they are present, only `kind: person` with `via: session` (typed in the app) now counts as the operator. Messages from older desktop versions carry neither field and are judged as before.
+
 ## [2.25.432] - 2026-10-01
 
 ### Fixed
