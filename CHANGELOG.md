@@ -2,6 +2,12 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.448] - 2026-10-01
+
+### Fixed
+- **The Trellis event stream could drop the newest missed message on reconnect.** The stream's `hello` carries the current position as its id, which is the id of the newest event about to be replayed. That id was recorded as already seen, so the replayed event was discarded. Found by testing the stream client against the desktop app's first stream release (v0.213.0): of two messages sent while disconnected, one arrived. Only content events are checked for repeats now, and a resume delivers every missed message.
+- Stopping the Trellis listener now also closes an open event stream.
+
 ## [2.25.447] - 2026-10-01
 
 ### Fixed

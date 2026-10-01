@@ -98,6 +98,7 @@ export class TrellisChannelListener {
 
   stop() {
     this.running = false;
+    this.stream?.stop();   // an open event stream would otherwise hold the loop
   }
 
   async _loop() {

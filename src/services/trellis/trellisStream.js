@@ -103,12 +103,14 @@ export class TrellisStream {
       const finish = (why) => {
         if (done) return;
         done = true;
+        this._finish = null;
         clearInterval(ackTimer); clearInterval(idleTimer);
         controller.abort();
         res.data?.destroy?.();
         this._ack().catch(() => {});
         resolve(why);
       };
+      this._finish = finish;
       const ackTimer = setInterval(() => {
         if (this.cursor && this.cursor !== acked) { acked = this.cursor; this._ack().catch(() => {}); }
       }, ACK_EVERY_MS);
@@ -128,13 +130,20 @@ export class TrellisStream {
     });
   }
 
+  /** End the open connection (plugin stopping, or a test); run() resolves with 'stopped'. */
+  stop() { this._finish?.('stopped'); }
+
   /** Handle one SSE event. Returns a reason to end the stream, or null. */
   async _dispatch(ev) {
     let env = null;
     try { env = ev.data ? JSON.parse(ev.data) : {}; } catch { return null; }
     const type = env.type || ev.event;
     const id = env.id || ev.id;
-    if (id) {
+    // Only content events can repeat. `hello` carries the head cursor as its id, which is the
+    // id of the newest event about to be replayed: counted as seen, it dropped that event
+    // (found against desktop 0.213.0: of two messages sent while disconnected, one arrived).
+    const structural = ['hello', 'reset', 'replaced', 'auth'].includes(type);
+    if (id && !structural) {
       if (this.seen.has(id)) return null;              // at-least-once: drop a repeat
       this.seen.add(id);
       if (this.seen.size > SEEN_MAX) this.seen.delete(this.seen.values().next().value);
