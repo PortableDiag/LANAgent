@@ -2,6 +2,11 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.434] - 2026-10-01
+
+### Security
+- **Trellis desktop: an unverified message could pass as the operator's.** From desktop v0.211.5, a message the desktop cannot verify (imported from another document, edited by hand, or copied from another card) shows no `kind`/`via`. The listener fell back to the sender name for such a message, so one signed `operator` still counted. Once a desktop has shown that it records `via`, a message without it is no longer treated as the operator's. Desktops that never record it keep the name rule.
+
 ## [2.25.433] - 2026-10-01
 
 ### Security

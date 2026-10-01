@@ -256,6 +256,7 @@ export class TrellisChannelListener {
     const member = !participants || participants.includes(me);
     const mentionsMe = new RegExp(`(^|[^\\w@.])@${escapeRegExp(this.name)}(?![\\w@])`, 'i');
 
+    if (messages.some(m => m && 'via' in m)) this.desktopRecordsVia = true;
     const fresh = messages.filter(m => (Number(m.seq) || 0) > since);
     const addressed = fresh.filter(m => {
       const from = String(m.from || '').toLowerCase();
@@ -495,8 +496,11 @@ export class TrellisChannelListener {
     // X-Agent is also written "operator", so only the app's own compose row (via: session)
     // counts. Messages from older desktops carry neither field.
     if (this.plugin.resolvedMode === 'desktop') {
-      if ('via' in m) return m.kind === 'person' && m.via === 'session';
-      return from === 'operator';
+      if ('via' in m) { this.desktopRecordsVia = true; return m.kind === 'person' && m.via === 'session'; }
+      // From v0.211.5 a row the desktop cannot verify (imported, hand-edited, copied) reads with
+      // no kind/via (2754 #280). Once this server has shown it records `via`, a message without
+      // one is not the operator's; only a desktop that never records it falls back to the name.
+      return !this.desktopRecordsVia && from === 'operator';
     }
     if (m.kind !== 'person' || m.from_key_owner !== true) return false;
     if ('via' in m) return m.via === 'session' || m.via === 'telegram';
