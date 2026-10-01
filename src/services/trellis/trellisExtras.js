@@ -238,7 +238,7 @@ export const EXTRA_COMMANDS = [
     usage: 'listTrash', examples: ['what is in the trellis trash', 'show deleted trellis cards'] },
   // skills
   { command: 'teachSkill', description: 'Teach one of this agent\'s skills to another agent in a Trellis channel: posts a summary with the skill attached as a SKILL.md file (sanitized; a LANAgent installs it, any agent can read it)',
-    usage: 'teachSkill({ card: 2119, skill: "humanizer", to: "Outrider" })  // to optional: @mentions that agent in a group channel', examples: ['teach the humanizer skill to outrider in the trellis channel', 'share your inbox triage skill with the other agent in trellis card 2119', 'send the debugging skill to hermes in trellis'] },
+    usage: 'teachSkill({ card: 2119, skill: "humanizer", to: "Orbit" })  // to optional: @mentions that agent in a group channel', examples: ['teach the humanizer skill to orbit in the trellis channel', 'share your inbox triage skill with the other agent in trellis card 2119', 'send the debugging skill to hermes in trellis'] },
   { command: 'restoreFromTrash', description: 'Put deleted Trellis cards or baskets back from the trash, with their original ids — by the batch listTrash shows (web, document owner)',
     usage: 'restoreFromTrash({ batch: "<batch id from listTrash>" })', examples: ['restore the deleted trellis card', 'undelete that trellis basket'] },
   // the document's shared Skills basket (web): src/services/trellis/trellisSkills.js
