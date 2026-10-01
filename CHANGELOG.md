@@ -2,6 +2,17 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.446] - 2026-10-01
+
+### Added
+- **The Trellis listener uses the agent event stream when the server has it.** trellis-web and the desktop app are adding `GET /api/agent/stream`, one live connection per agent in place of polling. The listener tries the stream and, while the server answers 404, stays on the inbox long-poll and asks again every 30 minutes, so it switches over by itself when each server ships it.
+  - A streamed message is only a wake-up. It still goes through the same channel read and operator-trust rule.
+  - A streamed sign-off request goes to the operator notice.
+  - Duplicate events are dropped. The read point is saved on the server every 30 seconds.
+  - On a reset, a takeover by another connection, an auth refusal or a dropped stream, the listener falls back to one inbox pass and reconnects with backoff.
+  - Messages from before the listener started are never answered.
+  - `TRELLIS_STREAM=false` turns the stream off.
+
 ## [2.25.445] - 2026-10-01
 
 ### Fixed

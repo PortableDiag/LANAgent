@@ -38,6 +38,7 @@ import fs from 'fs/promises';
 import path from 'path';
 import { DATA_PATH } from '../utils/paths.js';
 import { learnSkillFromPeer } from './skills/skillsService.js';
+import { TrellisStream } from './trellis/trellisStream.js';
 import { SkillTeacher, receiveSkillFiles } from './skills/skillTeaching.js';
 
 const CONTEXT_MESSAGES = 10;
@@ -105,7 +106,7 @@ export class TrellisChannelListener {
         await this.plugin._ensureTarget();
         if (Date.now() - this.cardAt > CARD_REFRESH_MS) await this._publishCard();
         if (this.inbox === undefined) await this._probeInbox();
-        if (this.inbox) { await this._inboxCycle(); continue; }
+        if (this.inbox) { await this._maybeStream(); await this._inboxCycle(); continue; }
         await this._cycle();
         await this._waitForChange();
       } catch (err) {
@@ -262,6 +263,61 @@ export class TrellisChannelListener {
       return `${verdict === 'approved' ? '✅ Approved' : '🛑 Rejected'} Trellis card ${p.card}${p.title ? ` "${p.title}"` : ''}${r.signoff?.done ? ' — it is now fully signed off.' : '.'}`;
     }
     return `❌ Not signed: ${r?.error || 'unknown error'}`;
+  }
+
+  /**
+   * The agent event stream (relay 2754 #303–#321) when the server has it: one connection that
+   * wakes this agent for each message and sign-off request, in place of the inbox long-poll.
+   * Tried when due; a server without it (404) is asked again in 30 minutes. However a stream
+   * ends, the caller runs one inbox cycle next, so nothing that arrived meanwhile is missed.
+   */
+  async _maybeStream() {
+    if (String(process.env.TRELLIS_STREAM || 'true').toLowerCase() === 'false') return;
+    if (Date.now() < (this.streamNextTry || 0)) return;
+    this.startedAt = this.startedAt || Date.now();
+    this.stream = this.stream || new TrellisStream({ plugin: this.plugin, onEvent: (e) => this._onStreamEvent(e) });
+    const why = await this.stream.run();
+    const later = (ms) => { this.streamNextTry = Date.now() + ms; };
+    if (why === 'unavailable') {
+      if (this.streamServed !== false) logger.info('[trellis-listen] this Trellis server has no agent event stream yet; using the inbox, will check again every 30 minutes');
+      this.streamServed = false;
+      return later(30 * 60000);
+    }
+    this.streamServed = true;
+    this.streamFailures = why === 'reset' ? 0 : (this.streamFailures || 0) + 1;
+    if (why === 'auth') { logger.warn('[trellis-listen] the event stream refused this key; using the inbox'); return later(6 * 3600000); }
+    if (why === 'replaced') { logger.warn('[trellis-listen] another connection with this agent name took over the event stream; using the inbox for 30 minutes'); return later(30 * 60000); }
+    logger.info(`[trellis-listen] event stream ended (${why}); one inbox pass, then reconnect`);
+    later(Math.min(5 * 60000, 5000 * 2 ** Math.min(6, this.streamFailures - 1)));
+  }
+
+  /** One stream event: a message wakes the channel path (which applies the trust rule). */
+  async _onStreamEvent(e) {
+    const docs = await this.plugin._followedDocuments();
+    const doc = docs.find(d => d.id === e.document) || (docs.length === 1 && !e.document ? docs[0] : null);
+    if (!doc || e.card == null) return;
+    if (e.type === 'signoff_requested') return this._noteOtherInboxRows([{ reason: 'signoff', ...e.data, card: e.card }], doc);
+    if (e.type !== 'message') return;
+    const m = e.data || {};
+    if (String(m.from || '').toLowerCase() === this.name.toLowerCase()) return;
+    // Never answer history: a first connection may replay what the server still holds.
+    if (m.at && Date.parse(m.at) < (this.startedAt || 0)) return;
+    const card = e.card;
+    const key = `${doc.id}:${card}`;
+    const seq = Number(m.seq) || 0;
+    if (!this.cursors.has(key)) this.cursors.set(key, Math.max(0, seq - 1));
+    const failed = this.failures.get(key);
+    if (failed && Date.now() < failed.nextRetryAt) return;
+    await this.plugin._runInDocument(doc, async () => {
+      try {
+        await this._handleChannel(doc, card, key);
+        this.failures.delete(key);
+        // Keep the inbox in step, so falling back to it does not deliver this again.
+        if (seq) await this.plugin._call('post', '/api/inbox/read', { body: { card, seq } }).catch(() => {});
+      } catch (err) {
+        this._recordFailure(key, err);
+      }
+    });
   }
 
   /** Long-poll until the document changes (~25 s), or sleep when that is not possible. */
