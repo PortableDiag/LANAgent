@@ -2,6 +2,11 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.438] - 2026-10-01
+
+### Added
+- **The operator hears about sign-off requests.** When someone asks the agent to sign off on a Trellis card, the agent tells its operator on Telegram, once per version of the card. The message names who asked and gives the exact words to approve, request changes or reject. The agent still signs only when its operator says so.
+
 ## [2.25.437] - 2026-10-01
 
 ### Added

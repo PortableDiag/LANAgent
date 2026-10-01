@@ -208,8 +208,22 @@ export class TrellisChannelListener {
       const id = `${r.reason}:${r.card}:${r.digest || ''}`;
       if (this.otherInboxSeen.has(id)) continue;
       this.otherInboxSeen.add(id);
-      logger.info(`[trellis-listen] inbox ${r.reason || 'row'} on card ${r.card}${r.title ? ` ("${r.title}")` : ''}${r.from ? ` from ${r.from}` : ''} — not a channel message; not acted on yet`);
+      logger.info(`[trellis-listen] inbox ${r.reason || 'row'} on card ${r.card}${r.title ? ` ("${r.title}")` : ''}${r.from ? ` from ${r.from}` : ''} — not a channel message`);
+      if (r.reason === 'signoff') this._tellOperatorSignoff(r);
     }
+  }
+
+  /**
+   * Someone asked this agent to sign off on a card. It signs only on the operator's word, so the
+   * operator hears about it once per card version, with the exact words that answer it.
+   */
+  _tellOperatorSignoff(r) {
+    const tg = this.agent?.interfaces?.get?.('telegram');
+    if (!tg?.sendNotification) return;
+    const text = `📝 ${r.from || 'Someone'} asked me to sign off on Trellis card ${r.card}${r.title ? ` "${r.title}"` : ''}. ` +
+      `I sign only when you say so. Reply e.g. "approve trellis card ${r.card}", "request changes on trellis card ${r.card}: <note>" ` +
+      `or "reject trellis card ${r.card}". If the card changes first, my approval would not count and I will tell you.`;
+    tg.sendNotification(text, { parse_mode: undefined }).catch(err => logger.debug(`[trellis-listen] sign-off notice failed: ${err.message}`));
   }
 
   /** Long-poll until the document changes (~25 s), or sleep when that is not possible. */
