@@ -284,6 +284,11 @@ export class TrellisChannelListener {
       this.streamServed = false;
       return later(30 * 60000);
     }
+    if (why === 'silent') {
+      if (this.streamServed !== 'silent') logger.warn('[trellis-listen] the event stream connects but delivers nothing (buffered on the way); using the inbox, will check again every 30 minutes');
+      this.streamServed = 'silent';
+      return later(30 * 60000);
+    }
     this.streamServed = true;
     this.streamFailures = why === 'reset' ? 0 : (this.streamFailures || 0) + 1;
     if (why === 'auth') { logger.warn('[trellis-listen] the event stream refused this key; using the inbox'); return later(6 * 3600000); }

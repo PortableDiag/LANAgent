@@ -18,6 +18,7 @@ import { logger } from '../../utils/logger.js';
 export const STREAM_TYPES = ['message', 'signoff_requested', 'hello', 'reset', 'replaced', 'auth', 'access'];
 const ACK_EVERY_MS = 30000;
 const IDLE_LIMIT_MS = 60000;      // keep-alives come every 15 s; a minute of nothing is a dead stream
+const FIRST_BYTE_MS = 20000;      // `hello` comes at once; nothing at all means something buffers the stream
 const SEEN_MAX = 2000;
 
 /** Split an SSE byte stream into events: {event, id, data} per blank-line-terminated block. */
@@ -68,13 +69,16 @@ export class TrellisStream {
   async run() {
     await this.plugin._ensureTarget();
     const controller = new AbortController();
+    // A connect timeout only: an axios `timeout` is a socket-inactivity limit, and on a quiet
+    // stream it cut the connection every 20 s (ALICE, web v0.84.0). Silence once connected is
+    // judged below, against IDLE_LIMIT_MS.
+    const connectTimer = setTimeout(() => controller.abort(), 20000);
     let res;
     try {
       res = await axios.get(`${this.plugin._base()}/api/agent/stream`, {
         params: { types: STREAM_TYPES.join(',') },
         responseType: 'stream',
         signal: controller.signal,
-        timeout: 20000,
         validateStatus: () => true,
         headers: {
           Accept: 'text/event-stream',
@@ -84,8 +88,10 @@ export class TrellisStream {
         }
       });
     } catch (err) {
+      clearTimeout(connectTimer);
       return 'error';
     }
+    clearTimeout(connectTimer);
     if ([404, 405, 501].includes(res.status)) {
       res.data?.destroy?.();
       this.available = false;
@@ -98,7 +104,9 @@ export class TrellisStream {
 
     return await new Promise((resolve) => {
       let done = false;
-      let lastByte = Date.now();
+      const opened = Date.now();
+      let lastByte = opened;
+      let longestGap = 0;
       let acked = this.cursor;
       const finish = (why) => {
         if (done) return;
@@ -108,13 +116,23 @@ export class TrellisStream {
         controller.abort();
         res.data?.destroy?.();
         this._ack().catch(() => {});
+        // How the transport behaves (relay 2754 #326 asks whether events pass unbuffered).
+        longestGap = Math.max(longestGap, Date.now() - lastByte);
+        logger.info(`[trellis-stream] stream ended (${why}) after ${Math.round((Date.now() - opened) / 1000)}s; ${gotByte ? `longest silence ${Math.round(longestGap / 1000)}s` : 'no bytes received'}`);
         resolve(why);
       };
       this._finish = finish;
       const ackTimer = setInterval(() => {
         if (this.cursor && this.cursor !== acked) { acked = this.cursor; this._ack().catch(() => {}); }
       }, ACK_EVERY_MS);
-      const idleTimer = setInterval(() => { if (Date.now() - lastByte > IDLE_LIMIT_MS) finish('idle'); }, 5000);
+      // A stream that sends nothing, not even `hello`, is being buffered on the way (trellis-web
+      // v0.84.0 behind Cloudflare: 200 and then 0 bytes). Say so, rather than reconnecting
+      // every minute while every event waits in someone else's buffer.
+      let gotByte = false;
+      const idleTimer = setInterval(() => {
+        if (!gotByte && Date.now() - opened > FIRST_BYTE_MS) return finish('silent');
+        if (Date.now() - lastByte > IDLE_LIMIT_MS) finish('idle');
+      }, 2000);
       ackTimer.unref?.(); idleTimer.unref?.();
 
       let chain = Promise.resolve();
@@ -122,7 +140,13 @@ export class TrellisStream {
         chain = chain.then(() => this._dispatch(ev)).then((end) => { if (end) finish(end); })
           .catch(err => logger.warn(`[trellis-stream] event failed: ${err.message}`));
       });
-      res.data.on('data', (chunk) => { lastByte = Date.now(); parser.push(chunk); });
+      res.data.on('data', (chunk) => {
+        const now = Date.now();
+        gotByte = true;
+        longestGap = Math.max(longestGap, now - lastByte);
+        lastByte = now;
+        parser.push(chunk);
+      });
       // Let queued events finish first: a server that sends `reset` and closes at once must end
       // the stream as a reset (with its cursor), not as a plain close.
       res.data.on('end', () => { chain.then(() => finish('closed')); });

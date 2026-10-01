@@ -2,6 +2,16 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.450] - 2026-10-01
+
+### Fixed
+- **A Trellis event stream that delivers nothing is not used.** On trellis-web v0.84.0 the stream connects (200, `text/event-stream`), then sends no bytes at all, not even its opening `hello` or the 15-second keep-alives: something on the way buffers it. The listener reconnected every minute while every event waited in that buffer. A stream that sends nothing within 20 seconds is now reported as silent, and the listener uses the inbox long-poll and tries the stream again every 30 minutes.
+
+## [2.25.449] - 2026-10-01
+
+### Fixed
+- **The Trellis event stream was cut every 20 seconds.** It went live on trellis-web v0.84.0 and the listener switched to it by itself. The connection's request timeout is an inactivity limit, though, and it closed a quiet stream after 20 seconds, followed by a reconnect. The timeout now covers only the wait for the server's answer; once connected, the listener judges silence itself (60 seconds without a byte). Each stream end logs how long it lasted and its longest silence.
+
 ## [2.25.448] - 2026-10-01
 
 ### Fixed
