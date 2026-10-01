@@ -155,8 +155,15 @@ export class TrellisChannelListener {
         }
         const data = await this.plugin._call('get', '/api/inbox', { query: { wait }, timeoutMs: (wait + 15) * 1000 });
         const byCard = new Map();
-        this._inboxHadPending = (data?.inbox || []).length > 0;
-        for (const m of data?.inbox || []) {
+        // Only message rows drive replies. Web is adding rows of other kinds (2754 #289: a
+        // sign-off request is {reason: "signoff", card, digest} with no seq, and cannot be marked
+        // read). Fed through as messages, one would fail on a card with no channel, and it would
+        // keep the inbox looking busy forever, turning the long-poll into a sleep loop.
+        const rows = data?.inbox || [];
+        const messages = rows.filter(m => (m.reason == null || m.reason === 'message') && Number.isFinite(Number(m.seq)));
+        this._noteOtherInboxRows(rows.filter(m => !messages.includes(m)));
+        this._inboxHadPending = messages.length > 0;
+        for (const m of messages) {
           const e = byCard.get(m.card) || { min: Infinity, max: 0 };
           e.min = Math.min(e.min, Number(m.seq) || 0);
           e.max = Math.max(e.max, Number(m.seq) || 0);
@@ -182,6 +189,20 @@ export class TrellisChannelListener {
     // their cards are in backoff (or several documents are polled without wait), pause instead
     // of spinning on an inbox that answers at once.
     if (!handled && (wait === 0 || this._inboxHadPending)) await sleep(IDLE_POLL_MS / 2);
+  }
+
+  /**
+   * Inbox rows that are not channel messages (a sign-off request, so far). Logged once per card
+   * and content digest, so the log says what was asked without repeating it every cycle.
+   */
+  _noteOtherInboxRows(rows) {
+    this.otherInboxSeen = this.otherInboxSeen || new Set();
+    for (const r of rows) {
+      const id = `${r.reason}:${r.card}:${r.digest || ''}`;
+      if (this.otherInboxSeen.has(id)) continue;
+      this.otherInboxSeen.add(id);
+      logger.info(`[trellis-listen] inbox ${r.reason || 'row'} on card ${r.card}${r.title ? ` ("${r.title}")` : ''}${r.from ? ` from ${r.from}` : ''} — not a channel message; not acted on yet`);
+    }
   }
 
   /** Long-poll until the document changes (~25 s), or sleep when that is not possible. */

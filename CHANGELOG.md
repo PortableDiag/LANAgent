@@ -2,6 +2,11 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.436] - 2026-10-01
+
+### Fixed
+- **Trellis inbox rows that are not messages.** trellis-web is adding inbox rows of other kinds. The first is a sign-off request: `reason: "signoff"`, with no message number, and it cannot be marked read. The listener handled every inbox row as a channel message. A sign-off row would have failed on a card with no channel and backed off again and again, and it would have kept the inbox looking busy, so the 25-second long-poll would have turned into a sleep loop. Only message rows (`reason` absent or `"message"`, with a numbered `seq`) now drive replies. Other rows are logged once per card and content version.
+
 ## [2.25.435] - 2026-10-01
 
 ### Changed
