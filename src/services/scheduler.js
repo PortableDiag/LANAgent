@@ -7,6 +7,8 @@ import { safeInterval } from '../utils/errorHandlers.js';
 import { selfModLock } from './selfModLock.js';
 import { verifyTrustedSender } from '../utils/emailSenderAuth.js';
 import { reassertPostUp } from '../utils/wireguardHooks.js';
+import fs from 'fs/promises';
+import path from 'path';
 
 // The WireGuard peer this instance checks reachability against. Hardcoding a
 // tunnel address puts deployment topology in the source; it belongs in config.
@@ -266,6 +268,18 @@ class TaskScheduler {
     }
   }
 
+  /** True when scripts/ops/self-update's timer has logged within the last 3 hours (it runs hourly). */
+  async _selfUpdateTimerOwnsUpdates() {
+    const dirs = [process.env.AGENT_REPO_PATH, process.cwd()].filter(Boolean);
+    for (const dir of dirs) {
+      try {
+        const st = await fs.stat(path.join(dir, 'logs', 'self-update.log'));
+        if (Date.now() - st.mtimeMs < 3 * 3600 * 1000) return true;
+      } catch { /* no timer log here */ }
+    }
+    return false;
+  }
+
   /**
    * Sync local repo from the upstream (genesis) repository.
    * For forked instances, origin points to their fork. UPSTREAM_REPO points
@@ -275,6 +289,15 @@ class TaskScheduler {
   async _syncFromUpstream(gitPlugin) {
     const upstreamRepo = process.env.UPSTREAM_REPO;
     if (!upstreamRepo) return; // Not a fork, or upstream not configured
+
+    // Where the OS self-update timer (scripts/ops/self-update) runs, it owns updates: it
+    // fast-forwards, installs, restarts and rolls back. A second updater here only raced it and,
+    // in the minutes between a release and the timer's next run, told the operator that "local
+    // changes prevent auto-merge" (DELTA, every 30 min on 2026-10-01, while fully up to date).
+    if (await this._selfUpdateTimerOwnsUpdates()) {
+      logger.debug('[UpstreamSync] The self-update timer manages this install — skipping');
+      return;
+    }
 
     // Skip if origin IS the upstream repo (single-repo genesis — no separate upstream to pull from).
     // In dual-repo mode (genesis=private, upstream=public), these URLs differ so sync proceeds
@@ -326,11 +349,20 @@ class TaskScheduler {
 
       logger.info(`[UpstreamSync] ${behindCount} new commit(s) from upstream`);
 
-      // Check for local uncommitted changes
-      const statusResult = await gitPlugin.executeGitCommand('status --porcelain');
+      // Edits to tracked files block a merge; untracked files (backups, a .venv) do not, and
+      // counting them made every check report "local changes".
+      const statusResult = await gitPlugin.executeGitCommand('status --porcelain --untracked-files=no');
       if (statusResult.success && statusResult.stdout.trim()) {
-        logger.warn('[UpstreamSync] Local changes present, skipping upstream merge');
-        await this.agent.notify(`📡 ${behindCount} upstream update(s) available but local changes prevent auto-merge. Commit or stash local changes to receive updates.`);
+        // Porcelain is "XY path", and the git plugin trims its output, so the first line's
+        // " M path" arrives as "M path": read the path after the status letters, not at column 3.
+        const changed = statusResult.stdout.split('\n').map(l => /^\s*\S{1,2}\s+(.+)$/.exec(l)?.[1]).filter(Boolean).slice(0, 5);
+        logger.warn(`[UpstreamSync] Local edits to tracked files block the merge: ${changed.join(', ')}`);
+        // Once per upstream commit, not every 30 minutes.
+        const head = (await gitPlugin.executeGitCommand('rev-parse upstream/main')).stdout?.trim();
+        if (head && head !== this._upstreamNagHead) {
+          this._upstreamNagHead = head;
+          await this.agent.notify(`📡 ${behindCount} upstream update(s) available, but these locally edited files block the merge: ${changed.join(', ')}. Commit or stash them to receive updates.`);
+        }
         return;
       }
 

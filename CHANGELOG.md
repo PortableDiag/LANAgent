@@ -2,6 +2,15 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.452] - 2026-10-01
+
+### Fixed
+- **"Upstream update(s) available but local changes prevent auto-merge" on an up-to-date instance.** The in-app upstream check ran every 30 minutes and had two faults:
+  - It counted untracked files (backups, a Python `.venv`) as local changes, although they never block a merge.
+  - On installs that the self-update timer keeps current, it raced that timer: in the minutes between a release and the timer's next hourly run it reported the release as blocked.
+
+  Now it ignores untracked files, and it stands down when the self-update timer manages the install (its log was written within the last 3 hours). When tracked files really are edited, the notice names them, and it is sent once per upstream commit instead of every 30 minutes.
+
 ## [2.25.451] - 2026-10-01
 
 ### Changed
