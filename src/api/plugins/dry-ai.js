@@ -18,10 +18,9 @@ import { PluginSettings } from '../../models/PluginSettings.js';
  * noreply@unitarylabs.com, as it was for v1's codes.
  */
 
-// The web origin (sign-in, tokens, REST) and the token-auth MCP endpoint. Dry's own
-// GET /api/config and /api/mcp/guide name them (webOrigin, mcpUrl). Its OAuth connector for
-// Claude/ChatGPT (drydotai-v2-mcp-server…workers.dev, 2026-10) is a different door that a
-// dry_pat_ token does not use. Override here if Dry moves either one.
+// The web origin (sign-in, tokens, REST) and the MCP endpoint: dry.ai/api/mcp is Dry's main
+// MCP server (GET /api/config → mcpUrl). The older drydotai-v2-mcp-server…workers.dev server
+// is no longer the main one. Override here if Dry moves either.
 const BASE = (process.env.DRY_BASE_URL || 'https://dry.ai').replace(/\/+$/, '');
 const MCP_URL = process.env.DRY_MCP_URL || `${BASE}/api/mcp`;
 const PAGE_TYPE = '00000000-0000-7000-8000-000000000004';
