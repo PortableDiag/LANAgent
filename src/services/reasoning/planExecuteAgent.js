@@ -464,7 +464,7 @@ class Executor {
     try {
       // executeTool re-reads the live catalog, runs through apiManager.executeAPI (which
       // enforces the plugin timeout) and never retries a command with side effects.
-      const outcome = await executeTool(this.agent, tool, command, params || {});
+      const outcome = await executeTool(this.agent, tool, command, params || {}, context);
       if (!outcome.success) {
         return { success: false, error: outcome.error || 'Plugin reported failure', output: outcome.result, step };
       }

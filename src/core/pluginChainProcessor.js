@@ -602,6 +602,13 @@ Analyze the request:`;
 
     const successful = results.filter(r => r.success).length;
     let summary = '';
+    // A chain that stopped says so FIRST. The failure used to come last, under the earlier steps'
+    // output (2026-09-30: a 1,900-character search write-up, then "❌ … No basket matching"), so
+    // the reply read as an answer to a task that had not been done.
+    const firstFailure = results.find(r => !r.success);
+    if (!overallSuccess && firstFailure) {
+      summary += `⚠️ **Not finished:** ${firstFailure.description || `step ${firstFailure.stepNumber}`} — ${firstFailure.error || 'failed'}\n\n`;
+    }
     results.forEach((result) => {
       summary += `**${result.success ? '✅' : '❌'} ${result.description || `Step ${result.stepNumber}`}**\n`;
       if (result.success) {

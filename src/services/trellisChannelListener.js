@@ -361,7 +361,8 @@ export class TrellisChannelListener {
     }
 
     this.cursors.set(key, maxSeq);
-    if (!reply) { this._settleReaction(card, target.seq, working, '👍'); return; }
+    const failed = target._outcome?.ok === false;
+    if (!reply) { this._settleReaction(card, target.seq, working, failed ? '🤷' : '👍', target._outcome?.note); return; }
     const files = teach?.files || null;
     const said = await this.plugin._call('post', `/api/cards/${card}/say`, {
       body: { text: reply.slice(0, MAX_REPLY_CHARS), ...(files ? { files } : {}) },
@@ -369,7 +370,7 @@ export class TrellisChannelListener {
     });
     if (Number.isFinite(said?.seq)) this.cursors.set(key, Math.max(maxSeq, said.seq));
     this._noteReply(key);
-    this._settleReaction(card, target.seq, working, '👍');
+    this._settleReaction(card, target.seq, working, failed ? '🤷' : '👍', target._outcome?.note);
     await this._remember(card, target, reply);
     logger.info(`[trellis-listen] answered ${key} #${target.seq} from ${target.from} (${fromOperator ? 'operator — full' : 'conversation only'})`);
   }
@@ -400,12 +401,12 @@ export class TrellisChannelListener {
   }
 
   /** Replace the 👀 with the outcome once the 👀 call has finished (so it can't land last). */
-  _settleReaction(card, seq, working, emoji) {
+  _settleReaction(card, seq, working, emoji, note = '') {
     Promise.resolve(working).then(added => {
       const clear = added ? this._react(card, seq, '👀', { remove: true }) : Promise.resolve();
       return clear.then(() => this._react(card, seq, emoji));
     }).catch(() => {});
-    this._settleState(card, seq, emoji === '🤷' ? 'failed' : 'completed');
+    this._settleState(card, seq, emoji === '🤷' ? 'failed' : 'completed', emoji === '🤷' ? note : '');
   }
 
   /**
@@ -511,18 +512,39 @@ export class TrellisChannelListener {
 
   async _operatorReply(m, context, doc, card) {
     try {
-      const result = await this.agent.processNaturalLanguage(this._stripAddressing(m.text), {
+      const result = await this.agent.processNaturalLanguage(this._stripAddressing(m.text) + this._sharedTaskNote(m), {
         // The operator's own user id, so a Trellis request and a Telegram one are one
         // conversation with the same person.
         userId: this._ownerUserId(),
         interface: 'trellis',
         trellis: { document: doc?.id || null, card, seq: m.seq, recent: context.map(c => `${c.from}: ${c.text}`).join('\n').slice(-4000) }
       });
+      // Remember how it went, so the request's state says failed rather than completed when it
+      // did not finish (a chain stopped at a failed step answers success: false).
+      m._outcome = result && result.success === false
+        ? { ok: false, note: String(result.error || 'did not finish; see the reply').slice(0, 200) }
+        : { ok: true };
       return textOf(result);
     } catch (err) {
       logger.warn(`[trellis-listen] operator request failed: ${err.message}`);
+      m._outcome = { ok: false, note: String(err.message).slice(0, 200) };
       return null;
     }
+  }
+
+  /**
+   * A message the operator sends to several agents at once ("@agents each of you post a card")
+   * is a shared task: this agent does its own part. Taken literally it planned "have each agent
+   * post a card" and listed its own internal sub-agents into a channel other agents read
+   * (2026-09-30). Empty when the message is for this agent alone.
+   */
+  _sharedTaskNote(m) {
+    const to = (Array.isArray(m.to) ? m.to : []).filter(n => String(n).toLowerCase() !== String(this.name).toLowerCase());
+    const shared = to.length > 0 || /@(agents|all|everyone)\b|\beach of you\b|\ball of you\b/i.test(String(m.text || ''));
+    if (!shared) return '';
+    const others = to.length ? to.join(', ') : 'the other agents in this channel';
+    return `\n\n(Note for ${this.name}: this message also goes to ${others}. Do only your own part, as ${this.name}: ` +
+      'act for yourself, not for the other agents, and do not list or describe your own internal sub-agents in this channel.)';
   }
 
   async _conversationReply(m, context, data) {

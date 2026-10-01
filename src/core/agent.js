@@ -930,6 +930,30 @@ export class Agent extends EventEmitter {
     return false;
   }
 
+  /**
+   * Run the configured reasoning agent (ReAct / Plan-Execute, which call tools step by step and
+   * keep a to-do list) on a request and render its answer. Returns null when no reasoning agent
+   * is available or it produced nothing.
+   */
+  async _runReasoning(input, context) {
+    if (!this.reasoningMode || this.reasoningMode === 'disabled') return null;
+    let reasoningResult;
+    if (this.reasoningMode === 'react' && this.reactAgent) {
+      reasoningResult = await this.reactAgent.run(input, context);
+    } else if (this.reasoningMode === 'plan-execute' && this.planExecuteAgent) {
+      reasoningResult = await this.planExecuteAgent.run(input, context);
+    } else if (this.reasoningMode === 'auto') {
+      // Auto mode: use ReAct for exploratory tasks, Plan-Execute for structured tasks
+      const isStructured = /\b(step|sequence|order|first|then|finally)\b/i.test(input);
+      if (isStructured && this.planExecuteAgent) {
+        reasoningResult = await this.planExecuteAgent.run(input, context);
+      } else if (this.reactAgent) {
+        reasoningResult = await this.reactAgent.run(input, context);
+      }
+    }
+    return reasoningResult ? await this.renderReasoningResult(input, reasoningResult, context, input) : null;
+  }
+
   // Natural language processing. `systemPrompt` is only used for a conversation-only
   // (guest) context — see core/guestGuard.js.
   /**
@@ -1197,6 +1221,18 @@ This reply is text only: you have not run any tool or taken any action in this t
             };
           }
         } catch (chainError) {
+          // A task bigger than the chain's step limit is exactly what the reasoning agent is for.
+          // It used to drop to a single intent instead, and on 2026-09-30 that single intent was a
+          // clarification which became a tool-less answer promising work that never ran.
+          if (/Too many steps/.test(chainError.message)) {
+            try {
+              logger.info(`Chain too long (${chainError.message}); handing the task to the reasoning agent`);
+              const rendered = await this._runReasoning(input, context);
+              if (rendered) return rendered;
+            } catch (reasoningError) {
+              logger.warn('Reasoning after a too-long chain failed:', reasoningError.message);
+            }
+          }
           logger.warn('Plugin chain analysis failed, continuing with single intent:', chainError.message);
         }
       }
@@ -1286,6 +1322,15 @@ This reply is text only: you have not run any tool or taken any action in this t
               // as a question below rather than asking the operator to repeat themselves.
               if (context.trellis?.recent) {
                 logger.info('Clarify skipped: the Trellis channel conversation gives the context');
+                // An instruction in a channel is usually a task, not a question: let the reasoning
+                // agent (which can call tools) take it before answering in words, which can only
+                // describe work, never do it.
+                try {
+                  const rendered = await this._runReasoning(input, context);
+                  if (rendered) return rendered;
+                } catch (reasoningError) {
+                  logger.warn('Reasoning for a Trellis request failed, answering as a question:', reasoningError.message);
+                }
               } else {
               const clarifyResponse = { 
                 type: 'text', 
@@ -3548,25 +3593,8 @@ Return ONLY a valid JSON object with the extracted parameters, nothing else.`;
               await context.showThinking('🧠 Engaging reasoning mode...');
             }
 
-            // Select reasoning agent based on mode
-            let reasoningResult;
-            if (this.reasoningMode === 'react' && this.reactAgent) {
-              reasoningResult = await this.reactAgent.run(input, context);
-            } else if (this.reasoningMode === 'plan-execute' && this.planExecuteAgent) {
-              reasoningResult = await this.planExecuteAgent.run(input, context);
-            } else if (this.reasoningMode === 'auto') {
-              // Auto mode: use ReAct for exploratory tasks, Plan-Execute for structured tasks
-              const isStructured = /\b(step|sequence|order|first|then|finally)\b/i.test(input);
-              if (isStructured && this.planExecuteAgent) {
-                reasoningResult = await this.planExecuteAgent.run(input, context);
-              } else if (this.reactAgent) {
-                reasoningResult = await this.reactAgent.run(input, context);
-              }
-            }
-
-            if (reasoningResult) {
-              return await this.renderReasoningResult(input, reasoningResult, context, input);
-            }
+            const rendered = await this._runReasoning(input, context);
+            if (rendered) return rendered;
           }
         } catch (reasoningError) {
           logger.warn('Reasoning failed, falling back to command parsing:', reasoningError.message);
@@ -5425,10 +5453,16 @@ Important:
       result = await plugin.execute({
         userId: context?.userId,
         ...params,
+        // The Trellis channel a request came from, so trellis-notes can place cards in that
+        // channel's basket and document. Only that plugin gets it: others may forward their
+        // params to outside services, and this names the operator's document.
+        ...(pluginName === 'trellis-notes' && context?.trellis ? { _trellis: context.trellis } : {}),
         action: actionStr
       });
 
-      status = 'success';
+      // A plugin that answers { success: false } failed even though it did not throw; logging it
+      // as a success also saved it to memory as a success.
+      status = result && result.success === false ? 'failed' : 'success';
     } catch (err) {
       status = 'error';
       error = err.message;

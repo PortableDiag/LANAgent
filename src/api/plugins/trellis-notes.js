@@ -52,8 +52,8 @@
  */
 
 import { BasePlugin } from '../core/basePlugin.js';
-import axios from 'axios';
 import { AsyncLocalStorage } from 'node:async_hooks';
+import axios from 'axios';
 import { PluginSettings } from '../../models/PluginSettings.js';
 import { TrellisChannelListener } from '../../services/trellisChannelListener.js';
 import { EXTRA_COMMANDS, EXTRA_ACTIONS, installTrellisExtras } from '../../services/trellis/trellisExtras.js';
@@ -90,6 +90,9 @@ function normalizeParamAliases(data) {
   }
   for (const list of Object.values(PARAM_ALIASES)) for (const a of list) delete data[a];
 }
+
+// Per-call Trellis channel context (see execute); async-safe across concurrent calls.
+const channelCall = new AsyncLocalStorage();
 
 export default class TrellisNotesPlugin extends BasePlugin {
   constructor(agent) {
@@ -302,6 +305,13 @@ export default class TrellisNotesPlugin extends BasePlugin {
 
   async execute(params) {
     const { action, ...data } = params;
+    // The Trellis channel this request came from ({document, card}), passed by the agent when the
+    // operator asked in a channel. Never forwarded to the server.
+    const channel = data._trellis && typeof data._trellis === 'object' ? data._trellis : null;
+    delete data._trellis;
+    if (channel?.document && data.document == null && !(typeof data.card === 'string' && data.card.includes(':'))) {
+      data.document = channel.document;
+    }
 
     try {
       // Inside the try on purpose: an unknown or missing action is a caller
@@ -312,7 +322,7 @@ export default class TrellisNotesPlugin extends BasePlugin {
       });
 
       normalizeParamAliases(data);
-      return await this._inDocument(data, () => this._dispatch(action, data));
+      return await channelCall.run(channel, () => this._inDocument(data, () => this._dispatch(action, data)));
     } catch (error) {
       this.logger.error(`${action} failed:`, error);
       return { success: false, error: error.message };
@@ -626,6 +636,16 @@ export default class TrellisNotesPlugin extends BasePlugin {
 
     const list = nodes || await this._flatTree();
 
+    // Asked from a Trellis channel with no basket named: the channel card's own basket. The
+    // configured default came first before, and ALICE's ("ALICE", a desktop basket) does not
+    // exist on the web; with an account-wide key there is no single top-level basket to fall
+    // back to either, so "post a card" in a channel failed with No basket matching "ALICE".
+    const channel = channelCall.getStore();
+    if (!given && allowDefault && channel?.card != null) {
+      const here = await this._channelBasket(channel.card, list);
+      if (here) return here;
+    }
+
     // No basket named: the configured default — and when that is unset or does not exist
     // here (ALICE's was "ALICE", a desktop basket, after it moved to the web), the key's only
     // top-level basket if it reaches exactly one.
@@ -870,6 +890,17 @@ export default class TrellisNotesPlugin extends BasePlugin {
       count: cards.length,
       cards
     };
+  }
+
+  /** The basket (node) a channel card sits in, from the tree already fetched; null if unknown. */
+  async _channelBasket(card, list) {
+    try {
+      const data = await this._call('get', `/api/cards/${Number(card)}`);
+      const id = data?.node ?? data?.card?.node;
+      return list.find(n => n.id === id) || null;
+    } catch {
+      return null;
+    }
   }
 
   async readCard({ card } = {}) {

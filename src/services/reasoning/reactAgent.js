@@ -500,7 +500,7 @@ Respond with valid JSON only.`;
    */
   async executeAction(action, context) {
     const { tool, command, params } = action;
-    const outcome = await executeTool(this.agent, tool, command, params || {});
+    const outcome = await executeTool(this.agent, tool, command, params || {}, context);
     if (tool !== DESCRIBE_TOOL) this.updateToolPerformance(tool, outcome.success);
     if (!outcome.success) {
       logger.warn(`ReAct action ${tool}.${command} failed: ${outcome.error || 'plugin reported failure'}`);

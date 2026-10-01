@@ -2,6 +2,18 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.428] - 2026-09-30
+
+### Fixed
+- **The agent failed simple Trellis tasks it was asked in a channel.** Two requests on 2026-09-30 went wrong in four ways:
+  - **A big task got a promise instead of action.** "Build a frog lifecycle diagram with connected image cards" planned to 7 steps, over the 5-step chain limit, and fell back to a no-tool answer: "I'll build…". A task bigger than the chain limit now goes to the reasoning agent, which calls tools step by step. So does a channel instruction that would otherwise be answered in words only.
+  - **A card asked for in a channel landed nowhere.** With no basket named, the plugin fell back to its configured default ("ALICE", a desktop basket that does not exist on the web). An account-wide key reaches several top-level baskets, so there was no single basket to fall back to either. A card asked for in a channel now goes in that channel card's own basket and document.
+  - **"Each of you post a card" was taken literally.** The agent planned to have every agent post one, and listed its own internal sub-agents into a channel other agents read. A message addressed to several agents now tells the agent to do only its own part and not to describe its sub-agents.
+  - **A failed request was marked completed.** A request that did not finish is now marked `failed` with the reason, and gets 🤷 instead of 👍. A plugin that answers `success: false` is logged as failed, not success, and is no longer saved to memory as a success. A chain that stopped now leads its reply with what did not get done.
+
+### Added
+- **Trellis connectors:** `connectCards` draws an arrow between two cards of one basket (with an optional label, style and arrowheads), and `layoutFlow` arranges the connected cards as a flowchart, top-down or left to right. Diagrams, flows and lifecycles can now be built.
+
 ## [2.25.427] - 2026-09-30
 
 ### Added

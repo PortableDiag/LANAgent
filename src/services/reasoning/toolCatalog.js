@@ -98,7 +98,7 @@ export function formatToolsForPrompt(tools, relevantNames = [], order = null, { 
  * Run one tool command. Goes through apiManager.executeAPI (plugin timeout, call stats) and
  * is NOT retried: a plugin command can have side effects that must not be repeated.
  */
-export async function executeTool(agent, tool, command, params = {}) {
+export async function executeTool(agent, tool, command, params = {}, context = null) {
   const tools = listTools(agent);
 
   if (tool === DESCRIBE_TOOL) {
@@ -111,7 +111,9 @@ export async function executeTool(agent, tool, command, params = {}) {
     return { success: false, error: `Tool '${tool}' not found or not available to reasoning` };
   }
   try {
-    const result = await agent.apiManager.executeAPI(tool, 'execute', { ...(params || {}), action: command });
+    // The Trellis channel a request came from, for trellis-notes only (see executePluginWithLogging).
+    const channel = tool === 'trellis-notes' && context?.trellis ? { _trellis: context.trellis } : {};
+    const result = await agent.apiManager.executeAPI(tool, 'execute', { ...(params || {}), ...channel, action: command });
     return { success: result?.success !== false, result };
   } catch (error) {
     return { success: false, error: error.message };

@@ -159,6 +159,13 @@ export const EXTRA_COMMANDS = [
   { command: 'createImageCard', description: 'Make an IMAGE card in a Trellis basket from a picture: find one on the web by description (freely licensed, from Wikimedia Commons), fetch one from an image URL, or upload a local file',
     usage: 'createImageCard({ basket: "AgentTests", query: "cool frog", title: "Frog" })  // or url: "https://…/x.jpg", or path: "/…/x.png"',
     examples: ['find a cool frog picture and make an image card in trellis', 'make a trellis image card of a lighthouse', 'post this picture as an image card in trellis', 'find a picture of a cat and put it on a trellis card'] },
+  // diagrams
+  { command: 'connectCards', description: 'Draw an arrow (connector) from one Trellis card to another in the same basket: for diagrams, flows, cycles and lifecycles',
+    usage: 'connectCards({ from: 189, to: 190, label: "hatches", style: "dashed", arrows: "end" })',
+    examples: ['connect the eggs card to the tadpole card in trellis', 'draw an arrow between those two trellis cards', 'link trellis card 189 to card 190 with an arrow', 'connect the cards into a cycle'] },
+  { command: 'layoutFlow', description: 'Arrange the cards a Trellis basket\'s arrows join as a flowchart, top-down or left-to-right',
+    usage: 'layoutFlow({ basket: 5, dir: "right" })',
+    examples: ['lay out the trellis diagram left to right', 'tidy the trellis flowchart', 'arrange the connected trellis cards as a flow'] },
   // editing
   { command: 'editCard', description: 'Change a Trellis card\'s title, body or colour (replaces the body; use appendNote to add to it)',
     usage: 'editCard({ card: 1391, title: "New title", body: "..." })', examples: ['rename the trellis card', 'rewrite the body of that trellis note', 'change the trellis card title'] },
@@ -388,6 +395,34 @@ const actions = {
     const f = await this._readLocalFile(p);
     const r = await this._call('post', `/api/cards/${c.id}/images`, { body: { image_base64: f.data_base64, name: name || f.name }, timeoutMs: 120000 });
     return { success: true, card: c.id, index: r.index ?? null, marker: r.marker || null };
+  },
+
+  async connectCards({ from, to, label, style, arrows, color } = {}) {
+    const a = Number(from), b = Number(to);
+    if (!Number.isInteger(a) || !Number.isInteger(b) || a === b) {
+      throw new Error('connectCards needs two different card ids: from and to.');
+    }
+    const [ca, cb] = await Promise.all([this._call('get', `/api/cards/${a}`), this._call('get', `/api/cards/${b}`)]);
+    const na = ca?.node ?? ca?.card?.node, nb = cb?.node ?? cb?.card?.node;
+    if (na == null || nb == null) throw new Error(`Could not find the basket of card ${na == null ? a : b}.`);
+    if (na !== nb) {
+      throw new Error(`Cards ${a} and ${b} are in different baskets (${na} and ${nb}). A connector joins two cards of one basket; across baskets, link with [[#${b}]] in a card body.`);
+    }
+    const body = { from: a, to: b };
+    if (label) body.label = String(label).slice(0, 200);
+    if (style) body.style = style;
+    if (arrows) body.arrows = arrows;
+    if (color) body.color = color;
+    const r = await this._call('post', `/api/nodes/${na}/connectors`, { body });
+    const connector = r?.connector || r;
+    return { success: true, basket: na, connector, result: `Connected card ${a} → card ${b}${label ? ` ("${label}")` : ''} in basket ${na}.` };
+  },
+
+  async layoutFlow({ basket, dir = 'down' } = {}) {
+    const node = await this._resolveNode(basket, { allowDefault: true });
+    const d = dir === 'right' ? 'right' : 'down';
+    const r = await this._call('post', `/api/nodes/${node.id}/layout`, { body: { kind: 'flow', dir: d } });
+    return { success: true, basket: node.id, moved: r?.moved ?? null, result: `Laid out ${node.title || `basket ${node.id}`} as a flowchart (${d === 'right' ? 'left to right' : 'top down'}): ${r?.moved ?? 0} card(s) moved.` };
   },
 
   async createImageCard({ basket, title, query, url, path: p, name, ...rest }) {
