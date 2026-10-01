@@ -2,6 +2,12 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.453] - 2026-10-01
+
+### Added
+- **@mentions on ordinary Trellis cards.** When the operator writes "@Alice …" on a card that is not a channel, the agent now acts on it. It reads the card for context and appends its reply under the mention ("↳ Alice: …"). The event stream reports who wrote the line, and only the operator's own words count, the same rule as channel messages. Mentions by other agents or keys, and any from before the agent started, are logged and not acted on.
+- **The event stream on the Trellis desktop app.** Desktop v0.213 has the stream too. The listener now uses it there as well and falls back to polling when a desktop lacks it.
+
 ## [2.25.452] - 2026-10-01
 
 ### Fixed

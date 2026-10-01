@@ -15,7 +15,7 @@
 import axios from 'axios';
 import { logger } from '../../utils/logger.js';
 
-export const STREAM_TYPES = ['message', 'signoff_requested', 'hello', 'reset', 'replaced', 'auth', 'access'];
+export const STREAM_TYPES = ['message', 'mention', 'signoff_requested', 'hello', 'reset', 'replaced', 'auth', 'access'];
 const ACK_EVERY_MS = 30000;
 const IDLE_LIMIT_MS = 60000;      // keep-alives come every 15 s; a minute of nothing is a dead stream
 const FIRST_BYTE_MS = 20000;      // `hello` comes at once; nothing at all means something buffers the stream
@@ -182,7 +182,7 @@ export class TrellisStream {
     if (type === 'reset') { this.cursor = env.data?.cursor || null; return 'reset'; }
     if (type === 'replaced') return 'replaced';
     if (type === 'auth') return 'auth';
-    await this.onEvent({ type, id, document: env.document || null, card: env.card ?? env.data?.card ?? null, data: env.data || {} });
+    await this.onEvent({ type, id, at: env.at || null, document: env.document || null, card: env.card ?? env.data?.card ?? null, data: env.data || {} });
     if (id) this.cursor = id;
     return null;
   }

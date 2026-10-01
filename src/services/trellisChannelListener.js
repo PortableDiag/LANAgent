@@ -108,6 +108,7 @@ export class TrellisChannelListener {
         if (Date.now() - this.cardAt > CARD_REFRESH_MS) await this._publishCard();
         if (this.inbox === undefined) await this._probeInbox();
         if (this.inbox) { await this._maybeStream(); await this._inboxCycle(); continue; }
+        await this._maybeStream();   // desktop v0.213+ streams too; a 404 keeps this loop
         await this._cycle();
         await this._waitForChange();
       } catch (err) {
@@ -299,31 +300,83 @@ export class TrellisChannelListener {
 
   /** One stream event: a message wakes the channel path (which applies the trust rule). */
   async _onStreamEvent(e) {
-    const docs = await this.plugin._followedDocuments();
-    const doc = docs.find(d => d.id === e.document) || (docs.length === 1 && !e.document ? docs[0] : null);
-    if (!doc || e.card == null) return;
+    // The desktop serves one document per port (its stream names it by file and run); the web
+    // names the document by id.
+    const desktop = this.plugin.resolvedMode === 'desktop';
+    let doc = null;
+    if (!desktop) {
+      const docs = await this.plugin._followedDocuments();
+      doc = docs.find(d => d.id === e.document) || (docs.length === 1 && !e.document ? docs[0] : null);
+      if (!doc) return;
+    }
+    if (e.card == null) return;
+    const inDoc = (fn) => (doc ? this.plugin._runInDocument(doc, fn) : fn());
     if (e.type === 'signoff_requested') return this._noteOtherInboxRows([{ reason: 'signoff', ...e.data, card: e.card }], doc);
+    if (e.type === 'mention') return inDoc(() => this._onMention(e, doc));
     if (e.type !== 'message') return;
     const m = e.data || {};
     if (String(m.from || '').toLowerCase() === this.name.toLowerCase()) return;
     // Never answer history: a first connection may replay what the server still holds.
     if (m.at && Date.parse(m.at) < (this.startedAt || 0)) return;
     const card = e.card;
-    const key = `${doc.id}:${card}`;
+    const key = `${doc?.id || 'desktop'}:${card}`;
     const seq = Number(m.seq) || 0;
     if (!this.cursors.has(key)) this.cursors.set(key, Math.max(0, seq - 1));
     const failed = this.failures.get(key);
     if (failed && Date.now() < failed.nextRetryAt) return;
-    await this.plugin._runInDocument(doc, async () => {
+    await inDoc(async () => {
       try {
         await this._handleChannel(doc, card, key);
         this.failures.delete(key);
         // Keep the inbox in step, so falling back to it does not deliver this again.
-        if (seq) await this.plugin._call('post', '/api/inbox/read', { body: { card, seq } }).catch(() => {});
+        if (seq && !desktop) await this.plugin._call('post', '/api/inbox/read', { body: { card, seq } }).catch(() => {});
       } catch (err) {
         this._recordFailure(key, err);
       }
     });
+  }
+
+  /**
+   * "@Alice …" written on an ordinary card (not a channel): the stream's `mention` event
+   * carries the new @lines and the writer's attestation (relay 2754 #319/#320). Only the
+   * operator's own words make the agent act — the same rule as a channel message. The card has
+   * no channel to answer in, so the reply goes on the card, under the mention.
+   */
+  async _onMention(e, doc) {
+    const d = e.data || {};
+    const me = this.name.toLowerCase();
+    const lines = (Array.isArray(d.lines) ? d.lines : []).map(String);
+    const names = (Array.isArray(d.names) ? d.names : []).map(n => String(n).toLowerCase());
+    const mentionsMe = new RegExp(`(^|[^\\w@.])@${escapeRegExp(this.name)}(?![\\w@])`, 'i');
+    if (!names.includes(me) && !lines.some(l => mentionsMe.test(l))) return;
+    const by = String(d.by || d.from || '');
+    if (by.toLowerCase() === me) return;
+    const at = Date.parse(d.at || e.at || '');
+    if (Number.isFinite(at) && at < (this.startedAt || 0)) return;   // never answer history
+    const writer = { from: by, kind: d.kind, via: d.via, from_key_owner: d.from_key_owner, agent_verified: d.agent_verified };
+    if (!(await this._isOperator(writer))) {
+      logger.info(`[trellis-listen] mention on card ${e.card} by ${by || 'someone'} — not the operator's own words, not acted on`);
+      return;
+    }
+    const request = lines.filter(l => mentionsMe.test(l)).join('\n') || lines.join('\n');
+    let cardText = '';
+    try {
+      const c = (await this.plugin._call('get', `/api/cards/${e.card}`)).card || {};
+      cardText = `Card ${e.card} "${c.title || ''}" (${c.kind || 'text'}):\n${String(c.body || '').slice(0, 2500)}` +
+        ((c.items || []).length ? `\n${c.items.map(i => `${i.done ? '[x]' : '[ ]'} ${i.text}`).join('\n').slice(0, 1500)}` : '');
+    } catch { /* the request alone */ }
+    const msg = { seq: 0, from: by, kind: d.kind, to: [this.name], text: request };
+    const reply = await this._operatorReply(msg, cardText ? [{ from: 'card', text: cardText }] : [], doc, e.card);
+    const failed = msg._outcome?.ok === false;
+    const text = String(reply || (failed ? `I could not do that: ${msg._outcome?.note || 'it did not finish'}` : '')).trim();
+    if (!text) return;
+    const line = `↳ ${this.name}: ${quietBroadcasts(text).replace(mentionsMe, '$1').slice(0, MAX_REPLY_CHARS > 1500 ? 1500 : MAX_REPLY_CHARS)}`;
+    try {
+      await this.plugin.appendNote({ card: e.card, text: line });
+      logger.info(`[trellis-listen] answered a mention on card ${e.card} from ${by} (operator — full)`);
+    } catch (err) {
+      logger.warn(`[trellis-listen] could not answer the mention on card ${e.card} there: ${err.message}`);
+    }
   }
 
   /** Long-poll until the document changes (~25 s), or sleep when that is not possible. */
