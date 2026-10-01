@@ -2,6 +2,12 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.431] - 2026-09-30
+
+### Fixed
+- **A download could hand back a different video with the same title.** Downloads were saved as `<title>.<ext>`, and some sites give different videos identical titles (redgifs titles are tag lists). A second request could then be served the first video, or the file could change under a download link before it was used, possibly to another person's video. Each file is now named `<title> [<id>]`, so a video only ever reuses its own file. Titles shown to the user no longer include the id.
+- **A profile link downloaded a video without saying so.** A link to a profile or page (a redgifs user, a TikTok or X account, and the like) downloads that profile's first video. The response now includes a `note` saying so, and the lanagent.net video downloader shows it. The `/social/download` response also includes `title`.
+
 ## [2.25.430] - 2026-09-30
 
 ### Added

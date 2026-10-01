@@ -565,6 +565,11 @@ Live in-memory snapshot of download-token usage (tokens within their TTL window)
 
 Sync covering 2.25.417–2.25.423.
 
+### v2.25.431 — Video and audio downloads (`/social/download`, ytdlp)
+
+- Files are named `<title> [<id>].<ext>`, so two videos with the same title never share a file.
+- The response adds `title` (without the id) and, when the link was a profile or page rather than one video, a `note` saying its first video was downloaded.
+
 ### v2.25.428 — Trellis channel tasks (trellis-notes)
 
 - `connectCards({ from, to, label?, style?, arrows?, color? })` draws a connector between two cards of ONE basket (`POST /api/nodes/{basket}/connectors` on trellis-web and the desktop app). Cards in different baskets are refused with a hint to use a `[[#id]]` link instead.

@@ -151,6 +151,9 @@ router.post('/download',
         filename: result.file.filename,
         size,
         caption: result.result || null,
+        title: result.title || null,
+        // Set when the link was a profile/page and its first video was downloaded instead.
+        ...(result.note ? { note: result.note } : {}),
         tokenExpires: '60 minutes',
         maxDownloads: 3
       });

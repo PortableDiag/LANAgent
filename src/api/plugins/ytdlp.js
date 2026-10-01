@@ -46,6 +46,36 @@ function isBulkUrl(url) {
   return BULK_URL_PATTERNS.some((re) => re.test(pathname));
 }
 
+// Every download is named "<title> [<id>].<ext>". Named by title alone, two different videos with
+// the same title shared one file: redgifs titles are tag lists ("Amateur Asian …" on 2026-09-30),
+// so a second request was served the first video, or the file was swapped under a pending
+// download link — possibly another customer's video. The id makes each file the video's own.
+// `.150B` caps the title by bytes, so long titles stay under filesystem name limits.
+const MEDIA_TEMPLATE = '%(title).150B [%(id)s].%(ext)s';
+
+/** "<title> [<id>].<ext>" → { title, id }; a name without an id gives { title: base, id: null }. */
+export function splitMediaName(filePath) {
+  if (!filePath) return { title: null, id: null };
+  const base = path.basename(filePath, path.extname(filePath));
+  const m = base.match(/^(.*) \[([^\[\]]+)\]$/);
+  return m ? { title: m[1].trim() || null, id: m[2] } : { title: base, id: null };
+}
+
+// Sites where a link to a profile or feed (not one video) still downloads "something": its
+// first item. Name those so the user knows they got the profile's video, not the one they saw.
+const PROFILE_LINK_HOSTS = /(^|\.)(redgifs\.com|tiktok\.com|instagram\.com|x\.com|twitter\.com|youtube\.com)$/i;
+
+/** A note when the downloaded video is not the one the link names (a profile/feed link). */
+export function profileLinkNote(url, mediaId) {
+  if (!mediaId) return null;
+  let u;
+  try { u = new URL(url); } catch { return null; }
+  if (!PROFILE_LINK_HOSTS.test(u.hostname)) return null;
+  if (decodeURIComponent(u.href).toLowerCase().includes(String(mediaId).toLowerCase())) return null;
+  return 'This link is a profile or page, not a single video, so its first video was downloaded. ' +
+    'To get a specific video, open that video and copy its own link.';
+}
+
 export default class YtDlpPlugin extends BasePlugin {
   constructor(agent) {
     super(agent);
@@ -665,7 +695,7 @@ export default class YtDlpPlugin extends BasePlugin {
       }
 
       // Output template
-      const outputTemplate = output || '%(title)s.%(ext)s';
+      const outputTemplate = output || MEDIA_TEMPLATE;
       command += ` -o "${path.join(this.downloadDir, outputTemplate)}"`;
 
       // Add subtitles if requested
@@ -745,6 +775,7 @@ export default class YtDlpPlugin extends BasePlugin {
           }
 
           logger.info(`Video download - extracted file path: ${downloadedFile || 'none'}`);
+          const media = splitMediaName(downloadedFile);
 
           // Sanitize filename (replace spaces/special chars with underscores)
           downloadedFile = await this.sanitizeDownloadedFile(downloadedFile);
@@ -764,8 +795,8 @@ export default class YtDlpPlugin extends BasePlugin {
             }
           }
 
-          // Use the filename (without extension) as the title for caption
-          const title = fileInfo ? path.basename(fileInfo.filename, path.extname(fileInfo.filename)) : null;
+          // The title as yt-dlp gave it (without the [id] the filename carries)
+          const title = fileInfo ? media.title : null;
 
           if (isYouTube && clients[i] && clients[i] !== this.youtubeClients[0]) {
             logger.info(`[ytdlp] YouTube download succeeded on fallback client "${clients[i]}" for ${url}`);
@@ -774,6 +805,9 @@ export default class YtDlpPlugin extends BasePlugin {
           return {
             success: true,
             result: title || `Video downloaded successfully`,
+            title,
+            mediaId: media.id,
+            note: profileLinkNote(url, media.id),
             file: fileInfo,
             progress: lastProgress,
             command: command
@@ -935,7 +969,7 @@ export default class YtDlpPlugin extends BasePlugin {
     let command = `${this._buildBaseCommand(data)} -f ${format}`;
 
     // Output template for playlists
-    command += ` -o "${path.join(this.downloadDir, '%(playlist)s/%(playlist_index)s - %(title)s.%(ext)s')}"`;
+    command += ` -o "${path.join(this.downloadDir, '%(playlist)s/%(playlist_index)s - %(title).120B [%(id)s].%(ext)s')}"`;
     
     // Limit number of items
     command += ` --playlist-items 1-${itemCap}`;
@@ -1107,7 +1141,7 @@ export default class YtDlpPlugin extends BasePlugin {
     }
     
     // Output template
-    const outputTemplate = output || '%(title)s.%(ext)s';
+    const outputTemplate = output || MEDIA_TEMPLATE;
     command += ` -o "${path.join(this.downloadDir, outputTemplate)}"`;
     
     // Add metadata
@@ -1145,6 +1179,7 @@ export default class YtDlpPlugin extends BasePlugin {
       }
 
       logger.info(`Audio download - extracted file path: ${downloadedFile || 'none'}`);
+      const media = splitMediaName(downloadedFile);
 
       // Sanitize filename (replace spaces/special chars with underscores)
       downloadedFile = await this.sanitizeDownloadedFile(downloadedFile);
@@ -1163,13 +1198,15 @@ export default class YtDlpPlugin extends BasePlugin {
         }
       }
       
-      // Use the filename (without extension) as the title for caption
-      // yt-dlp uses %(title)s which typically gives "Artist - Song" format
-      const title = fileInfo ? path.basename(fileInfo.filename, path.extname(fileInfo.filename)) : null;
+      // The title as yt-dlp gave it ("Artist - Song" for most music), without the [id]
+      const title = fileInfo ? media.title : null;
 
       return {
         success: true,
         result: title || `Audio downloaded successfully in ${format} format`,
+        title,
+        mediaId: media.id,
+        note: profileLinkNote(url, media.id),
         file: fileInfo,
         format: format,
         command: command
@@ -1199,7 +1236,7 @@ export default class YtDlpPlugin extends BasePlugin {
       return { success: false, error: 'URL required' };
     }
     
-    const command = `${this._buildBaseCommand(data)} --write-thumbnail --skip-download -o "${path.join(this.downloadDir, '%(title)s')}" "${url}"`;
+    const command = `${this._buildBaseCommand(data)} --write-thumbnail --skip-download -o "${path.join(this.downloadDir, '%(title).150B [%(id)s]')}" "${url}"`;
 
     try {
       logger.info(`Downloading thumbnail: ${command}`);
