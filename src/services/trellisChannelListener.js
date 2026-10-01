@@ -34,6 +34,9 @@
  * hourly reply cap; every failure is logged, nothing is posted about it.
  */
 import { logger } from '../utils/logger.js';
+import fs from 'fs/promises';
+import path from 'path';
+import { DATA_PATH } from '../utils/paths.js';
 import { learnSkillFromPeer } from './skills/skillsService.js';
 import { SkillTeacher, receiveSkillFiles } from './skills/skillTeaching.js';
 
@@ -464,7 +467,7 @@ export class TrellisChannelListener {
       if (hash === this.cardHash) return false;
       await this.plugin._call('post', '/api/agents/card', { body: card });
       this.cardHash = hash;
-      logger.info(`[trellis-listen] published this agent's card (${card.skills.length} skills)`);
+      logger.info(`[trellis-listen] published this agent's card (${card.skills.length} skills, ${card.icon_base64 ? 'with avatar' : 'no avatar'})`);
       return true;
     } catch (err) {
       logger.debug(`[trellis-listen] agent card not published: ${err.message}`);
@@ -716,5 +719,37 @@ export async function buildAgentCard(name, deps = {}) {
     }
   } catch { /* a card without skills is still a card */ }
   skills = skills.sort((a, b) => a.id.localeCompare(b.id)).slice(0, CARD_MAX_SKILLS);
-  return { description, skills };
+  const card = { description, skills };
+  // The agent's picture beside its messages (trellis-web v0.81, desktop: avatars, relay 2754
+  // #269–#273). Sent as bytes, which both servers accept (the desktop never fetches a URL).
+  const icon = await (deps.avatar || agentAvatarBase64)().catch(err => {
+    logger.warn(`[trellis-listen] avatar not added to the agent card: ${err.message}`);
+    return null;
+  });
+  if (icon) card.icon_base64 = icon;
+  return card;
+}
+
+/**
+ * The agent's avatar as base64 PNG for its Trellis card: TRELLIS_AGENT_AVATAR, else
+ * data/agent/avatar.png (or .jpg). Shrunk to 256×256: the limit is 256 KB and the server keeps
+ * 128×128, while ALICE's avatar is a 460 KB 1024×1024 PNG. Cached by file and mtime.
+ */
+let avatarCache = null;
+export async function agentAvatarBase64() {
+  const candidates = process.env.TRELLIS_AGENT_AVATAR
+    ? [process.env.TRELLIS_AGENT_AVATAR]
+    : [path.join(DATA_PATH, 'agent', 'avatar.png'), path.join(DATA_PATH, 'agent', 'avatar.jpg')];
+  for (const file of candidates) {
+    let stat;
+    try { stat = await fs.stat(file); } catch { continue; }
+    const key = `${file}:${stat.mtimeMs}:${stat.size}`;
+    if (avatarCache?.key === key) return avatarCache.data;
+    const { default: sharp } = await import('sharp');
+    const png = await sharp(await fs.readFile(file)).resize(256, 256, { fit: 'cover' }).png().toBuffer();
+    if (png.length > 256 * 1024) return null;
+    avatarCache = { key, data: png.toString('base64') };
+    return avatarCache.data;
+  }
+  return null;
 }

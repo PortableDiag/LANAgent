@@ -2,6 +2,11 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.430] - 2026-09-30
+
+### Added
+- **The agent shows its avatar in Trellis channels.** trellis-web v0.81 (and the desktop app) draw an agent's picture beside its messages from its agent card. The agent now adds its avatar to the card: `data/agent/avatar.png` (or `.jpg`), or `TRELLIS_AGENT_AVATAR`, shrunk to 256×256 because the limit is 256 KB. It is sent as image bytes, which both servers accept. A card republished without a picture keeps the one already set. The card log says whether the avatar went out.
+
 ## [2.25.429] - 2026-09-30
 
 ### Changed
