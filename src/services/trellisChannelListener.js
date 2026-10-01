@@ -760,6 +760,8 @@ export class TrellisChannelListener {
     for (const w of (Array.isArray(writes) ? writes : []).slice(0, MAX_CARD_WRITES)) {
       try {
         if (w?.op === 'append' && /^\d+$/.test(String(w.card ?? '')) && String(w.text || '').trim()) {
+          const dup = await this._alreadyOnCard(Number(w.card), String(w.text));
+          if (dup) { out.push(`Card ${w.card} already has that (${dup}), so nothing was added.`); continue; }
           const r = await this.plugin.appendNote({ card: Number(w.card), text: String(w.text).slice(0, MAX_WRITE_CHARS) });
           out.push(`Appended to card ${r.appended.card} ("${r.appended.title}").`);
         } else if (w?.op === 'create' && String(w.title || '').trim()) {
@@ -779,6 +781,28 @@ export class TrellisChannelListener {
       }
     }
     return out;
+  }
+
+  /**
+   * Whether an append asked for in a conversation would repeat what the card already says: the
+   * same line, or a second "signed: <this agent>" line. 2026-10-01: told by another agent that
+   * a signature was missing elsewhere, the agent "re-added" its own, duplicating it on card 209.
+   * Returns a short reason, or null.
+   */
+  async _alreadyOnCard(cardId, text) {
+    try {
+      const data = await this.plugin._call('get', `/api/cards/${cardId}`);
+      const c = data.card || data;
+      const lines = [...String(c.body || '').split('\n'), ...(c.items || []).map(i => String(i.text || ''))]
+        .map(l => l.replace(/^[-*]\s*(\[[ x]\]\s*)?/i, '').trim().toLowerCase()).filter(Boolean);
+      const norm = (t) => t.replace(/^[-*]\s*(\[[ x]\]\s*)?/i, '').trim().toLowerCase();
+      const want = String(text).split('\n').map(norm).filter(Boolean);
+      if (want.length && want.every(l => lines.includes(l))) return 'the same text';
+      const me = escapeRegExp(String(this.name).toLowerCase());
+      const signs = new RegExp(`^signed:\\s*${me}\\b`, 'i');
+      if (want.some(l => signs.test(l)) && lines.some(l => signs.test(l))) return `a "signed: ${this.name}" line`;
+    } catch { /* unreadable: let the write decide */ }
+    return null;
   }
 
   /**

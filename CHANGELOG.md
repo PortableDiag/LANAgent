@@ -2,6 +2,12 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.447] - 2026-10-01
+
+### Fixed
+- **A Telegram notice could be lost because of its formatting.** Notices are sent as Markdown, and text from outside the agent (a skill's audit findings, a card title) can contain an unpaired `_` or `*`. Telegram then refused the whole message ("can't parse entities") and the operator never saw it. Such a notice is now sent again as plain text.
+- **The agent duplicated its own signature on a Trellis card.** Another agent said a signature was missing, and the agent "re-added" its own, which was already there. A card write asked for in a channel conversation is now skipped when the card already has that text, or when it would add a second "signed: <this agent>" line. The reply says so.
+
 ## [2.25.446] - 2026-10-01
 
 ### Added

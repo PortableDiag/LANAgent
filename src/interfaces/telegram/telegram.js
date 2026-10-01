@@ -1342,42 +1342,34 @@ export class TelegramInterface extends EventEmitter {
 
       const finalOptions = { ...defaultOptions, ...safeOptions };
 
-      if (safeOptions.photo) {
-        await this.bot.telegram.sendPhoto(
-          this.authorizedUserId, 
-          safeOptions.photo,
-          { caption: message, ...finalOptions }
-        );
-      } else if (safeOptions.document) {
-        await this.bot.telegram.sendDocument(
-          this.authorizedUserId,
-          safeOptions.document,
-          { caption: message, ...finalOptions }
-        );
-      } else if (safeOptions.audio) {
-        await this.bot.telegram.sendAudio(
-          this.authorizedUserId,
-          safeOptions.audio,
-          { caption: message, ...finalOptions }
-        );
-      } else if (safeOptions.voice) {
-        await this.bot.telegram.sendVoice(
-          this.authorizedUserId,
-          safeOptions.voice,
-          finalOptions
-        );
-      } else if (safeOptions.animation) {
-        await this.bot.telegram.sendAnimation(
-          this.authorizedUserId,
-          safeOptions.animation,
-          { caption: message, ...finalOptions }
-        );
-      } else {
-        await this.bot.telegram.sendMessage(
-          this.authorizedUserId,
-          message,
-          finalOptions
-        );
+      const send = async (opts) => {
+        if (safeOptions.photo) {
+          await this.bot.telegram.sendPhoto(this.authorizedUserId, safeOptions.photo, { caption: message, ...opts });
+        } else if (safeOptions.document) {
+          await this.bot.telegram.sendDocument(this.authorizedUserId, safeOptions.document, { caption: message, ...opts });
+        } else if (safeOptions.audio) {
+          await this.bot.telegram.sendAudio(this.authorizedUserId, safeOptions.audio, { caption: message, ...opts });
+        } else if (safeOptions.voice) {
+          await this.bot.telegram.sendVoice(this.authorizedUserId, safeOptions.voice, opts);
+        } else if (safeOptions.animation) {
+          await this.bot.telegram.sendAnimation(this.authorizedUserId, safeOptions.animation, { caption: message, ...opts });
+        } else {
+          await this.bot.telegram.sendMessage(this.authorizedUserId, message, opts);
+        }
+      };
+
+      try {
+        await send(finalOptions);
+      } catch (error) {
+        // Text from outside (a skill's findings, a card title) can hold an unpaired _ or *, and
+        // Telegram then refuses the whole message ("can't parse entities"). The notice mattered
+        // more than its formatting: send the same text plain. 2026-10-01: a skill-audit notice
+        // was lost this way and the operator never saw it.
+        const unparsable = /can't parse entities|can't find end of the entity/i.test(String(error?.description || error?.message || ''));
+        if (!unparsable || !finalOptions.parse_mode) throw error;
+        logger.warn('Telegram refused the formatting of a notification; sending it as plain text');
+        const { parse_mode, ...plain } = finalOptions;
+        await send(plain);
       }
 
       logger.info('Telegram notification sent successfully');
