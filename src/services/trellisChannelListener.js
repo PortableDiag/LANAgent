@@ -145,6 +145,7 @@ export class TrellisChannelListener {
     this.inboxPrimed = this.inboxPrimed || new Set();
     const wait = docs.length === 1 ? 25 : 0;
     let handled = 0;
+    this._inboxOtherPending = false;
     for (const doc of docs) {
       await this.plugin._runInDocument(doc, async () => {
         // First start: everything already waiting is history, never answered (as before).
@@ -161,8 +162,10 @@ export class TrellisChannelListener {
         // keep the inbox looking busy forever, turning the long-poll into a sleep loop.
         const rows = data?.inbox || [];
         const messages = rows.filter(m => (m.reason == null || m.reason === 'message') && Number.isFinite(Number(m.seq)));
-        this._noteOtherInboxRows(rows.filter(m => !messages.includes(m)));
+        const others = rows.filter(m => !messages.includes(m));
+        this._noteOtherInboxRows(others);
         this._inboxHadPending = messages.length > 0;
+        this._inboxOtherPending = this._inboxOtherPending || others.length > 0;
         for (const m of messages) {
           const e = byCard.get(m.card) || { min: Infinity, max: 0 };
           e.min = Math.min(e.min, Number(m.seq) || 0);
@@ -188,6 +191,10 @@ export class TrellisChannelListener {
     // Nothing handled: after an empty long-poll go straight back; if messages are waiting but
     // their cards are in backoff (or several documents are polled without wait), pause instead
     // of spinning on an inbox that answers at once.
+    // A pending sign-off row keeps the inbox non-empty, so `?wait=` returns at once until it is
+    // decided (2754 #294). Going straight back would spin on the server: wait for the document
+    // to change instead, which wakes on a new message just the same.
+    if (!handled && this._inboxOtherPending && !this._inboxHadPending) { await this._waitForChange(); return; }
     if (!handled && (wait === 0 || this._inboxHadPending)) await sleep(IDLE_POLL_MS / 2);
   }
 

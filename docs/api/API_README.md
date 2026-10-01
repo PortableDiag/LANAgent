@@ -565,6 +565,12 @@ Live in-memory snapshot of download-token usage (tokens within their TTL window)
 
 Sync covering 2.25.417–2.25.423.
 
+### v2.25.437 — Trellis card sign-offs (trellis-notes)
+
+- `signOff({ card, verdict: "approved"|"changes-requested"|"rejected", note? })`: `{ success, card, title, verdict, digest }`. A card changed since it was read gives `{ success: false, error, currentDigest }`.
+- `withdrawSignOff({ card })`: `{ success, card, withdrawn }`.
+- `readCard` adds `signoff` (`{needed, approved, pending, stale, rejected, done}`) and `signoffs` (one line per signer).
+
 ### v2.25.432 — Git issues and Trellis channel files
 
 - git plugin: `closeIssue({ number, comment?, reason? })` and `updateIssue({ number, title?, body?, labels?, state?: "open"|"closed", comment? })`. The number can also be taken from the request ("close issue #12").

@@ -175,6 +175,11 @@ export const EXTRA_COMMANDS = [
     usage: 'setChecklistItem({ card: 1391, item: "Buy milk", done: true })', examples: ['tick off milk on the trellis checklist', 'mark that checklist line done in trellis'] },
   { command: 'setProperty', description: 'Set (or clear, with value null) a key:: value property on a Trellis card, e.g. due, status, owner',
     usage: 'setProperty({ card: 1391, key: "due", value: "2026-10-01" })', examples: ['set the due date on the trellis card', 'give that trellis card an owner property'] },
+  { command: 'signOff', description: 'Sign off on a Trellis card as this agent: approve it, request changes, or reject it, bound to the content as read',
+    usage: 'signOff({ card: 1391, verdict: "approved", note: "Looks right" })  // verdict: approved | changes-requested | rejected',
+    examples: ['approve trellis card 1391', 'sign off on that trellis card', 'request changes on the trellis spec card', 'reject trellis card 44'] },
+  { command: 'withdrawSignOff', description: "Withdraw this agent's own sign-off from a Trellis card",
+    usage: 'withdrawSignOff({ card: 1391 })', examples: ['withdraw my sign-off on trellis card 1391', 'take back the approval on that trellis card'] },
   { command: 'editTable', description: 'Change a table card in Trellis with table ops: set_cell, insert_row, remove_row, insert_col, remove_col, set_bg, set_header …',
     usage: 'editTable({ card: 1391, ops: [{ op: "set_cell", row: 1, col: 2, text: "42" }] })', examples: ['update a cell in the trellis table', 'add a row to the trellis table'] },
   { command: 'moveCard', description: 'Move a Trellis card to another basket, or to the front/back of its basket',
@@ -514,6 +519,45 @@ const actions = {
     const c = await this._card(ref);
     await this._call('post', `/api/cards/${c.id}/property`, { body: { key: String(key), value: value === null ? null : String(value) } });
     return { success: true, card: c.id, key, value };
+  },
+
+  /**
+   * A sign-off is a verdict on the card's content as it stands (relay 2754 #283–#294). The
+   * digest of the card as read goes with it, so an approval never lands on text this agent did
+   * not see: the server answers 409 if the card changed in between.
+   */
+  async signOff({ verdict = 'approved', note = null, digest = null, ...ref }) {
+    const v = String(verdict).toLowerCase().trim();
+    const norm = /^(approve|approved|ok|yes|lgtm|sign)/.test(v) ? 'approved'
+      : /^(change|changes|changes-requested|request)/.test(v) ? 'changes-requested'
+      : /^(reject|rejected|no|deny)/.test(v) ? 'rejected' : null;
+    if (!norm) throw new Error('signOff verdict is approved, changes-requested or rejected.');
+    const c = await this._card(ref);
+    const read = digest || c.signoff_digest || null;
+    const body = { verdict: norm, ...(note ? { note: String(note).slice(0, 200) } : {}), ...(read ? { digest: read } : {}) };
+    try {
+      const r = await this._call('post', `/api/cards/${c.id}/signoff`, { body });
+      return { success: true, card: c.id, title: c.title || null, verdict: norm, digest: r?.digest || read, signoff: r?.signoff || r?.card?.signoff || null };
+    } catch (err) {
+      if (err.status === 409) {
+        return { success: false, card: c.id, error: 'The card changed after it was read, so nothing was signed. Read it again and decide on the current text.', currentDigest: err.data?.digest || null };
+      }
+      if (err.status === 400 && /channel/i.test(err.message)) {
+        return { success: false, card: c.id, error: `Card ${c.id} is a channel; a sign-off is for a card's content. ${err.message}` };
+      }
+      throw err;
+    }
+  },
+
+  async withdrawSignOff(ref) {
+    const c = await this._card(ref);
+    try {
+      await this._call('delete', `/api/cards/${c.id}/signoff`);
+      return { success: true, card: c.id, title: c.title || null, withdrawn: true };
+    } catch (err) {
+      if (err.status === 404) return { success: false, card: c.id, error: `There is no sign-off of mine on card ${c.id} to withdraw.` };
+      throw err;
+    }
   },
 
   async editTable({ ops, ...ref }) {

@@ -2,6 +2,18 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.437] - 2026-10-01
+
+### Added
+- **Sign off on Trellis cards.** Trellis (desktop v0.212, trellis-web next) lets a person or an agent approve a card, request changes or reject it. The verdict is bound to the card's content, and it goes stale when the content changes. New trellis-notes actions:
+  - `signOff({ card, verdict, note? })` sends the content digest of the card as the agent read it. If the card changed in between, nothing is signed and the agent is told to read it again.
+  - `withdrawSignOff({ card })` removes the agent's own sign-off.
+  - `readCard` shows who is asked to sign off, each verdict, and whether it is stale or on the signer's own text.
+  - The agent signs only when its operator asks.
+
+### Fixed
+- **A pending sign-off request would make the Trellis listener spin.** The server keeps such a request in the inbox until it is decided, so the inbox long-poll answers at once. With only that row waiting, the listener now waits for the document to change instead of asking again straight away.
+
 ## [2.25.436] - 2026-10-01
 
 ### Fixed

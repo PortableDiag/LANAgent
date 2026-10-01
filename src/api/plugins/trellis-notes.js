@@ -451,6 +451,7 @@ export default class TrellisNotesPlugin extends BasePlugin {
       if (response.status >= 400) {
         const err = new Error(serverError || (response.status === 404 ? `Not found: ${path}` : `Trellis returned HTTP ${response.status}`));
         err.status = response.status;
+        err.data = response.data;   // a 409 sign-off carries the card's current digest
         throw err;
       }
       this.reachable = true;
@@ -791,6 +792,11 @@ export default class TrellisNotesPlugin extends BasePlugin {
     const props = card.properties || [];
     if (Array.isArray(props) && props.length) {
       out.properties = props.reduce((acc, p) => { acc[p.key] = p.value; return acc; }, {});
+    }
+    // Sign-offs (web/desktop v0.212, relay 2754 #288): who is asked, who decided, what is stale.
+    if (card.signoff) out.signoff = card.signoff;
+    if (Array.isArray(card.signoffs) && card.signoffs.length) {
+      out.signoffs = card.signoffs.map(r => `${r.by}: ${r.verdict}${r.stale ? ' (stale)' : ''}${r.author ? ' (own text)' : ''}${r.note ? ` — ${r.note}` : ''}`);
     }
     return out;
   }
