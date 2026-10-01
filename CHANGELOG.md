@@ -2,6 +2,11 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.439] - 2026-10-01
+
+### Fixed
+- **Trellis requests picked by the AI intent detector arrived with no arguments.** When the fast intent index misses, or is still being rebuilt after a restart, the AI detector chooses the action and leaves argument extraction to the plugin. trellis-notes never did that extraction, so "approve trellis card 44" failed with "No card given". The plugin now reads the arguments from the request, using the action's own call shape, and always takes "card N" from the words. Arguments that were given take precedence.
+
 ## [2.25.438] - 2026-10-01
 
 ### Added

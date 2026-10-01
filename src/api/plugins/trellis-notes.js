@@ -319,6 +319,10 @@ export default class TrellisNotesPlugin extends BasePlugin {
     if (channel?.document && data.document == null && !(typeof data.card === 'string' && data.card.includes(':'))) {
       data.document = channel.document;
     }
+    // An intent the AI detector picked arrives as { query, needsParameterExtraction } with no
+    // arguments: the agent leaves extraction to the plugin. "approve trellis card 44" reached
+    // signOff with no card (2026-10-01), so read the arguments from the request here.
+    if (data.needsParameterExtraction) await this._extractArgs(action, data);
     // A file named in a channel ("[report.md](trellis:file:0)") is an attachment of the channel's
     // own card. A planned "read that file" step carries no card (2026-10-01: readFile failed
     // "No card given" on card 21's attachment), so the channel's card is the default.
@@ -342,6 +346,43 @@ export default class TrellisNotesPlugin extends BasePlugin {
     } catch (error) {
       this.logger.error(`${action} failed:`, error);
       return { success: false, error: error.message };
+    }
+  }
+
+  /**
+   * Fill a request's arguments from its words, using the action's own usage line so the names
+   * match what the action reads. Given arguments win. Never throws: on failure the action runs
+   * with what it has and says what is missing.
+   */
+  async _extractArgs(action, data) {
+    const request = String(data.originalInput || data.query || '').trim();
+    for (const k of ['query', 'needsParameterExtraction', 'originalInput']) delete data[k];
+    if (!request) return;
+    const cmd = this.commands.find(c => c.command === action);
+    const pm = this.agent?.providerManager;
+    if (pm?.generateResponse && cmd?.usage) {
+      try {
+        const res = await pm.generateResponse(
+          `Extract the arguments for the Trellis action ${action} from this request.\n` +
+          `Call shape: ${cmd.usage}\nRequest: ${request}\n` +
+          'Use exactly the argument names in the call shape. Numbers stay numbers. Copy any text to write exactly as given. ' +
+          'Leave out what the request does not say. Answer with one JSON object only.',
+          { maxTokens: 1500, temperature: 0 });
+        const raw = String(res?.content || '').replace(/^```(?:json)?\s*|\s*```$/g, '');
+        const got = JSON.parse(raw.slice(raw.indexOf('{'), raw.lastIndexOf('}') + 1));
+        for (const [k, v] of Object.entries(got || {})) {
+          if (k === 'action' || k.startsWith('_')) continue;
+          if ((data[k] == null || data[k] === '') && v != null && v !== '') data[k] = v;
+        }
+      } catch (err) {
+        this.logger.warn(`${action}: argument extraction failed: ${err.message}`);
+      }
+    }
+    // The card number is the one argument most actions cannot do without: take "card 44" from
+    // the words when the model gave none.
+    if (data.card == null) {
+      const m = /\bcard\s*#?\s*(\d+)\b/i.exec(request);
+      if (m) data.card = Number(m[1]);
     }
   }
 
