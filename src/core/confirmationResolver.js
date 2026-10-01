@@ -53,3 +53,13 @@ export async function resolveConfirmation({ generate, conversation, input }) {
   if (!text || text.startsWith(NO_ACTION)) return null;
   return text;
 }
+
+/**
+ * An instruction to work something out or make something, rather than to fetch or run one thing:
+ * "come up with a test", "work together on…", "design / draft / plan …". Used only for messages
+ * sent to several agents at once, where the one-shot router misreads them.
+ */
+export function isOpenEndedTask(text) {
+  const t = String(text || '').split(/\n\n\(Note for /)[0];
+  return /\b(come up with|work (?:it out )?together|collaborate|agree on|figure out|design|draft|propose|plan out|put together|brainstorm|write up|develop|devise)\b/i.test(t);
+}

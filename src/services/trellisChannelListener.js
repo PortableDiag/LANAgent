@@ -611,7 +611,7 @@ export class TrellisChannelListener {
         // conversation with the same person.
         userId: this._ownerUserId(),
         interface: 'trellis',
-        trellis: { document: doc?.id || null, card, seq: m.seq, recent: context.map(c => `${c.from}: ${c.text}`).join('\n').slice(-4000) }
+        trellis: { document: doc?.id || null, card, seq: m.seq, shared: !!this._sharedTaskNote(m), recent: context.map(c => `${c.from}: ${c.text}`).join('\n').slice(-4000) }
       });
       // Remember how it went, so the request's state says failed rather than completed when it
       // did not finish (a chain stopped at a failed step answers success: false).

@@ -2,6 +2,12 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.445] - 2026-10-01
+
+### Fixed
+- **An open-ended task sent to several agents got a list of agents back.** "@agents all of you work together to come up with a standard agent test" matched the list-agents command on the word "agents", and the reply was a JSON dump. A Trellis message sent to several agents that asks them to work something out (come up with, work together, design, draft, plan, …) now goes to the reasoning agent, which plans it and uses its tools. Simple requests ("give me a status update") are routed as before.
+- **Appending to a Trellis checklist card was refused.** On a checklist, appending now adds the text as a new item, which is what the server's own append does.
+
 ## [2.25.444] - 2026-10-01
 
 ### Fixed

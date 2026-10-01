@@ -45,7 +45,7 @@ import { promisify } from 'util';
 import { readFileSync, existsSync, mkdirSync, copyFileSync } from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { isActionConfirmation, resolveConfirmation, isDeferredRequest } from './confirmationResolver.js';
+import { isActionConfirmation, resolveConfirmation, isDeferredRequest, isOpenEndedTask } from './confirmationResolver.js';
 import { BackgroundReview } from '../services/skills/backgroundReview.js';
 import { getUserProfile } from '../services/skills/userProfile.js';
 import { Curator, scheduleCurator } from '../services/skills/curator.js';
@@ -1058,6 +1058,20 @@ export class Agent extends EventEmitter {
 
       // "Don't do it yet — just tell me what you'd write": draft it and stop. The go-ahead
       // above then runs it. Without this the router executed the request at once.
+      // An open-ended task given to several agents at once ("@agents work together to come up
+      // with a standard test") is planning and tool work, not one command. The one-shot router
+      // matched it to listAgents on the word "agents" (0.62) and replied with a JSON dump
+      // (card 21 #1050, 2026-10-01). The reasoning agent can plan it and call the tools.
+      if (context.trellis?.shared && isOpenEndedTask(input)) {
+        try {
+          logger.info('Open-ended shared Trellis task: handing it to the reasoning agent');
+          const rendered = await this._runReasoning(input, context);
+          if (rendered) return rendered;
+        } catch (err) {
+          logger.warn(`Reasoning for a shared Trellis task failed, using the router: ${err.message}`);
+        }
+      }
+
       if (this.providerManager && !context.resolvedConfirmation && isDeferredRequest(input)) {
         try {
           const agentName = this.config?.name || process.env.AGENT_NAME || 'LANAgent';
@@ -7395,3 +7409,4 @@ Guidelines:
     }
   }
 }
+

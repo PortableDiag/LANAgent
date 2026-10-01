@@ -1152,8 +1152,17 @@ export default class TrellisNotesPlugin extends BasePlugin {
     if (!text || !String(text).trim()) throw new Error('appendNote needs text.');
     const { node, target } = await this._resolveCardRef({ basket, card });
 
+    // On a checklist the server's append adds an item, and that is what "add this to the
+    // checklist" means. Refusing it failed a standard-test sign-off line (card 21 #1054).
+    if (target.kind === 'checklist') {
+      const r = await this._call('post', `/api/cards/${target.id}/items`, { body: { text: String(text).trim() } });
+      return {
+        success: true,
+        appended: { card: target.id, title: target.title, basket: node?.id ?? null, basketTitle: node?.title ?? null, addedChars: String(text).trim().length, asItem: r?.item ?? r?.id ?? true }
+      };
+    }
     if (target.kind && target.kind !== 'text' && target.kind !== 'code') {
-      throw new Error(`Card "${target.title}" is a ${target.kind} card; appendNote only works on text and code cards.`);
+      throw new Error(`Card "${target.title}" is a ${target.kind} card; appendNote works on text, code and checklist cards.`);
     }
 
     // The server's append route: never resends the body, so it cannot race the
