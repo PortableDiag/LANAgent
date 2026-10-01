@@ -1726,6 +1726,19 @@ export class TelegramDashboard extends TelegramInterface {
     // Clarification answer buttons: the chosen option is the owner's answer to the pending
     // reasoning question, so it goes back through processNaturalLanguage like typed text.
     // Skills another agent taught (pending until approved): buttons sent by the Trellis listener.
+    // Approve / Reject on a Trellis sign-off notice (trellisChannelListener._tellOperatorSignoff).
+    this.bot.action(/^trellis_so:(\d+):(a|r)$/, async (ctx) => {
+      ctx.answerCbQuery().catch(() => {});
+      if (!ctx.isMaster) return;
+      const listener = this.agent.apiManager.getPlugin('trellis-notes')?.listener;
+      await ctx.editMessageReplyMarkup(undefined).catch(() => {});
+      if (!listener?.answerSignoff) return ctx.reply('The Trellis listener is not running, so I cannot sign. Reply e.g. "approve trellis card <number>".');
+      try {
+        await ctx.reply(await listener.answerSignoff(ctx.match[1], ctx.match[2]));
+      } catch (error) {
+        await ctx.reply(`❌ ${error.message}`);
+      }
+    });
     this.bot.action(/^skill_(ok|no):(.+)$/, async (ctx) => {
       ctx.answerCbQuery().catch(() => {});
       if (!ctx.isMaster) return;

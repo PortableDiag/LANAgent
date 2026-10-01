@@ -2,6 +2,13 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.441] - 2026-10-01
+
+### Fixed
+- **Answering a sign-off request with "approve" failed.** The operator replied "Approved" to a sign-off notice. The agent ran an unrelated "approve" action, which failed, and then did not know what the reply referred to. The notice had gone out as a bare notification, outside the conversation the agent reads to work out what a "yes" approves. Now:
+  - The notice has **✅ Approve** and **🛑 Reject** buttons, bound to the version of the card it describes. If the card changed since, nothing is signed and the reply says so.
+  - The notice is recorded in the operator's conversation, so a typed "approve" or "yes" resolves to that card.
+
 ## [2.25.440] - 2026-10-01
 
 ### Fixed

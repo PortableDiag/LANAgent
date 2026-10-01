@@ -163,7 +163,7 @@ export class TrellisChannelListener {
         const rows = data?.inbox || [];
         const messages = rows.filter(m => (m.reason == null || m.reason === 'message') && Number.isFinite(Number(m.seq)));
         const others = rows.filter(m => !messages.includes(m));
-        this._noteOtherInboxRows(others);
+        this._noteOtherInboxRows(others, doc);
         this._inboxHadPending = messages.length > 0;
         this._inboxOtherPending = this._inboxOtherPending || others.length > 0;
         for (const m of messages) {
@@ -202,28 +202,65 @@ export class TrellisChannelListener {
    * Inbox rows that are not channel messages (a sign-off request, so far). Logged once per card
    * and content digest, so the log says what was asked without repeating it every cycle.
    */
-  _noteOtherInboxRows(rows) {
+  _noteOtherInboxRows(rows, doc = null) {
     this.otherInboxSeen = this.otherInboxSeen || new Set();
     for (const r of rows) {
       const id = `${r.reason}:${r.card}:${r.digest || ''}`;
       if (this.otherInboxSeen.has(id)) continue;
       this.otherInboxSeen.add(id);
       logger.info(`[trellis-listen] inbox ${r.reason || 'row'} on card ${r.card}${r.title ? ` ("${r.title}")` : ''}${r.from ? ` from ${r.from}` : ''} — not a channel message`);
-      if (r.reason === 'signoff') this._tellOperatorSignoff(r);
+      if (r.reason === 'signoff') this._tellOperatorSignoff(r, doc);
     }
   }
 
   /**
    * Someone asked this agent to sign off on a card. It signs only on the operator's word, so the
-   * operator hears about it once per card version, with the exact words that answer it.
+   * operator hears about it once per card version, with buttons for the answer.
+   *
+   * 2026-10-01: the operator answered a notice with "Approved" and the agent did not know what
+   * was meant. The notice went out as a bare notification, outside the conversation the go-ahead
+   * resolver reads, and the reply matched an unrelated "approve" action. So the notice now (1)
+   * carries Approve / Reject buttons bound to the version it describes, and (2) is recorded in
+   * the operator's conversation, so a typed "approve" / "yes" resolves to this card.
    */
-  _tellOperatorSignoff(r) {
+  _tellOperatorSignoff(r, doc = null) {
     const tg = this.agent?.interfaces?.get?.('telegram');
+    const where = doc?.name ? ` in the ${doc.name} document` : '';
+    const ref = doc?.id ? `${doc.id}:${r.card}` : String(r.card);
+    this.pendingSignoffs = this.pendingSignoffs || new Map();
+    const id = String(++this.signoffSeq || (this.signoffSeq = 1));
+    this.pendingSignoffs.set(id, { ref, card: r.card, digest: r.digest || null, title: r.title || null, where, at: Date.now() });
+    if (this.pendingSignoffs.size > 50) this.pendingSignoffs.delete(this.pendingSignoffs.keys().next().value);
+    const text = `📝 ${r.from || 'Someone'} asked me to sign off on Trellis card ${r.card}${r.title ? ` "${r.title}"` : ''}${where}. ` +
+      'I sign only when you say so: tap a button, or reply "approve" / "reject". ' +
+      `To ask for changes, reply "request changes on trellis card ${r.card}: <what to change>".`;
+    // So a typed reply ("approve", "yes") resolves to this card: the go-ahead resolver reads this.
+    this.agent?.memoryManager?.storeConversation?.(this._ownerUserId(), '',
+      `${text} (Pending: sign off on Trellis card ${r.card}${where}.)`, { interface: 'trellis', from: r.from || 'trellis' })
+      ?.catch?.(() => {});
     if (!tg?.sendNotification) return;
-    const text = `📝 ${r.from || 'Someone'} asked me to sign off on Trellis card ${r.card}${r.title ? ` "${r.title}"` : ''}. ` +
-      `I sign only when you say so. Reply e.g. "approve trellis card ${r.card}", "request changes on trellis card ${r.card}: <note>" ` +
-      `or "reject trellis card ${r.card}". If the card changes first, my approval would not count and I will tell you.`;
-    tg.sendNotification(text, { parse_mode: undefined }).catch(err => logger.debug(`[trellis-listen] sign-off notice failed: ${err.message}`));
+    const keyboard = [[
+      { text: '✅ Approve', callback_data: `trellis_so:${id}:a` },
+      { text: '🛑 Reject', callback_data: `trellis_so:${id}:r` }
+    ]];
+    tg.sendNotification(text, { parse_mode: undefined, reply_markup: { inline_keyboard: keyboard } })
+      .catch(err => logger.debug(`[trellis-listen] sign-off notice failed: ${err.message}`));
+  }
+
+  /**
+   * A button on a sign-off notice: sign as told, against the version the notice described.
+   * Returns the line to show the operator.
+   */
+  async answerSignoff(id, verb) {
+    const p = this.pendingSignoffs?.get(String(id));
+    if (!p) return 'That sign-off request has expired (or I restarted). Reply e.g. "approve trellis card <number>".';
+    const verdict = verb === 'a' ? 'approved' : 'rejected';
+    const r = await this.plugin.execute({ action: 'signOff', card: p.ref, verdict, ...(p.digest ? { digest: p.digest } : {}) });
+    if (r?.success) {
+      this.pendingSignoffs.delete(String(id));
+      return `${verdict === 'approved' ? '✅ Approved' : '🛑 Rejected'} Trellis card ${p.card}${p.title ? ` "${p.title}"` : ''}${r.signoff?.done ? ' — it is now fully signed off.' : '.'}`;
+    }
+    return `❌ Not signed: ${r?.error || 'unknown error'}`;
   }
 
   /** Long-poll until the document changes (~25 s), or sleep when that is not possible. */
