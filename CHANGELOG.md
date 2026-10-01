@@ -2,6 +2,11 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.440] - 2026-10-01
+
+### Fixed
+- **A sign-off on trellis-web went out without the content check.** trellis-web v0.83 reports the card's content digest as `signoff.digest`, not the desktop's `signoff_digest`, which reads null there. The agent sent no digest, so an approval could land on text it never read. It now sends whichever one the server gives.
+
 ## [2.25.439] - 2026-10-01
 
 ### Fixed

@@ -533,7 +533,9 @@ const actions = {
       : /^(reject|rejected|no|deny)/.test(v) ? 'rejected' : null;
     if (!norm) throw new Error('signOff verdict is approved, changes-requested or rejected.');
     const c = await this._card(ref);
-    const read = digest || c.signoff_digest || null;
+    // The desktop reads carry `signoff_digest`; trellis-web v0.83 carries it as `signoff.digest`
+    // (its top-level field read null on 2026-10-01). Either is the content as read.
+    const read = digest || c.signoff_digest || c.signoff?.digest || null;
     const body = { verdict: norm, ...(note ? { note: String(note).slice(0, 200) } : {}), ...(read ? { digest: read } : {}) };
     try {
       const r = await this._call('post', `/api/cards/${c.id}/signoff`, { body });
