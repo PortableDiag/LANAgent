@@ -82,6 +82,9 @@ export class TrellisStream {
         validateStatus: () => true,
         headers: {
           Accept: 'text/event-stream',
+          // A compressed stream is held back in blocks: Caddy's zstd on web v0.84.0 delivered
+          // nothing (relay 2754 #327/#330). Ask for it uncompressed.
+          'Accept-Encoding': 'identity',
           'X-API-Key': this.plugin.credentials?.apiKey,
           'X-Agent': this.plugin._agentName(),
           ...(this.cursor ? { 'Last-Event-ID': this.cursor } : {})

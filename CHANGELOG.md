@@ -2,6 +2,11 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.451] - 2026-10-01
+
+### Changed
+- The Trellis event stream is requested uncompressed (`Accept-Encoding: identity`). trellis-web's stream had delivered nothing because a proxy compressed it and held its bytes back to fill a block. That is fixed on the server, and on trellis-web the stream now stays open with events arriving within a second.
+
 ## [2.25.450] - 2026-10-01
 
 ### Fixed
