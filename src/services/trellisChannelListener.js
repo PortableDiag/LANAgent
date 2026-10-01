@@ -256,6 +256,7 @@ export class TrellisChannelListener {
     if (!p) return 'That sign-off request has expired (or I restarted). Reply e.g. "approve trellis card <number>".';
     const verdict = verb === 'a' ? 'approved' : 'rejected';
     const r = await this.plugin.execute({ action: 'signOff', card: p.ref, verdict, ...(p.digest ? { digest: p.digest } : {}) });
+    logger.info(`[trellis-listen] operator's ${verdict} button on card ${p.card}: ${r?.success ? 'signed' : `not signed (${r?.error || 'unknown'})`}`);
     if (r?.success) {
       this.pendingSignoffs.delete(String(id));
       return `${verdict === 'approved' ? '✅ Approved' : '🛑 Rejected'} Trellis card ${p.card}${p.title ? ` "${p.title}"` : ''}${r.signoff?.done ? ' — it is now fully signed off.' : '.'}`;
