@@ -368,7 +368,7 @@ export class TrellisChannelListener {
     if (!reply) { this._settleReaction(card, target.seq, working, failed ? '🤷' : '👍', target._outcome?.note); return; }
     const files = teach?.files || null;
     const said = await this.plugin._call('post', `/api/cards/${card}/say`, {
-      body: { text: reply.slice(0, MAX_REPLY_CHARS), ...(files ? { files } : {}) },
+      body: { text: quietBroadcasts(reply).slice(0, MAX_REPLY_CHARS), ...(files ? { files } : {}) },
       ...(files ? { timeoutMs: 120000 } : {})
     });
     if (Number.isFinite(said?.seq)) this.cursors.set(key, Math.max(maxSeq, said.seq));
@@ -515,7 +515,7 @@ export class TrellisChannelListener {
 
   async _operatorReply(m, context, doc, card) {
     try {
-      const result = await this.agent.processNaturalLanguage(this._stripAddressing(m.text) + this._sharedTaskNote(m), {
+      const result = await this.agent.processNaturalLanguage(this._stripAddressing(m.text) + this._sharedTaskNote(m) + this._channelFileNote(context, card), {
         // The operator's own user id, so a Trellis request and a Telegram one are one
         // conversation with the same person.
         userId: this._ownerUserId(),
@@ -548,6 +548,22 @@ export class TrellisChannelListener {
     const others = to.length ? to.join(', ') : 'the other agents in this channel';
     return `\n\n(Note for ${this.name}: this message also goes to ${others}. Do only your own part, as ${this.name}: ` +
       'act for yourself, not for the other agents, and do not list or describe your own internal sub-agents in this channel.)';
+  }
+
+  /**
+   * Files posted in a channel are attachments of the channel's own card, shown in messages as
+   * "[name](trellis:file:N)". Without saying so, "proceed" on "use the attached report" planned
+   * a readFile with no card and "its the attached file" was answered from memory (2026-10-01).
+   */
+  _channelFileNote(context, card) {
+    const files = new Map();
+    for (const c of context) {
+      for (const f of String(c.text || '').matchAll(/\[([^\]]{1,120})\]\(trellis:file:(\d+)\)/g)) files.set(Number(f[2]), f[1]);
+    }
+    if (!files.size) return '';
+    const list = [...files].map(([i, n]) => `"${n}" = index ${i}`).join(', ');
+    return `\n\n(Note for ${this.name}: files in this channel are attachments of Trellis card ${card} (${list}). ` +
+      `To read one, use trellis-notes readFile with card ${card} and that index.)`;
   }
 
   async _conversationReply(m, context, data) {
@@ -674,7 +690,18 @@ export class TrellisChannelListener {
 function textOf(result) {
   if (!result) return null;
   if (typeof result === 'string') return result;
-  return result.content || result.text || result.message || null;
+  const text = result.content || result.text || result.message || null;
+  // A structured value must never reach a channel as "[object Object]".
+  return text && typeof text === 'object' ? JSON.stringify(text, null, 2) : text;
+}
+
+/**
+ * A reply never broadcasts. Quoting the request ("@agents give me a status update") addressed
+ * the reply to every agent in the channel and the builtin answered it (card 21 #959,
+ * 2026-10-01). The fullwidth sign reads the same and is not a mention.
+ */
+export function quietBroadcasts(text) {
+  return String(text || '').replace(/(^|[^\w@.])@(agents|all|everyone)\b/gi, '$1＠$2');
 }
 
 /** The conversation reply's JSON, or its plain text when the model answered without JSON. */

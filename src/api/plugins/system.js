@@ -132,9 +132,9 @@ export default class SystemPlugin extends BasePlugin {
         // Check if running under PM2
         const pm2Check = await execAsync('pm2 list').catch(() => null);
         
-        if (pm2Check && pm2Check.stdout.includes('lanagent')) {
+        if (pm2Check && process.env.pm_id != null) {
           logger.info('Restarting via PM2...');
-          await execAsync('pm2 restart lanagent');
+          await execAsync(`pm2 restart ${Number(process.env.pm_id)}`);
         } else {
           // Fallback to process exit (systemd or other process manager will restart)
           logger.info('Exiting process for external restart...');
@@ -424,38 +424,45 @@ export default class SystemPlugin extends BasePlugin {
         pm2: null
       };
       
-      // Get git status
-      try {
-        const branch = await execAsync('git rev-parse --abbrev-ref HEAD', { cwd: this.deployPath });
-        const commit = await execAsync('git rev-parse --short HEAD', { cwd: this.deployPath });
-        const behind = await execAsync('git rev-list --count HEAD..origin/main', { cwd: this.deployPath });
-        
-        status.git = {
-          branch: branch.stdout.trim(),
-          commit: commit.stdout.trim(),
-          behindOrigin: parseInt(behind.stdout.trim()) || 0
-        };
-      } catch (error) {
-        status.git.error = 'Unable to get git status';
+      // Git status. The deploy directory is an rsync target, not a checkout, so fall back to the
+      // repo the agent analyses itself from (AGENT_REPO_PATH) and say which one was read.
+      const gitDirs = [this.deployPath, process.env.AGENT_REPO_PATH].filter(Boolean);
+      status.git.error = 'Unable to get git status';
+      for (const cwd of gitDirs) {
+        try {
+          const branch = await execAsync('git rev-parse --abbrev-ref HEAD', { cwd });
+          const commit = await execAsync('git rev-parse --short HEAD', { cwd });
+          const behind = await execAsync('git rev-list --count HEAD..origin/main', { cwd }).catch(() => ({ stdout: '' }));
+          status.git = {
+            path: cwd,
+            branch: branch.stdout.trim(),
+            commit: commit.stdout.trim(),
+            behindOrigin: parseInt(behind.stdout.trim()) || 0
+          };
+          break;
+        } catch { /* not a repo here; try the next */ }
       }
-      
-      // Check PM2 status
+
+      // PM2: find this very process by the pm_id PM2 gives it (the app is named "lan-agent",
+      // and `pm2 show` has no --json flag, so the old lookup never matched).
       try {
-        const pm2Result = await execAsync('pm2 show lanagent --json');
-        const pm2Data = JSON.parse(pm2Result.stdout);
-        if (pm2Data && pm2Data.length > 0) {
+        const procs = JSON.parse((await execAsync('pm2 jlist', { maxBuffer: 16 * 1024 * 1024 })).stdout);
+        const me = procs.find(p => process.env.pm_id != null && String(p.pm_id) === String(process.env.pm_id))
+          || procs.find(p => p.pid === process.pid);
+        if (me) {
           status.pm2 = {
-            status: pm2Data[0].pm2_env.status,
-            restarts: pm2Data[0].pm2_env.restart_time,
-            cpu: pm2Data[0].monit.cpu,
-            memory: Math.round(pm2Data[0].monit.memory / 1024 / 1024) + ' MB'
+            name: me.name,
+            status: me.pm2_env?.status,
+            restarts: me.pm2_env?.restart_time,
+            cpu: me.monit?.cpu,
+            memory: Math.round((me.monit?.memory || 0) / 1024 / 1024) + ' MB'
           };
         }
-      } catch (error) {
+      } catch {
         // PM2 not available or not managing this process
         status.pm2 = null;
       }
-      
+
       return {
         success: true,
         result: status

@@ -2,6 +2,16 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.432] - 2026-10-01
+
+### Fixed
+- **A reply could start with `[object Object]`.** A command whose result is structured (for example "give me a status update") had that result inserted as text, so the reply began with the literal `[object Object]`. Structured results are now shown as formatted JSON. The Trellis channel listener also converts any structured reply before posting it.
+- **System status said PM2 and git were unavailable on a PM2 install.** It looked for a PM2 app named `lanagent` using a flag `pm2 show` does not have, and ran git in the deploy directory, which is not a checkout. It now finds its own process through PM2's process list and reads git from the deploy directory or, failing that, `AGENT_REPO_PATH` (the reply says which). A restart under PM2 now restarts this process by its PM2 id.
+- **A file posted in a Trellis channel could not be read.** "Use the attached report" planned a `readFile` with no card, which failed with "No card given". When a request comes from a channel, `listFiles`, `readFile` and `downloadFile` now default to that channel's card, and a `trellis:file:N` reference is read as index N. The listener also tells the agent which card holds the files the conversation mentions. In a multi-step request, a Trellis step that names no card now acts on the card the previous Trellis step named.
+- **A Trellis reply could broadcast to every agent.** A reply that quoted the request ("@agents give me a status update") was itself addressed to every agent in the channel, so the built-in agent answered it. Replies now write `@agents`, `@all` and `@everyone` with a fullwidth ＠, which is not a mention. Named mentions are unchanged.
+- **GitHub issues could not be closed or edited.** `closeIssue` and `updateIssue` were accepted by the git plugin but never carried out. Both work now: close with an optional comment, or change the title, body or labels, reopen, or comment. Their arguments are read from the request even when the AI intent detector picked the action, so a comment is not dropped, and the result says whether a comment was posted.
+- **A bug report filed from a request was too vague to act on.** The issue's title and body were the request itself. The issue is now written from the request and the conversation it came from, with summary, steps to reproduce, actual, expected and evidence sections. Credentials, addresses and balances are excluded. If no model answers, the old behaviour is used.
+
 ## [2.25.431] - 2026-09-30
 
 ### Fixed

@@ -80,6 +80,18 @@ export default class GitPlugin extends BasePlugin {
         command: 'tag',
         description: 'Create or list tags',
         usage: 'tag({ name: "v1.0.0", message: "Release version 1.0.0" })'
+      },
+      {
+        command: 'closeIssue',
+        description: 'Close a GitHub issue by number, optionally with a closing comment',
+        usage: 'closeIssue({ number: 2584, comment: "Replaced by #2585" })',
+        examples: ['close issue #2584', 'close github issue 12 as a duplicate', 'close that bug report']
+      },
+      {
+        command: 'updateIssue',
+        description: 'Change a GitHub issue: new title or body, reopen it, or add a comment',
+        usage: 'updateIssue({ number: 2584, body: "…", comment: "…", state: "open" })',
+        examples: ['update issue #2584 with the reproduction steps', 'add a comment to issue 12', 'reopen issue 40']
       }
     ];
     this.repoPath = process.cwd();
@@ -175,7 +187,7 @@ export default class GitPlugin extends BasePlugin {
       case 'createIssue':
         // If we have a message field, it's from natural language
         if (data.message) {
-          return await this.createIssueFromNaturalLanguage(data.message);
+          return await this.createIssueFromNaturalLanguage(data.message, data.conversation);
         }
         // Otherwise use direct API
         return await this.createGitHubIssue(data);
@@ -185,6 +197,10 @@ export default class GitPlugin extends BasePlugin {
         return await this.getGitHubIssue(data);
       case 'searchIssues':
         return await this.searchGitHubIssues(data);
+      case 'closeIssue':
+        return await this.closeGitHubIssue(await this._withIssueParams(data, action));
+      case 'updateIssue':
+        return await this.updateGitHubIssue(await this._withIssueParams(data, action));
       default:
         throw new Error(`Unknown action: ${action}`);
     }
@@ -1118,7 +1134,148 @@ Keep it concise and follow conventional commit format (feat:, fix:, docs:, etc)`
   /**
    * Smart issue creation from natural language
    */
-  async createIssueFromNaturalLanguage(message) {
+  /** owner/repo of the working repository's GitHub origin, or null. */
+  async _githubRepo() {
+    const remote = await this.executeGitCommand('remote get-url origin');
+    const m = remote.success && remote.stdout.trim().match(/github\.com[\/:](?:[^@\/]+@)?([^\/]+)\/([^\/\.]+)/);
+    return m ? { owner: m[1], repo: m[2] } : null;
+  }
+
+  /**
+   * An intent the AI detector picked arrives as { query, needsParameterExtraction } and the
+   * plugin extracts its own arguments. Without this, "close issue #2584 with the comment: …"
+   * closed the issue and dropped the comment (2026-10-01). Given params win.
+   */
+  async _withIssueParams(data, action) {
+    if (!data.needsParameterExtraction || !this.agent?.providerManager?.generateResponse) return data;
+    const request = String(data.originalInput || data.query || '');
+    const prompt =
+      `Extract the arguments for a GitHub ${action} from this request. ` +
+      `Copy any comment, title or body text exactly as written; do not add or rephrase.\n` +
+      `Request: ${request}\n` +
+      `Answer with JSON only, leaving out what the request does not give: ` +
+      `{"number": <issue number>, "comment": "<text>", "title": "<text>", "body": "<text>", "state": "open" | "closed", "reason": "completed" | "not_planned"}`;
+    try {
+      const res = await this.agent.providerManager.generateResponse(prompt, { maxTokens: 1500, temperature: 0 });
+      const raw = String(res?.content || '').replace(/^```(?:json)?\s*|\s*```$/g, '');
+      const got = JSON.parse(raw.slice(raw.indexOf('{'), raw.lastIndexOf('}') + 1));
+      const out = { ...data };
+      for (const k of ['number', 'comment', 'title', 'body', 'state', 'reason']) {
+        if (out[k] == null && got?.[k] != null && got[k] !== '') out[k] = got[k];
+      }
+      return out;
+    } catch (err) {
+      this.logger.warn(`Issue parameter extraction failed: ${err.message}`);
+      return data;
+    }
+  }
+
+  /** The issue number from params, or "#2584" / "issue 2584" in the request. */
+  _issueNumber(data) {
+    const direct = Number(data.number ?? data.issue ?? data.issueNumber);
+    if (Number.isInteger(direct) && direct > 0) return direct;
+    const m = /(?:#|issue\s+(?:number\s+)?)(\d+)/i.exec(String(data._context?.originalInput || data.message || ''));
+    return m ? Number(m[1]) : null;
+  }
+
+  async _githubIssueCall(method, number, path, body) {
+    const where = await this._githubRepo();
+    if (!where) return { ok: false, data: { message: 'Not a GitHub repository' } };
+    const response = await fetch(`https://api.github.com/repos/${where.owner}/${where.repo}/issues/${number}${path}`, {
+      method,
+      headers: {
+        'Authorization': `token ${this.gitToken}`,
+        'Accept': 'application/vnd.github.v3+json',
+        'Content-Type': 'application/json',
+        'User-Agent': 'LANAgent/1.0'
+      },
+      body: JSON.stringify(body)
+    });
+    return { ok: response.ok, data: await response.json().catch(() => ({})) };
+  }
+
+  async closeGitHubIssue(data) {
+    if (!this.gitToken) return { success: false, error: 'GitHub personal access token not configured' };
+    const number = this._issueNumber(data);
+    if (!number) return { success: false, error: 'Which issue? Give its number, e.g. "close issue #12".' };
+    try {
+      if (data.comment) {
+        const c = await this._githubIssueCall('POST', number, '/comments', { body: String(data.comment) });
+        if (!c.ok) return { success: false, error: `GitHub API error: ${c.data.message}` };
+      }
+      const reason = /duplicate|not.?planned|won'?t/i.test(String(data.reason || '')) ? 'not_planned' : 'completed';
+      const r = await this._githubIssueCall('PATCH', number, '', { state: 'closed', state_reason: reason });
+      if (!r.ok) return { success: false, error: `GitHub API error: ${r.data.message}` };
+      // Say whether a comment went on: the reply's summary claimed one that was never sent.
+      return { success: true, issue: { number, state: r.data.state, url: r.data.html_url, title: r.data.title },
+        commented: !!data.comment,
+        message: `GitHub issue #${number} closed ${data.comment ? 'with a comment' : '(no comment was posted)'}` };
+    } catch (error) {
+      return { success: false, error: error.message };
+    }
+  }
+
+  async updateGitHubIssue(data) {
+    if (!this.gitToken) return { success: false, error: 'GitHub personal access token not configured' };
+    const number = this._issueNumber(data);
+    if (!number) return { success: false, error: 'Which issue? Give its number, e.g. "update issue #12".' };
+    try {
+      const patch = {};
+      if (data.title) patch.title = String(data.title);
+      if (data.body) patch.body = String(data.body);
+      if (data.state === 'open' || data.state === 'closed') patch.state = data.state;
+      if (Array.isArray(data.labels)) patch.labels = data.labels;
+      if (data.comment) {
+        const c = await this._githubIssueCall('POST', number, '/comments', { body: String(data.comment) });
+        if (!c.ok) return { success: false, error: `GitHub API error: ${c.data.message}` };
+      }
+      if (!Object.keys(patch).length && !data.comment) {
+        return { success: false, error: 'Nothing to change: give a title, body, state or comment.' };
+      }
+      let issue = null;
+      if (Object.keys(patch).length) {
+        const r = await this._githubIssueCall('PATCH', number, '', patch);
+        if (!r.ok) return { success: false, error: `GitHub API error: ${r.data.message}` };
+        issue = { number, state: r.data.state, url: r.data.html_url, title: r.data.title };
+      }
+      return { success: true, issue: issue || { number }, message: `GitHub issue #${number} updated` };
+    } catch (error) {
+      return { success: false, error: error.message };
+    }
+  }
+
+  /**
+   * A bug report written from the request and the conversation it came from: title, what
+   * happened, reproduction, expected, evidence. Null when no model answers, and the caller
+   * falls back to the keyword parser. The raw request alone made reports nobody could act on
+   * (issue #2584 was titled with the operator's sentence and had it as its whole body).
+   */
+  async _draftIssue(message, conversation) {
+    const pm = this.agent?.providerManager;
+    if (!pm?.generateResponse) return null;
+    const prompt =
+      `Write a GitHub issue for this request from my operator. Use the conversation as evidence.\n` +
+      `Request: ${message}\n\n` +
+      (conversation ? `Conversation (oldest first):\n${String(conversation).slice(-4000)}\n\n` : '') +
+      `Rules: be specific and factual; quote the exact faulty output where the conversation shows it; ` +
+      `never include passwords, keys, tokens, IP addresses, wallet addresses or balances. ` +
+      `Body sections in Markdown: "## Summary", "## Steps to reproduce", "## Actual", "## Expected", ` +
+      `"## Evidence", and "## Suspected cause" only if the conversation supports one.\n` +
+      `Answer with JSON only: {"title": "<under 90 chars>", "body": "<markdown>", "labels": ["bug" | "enhancement" | "documentation"]}`;
+    try {
+      const res = await pm.generateResponse(prompt, { maxTokens: 1500, temperature: 0.2 });
+      const raw = String(res?.content || '').replace(/^```(?:json)?\s*|\s*```$/g, '');
+      const obj = JSON.parse(raw.slice(raw.indexOf('{'), raw.lastIndexOf('}') + 1));
+      if (!obj?.title || !obj?.body) return null;
+      return { title: String(obj.title).slice(0, 120), body: String(obj.body),
+        labels: (Array.isArray(obj.labels) ? obj.labels : []).filter(l => ['bug', 'enhancement', 'documentation'].includes(l)) };
+    } catch (err) {
+      this.logger.warn(`Issue draft failed, using the plain request: ${err.message}`);
+      return null;
+    }
+  }
+
+  async createIssueFromNaturalLanguage(message, conversation = null) {
     try {
       // Check if this is about a recent error
       const isErrorReport = message.toLowerCase().includes('that error') || 
@@ -1165,7 +1322,7 @@ Keep it concise and follow conventional commit format (feat:, fix:, docs:, etc)`
       this.logger.info(`Creating issue for project: ${projectContext.project} (${projectContext.owner}/${projectContext.repo})`);
       
       // Parse issue details from the enhanced message
-      const issueDetails = parseIssueDetails(enhancedMessage);
+      const issueDetails = (await this._draftIssue(enhancedMessage, conversation)) || parseIssueDetails(enhancedMessage);
       
       // Save current working directory
       const originalPath = this.currentWorkingPath;

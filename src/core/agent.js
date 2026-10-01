@@ -3014,7 +3014,10 @@ Return ONLY a valid JSON object with the extracted parameters, nothing else.`;
             if (!finalParams.title || !finalParams.body) {
               finalParams = {
                 ...finalParams,
-                message: input // Pass original input for natural language processing
+                message: input, // Pass original input for natural language processing
+                // The conversation the report is about, so the issue carries the evidence (a
+                // Trellis bug report filed as just "you have [object Object]…", 2026-10-01).
+                ...(context?.trellis?.recent ? { conversation: String(context.trellis.recent).slice(-4000) } : {})
               };
               logger.info('Using natural language processing for git.createIssue');
             }
@@ -3088,10 +3091,12 @@ Return ONLY a valid JSON object with the extracted parameters, nothing else.`;
 
             logger.info(`Returning downloaded file: ${filePath} as ${type}`);
           } else if (result.success && result.result) {
-            // For successful plugin results, return the actual result content
+            // For successful plugin results, return the actual result content. A structured
+            // result is shown as JSON: interpolated as-is it reached a Trellis channel as the
+            // literal "[object Object]" (system.status, 2026-10-01).
             response = {
               type: 'text',
-              content: result.result
+              content: typeof result.result === 'string' ? result.result : safeJsonStringify(result.result, 2)
             };
             // Propagate session mode flags (e.g., journal mode enter/exit)
             if (result.enterMode) {
@@ -3441,7 +3446,6 @@ Return ONLY a valid JSON object with the extracted parameters, nothing else.`;
                         obj[key] = result[key];
                         return obj;
                       }, {}), 
-                      null, 
                       2
                     );
                   }

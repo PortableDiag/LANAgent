@@ -70,6 +70,8 @@ const MODES = ['auto', 'web', 'desktop'];
 const DOCS_TTL_MS = 5 * 60 * 1000;   // re-read the key's documents, as TrellisBridge does
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const DOC_CARD_RE = /^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}):(\d+)$/i;
+/** Read-only file actions that default to the channel's own card when a request names none. */
+const CHANNEL_FILE_ACTIONS = new Set(['listFiles', 'readFile', 'downloadFile']);
 
 // The document one action runs against. Carried per call rather than on the instance,
 // so two actions in flight against different documents cannot cross.
@@ -316,6 +318,15 @@ export default class TrellisNotesPlugin extends BasePlugin {
     delete data._trellis;
     if (channel?.document && data.document == null && !(typeof data.card === 'string' && data.card.includes(':'))) {
       data.document = channel.document;
+    }
+    // A file named in a channel ("[report.md](trellis:file:0)") is an attachment of the channel's
+    // own card. A planned "read that file" step carries no card (2026-10-01: readFile failed
+    // "No card given" on card 21's attachment), so the channel's card is the default.
+    if (CHANNEL_FILE_ACTIONS.has(action)) {
+      const ref = /trellis:file:(\d+)/.exec(String(data.index ?? data.file ?? ''));
+      if (ref) data.index = Number(ref[1]);
+      delete data.file;
+      if (channel?.card != null && (data.card == null || data.card === '') && data.title == null) data.card = channel.card;
     }
 
     try {

@@ -565,6 +565,12 @@ Live in-memory snapshot of download-token usage (tokens within their TTL window)
 
 Sync covering 2.25.417–2.25.423.
 
+### v2.25.432 — Git issues and Trellis channel files
+
+- git plugin: `closeIssue({ number, comment?, reason? })` and `updateIssue({ number, title?, body?, labels?, state?: "open"|"closed", comment? })`. The number can also be taken from the request ("close issue #12").
+- trellis-notes: when a request comes from a Trellis channel, `listFiles`, `readFile` and `downloadFile` without a `card` use the channel's card, and `index` (or `file`) accepts `trellis:file:N`.
+- `system.status` result: `git.path` names the repository read; `pm2.name` is the PM2 app name.
+
 ### v2.25.431 — Video and audio downloads (`/social/download`, ytdlp)
 
 - Files are named `<title> [<id>].<ext>`, so two videos with the same title never share a file.

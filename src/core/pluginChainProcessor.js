@@ -334,6 +334,8 @@ Analyze the request:`;
       try {
         logger.info(`Executing step ${stepNumber}/${steps.length}: ${step.description}`);
 
+        inheritTrellisTarget(steps, i, results);
+
         // Set timeout for this step
         const stepPromise = this.executeStep(step, sharedData, context);
         const timeoutPromise = new Promise((_, reject) => 
@@ -661,5 +663,30 @@ Analyze the request:`;
       });
     }
     return locks;
+  }
+}
+
+/**
+ * A Trellis step that names no card or document acts on the one the chain's earlier Trellis
+ * step named. The planner wrote "read card 21 and find the attachment" then "read the file
+ * attached to the card at index 0" with no card, and the second step failed (2026-10-01).
+ * Trellis only: other plugins' "card" may mean something else.
+ */
+export function inheritTrellisTarget(steps, i, results = []) {
+  const step = steps[i];
+  if (step?.plugin !== 'trellis-notes') return;
+  step.params = step.params || {};
+  for (let j = i - 1; j >= 0; j--) {
+    const prev = steps[j];
+    if (prev?.plugin !== 'trellis-notes') continue;
+    // The card the earlier step named, or else the one its result was about (the planner
+    // does not always put the card in params; readCard's result carries card.id).
+    const res = results.find(r => r.stepNumber === j + 1)?.result;
+    const resultCard = res && typeof res === 'object' ? (res.card?.id ?? (Number.isInteger(res.card) ? res.card : null)) : null;
+    const from = { card: prev.params?.card ?? resultCard, document: prev.params?.document };
+    for (const k of ['card', 'document']) {
+      if ((step.params[k] == null || step.params[k] === '') && from[k] != null && from[k] !== '') step.params[k] = from[k];
+    }
+    return;
   }
 }
