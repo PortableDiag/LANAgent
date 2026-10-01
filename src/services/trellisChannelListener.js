@@ -52,6 +52,8 @@ const MAX_AGENT_RUN = Number(process.env.TRELLIS_LISTEN_MAX_AGENT_RUN) || 8;
 const RUN_GAP_MS = 600000;
 // The model answers with exactly this when there is nothing worth saying ("thanks", "ok").
 const NO_REPLY = 'NO_REPLY';
+const CARD_REFRESH_MS = 6 * 60 * 60 * 1000;
+const CARD_MAX_SKILLS = 32;
 // Card writes another agent may ask for in one message, and the size of each.
 const MAX_CARD_WRITES = 3;
 const MAX_WRITE_CHARS = 8000;
@@ -76,6 +78,9 @@ export class TrellisChannelListener {
     this.rev = 0;
     this.warnedNoVia = false;      // logged once: web messages carry no `via` yet
     this.primed = false;           // true after the first full cycle since start
+    this.statePromises = new Map(); // `${card}:${seq}` → the pending "working" state call
+    this.cardHash = null;          // what was last published as this agent's card
+    this.cardAt = 0;
   }
 
   get name() { return this.plugin._agentName(); }
@@ -95,6 +100,7 @@ export class TrellisChannelListener {
     while (this.running) {
       try {
         await this.plugin._ensureTarget();
+        if (Date.now() - this.cardAt > CARD_REFRESH_MS) await this._publishCard();
         if (this.inbox === undefined) await this._probeInbox();
         if (this.inbox) { await this._inboxCycle(); continue; }
         await this._cycle();
@@ -285,6 +291,7 @@ export class TrellisChannelListener {
     const fromOperator = await this._isOperator(target);
     // 👀 while working on it, 👍 once answered (or when it needs no answer), 🤷 on failure.
     const working = this._react(card, target.seq, '👀');
+    this._startState(card, target.seq);
     try {
       await this._answer({ doc, card, key, target, messages, maxSeq, group, data, fromOperator, working });
     } catch (err) {
@@ -398,6 +405,70 @@ export class TrellisChannelListener {
       const clear = added ? this._react(card, seq, '👀', { remove: true }) : Promise.resolve();
       return clear.then(() => this._react(card, seq, emoji));
     }).catch(() => {});
+    this._settleState(card, seq, emoji === '🤷' ? 'failed' : 'completed');
+  }
+
+  /**
+   * Request states (A2A task lifecycle; relay 2754 #261–#268, desktop v0.208, web v0.78): the
+   * addressee records its own state on a message — working, then completed or failed. Data,
+   * where the reactions above are a convention; both are kept. Best effort and never awaited
+   * by the reply path. A server without the route (404) pauses states for 10 minutes; a 403
+   * (this agent is not an addressee) or 409 (the author canceled) is simply not an error.
+   * TRELLIS_REQUEST_STATES=false turns them off.
+   */
+  _state(card, seq, state, note = '') {
+    if (String(process.env.TRELLIS_REQUEST_STATES || 'true').toLowerCase() === 'false') return Promise.resolve(false);
+    if (!(Number(seq) > 0) || (this.statesPausedUntil || 0) > Date.now()) return Promise.resolve(false);
+    const body = { state, ...(note ? { note: String(note).slice(0, 200) } : {}) };
+    return this.plugin._call('post', `/api/cards/${card}/channel/${Number(seq)}/state`, { body })
+      .then(() => true)
+      .catch(err => {
+        if (err.status === 404) {
+          this.statesPausedUntil = Date.now() + 10 * 60000;
+          logger.debug('[trellis-listen] this server has no request states yet; retrying in 10 minutes');
+        } else {
+          logger.debug(`[trellis-listen] state ${state} on ${card}#${seq} not set: ${err.message}`);
+        }
+        return false;
+      });
+  }
+
+  _startState(card, seq) {
+    this.statePromises.set(`${card}:${seq}`, this._state(card, seq, 'working'));
+  }
+
+  /** The final state, sent after "working" has landed so it cannot be overwritten by it. */
+  _settleState(card, seq, state, note = '') {
+    const key = `${card}:${seq}`;
+    const started = this.statePromises.get(key) || Promise.resolve();
+    this.statePromises.delete(key);
+    return Promise.resolve(started).then(() => this._state(card, seq, state, note)).catch(() => false);
+  }
+
+  /**
+   * This agent's card (A2A AgentCard; web v0.78 / desktop v0.209): who it is and what it can
+   * do, so agents in a group know what to ask it. Published from the key bound to this
+   * agent's name; republished only when it changes, checked every CARD_REFRESH_MS. The skills
+   * listed are bundled ones and learned ones that passed the sharing privacy audit
+   * (shareAudit.js), never one it kept private. TRELLIS_AGENT_CARD=false turns it off.
+   */
+  async _publishCard() {
+    this.cardAt = Date.now();
+    if (String(process.env.TRELLIS_AGENT_CARD || 'true').toLowerCase() === 'false') return false;
+    try {
+      const api = await this.plugin._call('get', '/api').catch(() => null);
+      if (!api?.features?.agent_cards) return false;
+      const card = await buildAgentCard(this.name, this.cardDeps || {});
+      const hash = JSON.stringify(card);
+      if (hash === this.cardHash) return false;
+      await this.plugin._call('post', '/api/agents/card', { body: card });
+      this.cardHash = hash;
+      logger.info(`[trellis-listen] published this agent's card (${card.skills.length} skills)`);
+      return true;
+    } catch (err) {
+      logger.debug(`[trellis-listen] agent card not published: ${err.message}`);
+      return false;
+    }
   }
 
   /**
@@ -599,3 +670,29 @@ export function parseConversationAnswer(content) {
 
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 const escapeRegExp = (t) => String(t).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+/**
+ * The card body (the name is never a body field: the server takes it from the key).
+ * Exported for tests. `deps` lets tests supply the skills and the audit.
+ */
+export async function buildAgentCard(name, deps = {}) {
+  const description = String(process.env.TRELLIS_AGENT_DESCRIPTION ||
+    `${name || 'This agent'} is a LANAgent: an autonomous assistant that runs on its operator's own server. ` +
+    'In Trellis it answers in channels, and reads and writes cards, agenda items and skills in this document. ' +
+    'Its own tools include web search, scraping, email, media and file handling, scheduling and blockchain lookups. ' +
+    'Any agent can talk with it; only its operator\'s own messages make it act.').slice(0, 1000);
+  let skills = [];
+  try {
+    const service = deps.service || (await import('./skills/skillsService.js')).getSkillsService();
+    const audit = deps.audit || (await import('./skills/shareAudit.js')).getShareAudit();
+    const SkillSharing = deps.SkillSharing || (await import('./p2p/skillSharing.js')).default;
+    await service.scan();
+    for (const s of service.skills.values()) {
+      if ((s.meta?.status || 'active') !== 'active') continue;
+      if (!s.bundled && !(await audit.cleared(SkillSharing.payload(s)))) continue;
+      skills.push({ id: s.name, name: s.name, description: String(s.description || '').slice(0, 200) });
+    }
+  } catch { /* a card without skills is still a card */ }
+  skills = skills.sort((a, b) => a.id.localeCompare(b.id)).slice(0, CARD_MAX_SKILLS);
+  return { description, skills };
+}

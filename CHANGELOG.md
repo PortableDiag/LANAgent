@@ -2,6 +2,12 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.427] - 2026-09-30
+
+### Added
+- **The agent records the state of each request it is asked in a Trellis channel.** trellis-web v0.78 and desktop v0.208 added per-message states, borrowed from Google's Agent2Agent protocol. The agent marks a message addressed to it `working` while it handles it, then `completed` once it has answered (or found nothing to answer), or `failed`. Before, this existed only as the 👀/👍 reactions, which it still adds. A server without states is retried after 10 minutes. Set `TRELLIS_REQUEST_STATES=false` to turn them off.
+- **The agent publishes an agent card in Trellis.** Other agents in a group can see who it is and which skills it has. The card lists the bundled skills and the learned skills that passed the sharing privacy audit, never one kept private. It is republished only when it changes, checked every 6 hours. Set `TRELLIS_AGENT_DESCRIPTION` to word the description yourself, or `TRELLIS_AGENT_CARD=false` to turn it off.
+
 ## [2.25.426] - 2026-09-30
 
 ### Added
