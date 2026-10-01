@@ -71,7 +71,15 @@ const DOCS_TTL_MS = 5 * 60 * 1000;   // re-read the key's documents, as TrellisB
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const DOC_CARD_RE = /^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}):(\d+)$/i;
 /** Read-only file actions that default to the channel's own card when a request names none. */
-const CHANNEL_FILE_ACTIONS = new Set(['listFiles', 'readFile', 'downloadFile']);
+const CHANNEL_FILE_ACTIONS = new Set(['listFiles', 'readFile', 'downloadFile', 'describeImage']);
+
+/** "what is in the picture on trellis card 219?": a question that names an existing card. */
+export function isQuestionAboutCardPicture(text) {
+  const t = String(text || '').trim();
+  const question = /^(what|what's|whats|which|who|describe|tell me|read|look at|show me what|can you (see|read|tell))\b/i.test(t) || /\?\s*$/.test(t);
+  const existing = /\bcard\s*#?\s*\d+\b|\battached\b|\bon (that|this|the) (trellis )?card\b/i.test(t);
+  return question && existing;
+}
 
 // The document one action runs against. Carried per call rather than on the instance,
 // so two actions in flight against different documents cannot cross.
@@ -311,7 +319,7 @@ export default class TrellisNotesPlugin extends BasePlugin {
   }
 
   async execute(params) {
-    const { action, ...data } = params;
+    let { action, ...data } = params;
     // The Trellis channel this request came from ({document, card}), passed by the agent when the
     // operator asked in a channel. Never forwarded to the server.
     const channel = data._trellis && typeof data._trellis === 'object' ? data._trellis : null;
@@ -322,6 +330,17 @@ export default class TrellisNotesPlugin extends BasePlugin {
     // An intent the AI detector picked arrives as { query, needsParameterExtraction } with no
     // arguments: the agent leaves extraction to the plugin. "approve trellis card 44" reached
     // signOff with no card (2026-10-01), so read the arguments from the request here.
+    // A question about a picture already on a card is never a request to make one. The vector
+    // match sent "what is in the picture attached to trellis card 219" to createImageCard (0.61),
+    // which searched Wikimedia for "attached trellis 219" and would have posted what it found.
+    const asked = String(data._context?.originalInput || data.originalInput || data.query || '');
+    if (action === 'createImageCard' && isQuestionAboutCardPicture(asked)) {
+      this.logger.info(`createImageCard → describeImage: "${asked.slice(0, 120)}" asks about an existing card`);
+      action = 'describeImage';
+      for (const k of ['basket', 'url', 'path', 'title']) delete data[k];
+      data.needsParameterExtraction = true;
+      data.originalInput = asked;
+    }
     if (data.needsParameterExtraction) await this._extractArgs(action, data);
     // A file named in a channel ("[report.md](trellis:file:0)") is an attachment of the channel's
     // own card. A planned "read that file" step carries no card (2026-10-01: readFile failed

@@ -2,6 +2,24 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.444] - 2026-10-01
+
+### Fixed
+- **A picture read on a Trellis card came back as "[object Object]".** Vision providers return their answer under different names: OpenRouter uses `analysis`, OpenAI, Anthropic and Gab use `description`, and Ollama uses `content`. Reading a picture now takes whichever one the provider gives.
+
+## [2.25.443] - 2026-10-01
+
+### Fixed
+- **A question about a picture on a Trellis card could create a new image card.** "What is in the picture attached to trellis card 219?" matched `createImageCard`. That action searched Wikimedia Commons for "attached trellis 219" and would have posted whatever it found. A question that names an existing card is now answered by reading that card's picture, and nothing is created.
+
+### Added
+- **`describeImage({ card, index? })`** says what a picture on a card shows and transcribes any text in it. With no index, it uses the card's picture: an image card's own picture, the first attached image, or the first picture in the text.
+
+## [2.25.442] - 2026-10-01
+
+### Fixed
+- **The agent could not read a picture attached to a Trellis card.** `readFile` used only the server's text route, which reads text and PDF files and refuses an image ("not a PDF or a text file"). A picture is now downloaded and read by the vision model: described, with any text in it transcribed. `readFile` also reads an image card's pictures (`kind: "image"`) and pictures in a card's text (`kind: "inline"`). Audio and video point to `transcribeFile`. Any other type says what can be read. The vision call now receives the picture's real type instead of always being labelled JPEG.
+
 ## [2.25.441] - 2026-10-01
 
 ### Fixed

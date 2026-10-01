@@ -719,9 +719,10 @@ export class ProviderManager extends EventEmitter {
     throw new Error("No provider available for speech generation");
   }
 
-  async analyzeImage(imageBuffer, prompt) {
+  async analyzeImage(imageBuffer, prompt, options = {}) {
     const provider = await this.getCurrentProvider();
-    return await retryOperation(() => provider.analyzeImage(imageBuffer, prompt), { retries: 3 });
+    // options.mimeType: the real type of the picture (OpenRouter labels it image/jpeg otherwise).
+    return await retryOperation(() => provider.analyzeImage(imageBuffer, prompt, options), { retries: 3 });
   }
 
   async tryFallbackProviders(prompt, options) {

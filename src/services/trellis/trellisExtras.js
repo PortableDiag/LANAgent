@@ -144,8 +144,9 @@ export const EXTRA_COMMANDS = [
   // files
   { command: 'listFiles', description: 'List the files and pictures on a Trellis card (names, sizes, index numbers)',
     usage: 'listFiles({ card: 1391 })', examples: ['what files are attached to trellis card 1391', 'list the pictures on that trellis card'] },
-  { command: 'readFile', description: 'Read the text of a PDF or text file attached to a Trellis card (free)',
-    usage: 'readFile({ card: 1391, index: 0 })', examples: ['read the pdf attached to trellis card 1391', 'what does the attached document on that trellis card say'] },
+  { command: 'readFile', description: 'Read a file or picture on a Trellis card: the text of a PDF, text, markdown, CSV or JSON file, or what a picture shows (described, with its text transcribed)',
+    usage: 'readFile({ card: 1391, index: 0 })  // kind: "file" (attachments, default) | "image" (an image card\'s pictures) | "inline" (pictures in the text)',
+    examples: ['read the pdf attached to trellis card 1391', 'what does the attached document on that trellis card say', 'what is in the picture attached to trellis card 1391', 'read the image on that trellis card'] },
   { command: 'downloadFile', description: 'Download a file or picture from a Trellis card (or one posted in a channel) to a local file',
     usage: 'downloadFile({ card: 1391, index: 0, kind: "file" })  // kind: file | image | inline', examples: ['download the file from trellis card 1391', 'save the picture the operator posted in trellis'] },
   { command: 'transcribeFile', description: 'Transcribe an audio or video file attached to a Trellis card (paid from the Trellis AI allowance); appends the transcript to the card unless write is false',
@@ -156,6 +157,9 @@ export const EXTRA_COMMANDS = [
     usage: 'addImage({ card: 1391, path: "/path/to/chart.png" })', examples: ['add the chart image to the trellis card', 'put this picture on my trellis note'] },
   { command: 'ocrImage', description: 'Read the text out of a picture card in Trellis',
     usage: 'ocrImage({ card: 1391 })', examples: ['read the text in the trellis picture', 'ocr the screenshot card in trellis'] },
+  { command: 'describeImage', description: 'Look at a picture already on a Trellis card (an attached image, or an image card) and say what it shows, transcribing any text in it',
+    usage: 'describeImage({ card: 219, index: 5 })  // index optional: the first picture on the card',
+    examples: ['what is in the picture attached to trellis card 219', 'describe the image on trellis card 44', 'what does the photo on that trellis card show', 'read the text in the image attached to the trellis card', 'look at the picture on trellis card 12'] },
   { command: 'createImageCard', description: 'Make an IMAGE card in a Trellis basket from a picture: find one on the web by description (freely licensed, from Wikimedia Commons), fetch one from an image URL, or upload a local file',
     usage: 'createImageCard({ basket: "AgentTests", query: "cool frog", title: "Frog" })  // or url: "https://…/x.jpg", or path: "/…/x.png"',
     examples: ['find a cool frog picture and make an image card in trellis', 'make a trellis image card of a lighthouse', 'post this picture as an image card in trellis', 'find a picture of a cat and put it on a trellis card'] },
@@ -359,12 +363,65 @@ const actions = {
     };
   },
 
-  async readFile({ index = 0, ...ref }) {
+  /**
+   * Read any file on a card. Text and PDF come from the server's text route. A picture has no
+   * text there (400 "not a PDF or a text file"), so it is downloaded and read by the vision model:
+   * described, with any text in it transcribed. 2026-10-01: an attached PNG could not be read.
+   */
+  async readFile({ index = 0, kind = 'file', ...ref }) {
     const c = await this._card(ref);
-    const r = await this._call('get', `/api/cards/${c.id}/attachments/${Number(index)}/text`);
-    const text = String(r.text || '');
-    return { success: true, card: c.id, name: r.name || null, chars: r.chars ?? text.length,
-      text: text.length > MAX_TEXT_CHARS ? `${text.slice(0, MAX_TEXT_CHARS)}\n… [${text.length - MAX_TEXT_CHARS} more chars]` : text };
+    const i = Number(index);
+    if (kind === 'file') {
+      try {
+        const r = await this._call('get', `/api/cards/${c.id}/attachments/${i}/text`);
+        const text = String(r.text || '');
+        return { success: true, card: c.id, name: r.name || null, chars: r.chars ?? text.length,
+          text: text.length > MAX_TEXT_CHARS ? `${text.slice(0, MAX_TEXT_CHARS)}\n… [${text.length - MAX_TEXT_CHARS} more chars]` : text };
+      } catch (err) {
+        if (err.status !== 400 && err.status !== 415) throw err;
+      }
+    }
+    const route = kind === 'image' ? `/api/cards/${c.id}/images/${i}`
+      : kind === 'inline' ? `/api/cards/${c.id}/inline/${i}`
+      : `/api/cards/${c.id}/attachments/${i}`;
+    const got = await this._download(route);
+    const name = got.name || `${kind}-${i}`;
+    const type = String(got.contentType || '').toLowerCase();
+    const isImage = type.startsWith('image/') || /\.(png|jpe?g|gif|webp|bmp)$/i.test(name);
+    if (isImage) {
+      const pm = this.agent?.providerManager;
+      if (!pm?.analyzeImage) return { success: false, card: c.id, name, error: `${name} is a picture, and no vision model is available to read it.` };
+      const ext = (/\.(png|jpe?g|gif|webp|bmp)$/i.exec(name)?.[1] || '').toLowerCase();
+      const mimeType = type.startsWith('image/') ? type.split(';')[0] : `image/${ext === 'jpg' ? 'jpeg' : ext || 'png'}`;
+      const out = await pm.analyzeImage(got.bytes,
+        'Describe this image in detail. Then transcribe every piece of text in it exactly, under the heading "Text in the image:". Say "none" if there is no text.',
+        { mimeType });
+      // Providers answer differently: OpenRouter {analysis}, others {content} / {text} /
+      // {description} or a plain string. String({…}) was "[object Object]" (2026-10-01).
+      const pick = typeof out === 'string' ? out : (out?.analysis ?? out?.content ?? out?.text ?? out?.description ?? out?.caption);
+      const text = (typeof pick === 'string' ? pick : (pick == null ? '' : JSON.stringify(pick))).trim();
+      if (!text) return { success: false, card: c.id, name, error: `The vision model returned nothing for ${name}.` };
+      return { success: true, card: c.id, name, kind: 'image', read: 'vision', chars: text.length, text: this._trim(text) };
+    }
+    if (type.startsWith('audio/') || type.startsWith('video/') || /\.(mp3|m4a|wav|ogg|mp4|mov|webm)$/i.test(name)) {
+      return { success: false, card: c.id, name, error: `${name} is audio or video. Use transcribeFile({ card: ${c.id}, index: ${i} }) to get its words.` };
+    }
+    return { success: false, card: c.id, name, error: `${name} (${type || 'unknown type'}) cannot be read as text. Text, markdown, CSV, JSON, PDF and pictures can; downloadFile saves anything else.` };
+  },
+
+  /** A picture already on a card: an image card's own picture, or the attachment that is one. */
+  async describeImage({ index = null, kind = null, ...ref }) {
+    const c = await this._card(ref);
+    if (kind) return this.readFile({ card: c.id, index: index ?? 0, kind });
+    if (c.kind === 'image' && index == null) return this.readFile({ card: c.id, index: 0, kind: 'image' });
+    if (index != null) return this.readFile({ card: c.id, index, kind: 'file' });
+    const att = await this._call('get', `/api/cards/${c.id}/attachments`).catch(() => ({}));
+    const pic = (att.attachments || []).find(a => /\.(png|jpe?g|gif|webp|bmp)$/i.test(String(a.name || '')) || String(a.type || a.content_type || '').startsWith('image/'));
+    if (pic) return this.readFile({ card: c.id, index: pic.index ?? 0, kind: 'file' });
+    const img = await this._call('get', `/api/cards/${c.id}/images`).catch(() => ({}));
+    if ((img.images || []).length) return this.readFile({ card: c.id, index: 0, kind: 'image' });
+    if ((img.inline_images || []).length) return this.readFile({ card: c.id, index: 0, kind: 'inline' });
+    return { success: false, card: c.id, error: `Card ${c.id} has no picture on it.` };
   },
 
   async downloadFile({ index = 0, kind = 'file', ...ref }) {

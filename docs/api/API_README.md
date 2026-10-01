@@ -565,6 +565,13 @@ Live in-memory snapshot of download-token usage (tokens within their TTL window)
 
 Sync covering 2.25.417–2.25.423.
 
+### v2.25.442 — Reading Trellis files (trellis-notes `readFile`)
+
+- v2.25.443: `describeImage({ card, index? })` reads a picture already on a card (an image card, the first attached image, or the first inline picture). A question about a picture on an existing card is never turned into `createImageCard`.
+
+- `readFile({ card, index, kind? })`: `kind` is `"file"` (attachments, default), `"image"` (an image card's pictures) or `"inline"` (pictures in the text).
+- Text, markdown, CSV, JSON and PDF return `{ success, card, name, chars, text }`. A picture returns `{ success, card, name, kind: "image", read: "vision", text }`, where `text` is a description plus any text in the picture.
+
 ### v2.25.437 — Trellis card sign-offs (trellis-notes)
 
 - `signOff({ card, verdict: "approved"|"changes-requested"|"rejected", note? })`: `{ success, card, title, verdict, digest }`. A card changed since it was read gives `{ success: false, error, currentDigest }`.
