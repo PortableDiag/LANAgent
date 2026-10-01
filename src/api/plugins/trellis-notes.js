@@ -91,6 +91,11 @@ function normalizeParamAliases(data) {
   for (const list of Object.values(PARAM_ALIASES)) for (const a of list) delete data[a];
 }
 
+// The configured default basket can be deleted or renamed on the server (the operator's account
+// key reaches every basket, and test baskets come and go): say that, rather than a bare miss.
+const missingDefault = (target) =>
+  `The default basket "${target}" was not found (it may have been deleted or renamed). Name a basket, or set a new default (trellis-notes defaultBasket).`;
+
 // Per-call Trellis channel context (see execute); async-safe across concurrent calls.
 const channelCall = new AsyncLocalStorage();
 
@@ -665,7 +670,7 @@ export default class TrellisNotesPlugin extends BasePlugin {
     if (typeof target === 'number' || /^\d+$/.test(String(target))) {
       const id = Number(target);
       const hit = list.find(n => n.id === id);
-      if (!hit) throw new Error(`No basket with id ${id}.`);
+      if (!hit) throw new Error(!given && allowDefault ? missingDefault(target) : `No basket with id ${id}.`);
       return hit;
     }
 
@@ -681,7 +686,7 @@ export default class TrellisNotesPlugin extends BasePlugin {
     if (partial.length > 1) {
       throw new Error(`"${target}" is ambiguous: ${partial.slice(0, 8).map(n => `${n.title} (${n.id})`).join(', ')}.`);
     }
-    throw new Error(`No basket matching "${target}".`);
+    throw new Error(!given && allowDefault ? missingDefault(target) : `No basket matching "${target}".`);
   }
 
   /** Ids of a basket and every basket under it. */
