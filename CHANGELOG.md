@@ -2,6 +2,12 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.429] - 2026-09-30
+
+### Changed
+- **A missing default Trellis basket says what happened.** If the basket set as the plugin's default has been deleted or renamed, a request that names no basket now says so ("The default basket … was not found (it may have been deleted or renamed)"), instead of a bare "No basket matching". Requests made from a Trellis channel use that channel's basket first and are unaffected.
+- The `teachSkill` example now names the Trellis agent Orbit (renamed from Outrider).
+
 ## [2.25.428] - 2026-09-30
 
 ### Fixed

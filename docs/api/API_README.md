@@ -565,6 +565,14 @@ Live in-memory snapshot of download-token usage (tokens within their TTL window)
 
 Sync covering 2.25.417–2.25.423.
 
+### v2.25.428 — Trellis channel tasks (trellis-notes)
+
+- `connectCards({ from, to, label?, style?, arrows?, color? })` draws a connector between two cards of ONE basket (`POST /api/nodes/{basket}/connectors` on trellis-web and the desktop app). Cards in different baskets are refused with a hint to use a `[[#id]]` link instead.
+- `layoutFlow({ basket?, dir: "down"|"right" })` arranges the cards a basket's connectors join as a flowchart.
+- A request that comes from a Trellis channel carries the channel (document and card) to the plugin. Card-creating actions that name no basket use the channel card's own basket and document. A named basket is still honoured.
+- The channel listener marks a request `failed` (with a reason) when it did not finish, and tells the agent to do only its own part of a message addressed to several agents.
+- v2.25.429: if the configured default basket no longer exists, the error says so.
+
 ### v2.25.426 — Skill privacy audit before sharing (skills plugin)
 
 A skill is shared with other agents (P2P sync, requests, broadcasts, knowledge packs) only after its exact outgoing text passes a privacy audit. The verdict is keyed by the text's sha256, so any edit is audited again.
