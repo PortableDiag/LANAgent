@@ -2,6 +2,11 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.435] - 2026-10-01
+
+### Changed
+- **The Dry endpoints can be set from the environment.** `DRY_BASE_URL` (default `https://dry.ai`) and `DRY_MCP_URL` (default `<base>/api/mcp`). Dry now offers Claude and ChatGPT a separate OAuth connector address. The plugin's `dry_pat_` token still uses `https://dry.ai/api/mcp`, which Dry's `/api/config` lists as its MCP URL, so nothing changes by default.
+
 ## [2.25.434] - 2026-10-01
 
 ### Security

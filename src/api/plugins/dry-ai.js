@@ -18,7 +18,12 @@ import { PluginSettings } from '../../models/PluginSettings.js';
  * noreply@unitarylabs.com, as it was for v1's codes.
  */
 
-const BASE = 'https://dry.ai';
+// The web origin (sign-in, tokens, REST) and the token-auth MCP endpoint. Dry's own
+// GET /api/config and /api/mcp/guide name them (webOrigin, mcpUrl). Its OAuth connector for
+// Claude/ChatGPT (drydotai-v2-mcp-server…workers.dev, 2026-10) is a different door that a
+// dry_pat_ token does not use. Override here if Dry moves either one.
+const BASE = (process.env.DRY_BASE_URL || 'https://dry.ai').replace(/\/+$/, '');
+const MCP_URL = process.env.DRY_MCP_URL || `${BASE}/api/mcp`;
 const PAGE_TYPE = '00000000-0000-7000-8000-000000000004';
 const UA = 'LANAgent-dry/2';
 const MAIL_FROM = 'unitarylabs.com';
@@ -307,7 +312,7 @@ export default class DryAIPlugin extends BasePlugin {
   }
 
   async _rpc(method, params = {}) {
-    const res = await fetch(`${BASE}/api/mcp`, {
+    const res = await fetch(MCP_URL, {
       method: 'POST',
       headers: { Authorization: `Bearer ${this.token}`, 'Content-Type': 'application/json', Accept: 'application/json, text/event-stream', 'User-Agent': UA },
       body: JSON.stringify({ jsonrpc: '2.0', id: ++this.rpcId, method, params }),
