@@ -2,6 +2,13 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.459] - 2026-10-01
+
+### Fixed
+- **"Add to the card as requested" was answered with text.** A Trellis follow-up that only makes sense with the channel conversation went to the one-shot router. The router read it as a question and replied that the Trellis tool was not available (card 21 #1281). Requests that lean on the conversation ("as requested", "do your part", "add yours", "finish the task") now go to the reasoning agent with the channel conversation and the tools.
+- **The reasoning agent lost steps to its own parser.** Some models reply with the step and then a second JSON object. One greedy match from the first `{` to the last `}` is not JSON, so 3 of 10 steps on card 21 #1268 were thrown away. Every top-level object is now parsed and merged; braces inside strings are text.
+- **"Max iterations reached without finding an answer" was posted into a channel.** When its steps run out, the reasoning agent now makes one last call that may only answer: what it actually did and what is still not done. Each tool step it takes is now logged (`ReAct action: tool.command {params}`).
+
 ## [2.25.458] - 2026-10-01
 
 ### Fixed

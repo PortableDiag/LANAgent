@@ -285,6 +285,7 @@ export class ReActAgent extends EventEmitter {
 
           // Tool steps are always reported (briefly); full thoughts only with showThoughts
           await progress(`🔧 ${action.tool}.${action.command}`);
+          logger.info(`ReAct action: ${action.tool}.${action.command} ${JSON.stringify(action.params || {}).slice(0, 200)}`);
 
           // Step 3: OBSERVATION - Execute and observe result
           run.toolCalls++;
@@ -304,6 +305,16 @@ export class ReActAgent extends EventEmitter {
             await context.showThinking(`👁️ Observation: ${obsPreview}...`);
           }
         }
+      }
+
+      // Out of steps: one last call that may only answer, so the person gets what was done and
+      // what is left instead of "Max iterations reached" posted into a channel (card 21 #1277).
+      const closing = await this._closingAnswer(query, thoughts, context, guidance).catch(() => null);
+      if (closing) {
+        const result = withTodo({ success: true, partial: true, answer: closing, thoughts, iterations: iteration, duration: Date.now() - startTime });
+        if (this.thoughtStore) await this.thoughtStore.saveThoughtChain(query, thoughts, result);
+        this.emit('maxIterations', result);
+        return result;
       }
 
       // Max iterations reached
@@ -391,6 +402,16 @@ export class ReActAgent extends EventEmitter {
     }
   }
 
+  /** A final answer from the steps taken so far, when the step budget is spent. Null if none. */
+  async _closingAnswer(query, history, context, guidance) {
+    const prompt = this.buildThinkingPrompt(query, history, guidance) +
+      '\n\nYou have no steps left. Do not call a tool. Reply with {"finalAnswer": "..."} only: say plainly what you ' +
+      'actually did (only what the observations show succeeded) and what is still not done.';
+    const response = await this.agent.providerManager.generateResponse(prompt, { maxTokens: 700, temperature: 0.2 });
+    const answer = this.parseThought(response?.content || response || '').finalAnswer;
+    return answer ? String(answer) : null;
+  }
+
   /**
    * Build the prompt for the thinking step
    */
@@ -463,15 +484,42 @@ Only include "todo" when your to-do list changes, and then send the whole list.
 Respond with valid JSON only.`;
   }
 
+  /** The top-level {...} objects in a text that parse as JSON (braces inside strings are skipped). */
+  static jsonObjects(text) {
+    const out = [];
+    const src = String(text || '');
+    let depth = 0, start = -1, inString = false, escaped = false;
+    for (let i = 0; i < src.length; i++) {
+      const c = src[i];
+      if (inString) {
+        if (escaped) escaped = false;
+        else if (c === '\\') escaped = true;
+        else if (c === '"') inString = false;
+        continue;
+      }
+      if (c === '"') { if (depth > 0) inString = true; continue; }
+      if (c === '{') { if (depth++ === 0) start = i; continue; }
+      if (c === '}' && depth > 0 && --depth === 0) {
+        try {
+          const v = JSON.parse(src.slice(start, i + 1));
+          if (v && typeof v === 'object' && !Array.isArray(v)) out.push(v);
+        } catch { /* not JSON: skip it */ }
+      }
+    }
+    return out;
+  }
+
   /**
    * Parse the thought response from LLM
    */
   parseThought(response) {
     try {
-      // Try to extract JSON from the response
-      const jsonMatch = response.match(/\{[\s\S]*\}/);
-      if (jsonMatch) {
-        const parsed = JSON.parse(jsonMatch[0]);
+      // Every top-level JSON object in the reply, merged in order. Some models send the step and
+      // then a second object (the to-do list, a correction); one greedy match from the first {
+      // to the last } is not JSON, and the whole step was lost (3 of 10 steps on card 21 #1268).
+      const objects = ReActAgent.jsonObjects(response);
+      if (objects.length) {
+        const parsed = Object.assign({}, ...objects);
         const options = Array.isArray(parsed.clarificationOptions)
           ? parsed.clarificationOptions.filter(o => typeof o === 'string' && o.trim()).map(o => o.trim().substring(0, 60)).slice(0, 4)
           : [];
