@@ -381,17 +381,23 @@ router.get('/', async (req, res) => {
     });
     if (creds.some(c => c.required) && !hasRequiredCreds) continue;
 
+    const base = PLUGIN_CREDIT_COSTS[plugin] || 3;
+    // The gateway bills and lists from this endpoint, so each action priced apart from the plugin
+    // is published here as well as in the catalog (ytdlp download 10 / audio 8, aiDetector by kind).
+    const actionCosts = {};
     const commands = offeredCommands(instance)
-      .map(cmd => ({
-        action: cmd.command || cmd.name,
-        description: cmd.description,
-        usage: cmd.usage
-      }));
+      .map(cmd => {
+        const action = cmd.command || cmd.name;
+        const cost = actionCreditCost(plugin, action);
+        if (cost !== base) actionCosts[action] = cost;
+        return { action, description: cmd.description, usage: cmd.usage, creditCost: cost };
+      });
 
     if (commands.length > 0) {
       services.push({
         plugin,
-        creditCost: PLUGIN_CREDIT_COSTS[plugin] || 3,
+        creditCost: base,
+        ...(Object.keys(actionCosts).length ? { actionCosts } : {}),
         commands
       });
     }

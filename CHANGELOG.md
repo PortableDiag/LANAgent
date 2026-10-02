@@ -5,7 +5,7 @@ All notable changes to LANAgent will be documented in this file.
 ## [2.25.456] - 2026-10-01
 
 ### Fixed
-- **A yt-dlp download through the service route cost a third of the same download elsewhere.** The ytdlp plugin had one flat price of 3 credits for every action. A video download or an audio extraction is the work the catalog prices as `youtube-download` 10 and `youtube-audio` 8, the same as the gateway's `social_download` / `social_audio`. Those two actions now cost 10 and 8 (info, search, formats and thumbnail stay 3). The catalog publishes them in `actionCosts`.
+- **A yt-dlp download through the service route cost a third of the same download elsewhere.** The ytdlp plugin had one flat price of 3 credits for every action. A video download or an audio extraction is the work the catalog prices as `youtube-download` 10 and `youtube-audio` 8, the same as the gateway's `social_download` / `social_audio`. Those two actions now cost 10 and 8 (info, search, formats and thumbnail stay 3). The catalog and the service list (`GET /api/external/service`, which the gateway bills and lists from) publish them in `actionCosts`, and each command carries its own `creditCost`.
 
 ## [2.25.455] - 2026-10-01
 
