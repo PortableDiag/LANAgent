@@ -1,5 +1,6 @@
 import { logger } from '../../utils/logger.js';
 import contractServiceWrapper from './contractServiceWrapper.js';
+import { isSystemTokenExempt } from './systemTokens.js';
 
 const REGISTRY_ABI = [
   // SkynetHub combined ABI (staking + registry)
@@ -110,7 +111,8 @@ class ScammerRegistryService {
       const persisted = await SystemSettings.getSetting('scammer_report_queue', []);
       if (Array.isArray(persisted) && persisted.length > 0) {
         for (const r of persisted) {
-          if (r?.address && !this._reportQueue.has(r.address.toLowerCase())) {
+          if (r?.address && !this._reportQueue.has(r.address.toLowerCase())
+              && !isSystemTokenExempt(r.network || this.network, r.address, 'scamRegistry')) {
             this._reportQueue.set(r.address.toLowerCase(), r);
           }
         }
@@ -172,6 +174,10 @@ class ScammerRegistryService {
 
     // Validate address
     if (!ethers.isAddress(address)) throw new Error(`Invalid address: ${address}`);
+    // Our own tokens are never reported: a report is a permanent on-chain record.
+    if (isSystemTokenExempt(this.network, address, 'scamRegistry')) {
+      throw new Error(`Refusing to report system token ${address}`);
+    }
 
     // Determine target type: wallet (1) or contract (2)
     // Auto-detect by checking on-chain bytecode if not explicitly specified
@@ -221,6 +227,8 @@ class ScammerRegistryService {
   async batchReportScammer(reports) {
     if (!this.isAvailable()) throw new Error('Scammer registry not configured');
     if (reports.length > 50) throw new Error('Maximum 50 addresses per batch');
+    const exempt = reports.find(r => isSystemTokenExempt(this.network, r?.address, 'scamRegistry'));
+    if (exempt) throw new Error(`Refusing to report system token ${exempt.address}`);
 
     const { ethers } = await import('ethers');
     const contract = await this._getContract(true);
@@ -733,6 +741,11 @@ class ScammerRegistryService {
     // Require high confidence — never auto-report borderline tokens
     if ((opts.confidence || 0) < 50) {
       logger.debug(`Scam report skipped for ${opts.symbol || address}: confidence ${opts.confidence} < 50 threshold`);
+      return;
+    }
+    // Our own tokens are exempt from the registry, however strong the signals look
+    if (isSystemTokenExempt(opts.network || 'bsc', address, 'scamRegistry')) {
+      logger.debug(`Scam report skipped for ${opts.symbol || address}: system token`);
       return;
     }
     const addrLower = address.toLowerCase();

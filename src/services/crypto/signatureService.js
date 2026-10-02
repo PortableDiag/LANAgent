@@ -12,7 +12,7 @@ const EIP712_DOMAIN = {
 };
 
 // Common message types
-const MESSAGE_TYPES = {
+export const MESSAGE_TYPES = {
     SIWE: 'Sign-In with Ethereum',
     TRANSACTION: 'Transaction Authorization',
     CONTRACT: 'Contract Interaction',

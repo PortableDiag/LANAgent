@@ -42,7 +42,7 @@ function getIdempotencyKeys(req, operation) {
  * @param {() => Promise<any>} execFn
  */
 async function handleIdempotentMutation(req, res, operation, execFn) {
-    const { rawKey, cacheKey } = getIdempotencyKeys(req, operation);
+    const { cacheKey } = getIdempotencyKeys(req, operation);
 
     if (cacheKey) {
         const cached = idempotencyCache.get(cacheKey);
@@ -71,7 +71,9 @@ async function handleIdempotentMutation(req, res, operation, execFn) {
             // Ensure no stale/partial error entries remain
             idempotencyCache.del(cacheKey);
         }
-        return res.status(500).json({ success: false, error: error.message });
+        // Validation and lookup failures carry their own status (400/404/503); only
+        // unexpected failures are a 500.
+        return res.status(error.statusCode || 500).json({ success: false, error: error.message });
     }
 }
 
@@ -202,10 +204,85 @@ function looksLikeCron(s) {
     return /^[\d*/,\-?LW#]+(\s+[\d*/,\-?LW#a-zA-Z]+){4,5}$/.test(trimmed);
 }
 
+/**
+ * Convert an Agenda job into the public schedule representation.
+ * @param {object} job
+ * @returns {object}
+ */
+function serializeScheduleJob(job) {
+    const attrs = job.attrs || job;
+    return {
+        jobId: String(attrs._id),
+        name: attrs.name,
+        nextRunAt: attrs.nextRunAt,
+        lastRunAt: attrs.lastRunAt,
+        lastFinishedAt: attrs.lastFinishedAt,
+        failCount: attrs.failCount || 0,
+        failReason: attrs.failReason,
+        repeatInterval: attrs.repeatInterval || null,
+        disabled: !!attrs.disabled,
+        data: attrs.data
+    };
+}
+
+/**
+ * Resolve and validate an LP market-maker Agenda job by ObjectId.
+ * @param {express.Request} req
+ * @returns {Promise<object>}
+ */
+async function resolveScheduleJob(req) {
+    const agenda = getAgenda(req);
+    if (!agenda) {
+        const error = new Error('Scheduler not available');
+        error.statusCode = 503;
+        throw error;
+    }
+
+    const { ObjectId } = await import('mongodb');
+    const { jobId } = req.params;
+
+    if (!ObjectId.isValid(jobId)) {
+        const error = new Error('Invalid jobId');
+        error.statusCode = 400;
+        throw error;
+    }
+
+    const jobs = await agenda.jobs({ _id: new ObjectId(jobId) });
+    const job = jobs[0];
+    if (!job || !Object.values(OPERATION_TO_JOB).includes((job.attrs || job).name)) {
+        const error = new Error('Scheduled job not found');
+        error.statusCode = 404;
+        throw error;
+    }
+
+    return job;
+}
+
+/**
+ * Validate a schedule value accepted by Agenda.
+ * @param {*} value
+ * @returns {boolean}
+ */
+function isValidScheduleValue(value) {
+    if (value instanceof Date) return !Number.isNaN(value.getTime());
+    if (typeof value === 'number') return Number.isFinite(value);
+    return typeof value === 'string' && value.trim().length > 0;
+}
+
+/**
+ * Validate a repeat interval accepted by Agenda.
+ * @param {*} value
+ * @returns {boolean}
+ */
+function isValidRepeatInterval(value) {
+    return (typeof value === 'number' && Number.isFinite(value) && value > 0)
+        || (typeof value === 'string' && value.trim().length > 0);
+}
+
 // POST /schedule — schedule a one-shot or recurring operation
 //   body: { operation: 'rebalance'|'collect'|'open'|'close', when: <ISO date | 'in 5 minutes' | cron expression>, data?: {...}, idempotencyKey?: string }
 router.post('/schedule', async (req, res) => {
-    const { rawKey, cacheKey } = getIdempotencyKeys(req, 'schedule');
+    const { cacheKey } = getIdempotencyKeys(req, 'schedule');
     try {
         if (cacheKey) {
             const cached = idempotencyCache.get(cacheKey);
@@ -266,17 +343,7 @@ router.get('/schedule', async (req, res) => {
         const jobs = await agenda.jobs({ name: { $in: Object.values(OPERATION_TO_JOB) } });
         res.json({
             success: true,
-            data: jobs.map(j => ({
-                jobId: String(j.attrs._id),
-                name: j.attrs.name,
-                nextRunAt: j.attrs.nextRunAt,
-                lastRunAt: j.attrs.lastRunAt,
-                lastFinishedAt: j.attrs.lastFinishedAt,
-                failCount: j.attrs.failCount || 0,
-                failReason: j.attrs.failReason,
-                repeatInterval: j.attrs.repeatInterval || null,
-                data: j.attrs.data
-            }))
+            data: jobs.map(serializeScheduleJob)
         });
     } catch (error) {
         logger.error('LP MM list-schedule error:', error);
@@ -284,25 +351,102 @@ router.get('/schedule', async (req, res) => {
     }
 });
 
-// DELETE /schedule/:jobId — cancel a single job
-router.delete('/schedule/:jobId', async (req, res) => {
+/**
+ * Update a scheduled job's next execution time or repeat interval.
+ * PATCH /schedule/:jobId
+ * Body: { when?: Date|string|number, repeatInterval?: string|number, data?: object }
+ */
+router.patch('/schedule/:jobId', async (req, res) => {
+    const { cacheKey } = getIdempotencyKeys(req, `schedule-update:${req.params.jobId}`);
     try {
-        const agenda = getAgenda(req);
-        if (!agenda) return res.status(503).json({ success: false, error: 'Scheduler not available' });
-        const { jobId } = req.params;
-        const ObjectId = (await import('mongodb')).ObjectId;
-        let filter;
-        try {
-            filter = { _id: new ObjectId(jobId) };
-        } catch {
-            return res.status(400).json({ success: false, error: 'Invalid jobId' });
+        if (cacheKey) {
+            const cached = idempotencyCache.get(cacheKey);
+            if (cached) return res.json(cached);
         }
-        const numRemoved = await agenda.cancel(filter);
-        res.json({ success: true, data: { cancelled: numRemoved } });
+
+        const body = req.body || {};
+        const hasWhen = Object.prototype.hasOwnProperty.call(body, 'when');
+        const hasRepeatInterval = Object.prototype.hasOwnProperty.call(body, 'repeatInterval');
+        const hasData = Object.prototype.hasOwnProperty.call(body, 'data');
+
+        if (!hasWhen && !hasRepeatInterval && !hasData) {
+            return res.status(400).json({
+                success: false,
+                error: 'At least one of when, repeatInterval, or data is required'
+            });
+        }
+        if (hasWhen && !isValidScheduleValue(body.when)) {
+            return res.status(400).json({ success: false, error: 'Invalid when value' });
+        }
+        if (hasRepeatInterval && !isValidRepeatInterval(body.repeatInterval)) {
+            return res.status(400).json({ success: false, error: 'Invalid repeatInterval value' });
+        }
+        if (hasData && (body.data === null || typeof body.data !== 'object' || Array.isArray(body.data))) {
+            return res.status(400).json({ success: false, error: 'data must be an object' });
+        }
+
+        const job = await resolveScheduleJob(req);
+
+        if (hasWhen) {
+            job.schedule(body.when);
+        }
+        if (hasRepeatInterval) {
+            job.repeatEvery(body.repeatInterval);
+        }
+        if (hasData) {
+            job.attrs.data = body.data;
+        }
+
+        await job.save();
+
+        const payload = { success: true, data: serializeScheduleJob(job) };
+        if (cacheKey) idempotencyCache.set(cacheKey, payload);
+        cache.flushAll();
+        return res.json(payload);
     } catch (error) {
-        logger.error('LP MM cancel-schedule error:', error);
-        res.status(500).json({ success: false, error: error.message });
+        logger.error('LP MM update-schedule error:', error);
+        if (cacheKey) idempotencyCache.del(cacheKey);
+        return res.status(error.statusCode || 500).json({ success: false, error: error.message });
     }
+});
+
+/**
+ * Pause a scheduled LP market-maker job.
+ * POST /schedule/:jobId/pause
+ */
+router.post('/schedule/:jobId/pause', async (req, res) => {
+    await handleIdempotentMutation(req, res, `schedule-pause:${req.params.jobId}`, async () => {
+        const job = await resolveScheduleJob(req);
+        job.disable();
+        await job.save();
+        cache.flushAll();
+        return serializeScheduleJob(job);
+    });
+});
+
+/**
+ * Resume a paused scheduled LP market-maker job.
+ * POST /schedule/:jobId/resume
+ */
+router.post('/schedule/:jobId/resume', async (req, res) => {
+    await handleIdempotentMutation(req, res, `schedule-resume:${req.params.jobId}`, async () => {
+        const job = await resolveScheduleJob(req);
+        job.enable();
+        await job.save();
+        cache.flushAll();
+        return serializeScheduleJob(job);
+    });
+});
+
+// DELETE /schedule/:jobId — cancel a single job. Only LP market-maker jobs: on
+// an id belonging to any other Agenda job (the cold-storage sweep, system jobs)
+// this answers 404 instead of cancelling it.
+router.delete('/schedule/:jobId', async (req, res) => {
+    await handleIdempotentMutation(req, res, `schedule-delete:${req.params.jobId}`, async () => {
+        const job = await resolveScheduleJob(req);
+        const numRemoved = await getAgenda(req).cancel({ _id: job.attrs._id });
+        return { cancelled: numRemoved };
+    });
 });
 
 export default router;

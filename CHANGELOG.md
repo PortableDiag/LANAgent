@@ -2,6 +2,18 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.457] - 2026-10-01
+
+### Added
+- **LP market-maker schedule control.** `PATCH /api/crypto/lp/mm/schedule/:jobId` changes a scheduled job's next run, repeat interval or data; `POST …/:jobId/pause` and `…/resume` disable and enable it. `GET /schedule` entries report `disabled`.
+- **Per-item batch signing.** `POST /api/signatures/sign-batch` accepts `items: [{ message, network?, purpose? }]` beside the existing `messages[]` form. Each result reports the network and purpose it was signed with.
+- **System-token policy.** `getSystemTokenPolicy()`, `isSystemTokenExempt()` and `systemTokensExemptFrom()` in `services/crypto/systemTokens.js`. The residual sweep, the deposit handler, auto-sell and the arbitrage scan now check the exemption they need instead of the bare allowlist. SKYNET keeps all four exemptions, so its behaviour is unchanged.
+
+### Fixed
+- **DELETE /api/crypto/lp/mm/schedule/:jobId could cancel any scheduled job.** It took any Agenda id, including the cold-storage sweep or a system job. It now cancels only LP market-maker jobs and answers 404 otherwise; invalid ids are 400, and a missing scheduler is 503 (these were all 500).
+- **Batch signing accepted non-text messages.** An object was signed as the text "[object Object]". Batches now reject non-string or empty messages and more than 100 entries.
+- **The scam registry could report the agent's own token.** The `scamRegistry` exemption was declared but nothing enforced it. Queueing, the restored queue, and single and batch reports now refuse system tokens.
+
 ## [2.25.456] - 2026-10-01
 
 ### Fixed

@@ -1,6 +1,6 @@
 import express from 'express';
 import { authenticateToken as authMiddleware } from '../interfaces/web/auth.js';
-import signatureService from '../services/crypto/signatureService.js';
+import signatureService, { MESSAGE_TYPES } from '../services/crypto/signatureService.js';
 import { logger } from '../utils/logger.js';
 import NodeCache from 'node-cache';
 import { retryOperation } from '../utils/retryUtils.js';
@@ -9,6 +9,7 @@ import compression from 'compression';
 
 const router = express.Router();
 const cache = new NodeCache({ stdTTL: 300, checkperiod: 60 });
+const MAX_SIGN_BATCH_SIZE = 100;
 
 // Apply authentication middleware to all routes
 router.use(authMiddleware);
@@ -406,19 +407,116 @@ router.post('/proof', async (req, res) => {
  */
 router.post('/sign-batch', async (req, res) => {
     try {
-        const { messages, network = 'ethereum', purpose } = req.body;
+        const {
+            messages,
+            items,
+            network = 'ethereum',
+            purpose
+        } = req.body || {};
 
-        if (!messages || !Array.isArray(messages) || messages.length === 0) {
+        if (Array.isArray(messages) && Array.isArray(items)) {
             return res.status(400).json({
-                error: 'An array of messages is required'
+                error: 'Provide either messages or items, not both'
             });
         }
 
-        const signPromises = messages.map(message => 
-            signatureService.signMessage(message, { network, purpose })
-        );
+        let signingItems;
 
-        const results = await Promise.all(signPromises);
+        if (Array.isArray(items)) {
+            if (items.length === 0) {
+                return res.status(400).json({
+                    error: 'An array of items is required'
+                });
+            }
+
+            if (items.length > MAX_SIGN_BATCH_SIZE) {
+                return res.status(400).json({
+                    error: `Batch size must not exceed ${MAX_SIGN_BATCH_SIZE} items`
+                });
+            }
+
+            for (let index = 0; index < items.length; index += 1) {
+                const item = items[index];
+
+                if (!item || typeof item !== 'object' || Array.isArray(item)) {
+                    return res.status(400).json({
+                        error: `Item at index ${index} must be an object`
+                    });
+                }
+
+                if (typeof item.message !== 'string' || item.message.length === 0) {
+                    return res.status(400).json({
+                        error: `Item at index ${index} must include a non-empty message`
+                    });
+                }
+
+                if (item.network !== undefined &&
+                    (typeof item.network !== 'string' || item.network.length === 0)) {
+                    return res.status(400).json({
+                        error: `Item at index ${index} must include a non-empty network`
+                    });
+                }
+
+                if (item.purpose !== undefined &&
+                    (typeof item.purpose !== 'string' || item.purpose.length === 0)) {
+                    return res.status(400).json({
+                        error: `Item at index ${index} must include a non-empty purpose`
+                    });
+                }
+            }
+
+            signingItems = items.map(item => ({
+                message: item.message,
+                network: item.network === undefined ? 'ethereum' : item.network,
+                purpose: item.purpose
+            }));
+        } else {
+            if (!Array.isArray(messages) || messages.length === 0) {
+                return res.status(400).json({
+                    error: 'An array of messages or items is required'
+                });
+            }
+
+            if (messages.length > MAX_SIGN_BATCH_SIZE) {
+                return res.status(400).json({
+                    error: `Batch size must not exceed ${MAX_SIGN_BATCH_SIZE} messages`
+                });
+            }
+
+            for (let index = 0; index < messages.length; index += 1) {
+                if (typeof messages[index] !== 'string' || messages[index].length === 0) {
+                    return res.status(400).json({
+                        error: `Message at index ${index} must be a non-empty string`
+                    });
+                }
+            }
+
+            signingItems = messages.map(message => ({
+                message,
+                network,
+                purpose
+            }));
+        }
+
+        const results = await Promise.all(
+            signingItems.map(async item => {
+                const result = await signatureService.signMessage(
+                    item.message,
+                    {
+                        network: item.network,
+                        purpose: item.purpose
+                    }
+                );
+
+                // Echo what was actually signed with: signMessage defaults a missing
+                // purpose to CUSTOM, so report that rather than undefined.
+                return {
+                    ...result,
+                    network: item.network,
+                    purpose: item.purpose ?? MESSAGE_TYPES.CUSTOM
+                };
+            })
+        );
 
         res.json({
             success: true,
