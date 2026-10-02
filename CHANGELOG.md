@@ -2,6 +2,11 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.462] - 2026-10-01
+
+### Changed
+- **The agent acts instead of asking the operator to confirm what they just asked for.** The short-follow-up chat path told the model: "if the user wants something done, say what you will do and ask them to state the request". So "try again" or "go ahead" came back as "please confirm…" (card 21 #1284). That path now hands an instruction on to be done: in a Trellis channel by the reasoning agent, which has the conversation; elsewhere by the router. The reasoning agent is told to be decisive. It never asks to confirm or restate a request already made, and never asks permission for an ordinary reversible action (reading, searching, writing to a card, posting). It asks only when a request is truly ambiguous and a wrong guess would be costly or irreversible (spending, deleting, sending outside).
+
 ## [2.25.461] - 2026-10-01
 
 ### Fixed

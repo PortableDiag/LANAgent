@@ -46,6 +46,8 @@ import { readFileSync, existsSync, mkdirSync, copyFileSync } from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { isActionConfirmation, resolveConfirmation, isDeferredRequest, isOpenEndedTask, refersToConversation } from './confirmationResolver.js';
+// What the follow-up chat answers when the message is an instruction to act, not conversation.
+const ACT_MARKER = 'ACT_ON_IT';
 import { BackgroundReview } from '../services/skills/backgroundReview.js';
 import { getUserProfile } from '../services/skills/userProfile.js';
 import { Curator, scheduleCurator } from '../services/skills/curator.js';
@@ -1137,14 +1139,28 @@ ${conversationCtx}
 User: ${input}
 
 Respond conversationally — elaborate, clarify, or answer based on what was just discussed. Be natural, not robotic. Keep it concise.
-This reply is text only: you have not run any tool or taken any action in this turn. Never say you did, sent, wrote, appended, created, changed or completed anything now. If the user wants something done, say what you will do and ask them to state the request.`;
+This reply is text only: you have not run any tool or taken any action in this turn. Never say you did, sent, wrote, appended, created, changed or completed anything now.
+If the user is telling you to DO something (retry, go ahead, write it, add it, fix it, finish it), do not answer it here and do not ask them to confirm or restate it: reply with exactly ${ACT_MARKER} and nothing else, and it will be done with your tools.`;
 
             const response = await this.providerManager.generateResponse(followUpPrompt, {
               maxTokens: 400, temperature: 0.7,
               systemPrompt: this.getSystemPrompt()
             });
             const content = (response?.content || response?.text || '').toString().trim();
-            if (content && content.length > 5) {
+            // An instruction, not chat. This path used to answer it with "say what you will do and
+            // ask them to state the request", so the operator kept being asked to confirm what they
+            // had just asked for (card 21 #1284). It goes on to be done instead: in a Trellis
+            // channel by the reasoning agent, which has the conversation; elsewhere by the router.
+            if (content.replace(/[^A-Z_]/g, '') === ACT_MARKER) {
+              logger.info('Follow-up is an instruction: acting on it instead of chatting');
+              if (context.trellis) {
+                const rendered = await this._runReasoning(input, context).catch(err => {
+                  logger.warn(`Reasoning for a Trellis follow-up failed, using the router: ${err.message}`);
+                  return null;
+                });
+                if (rendered) return rendered;
+              }
+            } else if (content && content.length > 5) {
               await this.memoryManager.storeConversation(userId, input, content, context);
               logger.info('Handled as conversational follow-up');
               return { type: 'text', content };
