@@ -190,7 +190,14 @@ export class ReActAgent extends EventEmitter {
       if (pastExamples) logger.info('ReAct: reusing similar past reasoning as examples');
       const skills = await getSkillsService().promptFor(query).catch(() => '');
       if (skills) logger.info('ReAct: following a matching skill');
-      const guidance = { relevant, pastExamples, skills, todo };
+      // A request from a shared Trellis channel only makes sense with that conversation: "do you
+      // all agree on the steps?" is about cards and messages ReAct otherwise never sees. On card
+      // 21 #1255 (2026-10-01) it answered that it could not see the steps of a test it had run
+      // and signed the day before.
+      const channel = context.trellis?.recent
+        ? `This request came from a shared Trellis channel (card ${context.trellis.card}). The conversation there, oldest first (your own messages are signed ${this.agent?.config?.name || 'ALICE'}):\n${String(context.trellis.recent).slice(-4000)}\n\nCards it mentions ("#209", "the test", "the card in this workspace") are in the Trellis workspace: find them with the trellis-notes search and read actions before saying you cannot see them.`
+        : '';
+      const guidance = { relevant, pastExamples, skills, todo, channel };
       let freeTodoSteps = 0;
 
       while (iteration < this.maxIterations + freeTodoSteps) {
@@ -387,11 +394,12 @@ export class ReActAgent extends EventEmitter {
   /**
    * Build the prompt for the thinking step
    */
-  buildThinkingPrompt(query, history, { relevant = [], pastExamples = '', skills = '', todo = null } = {}) {
+  buildThinkingPrompt(query, history, { relevant = [], pastExamples = '', skills = '', todo = null, channel = '' } = {}) {
     // Relevant tools in full, the rest as a catalog ranked by past performance
     const toolDescriptions = formatToolsForPrompt(this.tools, relevant, this.getPrioritizedTools());
 
     // Format history
+    const lastObservation = [...history].reverse().find(h => h.type === 'observation');
     const historyText = history.length > 0
       ? history.map(h => {
           switch (h.type) {
@@ -403,8 +411,12 @@ export class ReActAgent extends EventEmitter {
               if (h.content?.tool === TODO_TOOL) {
                 return `Observation: to-do list ${h.content.command === 'write' ? 'saved' : 'read'}${h.content.success === false ? ` (failed: ${h.content.error})` : ''}, revision ${h.content.result?.revision ?? 0} (current list shown below)`;
               }
+              // The newest observation is what the next step acts on (a card's whole checklist,
+              // a file's text), so it is kept long; older ones are context and stay short. At a
+              // flat 500 characters a card read lost all but its first steps.
               const obs = typeof h.content === 'string' ? h.content : JSON.stringify(h.content);
-              return `Observation: ${obs.substring(0, 500)}${obs.length > 500 ? '...' : ''}`;
+              const limit = h === lastObservation ? 4000 : 500;
+              return `Observation: ${obs.substring(0, limit)}${obs.length > limit ? '...' : ''}`;
             default:
               return '';
           }
@@ -421,7 +433,7 @@ ${TODO_TOOL_PROMPT}
 ${skills ? `## Skills (known procedures for this kind of task; follow them where they apply):\n${skills}\n\n` : ''}${pastExamples ? `## Similar Tasks That Worked Before:\n${pastExamples}\n\n` : ''}## Previous Steps:
 ${historyText}
 
-${todo && !todo.empty ? `## ${todo.promptBlock()}\nKeep it current: mark items done as you finish them.\n\n` : ''}## Current Task:
+${todo && !todo.empty ? `## ${todo.promptBlock()}\nKeep it current: mark items done as you finish them.\n\n` : ''}${channel ? `## Where This Came From:\n${channel}\n\n` : ''}## Current Task:
 ${query}
 
 ## Instructions:

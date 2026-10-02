@@ -56,6 +56,11 @@ const MAX_AGENT_RUN = Number(process.env.TRELLIS_LISTEN_MAX_AGENT_RUN) || 8;
 const RUN_GAP_MS = 600000;
 // The model answers with exactly this when there is nothing worth saying ("thanks", "ok").
 const NO_REPLY = 'NO_REPLY';
+// After answering the operator in a group channel, keep watching that channel this long for
+// their follow-up. The server routes an un-addressed message in a group to the channel's lead,
+// so "Its in a card in this workspace" / "Alice?" right after ALICE's reply never reached it
+// (card 21 #1261, #1263, 2026-10-01): the inbox and the stream only carry what is addressed.
+const FOLLOW_UP_MS = Number(process.env.TRELLIS_LISTEN_FOLLOW_UP_MS) || 10 * 60 * 1000;
 const CARD_REFRESH_MS = 6 * 60 * 60 * 1000;
 const CARD_MAX_SKILLS = 32;
 // Card writes another agent may ask for in one message, and the size of each.
@@ -85,6 +90,9 @@ export class TrellisChannelListener {
     this.statePromises = new Map(); // `${card}:${seq}` → the pending "working" state call
     this.cardHash = null;          // what was last published as this agent's card
     this.cardAt = 0;
+    this.following = new Map();    // `${doc}:${card}` → follow-up window end, after answering the operator
+    this.handling = new Set();     // channels being handled right now
+    this.handleAgain = new Set();  // a wake-up came while handling: run once more after
   }
 
   get name() { return this.plugin._agentName(); }
@@ -380,6 +388,42 @@ export class TrellisChannelListener {
   }
 
   /** Long-poll until the document changes (~25 s), or sleep when that is not possible. */
+  /**
+   * Watch one group channel for FOLLOW_UP_MS after answering the operator there, so their next
+   * message reaches this agent even when they leave off the @. One `wait` socket per open
+   * conversation; answering again extends the window instead of starting a second watch.
+   */
+  _followUp(doc, card, key) {
+    this.following.set(key, Date.now() + FOLLOW_UP_MS);
+    if (this.followLoops?.has(key)) return;
+    (this.followLoops ||= new Set()).add(key);
+    const run = async () => {
+      let failures = 0;
+      while (this.running && (this.following.get(key) || 0) > Date.now()) {
+        try {
+          const seq = this.cursors.get(key) || 0;
+          const started = Date.now();
+          const call = () => this.plugin._call('get', '/api/wait', { query: { card, seq }, timeoutMs: 40000 });
+          const res = doc ? await this.plugin._runInDocument(doc, call) : await call();
+          failures = 0;
+          const next = Number(res?.seq);
+          if (res?.changed === false || (Number.isFinite(next) && next <= seq)) {
+            // A wait is held ~25 s; one that came straight back without news must not spin.
+            if (Date.now() - started < 1000) await sleep(1000);
+            continue;
+          }
+          await (doc ? this.plugin._runInDocument(doc, () => this._handleChannel(doc, card, key)) : this._handleChannel(doc, card, key));
+        } catch (err) {
+          if (++failures >= 3) { logger.debug(`[trellis-listen] stopped following ${key}: ${err.message}`); break; }
+          await sleep(5000);
+        }
+      }
+      if ((this.following.get(key) || 0) <= Date.now()) this.following.delete(key);
+      this.followLoops.delete(key);
+    };
+    run().catch(() => { this.followLoops.delete(key); });
+  }
+
   async _waitForChange() {
     const docs = this.plugin.resolvedMode === 'web' ? await this.plugin._followedDocuments() : [null];
     if (docs.length !== 1) return sleep(IDLE_POLL_MS);
@@ -441,7 +485,25 @@ export class TrellisChannelListener {
     logger.warn(`[trellis-listen] channel ${key} failed (${count} in a row): ${err?.message || err}; retrying in ${Math.round(delay / 1000)}s`);
   }
 
+  /**
+   * One handler per channel at a time. The stream, the inbox and a follow-up watch can all wake
+   * the same channel; two handlers reading it at once would both answer the newest message. A
+   * wake-up that arrives mid-run is not dropped: the channel is read once more afterwards.
+   */
   async _handleChannel(doc, card, key) {
+    if (this.handling.has(key)) { this.handleAgain.add(key); return; }
+    this.handling.add(key);
+    try {
+      do {
+        this.handleAgain.delete(key);
+        await this._handleChannelOnce(doc, card, key);
+      } while (this.handleAgain.has(key) && this.running !== false);
+    } finally {
+      this.handling.delete(key);
+    }
+  }
+
+  async _handleChannelOnce(doc, card, key) {
     const since = this.cursors.get(key) || 0;
     const data = await this.plugin._call('get', `/api/cards/${card}/channel`);
     const messages = Array.isArray(data) ? data : (data.messages || []);
@@ -453,13 +515,23 @@ export class TrellisChannelListener {
 
     if (messages.some(m => m && 'via' in m)) this.desktopRecordsVia = true;
     const fresh = messages.filter(m => (Number(m.seq) || 0) > since);
-    const addressed = fresh.filter(m => {
+    // The operator talking to this agent without an @: "Alice?", "Alice, read it again", or
+    // any follow-up while the conversation with this agent is still open. The server sent it to
+    // the lead, so it is ours only when it @mentions nobody.
+    const namesMe = new RegExp(`(^\\s*${escapeRegExp(this.name)}\\b|\\b${escapeRegExp(this.name)}[\\s?!.]*$)`, 'i');
+    const following = (this.following.get(key) || 0) > Date.now();
+    const addressed = [];
+    for (const m of fresh) {
       const from = String(m.from || '').toLowerCase();
-      if (from === me) return false;
-      if (Array.isArray(m.to) && m.to.some(n => String(n).toLowerCase() === me)) return true;
-      if (!member) return mentionsMe.test(String(m.text || ''));
-      return !group;
-    });
+      if (from === me) continue;
+      if (Array.isArray(m.to) && m.to.some(n => String(n).toLowerCase() === me)) { addressed.push(m); continue; }
+      if (!member) { if (mentionsMe.test(String(m.text || ''))) addressed.push(m); continue; }
+      if (!group) { addressed.push(m); continue; }
+      const text = String(m.text || '');
+      if (/(^|[^\w@.])@\w/.test(text)) continue;                  // addressed to someone by name
+      // Marked so the reply is not told the message "also goes to" the lead it was routed to.
+      if ((following || namesMe.test(text)) && await this._isOperator(m)) addressed.push({ ...m, followUp: true });
+    }
 
     const maxSeq = messages.reduce((a, m) => Math.max(a, Number(m.seq) || 0), since);
     if (!addressed.length) { this.cursors.set(key, maxSeq); return; }
@@ -493,6 +565,7 @@ export class TrellisChannelListener {
     this._startState(card, target.seq);
     try {
       await this._answer({ doc, card, key, target, messages, maxSeq, group, data, fromOperator, working });
+      if (fromOperator && group) this._followUp(doc, card, key);
     } catch (err) {
       this._settleReaction(card, target.seq, working, '🤷');
       throw err;
@@ -751,6 +824,7 @@ export class TrellisChannelListener {
    * (2026-09-30). Empty when the message is for this agent alone.
    */
   _sharedTaskNote(m) {
+    if (m.followUp) return '';      // the operator's follow-up to this agent; the lead got it by default routing
     const to = (Array.isArray(m.to) ? m.to : []).filter(n => String(n).toLowerCase() !== String(this.name).toLowerCase());
     const shared = to.length > 0 || /@(agents|all|everyone)\b|\beach of you\b|\ball of you\b/i.test(String(m.text || ''));
     if (!shared) return '';

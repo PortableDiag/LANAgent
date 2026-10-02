@@ -32,6 +32,30 @@ export function worthReviewing(input, reply) {
   return text.length >= 60;
 }
 
+const STOP = new Set(('about after again their there these those which while where would should could being '
+  + 'every other using use when with from into that this your have will them then than what each only '
+  + 'skill skills step steps agent agents').split(' '));
+
+function topicWords(text) {
+  return new Set((String(text || '').toLowerCase().match(/[a-z][a-z0-9-]{4,}/g) || []).filter(w => !STOP.has(w)));
+}
+
+/**
+ * Does a replacement body still describe the same procedure? The reviewer is told to keep every
+ * step that was right, so a genuine correction shares most of the old body's vocabulary. A body
+ * that shares almost none is another task's procedure: on 2026-09-30 a review of an unrelated
+ * exchange (turning a file card into a GitHub issue) replaced trellis-shared-card-writes with
+ * that task's steps, three times, and the agent then followed them in a Trellis channel.
+ */
+export function keepsTopic(oldBody, newBody, min = 0.4) {
+  const before = topicWords(oldBody);
+  if (before.size < 5) return true;               // too little text to judge
+  const after = topicWords(newBody);
+  let kept = 0;
+  for (const w of before) if (after.has(w)) kept++;
+  return kept / before.size >= min;
+}
+
 /** Parse the model's JSON decision; anything malformed means "nothing to keep". */
 export function parseDecision(content) {
   const m = String(content || '').match(/\{[\s\S]*\}/);
@@ -138,12 +162,29 @@ Answer JSON only:
         const description = s.description ? String(s.description).slice(0, 1024) : undefined;
         const body = s.body ? String(s.body) : undefined;
         if (s.op === 'update') {
+          // An update is for a CORRECTION. The prompt says so, but a long message with no
+          // correction in it is also reviewed, and the model has edited skills from those.
+          if (!CORRECTION.test(String(input || ''))) {
+            logger.info(`[background-review] skipped update of ${s.name}: the operator's message corrects nothing`);
+            continue;
+          }
           const current = await this.service.get(String(s.name || ''));
           if (!current) continue;
           if (current.meta?.source === 'trellis') continue;   // owned by the Skills basket sync
           // agentskills.io: "add the correction to the gotchas section" — the steps are rewritten
-          // only when the reviewer says they were wrong, and even then the gotcha is kept.
-          let nextBody = body || current.body;
+          // only when the reviewer says they were wrong, and even then the gotcha is kept. A
+          // shipped (bundled) skill only ever gains a gotcha, and a rewrite that drops the
+          // skill's own subject is refused.
+          let nextBody = current.body;
+          if (body) {
+            if (current.bundled || current.meta?.overrides === 'bundled') {
+              logger.info(`[background-review] kept only the gotcha for ${current.name}: a bundled skill's steps are not rewritten`);
+            } else if (!keepsTopic(current.body, body)) {
+              logger.warn(`[background-review] refused to rewrite ${current.name}: the new steps describe a different procedure`);
+            } else {
+              nextBody = body;
+            }
+          }
           if (s.gotcha) nextBody = addGotcha(nextBody, String(s.gotcha).slice(0, 400));
           if (nextBody === current.body && !description) continue;
           await this.service.update(current.name, { description, body: nextBody }, { actor: 'background-review', reason: s.reason || s.gotcha || 'correction in conversation' });

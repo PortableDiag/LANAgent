@@ -2,6 +2,13 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.458] - 2026-10-01
+
+### Fixed
+- **The learning loop rewrote a Trellis skill with an unrelated task's steps.** Background review replaced `trellis-shared-card-writes` ("add your section to a shared card") with a procedure for turning a file card into a GitHub issue, three times, from exchanges that corrected nothing. The agent then followed that in a Trellis channel. A review now updates a skill only when the operator's message is a correction. A shipped skill, or a local override of one, only ever gains a gotcha. A replacement body that keeps less than 40% of the old body's vocabulary is refused as a different procedure.
+- **Follow-ups without an @ never reached the agent in a group channel.** The server routes an un-addressed message to the channel's lead, so "Its in a card in this workspace" and "Alice?" right after the agent's reply went to another agent (card 21, #1261 and #1263). For 10 minutes after answering the operator in a group channel, the agent now watches that channel (`/api/wait`) and takes the operator's follow-ups that @mention nobody, plus any message that calls it by name ("Alice?", "Alice, …"). The window is set by `TRELLIS_LISTEN_FOLLOW_UP_MS`. Each channel has one handler at a time, so the watch and the stream cannot answer the same message twice.
+- **The reasoning agent never saw the Trellis conversation.** A shared task ("do you all agree on the test steps?") reached it as a bare sentence, so it answered that it could not see the steps of a test it had run and signed the day before. It now gets the channel conversation and is told to find mentioned cards with the Trellis search and read actions. The newest tool result is kept up to 4,000 characters instead of 500, so a card read keeps its whole checklist.
+
 ## [2.25.457] - 2026-10-01
 
 ### Added
