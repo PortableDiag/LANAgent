@@ -145,6 +145,14 @@ const MEDIA_EXT = {
 };
 const AI_DETECTION_COSTS = { text: 5, image: 5, audio: 8, video: 10 };
 
+/**
+ * yt-dlp: the flat 3 is right for info/search/formats/thumbnail, but a download or an audio
+ * extraction is the same work the catalog prices as 'youtube-download' 10 and 'youtube-audio' 8
+ * (and the gateway's social_download / social_audio charge). Through this route they cost 3,
+ * so the same download was a third of the price depending on the door (operator, 2026-10-01).
+ */
+const YTDLP_ACTION_COSTS = { download: 10, audio: 8 };
+
 /** What aiDetector's auto `detect` will treat the input as — the same routing its autoDetect uses. */
 export function aiDetectKind(params = {}) {
   const mime = String(params.mimeType || params.mime || '').toLowerCase();
@@ -164,6 +172,7 @@ export function actionCreditCost(plugin, action, params = {}) {
       || (action === 'detect' ? aiDetectKind(params) : null);
     if (kind) return AI_DETECTION_COSTS[kind];
   }
+  if (plugin === 'ytdlp' && YTDLP_ACTION_COSTS[action] !== undefined) return YTDLP_ACTION_COSTS[action];
   return PLUGIN_CREDIT_COSTS[plugin] || 3;
 }
 
