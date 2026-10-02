@@ -2,6 +2,11 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.463] - 2026-10-01
+
+### Fixed
+- **Liquidity-provision and system-token work could reach the public auto-post.** "chore: v2.25.457 — LP schedule control, per-item batch signing, system-token policy" and the squash subject "extend_plugin_apis: lpMarketMaker.js" passed the commit filter. `LP`, `market maker` and `system token` are now sensitive terms. Verified by running the deployed filter over the day's 105 commit subjects: none of those subjects pass now, and ordinary subjects still do.
+
 ## [2.25.462] - 2026-10-01
 
 ### Changed
