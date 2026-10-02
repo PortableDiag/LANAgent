@@ -537,6 +537,34 @@ router.post('/api/tokens/:id/revoke', authenticateToken, async (req, res) => {
   }
 });
 
+// Rotate token: issue a replacement with the same access policy and
+// invalidate the original. The new plaintext is shown only once.
+router.post('/api/tokens/:id/rotate', authenticateToken, async (req, res) => {
+  try {
+    const { name, expiresIn, description } = req.body || {};
+    const options = {};
+    if (name !== undefined) options.name = name;
+    if (expiresIn !== undefined) options.expiresIn = expiresIn;
+    if (description !== undefined) options.description = description;
+
+    const result = await MCPToken.rotateToken(req.params.id, options);
+    res.json({
+      success: true,
+      token: result.token, // Only shown once
+      tokenInfo: result.display
+    });
+  } catch (error) {
+    if (error.message === 'MCP token not found') {
+      return res.status(404).json({ success: false, error: error.message });
+    }
+    if (error instanceof TypeError || /Cannot rotate|concurrently/.test(error.message)) {
+      return res.status(400).json({ success: false, error: error.message });
+    }
+    logger.error('Rotate MCP token error:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
 // Delete token
 router.delete('/api/tokens/:id', authenticateToken, async (req, res) => {
   try {

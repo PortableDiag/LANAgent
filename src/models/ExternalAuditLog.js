@@ -117,6 +117,11 @@ const externalAuditLogSchema = new mongoose.Schema({
   responseBody: {
     type: String,
     default: null
+  },
+  // 'completed' (the response finished) or 'aborted' (the connection closed first).
+  completionState: {
+    type: String,
+    default: 'completed'
   }
 }, {
   timestamps: false

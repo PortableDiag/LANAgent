@@ -12,9 +12,125 @@ const limiter = rateLimit({
     message: 'Too many requests, please try again later.'
 });
 
+// Each entry is one on-chain read; keep a batch small so one rate-limited
+// request cannot fan out into hundreds of RPC calls.
+const MAX_BATCH_SIZE = 20;
+const BATCH_CONCURRENCY = 5;
+// Scope names the trust registry understands (see SCOPES in trustRegistryService).
+const BATCH_SCOPES = new Set(['universal', 'commerce', 'p2p', 'oracle', 'network']);
+
 router.use(limiter);
 
 // --- External Routes (public / ERC-8004 auth) ---
+
+/**
+ * POST /api/external/trust/batch/level
+ * Check trust levels for multiple agents with bounded concurrency.
+ * Body: { agents: [{ agent, scope? }] } or { agents: ['agent1.eth', 'agent2.eth'] }
+ */
+router.post('/batch/level', async (req, res) => {
+    const agents = req.body?.agents;
+
+    if (!Array.isArray(agents)) {
+        return res.status(400).json({
+            success: false,
+            error: 'agents must be an array'
+        });
+    }
+
+    if (agents.length === 0 || agents.length > MAX_BATCH_SIZE) {
+        return res.status(400).json({
+            success: false,
+            error: `agents must contain between 1 and ${MAX_BATCH_SIZE} entries`
+        });
+    }
+
+    const results = new Array(agents.length);
+    let nextIndex = 0;
+
+    const resolveEntry = async (entry, index) => {
+        let agent;
+        let scope = 'universal';
+
+        if (typeof entry === 'string') {
+            agent = entry;
+        } else if (entry && typeof entry === 'object' && !Array.isArray(entry)) {
+            agent = entry.agent;
+            if (entry.scope !== undefined && entry.scope !== null) {
+                scope = entry.scope;
+            }
+        }
+
+        if (typeof agent !== 'string' || !agent.trim()) {
+            results[index] = {
+                success: false,
+                agent: agent ?? null,
+                scope,
+                error: 'Each entry must contain a non-empty agent identifier'
+            };
+            return;
+        }
+
+        if (typeof scope !== 'string') {
+            results[index] = {
+                success: false,
+                agent,
+                scope: 'universal',
+                error: 'scope must be a string when provided'
+            };
+            return;
+        }
+
+        scope = scope.trim().toLowerCase() || 'universal';
+        agent = agent.trim();
+
+        if (!BATCH_SCOPES.has(scope)) {
+            results[index] = {
+                success: false,
+                agent,
+                scope,
+                error: `Unknown scope; expected one of: ${[...BATCH_SCOPES].join(', ')}`
+            };
+            return;
+        }
+
+        try {
+            const level = await trustRegistryService.getTrustLevel(agent, scope);
+            results[index] = {
+                success: true,
+                agent,
+                level,
+                scope
+            };
+        } catch (err) {
+            logger.error(`POST /trust/batch/level entry error for ${agent}: ${err.message}`);
+            results[index] = {
+                success: false,
+                agent,
+                scope,
+                error: err.message
+            };
+        }
+    };
+
+    const worker = async () => {
+        while (true) {
+            const index = nextIndex++;
+            if (index >= agents.length) {
+                return;
+            }
+
+            await resolveEntry(agents[index], index);
+        }
+    };
+
+    const workerCount = Math.min(BATCH_CONCURRENCY, agents.length);
+    await Promise.all(
+        Array.from({ length: workerCount }, () => worker())
+    );
+
+    res.json({ success: true, results });
+});
 
 /**
  * GET /api/external/trust/level?agent=name.eth

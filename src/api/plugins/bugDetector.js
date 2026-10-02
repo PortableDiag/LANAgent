@@ -25,6 +25,11 @@ export default class BugDetectorPlugin extends BasePlugin {
         command: 'bugs',
         description: 'List found bugs',
         usage: 'bugs [status]'
+      },
+      {
+        command: 'searchBugs',
+        description: 'Search stored bug reports with filters, text search, paging and counts',
+        usage: 'searchBugs({ search, severity, status, environment, startDate, endDate, fields, limit, cursor, includeCounts })'
       }
     ];
     
@@ -85,6 +90,8 @@ export default class BugDetectorPlugin extends BasePlugin {
           return await this.performDailyScan(data);
         case 'listBugs':
           return await this.listBugs(data);
+        case 'searchBugs':
+          return await this.searchBugs(data);
         case 'getBug':
           return await this.getBug(data);
         case 'createGitHubIssue':
@@ -104,7 +111,7 @@ export default class BugDetectorPlugin extends BasePlugin {
         default:
           return {
             success: false,
-            error: 'Unknown action. Use: scan, scanIncremental, scanDaily, listBugs, getBug, createGitHubIssue, getSettings, updateSettings, testScan, testAI, clearDuplicateCache, getScanProgress'
+            error: 'Unknown action. Use: scan, scanIncremental, scanDaily, listBugs, searchBugs, getBug, createGitHubIssue, getSettings, updateSettings, testScan, testAI, clearDuplicateCache, getScanProgress'
           };
       }
     } catch (error) {
@@ -1633,6 +1640,28 @@ ${bug.code}
         success: false,
         error: `Failed to list bugs: ${error.message}`
       };
+    }
+  }
+
+  /**
+   * Paged search over the BugReport collection (bugs stored by scans when
+   * autoStoreBugs is on). Always uses the paged form of advancedSearch so a
+   * caller can never pull the whole collection in one call.
+   */
+  async searchBugs(data = {}) {
+    try {
+      const { BugReport } = await import('../../models/BugReport.js');
+      const criteria = {};
+      for (const key of ['search', 'severity', 'status', 'environment', 'startDate', 'endDate',
+        'metadata', 'fields', 'cursor', 'includeCounts', 'includeCode']) {
+        if (data[key] !== undefined && data[key] !== null && data[key] !== '') criteria[key] = data[key];
+      }
+      criteria.limit = data.limit === undefined ? 25 : Number(data.limit);
+      const result = await BugReport.advancedSearch(criteria);
+      return { success: true, data: { ...result, count: result.items.length } };
+    } catch (error) {
+      logger.error('Error searching bug reports:', error);
+      return { success: false, error: `Failed to search bugs: ${error.message}` };
     }
   }
 

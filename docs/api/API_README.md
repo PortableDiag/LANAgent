@@ -565,6 +565,20 @@ Live in-memory snapshot of download-token usage (tokens within their TTL window)
 
 Sync covering 2.25.417–2.25.423.
 
+### v2.25.454 — Self-improvement PR sweep (new routes and actions)
+
+- `POST /mcp/api/tokens/:id/rotate`: rotates an MCP token. The old token stops working at once, and a revoked token cannot be rotated.
+- `POST /api/external/trust/batch/level` `{ agents: [...], scope? }`: up to 20 trust levels in one call (each is an on-chain read).
+- `GET /mqtt/api/states/freshness` and `GET /mqtt/api/states/freshness-summary`: MQTT device state by age, and a fresh/stale summary.
+- Device aliases: `POST …/device-aliases/batch/resolve` resolves up to 100 aliases in one query. Results come back in request order, with `found: false` for misses.
+- Plugin actions:
+  - `skills.search`, `skills.curatePreview`;
+  - `chathistory.export` (json, markdown or text);
+  - `bugDetector.searchBugs`, `priceWatch.trend`;
+  - `homeassistant.list_services`, `thousandeyes.getTestDetails`, `spoonacular.getIngredientInformation`;
+  - `maps.geocodeBatch` / `maps.reverseBatch`, `domainIntel.tlsPosture`.
+- `ExternalAuditLog` rows gain `completionState`. Aborted requests are recorded as 499, and binary responses as `[binary N bytes]`.
+
 ### v2.25.442 — Reading Trellis files (trellis-notes `readFile`)
 
 - v2.25.443: `describeImage({ card, index? })` reads a picture already on a card (an image card, the first attached image, or the first inline picture). A question about a picture on an existing card is never turned into `createImageCard`.

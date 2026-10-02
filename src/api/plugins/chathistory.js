@@ -39,6 +39,16 @@ export default class ChatHistoryPlugin extends BasePlugin {
           'summarize our conversations about the backup schedule',
           'summarize our recent conversation history'
         ]
+      },
+      {
+        command: 'export',
+        description: 'Export matching or recent conversation history as JSON, Markdown, or plain text',
+        usage: 'export({ query: "backup schedule", format: "markdown" }) or export({ recent: true, format: "json" })',
+        examples: [
+          'export our recent conversation history as markdown',
+          'export conversations about docker as json',
+          'download the last 20 messages as plain text'
+        ]
       }
     ];
   }
@@ -61,8 +71,8 @@ export default class ChatHistoryPlugin extends BasePlugin {
     const memory = this.agent?.memoryManager;
     const historyUnavailable =
       !memory ||
-      (action === 'search' && typeof memory.searchConversations !== 'function') ||
-      (action === 'recent' && typeof memory.recentConversations !== 'function') ||
+      ((action === 'search' || action === 'export') && typeof memory.searchConversations !== 'function') ||
+      ((action === 'recent' || action === 'export') && typeof memory.recentConversations !== 'function') ||
       (action === 'summarize' &&
         typeof memory.searchConversations !== 'function' &&
         typeof memory.recentConversations !== 'function');
@@ -78,10 +88,15 @@ export default class ChatHistoryPlugin extends BasePlugin {
     if (this.agent.providerManager && action === 'search' && (!data.query || queryIsWholeRequest || params.needsParameterExtraction)) {
       Object.assign(data, await this.extractQuery(params.originalInput || params.input));
     }
-    // summarize: a request with no explicit topic ("summarize our recent conversation") is a
-    // recent-history digest; otherwise reduce the request to its topic words like search does.
+    // summarize / export: a request with no explicit topic ("summarize our recent conversation",
+    // "export our recent history as markdown") covers the recent history; otherwise reduce the
+    // request to its topic words like search does.
     const wantsRecent = data.recent === true || String(data.recent).toLowerCase() === 'true';
-    if (action === 'summarize' && !wantsRecent && (!data.query || queryIsWholeRequest || params.needsParameterExtraction)) {
+    if (action === 'export' && !data.format && rawInput) {
+      if (/\bjson\b/i.test(rawInput)) data.format = 'json';
+      else if (/\b(markdown|md)\b/i.test(rawInput)) data.format = 'markdown';
+    }
+    if ((action === 'summarize' || action === 'export') && !wantsRecent && (!data.query || queryIsWholeRequest || params.needsParameterExtraction)) {
       const extracted = (this.agent.providerManager && rawInput)
         ? await this.extractQuery(rawInput, { allowRecent: true })
         : {};
@@ -119,6 +134,8 @@ export default class ChatHistoryPlugin extends BasePlugin {
       switch (action) {
         case 'summarize':
           return await this.summarize(data);
+        case 'export':
+          return await this.export(data);
         default:
           throw new Error(`Unknown action: ${action}`);
       }
@@ -126,6 +143,139 @@ export default class ChatHistoryPlugin extends BasePlugin {
       this.logger.error(`chathistory ${action} failed:`, error);
       return { success: false, error: error.message };
     }
+  }
+
+  /**
+   * Export matching or recent conversation records in a bounded, stable format.
+   */
+  async export(data = {}) {
+    const memory = this.agent?.memoryManager;
+    const recent = data.recent === true || String(data.recent).toLowerCase() === 'true';
+    const requestedFormat = String(data.format || 'text').toLowerCase();
+
+    this.validateParams({ format: requestedFormat }, {
+      format: { type: 'string', enum: ['json', 'markdown', 'text'] }
+    });
+
+    const requestedLimit = Number(data.limit);
+    const limit = Number.isFinite(requestedLimit) && requestedLimit > 0
+      ? Math.min(Math.floor(requestedLimit), 100)
+      : 50;
+
+    let sourceRecords;
+    if (recent) {
+      if (typeof memory?.recentConversations !== 'function') {
+        return { success: false, count: 0, records: [], document: '', error: 'Recent conversation history is not available' };
+      }
+      sourceRecords = await memory.recentConversations({ limit });
+    } else {
+      this.validateParams(data, { query: { required: true, type: 'string' } });
+      if (typeof memory?.searchConversations !== 'function') {
+        return { success: false, count: 0, records: [], document: '', error: 'Conversation search is not available' };
+      }
+      const requestedDays = Number(data.days);
+      const days = Number.isFinite(requestedDays) && requestedDays > 0
+        ? Math.min(Math.floor(requestedDays), 3650)
+        : 90;
+      sourceRecords = await memory.searchConversations(data.query, { days, limit });
+    }
+
+    const records = (Array.isArray(sourceRecords) ? sourceRecords : []).map(record => {
+      const rawTimestamp = record?.timestamp || record?.when || record?.createdAt;
+      const parsedTimestamp = rawTimestamp ? new Date(rawTimestamp) : null;
+      const timestamp = parsedTimestamp && !Number.isNaN(parsedTimestamp.getTime())
+        ? parsedTimestamp.toISOString()
+        : (rawTimestamp == null ? null : String(rawTimestamp));
+      const content = String(record?.content ?? '');
+
+      let context = record?.context ?? null;
+      if (context !== null && typeof context !== 'string') {
+        const serializedContext = safeJsonStringify(context);
+        if (serializedContext.length > 4000) {
+          context = {
+            truncated: true,
+            value: serializedContext.substring(0, 3997) + '...'
+          };
+        }
+      } else if (typeof context === 'string' && context.length > 4000) {
+        context = `${context.substring(0, 3997)}...`;
+      }
+
+      return {
+        timestamp,
+        role: String(record?.role ?? ''),
+        interface: String(record?.interface ?? ''),
+        content: content.length > 4000 ? `${content.substring(0, 3997)}...` : content,
+        context
+      };
+    });
+
+    const maxRequested = Number(data.maxOutputSize ?? data.maxChars);
+    const maxOutputSize = Number.isFinite(maxRequested) && maxRequested > 0
+      ? Math.min(Math.max(Math.floor(maxRequested), 256), 100000)
+      : 100000;
+
+    const escapeMarkdown = value => String(value)
+      .replace(/\\/g, '\\\\')
+      .replace(/\|/g, '\\|')
+      .replace(/\r?\n/g, '<br>');
+
+    const render = rows => {
+      if (requestedFormat === 'json') {
+        return safeJsonStringify(rows, 2);
+      }
+
+      if (requestedFormat === 'markdown') {
+        return rows.map((row, index) => {
+          const context = row.context === null ? '' : `\n\n**Context:**\n\`\`\`json\n${safeJsonStringify(row.context, 2)}\n\`\`\``;
+          return `### ${index + 1}. ${escapeMarkdown(row.timestamp || '')}\n\n- **Role:** ${escapeMarkdown(row.role)}\n- **Interface:** ${escapeMarkdown(row.interface)}\n\n${escapeMarkdown(row.content)}${context}`;
+        }).join('\n\n---\n\n');
+      }
+
+      return rows.map(row => {
+        const context = row.context === null ? '' : `\nContext: ${safeJsonStringify(row.context)}`;
+        return `${row.timestamp || ''} [${row.interface}] ${row.role}: ${row.content}${context}`;
+      }).join('\n\n');
+    };
+
+    let exportedRecords = records.slice();
+    let document = render(exportedRecords);
+    const truncated = document.length > maxOutputSize;
+
+    // Over the size cap, drop the least useful end: search hits come most relevant first, but
+    // recent history comes oldest first, so there the OLDEST messages go.
+    while (document.length > maxOutputSize && exportedRecords.length > 1) {
+      exportedRecords = recent ? exportedRecords.slice(1) : exportedRecords.slice(0, -1);
+      document = render(exportedRecords);
+    }
+
+    if (document.length > maxOutputSize && exportedRecords.length === 1) {
+      const record = { ...exportedRecords[0], context: null };
+      exportedRecords = [record];
+      let contentLimit = Math.max(16, record.content.length);
+      while (document.length > maxOutputSize && contentLimit > 16) {
+        contentLimit = Math.max(16, Math.floor(contentLimit * 0.75));
+        record.content = `${record.content.substring(0, Math.max(0, contentLimit - 3))}...`;
+        document = render(exportedRecords);
+      }
+    }
+
+    if (document.length > maxOutputSize) {
+      exportedRecords = [];
+      document = render(exportedRecords);
+    }
+
+    return {
+      success: true,
+      format: requestedFormat,
+      count: exportedRecords.length,
+      // Matched before the size cap; larger than count when the cap dropped records.
+      total: records.length,
+      truncated,
+      records: exportedRecords,
+      document,
+      result: document
+    };
   }
 
   /**

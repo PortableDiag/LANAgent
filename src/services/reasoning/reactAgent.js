@@ -1,7 +1,7 @@
 import { logger } from '../../utils/logger.js';
 import { EventEmitter } from 'events';
 import NodeCache from 'node-cache';
-import { listTools, selectRelevantTools, formatToolsForPrompt, executeTool, findPastExamples, DESCRIBE_TOOL } from './toolCatalog.js';
+import { listTools, selectRelevantTools, formatToolsForPrompt, executeTool, findPastExamples, DESCRIBE_TOOL, SEARCH_TOOL } from './toolCatalog.js';
 import { getSkillsService, learnSkillFromTask } from '../skills/skillsService.js';
 import { TodoList, TODO_TOOL, TODO_TOOL_PROMPT, runTodoTool } from './todoList.js';
 
@@ -445,7 +445,7 @@ Respond in this JSON format:
   "todo": [{"text": "step", "status": "pending|in_progress|done"}]
 }
 
-Only include "action" if you need to use a tool. To see the commands of a tool listed only by name, use {"tool": "${DESCRIBE_TOOL}", "command": "describe", "params": {"name": "<tool>"}}.
+Only include "action" if you need to use a tool. To see the commands of a tool listed only by name, use {"tool": "${DESCRIBE_TOOL}", "command": "describe", "params": {"name": "<tool>"}}. To find a command by keyword across every tool, use {"tool": "${SEARCH_TOOL}", "command": "search", "params": {"query": "<keywords>"}}.
 Only include "finalAnswer" if you have completed the task.
 Only include "todo" when your to-do list changes, and then send the whole list.
 Respond with valid JSON only.`;
@@ -501,7 +501,7 @@ Respond with valid JSON only.`;
   async executeAction(action, context) {
     const { tool, command, params } = action;
     const outcome = await executeTool(this.agent, tool, command, params || {}, context);
-    if (tool !== DESCRIBE_TOOL) this.updateToolPerformance(tool, outcome.success);
+    if (tool !== DESCRIBE_TOOL && tool !== SEARCH_TOOL) this.updateToolPerformance(tool, outcome.success);
     if (!outcome.success) {
       logger.warn(`ReAct action ${tool}.${command} failed: ${outcome.error || 'plugin reported failure'}`);
     }

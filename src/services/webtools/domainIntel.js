@@ -123,6 +123,172 @@ export async function certificate(domainIn, port = 443) {
   };
 }
 
+/**
+ * Assess the negotiated TLS connection posture, including protocol, cipher,
+ * key exchange, certificate chain, and ALPN negotiation.
+ */
+export async function tlsPosture(domainIn, options = {}) {
+  const domain = normaliseDomain(domainIn);
+  await assertPublicUrl(`https://${domain}/`, domain);
+
+  const port = Number(options.port) || 443;
+  const timeout = Number(options.timeout) || 10000;
+  // Offer h2 and http/1.1 like a browser does; with nothing offered the server can
+  // never select a protocol, and every site would be reported as missing ALPN.
+  const alpnProtocols = Array.isArray(options.alpnProtocols) && options.alpnProtocols.length
+    ? options.alpnProtocols
+    : ['h2', 'http/1.1'];
+
+  const handshake = await new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (fn, value) => {
+      if (settled) return;
+      settled = true;
+      fn(value);
+    };
+
+    const connectOptions = {
+      host: domain,
+      port,
+      servername: domain,
+      rejectUnauthorized: false,
+      timeout
+    };
+    connectOptions.ALPNProtocols = alpnProtocols;
+
+    const socket = tls.connect(connectOptions, () => {
+      let peer;
+      try {
+        peer = socket.getPeerCertificate(true);
+      } catch {
+        peer = socket.getPeerCertificate();
+      }
+
+      const protocol = typeof socket.getProtocol === 'function' ? socket.getProtocol() : null;
+      const cipher = typeof socket.getCipher === 'function' ? socket.getCipher() : null;
+      const keyInfo = typeof socket.getEphemeralKeyInfo === 'function' ? socket.getEphemeralKeyInfo() : null;
+      const alpn = socket.alpnProtocol || null;
+      const authorized = socket.authorized === true;
+      const authorizationError = socket.authorizationError || null;
+
+      socket.end();
+      finish(resolve, { peer, protocol, cipher, keyInfo, alpn, authorized, authorizationError });
+    });
+
+    socket.on('timeout', () => {
+      socket.destroy();
+      finish(reject, new Error('TLS handshake timed out'));
+    });
+    socket.on('error', error => finish(reject, error));
+  });
+
+  const first = handshake.peer;
+  if (!first || !first.subject) throw new Error('no certificate presented');
+
+  const chain = [];
+  const seen = new Set();
+  let current = first;
+  while (current && typeof current === 'object' && !seen.has(current.fingerprint256 || current.serialNumber || current.subject?.CN)) {
+    const identity = current.fingerprint256 || current.serialNumber || current.subject?.CN;
+    seen.add(identity);
+    chain.push({
+      subject: current.subject || {},
+      issuer: current.issuer || {},
+      subjectCommonName: current.subject?.CN || null,
+      issuerCommonName: current.issuer?.CN || null,
+      validFrom: current.valid_from ? new Date(current.valid_from).toISOString() : null,
+      validTo: current.valid_to ? new Date(current.valid_to).toISOString() : null,
+      fingerprint256: current.fingerprint256 || null,
+      serialNumber: current.serialNumber || null,
+      selfSigned: Boolean(current.subject && current.issuer && JSON.stringify(current.subject) === JSON.stringify(current.issuer))
+    });
+    current = current.issuerCertificate;
+  }
+
+  const protocol = handshake.protocol || null;
+  const cipher = handshake.cipher ? {
+    name: handshake.cipher.name || null,
+    standardName: handshake.cipher.standardName || null,
+    version: handshake.cipher.version || null,
+    bits: Number.isFinite(Number(handshake.cipher.bits)) ? Number(handshake.cipher.bits) : null
+  } : null;
+  const keyExchange = handshake.keyInfo ? {
+    type: handshake.keyInfo.type || null,
+    name: handshake.keyInfo.name || null,
+    size: Number.isFinite(Number(handshake.keyInfo.size)) ? Number(handshake.keyInfo.size) : null
+  } : null;
+
+  const findings = [];
+  const addFinding = (id, title, severity, recommendation) => findings.push({ id, title, severity, recommendation });
+
+  if (protocol === 'SSLv3' || protocol === 'TLSv1' || protocol === 'TLSv1.1') {
+    addFinding(
+      'obsolete-protocol',
+      `The negotiated protocol is obsolete (${protocol})`,
+      'high',
+      'Disable SSLv3, TLS 1.0, and TLS 1.1 and require TLS 1.2 or newer.'
+    );
+  }
+
+  const cipherName = String(cipher?.name || '').toUpperCase();
+  if (
+    !cipherName ||
+    /(?:RC4|RC2|3DES|DES|NULL|EXPORT|ANON|MD5|CBC)/.test(cipherName) ||
+    (cipher?.bits != null && cipher.bits < 128)
+  ) {
+    addFinding(
+      'weak-cipher',
+      cipherName ? `The negotiated cipher is weak (${cipher.name})` : 'No usable cipher information was reported',
+      'high',
+      'Use an authenticated, forward-secret cipher with at least 128-bit security, such as an AES-GCM or ChaCha20-Poly1305 suite.'
+    );
+  }
+
+  // Trust is not a finding here: certificate() already reports it, and
+  // securityPosture() scores it once as certificate-untrusted.
+
+  const leafIssuer = first.issuer?.CN || first.issuer?.O || null;
+  const secondSubject = chain[1]?.subjectCommonName || chain[1]?.subject?.O || null;
+  const appearsIncomplete = chain.length === 1 && !chain[0].selfSigned && leafIssuer && leafIssuer !== secondSubject;
+  if (appearsIncomplete) {
+    addFinding(
+      'incomplete-chain',
+      'The server did not provide a complete certificate chain',
+      'high',
+      'Configure the server to send the leaf certificate followed by all required intermediate certificates.'
+    );
+  }
+
+  if (!handshake.alpn) {
+    addFinding(
+      'missing-alpn',
+      'No ALPN protocol was negotiated',
+      'low',
+      'Advertise and negotiate an application protocol such as h2 or http/1.1.'
+    );
+  }
+
+  return {
+    domain,
+    protocol,
+    cipher,
+    keyExchange,
+    alpn: handshake.alpn,
+    certificate: {
+      subject: first.subject || {},
+      issuer: first.issuer || {},
+      validFrom: first.valid_from ? new Date(first.valid_from).toISOString() : null,
+      validTo: first.valid_to ? new Date(first.valid_to).toISOString() : null,
+      fingerprint256: first.fingerprint256 || null,
+      serialNumber: first.serialNumber || null,
+      trusted: handshake.authorized,
+      trustError: handshake.authorized ? null : String(handshake.authorizationError || '')
+    },
+    chain,
+    findings
+  };
+}
+
 export async function registration(domainIn) {
   const domain = normaliseDomain(domainIn);
   const res = await axios.get(`https://rdap.org/domain/${domain}`, { headers: { 'User-Agent': UA, Accept: 'application/rdap+json' }, timeout: 20000, maxRedirects: 5, validateStatus: () => true });
@@ -139,11 +305,22 @@ export async function registration(domainIn) {
   };
 }
 
-export async function report(domainIn) {
+export async function report(domainIn, options = {}) {
   const domain = normaliseDomain(domainIn);
   const settle = p => p.then(v => v, e => ({ error: e.message }));
-  const [reg, dns, subs, cert] = await Promise.all([settle(registration(domain)), settle(dnsRecords(domain)), settle(subdomains(domain)), settle(certificate(domain))]);
-  return { domain, registration: reg, dns, subdomains: subs, certificate: cert };
+  const includeTlsPosture = options?.includeTlsPosture === true;
+  const tasks = [
+    settle(registration(domain)),
+    settle(dnsRecords(domain)),
+    settle(subdomains(domain)),
+    settle(certificate(domain))
+  ];
+  if (includeTlsPosture) tasks.push(settle(tlsPosture(domain, options.tlsPostureOptions || {})));
+
+  const [reg, dns, subs, cert, posture] = await Promise.all(tasks);
+  const result = { domain, registration: reg, dns, subdomains: subs, certificate: cert };
+  if (includeTlsPosture) result.tlsPosture = posture;
+  return result;
 }
 
 /**
@@ -155,7 +332,7 @@ export async function report(domainIn) {
  */
 export async function securityPosture(domainIn, options = {}) {
   const supplied = domainIn && typeof domainIn === 'object' ? domainIn : null;
-  const data = supplied || await report(domainIn);
+  const data = supplied || await report(domainIn, { includeTlsPosture: true });
   const domain = normaliseDomain(data.domain || domainIn);
   const includeEvidence = options?.includeEvidence === true;
   const findings = [];
@@ -187,6 +364,14 @@ export async function securityPosture(domainIn, options = {}) {
       // certificates (and lifetimes are shrinking), so it flagged every
       // well-run site. Under 30 days is the signal that renewal is failing.
       evidence.push({ id: 'certificate-lifetime', value: { daysLeft, validFrom: cert.validFrom || null, validTo: cert.validTo || null } });
+    }
+  }
+
+  const tlsData = data.tlsPosture && !data.tlsPosture.error ? data.tlsPosture : null;
+  if (tlsData) {
+    for (const finding of tlsData.findings || []) {
+      const deduction = finding.id === 'obsolete-protocol' || finding.id === 'weak-cipher' ? 15 : finding.id === 'incomplete-chain' ? 10 : 4;
+      addFinding(`tls-${finding.id}`, finding.title, finding.severity, deduction, finding.recommendation, tlsData);
     }
   }
 

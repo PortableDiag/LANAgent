@@ -1,6 +1,7 @@
 import mongoose from 'mongoose';
 import crypto from 'crypto';
 import bcrypt from 'bcryptjs';
+import { retryOperation } from '../utils/retryUtils.js';
 import { logger } from '../utils/logger.js';
 
 /**
@@ -92,6 +93,9 @@ const mcpTokenSchema = new mongoose.Schema({
     default: true,
     index: true
   },
+  revocationReason: String,
+  revokedAt: Date,
+  rotatedAt: Date,
 
   // Token usage analytics
   usageAnalytics: {
@@ -170,6 +174,136 @@ mcpTokenSchema.statics.generateToken = async function(options = {}) {
   return {
     token: tokenValue,
     doc
+  };
+};
+
+/**
+ * Rotate an active MCP token: issue a replacement that carries the same access
+ * policy and invalidate the original credential.
+ * A revoked token is never rotated — revocation is how a compromised credential
+ * is cut off, and rotating it would hand its access back out under a new value.
+ * @param {string|mongoose.Types.ObjectId} tokenId - ID of the token to rotate
+ * @param {object} options - Optional rotation overrides
+ * @param {string} [options.name] - Replacement token display name
+ * @param {number|null} [options.expiresIn] - Replacement lifetime in milliseconds (null = never expires).
+ *   Omitted = the replacement keeps the original token's expiry time.
+ * @param {string} [options.description] - Replacement token description
+ * @returns {object} { token: plaintext, doc: replacement document, display: safe representation }
+ */
+mcpTokenSchema.statics.rotateToken = async function(tokenId, options = {}) {
+  if (!tokenId) {
+    throw new TypeError('A token ID is required for rotation');
+  }
+
+  const sourceToken = await this.findById(tokenId);
+  if (!sourceToken) {
+    throw new Error('MCP token not found');
+  }
+
+  if (!sourceToken.active) {
+    throw new Error('Cannot rotate a revoked MCP token');
+  }
+
+  const now = Date.now();
+  if (sourceToken.expiresAt && sourceToken.expiresAt.getTime() <= now) {
+    throw new Error('Cannot rotate an expired MCP token');
+  }
+
+  let expiresAt = sourceToken.expiresAt || null;
+  if (Object.prototype.hasOwnProperty.call(options, 'expiresIn')) {
+    expiresAt = null;
+    if (options.expiresIn !== null) {
+      if (typeof options.expiresIn !== 'number' || !Number.isFinite(options.expiresIn) || options.expiresIn <= 0) {
+        throw new TypeError('expiresIn must be a positive number of milliseconds or null');
+      }
+      expiresAt = new Date(now + options.expiresIn);
+    }
+  }
+
+  const name = options.name === undefined ? sourceToken.name : options.name;
+  if (typeof name !== 'string' || name.trim().length === 0) {
+    throw new TypeError('Token name must be a non-empty string');
+  }
+
+  const description = options.description === undefined
+    ? sourceToken.description
+    : options.description;
+
+  // Generate the replacement credential independently so the old plaintext
+  // token can never be recovered from either document.
+  const tokenValue = `mcp_${crypto.randomBytes(32).toString('hex')}`;
+  const tokenPrefix = `mcp_${tokenValue.slice(4, 8)}...`;
+  const hashedToken = await bcrypt.hash(tokenValue, 10);
+  const lookupKey = crypto.createHash('sha256').update(tokenValue).digest('hex');
+
+  const replacement = new this({
+    name,
+    token: hashedToken,
+    lookupKey,
+    tokenPrefix,
+    permissions: [...(sourceToken.permissions || [])],
+    allowedTools: [...(sourceToken.allowedTools || [])],
+    deniedTools: [...(sourceToken.deniedTools || [])],
+    expiresAt,
+    rateLimit: sourceToken.rateLimit
+      ? {
+          requests: sourceToken.rateLimit.requests,
+          window: sourceToken.rateLimit.window
+        }
+      : undefined,
+    createdBy: sourceToken.createdBy,
+    description,
+    active: true,
+    usageThreshold: sourceToken.usageThreshold
+  });
+
+  // Persist the replacement first; if this fails nothing has changed and the
+  // original token keeps working.
+  await retryOperation(() => replacement.save(), { retries: 3 });
+
+  // Invalidate the original with a conditional update so two concurrent
+  // rotations of the same token cannot both succeed and leave two live
+  // replacements. If it is no longer active, or the update fails, the
+  // replacement is removed again so no extra credential survives.
+  const rotationTimestamp = new Date();
+  let invalidated = null;
+  try {
+    invalidated = await retryOperation(() => this.findOneAndUpdate(
+      { _id: sourceToken._id, active: true },
+      {
+        $set: {
+          active: false,
+          revocationReason: 'Token rotated',
+          revokedAt: rotationTimestamp,
+          rotatedAt: rotationTimestamp
+        }
+      },
+      { new: true }
+    ), { retries: 3 });
+  } catch (error) {
+    logger.error('Failed to invalidate MCP token during rotation; removing replacement', {
+      tokenId: sourceToken._id?.toString(),
+      replacementId: replacement._id?.toString(),
+      error: error.message
+    });
+    await this.deleteOne({ _id: replacement._id }).catch(() => {});
+    throw error;
+  }
+
+  if (!invalidated) {
+    await this.deleteOne({ _id: replacement._id }).catch(() => {});
+    throw new Error('MCP token was revoked or rotated concurrently');
+  }
+
+  logger.info(`Rotated MCP token: ${sourceToken.name} (${sourceToken.tokenPrefix}) -> ${replacement.tokenPrefix}`, {
+    tokenId: sourceToken._id?.toString(),
+    replacementId: replacement._id?.toString()
+  });
+
+  return {
+    token: tokenValue,
+    doc: replacement,
+    display: replacement.toDisplay()
   };
 };
 

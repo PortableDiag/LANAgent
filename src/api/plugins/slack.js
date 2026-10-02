@@ -16,8 +16,8 @@ export default class SlackPlugin extends BasePlugin {
       },
       {
         command: 'listChannels',
-        description: 'List all channels in the workspace',
-        usage: 'listChannels'
+        description: 'List workspace channels with optional pagination and filtering',
+        usage: 'listChannels [cursor] [limit] [types] [excludeArchived]'
       },
       {
         command: 'getUserInfo',
@@ -61,14 +61,40 @@ export default class SlackPlugin extends BasePlugin {
   }
 
   async execute(params) {
-    const { action, channel, text, userId, sendAt, threadTs, buttons, blocks, timestamp, emoji, limit, oldest, latest } = params;
+    const {
+      action,
+      channel,
+      text,
+      userId,
+      sendAt,
+      threadTs,
+      buttons,
+      blocks,
+      timestamp,
+      emoji,
+      limit,
+      oldest,
+      latest,
+      cursor,
+      types,
+      excludeArchived
+    } = params;
     
     try {
       switch(action) {
         case 'sendMessage':
           return await this.sendMessage(channel, text);
-        case 'listChannels':
-          return await this.listChannels();
+        case 'listChannels': {
+          const options = {};
+          if (cursor !== undefined) options.cursor = cursor;
+          if (limit !== undefined) options.limit = limit;
+          if (types !== undefined) options.types = types;
+          if (excludeArchived !== undefined) options.excludeArchived = excludeArchived;
+
+          return await this.listChannels(
+            Object.keys(options).length > 0 ? options : undefined
+          );
+        }
         case 'getUserInfo':
           return await this.getUserInfo(userId);
         case 'scheduleMessage':
@@ -120,19 +146,72 @@ export default class SlackPlugin extends BasePlugin {
     }
   }
 
-  async listChannels() {
+  /**
+   * List Slack channels with optional cursor pagination and channel filters.
+   * @param {Object} [options] - Channel discovery options
+   * @param {string} [options.cursor] - Cursor returned by a previous request
+   * @param {number} [options.limit] - Number of channels to request, bounded to Slack's supported range
+   * @param {string|string[]} [options.types] - Slack channel types to include
+   * @param {boolean} [options.excludeArchived] - Whether archived channels should be excluded
+   * @returns {Promise<Object>}
+   */
+  async listChannels(options) {
     if (!this.apiKey) {
       return { success: false, error: 'API key not configured' };
     }
 
     try {
+      const params = {};
+
+      if (options && options.cursor) {
+        params.cursor = options.cursor;
+      }
+
+      if (options && options.limit !== undefined) {
+        // Slack rejects a limit above 1000; clamp rather than let the API refuse the
+        // whole call over an argument we can bound ourselves.
+        params.limit = Math.min(Math.max(Number(options.limit) || 1, 1), 1000);
+      }
+
+      if (options && options.types !== undefined) {
+        const channelTypes = Array.isArray(options.types)
+          ? options.types.join(',')
+          : String(options.types);
+
+        if (channelTypes) {
+          params.types = channelTypes;
+        }
+      }
+
+      if (options && options.excludeArchived !== undefined) {
+        params.exclude_archived = options.excludeArchived === true ||
+          options.excludeArchived === 'true';
+      }
+
       const response = await axios.get(`${this.baseUrl}/conversations.list`, {
         headers: {
           Authorization: `Bearer ${this.apiKey}`
-        }
+        },
+        ...(Object.keys(params).length > 0 ? { params } : {})
       });
 
-      return { success: true, data: response.data.channels };
+      // Slack answers a FAILED call with HTTP 200 and { ok: false, error: '...' }, so
+      // axios does not throw. Check the response envelope before returning channel data.
+      if (!response.data?.ok) {
+        const reason = response.data?.error || 'unknown_error';
+        logger.error(`List channels error: Slack returned ${reason}`);
+        return { success: false, error: `Failed to list channels: ${reason}` };
+      }
+
+      // conversations.list has no has_more field (unlike conversations.history):
+      // a further page exists exactly when next_cursor is non-empty.
+      const nextCursor = response.data.response_metadata?.next_cursor || null;
+      return {
+        success: true,
+        data: response.data.channels || [],
+        hasMore: Boolean(nextCursor),
+        nextCursor
+      };
     } catch (error) {
       logger.error('List channels error:', error.message);
       return { success: false, error: `Failed to list channels: ${error.message}` };

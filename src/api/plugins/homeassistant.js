@@ -36,6 +36,12 @@ export default class HomeAssistantPlugin extends BasePlugin {
         examples: ['list my home assistant lights', 'what sensors does home assistant have', 'show home assistant entities in the garage']
       },
       {
+        command: 'list_services',
+        description: 'List Home Assistant services and inspect their target and field schemas, optionally filtered by domain or service name',
+        usage: 'list_services({ domain: "climate", search: "temperature" })',
+        examples: ['what services can home assistant use', 'show home assistant climate services', 'what fields does the light turn on service support']
+      },
+      {
         command: 'get_state',
         description: 'Get the current state and attributes of one Home Assistant entity',
         usage: 'get_state({ entity: "sensor.living_room_temperature" })',
@@ -67,8 +73,14 @@ export default class HomeAssistantPlugin extends BasePlugin {
       }
     ];
 
-    this.config = { url: null, token: null, timeoutMs: 10000 };
+    this.config = {
+      url: null,
+      token: null,
+      timeoutMs: 10000,
+      serviceCacheTtlSeconds: 300
+    };
     this.cache = new NodeCache({ stdTTL: 30, checkperiod: 60 });
+    this.serviceCache = new NodeCache({ stdTTL: 0, checkperiod: 60 });
     this.initialized = false;
   }
 
@@ -150,6 +162,8 @@ export default class HomeAssistantPlugin extends BasePlugin {
       switch (action) {
         case 'list_entities':
           return await this.listEntities(data);
+        case 'list_services':
+          return await this.listServices(data);
         case 'get_state':
           return await this.getState(data.entity || data.entity_id);
         case 'call_service':
@@ -197,6 +211,76 @@ export default class HomeAssistantPlugin extends BasePlugin {
       result: states.length
         ? `${states.length} entities${states.length > shown.length ? ` (showing ${shown.length})` : ''}:\n` + shown.map(s => `• ${this.summarize(s)}`).join('\n')
         : 'No matching Home Assistant entities.'
+    };
+  }
+
+  /**
+   * List Home Assistant services and their service-call schemas.
+   *
+   * The service registry changes less frequently than entity state, so it uses
+   * a separate cache. Set force, refresh, or invalidate to explicitly discard
+   * the cached registry before fetching it again.
+   */
+  async listServices({ domain, search, force = false, refresh = false, invalidate = false } = {}) {
+    const refreshRequested = Boolean(force || refresh || invalidate);
+    if (refreshRequested) this.serviceCache.del('services');
+
+    let services = this.serviceCache.get('services');
+    if (!services) {
+      services = await this.request('get', '/api/services');
+      if (!Array.isArray(services)) {
+        throw new Error('Home Assistant returned an invalid service registry');
+      }
+
+      const configuredTtl = Number(this.config.serviceCacheTtlSeconds);
+      const ttl = Number.isFinite(configuredTtl) && configuredTtl > 0 ? configuredTtl : 300;
+      this.serviceCache.set('services', services, ttl);
+    }
+
+    const normalizedDomain = domain ? String(domain).trim().toLowerCase() : null;
+    // Natural-language searches say "turn on" where service names say "turn_on".
+    const normalizedSearch = search ? String(search).trim().toLowerCase().replace(/[\s_]+/g, ' ') : null;
+    const result = [];
+
+    for (const domainEntry of services) {
+      if (!domainEntry || typeof domainEntry !== 'object') continue;
+
+      const serviceDomain = String(domainEntry.domain || '').trim();
+      if (!serviceDomain) continue;
+      if (normalizedDomain && serviceDomain.toLowerCase() !== normalizedDomain) continue;
+
+      const definitions = domainEntry.services && typeof domainEntry.services === 'object'
+        ? domainEntry.services
+        : {};
+
+      for (const [serviceName, definitionValue] of Object.entries(definitions)) {
+        const definition = definitionValue && typeof definitionValue === 'object' ? definitionValue : {};
+        const fullName = `${serviceDomain}.${serviceName}`;
+        const haystack = `${fullName} ${definition.name || ''} ${definition.description || ''}`
+          .toLowerCase()
+          .replace(/[\s_]+/g, ' ');
+        if (normalizedSearch && !haystack.includes(normalizedSearch)) continue;
+
+        result.push({
+          name: fullName,
+          service_name: fullName,
+          domain: serviceDomain,
+          service: serviceName,
+          display_name: definition.name,
+          description: definition.description,
+          target: definition.target || {},
+          fields: definition.fields || {}
+        });
+      }
+    }
+
+    return {
+      success: true,
+      count: result.length,
+      services: result,
+      result: result.length
+        ? `${result.length} Home Assistant services:\n` + result.map(service => `• ${service.name}`).join('\n')
+        : 'No matching Home Assistant services.'
     };
   }
 

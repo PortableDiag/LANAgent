@@ -1,4 +1,4 @@
-import WebWatch from '../../models/WebWatch.js';
+import WebWatch, { priceHistoryLimit } from '../../models/WebWatch.js';
 import { readFeed } from './feedReader.js';
 import { extractPrice } from './priceExtractor.js';
 import { fetchPublic } from './fetchPublic.js';
@@ -120,7 +120,12 @@ export class WebWatchService {
     const { update, alert } = evaluatePrice(watch, reading);
     const set = { ...update, lastCheckedAt: new Date(), lastError: null, failCount: 0 };
     if (!watch.name && reading.title) set.name = reading.title;
-    await WebWatch.updateOne({ _id: watch._id }, { $set: set });
+    // Keep a bounded history of readings for trend reporting (priceWatch.trend).
+    const observation = { price: reading.price, checkedAt: set.lastCheckedAt };
+    await WebWatch.updateOne({ _id: watch._id }, {
+      $set: set,
+      $push: { priceHistory: { $each: [observation], $slice: -priceHistoryLimit(watch) } }
+    });
     if (alert) await this.notify(alert);
     return { kind: 'price', price: reading.price, currency: reading.currency, source: reading.source, alerted: Boolean(alert) };
   }

@@ -341,6 +341,19 @@ export default class TrellisNotesPlugin extends BasePlugin {
       data.needsParameterExtraction = true;
       data.originalInput = asked;
     }
+    // Publishing sends one of the agent's skills to every agent in the document, so it takes an
+    // explicit ask. "search my skills for trellis" matched publishSkill (0.68) on the words
+    // "skills" and "trellis" and tried to publish a skill named "trellis" (2026-10-01).
+    if (action === 'publishSkill' && asked && !/\b(publish|share|put|post|upload|send)\b/i.test(asked)) {
+      this.logger.info(`publishSkill refused: "${asked.slice(0, 120)}" does not ask to publish`);
+      // Most such requests are a search of the agent's own skills: answer that instead.
+      const skills = this.agent?.apiManager?.getPlugin?.('skills');
+      if (skills?.execute && /\b(search|find|look|which|what|list|show)\b/i.test(asked)) {
+        const query = asked.replace(/^.*?\b(?:for|about|mentioning|mention|on|with)\b\s*/i, '').replace(/[?.!]+$/, '').trim() || asked;
+        return await skills.execute({ action: 'search', query });
+      }
+      return { success: false, error: 'That reads like a question about skills, not a request to publish one, so nothing was published. To look through saved skills, say e.g. "search skills for trellis"; to publish, say "publish the <name> skill to the trellis skills basket".' };
+    }
     if (data.needsParameterExtraction) await this._extractArgs(action, data);
     // A file named in a channel ("[report.md](trellis:file:0)") is an attachment of the channel's
     // own card. A planned "read that file" step carries no card (2026-10-01: readFile failed

@@ -17,57 +17,70 @@ import { logger } from './logger.js';
 
 let puppeteerImpl = null;
 let stealthApplied = false;
+let puppeteerInitPromise = null;
 
 async function getPuppeteer() {
   if (puppeteerImpl) return puppeteerImpl;
+  if (puppeteerInitPromise) return puppeteerInitPromise;
 
-  // v2.25.89: prefer rebrowser-puppeteer-core as the underlying Puppeteer
-  // implementation under puppeteer-extra. rebrowser is a Puppeteer fork
-  // specifically patched against modern CDP-detection vectors
-  // (Runtime.evaluate timing, isolated-world detection, the console.log
-  // slowdown that's used as a "DevTools open" tell). Stealth plugin still
-  // applies on top — they complement each other rather than conflict.
-  //
-  // rebrowser-puppeteer-core has no bundled Chromium, so we point it at
-  // the Chromium that the regular `puppeteer` package downloaded into
-  // node_modules. Falls back to plain puppeteer-extra → plain puppeteer.
-  try {
-    const { addExtra } = await import('puppeteer-extra');
-    let baseImpl;
-    let basePath = 'puppeteer';
+  puppeteerInitPromise = (async () => {
+    // v2.25.89: prefer rebrowser-puppeteer-core as the underlying Puppeteer
+    // implementation under puppeteer-extra. rebrowser is a Puppeteer fork
+    // specifically patched against modern CDP-detection vectors
+    // (Runtime.evaluate timing, isolated-world detection, the console.log
+    // slowdown that's used as a "DevTools open" tell). Stealth plugin still
+    // applies on top — they complement each other rather than conflict.
+    //
+    // rebrowser-puppeteer-core has no bundled Chromium, so we point it at
+    // the Chromium that the regular `puppeteer` package downloaded into
+    // node_modules. Falls back to plain puppeteer-extra → plain puppeteer.
     try {
-      const rebrowser = (await import('rebrowser-puppeteer-core')).default;
-      // Resolve Chromium path from the regular puppeteer install
-      const plainPuppeteer = (await import('puppeteer')).default;
-      const chromiumPath = typeof plainPuppeteer.executablePath === 'function'
-        ? plainPuppeteer.executablePath()
-        : null;
-      if (chromiumPath) {
-        // Wrap launch() to inject executablePath so callers don't have to
-        const origLaunch = rebrowser.launch.bind(rebrowser);
-        rebrowser.launch = (opts = {}) => origLaunch({ executablePath: chromiumPath, ...opts });
-        baseImpl = rebrowser;
-        basePath = `rebrowser-puppeteer-core (chromium: ${chromiumPath})`;
-      } else {
-        baseImpl = plainPuppeteer;
-        logger.warn('rebrowser-puppeteer-core present but Chromium path unresolved — falling back to plain puppeteer');
+      const { addExtra } = await import('puppeteer-extra');
+      let baseImpl;
+      let basePath = 'puppeteer';
+      try {
+        const rebrowser = (await import('rebrowser-puppeteer-core')).default;
+        // Resolve Chromium path from the regular puppeteer install
+        const plainPuppeteer = (await import('puppeteer')).default;
+        const chromiumPath = typeof plainPuppeteer.executablePath === 'function'
+          ? plainPuppeteer.executablePath()
+          : null;
+        if (chromiumPath) {
+          // Wrap launch() to inject executablePath so callers don't have to
+          const origLaunch = rebrowser.launch.bind(rebrowser);
+          rebrowser.launch = (opts = {}) => origLaunch({ executablePath: chromiumPath, ...opts });
+          baseImpl = rebrowser;
+          basePath = `rebrowser-puppeteer-core (chromium: ${chromiumPath})`;
+        } else {
+          baseImpl = plainPuppeteer;
+          logger.warn('rebrowser-puppeteer-core present but Chromium path unresolved — falling back to plain puppeteer');
+        }
+      } catch {
+        // rebrowser-puppeteer-core not installed — use the bundled puppeteer
+        baseImpl = (await import('puppeteer')).default;
       }
-    } catch {
-      // rebrowser-puppeteer-core not installed — use the bundled puppeteer
-      baseImpl = (await import('puppeteer')).default;
+      const puppeteerExtra = addExtra(baseImpl);
+      const StealthPlugin = (await import('puppeteer-extra-plugin-stealth')).default;
+      puppeteerExtra.use(StealthPlugin());
+      puppeteerImpl = puppeteerExtra;
+      stealthApplied = true;
+      logger.info(`Stealth Puppeteer loaded (${basePath} + puppeteer-extra + stealth plugin)`);
+    } catch (error) {
+      logger.warn(`puppeteer-extra not available, falling back to plain puppeteer: ${error.message}`);
+      puppeteerImpl = (await import('puppeteer')).default;
     }
-    const puppeteerExtra = addExtra(baseImpl);
-    const StealthPlugin = (await import('puppeteer-extra-plugin-stealth')).default;
-    puppeteerExtra.use(StealthPlugin());
-    puppeteerImpl = puppeteerExtra;
-    stealthApplied = true;
-    logger.info(`Stealth Puppeteer loaded (${basePath} + puppeteer-extra + stealth plugin)`);
-  } catch (error) {
-    logger.warn(`puppeteer-extra not available, falling back to plain puppeteer: ${error.message}`);
-    puppeteerImpl = (await import('puppeteer')).default;
-  }
 
-  return puppeteerImpl;
+    return puppeteerImpl;
+  })();
+
+  // Clear the shared promise after a failed initialization so subsequent
+  // callers can retry instead of reusing a permanently rejected promise.
+  puppeteerInitPromise = puppeteerInitPromise.catch(error => {
+    puppeteerInitPromise = null;
+    throw error;
+  });
+
+  return puppeteerInitPromise;
 }
 
 /**
@@ -142,8 +155,8 @@ async function launchBrowser(options = {}) {
     // is actually connectable. The old check was `pgrep -x Xvfb || start :99` —
     // which is wrong: a STRAY Xvfb on some other display (seen on DELTA 2026-06-27:
     // `Xvfb :1867971576` from an unrelated process) makes pgrep succeed, so :99 is
-    // never started, yet DISPLAY=:99 is set anyway → :99 is dead → Chrome fails to
-    // launch with the opaque "Failed to launch the browser process! undefined", and
+    // never started, yet DISPLAY=:99 is set anyway → :99 is dead → Chrome fails
+    // to launch with the opaque "Failed to launch the browser process! undefined", and
     // the scraper's browser scraping goes silently dead. Validate the SPECIFIC
     // display's socket (/tmp/.X11-unix/X99), start a dedicated :99 if absent, and
     // fall back to true headless if it never comes up — so a missing/broken Xvfb
@@ -238,10 +251,10 @@ async function launchBrowser(options = {}) {
       // the second launch fails/attaches to the first. Pass a distinct
       // `userDataDir` for any concurrent instance.
       //
-      // DISK-backed by default (/var/tmp), NOT /tmp. /tmp is a RAM tmpfs on the
-      // agents; the profile's Chrome cache grows unbounded (12G seen on DELTA
-      // 2026-06-27) and filling the tmpfs took the whole box down (a full /tmp
-      // made dns-pin write an empty /etc/hosts → localhost dead → Mongo → outage).
+      // DISK-backed by default (/var/tmp), NOT /tmp. /tmp is a RAM tmpfs on
+      // the agents; the profile's Chrome cache grows unbounded (12G seen on
+      // DELTA 2026-06-27) and filling the tmpfs took the whole box down (a full
+      // /tmp made dns-pin write an empty /etc/hosts → localhost dead → Mongo → outage).
       // On disk it can grow harmlessly. Override with PUPPETEER_PROFILE_DIR.
       `--user-data-dir=${options.userDataDir || process.env.PUPPETEER_PROFILE_DIR || '/var/tmp/puppeteer-profile'}`
     ]

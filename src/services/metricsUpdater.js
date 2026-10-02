@@ -11,6 +11,9 @@ export class MetricsUpdaterService {
     this.updateInterval = '0 */15 * * * *'; // Every 15 minutes
     this.dailyUpdateInterval = '5 0 * * *'; // 12:05 AM daily
     this.isRunning = false;
+    this.scheduledTasks = new Map();
+    this._initialized = false;
+    this._initializePromise = null;
     // Per-job overrun flags. Cron ticks that arrive while a previous run is
     // still in progress are skipped instead of stacking. Sufficient for
     // single-process deployments; multi-process cluster locking would need
@@ -24,22 +27,77 @@ export class MetricsUpdaterService {
    * Initialize the metrics updater service
    */
   async initialize() {
+    if (this._initialized) {
+      this.start();
+      return;
+    }
+
+    if (this._initializePromise) {
+      return this._initializePromise;
+    }
+
+    this._initializePromise = (async () => {
+      try {
+        logger.info('[MetricsUpdater] Initializing metrics updater service', {
+          service: 'metrics-updater'
+        });
+
+        // Update metrics immediately on startup
+        await this.updateCurrentMetrics();
+
+        // Schedule periodic updates
+        this.start();
+
+        this._initialized = true;
+
+        logger.info('[MetricsUpdater] Metrics updater service initialized successfully', {
+          service: 'metrics-updater'
+        });
+      } catch (error) {
+        this.isRunning = false;
+        this._initialized = false;
+        logger.error('[MetricsUpdater] Failed to initialize:', error, {
+          service: 'metrics-updater'
+        });
+        throw error;
+      } finally {
+        this._initializePromise = null;
+      }
+    })();
+
+    return this._initializePromise;
+  }
+
+  /**
+   * Start scheduled metric updates.
+   *
+   * Cron tasks are created on the first start only; later starts resume the
+   * existing handles, so no duplicate cron jobs are ever registered.
+   */
+  start() {
+    if (this.isRunning) {
+      return;
+    }
+
     try {
-      logger.info('[MetricsUpdater] Initializing metrics updater service', {
-        service: 'metrics-updater'
-      });
+      if (this.scheduledTasks.size === 0) {
+        this.scheduleUpdates();
+      } else {
+        for (const task of this.scheduledTasks.values()) {
+          if (task && typeof task.start === 'function') {
+            task.start();
+          }
+        }
+      }
 
-      // Update metrics immediately on startup
-      await this.updateCurrentMetrics();
-
-      // Schedule periodic updates
-      this.scheduleUpdates();
-
-      logger.info('[MetricsUpdater] Metrics updater service initialized successfully', {
-        service: 'metrics-updater'
+      this.isRunning = true;
+      logger.info('[MetricsUpdater] Metric update scheduling started', {
+        service: 'metrics-updater',
+        scheduledTasks: this.scheduledTasks.size
       });
     } catch (error) {
-      logger.error('[MetricsUpdater] Failed to initialize:', error, {
+      this.isRunning = false;
+      logger.error('[MetricsUpdater] Failed to start metric update scheduling:', error, {
         service: 'metrics-updater'
       });
       throw error;
@@ -47,40 +105,117 @@ export class MetricsUpdaterService {
   }
 
   /**
+   * Stop scheduled metric updates.
+   *
+   * Task handles are kept and resumed by start(). node-cron 3 has no
+   * destroy() and keeps every task it ever scheduled in its global storage,
+   * so re-creating tasks on each stop/start cycle would leak stopped tasks.
+   */
+  stop() {
+    if (!this.isRunning) {
+      return;
+    }
+
+    this.isRunning = false;
+
+    for (const [name, task] of this.scheduledTasks.entries()) {
+      try {
+        if (task && typeof task.stop === 'function') {
+          task.stop();
+        }
+      } catch (error) {
+        logger.error(`[MetricsUpdater] Failed to stop ${name} metric task:`, error, {
+          service: 'metrics-updater',
+          task: name
+        });
+      }
+    }
+
+    logger.info('[MetricsUpdater] Metric update scheduling stopped', {
+      service: 'metrics-updater'
+    });
+  }
+
+  /**
+   * Restart scheduled metric updates.
+   */
+  restart() {
+    this.stop();
+    this.start();
+  }
+
+  /**
    * Schedule periodic metric updates
    */
   scheduleUpdates() {
-    // Update current day metrics every 15 minutes
-    cron.schedule(this.updateInterval, async () => {
-      if (this._runningCurrent) {
-        logger.debug('[MetricsUpdater] Skipping tick — current run still in progress');
-        return;
-      }
-      try {
-        await this.updateCurrentMetrics();
-      } catch (error) {
-        logger.error('[MetricsUpdater] Failed to update current metrics:', error);
-      }
-    });
+    if (this.scheduledTasks.size > 0) {
+      logger.debug('[MetricsUpdater] Metric updates are already scheduled', {
+        service: 'metrics-updater',
+        scheduledTasks: this.scheduledTasks.size
+      });
+      return;
+    }
 
-    // Update previous day metrics at midnight
-    cron.schedule(this.dailyUpdateInterval, async () => {
-      if (this._runningPrev) {
-        logger.debug('[MetricsUpdater] Skipping tick — previous-day run still in progress');
-        return;
-      }
-      try {
-        await this.updatePreviousDayMetrics();
-      } catch (error) {
-        logger.error('[MetricsUpdater] Failed to update previous day metrics:', error);
-      }
-    });
+    try {
+      // Update current day metrics every 15 minutes
+      const currentTask = cron.schedule(this.updateInterval, async () => {
+        if (!this.isRunning) {
+          return;
+        }
+        if (this._runningCurrent) {
+          logger.debug('[MetricsUpdater] Skipping tick — current run still in progress');
+          return;
+        }
+        try {
+          await this.updateCurrentMetrics();
+        } catch (error) {
+          logger.error('[MetricsUpdater] Failed to update current metrics:', error);
+        }
+      });
 
-    logger.info('[MetricsUpdater] Scheduled metric updates', {
-      service: 'metrics-updater',
-      currentInterval: this.updateInterval,
-      dailyInterval: this.dailyUpdateInterval
-    });
+      this.scheduledTasks.set('current', currentTask);
+
+      // Update previous day metrics at midnight
+      const previousTask = cron.schedule(this.dailyUpdateInterval, async () => {
+        if (!this.isRunning) {
+          return;
+        }
+        if (this._runningPrev) {
+          logger.debug('[MetricsUpdater] Skipping tick — previous-day run still in progress');
+          return;
+        }
+        try {
+          await this.updatePreviousDayMetrics();
+        } catch (error) {
+          logger.error('[MetricsUpdater] Failed to update previous day metrics:', error);
+        }
+      });
+
+      this.scheduledTasks.set('previous', previousTask);
+
+      logger.info('[MetricsUpdater] Scheduled metric updates', {
+        service: 'metrics-updater',
+        currentInterval: this.updateInterval,
+        dailyInterval: this.dailyUpdateInterval
+      });
+    } catch (error) {
+      for (const task of this.scheduledTasks.values()) {
+        try {
+          if (task && typeof task.stop === 'function') {
+            task.stop();
+          }
+          if (task && typeof task.destroy === 'function') {
+            task.destroy();
+          }
+        } catch (cleanupError) {
+          logger.error('[MetricsUpdater] Failed to clean up partially scheduled task:', cleanupError, {
+            service: 'metrics-updater'
+          });
+        }
+      }
+      this.scheduledTasks.clear();
+      throw error;
+    }
   }
 
   /**
@@ -152,6 +287,12 @@ export class MetricsUpdaterService {
    * Backfill metrics for a date range
    */
   async backfillMetrics(startDate, endDate) {
+    const wasRunning = this.isRunning;
+
+    if (wasRunning) {
+      this.stop();
+    }
+
     try {
       logger.info('[MetricsUpdater] Starting metrics backfill', {
         service: 'metrics-updater',
@@ -181,6 +322,10 @@ export class MetricsUpdaterService {
     } catch (error) {
       logger.error('[MetricsUpdater] Error during backfill:', error);
       throw error;
+    } finally {
+      if (wasRunning) {
+        this.start();
+      }
     }
   }
 

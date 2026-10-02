@@ -29,7 +29,10 @@ export default class PriceWatchPlugin extends BasePlugin {
         usage: 'list', examples: ['what prices am I tracking', 'list my price alerts'] },
       { command: 'recheck', description: 'Check watched prices now (one, or all of them)',
         usage: 'recheck({ name: "Monitor" })  // no name = all',
-        examples: ['check my price watches now', 'has the monitor price changed'] }
+        examples: ['check my price watches now', 'has the monitor price changed'] },
+      { command: 'trend', description: 'Show how a watched price has moved over its recent checks: change, low, high and direction',
+        usage: 'trend({ name: "Monitor", window: 10 })  // or url / id; window = last N checks, default all kept',
+        examples: ['how has the monitor price moved', 'show the price trend for the laptop', 'is the price of that item going up or down'] }
     ];
     this.watcher = getWebWatchService(this);
   }
@@ -47,7 +50,8 @@ export default class PriceWatchPlugin extends BasePlugin {
         case 'unwatch': return await this.unwatch(p);
         case 'list': return await this.list();
         case 'recheck': return await this.recheck(p);
-        default: return { success: false, error: `Unknown action '${action}'. Use: check, watch, unwatch, list, recheck` };
+        case 'trend': return await this.trend(p);
+        default: return { success: false, error: `Unknown action '${action}'. Use: check, watch, unwatch, list, recheck, trend` };
       }
     } catch (error) {
       this.logger.warn(`priceWatch ${action} failed: ${error.message}`);
@@ -105,5 +109,25 @@ export default class PriceWatchPlugin extends BasePlugin {
     }
     const r = await this.watcher.checkDue(new Date(), { force: true, kind: 'price' });
     return { success: true, ...r, result: `Checked ${r.checked || 0} price watch(es)${r.failed ? `, ${r.failed} failed` : ''}; any alert was sent.` };
+  }
+
+  async trend(p) {
+    const w = await findWatch('price', p);
+    const t = await WebWatch.getPriceTrend(w._id, p.window == null || p.window === '' ? undefined : Number(p.window));
+    const label = w.name || w.url;
+    if (!t || t.observations.length === 0) {
+      return { success: true, trend: t, result: `No price history for ${label} yet — it builds up as the watch is checked.` };
+    }
+    const cur = w.currency ? `${w.currency} ` : '';
+    const n = t.observations.length;
+    const first = t.observations[0];
+    const last = t.observations[n - 1];
+    const pct = t.percentageChange == null ? '' : ` (${t.percentageChange > 0 ? '+' : ''}${t.percentageChange.toFixed(1)}%)`;
+    const result = n === 1
+      ? `${label}: one reading so far, ${cur}${last.price} on ${last.checkedAt.toISOString().slice(0, 10)}.`
+      : `${label} over the last ${n} checks (${first.checkedAt.toISOString().slice(0, 10)} → ${last.checkedAt.toISOString().slice(0, 10)}): ` +
+        `${cur}${first.price} → ${cur}${last.price}, ${t.direction}${t.absoluteChange ? ` ${t.absoluteChange > 0 ? '+' : ''}${Number(t.absoluteChange.toFixed(2))}` : ''}${pct}; ` +
+        `low ${cur}${t.minimum}, high ${cur}${t.maximum}.`;
+    return { success: true, trend: t, result };
   }
 }

@@ -210,10 +210,10 @@ class TrustRegistryService {
     /**
      * Get simplified trust level for an agent (from our perspective)
      */
-    async getTrustLevel(agentENS) {
+    async getTrustLevel(agentENS, scopeName = 'universal') {
         try {
             const ourENS = `${(process.env.AGENT_NAME || 'lanagent').toLowerCase()}.lanagent.eth`;
-            const result = await this.getTrust(ourENS, agentENS);
+            const result = await this.getTrust(ourENS, agentENS, scopeName);
             return result.level;
         } catch {
             return 'Unknown';

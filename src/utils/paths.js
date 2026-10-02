@@ -56,6 +56,20 @@ export const PATH_KEYS = Object.freeze({
   WAKE_WORD_SAMPLES_PATH
 });
 
+const CANONICAL_PATH_KEYS = Object.freeze([
+  ['deploy', DEPLOY_PATH],
+  ['data', DATA_PATH],
+  ['logs', LOGS_PATH],
+  ['workspace', WORKSPACE_PATH],
+  ['temp', TEMP_PATH],
+  ['uploads', UPLOADS_PATH],
+  ['repo', REPO_PATH],
+  ['venv', VENV_PATH],
+  ['scripts', SCRIPTS_PATH],
+  ['wakeWordModels', WAKE_WORD_MODELS_PATH],
+  ['wakeWordSamples', WAKE_WORD_SAMPLES_PATH]
+]);
+
 /**
  * Check whether a candidate path is contained by a selected managed root.
  *
@@ -120,6 +134,95 @@ export function getManagedPath(name, ...segments) {
   }
 
   return resolveContainedPath(PATH_KEYS[name], segments);
+}
+
+/**
+ * Serialize an absolute or relative file path into a deployment-independent
+ * managed path reference.
+ *
+ * The most specific managed root containing the path is selected. Relative
+ * paths use forward slashes so references remain portable across platforms.
+ *
+ * @param {string} filePath - The file path to serialize.
+ * @returns {{name: string, relativePath: string}} A managed path reference.
+ * @throws {TypeError} If filePath is not a string.
+ * @throws {Error} If the path is outside all managed roots.
+ */
+export function toManagedPathReference(filePath) {
+  if (typeof filePath !== 'string') {
+    throw new TypeError('Managed file path must be a string');
+  }
+
+  const absolutePath = path.resolve(filePath);
+  let selectedRoot;
+  let selectedName;
+
+  for (const [name, root] of CANONICAL_PATH_KEYS) {
+    const normalizedRoot = path.resolve(root);
+
+    if (!isContainedPath(normalizedRoot, absolutePath)) {
+      continue;
+    }
+
+    if (
+      selectedRoot === undefined ||
+      normalizedRoot.length > selectedRoot.length
+    ) {
+      selectedRoot = normalizedRoot;
+      selectedName = name;
+    }
+  }
+
+  if (selectedRoot === undefined) {
+    throw new Error('Path is outside all managed roots');
+  }
+
+  return {
+    name: selectedName,
+    relativePath: path.relative(selectedRoot, absolutePath).split(path.sep).join('/')
+  };
+}
+
+/**
+ * Resolve a deployment-independent managed path reference.
+ *
+ * @param {{name: string, relativePath: string, version?: number}} reference - Managed path reference.
+ * @returns {string} The resolved absolute path.
+ * @throws {TypeError} If the reference shape is invalid.
+ * @throws {Error} If the managed path name is unknown or traversal is attempted.
+ */
+export function resolveManagedPathReference(reference) {
+  if (reference === null || typeof reference !== 'object' || Array.isArray(reference)) {
+    throw new TypeError('Managed path reference must be an object');
+  }
+
+  if (typeof reference.name !== 'string' || reference.name.length === 0) {
+    throw new TypeError('Managed path reference name must be a string');
+  }
+
+  if (typeof reference.relativePath !== 'string') {
+    throw new TypeError('Managed path reference relativePath must be a string');
+  }
+
+  if (Object.prototype.hasOwnProperty.call(reference, 'version') && reference.version !== 1) {
+    throw new Error('Unsupported managed path reference version');
+  }
+
+  if (!Object.prototype.hasOwnProperty.call(PATH_KEYS, reference.name)) {
+    throw new Error(`Unknown managed path name: ${reference.name}`);
+  }
+
+  if (
+    path.isAbsolute(reference.relativePath) ||
+    path.posix.isAbsolute(reference.relativePath) ||
+    path.win32.isAbsolute(reference.relativePath)
+  ) {
+    throw new Error('Managed path reference must contain a relative path');
+  }
+
+  const platformRelativePath = reference.relativePath.split('/').join(path.sep);
+
+  return resolveContainedPath(PATH_KEYS[reference.name], [platformRelativePath]);
 }
 
 /**

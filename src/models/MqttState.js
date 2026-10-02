@@ -96,6 +96,7 @@ mqttStateSchema.pre('save', function(next) {
 // Indexes for efficient queries
 mqttStateSchema.index({ 'topicMetadata.baseTopic': 1 });
 mqttStateSchema.index({ brokerId: 1, receivedAt: -1 });
+mqttStateSchema.index({ deviceId: 1, receivedAt: -1 });
 
 // Initialize cache with configuration from environment variables
 const envSize = parseInt(process.env.MQTT_PATTERN_CACHE_SIZE, 10);
@@ -260,6 +261,167 @@ mqttStateSchema.statics.findByPattern = async function(pattern) {
   }
 
   return results;
+};
+
+/**
+ * Find state documents within an age range, ordered from freshest to stalest.
+ *
+ * maxAgeMs limits results to states received no earlier than that many
+ * milliseconds ago. minAgeMs limits results to states received at least that
+ * many milliseconds ago. Supplying both creates a bounded age window.
+ *
+ * @param {Object} options Query options
+ * @param {string} [options.brokerId] Restrict results to a broker
+ * @param {string} [options.deviceId] Restrict results to a device
+ * @param {number} [options.maxAgeMs] Maximum permitted state age
+ * @param {number} [options.minAgeMs] Minimum permitted state age
+ * @param {number} [options.limit=100] Maximum number of documents to return (capped at 1000)
+ * @param {string} [options.topicPrefix] Restrict results to topics with this prefix
+ * @returns {Promise<Array>} Matching MQTT state documents
+ */
+mqttStateSchema.statics.findByFreshness = async function(options = {}) {
+  const {
+    brokerId,
+    deviceId,
+    maxAgeMs,
+    minAgeMs,
+    limit,
+    topicPrefix = options.prefix
+  } = options;
+
+  const query = {};
+  const now = Date.now();
+
+  if (brokerId !== undefined && brokerId !== null) {
+    query.brokerId = brokerId;
+  }
+
+  if (deviceId !== undefined && deviceId !== null) {
+    query.deviceId = deviceId;
+  }
+
+  if (topicPrefix !== undefined && topicPrefix !== null) {
+    if (typeof topicPrefix !== 'string') {
+      throw new TypeError('topicPrefix must be a string');
+    }
+
+    query.topic = {
+      $regex: `^${topicPrefix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`
+    };
+  }
+
+  const hasMaxAge = maxAgeMs !== undefined && maxAgeMs !== null;
+  const hasMinAge = minAgeMs !== undefined && minAgeMs !== null;
+
+  if (hasMaxAge && (!Number.isFinite(maxAgeMs) || maxAgeMs < 0)) {
+    throw new TypeError('maxAgeMs must be a non-negative finite number');
+  }
+
+  if (hasMinAge && (!Number.isFinite(minAgeMs) || minAgeMs < 0)) {
+    throw new TypeError('minAgeMs must be a non-negative finite number');
+  }
+
+  if (hasMaxAge || hasMinAge) {
+    query.receivedAt = {};
+
+    if (hasMaxAge) {
+      query.receivedAt.$gte = new Date(now - maxAgeMs);
+    }
+
+    if (hasMinAge) {
+      query.receivedAt.$lte = new Date(now - minAgeMs);
+    }
+  }
+
+  // Bounded by default: mongoose treats limit(0) as "no limit", so 0 is rejected.
+  const resultLimit = limit === undefined || limit === null ? 100 : limit;
+  if (!Number.isInteger(resultLimit) || resultLimit < 1) {
+    throw new TypeError('limit must be a positive integer');
+  }
+
+  // Build the query inside the retry: a mongoose Query cannot be executed twice.
+  return retryOperation(
+    () => this.find(query).sort({ receivedAt: -1 }).limit(Math.min(resultLimit, 1000)),
+    { retries: 3 }
+  );
+};
+
+/**
+ * Summarize fresh and stale state counts grouped by broker or device.
+ *
+ * States newer than maxAgeMs are fresh; all older states are stale.
+ * By default, freshness is measured against a five-minute threshold.
+ *
+ * @param {Object} options Aggregation options
+ * @param {string} [options.groupBy='broker'] Group results by broker or device
+ * @param {number} [options.maxAgeMs=300000] Freshness threshold in milliseconds
+ * @param {string} [options.brokerId] Restrict results to a broker
+ * @param {string} [options.deviceId] Restrict results to a device
+ * @param {string} [options.topicPrefix] Restrict results to topics with this prefix
+ * @returns {Promise<Array>} Fresh, stale, and total counts by group
+ */
+mqttStateSchema.statics.getFreshnessSummary = async function(options = {}) {
+  const {
+    groupBy = 'broker',
+    maxAgeMs = 5 * 60 * 1000,
+    brokerId,
+    deviceId,
+    topicPrefix = options.prefix
+  } = options;
+
+  if (groupBy !== 'broker' && groupBy !== 'device') {
+    throw new TypeError('groupBy must be either "broker" or "device"');
+  }
+
+  if (!Number.isFinite(maxAgeMs) || maxAgeMs < 0) {
+    throw new TypeError('maxAgeMs must be a non-negative finite number');
+  }
+
+  const match = {};
+
+  if (brokerId !== undefined && brokerId !== null) {
+    match.brokerId = brokerId;
+  }
+
+  if (deviceId !== undefined && deviceId !== null) {
+    match.deviceId = deviceId;
+  }
+
+  if (topicPrefix !== undefined && topicPrefix !== null) {
+    if (typeof topicPrefix !== 'string') {
+      throw new TypeError('topicPrefix must be a string');
+    }
+
+    match.topic = {
+      $regex: `^${topicPrefix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`
+    };
+  }
+
+  const freshSince = new Date(Date.now() - maxAgeMs);
+  const groupField = groupBy === 'broker' ? '$brokerId' : '$deviceId';
+
+  const pipeline = [
+    { $match: match },
+    {
+      $group: {
+        _id: groupField,
+        fresh: {
+          $sum: {
+            $cond: [{ $gte: ['$receivedAt', freshSince] }, 1, 0]
+          }
+        },
+        stale: {
+          $sum: {
+            $cond: [{ $lt: ['$receivedAt', freshSince] }, 1, 0]
+          }
+        },
+        total: { $sum: 1 }
+      }
+    },
+    { $sort: { _id: 1 } }
+  ];
+
+  return retryOperation(() => this.aggregate(pipeline), { retries: 3 });
 };
 
 // Static method to get cache statistics

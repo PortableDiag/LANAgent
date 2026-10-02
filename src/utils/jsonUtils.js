@@ -1,6 +1,238 @@
 import { logger } from './logger.js';
 
 /**
+ * Create a structured JSON parsing failure result.
+ *
+ * @param {*} defaultValue - Default value returned after a failure
+ * @param {string} code - Stable error code
+ * @param {string} message - Human-readable error message
+ * @param {number|null} position - Character position associated with the error
+ * @returns {{ok: false, value: *, error: {code: string, message: string, position: number|null}, truncated: boolean}}
+ */
+function jsonParseFailure(defaultValue, code, message, position = null) {
+  return {
+    ok: false,
+    value: defaultValue,
+    error: { code, message, position },
+    truncated: false
+  };
+}
+
+/**
+ * Extract a character position from the different SyntaxError formats
+ * produced by supported Node.js versions.
+ *
+ * @param {Error} error - JSON parsing error
+ * @returns {number|null} Character position or null when unavailable
+ */
+function getJsonErrorPosition(error) {
+  const message = error?.message || '';
+  const positionMatch = message.match(/\bposition\s+(\d+)/i);
+  if (positionMatch) return Number(positionMatch[1]);
+
+  const columnMatch = message.match(/\bcolumn\s+(\d+)/i);
+  if (columnMatch) return Number(columnMatch[1]) - 1;
+
+  return null;
+}
+
+/**
+ * Return a configured non-negative integer limit, or undefined when no
+ * usable limit was supplied.
+ *
+ * @param {*} value - Candidate limit
+ * @returns {number|undefined} Normalized limit
+ */
+function normalizeLimit(value) {
+  return Number.isSafeInteger(value) && value >= 0 ? value : undefined;
+}
+
+/**
+ * Walk a parsed JSON value and enforce collection and nesting limits.
+ *
+ * @param {*} value - Parsed value
+ * @param {Object} limits - Configured limits
+ * @param {number} depth - Current nesting depth
+ * @param {string} path - Diagnostic value path
+ * @param {Set<object>} seen - Ancestors of value (cycle detection)
+ * @returns {{code: string, message: string, position: null}|null} Limit failure or null
+ */
+function findJsonLimitFailure(value, limits, depth = 0, path = '$', seen = new Set()) {
+  if (value === null || typeof value !== 'object') return null;
+
+  if (limits.maxDepth !== undefined && depth > limits.maxDepth) {
+    return {
+      code: 'MAX_DEPTH_EXCEEDED',
+      message: `Maximum JSON nesting depth of ${limits.maxDepth} exceeded at ${path}`,
+      position: null
+    };
+  }
+
+  // `seen` holds the ancestors of this value only, so a reviver that returns the same object
+  // twice is not mistaken for a cycle.
+  if (seen.has(value)) {
+    return {
+      code: 'CIRCULAR_VALUE',
+      message: `Circular value encountered at ${path}`,
+      position: null
+    };
+  }
+  seen.add(value);
+  try {
+    return findJsonChildLimitFailure(value, limits, depth, path, seen);
+  } finally {
+    seen.delete(value);
+  }
+}
+
+/** Container checks and recursion for findJsonLimitFailure (value is a non-null object). */
+function findJsonChildLimitFailure(value, limits, depth, path, seen) {
+  if (Array.isArray(value)) {
+    if (limits.maxArrayLength !== undefined && value.length > limits.maxArrayLength) {
+      return {
+        code: 'MAX_ARRAY_LENGTH_EXCEEDED',
+        message: `Maximum JSON array length of ${limits.maxArrayLength} exceeded at ${path}`,
+        position: null
+      };
+    }
+
+    for (let index = 0; index < value.length; index += 1) {
+      const failure = findJsonLimitFailure(
+        value[index],
+        limits,
+        depth + 1,
+        `${path}[${index}]`,
+        seen
+      );
+      if (failure) return failure;
+    }
+    return null;
+  }
+
+  const keys = Object.keys(value);
+  if (limits.maxObjectKeys !== undefined && keys.length > limits.maxObjectKeys) {
+    return {
+      code: 'MAX_OBJECT_KEYS_EXCEEDED',
+      message: `Maximum JSON object key count of ${limits.maxObjectKeys} exceeded at ${path}`,
+      position: null
+    };
+  }
+
+  for (const key of keys) {
+    const failure = findJsonLimitFailure(
+      value[key],
+      limits,
+      depth + 1,
+      `${path}.${key}`,
+      seen
+    );
+    if (failure) return failure;
+  }
+
+  return null;
+}
+
+/**
+ * Parse JSON with diagnostic failure details and configurable resource limits.
+ *
+ * Strings are measured in UTF-8 bytes before parsing. Buffers are decoded as
+ * UTF-8 and measured using their original byte length. Limits are checked
+ * after parsing so the returned value is never partially truncated.
+ *
+ * @param {string|Buffer} input - JSON string or UTF-8 Buffer to parse
+ * @param {Object} [options={}] - Parsing and resource limit options
+ * @param {*} [options.defaultValue=null] - Value returned after a failure
+ * @param {Function} [options.reviver] - Optional JSON reviver
+ * @param {number} [options.maxBytes] - Maximum UTF-8 input size
+ * @param {number} [options.maxDepth] - Maximum nested container depth
+ * @param {number} [options.maxArrayLength] - Maximum array length
+ * @param {number} [options.maxObjectKeys] - Maximum enumerable object keys
+ * @returns {{ok: true, value: *}|{ok: false, value: *, error: {code: string, message: string, position: number|null}, truncated: boolean}}
+ */
+export function parseJsonDetailed(input, options = {}) {
+  const parseOptions = options && typeof options === 'object' ? options : {};
+  const defaultValue = Object.prototype.hasOwnProperty.call(parseOptions, 'defaultValue')
+    ? parseOptions.defaultValue
+    : null;
+
+  let text;
+  let byteLength;
+
+  if (Buffer.isBuffer(input)) {
+    byteLength = input.length;
+    text = input.toString('utf8');
+  } else if (typeof input === 'string') {
+    text = input;
+    byteLength = Buffer.byteLength(input, 'utf8');
+  } else {
+    const failure = jsonParseFailure(
+      defaultValue,
+      'INVALID_INPUT',
+      'JSON input must be a string or Buffer'
+    );
+    logger.debug(`JSON parse error: ${failure.error.message}`);
+    return failure;
+  }
+
+  const maxBytes = normalizeLimit(parseOptions.maxBytes);
+  if (maxBytes !== undefined && byteLength > maxBytes) {
+    const failure = jsonParseFailure(
+      defaultValue,
+      'MAX_BYTES_EXCEEDED',
+      `JSON input size of ${byteLength} bytes exceeds the maximum of ${maxBytes} bytes`
+    );
+    logger.debug(`JSON parse error: ${failure.error.message}`, {
+      byteLength,
+      maxBytes
+    });
+    return failure;
+  }
+
+  let value;
+  try {
+    value = typeof parseOptions.reviver === 'function'
+      ? JSON.parse(text, parseOptions.reviver)
+      : JSON.parse(text);
+  } catch (error) {
+    const message = error?.message || 'Invalid JSON';
+    const failure = jsonParseFailure(
+      defaultValue,
+      'JSON_PARSE_ERROR',
+      message,
+      getJsonErrorPosition(error)
+    );
+    logger.debug(`JSON parse error: ${message}`, {
+      text: text.substring(0, 100),
+      error: message
+    });
+    return failure;
+  }
+
+  const limits = {
+    maxDepth: normalizeLimit(parseOptions.maxDepth),
+    maxArrayLength: normalizeLimit(parseOptions.maxArrayLength),
+    maxObjectKeys: normalizeLimit(parseOptions.maxObjectKeys)
+  };
+  // Walk the parsed value only when a limit was asked for; safeJsonParse sets none and must
+  // not pay for a full traversal on every call.
+  const hasLimits = Object.values(limits).some(limit => limit !== undefined);
+  const limitFailure = hasLimits ? findJsonLimitFailure(value, limits) : null;
+
+  if (limitFailure) {
+    const failure = jsonParseFailure(
+      defaultValue,
+      limitFailure.code,
+      limitFailure.message,
+      limitFailure.position
+    );
+    logger.debug(`JSON parse limit exceeded: ${limitFailure.message}`);
+    return failure;
+  }
+
+  return { ok: true, value };
+}
+
+/**
  * Safely parse JSON with error handling and custom deserializer
  * @param {string} text - JSON string to parse
  * @param {*} defaultValue - Default value if parsing fails
@@ -8,19 +240,15 @@ import { logger } from './logger.js';
  * @returns {*} Parsed object or default value
  */
 export function safeJsonParse(text, defaultValue = null, customDeserializer = null) {
+  // Unchanged contract: only non-empty strings are parsed (a Buffer still gets the default).
   if (!text || typeof text !== 'string') {
     return defaultValue;
   }
-  
-  try {
-    return customDeserializer ? JSON.parse(text, customDeserializer) : JSON.parse(text);
-  } catch (error) {
-    logger.debug(`JSON parse error: ${error.message}`, { 
-      text: text.substring(0, 100),
-      error: error.message 
-    });
-    return defaultValue;
-  }
+
+  return parseJsonDetailed(text, {
+    defaultValue,
+    reviver: customDeserializer
+  }).value;
 }
 
 /**

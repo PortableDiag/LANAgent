@@ -22,6 +22,12 @@ export default class SkillsPlugin extends BasePlugin {
         examples: ['what skills do you have', 'list your skills', 'show saved procedures']
       },
       {
+        command: 'search',
+        description: 'Search saved skills by name, description, procedure text, source, status, or author',
+        usage: 'search({ query: "backup", status: "approved", source: "peer", taughtBy: "outrider", limit: 10 })',
+        examples: ['search skills for backup', 'search my skills for trellis', 'find my skills about email', 'which of my skills mention backups', 'find procedures taught by outrider', 'search skills for pending network procedures']
+      },
+      {
         command: 'view',
         description: 'Show one skill in full',
         usage: 'view({ name: "rotate-vpn-exit" })',
@@ -136,6 +142,12 @@ export default class SkillsPlugin extends BasePlugin {
         examples: ['clean up your skills', 'run skill housekeeping', 'curate your skills']
       },
       {
+        command: 'curatePreview',
+        description: 'Preview skill housekeeping without changing anything: which learned skills would be marked stale or archived, and which duplicates would be merged',
+        usage: 'curatePreview',
+        examples: ['preview skill housekeeping', 'what would the curator change', 'dry run the skill cleanup']
+      },
+      {
         command: 'profile',
         description: 'Show, add to, or replace the profile the agent keeps about its operator (it is part of every prompt)',
         usage: 'profile()  |  profile({ add: "I prefer short answers" })  |  profile({ set: "- ...\\n- ..." })',
@@ -164,7 +176,7 @@ export default class SkillsPlugin extends BasePlugin {
     });
     const service = this.service || getSkillsService();
 
-    if (params.needsParameterExtraction && this.agent.providerManager && !['list', 'approveAll', 'setAutoApprove', 'curate', 'shareAudit'].includes(action)) {
+    if (params.needsParameterExtraction && this.agent.providerManager && !['list', 'approveAll', 'setAutoApprove', 'curate', 'curatePreview', 'shareAudit'].includes(action)) {
       Object.assign(data, await this.extractParameters(params.originalInput || params.input, action));
     }
 
@@ -188,6 +200,106 @@ export default class SkillsPlugin extends BasePlugin {
             skills,
             ...(archived ? { archived } : {}),
             result: `${skills.length} skill(s):\n` + skills.map(s => `• ${s.name}${s.status === 'pending' ? ` (PENDING — taught by ${s.taughtBy || 'another agent'}; "approve skill ${s.name}" to use it)` : s.source === 'auto' ? ' (learned)' : s.source === 'peer' ? ` (taught by ${s.taughtBy || 'another agent'})` : ''}: ${s.description}`).join('\n')
+          };
+        }
+        case 'search': {
+          const normalize = value => String(value ?? '').trim().toLocaleLowerCase();
+          const query = normalize(data.query);
+          const statusFilter = normalize(data.status);
+          const sourceFilter = normalize(data.source);
+          const taughtByFilter = normalize(data.taughtBy);
+          const requestedLimit = Number(data.limit);
+          const limit = Number.isFinite(requestedLimit)
+            ? Math.min(100, Math.max(1, Math.floor(requestedLimit)))
+            : 20;
+          // list() carries name/description/source/status only; the procedure body lives
+          // on the full skill record (already in memory after list()'s scan).
+          const skills = await Promise.all((await service.list()).map(async s => {
+            if (s.body !== undefined || typeof service.get !== 'function') return s;
+            const full = await service.get(s.name);
+            return { ...s, body: full?.body ?? '' };
+          }));
+
+          const matches = skills
+            .map((skill, index) => {
+              const extra = skill.extra && typeof skill.extra === 'object' ? skill.extra : {};
+              const name = String(skill.name ?? '');
+              const description = String(skill.description ?? '');
+              const body = String(skill.body ?? '');
+              const source = String(skill.source ?? '');
+              const status = String(skill.status ?? '');
+              const taughtBy = String(skill.taughtBy ?? extra.taughtBy ?? extra.teacher ?? '');
+              const author = String(skill.author ?? extra.author ?? taughtBy);
+              const searchable = [
+                name,
+                description,
+                body,
+                source,
+                status,
+                taughtBy,
+                author
+              ].map(normalize);
+
+              const matchesQuery = !query || searchable.some(field => field.includes(query));
+              const matchesStatus = !statusFilter || normalize(status) === statusFilter;
+              const matchesSource = !sourceFilter || normalize(source) === sourceFilter;
+              const matchesTeacher = !taughtByFilter || normalize(taughtBy) === taughtByFilter;
+
+              return {
+                skill,
+                index,
+                name,
+                description,
+                source,
+                status,
+                taughtBy,
+                author,
+                matches: matchesQuery && matchesStatus && matchesSource && matchesTeacher,
+                exactName: Boolean(query) && normalize(name) === query,
+                nameStartsWithQuery: Boolean(query) && normalize(name).startsWith(query)
+              };
+            })
+            .filter(entry => entry.matches)
+            .sort((left, right) => {
+              if (left.exactName !== right.exactName) return left.exactName ? -1 : 1;
+              if (left.nameStartsWithQuery !== right.nameStartsWithQuery) return left.nameStartsWithQuery ? -1 : 1;
+              const nameOrder = normalize(left.name).localeCompare(normalize(right.name));
+              return nameOrder || left.index - right.index;
+            })
+            .slice(0, limit);
+
+          const summaries = matches.map(({ skill, name, description, source, status, taughtBy, author }) => ({
+            name,
+            description,
+            source,
+            status,
+            taughtBy,
+            author
+          }));
+
+          if (!summaries.length) {
+            const criteria = query ? ` matching "${data.query}"` : '';
+            return {
+              success: true,
+              count: 0,
+              skills: [],
+              result: `No skills found${criteria}.`
+            };
+          }
+
+          return {
+            success: true,
+            count: summaries.length,
+            skills: summaries,
+            result: `${summaries.length} skill(s) found${query ? ` for "${data.query}"` : ''}:\n` +
+              summaries.map(skill => {
+                const details = [
+                  skill.status || null,
+                  skill.source || null,
+                  skill.author || skill.taughtBy ? `by ${skill.author || skill.taughtBy}` : null
+                ].filter(Boolean).join(', ');
+                return `• ${skill.name}${details ? ` (${details})` : ''}: ${skill.description}`;
+              }).join('\n')
           };
         }
         case 'view': {
@@ -346,6 +458,15 @@ export default class SkillsPlugin extends BasePlugin {
           if (r.profile?.changed) parts.push(`profile tidied (${r.profile.from} → ${r.profile.chars} characters)`);
           return { success: true, report: r, result: parts.length ? `Housekeeping done — ${parts.join('; ')}.` : 'Housekeeping done — nothing needed changing.' };
         }
+        case 'curatePreview': {
+          if (!this.agent?.curator) return { success: false, error: 'The curator is not running on this agent' };
+          const r = await this.agent.curator.run({ dryRun: true });
+          if (r.error) return { success: false, report: r, error: `Housekeeping preview failed: ${r.error}` };
+          const verb = { initialize: 'start tracking', stale: 'mark stale', archive: 'archive' };
+          const parts = r.plannedLifecycle.filter(a => a.action !== 'initialize').map(a => `${verb[a.action]} ${a.name} (${a.reason})`);
+          parts.push(...r.plannedMerges.map(m => `merge ${m.archived} into ${m.kept} (similarity ${m.similarity.toFixed(2)})`));
+          return { success: true, report: r, result: parts.length ? `Housekeeping would: ${parts.join('; ')}. Nothing was changed.` : 'Housekeeping preview — nothing would change.' };
+        }
         case 'profile': {
           const profile = this.agent?.userProfile || (await import('../../services/skills/userProfile.js')).getUserProfile();
           if (data.set !== undefined) {
@@ -386,6 +507,7 @@ export default class SkillsPlugin extends BasePlugin {
       update: `The user wants to change an existing skill. Produce JSON only: {"name": "kebab-case skill name", "body": "the full new procedure as markdown steps if they gave one, else omit", "description": "new one-line description if they gave one, else omit", "reason": "what they want changed"}`,
       installFromUrl: `Extract the link or owner/repo/path of the skill to install. JSON only: {"url": "..."}`,
       profile: `The user is talking about the profile the agent keeps about them. JSON only: {"add": "the fact or preference to remember, in one short line"} if they want something remembered; {} if they only want to see it.`,
+      search: `The user wants to search the saved skills. JSON only, omitting anything they did not say: {"query": "words to look for", "status": "pending|active", "source": "auto|peer|manual|bundled", "taughtBy": "agent name"}`,
       pin: `Extract the skill and whether to pin it. JSON only: {"name": "kebab-case-name", "pinned": true|false}`
     };
     const prompt = `${prompts[action] || 'Extract the skill name the user refers to, as JSON only: {"name": "kebab-case-name"}'}

@@ -37,9 +37,22 @@ export class Curator {
     this.lastRun = null;
   }
 
-  /** One maintenance pass. Returns what it changed. Never throws. */
-  async run() {
-    const report = { stale: [], archived: [], merged: [], profile: null, at: new Date(this.now()).toISOString() };
+  /**
+   * One maintenance pass. Returns what it changed or, with dryRun, what it would change
+   * (plannedLifecycle / plannedMerges) without archiving, merging or touching usage state.
+   * Never throws.
+   */
+  async run({ dryRun = false } = {}) {
+    const report = {
+      stale: [],
+      archived: [],
+      merged: [],
+      plannedLifecycle: [],
+      plannedMerges: [],
+      profile: null,
+      at: new Date(this.now()).toISOString()
+    };
+
     try {
       await this.service.scan(true);
       const usage = await this.service.usage();
@@ -47,30 +60,70 @@ export class Curator {
 
       // 1. lifecycle
       const firstSeen = [];
+      const archiveCandidates = new Set();
+      const lifecycleActions = [];
+
       for (const s of skills.filter(isManaged)) {
         const u = usage[s.name] || {};
         if (u.pinned) continue;
         const since = Date.parse(u.lastUsed || u.created || '') || null;
-        if (!since) { firstSeen.push(s.name); continue; }
+        if (!since) {
+          firstSeen.push(s.name);
+          lifecycleActions.push({
+            action: 'initialize',
+            name: s.name,
+            state: 'active'
+          });
+          continue;
+        }
+
         const idleDays = (this.now() - since) / DAY;
         if (idleDays >= ARCHIVE_DAYS) {
-          await this.service.archive(s.name, { actor: 'curator', reason: `unused for ${Math.floor(idleDays)} days` });
-          report.archived.push(s.name);
+          const action = {
+            action: 'archive',
+            name: s.name,
+            reason: `unused for ${Math.floor(idleDays)} days`
+          };
+          lifecycleActions.push(action);
+          archiveCandidates.add(s.name);
+          if (!dryRun) {
+            await this.service.archive(s.name, { actor: 'curator', reason: action.reason });
+            report.archived.push(s.name);
+          }
         } else if (idleDays >= STALE_DAYS && u.state !== 'stale') {
-          await this.service._updateUsage(x => { x[s.name] = { ...(x[s.name] || {}), state: 'stale' }; });
-          report.stale.push(s.name);
+          const action = {
+            action: 'stale',
+            name: s.name,
+            reason: `unused for ${Math.floor(idleDays)} days`
+          };
+          lifecycleActions.push(action);
+          if (!dryRun) {
+            await this.service._updateUsage(x => { x[s.name] = { ...(x[s.name] || {}), state: 'stale' }; });
+            report.stale.push(s.name);
+          }
         }
       }
+
       if (firstSeen.length) {
         const t = new Date(this.now()).toISOString();
-        await this.service._updateUsage(x => { for (const n of firstSeen) x[n] = { uses: 0, ...(x[n] || {}), created: t, state: 'active' }; });
+        if (!dryRun) {
+          await this.service._updateUsage(x => { for (const n of firstSeen) x[n] = { uses: 0, ...(x[n] || {}), created: t, state: 'active' }; });
+        }
       }
 
+      if (dryRun) report.plannedLifecycle = lifecycleActions;
+
       // 2. duplicates among managed, active, unpinned skills
-      report.merged = await this._mergeDuplicates(usage);
+      const mergeResult = await this._mergeDuplicates(usage, {
+        dryRun,
+        excluded: archiveCandidates
+      });
+      report.merged = mergeResult.applied;
+      if (dryRun) report.plannedMerges = mergeResult.planned;
 
       // 3. operator profile
-      if (this.profile) {
+      // Profile seeding and tidying can update operator state, so review runs leave it untouched.
+      if (this.profile && !dryRun) {
         if (this.memoryModel) await this.profile.seedFromMemory(this.memoryModel, this.providerManager).catch(() => 0);
         report.profile = await this.profile.tidy(this.providerManager).catch(() => null);
       }
@@ -78,42 +131,94 @@ export class Curator {
       logger.warn(`[curator] run failed: ${err.message}`);
       report.error = err.message;
     }
-    this.lastRun = report;
+
+    // A preview is not a maintenance pass; lastRun keeps describing the last real one.
+    if (!dryRun) this.lastRun = report;
     const changed = report.archived.length + report.merged.length + report.stale.length;
-    logger.info(`[curator] ${changed ? `stale ${report.stale.length}, archived ${report.archived.length}, merged ${report.merged.length}` : 'nothing to change'}${report.profile?.changed ? `; profile ${report.profile.from}→${report.profile.chars} chars` : ''}`);
-    if ((report.archived.length || report.merged.length) && this.notify) await this.notify(report).catch(() => {});
+    const planned = report.plannedLifecycle.length + report.plannedMerges.length;
+    logger.info(`[curator] ${dryRun
+      ? `${planned ? `planned ${planned} action${planned === 1 ? '' : 's'}` : 'nothing to plan'}`
+      : `${changed ? `stale ${report.stale.length}, archived ${report.archived.length}, merged ${report.merged.length}` : 'nothing to change'}`
+    }${report.profile?.changed ? `; profile ${report.profile.from}→${report.profile.chars} chars` : ''}`);
+
+    if (!dryRun && (report.archived.length || report.merged.length) && this.notify) {
+      await this.notify(report).catch(() => {});
+    }
     return report;
   }
 
-  async _mergeDuplicates(usage) {
+  async _mergeDuplicates(usage, { dryRun = false, excluded = new Set() } = {}) {
     const gen = this.providerManager?.generateAux || this.providerManager?.generateResponse;
-    if (!gen) return [];
-    const pool = [...this.service.skills.values()].filter(s => isManaged(s) && !usage[s.name]?.pinned);
-    if (pool.length < 2) return [];
+    const result = { applied: [], planned: [] };
+    if (!gen) return result;
+
+    const pool = [...this.service.skills.values()].filter(s =>
+      isManaged(s) && !usage[s.name]?.pinned && !excluded.has(s.name)
+    );
+    if (pool.length < 2) return result;
+
     const vecs = new Map();
     for (const s of pool) {
-      try { vecs.set(s.name, await this.service.vectorFor(s)); } catch { return []; }
+      try {
+        vecs.set(s.name, await this.service.vectorFor(s));
+      } catch (err) {
+        logger.warn(`[curator] unable to vectorize ${s.name}: ${err.message}`);
+        return result;
+      }
     }
+
     const pairs = [];
     for (let i = 0; i < pool.length; i++) for (let j = i + 1; j < pool.length; j++) {
       const sim = cosine(vecs.get(pool[i].name), vecs.get(pool[j].name));
       if (sim >= DUP_SIMILARITY) pairs.push({ a: pool[i], b: pool[j], sim });
     }
+
     pairs.sort((x, y) => y.sim - x.sim);
-    const merged = [], used = new Set();
+    const used = new Set();
+
     for (const { a, b, sim } of pairs) {
-      if (merged.length >= MAX_MERGES || used.has(a.name) || used.has(b.name)) continue;
+      if (result.applied.length + result.planned.length >= MAX_MERGES || used.has(a.name) || used.has(b.name)) continue;
+
       const [keep, drop] = (usage[a.name]?.uses || 0) >= (usage[b.name]?.uses || 0) ? [a, b] : [b, a];
-      const res = await gen.call(this.providerManager, `Two saved procedures (skills) of an AI agent overlap. If they describe the same task, merge them into ONE skill that keeps every useful step and every Gotchas line from both; answer JSON {"same":true,"description":"Use this skill when ...","body":"merged numbered steps, then ## Gotchas"}. If they are different tasks, answer {"same":false}.\n\n${SKILL_WRITING_RULES}\n\n### ${keep.name}\n${keep.description}\n\n${keep.body.slice(0, 4000)}\n\n### ${drop.name}\n${drop.description}\n\n${drop.body.slice(0, 4000)}`, { maxTokens: 1500, temperature: 0, auxTask: 'skill-merge' }).catch(() => null);
+      const prompt = `Two saved procedures (skills) of an AI agent overlap. If they describe the same task, merge them into ONE skill that keeps every useful step and every Gotchas line from both; answer JSON {"same":true,"description":"Use this skill when ...","body":"merged numbered steps, then ## Gotchas"}. If they are different tasks, answer {"same":false}.\n\n${SKILL_WRITING_RULES}\n\n### ${keep.name}\n${keep.description}\n\n${keep.body.slice(0, 4000)}\n\n### ${drop.name}\n${drop.description}\n\n${drop.body.slice(0, 4000)}`;
+
+      // The provider manager already fails over between providers; a failed proposal just skips this pair.
+      const res = await gen.call(this.providerManager, prompt, { maxTokens: 1500, temperature: 0, auxTask: 'skill-merge' }).catch(err => {
+        logger.warn(`[curator] merge proposal failed for ${keep.name}/${drop.name}: ${err.message}`);
+        return null;
+      });
+
       let d = null;
       try { d = JSON.parse(String(res?.content || '').match(/\{[\s\S]*\}/)?.[0] || 'null'); } catch { d = null; }
       if (!d?.same || !d.body || !d.description) continue;
-      await this.service.update(keep.name, { description: d.description, body: d.body }, { actor: 'curator', reason: `merged ${drop.name} into it (similarity ${sim.toFixed(2)})` });
-      await this.service.archive(drop.name, { actor: 'curator', reason: `merged into ${keep.name}` });
-      used.add(keep.name); used.add(drop.name);
-      merged.push({ kept: keep.name, archived: drop.name });
+
+      const proposal = {
+        kept: keep.name,
+        archived: drop.name,
+        similarity: sim,
+        description: d.description,
+        body: d.body
+      };
+
+      if (dryRun) {
+        result.planned.push(proposal);
+      } else {
+        await this.service.update(keep.name, { description: d.description, body: d.body }, {
+          actor: 'curator',
+          reason: `merged ${drop.name} into it (similarity ${sim.toFixed(2)})`
+        });
+        await this.service.archive(drop.name, {
+          actor: 'curator',
+          reason: `merged into ${keep.name}`
+        });
+        result.applied.push({ kept: keep.name, archived: drop.name });
+      }
+
+      used.add(keep.name);
+      used.add(drop.name);
     }
-    return merged;
+
+    return result;
   }
 }
 

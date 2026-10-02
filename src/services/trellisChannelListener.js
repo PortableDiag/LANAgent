@@ -527,6 +527,7 @@ export class TrellisChannelListener {
         message: target,
         fetch: (index) => this.plugin._download(`/api/cards/${card}/attachments/${index}`).then(r => r.bytes)
       }).catch(err => { logger.warn(`[trellis-listen] skill file not read: ${err.message}`); return []; });
+      const saved = [];
       for (const r of receivedSkills) {
         const note = r.saved
           ? `Saved your skill \`${r.name}\` — ${r.status === 'active' ? "I'll use it from now on." : 'pending until my operator approves it.'}`
@@ -534,9 +535,11 @@ export class TrellisChannelListener {
         reply = reply ? `${reply}\n\n${note}` : `Thanks, ${target.from}. ${note}`;
         if (r.saved) {
           logger.info(`[trellis-listen] installed skill ${r.name} (${r.status}) from ${target.from}'s SKILL.md`);
-          await this._askOperatorToApprove(r.skill, target.from, card);
+          saved.push(r.skill);
         }
       }
+      // Several files in one message → one Telegram notice, not one per skill.
+      if (saved.length) await this._askOperatorToApprove(saved, target.from, card);
     }
 
     // Another agent teaching a procedure in prose: keep it as a pending skill (the operator
@@ -867,10 +870,13 @@ export class TrellisChannelListener {
   /**
    * Tell the operator on Telegram, with Approve / Reject / Approve-all buttons (handled in
    * telegramDashboard.js). Best effort: without Telegram, "approve skill <name>" still works.
+   * Takes one skill or a list of skills that arrived together (sent as one message).
    */
-  async _askOperatorToApprove(skill, from, card) {
-    const { sendSkillNotice } = await import('./skills/skillNotice.js');
-    return sendSkillNotice(this.agent, skill, `${from} taught me a skill in Trellis (card ${card})`);
+  async _askOperatorToApprove(skills, from, card) {
+    const { sendSkillNotices } = await import('./skills/skillNotice.js');
+    const list = [].concat(skills);
+    const origin = `${from} taught me ${list.length > 1 ? `${list.length} skills` : 'a skill'} in Trellis (card ${card})`;
+    return sendSkillNotices(this.agent, list.map(skill => ({ skill, origin })));
   }
 
   /** The operator's user id in the agent's other interfaces (Telegram). */

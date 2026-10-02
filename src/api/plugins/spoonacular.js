@@ -50,6 +50,16 @@ export default class SpoonacularPlugin extends BasePlugin {
         ]
       },
       {
+        command: 'getIngredientInformation',
+        description: 'Get nutrition and serving information for a specific ingredient',
+        usage: 'getIngredientInformation({ ingredientId: 9266, amount: 1, unit: "banana" })',
+        examples: [
+          'show nutrition information for ingredient 9266',
+          'get nutrition facts for spoonacular ingredient 9266, 100 grams',
+          'show serving information for ingredient id 11124'
+        ]
+      },
+      {
         command: 'autocompleteRecipeSearch',
         description: 'Autocomplete recipe search queries',
         usage: 'autocompleteRecipeSearch({ query: "chick", number: 10 })',
@@ -140,6 +150,8 @@ export default class SpoonacularPlugin extends BasePlugin {
           return await this.findRecipesByIngredients(data);
         case 'getRecipeInformation':
           return await this.getRecipeInformation(data);
+        case 'getIngredientInformation':
+          return await this.getIngredientInformation(data);
         case 'autocompleteRecipeSearch':
           return await this.autocompleteRecipeSearch(data);
         case 'getRandomRecipes':
@@ -333,6 +345,70 @@ export default class SpoonacularPlugin extends BasePlugin {
     const response = await retryOperation(() => axios.get(url, config), { 
       retries: 3, 
       context: 'Spoonacular getRecipeInformation' 
+    });
+
+    this.cache.set(cacheKey, response.data);
+    return { success: true, data: response.data };
+  }
+
+  /**
+   * Get nutrition and serving information for an ingredient.
+   *
+   * @param {Object} params - Ingredient lookup parameters.
+   * @param {number} params.ingredientId - Spoonacular ingredient identifier.
+   * @param {number} [params.amount] - Amount for which to calculate nutrition.
+   * @param {string} [params.unit] - Unit associated with the requested amount.
+   * @returns {Promise<{success: boolean, data: Object}>} Ingredient information.
+   */
+  async getIngredientInformation(params) {
+    this.validateParams(params, {
+      ingredientId: { required: true, type: 'number' },
+      amount: { required: false, type: 'number' },
+      unit: { required: false, type: 'string' }
+    });
+
+    if (!Number.isFinite(params.ingredientId) || params.ingredientId <= 0) {
+      throw new Error('ingredientId must be a positive number');
+    }
+
+    if (params.amount !== undefined &&
+      (!Number.isFinite(params.amount) || params.amount <= 0)) {
+      throw new Error('amount must be a positive number');
+    }
+
+    if (params.unit !== undefined && !params.unit.trim()) {
+      throw new Error('unit must not be empty');
+    }
+
+    if (!this.config.apiKey) {
+      throw new Error('API key not configured');
+    }
+
+    const amountKey = params.amount ?? '';
+    const unitKey = params.unit?.trim() ?? '';
+    const cacheKey = `ingredient_info_${params.ingredientId}_${amountKey}_${unitKey}`;
+    const cached = this.cache.get(cacheKey);
+    if (cached) {
+      return { success: true, data: cached };
+    }
+
+    const url = `${this.config.baseUrl}/food/ingredients/${params.ingredientId}/information`;
+    const queryParams = {
+      apiKey: this.config.apiKey
+    };
+
+    if (params.amount !== undefined) {
+      queryParams.amount = params.amount;
+    }
+    if (params.unit !== undefined) {
+      queryParams.unit = params.unit.trim();
+    }
+
+    const response = await retryOperation(() => axios.get(url, {
+      params: queryParams
+    }), {
+      retries: 3,
+      context: 'Spoonacular getIngredientInformation'
     });
 
     this.cache.set(cacheKey, response.data);

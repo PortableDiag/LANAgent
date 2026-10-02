@@ -48,6 +48,20 @@ export default class ThousandEyesPlugin extends BasePlugin {
         ]
       },
       {
+        command: 'getTestDetails',
+        description: 'Get the configuration and metadata of a specific test by ID',
+        usage: 'getTestDetails({ testId: "12345", testType: "http-server" })',
+        parameters: {
+          testId: { required: true, type: 'string' },
+          testType: { required: false, type: 'string', description: 'v7 test type; looked up from the test list when omitted' }
+        },
+        examples: [
+          'check details of test 12345',
+          'get configuration for test with ID 67890',
+          'test details for ID 54321'
+        ]
+      },
+      {
         command: 'listAlerts',
         description: 'Retrieve a list of alerts from ThousandEyes',
         usage: 'listAlerts()',
@@ -168,6 +182,8 @@ export default class ThousandEyesPlugin extends BasePlugin {
           return await this.getAgentStatus(data);
         case 'listTests':
           return await this.listTests();
+        case 'getTestDetails':
+          return await this.getTestDetails(data);
         case 'listAlerts':
           return await this.listAlerts();
         case 'getAlertDetails':
@@ -214,6 +230,52 @@ export default class ThousandEyesPlugin extends BasePlugin {
       return { success: true, data };
     } catch (error) {
       this.logger.error('listTests failed:', error);
+      return { success: false, error: error.message };
+    }
+  }
+
+  /**
+   * Retrieve the configuration and metadata for an individual ThousandEyes test.
+   *
+   * v7 has no generic /tests/{id} resource: single tests live under their type,
+   * e.g. /tests/http-server/{id}. When the caller does not give the type it is
+   * looked up from the (cached) test list, which carries `type` for every test.
+   * @param {Object} params - Command parameters
+   * @param {string|number} params.testId - ThousandEyes test identifier
+   * @param {string} [params.testType] - v7 test type (e.g. "http-server"); optional
+   * @returns {Promise<{success: boolean, data?: any, error?: string}>}
+   */
+  async getTestDetails({ testId, testType } = {}) {
+    // Ids extracted from natural language often arrive as numbers.
+    const id = testId === undefined || testId === null ? testId : String(testId);
+    this.validateParams({ testId: id }, {
+      testId: { required: true, type: 'string' }
+    });
+
+    try {
+      let type = testType ? String(testType) : null;
+      if (!type) {
+        const list = await this.getCachedData('tests_list', () => this._fetch('/tests', 'listTests'));
+        const tests = Array.isArray(list?.tests) ? list.tests : [];
+        const match = tests.find(t => String(t?.testId) === id);
+        if (!match) {
+          return { success: false, error: `Test ${id} not found` };
+        }
+        if (!match.type) {
+          return { success: false, error: `Test ${id} has no type in the test list` };
+        }
+        type = String(match.type);
+      }
+
+      const cacheKey = `test_details_${type}_${id}`;
+      const path = `/tests/${encodeURIComponent(type)}/${encodeURIComponent(id)}`;
+      const data = await this.getCachedData(
+        cacheKey,
+        () => this._fetch(path, 'getTestDetails')
+      );
+      return { success: true, data };
+    } catch (error) {
+      this.logger.error('getTestDetails failed:', error);
       return { success: false, error: error.message };
     }
   }

@@ -2874,7 +2874,13 @@ This reply is text only: you have not run any tool or taken any action in this t
             return { type: 'text', content: errorContent };
           }
 
-          if (intentResult.needsParameterExtraction && this.providerManager) {
+          // The AI intent detector leaves extraction to the plugin and says so INSIDE params
+          // ({query, needsParameterExtraction, originalInput}); only the vector detector sets it at
+          // the top. Read both, so a request the AI picked gets real arguments too. Plugin by plugin
+          // this broke three times on 2026-10-01: a closed issue's comment dropped, "approve card 44"
+          // with no card, "search my skills for trellis" searching for the whole sentence.
+          const needsExtraction = intentResult.needsParameterExtraction || finalParams.needsParameterExtraction;
+          if (needsExtraction && this.providerManager) {
             try {
               logger.info('Using AI to extract parameters for action:', intentResult.action);
               
@@ -2898,7 +2904,7 @@ ${actionInfo ? (actionInfo.params || actionInfo.parameters
   ? JSON.stringify(actionInfo.params || actionInfo.parameters, null, 2)
   // Most commands declare only a usage line; its argument names are the ones the plugin reads
   // (without it the model invented names — sort_by for sort — that the plugin ignored).
-  : actionInfo.usage ? `Use exactly the argument names in this call shape: ${actionInfo.usage}` : 'Unknown - extract based on the action type')
+  : actionInfo.usage ? `Use exactly the argument names in this call shape: ${actionInfo.usage}\nThe VALUES in that call shape are placeholders: never copy them. Take every value from the user request; leave out any argument the request does not give.` : 'Unknown - extract based on the action type')
   : 'Unknown - extract based on the action type'}
 
 Examples of this action:
@@ -2943,20 +2949,41 @@ Return ONLY a valid JSON object with the extracted parameters, nothing else.`;
 
               const aiParams = JSON.parse(cleanedResponse);
               logger.info('AI extracted parameters:', aiParams);
+              // A value lifted from the usage example instead of the request: "read the file on
+              // trellis card 21" came back as card 1391, readFile's example (2026-10-01). Drop any
+              // value that appears in the example but nowhere in what the user said.
+              if (actionInfo?.usage && aiParams && typeof aiParams === 'object') {
+                const said = String(input).toLowerCase();
+                for (const [k, v] of Object.entries(aiParams)) {
+                  if (v === null || typeof v === 'object' || typeof v === 'boolean') continue;
+                  const val = String(v).toLowerCase();
+                  if (val.length && actionInfo.usage.toLowerCase().includes(val) && !said.includes(val)) {
+                    logger.warn(`Dropped extracted ${k}=${JSON.stringify(v)}: it is the usage example's value, not the user's`);
+                    delete aiParams[k];
+                  }
+                }
+              }
 
               // Merge AI params with any pre-set params (e.g. from vector detector)
               // Pre-set params take priority for fields they already have
               finalParams = { ...aiParams, ...finalParams, ...aiParams };
               // But keep pre-set values for key fields that AI might have gotten wrong
               const presetParams = intentResult.parameters || {};
+              // The AI detector's own placeholders (the whole sentence as `query`) are not real
+              // values: restoring them undid the extraction ("search my skills for trellis").
+              const placeholders = new Set(['fromAI', 'query', 'originalInput', 'needsParameterExtraction']);
               for (const key of Object.keys(presetParams)) {
-                if (presetParams[key] && key !== 'fromAI') {
+                if (presetParams[key] && !(placeholders.has(key) && (key !== 'query' || presetParams.query === presetParams.originalInput || presetParams.needsParameterExtraction))) {
                   finalParams[key] = presetParams[key];
                 }
               }
 
               // Always ensure fromAI is set for AI-detected intents
               finalParams.fromAI = true;
+              // Extracted here: a plugin that extracts for itself must not do it again, and a
+              // leftover `query` holding the whole sentence must not stand in for a real argument.
+              delete finalParams.needsParameterExtraction;
+              if (finalParams.query && finalParams.query === finalParams.originalInput && aiParams.query === undefined) delete finalParams.query;
               
             } catch (error) {
               logger.warn('AI parameter extraction failed:', error.message);

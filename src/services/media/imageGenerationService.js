@@ -7,6 +7,8 @@ import PQueueModule from 'p-queue';
 const PQueue = PQueueModule.default || PQueueModule;
 
 const DEFAULT_IDEMPOTENCY_TTL = 600;
+const MAX_PROVIDER_CHAIN_LENGTH = 10;
+const AVAILABLE_PROVIDER_ORDER = ['openai', 'openrouter', 'huggingface'];
 
 class ImageGenerationService {
     constructor() {
@@ -49,6 +51,7 @@ class ImageGenerationService {
         return {
             enabled: true,
             provider: 'openai',
+            fallbackProviders: [],
             openai: {
                 model: 'gpt-image-1',
                 size: '1024x1024',
@@ -153,20 +156,169 @@ class ImageGenerationService {
         return promise;
     }
 
-    async generateImageTask(prompt, options) {
-        const provider = options.provider || this.settings.provider;
-        const providerInstance = this.providerManager.providers.get(provider);
+    /**
+     * Build an ordered, duplicate-free provider chain. The requested provider
+     * always has precedence, followed by configured fallbacks and then the
+     * established availability order. The full chain is always built: a provider
+     * that is not registered at all has always been substituted, even for strict
+     * callers. Strictness only stops failover after a provider was actually tried.
+     */
+    getProviderChain(requestedProvider, fallbackProviders = []) {
+        const candidates = [requestedProvider];
 
-        if (!providerInstance) {
-            const availableProvider = this.getAvailableImageProvider();
-            if (!availableProvider) {
-                throw new Error(`Provider ${provider} not available and no fallback found`);
-            }
-            logger.warn(`Provider ${provider} not available, using fallback: ${availableProvider.name}`);
-            return this.generateWithProvider(availableProvider, prompt, options);
+        if (Array.isArray(fallbackProviders)) {
+            candidates.push(...fallbackProviders);
+        }
+        candidates.push(...AVAILABLE_PROVIDER_ORDER);
+
+        const seen = new Set();
+        return candidates
+            .filter(providerName => typeof providerName === 'string' && providerName.trim())
+            .map(providerName => providerName.trim().toLowerCase())
+            .filter(providerName => {
+                if (seen.has(providerName) || seen.size >= MAX_PROVIDER_CHAIN_LENGTH) {
+                    return false;
+                }
+                seen.add(providerName);
+                return true;
+            });
+    }
+
+    /**
+     * Resolve a provider by name while tolerating provider registration casing.
+     */
+    getProviderByName(providerName) {
+        const providers = this.providerManager?.providers;
+        if (!providers || typeof providerName !== 'string') {
+            return null;
         }
 
-        return this.generateWithProvider(providerInstance, prompt, options);
+        const normalizedName = providerName.toLowerCase();
+        const directProvider = providers.get(normalizedName);
+        if (directProvider && typeof directProvider.generateImage === 'function') {
+            return directProvider;
+        }
+
+        for (const provider of providers.values()) {
+            if (
+                provider &&
+                typeof provider.name === 'string' &&
+                provider.name.toLowerCase() === normalizedName &&
+                typeof provider.generateImage === 'function'
+            ) {
+                return provider;
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * Attach provider-attempt details without replacing the original provider
+     * error. This keeps the original stack and error type available to callers.
+     */
+    attachProviderFailureMetadata(error, providerAttempts, originalError) {
+        if (!error || typeof error !== 'object') {
+            return error;
+        }
+
+        try {
+            error.providerAttempts = providerAttempts;
+            if (originalError && !error.originalError) {
+                error.originalError = originalError;
+            }
+        } catch (metadataError) {
+            logger.debug(`Unable to attach image provider failure metadata: ${metadataError.message}`);
+        }
+
+        return error;
+    }
+
+    async generateImageTask(prompt, options = {}) {
+        const requestedProvider = options.provider || this.settings.provider;
+        // A caller that named a provider or a model chose it deliberately (the paid
+        // external route forwards both from the customer), and a model id is only
+        // meaningful to the provider it belongs to. Those requests never fail over
+        // to a different provider after a generation failure.
+        const disableProviderFailover = options.disableProviderFailover === true ||
+            Boolean(options.provider) ||
+            Boolean(options.model);
+        const fallbackProviders = this.settings?.fallbackProviders || [];
+        const providerChain = this.getProviderChain(requestedProvider, fallbackProviders);
+        const providerAttempts = [];
+        let firstError = null;
+
+        for (const providerName of providerChain) {
+            const providerInstance = this.getProviderByName(providerName);
+
+            if (!providerInstance) {
+                providerAttempts.push({
+                    provider: providerName,
+                    available: false,
+                    retryable: true
+                });
+                continue;
+            }
+
+            try {
+                const result = await this.generateWithProvider(providerInstance, prompt, options);
+                providerAttempts.push({
+                    provider: providerName,
+                    available: true,
+                    success: true
+                });
+                return result;
+            } catch (error) {
+                const retryable = isRetryableError(error);
+                providerAttempts.push({
+                    provider: providerName,
+                    available: true,
+                    success: false,
+                    retryable,
+                    error
+                });
+
+                if (!firstError) {
+                    firstError = error;
+                }
+
+                if (disableProviderFailover || !retryable) {
+                    throw error;
+                }
+
+                // aiProviders.locked means "spend on this provider only": a failed
+                // request fails rather than being billed to another provider.
+                if (await this.isProviderLocked()) {
+                    logger.warn(`[provider-lock] image provider ${providerName} failed; failover blocked by the provider lock`);
+                    throw error;
+                }
+
+                logger.warn(
+                    `Image provider ${providerName} failed with a retryable error; trying the next provider`
+                );
+            }
+        }
+
+        if (firstError) {
+            this.attachProviderFailureMetadata(firstError, providerAttempts, firstError);
+            throw firstError;
+        }
+
+        const unavailableError = new Error(
+            `Provider ${requestedProvider} not available and no fallback found`
+        );
+        this.attachProviderFailureMetadata(unavailableError, providerAttempts, unavailableError);
+        throw unavailableError;
+    }
+
+    async isProviderLocked() {
+        if (typeof this.providerManager?.isLocked !== 'function') return false;
+        try {
+            return await this.providerManager.isLocked();
+        } catch {
+            // Fail closed on spending, as providerManager.isLocked() itself does.
+            return true;
+        }
     }
 
     async generateWithProvider(providerInstance, prompt, options = {}) {
@@ -196,17 +348,21 @@ class ImageGenerationService {
         logger.info(`Generating image with ${provider}: "${prompt.substring(0, 50)}..."`);
 
         try {
-            const result = await retryOperation(() => providerInstance.generateImage(prompt, providerOptions), {
+            const result = await retryOperation(async () => {
+                const generatedResult = await providerInstance.generateImage(prompt, providerOptions);
+
+                if (!generatedResult || !generatedResult.success) {
+                    throw new Error(generatedResult?.error || 'Image generation failed');
+                }
+
+                return generatedResult;
+            }, {
                 retries: 3,
                 factor: 2,
                 minTimeout: 1000,
                 maxTimeout: 5000,
                 shouldRetry: isRetryableError
             });
-
-            if (!result.success) {
-                throw new Error(result.error || 'Image generation failed');
-            }
 
             logger.info(`Image generated successfully with ${provider}`);
             return result;
@@ -216,19 +372,19 @@ class ImageGenerationService {
         }
     }
 
-    getAvailableImageProvider() {
+    getAvailableImageProviders() {
         if (!this.providerManager?.providers) {
-            return null;
+            return [];
         }
 
-        for (const providerName of ['openai', 'openrouter', 'huggingface']) {
-            const provider = this.providerManager.providers.get(providerName);
-            if (provider && typeof provider.generateImage === 'function') {
-                return provider;
-            }
-        }
+        return AVAILABLE_PROVIDER_ORDER
+            .map(providerName => this.getProviderByName(providerName))
+            .filter(Boolean);
+    }
 
-        return null;
+    getAvailableImageProvider() {
+        const availableProviders = this.getAvailableImageProviders();
+        return availableProviders[0] || null;
     }
 
     getSettings() {

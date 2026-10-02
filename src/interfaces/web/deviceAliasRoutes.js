@@ -11,6 +11,21 @@ const router = express.Router();
 // Initialize cache with a 5-minute TTL
 const cache = new NodeCache({ stdTTL: 300, checkperiod: 60 });
 
+/**
+ * Maximum number of aliases accepted by the batch resolution endpoint.
+ */
+export const MAX_BATCH_RESOLVE_SIZE = 100;
+
+/**
+ * Normalize an alias for storage and lookup.
+ *
+ * @param {string} alias - Alias supplied by the caller.
+ * @returns {string} Trimmed, case-insensitive alias.
+ */
+export function normalizeAlias(alias) {
+  return String(alias).trim().toLowerCase();
+}
+
 // Health check endpoint (before rate limiting)
 router.get('/health', (req, res) => {
   res.json({ success: true, status: 'healthy', service: 'deviceAlias' });
@@ -63,6 +78,142 @@ async function getCachedData(key, fetchFunc) {
   return data;
 }
 
+/**
+ * Resolve multiple aliases with a single MongoDB query for uncached entries.
+ *
+ * Results remain in the same order as the requested pairs. Missing aliases are
+ * returned with found set to false rather than causing the whole request to
+ * fail.
+ */
+router.post('/batch/resolve', async (req, res) => {
+  try {
+    const { aliases } = req.body || {};
+
+    if (!Array.isArray(aliases)) {
+      return res.status(400).json({
+        success: false,
+        error: 'Aliases must be an array'
+      });
+    }
+
+    if (aliases.length > MAX_BATCH_RESOLVE_SIZE) {
+      return res.status(400).json({
+        success: false,
+        error: `A maximum of ${MAX_BATCH_RESOLVE_SIZE} aliases may be resolved per request`
+      });
+    }
+
+    const requests = aliases.map((item, index) => {
+      if (!item || typeof item !== 'object' || Array.isArray(item)) {
+        throw new Error(`Alias entry at index ${index} must be an object`);
+      }
+
+      if (typeof item.alias !== 'string' || !item.alias.trim()) {
+        throw new Error(`Alias entry at index ${index} must include a non-empty alias`);
+      }
+
+      const plugin = item.plugin === undefined ? 'govee' : item.plugin;
+      if (typeof plugin !== 'string' || !plugin.trim()) {
+        throw new Error(`Alias entry at index ${index} must include a valid plugin`);
+      }
+
+      return {
+        alias: normalizeAlias(item.alias),
+        plugin: plugin.trim()
+      };
+    });
+
+    const resolvedByKey = new Map();
+    const uncachedRequests = [];
+    const uncachedKeys = new Set();
+
+    for (const request of requests) {
+      const key = `alias_${request.alias}_${request.plugin}`;
+      const cached = cache.get(key);
+
+      if (cached !== undefined) {
+        resolvedByKey.set(key, cached);
+      } else if (!uncachedKeys.has(key)) {
+        uncachedKeys.add(key);
+        uncachedRequests.push(request);
+      }
+    }
+
+    if (uncachedRequests.length > 0) {
+      const matches = await retryOperation(() => DeviceAlias.find({
+        $or: uncachedRequests.map(({ alias, plugin }) => ({ alias, plugin }))
+      }).lean());
+
+      const matchesByKey = new Map(
+        matches.map((deviceAlias) => [
+          `alias_${deviceAlias.alias}_${deviceAlias.plugin}`,
+          deviceAlias
+        ])
+      );
+
+      for (const request of uncachedRequests) {
+        const key = `alias_${request.alias}_${request.plugin}`;
+        const deviceAlias = matchesByKey.get(key) || null;
+        resolvedByKey.set(key, deviceAlias);
+        cache.set(key, deviceAlias);
+      }
+    }
+
+    const results = requests.map(({ alias, plugin }) => {
+      const deviceAlias = resolvedByKey.get(`alias_${alias}_${plugin}`);
+
+      if (!deviceAlias) {
+        return {
+          alias,
+          plugin,
+          found: false,
+          deviceName: null,
+          deviceId: null,
+          usageCount: 0,
+          lastUsed: null,
+          usage: {
+            usageCount: 0,
+            lastUsed: null
+          }
+        };
+      }
+
+      return {
+        alias,
+        plugin,
+        found: true,
+        deviceName: deviceAlias.deviceName,
+        deviceId: deviceAlias.deviceId ?? null,
+        usageCount: deviceAlias.usageCount ?? 0,
+        lastUsed: deviceAlias.lastUsed ?? null,
+        usage: {
+          usageCount: deviceAlias.usageCount ?? 0,
+          lastUsed: deviceAlias.lastUsed ?? null
+        }
+      };
+    });
+
+    res.json({
+      success: true,
+      results
+    });
+  } catch (error) {
+    if (error.message.startsWith('Alias entry at index')) {
+      return res.status(400).json({
+        success: false,
+        error: error.message
+      });
+    }
+
+    logger.error('Failed to batch resolve device aliases:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to resolve aliases',
+      message: error.message
+    });
+  }
+});
+
 // List all aliases with advanced search capabilities
 router.get('/', async (req, res) => {
   try {
@@ -99,12 +250,12 @@ router.get('/', async (req, res) => {
 // Get alias by name
 router.get('/:alias', async (req, res) => {
   try {
-    const { alias } = req.params;
+    const alias = normalizeAlias(req.params.alias);
     const { plugin = 'govee' } = req.query;
 
-    const deviceAlias = await getCachedData(`alias_${alias.toLowerCase()}_${plugin}`, async () => {
+    const deviceAlias = await getCachedData(`alias_${alias}_${plugin}`, async () => {
       return await retryOperation(() => DeviceAlias.findOne({
-        alias: alias.toLowerCase(),
+        alias,
         plugin
       }).lean());
     });
@@ -142,10 +293,11 @@ router.post('/', async (req, res) => {
       });
     }
 
+    const normalizedAlias = normalizeAlias(alias);
     const userId = req.user?.userId || req.apiKey?.name || 'system';
 
     const deviceAlias = await retryOperation(() => DeviceAlias.setAlias(
-      alias,
+      normalizedAlias,
       deviceName,
       plugin,
       userId
@@ -158,7 +310,7 @@ router.post('/', async (req, res) => {
     }
 
     // Invalidate cache for updated alias
-    cache.del(`alias_${alias.toLowerCase()}_${plugin}`);
+    cache.del(`alias_${normalizedAlias}_${plugin}`);
 
     res.json({
       success: true,
@@ -178,11 +330,11 @@ router.post('/', async (req, res) => {
 // Delete alias
 router.delete('/:alias', async (req, res) => {
   try {
-    const { alias } = req.params;
+    const alias = normalizeAlias(req.params.alias);
     const { plugin = 'govee' } = req.query;
 
     const result = await retryOperation(() => DeviceAlias.deleteOne({
-      alias: alias.toLowerCase(),
+      alias,
       plugin
     }));
 
@@ -194,7 +346,7 @@ router.delete('/:alias', async (req, res) => {
     }
 
     // Invalidate cache for deleted alias
-    cache.del(`alias_${alias.toLowerCase()}_${plugin}`);
+    cache.del(`alias_${alias}_${plugin}`);
 
     res.json({
       success: true,
@@ -227,8 +379,9 @@ router.post('/bulk', async (req, res) => {
     // Process aliases in parallel for better performance
     const results = await Promise.all(aliases.map(async ({ alias, deviceName, deviceId }) => {
       try {
+        const normalizedAlias = normalizeAlias(alias);
         const deviceAlias = await retryOperation(() => DeviceAlias.setAlias(
-          alias,
+          normalizedAlias,
           deviceName,
           plugin,
           userId
@@ -240,7 +393,7 @@ router.post('/bulk', async (req, res) => {
         }
 
         // Invalidate cache for updated alias
-        cache.del(`alias_${alias.toLowerCase()}_${plugin}`);
+        cache.del(`alias_${normalizedAlias}_${plugin}`);
 
         return { alias, success: true };
       } catch (error) {

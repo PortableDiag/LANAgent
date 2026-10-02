@@ -11,8 +11,8 @@ import { vectorStore } from '../vectorStore.js';
  *
  * The plugins expose over a thousand commands — too many to list in every reasoning step.
  * A prompt gets full command lists only for the plugins the vector intent index ranks as
- * relevant to the task, a one-line catalog of the rest, and a describe_tool pseudo-tool
- * to fetch any other plugin's commands on demand.
+ * relevant to the task, a one-line catalog of the rest, and describe_tool and search_tools
+ * pseudo-tools to discover commands on demand.
  */
 
 // Plugins that can move funds, sign transactions or act on the trading wallet are never
@@ -20,6 +20,10 @@ import { vectorStore } from '../vectorStore.js';
 const DEFAULT_EXCLUDED = ['contractCommands', 'cryptoMonitor', 'walletProfiler', 'tokenProfiler', 'chainlink', 'mindswarm'];
 
 export const DESCRIBE_TOOL = 'describe_tool';
+export const SEARCH_TOOL = 'search_tools';
+
+const DEFAULT_SEARCH_LIMIT = 10;
+const MAX_SEARCH_LIMIT = 50;
 
 export function excludedPlugins() {
   const extra = (process.env.REASONING_EXCLUDED_PLUGINS || '').split(',').map(s => s.trim()).filter(Boolean);
@@ -38,7 +42,9 @@ export function listTools(agent) {
     tools.push({
       name,
       description: plugin.description || `${name} plugin`,
-      commands: (plugin.commands || []).map(c => ({ command: c.command, description: c.description, usage: c.usage }))
+      commands: (Array.isArray(plugin.commands) ? plugin.commands : [])
+        .filter(c => c && c.command)
+        .map(c => ({ command: c.command, description: c.description, usage: c.usage }))
     });
   }
   return tools;
@@ -70,6 +76,87 @@ function commandLines(tool) {
   return tool.commands.map(c => `  - ${c.command}: ${c.description || ''}${c.usage ? ` (usage: ${c.usage})` : ''}`).join('\n');
 }
 
+function tokenize(value) {
+  return String(value || '')
+    .toLowerCase()
+    .split(/[^a-z0-9_:-]+/)
+    .map(token => token.trim())
+    .filter(Boolean);
+}
+
+function normalizedText(value) {
+  return tokenize(value).join(' ');
+}
+
+function searchLimit(options = {}) {
+  const requested = Number(options.max ?? options.limit ?? DEFAULT_SEARCH_LIMIT);
+  if (!Number.isFinite(requested)) return DEFAULT_SEARCH_LIMIT;
+  return Math.max(1, Math.min(MAX_SEARCH_LIMIT, Math.floor(requested)));
+}
+
+/**
+ * Search enabled plugin commands by command name, description, and usage.
+ *
+ * Command-name matches receive higher scores than description and usage matches.
+ * The catalog is rebuilt from the live enabled plugin set for every search so runtime
+ * plugin enablement, disablement, and command changes are reflected immediately.
+ */
+export function searchTools(agent, query, options = {}) {
+  const queryText = String(query || '').trim();
+  const queryTokens = tokenize(queryText);
+  if (!queryTokens.length) return [];
+
+  const normalizedQuery = normalizedText(queryText);
+  const entries = [];
+  for (const plugin of listTools(agent)) {
+    for (const command of plugin.commands) {
+      const commandText = String(command.command || '');
+      const description = String(command.description || '');
+      const usage = String(command.usage || '');
+      const commandTokens = tokenize(commandText);
+      const descriptionTokens = tokenize(description);
+      const usageTokens = tokenize(usage);
+
+      const commandExact = normalizedText(commandText) === normalizedQuery;
+      // Substring matching only for tokens of 3+ characters: a query word like "a" or
+      // "to" would otherwise be contained in nearly every description.
+      const hits = (token, candidates) => candidates.some(candidate =>
+        candidate === token || (token.length >= 3 && candidate.includes(token)));
+      const commandMatches = queryTokens.filter(token => hits(token, commandTokens)).length;
+      const descriptionMatches = queryTokens.filter(token => hits(token, descriptionTokens)).length;
+      const usageMatches = queryTokens.filter(token => hits(token, usageTokens)).length;
+
+      if (!commandExact && commandMatches === 0 && descriptionMatches === 0 && usageMatches === 0) {
+        continue;
+      }
+
+      const score =
+        (commandExact ? 10000 : 0) +
+        (commandMatches * 100) +
+        (descriptionMatches * 10) +
+        usageMatches +
+        (commandText.toLowerCase().includes(queryText.toLowerCase()) ? 25 : 0);
+
+      entries.push({
+        plugin: plugin.name,
+        command: commandText,
+        description,
+        usage,
+        score
+      });
+    }
+  }
+
+  return entries
+    .sort((a, b) =>
+      b.score - a.score ||
+      a.plugin.localeCompare(b.plugin) ||
+      a.command.localeCompare(b.command)
+    )
+    .slice(0, searchLimit(options))
+    .map(({ score, ...result }) => result);
+}
+
 /**
  * Prompt text: detailed commands for the relevant plugins, one line for every other one.
  * `order` optionally ranks the catalog (e.g. by past success). `describeHint` is off for
@@ -86,7 +173,8 @@ export function formatToolsForPrompt(tools, relevantNames = [], order = null, { 
   }
   if (rest.length) {
     const hint = describeHint
-      ? 'call `' + DESCRIBE_TOOL + '` with params {"name": "<tool>"} to see their commands first'
+      ? 'call `' + DESCRIBE_TOOL + '` with params {"name": "<tool>"} to see their commands, or `' +
+        SEARCH_TOOL + '` with params {"query": "<keywords>"} to search commands'
       : 'commands not listed; prefer the tools listed above';
     sections.push(`Other tools (${hint}):\n` +
       rest.map(t => `- ${t.name}: ${String(t.description).substring(0, 90)}`).join('\n'));
@@ -105,6 +193,30 @@ export async function executeTool(agent, tool, command, params = {}, context = n
     const target = tools.find(t => t.name === params?.name);
     if (!target) return { success: false, error: `No available tool named "${params?.name}"` };
     return { success: true, result: `${target.name}: ${target.description}\n${commandLines(target)}` };
+  }
+
+  if (tool === SEARCH_TOOL) {
+    const query = params?.query ?? params?.q ?? (command !== 'search' ? command : '');
+    if (!String(query || '').trim()) {
+      return { success: false, error: 'A search query is required' };
+    }
+    try {
+      const matches = searchTools(agent, query, {
+        ...(params?.options || {}),
+        ...(params?.max !== undefined ? { max: params.max } : {})
+      });
+      // Text, like describe_tool, so the observation reads the same in the next prompt.
+      return {
+        success: true,
+        matches,
+        result: matches.length
+          ? matches.map(m => `- ${m.plugin}.${m.command}: ${m.description}${m.usage ? ` (usage: ${m.usage})` : ''}`).join('\n')
+          : `No commands match "${String(query).trim()}".`
+      };
+    } catch (error) {
+      logger.debug(`Tool search failed: ${error.message}`);
+      return { success: false, error: 'Unable to search available tools' };
+    }
   }
 
   if (!tools.some(t => t.name === tool)) {

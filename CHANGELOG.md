@@ -2,6 +2,49 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.455] - 2026-10-01
+
+### Fixed
+- **A skills search could try to publish a skill.** "search my skills for trellis" matched the action that publishes one of the agent's skills to every agent in a Trellis document. It tried to publish a skill named "trellis", and failed only because there was none. Publishing now runs only when the request says publish, share, put, post, upload or send. The new skills search has the phrasings that lost here.
+- **Requests chosen by the AI intent detector now get their arguments extracted.** That detector marks extraction as needed inside the parameters, and only the top-level mark was honoured, so its plugin calls ran with the whole sentence as the query. Today this dropped a closing comment, lost a card number and searched skills for the full sentence. Extraction now runs for both, once, and a plugin's own extraction does not repeat it.
+
+## [2.25.454] - 2026-10-01
+
+Self-improvement PRs reviewed: 28 merged (most after repair), 13 closed, 8 that touch trading or payment paths left open for the operator.
+
+### Added
+- **Skills:** `search` across saved skills, including the text of their procedures. `curatePreview` reports what housekeeping would mark stale, archive or merge, without changing anything. Several skills arriving together (from another agent, or several SKILL.md files in one Trellis message) produce a single Telegram notice.
+- **Chat history:** an `export` action, as JSON, Markdown or plain text. When over the size limit it keeps the most recent messages.
+- **Reasoning agent:** a `search_tools` helper that finds commands by keyword.
+- **Task agents:** a per-task tool policy (allowed and denied tools and commands, or read-only). Blocked actions never run.
+- **MCP:** token rotation (`POST /mcp/api/tokens/:id/rotate`). A revoked token cannot be rotated back into use.
+- **Plugins:**
+  - Home Assistant `list_services`.
+  - Slack channel list with pagination and filters.
+  - ThousandEyes `getTestDetails`.
+  - Spoonacular `getIngredientInformation`.
+  - Maps `geocodeBatch` / `reverseBatch` (up to 25, at the OpenStreetMap rate).
+  - domainIntel `tlsPosture`, which also feeds `securityPosture`.
+  - bugDetector `searchBugs`.
+  - priceWatch `trend`, from a bounded price history that each price check now records.
+- **Routes:**
+  - Batch device-alias resolution.
+  - Batch trust levels (`POST /api/external/trust/batch/level`, up to 20).
+  - MQTT state freshness (`GET /mqtt/api/states/freshness`, `/freshness-summary`).
+- **Image generation:** fails over to the next provider on a temporary error. It never does so while the provider lock is on, or when the caller named a provider or model.
+- **Utilities:**
+  - `parseJsonDetailed()` with optional size and depth limits.
+  - Embedding similarity helpers.
+  - Cancellable public fetches with a total deadline across redirects.
+  - Queue cancellation and timeouts in the concurrency limiter.
+  - Metrics updater start/stop/restart.
+
+### Fixed
+- **Embeddings:** the cache key ignored `dimensions`, so a vector of the wrong width could be returned.
+- **MCP client:** connections were keyed by ObjectId but looked up by string, so status never showed "connected". Concurrent connects to one server now share one attempt.
+- **External audit log:** it now records every response, not only JSON ones. Aborted requests are recorded as 499 with a `completionState`, and binary responses are stored by size only.
+- **Stealth browser:** concurrent first callers now share one initialisation.
+
 ## [2.25.453] - 2026-10-01
 
 ### Added

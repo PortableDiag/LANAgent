@@ -154,7 +154,8 @@ class EmbeddingService {
         throw new Error(`Model configuration for ${modelId} not found`);
       }
 
-      const cacheKey = `embedding:${modelId}:${text}`;
+      const cacheDimensions = options.dimensions || modelConfig.dimension;
+      const cacheKey = `embedding:${modelId}:${cacheDimensions}:${text}`;
       const cachedEmbedding = this.cache.get(cacheKey);
       if (cachedEmbedding) {
         return cachedEmbedding;
@@ -248,6 +249,122 @@ class EmbeddingService {
     // Return dimension of default model if no model specified
     const defaultModelConfig = this.models[this.defaultModel];
     return defaultModelConfig ? defaultModelConfig.dimension : 1536;
+  }
+
+  /**
+   * Calculate cosine similarity between two vectors.
+   * @param {Array<number>} vectorA - The first vector
+   * @param {Array<number>} vectorB - The second vector
+   * @returns {number} Similarity in the range [-1, 1]
+   */
+  cosineSimilarity(vectorA, vectorB) {
+    const isVector = vector =>
+      Array.isArray(vector) ||
+      (ArrayBuffer.isView(vector) && !(vector instanceof DataView));
+
+    if (!isVector(vectorA) || !isVector(vectorB)) {
+      throw new TypeError('Both vectors must be arrays or typed arrays');
+    }
+
+    if (vectorA.length === 0 || vectorB.length === 0) {
+      throw new Error('Vectors must not be empty');
+    }
+
+    if (vectorA.length !== vectorB.length) {
+      throw new Error(`Vector dimensions must match: ${vectorA.length} !== ${vectorB.length}`);
+    }
+
+    let dotProduct = 0;
+    let magnitudeA = 0;
+    let magnitudeB = 0;
+
+    for (let index = 0; index < vectorA.length; index += 1) {
+      const valueA = vectorA[index];
+      const valueB = vectorB[index];
+
+      if (!Number.isFinite(valueA) || !Number.isFinite(valueB)) {
+        throw new TypeError('Vectors must contain only finite numbers');
+      }
+
+      dotProduct += valueA * valueB;
+      magnitudeA += valueA * valueA;
+      magnitudeB += valueB * valueB;
+    }
+
+    if (magnitudeA === 0 || magnitudeB === 0) {
+      return 0;
+    }
+
+    return dotProduct / (Math.sqrt(magnitudeA) * Math.sqrt(magnitudeB));
+  }
+
+  /**
+   * Generate embeddings for two texts and compare them using cosine similarity.
+   * Both texts are embedded with the same selected model and dimensions.
+   * @param {string} textA - The first text
+   * @param {string} textB - The second text
+   * @param {Object} options - Embedding options, including model and dimensions
+   * @returns {Promise<number>} Cosine similarity between the generated embeddings
+   */
+  async compareEmbedding(textA, textB, options = {}) {
+    if (typeof textA !== 'string' || typeof textB !== 'string') {
+      throw new TypeError('Both texts must be strings');
+    }
+
+    const model = this.selectOptimalModel(textA, options);
+    const sharedOptions = { ...options, model };
+    const [embeddingA, embeddingB] = await Promise.all([
+      this.generateEmbedding(textA, sharedOptions),
+      this.generateEmbedding(textB, sharedOptions)
+    ]);
+
+    return this.cosineSimilarity(embeddingA, embeddingB);
+  }
+
+  /**
+   * Rank candidate vectors by cosine similarity to a query vector.
+   * Candidates may be vectors or records containing an embedding field.
+   * @param {Array<number>} queryVector - The query embedding
+   * @param {Array<Array<number>|Object>} candidates - Vectors or embedding records
+   * @param {Object} options - Ranking options
+   * @param {number} [options.topK] - Maximum number of results to return
+   * @returns {Array<Object>} Results sorted by descending score
+   */
+  rankBySimilarity(queryVector, candidates, options = {}) {
+    if (!Array.isArray(candidates)) {
+      throw new TypeError('Candidates must be an array');
+    }
+
+    if (
+      options.topK !== undefined &&
+      (!Number.isInteger(options.topK) || options.topK < 0)
+    ) {
+      throw new TypeError('topK must be a non-negative integer');
+    }
+
+    const results = candidates.map((candidate, index) => {
+      const embedding = Array.isArray(candidate) ||
+        (ArrayBuffer.isView(candidate) && !(candidate instanceof DataView))
+        ? candidate
+        : candidate && candidate.embedding;
+
+      if (!embedding) {
+        throw new TypeError(`Candidate at index ${index} must be a vector or contain an embedding field`);
+      }
+
+      return {
+        candidate,
+        score: this.cosineSimilarity(queryVector, embedding)
+      };
+    });
+
+    results.sort((left, right) => right.score - left.score);
+
+    if (options.topK !== undefined) {
+      return results.slice(0, options.topK);
+    }
+
+    return results;
   }
 
   /**

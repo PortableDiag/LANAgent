@@ -325,6 +325,47 @@ router.get('/api/states', authenticateToken, async (req, res) => {
   }
 });
 
+// States filtered by age (receivedAt), freshest first.
+// ?maxAgeMs= only states newer than this; ?minAgeMs= only states older than this (stale).
+router.get('/api/states/freshness', authenticateToken, async (req, res) => {
+  try {
+    const num = (v) => (v === undefined || v === '' ? undefined : Number(v));
+    const { brokerId, deviceId, topicPrefix } = req.query;
+    const states = await MqttState.findByFreshness({
+      brokerId: brokerId || undefined,
+      deviceId: deviceId || undefined,
+      topicPrefix: topicPrefix || undefined,
+      maxAgeMs: num(req.query.maxAgeMs),
+      minAgeMs: num(req.query.minAgeMs),
+      limit: num(req.query.limit)
+    });
+    res.json({ success: true, states, count: states.length });
+  } catch (error) {
+    const status = error instanceof TypeError ? 400 : 500;
+    if (status === 500) logger.error('Get states by freshness error:', error);
+    res.status(status).json({ success: false, error: error.message });
+  }
+});
+
+// Fresh/stale/total state counts per broker or device (?groupBy=broker|device&maxAgeMs=300000).
+router.get('/api/states/freshness-summary', authenticateToken, async (req, res) => {
+  try {
+    const { brokerId, deviceId, topicPrefix, groupBy } = req.query;
+    const summary = await MqttState.getFreshnessSummary({
+      groupBy: groupBy || undefined,
+      maxAgeMs: req.query.maxAgeMs === undefined || req.query.maxAgeMs === '' ? undefined : Number(req.query.maxAgeMs),
+      brokerId: brokerId || undefined,
+      deviceId: deviceId || undefined,
+      topicPrefix: topicPrefix || undefined
+    });
+    res.json({ success: true, summary });
+  } catch (error) {
+    const status = error instanceof TypeError ? 400 : 500;
+    if (status === 500) logger.error('Get state freshness summary error:', error);
+    res.status(status).json({ success: false, error: error.message });
+  }
+});
+
 // ==================== Publishing ====================
 
 // Publish message
