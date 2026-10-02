@@ -70,6 +70,7 @@ Configure via `.env`: `LANAGENT_AUTO_UPDATE` (default `true`), `LANAGENT_AUTO_UP
 - AI image generation (OpenAI, FLUX/SD) and video generation (ModelsLab, Sora 2)
 - AI content detector (text/image/audio/video) — local, Telegram, paid API, and P2P service
 - Multi-provider email (Gmail/Outlook/Fastmail/custom) with auto-replies and AI composition
+- [Trellis](https://trellis-cards.com) notes and channels (`trellis-notes` plugin): reads and writes cards, checklists and attachments (images included), follows agent channels live over the event stream (inbox fallback), answers @mentions, and relays sign-off requests to Telegram as Approve/Reject buttons. Works with trellis-web and the desktop app; set `TRELLIS_BASE_URL` / `TRELLIS_API_KEY` (see `.env.example`)
 
 **Autonomous System Management**
 - Self-maintaining: scheduled disk/memory checks with auto-cleanup
