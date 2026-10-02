@@ -109,6 +109,23 @@ const missingDefault = (target) =>
 // Per-call Trellis channel context (see execute); async-safe across concurrent calls.
 const channelCall = new AsyncLocalStorage();
 
+/**
+ * A write's result as a sentence beside its data. With only data, the agent posted the raw object
+ * into the channel ({"appended": {"card": 243, ..., "addedChars": 20}}, card 21 #1286, 2026-10-01).
+ */
+export function describeWrite(out) {
+  if (!out || out.success !== true || out.result != null || out.message != null) return out;
+  const name = (t) => (t ? ` "${t}"` : '');
+  if (out.appended?.card != null) {
+    const a = out.appended;
+    out.result = `Appended ${a.addedChars ?? 'the'} characters to card #${a.card}${name(a.title)}${a.asItem ? ' as a checklist item' : ''}.`;
+  } else if (out.created?.card != null) {
+    const c = out.created;
+    out.result = `Created card #${c.card}${name(c.title)}${c.basketTitle ? ` in ${c.basketTitle}` : ''}.`;
+  }
+  return out;
+}
+
 export default class TrellisNotesPlugin extends BasePlugin {
   constructor(agent) {
     super(agent);
@@ -374,7 +391,7 @@ export default class TrellisNotesPlugin extends BasePlugin {
       });
 
       normalizeParamAliases(data);
-      return await channelCall.run(channel, () => this._inDocument(data, () => this._dispatch(action, data)));
+      return describeWrite(await channelCall.run(channel, () => this._inDocument(data, () => this._dispatch(action, data))));
     } catch (error) {
       this.logger.error(`${action} failed:`, error);
       return { success: false, error: error.message };

@@ -2,6 +2,12 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.461] - 2026-10-01
+
+### Fixed
+- **A confirmed append wrote only a heading.** The agent drafted its block in a Trellis channel and asked for the go-ahead. "Yes" resolved to "append the prepared block verbatim to card #243", which the one-shot router ran as appendNote. The block was in an earlier message, so parameter extraction found only its heading and 20 characters landed; another agent had to relay the rest (card 21 #1285–#1290). A go-ahead resolved in a channel now goes to the reasoning agent, which has the conversation the drafted text is in.
+- **A Trellis write's raw result was posted into the channel.** appendNote and the create actions returned only data, and the channel got `{"appended": {...}}` (#1286). Their results now carry a sentence ("Appended 412 characters to card #243 \"…\"."); the data is kept beside it.
+
 ## [2.25.460] - 2026-10-01
 
 ### Fixed

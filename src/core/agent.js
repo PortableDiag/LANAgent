@@ -1064,7 +1064,10 @@ export class Agent extends EventEmitter {
       // (card 21 #1050, 2026-10-01). The reasoning agent can plan it and call the tools.
       // A follow-up that leans on the channel ("add to the card as requested") is the same kind
       // of work, even addressed to this agent alone: it needs the conversation and the tools.
-      if (context.trellis && ((context.trellis.shared && isOpenEndedTask(input)) || refersToConversation(input))) {
+      // So is a go-ahead resolved in a channel: "append the prepared block verbatim" names text that
+      // is in an earlier message. The one-shot router extracted only its heading and appended 20
+      // characters (card 21 #1285).
+      if (context.trellis && ((context.trellis.shared && isOpenEndedTask(input)) || refersToConversation(input) || context.resolvedConfirmation)) {
         try {
           logger.info('Trellis task that needs the channel: handing it to the reasoning agent');
           const rendered = await this._runReasoning(input, context);
