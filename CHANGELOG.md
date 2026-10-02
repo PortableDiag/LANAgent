@@ -2,6 +2,11 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.460] - 2026-10-01
+
+### Fixed
+- **"Try again" in a Trellis channel asked for confirmation instead of retrying.** The router's short-follow-up path treated it as chit-chat, and the model replied by asking the operator to confirm (card 21 #1283). "Try again", "retry", "one more time" and "have another go" now go to the reasoning agent with the channel conversation, like the other requests that lean on it.
+
 ## [2.25.459] - 2026-10-01
 
 ### Fixed

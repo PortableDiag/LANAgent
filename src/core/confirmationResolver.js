@@ -62,11 +62,12 @@ export async function resolveConfirmation({ generate, conversation, input }) {
 /**
  * A request that only means something with the channel conversation: "add to the card as
  * requested", "do your part", "add yours". Without it, the one-shot router read "add to the card
- * as requested" as a question and answered it with text (card 21 #1281, 2026-10-01).
+ * as requested" as a question and answered it with text (card 21 #1281, 2026-10-01), and "try
+ * again" as chit-chat that asked for a confirmation instead of retrying (#1283).
  */
 export function refersToConversation(text) {
   const t = String(text || '').split(/\n\n\(Note for /)[0];
-  return /\b(as (?:requested|asked|discussed|agreed|planned|instructed)|like (?:the others|everyone else|they did)|your (?:part|block|section|share|bit|items?|suggestions?)|add (?:yours|it|that|them|to (?:it|that|the card))|the (?:card|task) (?:above|we|they|everyone)|(?:do|finish|complete) (?:it|that|the task|your part))\b/i.test(t);
+  return /\b(as (?:requested|asked|discussed|agreed|planned|instructed)|like (?:the others|everyone else|they did)|your (?:part|block|section|share|bit|items?|suggestions?)|add (?:yours|it|that|them|to (?:it|that|the card))|the (?:card|task) (?:above|we|they|everyone)|(?:do|finish|complete) (?:it|that|the task|your part)|try (?:it |that )?again|retry|one more time|have another go)\b/i.test(t);
 }
 
 export function isOpenEndedTask(text) {
