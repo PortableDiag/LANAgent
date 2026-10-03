@@ -68,6 +68,18 @@ try {
   logger.warn('Could not read package.json version:', error.message);
 }
 
+
+/** Whether a provider's model takes image input; true when the provider cannot say (no catalog). */
+async function modelAcceptsImages(providerInstance, model) {
+  try {
+    if (typeof providerInstance.refreshCatalog === 'function') await providerInstance.refreshCatalog().catch(() => {});
+    const meta = providerInstance.catalog?.get?.(model);
+    return !meta || !Array.isArray(meta.inputModalities) || meta.inputModalities.includes('image');
+  } catch {
+    return true;
+  }
+}
+
 export class WebInterface {
   constructor(agent) {
     this.agent = agent;
@@ -4041,7 +4053,14 @@ export class WebInterface {
           // Read vision BEFORE overwriting chat: the old code compared vision against the
           // already-updated chat value, so a vision model that tracked chat stopped tracking
           // it on the first switch and silently stayed on the previous model.
-          const visionTrackedChat = providerInstance.models.vision === providerInstance.models.chat;
+          let visionTrackedChat = providerInstance.models.vision === providerInstance.models.chat;
+          // Vision follows chat only onto a model that accepts images. Moving chat to
+          // deepseek/deepseek-v4-pro took image captioning with it, and every image call failed
+          // with "does not accept images" (2026-10-02).
+          if (visionTrackedChat && !(await modelAcceptsImages(providerInstance, model))) {
+            visionTrackedChat = false;
+            logger.warn(`${provider}: ${model} does not accept images — the vision model stays ${providerInstance.models.vision}`);
+          }
           providerInstance.models.chat = model;
           if (visionTrackedChat) {
             providerInstance.models.vision = model;

@@ -563,6 +563,18 @@ Live in-memory snapshot of download-token usage (tokens within their TTL window)
 
 ## Recent Updates (October 2, 2026)
 
+### v2.25.465 — Follow-ups, media analysis
+
+| Plugin / route | What |
+|---|---|
+| `followup.schedule` | `{ task, inMinutes? }`: re-run `task` later through the reasoning agent with the same channel. It reports when done, otherwise rechecks at 5, 15 and 45 min |
+| `vision.ask` | `{ path \| paths (≤8), question }`: ask the vision model about local images (temp, data, upload, workspace, media folders) |
+| `http.request` | every response adds `bytes` and `sha256`; `saveTo: "<name>"` writes the body under the temp folder and returns `savedTo` |
+| `ffmpeg.extract` | `type: "frames"` now returns `frames[]` and `frameCount` |
+| `POST /api/ai/update-model` | the vision model follows the chat model only onto a model whose catalog lists image input; pin it with `OPENROUTER_VISION_MODEL` |
+
+
+
 ### v2.25.464 — Generic HTTP requests (`http` plugin) and trusted Trellis agents
 Plugin `http`, through `POST /api/plugin` (or in plain words through `POST /api/command/execute`):
 

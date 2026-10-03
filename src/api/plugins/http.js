@@ -5,6 +5,7 @@ import { assertPublicUrl } from '../../utils/publicUrl.js';
 import { BROWSER_UA } from '../../services/webtools/fetchPublic.js';
 import { DATA_PATH, TEMP_PATH, UPLOADS_PATH, WORKSPACE_PATH } from '../../utils/paths.js';
 import fs from 'fs/promises';
+import crypto from 'crypto';
 import path from 'path';
 
 /**
@@ -42,7 +43,7 @@ export default class HttpPlugin extends BasePlugin {
       {
         command: 'request',
         description: 'Send an HTTP request to an API and return status, headers and body. Use for any POST/PUT/PATCH/DELETE, API signups and registrations, authenticated calls and file uploads. Credentials in the response are saved and shown as {{secret:<host>.<field>}}; put that placeholder in a later header or body to use it.',
-        usage: 'request({ url: "https://api.example.com/x", method: "POST", headers: { "X-Api-Key": "{{secret:api.example.com.api_key}}" }, json: { ... } | form: { ... } | body: "raw" | multipart: { fields: { ... }, files: [{ field: "file", path: "/abs/path" }] } })',
+        usage: 'request({ url, method, headers, json | form | body | multipart, saveTo: "clip.mp4" })  // saveTo writes the response body to a local file (returned as savedTo) for ffmpeg/vision. Example: request({ url: "https://api.example.com/x", method: "POST", headers: { "X-Api-Key": "{{secret:api.example.com.api_key}}" }, json: { ... } | form: { ... } | body: "raw" | multipart: { fields: { ... }, files: [{ field: "file", path: "/abs/path" }] } })',
         examples: [
           'send a POST request to this API',
           'call the API endpoint with a JSON body',
@@ -261,7 +262,23 @@ export default class HttpPlugin extends BasePlugin {
 
       const contentType = res.headers.get('content-type') || '';
       const buf = Buffer.from(await res.arrayBuffer());
-      if (buf.length > MAX_RESPONSE_BYTES) throw new Error(`Response is ${buf.length} bytes; limit ${MAX_RESPONSE_BYTES}`);
+      const limit = params.saveTo ? MAX_UPLOAD_BYTES : MAX_RESPONSE_BYTES;
+      if (buf.length > limit) throw new Error(`Response is ${buf.length} bytes; limit ${limit}`);
+      // saveTo: keep the body as a local file other tools can read (ffmpeg, vision, uploads).
+      // On 2026-10-02 the agent downloaded a reaction video it then could not analyse: nothing
+      // could write the bytes to disk. Always under TEMP_PATH, under a sanitized name.
+      let savedTo = null;
+      if (params.saveTo && res.status < 400) {
+        const name = path.basename(String(params.saveTo)).replace(/[^\w.-]+/g, '_').replace(/^\.+/, '').slice(0, 120) || `download-${Date.now()}`;
+        await fs.mkdir(TEMP_PATH, { recursive: true });
+        savedTo = path.join(TEMP_PATH, name);
+        await fs.writeFile(savedTo, buf);
+      }
+      // Size and hash of exactly the bytes received, so a download can be checked against a
+      // published digest (a signed receipt's video_sha256). On 2026-10-02 the agent reported
+      // that a hash "matches the file we downloaded" when it had no way to hash the download.
+      const bytes = buf.length;
+      const sha256 = crypto.createHash('sha256').update(buf).digest('hex');
       const saved = [];
       let data = null;
       let text = null;
@@ -271,7 +288,7 @@ export default class HttpPlugin extends BasePlugin {
       if (data === null) {
         text = /^(text\/|application\/(xml|xhtml|javascript|x-www-form-urlencoded))/i.test(contentType) || !contentType
           ? buf.toString('utf8')
-          : `<${buf.length} bytes of ${contentType}>`;
+          : `<${buf.length} bytes of ${contentType}, sha256 ${sha256}>`;
       }
       const shownHeaders = {};
       for (const h of SHOWN_HEADERS) if (res.headers.get(h)) shownHeaders[h] = res.headers.get(h);
@@ -283,11 +300,15 @@ export default class HttpPlugin extends BasePlugin {
         success: res.status < 400,
         status: res.status,
         headers: shownHeaders,
+        bytes,
+        sha256,
+        ...(savedTo ? { savedTo } : {}),
         ...(data !== null ? { data } : { text: clipped }),
         ...(saved.length ? { savedSecrets: saved.map(n => `{{secret:${n}}}`) } : {}),
         ...(res.status >= 400 ? { error: `HTTP ${res.status}` } : {}),
-        result: `${method} ${target.replace(/\{\{[^}]+\}\}/g, '…')} → HTTP ${res.status}` +
+        result: `${method} ${target.replace(/\{\{[^}]+\}\}/g, '…')} → HTTP ${res.status} (${bytes} bytes, sha256 ${sha256})` +
           (saved.length ? `\nSaved credentials (use these placeholders, never the values): ${saved.map(n => `{{secret:${n}}}`).join(', ')}` : '') +
+          (savedTo ? `\nSaved the body to ${savedTo}` : '') +
           `\n${clipped}`
       };
     } catch (err) {

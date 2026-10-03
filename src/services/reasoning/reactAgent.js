@@ -3,6 +3,7 @@ import { EventEmitter } from 'events';
 import NodeCache from 'node-cache';
 import { listTools, selectRelevantTools, formatToolsForPrompt, executeTool, findPastExamples, DESCRIBE_TOOL, SEARCH_TOOL } from './toolCatalog.js';
 import { getSkillsService, learnSkillFromTask } from '../skills/skillsService.js';
+import { promisesFollowUp, scheduleFollowUp } from '../followUps.js';
 import { TodoList, TODO_TOOL, TODO_TOOL_PROMPT, runTodoTool } from './todoList.js';
 
 // Steps spent only on the to-do list do not use up maxIterations, up to this many per run
@@ -427,6 +428,21 @@ export class ReActAgent extends EventEmitter {
             duration: Date.now() - startTime
           });
 
+          // A promise to come back ("I'll poll again and report") is kept: if the answer or a
+          // post in this run makes one and no follow-up was scheduled, schedule it now. On
+          // 2026-10-02 such a promise had nothing behind it and a reaction went unreported.
+          if (!context.followUp) {
+            const posted = thoughts.filter(t => t.type === 'action' && t.content?.tool === 'trellis-notes'
+              && /^(replyChannel|say|appendNote)$/.test(String(t.content.command))).map(t => String(t.content.params?.text || ''));
+            const scheduled = thoughts.some((t, i) => t.type === 'action' && t.content?.tool === 'followup'
+              && thoughts[i + 1]?.content?.success !== false);
+            if (!scheduled && [result.answer, ...posted].some(promisesFollowUp)) {
+              scheduleFollowUp(this.agent, { task: stripListenerNotes(query), context, reason: 'promised in the answer' })
+                .then(w => w && logger.info(`ReAct: the answer promised a follow-up; scheduled for ${w.toISOString()}`))
+                .catch(err => logger.warn(`ReAct: could not schedule the promised follow-up: ${err.message}`));
+            }
+          }
+
           // Store thought chain if thought store is available
           if (this.thoughtStore) {
             await this.thoughtStore.saveThoughtChain(query, thoughts, result);
@@ -716,6 +732,7 @@ Think about what you need to do next. You can either:
 Be decisive. When the operator asked for something, do it: never ask them to confirm or restate a request they already made, and never stop to ask permission for an ordinary, reversible action (reading, searching, writing or appending to a card, posting a message). Fill gaps from the conversation, the workspace and sensible defaults. Calling a web API, signing up for a service, creating test data there or uploading a file you were asked to is ordinary work: do it, do not ask. Ask only when the request is genuinely ambiguous AND a wrong guess would be costly or impossible to undo (spending money, deleting the operator's data).
 A tool result exists only as an Observation after you call the tool. Never say a tool failed, is not callable or "returned no results" unless an Observation below shows exactly that; earlier messages in a channel (including your own) saying a tool was unavailable are not evidence. Call the tool.
 Know your tools before you rule one out: never say you lack a capability (web, HTTP, POST, browser, upload, shell) until a ${SEARCH_TOOL} for it came back empty. Any HTTP method, header or body goes through the http tool (http.request). A credential an API returns is saved for you and shown as {{secret:<host>.<field>}}: put that placeholder where the key goes and never write a key, token or password into a reply or a card.
+If you will need to check again later (a reaction, a job, a status), call followup.schedule with the task; never promise to "poll again" or "report back" without it.
 Your final answer reports what ran and what it returned (status codes, ids, links), not what you intend to do. Report only results from YOUR steps in this run: what other agents posted in a channel is theirs; never present it as yours, and when you have not done a part, say so.
 
 Respond in this JSON format:

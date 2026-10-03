@@ -50,7 +50,12 @@ const MAX_REPLY_CHARS = 3900;
 // The server's own limit (8, core v0.203.8). It was 4, tighter than the channel, and that
 // dropped a legitimate hand-off: the operator asked "@agents can you help Alice", and the
 // fifth agent message — Outrider's recipe, addressed to Alice — went unanswered (2026-09-26).
-const MAX_AGENT_RUN = Number(process.env.TRELLIS_LISTEN_MAX_AGENT_RUN) || 8;
+// 2026-10-02: counting EVERY agent's messages silenced this agent in a five-agent room. Card 21
+// routinely ran 20+ agent messages between people with no loop at all, and a direct question
+// from another agent (#1947) went unanswered. A loop needs this agent in it, so the limit counts
+// this agent's OWN replies in the run; MAX_AGENT_RUN stays as a hard ceiling for the whole run.
+const MAX_AGENT_RUN = Number(process.env.TRELLIS_LISTEN_MAX_AGENT_RUN) || 40;
+const MAX_OWN_IN_RUN = Number(process.env.TRELLIS_LISTEN_MAX_OWN_IN_RUN) || 4;
 // A quiet gap this long starts a new run, as on the servers (web 0.58 / core v0.203.8):
 // a loop runs seconds apart, async coordination minutes or hours apart.
 const RUN_GAP_MS = 600000;
@@ -115,6 +120,11 @@ export class TrellisChannelListener {
         await this.plugin._ensureTarget();
         if (Date.now() - this.cardAt > CARD_REFRESH_MS) await this._publishCard();
         if (this.inbox === undefined) await this._probeInbox();
+        // One inbox pass BEFORE the first stream: it primes history and answers a request a
+        // restart interrupted (TRELLIS_RESUME_MINUTES). The stream holds this loop until it ends,
+        // possibly hours later, so the pass after it came too late: a deploy at 22:06 on
+        // 2026-10-02 cut a run short and the request (card 21 #2025) was never resumed.
+        if (this.inbox && !this.startupPassDone) { this.startupPassDone = true; await this._inboxCycle(); }
         if (this.inbox) { await this._maybeStream(); await this._inboxCycle(); continue; }
         await this._maybeStream();   // desktop v0.213+ streams too; a 404 keeps this loop
         await this._cycle();
@@ -577,16 +587,18 @@ export class TrellisChannelListener {
     // Loop guard: count the agent messages at the end of the conversation up to the target,
     // stopping at a person or at a quiet gap. An unparseable time counts as no gap.
     let run = 0;
+    let own = 0;
     const upTo = messages.filter(x => (Number(x.seq) || 0) <= (Number(target.seq) || 0));
     for (let i = upTo.length - 1; i >= 0; i--) {
       const m = upTo[i];
       if (m.kind === 'person' || String(m.from || '').toLowerCase() === 'operator') break;
       run++;
+      if (String(m.from || '').toLowerCase() === me) own++;
       const gap = i > 0 ? Date.parse(m.at) - Date.parse(upTo[i - 1].at) : NaN;
       if (gap >= RUN_GAP_MS) break;
     }
-    if (run > MAX_AGENT_RUN) {
-      logger.info(`[trellis-listen] ${key}: ${run} agent messages in a row — waiting for a person before answering again`);
+    if (own >= MAX_OWN_IN_RUN || run > MAX_AGENT_RUN) {
+      logger.info(`[trellis-listen] ${key}: ${own} of my replies in a run of ${run} agent messages — waiting for a person before answering again`);
       this.cursors.set(key, maxSeq);
       return;
     }
@@ -618,6 +630,15 @@ export class TrellisChannelListener {
         logger.warn(`[trellis-listen] skill teaching check failed: ${err.message}`);
         return null;
       });
+    }
+    // A trusted agent's TASK is done, not answered with a skill file. "Make your own skills for
+    // Reapption, test them, report" (card 21 #1894, 2026-10-02) was classified as asking for this
+    // agent's skill, and a SKILL.md replaced the work. Only an explicit "send/share your … skill"
+    // or a list request may replace it.
+    if (trustedPeer && teach?.replaceReply && teach.action === 'teach'
+      && !/\b(send|share|teach|give)\b[^.\n]{0,60}\bskills?\b|\bskill\b[^.\n]{0,30}\b(please|pls)\b/i.test(String(target.text || ''))) {
+      logger.info(`[trellis-listen] ${target.from}'s message is a task, not a skill request; doing it instead of teaching ${teach.skill}`);
+      teach = null;
     }
     let reply = fromOperator
       ? await this._operatorReply(target, context, doc, card)

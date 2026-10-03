@@ -2,6 +2,29 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.465] - 2026-10-02
+
+### Added
+- **Follow-ups the agent promises are kept (`followup` plugin, `services/followUps.js`).** `followup.schedule({ task, inMinutes })` schedules an Agenda job that re-runs the task through the reasoning agent with the same channel. It reports and stops once what it was waiting for has happened, otherwise checks again (5, 15, 45 minutes, then gives up). If an answer or a channel post promises to "poll again", "check back" or "report back" and the run scheduled nothing, a follow-up is scheduled automatically. On 2026-10-02 such a promise had nothing behind it, and a reaction the operator recorded two minutes later was never reported.
+- **The agent can analyse media it downloads.** Asked to judge a recorded reaction, it downloaded the video and then was stuck: nothing could write the bytes to a file, `ffmpeg` mangled a URL into a path, and `imageCaption` takes only a URL or base64 and writes a generic caption. Now:
+  - `http.request({ saveTo })` writes the body under the temp folder (sanitized name) and returns `savedTo`.
+  - `ffmpeg extract frames` lists the frame files, not just their folder.
+  - `vision.ask({ path | paths, question })` asks the vision model a question about local images (temp, data, upload, workspace and media folders only).
+
+### Changed
+- **Auto reasoning mode runs ReAct.** Plan-Execute plans every step before running any, so it cannot use what an earlier step returns. It failed a numbered "1) extract frames 2) ask about them" request at step 2 and had invented tools earlier. It remains available as the explicit `plan-execute` mode.
+
+### Fixed
+- **A voice recording sent to `aiDetector.detectVideo` failed with HTTP 500, and the client retried it every 20 seconds for a day.** The upload was a WebM with an Opus track and no picture. ffmpeg's "Output file does not contain any stream" was thrown, and the external route answers a throw with 500. `detectVideo` now probes the file: audio-only goes to the audio detector (with a note); a file with neither is a plain error; an ffmpeg failure returns ffmpeg's own reason instead of throwing.
+- **A trusted agent's task was answered with a skill file instead of being done.** "Make your own skills for Reapption, test them against the sandbox, report" was classified as asking for this agent's skill, and the SKILL.md replaced the work. From a trusted agent, a teach replaces the reply only when the message explicitly asks to be sent a skill.
+- **Download links showed this server's file paths and wallet to clients.** A download token is a signed JWT, not an encrypted one, and it carried `filePath` (`…/downloads/<file>`) and the agent id. The token now carries only an opaque file id and the filename. The path and agent id stay on the server for the token's lifetime, and tokens issued earlier still verify.
+- **Public-API skills were kept from sharing.** The share audit's auxiliary model blocked skills for naming a public domain, a `{{secret:…}}` placeholder and an HTTP status code. The model review now runs on the main model, with those listed as not private. Findings only about a placeholder are dropped. A skill blocked by an older audit (`AUDIT_VERSION`) is audited once more. Credentials, ids, wallets and the owner's own terms are still caught by the scan without any model.
+- **In a busy multi-agent room, a direct mention went unanswered.** The loop guard counted every agent's messages since the last person and stopped at 8. In a five-agent channel, 21 agent messages without a loop is normal, so another agent's question to this agent (card 21 #1947) was dropped. The guard now counts this agent's own replies in the run (`TRELLIS_LISTEN_MAX_OWN_IN_RUN`, default 4), because a loop needs this agent in it. A ceiling of 40 for the whole run remains (`TRELLIS_LISTEN_MAX_AGENT_RUN`).
+- **Changing the chat model took image analysis with it.** `POST /api/ai/update-model` moved the vision model along with chat whenever they had been equal. Moving chat to a model without image input broke every image call ("does not accept images"). Vision now follows chat only onto a model whose catalog entry accepts images; otherwise it stays and the update logs why. Set `OPENROUTER_VISION_MODEL` to pin it.
+- **A download could not be checked against a published hash.** `http.request` reported a binary body only as "<N bytes of video/mp4>", yet the agent reported that a receipt's `video_sha256` "matches the file we downloaded". Every response now carries `bytes` and `sha256` of exactly what was received, also on the result line.
+- **`ffmpeg extract` never worked.** Its output paths were declared as consts inside the `switch` cases and read after the `switch`, where they are out of scope. Every frames, audio or video extraction failed with "framesDir is not defined". They are declared before the `switch` now (test extracts real frames and audio).
+- **A restart still lost an interrupted Trellis request when the event stream was up.** The resume pass ran in the inbox cycle, but the stream holds the loop until it ends, so at startup the pass came hours late (card 21 #2025). One inbox pass now runs before the first stream connects.
+
 ## [2.25.464] - 2026-10-02
 
 ### Added

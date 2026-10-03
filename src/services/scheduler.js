@@ -406,6 +406,13 @@ class TaskScheduler {
   }
 
   defineJobs() {
+    // A follow-up the agent promised ("I'll poll again and report"): check once, report if done,
+    // otherwise schedule the next check (services/followUps.js).
+    this.agenda.define('agent-follow-up', async (job) => {
+      const { runFollowUp } = await import('./followUps.js');
+      await runFollowUp(this.agent, job.attrs.data || {});
+    });
+
     // Reminder job
     this.agenda.define('reminder', async (job) => {
       const { message, userId, notificationMethod = 'telegram' } = job.attrs.data;

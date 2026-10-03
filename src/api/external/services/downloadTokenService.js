@@ -1,9 +1,16 @@
 import jwt from 'jsonwebtoken';
+import crypto from 'crypto';
 import NodeCache from 'node-cache';
 import { logger } from '../../../utils/logger.js';
 
 // Track download counts per token
 const downloadCounters = new NodeCache({ stdTTL: 7200, checkperiod: 300 });
+
+// The file behind a token, by an opaque id. The path and the agent id used to sit IN the token,
+// and a JWT is signed, not encrypted: every client could read this server's file layout
+// (the deploy path of downloads/<file>) and its wallet out of the link it was handed (2026-10-02).
+// Kept here for the same lifetime as the download counter, which is already in memory.
+const fileRefs = new NodeCache({ stdTTL: 7200, checkperiod: 300 });
 
 // Per-token metadata for admin analytics — a parallel cache so the hot
 // verify/consume path keeps its existing shape
@@ -22,12 +29,13 @@ function getSecret() {
 }
 
 export function generateDownloadToken({ filePath, filename, agentId, maxDownloads = 3, expiresInMinutes = 60 }) {
+  const fid = crypto.randomBytes(12).toString('base64url');
+  fileRefs.set(fid, { filePath, agentId }, expiresInMinutes * 60);
   const token = jwt.sign(
     {
       type: 'download',
-      filePath,
+      fid,
       filename,
-      agentId,
       maxDownloads
     },
     getSecret(),
@@ -50,13 +58,18 @@ export function generateDownloadToken({ filePath, filename, agentId, maxDownload
   return token;
 }
 
+/** A verified token's claims with the file it names filled in from fileRefs; null if gone. */
+function resolveClaims(decoded) {
+  if (!decoded || decoded.type !== 'download') return null;
+  if (decoded.filePath) return decoded;            // a token minted before the path left the token
+  const ref = decoded.fid ? fileRefs.get(decoded.fid) : null;
+  if (!ref) return null;
+  return { ...decoded, filePath: ref.filePath, agentId: ref.agentId };
+}
+
 export function verifyDownloadToken(token) {
   try {
-    const decoded = jwt.verify(token, getSecret());
-    if (decoded.type !== 'download') {
-      return null;
-    }
-    return decoded;
+    return resolveClaims(jwt.verify(token, getSecret()));
   } catch (error) {
     return null;
   }
@@ -140,10 +153,11 @@ export function getTokenAnalytics() {
 export function inspectDownloadToken(token) {
   try {
     // Verify the token first
-    const decoded = jwt.verify(token, getSecret());
-    if (decoded.type !== 'download') {
+    const raw = jwt.verify(token, getSecret());
+    if (raw.type !== 'download') {
       return { isValid: false, error: 'Not a download token' };
     }
+    const decoded = resolveClaims(raw) || { ...raw, filePath: null, agentId: tokenMetadata.get(token)?.agentId ?? null };
 
     // Get current metadata
     const meta = tokenMetadata.get(token);

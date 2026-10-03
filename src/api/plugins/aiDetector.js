@@ -210,7 +210,9 @@ Respond with ONLY a JSON object in this exact format:
     }
 
     const transcript = transcribeResponse.data.result?.transcript || '';
-    if (!transcript || transcript.length < 20) {
+    // The text detector needs 50 characters; a shorter transcript (a tone, a cough, one word)
+    // is not enough to judge, which is an answer, not a failure.
+    if (!transcript || transcript.trim().length < 50) {
       return {
         success: true,
         type: 'audio',
@@ -231,10 +233,36 @@ Respond with ONLY a JSON object in this exact format:
     return textResult;
   }
 
+  /** The kinds of streams a media file holds, by ffprobe: { video, audio } (both false if unreadable). */
+  async _streamKinds(filePath) {
+    try {
+      const { execFile } = await import('child_process');
+      const { promisify } = await import('util');
+      const { stdout } = await promisify(execFile)('ffprobe', ['-v', 'error', '-show_entries', 'stream=codec_type', '-of', 'csv=p=0', filePath], { timeout: 20000 });
+      const kinds = String(stdout).split('\n').map(l => l.trim());
+      return { video: kinds.includes('video'), audio: kinds.includes('audio'), probed: true };
+    } catch {
+      return { video: false, audio: false, probed: false };
+    }
+  }
+
   async detectVideo(data) {
     const filePath = await this._resolveToFilePath(data);
     if (!filePath) {
       return { success: false, error: 'No video provided. Pass a URL or file path.' };
+    }
+
+    // An upload with no picture (a WebM/MP4 of a voice recording) cannot be split into frames.
+    // ffmpeg's "Output file does not contain any stream" was thrown, answered 500, and a
+    // client retried it every 20 s for a day (2026-10-02). Audio-only goes to the audio
+    // detector; a file with neither is a plain error, not a server fault.
+    const streams = await this._streamKinds(filePath);
+    if (streams.probed && !streams.video) {
+      if (streams.audio) {
+        const audioResult = await this.detectAudio({ path: filePath, filename: data.filename || path.basename(filePath) });
+        return { ...audioResult, type: 'audio', note: 'The file has no video stream, so its audio was analyzed instead.' };
+      }
+      return { success: false, error: 'The file has no video or audio stream that can be analyzed.', code: 'no_media_stream' };
     }
 
     // Extract frames using FFmpeg
@@ -271,9 +299,16 @@ Respond with ONLY a JSON object in this exact format:
         const { exec } = await import('child_process');
         const { promisify } = await import('util');
         const execAsync = promisify(exec);
-        await execAsync(`ffmpeg -i "${filePath}" -vf "fps=0.5" -frames:v 20 "${framesDir}/frame_%04d.png" -y`, {
-          timeout: 60000
-        });
+        try {
+          await execAsync(`ffmpeg -i "${filePath}" -vf "fps=0.5" -frames:v 20 "${framesDir}/frame_%04d.png" -y`, {
+            timeout: 60000
+          });
+        } catch (ffErr) {
+          // The input is at fault (corrupt, unsupported): say what ffmpeg said, do not throw.
+          const reason = String(ffErr.stderr || ffErr.message || '').split('\n').map(l => l.trim())
+            .filter(l => l && !/^(ffmpeg version|built with|configuration:|lib[a-z]+ )/.test(l)).slice(-2).join(' ');
+          return { success: false, error: `Could not read frames from the video: ${reason || 'ffmpeg failed'}`, code: 'unreadable_video' };
+        }
         const files = await fs.readdir(framesDir);
         framePaths = files
           .filter(f => f.endsWith('.png'))

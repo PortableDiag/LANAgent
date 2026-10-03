@@ -952,8 +952,12 @@ export class Agent extends EventEmitter {
       // Plan-Execute writes every step before seeing any result, so it cannot answer what a
       // service asks back (a signup challenge) and it invented tools ("reapption",
       // "shell_or_http") for one on 2026-10-02. Web/API work and Trellis requests go to ReAct.
-      const adaptive = /\b(api|https?|url|endpoint|sign ?up|register|login|upload|post|\w+\.(?:com|net|org|io|ai|dev|app))\b/i.test(input) || !!context?.trellis;
-      const isStructured = !adaptive && /\b(step|sequence|order|first|then|finally)\b/i.test(input);
+      // Auto mode runs ReAct. Plan-Execute writes every step before running any, so a step that
+      // needs the previous one's output (frame files from an extraction, a challenge from a
+      // signup) cannot be planned: it invented tools on 2026-10-02 and failed a numbered
+      // "1) extract frames 2) ask about them" request at step 2. It stays available as the
+      // explicit 'plan-execute' mode.
+      const isStructured = false;
       if (isStructured && this.planExecuteAgent) {
         reasoningResult = await this.planExecuteAgent.run(input, context);
       } else if (this.reactAgent) {

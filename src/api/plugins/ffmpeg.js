@@ -219,22 +219,25 @@ export default class FFmpegPlugin extends BasePlugin {
     
     const inputPath = this.resolveMediaPath(input);
     let command;
+    // Declared out here: as consts inside the cases they were out of scope at the return
+    // below, so every extraction failed with "framesDir is not defined" (2026-10-02).
+    let audioPath = null, videoPath = null, framesDir = null;
     
     switch(type) {
       case 'audio':
         const audioOutput = output || `${path.basename(input, path.extname(input))}.mp3`;
-        const audioPath = this.resolveMediaPath(audioOutput);
+        audioPath = this.resolveMediaPath(audioOutput);
         command = `ffmpeg -i "${inputPath}" -vn -acodec mp3 -y "${audioPath}"`;
         break;
         
       case 'video':
         const videoOutput = output || `${path.basename(input, path.extname(input))}_video.mp4`;
-        const videoPath = this.resolveMediaPath(videoOutput);
+        videoPath = this.resolveMediaPath(videoOutput);
         command = `ffmpeg -i "${inputPath}" -an -vcodec copy -y "${videoPath}"`;
         break;
         
       case 'frames':
-        const framesDir = path.join(this.mediaDir, 'frames', Date.now().toString());
+        framesDir = path.join(this.mediaDir, 'frames', Date.now().toString());
         await fs.mkdir(framesDir, { recursive: true });
         const fps = options.fps || 1;
         command = `ffmpeg -i "${inputPath}" -vf fps=${fps} "${framesDir}/frame_%04d.png"`;
@@ -248,11 +251,16 @@ export default class FFmpegPlugin extends BasePlugin {
       logger.info(`Extracting ${type}: ${command}`);
       const { stdout, stderr } = await execAsync(command);
       
+      // The frame files themselves: given only the folder, the next step had to guess names.
+      const frames = type === 'frames'
+        ? (await fs.readdir(framesDir)).filter(f => f.endsWith('.png')).sort().map(f => path.join(framesDir, f))
+        : null;
       return {
         success: true,
-        result: `${type} extracted successfully`,
+        result: type === 'frames' ? `${frames.length} frames extracted to ${framesDir}` : `${type} extracted to ${audioPath || videoPath}`,
         type: type,
         output: type === 'frames' ? framesDir : (audioPath || videoPath),
+        ...(frames ? { frames: frames.slice(0, 200), frameCount: frames.length } : {}),
         command: command
       };
     } catch (error) {

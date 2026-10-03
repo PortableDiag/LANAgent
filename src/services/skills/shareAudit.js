@@ -24,6 +24,10 @@ import { getUserProfile } from './userProfile.js';
  */
 
 const AUDIT_FILE = '.share-audit.json';
+// Bumped when the audit itself changes: a skill BLOCKED by an older audit is audited again once
+// (v2, 2026-10-02: the auxiliary model blocked public-API skills for naming the public domain).
+// A clear verdict or the operator's release is never revisited.
+export const AUDIT_VERSION = 2;
 const RETRY_ERROR_MS = 60 * 60 * 1000;
 const TERMS_TTL_MS = 10 * 60 * 1000;
 
@@ -106,6 +110,8 @@ export function parseFindings(content, text) {
   for (const d of j.private_details.slice(0, 10)) {
     const quote = norm(d?.quote || '');
     if (quote.length < 3 || !hay.includes(quote)) continue;
+    // A finding that is only about a placeholder is not one: the placeholder is what replaced the secret.
+    if (/\{\{\s*secret:/i.test(d.quote || '') && /placeholder/i.test(String(d.why || '')) && !/\b(name|email|address|wallet|ip|host)\b/i.test(String(d.why || ''))) continue;
     out.push(`${String(d.why || 'private detail').slice(0, 160)}: "${String(d.quote).slice(0, 80)}"`);
   }
   return out;
@@ -159,7 +165,8 @@ export class ShareAudit {
   /** Audit a payload unless a current verdict exists. Concurrent calls share one run. */
   async audit(payload) {
     const existing = await this.recordFor(payload);
-    if (existing && !(existing.verdict === 'error' && Date.now() - existing.at > RETRY_ERROR_MS)) return existing;
+    const staleBlock = existing && existing.verdict === 'blocked' && !existing.released && (existing.auditVersion || 1) < AUDIT_VERSION;
+    if (existing && !staleBlock && !(existing.verdict === 'error' && Date.now() - existing.at > RETRY_ERROR_MS)) return existing;
     if (this._inflight.has(payload.sha256)) return this._inflight.get(payload.sha256);
     const run = this._run(payload).finally(() => this._inflight.delete(payload.sha256));
     this._inflight.set(payload.sha256, run);
@@ -167,7 +174,7 @@ export class ShareAudit {
   }
 
   async _run(payload) {
-    const base = { name: payload.name, sha256: payload.sha256, at: Date.now() };
+    const base = { name: payload.name, sha256: payload.sha256, at: Date.now(), auditVersion: AUDIT_VERSION };
     const findings = scanPayload(payload, await this._privateTerms());
     if (findings.length) {
       const record = { ...base, verdict: 'blocked', via: 'scan', findings };
@@ -195,6 +202,7 @@ List every detail that would reveal, directly or by clear implication:
 - credentials or anything key-shaped;
 - trading or investment positions, strategies or amounts.
 A general technique that any agent could use reveals nothing: naming a public product, service, API, file format or tool is fine, and so is describing how something works.
+These are NOT private and must not be listed: a public website's domain or its documented API routes, HTTP methods, status codes and field names (task_id, react_url…); a credential PLACEHOLDER such as {{secret:host.field}}, <your key>, YOUR_API_KEY or a truncated prefix ending in "…" (agt_…, sk-…); generic words like "agent", "task", "quota". Only list something if it identifies THIS owner, their people, accounts or systems.
 
 What the agent knows about its owner (never to be revealed; use it to recognise private details):
 <<<PROFILE
@@ -215,7 +223,10 @@ An empty list means the skill is safe to share: {"private_details": []}`;
 
     let modelFindings = null;
     try {
-      const gen = pm.generateAux || pm.generateResponse;
+      // The main model. The auxiliary one kept public-API skills private for naming the public
+      // domain, a {{secret:…}} placeholder and a 201 status code (2026-10-02). Credentials, ids,
+      // wallets and this owner's terms are caught by the scan above without any model.
+      const gen = pm.generateResponse || pm.generateAux;
       const res = await gen.call(pm, prompt, { maxTokens: 600, temperature: 0, auxTask: 'skill-share-audit' });
       modelFindings = parseFindings(res?.content, `${payload.name}\n${payload.description}\n${payload.body}`);
     } catch (err) {
