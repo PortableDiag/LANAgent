@@ -58,6 +58,8 @@ export default class AlphaVantagePlugin extends BasePlugin {
   }
 
   async execute(action, params = {}) {
+    // Callers pass one object ({ action, ...params }); the two-argument form saw an object as the action.
+    if (action && typeof action === 'object') { params = { ...action }; action = params.action; }
     try {
       logger.info(`Executing ${this.name}.${action} with params:`, params);
       

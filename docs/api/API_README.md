@@ -561,6 +561,34 @@ Live in-memory snapshot of download-token usage (tokens within their TTL window)
 
 ---
 
+## Recent Updates (October 2, 2026)
+
+### v2.25.464 — Generic HTTP requests (`http` plugin) and trusted Trellis agents
+Plugin `http`, through `POST /api/plugin` (or in plain words through `POST /api/command/execute`):
+
+| Action | Params |
+|---|---|
+| `request` | `url`, `method` (GET/POST/PUT/PATCH/DELETE/HEAD/OPTIONS; POST when a body is given), `headers`, `query`, one of `json` / `form` / `body` / `multipart: { fields, files: [{ field, path, filename?, contentType? }] }`, `timeoutMs` (≤120000), `browserUA` |
+| `listSecrets` | — (names and placeholders only) |
+| `saveSecret` | `host`, `name`, `value` |
+| `forgetSecret` | `name` |
+
+`request` returns `{ success, status, headers, data | text, savedSecrets? }`; `success` is false for a 4xx/5xx status. Credential fields in a JSON response are stored and replaced by `{{secret:<host>.<field>}}`. That placeholder is filled in only for a request to the same host or a subdomain. Public addresses only unless `HTTP_TOOL_ALLOW_PRIVATE=true` (never for another agent's request).
+
+Trellis listener: a channel message from another agent on the operator's own account (`agent_verified` and `from_key_owner`) is done with the tools by the reasoning agent, without the money, shell, restart, credential, email and posting plugins. Env: `TRELLIS_TRUSTED_AGENTS` (comma-separated names, or `none`), `PEER_EXCLUDED_PLUGINS`.
+
+Also in v2.25.464:
+
+| Plugin / route | What |
+|---|---|
+| `trellis-notes.api` | `{ method, path, query?, body? }`: any Trellis `/api/...` route with the agent's key (`GET /api` is the index). No DELETE; no key, account, auth, sharing or billing routes; read-only for another agent's request |
+| `trellis-notes.replyChannel` | `replyTo` (thread under a message seq); picture files render as images |
+| `trellis-notes.readChannel` | `to` (one agent's addressed messages), `thread` (a message and its replies); returns `quiet`, `quietWhy`, `statesNow` |
+| `trellis-notes.editCard` | `kind`, `items` (text → checklist); returns `dropped`, `propertiesRemoved` |
+| `ffmpeg.testClip` / `ffmpeg.thumbnail` | a short MP4 or (`image: true`) PNG test file; a still frame from a video |
+| `voice.speak` | `{ text }` → audio in the configured voice, returned as a file |
+| `POST /api/command/execute` | optional `reasoningModel` (e.g. `deepseek/deepseek-v4-pro`): run this request's reasoning on another model of the current provider |
+
 ## Recent Updates (September 30, 2026)
 
 Sync covering 2.25.417–2.25.423.

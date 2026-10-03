@@ -19,6 +19,135 @@ export const FREE_TODO_STEPS = 3;
  * - Adjust strategy based on observations
  * - Provide transparent reasoning traces
  */
+
+/**
+ * What a final answer claims was written (a channel message, a card) when no successful step
+ * wrote it; null when every such claim is backed by a step.
+ */
+export function unbackedWriteClaim(answer, thoughts = []) {
+  const text = String(answer || '');
+  const done = thoughts
+    .filter(t => t.type === 'observation' && t.content && t.content.success !== false)
+    .map(t => String(t.content.command || ''));
+  const claims = [
+    [/\b(posted|replied|sent|shared)\b[^.\n]{0,80}\b(channel|trellis|card\s*#?\d+|chat)\b|\b(channel|card\s*#?\d+)\b[^.\n]{0,40}\b(posted|replied)\b/i,
+      /^(replyChannel|say|postMessage|sendMessage|reply\w*|post\w*)$/i, 'that a message was posted'],
+    [/\b(appended|recorded|wrote|written)\b[^.\n]{0,60}\b(card|trellis)\b|\b(added|updated)\b[^.\n]{0,20}\b(to|on)\s+(trellis\s+)?card\b/i,
+      /^(append\w*|create\w*|update\w*|set\w*|edit\w*|write\w*|replyChannel|move\w*|add\w*)$/i, 'that a card was written']
+  ];
+  for (const [said, did, what] of claims) {
+    if (said.test(text) && !done.some(c => did.test(c))) return what;
+  }
+  return null;
+}
+
+
+/** The request without the notes a channel listener appends ("(Note for ALICE: …)"). */
+export function stripListenerNotes(text) {
+  return String(text || '').replace(/\n*\(Note for [^:]{1,40}:[\s\S]*?\)\s*$/g, '').replace(/\n*\(Note for [^:]{1,40}:[\s\S]*?\)(?=\s*\(Note for|\s*$)/g, '').trim() || String(text || '');
+}
+
+
+/**
+ * Statements in a final answer that no step supports, by one auxiliary-model call. Best effort:
+ * no model, a failed call or an unreadable reply returns [] and the answer stands.
+ */
+export async function auditAnswer(providerManager, answer, thoughts = []) {
+  if (!(providerManager?.generateResponse || providerManager?.generateAux) || !answer) return [];
+  const steps = [];
+  for (const t of thoughts) {
+    if (t.type === 'action') steps.push(`ACTION ${t.content.tool}.${t.content.command} ${JSON.stringify(t.content.params || {}).slice(0, 300)}`);
+    else if (t.type === 'observation' && t.content?.tool !== 'check') {
+      const c = t.content || {};
+      steps.push(`RESULT ${c.success === false ? 'FAILED ' + String(c.error || '').slice(0, 150) : 'ok ' + JSON.stringify(c.result ?? c).slice(0, 900)}`);
+    }
+  }
+  const targets = [...new Set(thoughts.filter(t => t.type === 'action').map(t => {
+    const q = t.content?.params || {};
+    return `${t.content?.tool}.${t.content?.command} ${q.url || (q.card !== undefined ? `card ${q.card}` : '')}`.trim();
+  }))];
+  const prompt = 'You check an AI agent\'s report against the steps it actually ran.\n\nEVERYTHING IT CALLED (nothing else was fetched or checked):\n' + targets.join('\n').slice(0, 3000) +
+    '\n\nSTEPS (in order):\n' + steps.join('\n').slice(-12000) +
+    '\n\nREPORT:\n' + String(answer).slice(0, 3000) +
+    '\n\nList each statement in the REPORT that says the agent itself did, fetched, checked, created, sent or found something that NO step above shows ' +
+    '(e.g. "checked both tasks" when only one was fetched, or a size/number for an item whose URL is not in the list above). Counts, ids, sizes and status codes must come from the RESULTS. Statements about what others did, plans, or ' +
+    'admissions of what was not done are fine. Reply with JSON only: {"unsupported": ["<short quote>", ...]} — an empty list if every claim is backed.';
+  try {
+    // The main model: the auxiliary one passed #1744's invented delete and picture post.
+    const generate = providerManager.generateResponse ? providerManager.generateResponse.bind(providerManager) : providerManager.generateAux.bind(providerManager);
+    const res = await generate(prompt, { maxTokens: 300, temperature: 0, auxTask: 'answer-audit' });
+    const m = String(res?.content || res || '').match(/\{[\s\S]*\}/);
+    const list = m ? JSON.parse(m[0]).unsupported : [];
+    return Array.isArray(list) ? list.map(String).filter(Boolean).slice(0, 5) : [];
+  } catch {
+    return [];
+  }
+}
+
+
+/**
+ * An earlier successful step this action would duplicate: a second channel post or card write
+ * to the same card, or a second POST/PUT/PATCH/DELETE to the same URL. Null when the action is
+ * new, the earlier one failed, or params.allowRepeat is set.
+ */
+export function repeatedSideEffect(action, thoughts = []) {
+  const p = action?.params || {};
+  if (p.allowRepeat === true) return null;
+  const keyOf = (a) => {
+    const q = a?.params || {};
+    // A channel post or append is a duplicate only with the same text (a second, different
+    // message to the same channel is ordinary: the v0.88.0 checks post a picture, a thread
+    // reply and a bad-thread probe to one test channel). Creates are keyed by title.
+    if (a?.tool === 'trellis-notes' && /^(replyChannel|say|appendNote)$/.test(String(a.command))) {
+      const text = String(q.text || '').toLowerCase().replace(/\s+/g, ' ').replace(/[0-9a-f]{8}-[0-9a-f-]{27,}|https?:\S+|\d+/g, '#').trim().slice(0, 160);
+      return `trellis:${a.command === 'appendNote' ? 'append' : 'post'}:${q.card ?? ''}:${text}:${[].concat(q.files || []).length}`;
+    }
+    if (a?.tool === 'trellis-notes' && /^(createNote|createTask|createImageCard)$/.test(String(a.command))) {
+      return `trellis:${a.command}:${String(q.title ?? '').toLowerCase()}`;
+    }
+    if (a?.tool === 'http' && a.command === 'request') {
+      const method = String(q.method || (q.json || q.form || q.body || q.multipart ? 'POST' : 'GET')).toUpperCase();
+      if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(method)) return `http:${method}:${String(q.url || '').split('?')[0]}`;
+    }
+    return null;
+  };
+  const key = keyOf(action);
+  if (!key) return null;
+  for (let i = 0; i < thoughts.length - 1; i++) {
+    const t = thoughts[i];
+    if (t.type !== 'action' || keyOf(t.content) !== key) continue;
+    const o = thoughts[i + 1];
+    // Something failed after it (a register call rejected): starting that part over is a retry,
+    // not a duplicate, e.g. a fresh signup challenge.
+    const failedSince = thoughts.slice(i + 2).some(x => x.type === 'observation' && x.content?.success === false && !x.content?.refused && x.content?.tool !== 'check');
+    if (failedSince) continue;
+    if (o?.type === 'observation' && o.content && o.content.success !== false && !o.content.refused) {
+      const r = o.content.result || {};
+      const summary = [r.status && `HTTP ${r.status}`, r.data?.task_id && `task ${r.data.task_id}`, r.seq && `message #${r.seq}`].filter(Boolean).join(', ') || 'succeeded';
+      return { iteration: t.iteration, summary };
+    }
+  }
+  return null;
+}
+
+
+/**
+ * Tool commands a report names as done that never ran successfully in this run. Deterministic,
+ * no model: #1744 (2026-10-02) said "deleteCard with confirmTitle succeeded" for a delete that
+ * never ran, and the model-based check let it through.
+ */
+export function unrunCommandsNamed(text, thoughts = [], knownCommands = []) {
+  const done = new Set(thoughts
+    .filter((t, i) => t.type === 'action' && thoughts[i + 1]?.type === 'observation' && thoughts[i + 1].content?.success !== false && !thoughts[i + 1].content?.refused)
+    .map(t => String(t.content?.command || '')));
+  const named = [];
+  for (const cmd of new Set(knownCommands)) {
+    if (!cmd || cmd.length < 6 || !/[A-Z]/.test(cmd)) continue;     // camelCase names only: "readCard", not "list"
+    if (new RegExp(`\\b${cmd}\\b`).test(String(text || '')) && !done.has(cmd)) named.push(cmd);
+  }
+  return named;
+}
+
 export class ReActAgent extends EventEmitter {
   constructor(agent, options = {}) {
     super();
@@ -48,8 +177,8 @@ export class ReActAgent extends EventEmitter {
    * Refresh the list of available tools from plugins. The catalog is read live on every
    * run; this snapshot only serves getState() and the startup log.
    */
-  async refreshTools() {
-    this.tools = listTools(this.agent);
+  async refreshTools(context = null) {
+    this.tools = listTools(this.agent, context);
     this.toolMap = new Map(this.tools.map(t => [t.name, t]));
   }
 
@@ -184,18 +313,28 @@ export class ReActAgent extends EventEmitter {
 
       // Tools and worked examples are chosen once per task: the plugins relevant to it get
       // full command lists, and similar tasks that succeeded before are shown as examples.
-      await this.refreshTools();
-      const relevant = await selectRelevantTools(this.agent, query, { available: this.tools });
-      const pastExamples = await findPastExamples(this.thoughtStore, query);
+      await this.refreshTools(context);
+      const relevant = await selectRelevantTools(this.agent, stripListenerNotes(query), { available: this.tools });
+      // A web or API task gets the http tool's full usage, not a one-line catalog entry: listed
+      // only by name, it went unused and the run asked the operator to "enable the HTTP tool"
+      // (2026-10-02).
+      if (/\b(api|https?|url|endpoint|sign ?up|register|webhook|upload|post|\w+\.(?:com|net|org|io|ai|dev|app))\b/i.test(query)
+        && this.tools.some(t => t.name === 'http') && !relevant.includes('http')) relevant.unshift('http');
+      const pastExamples = await findPastExamples(this.thoughtStore, stripListenerNotes(query));
       if (pastExamples) logger.info('ReAct: reusing similar past reasoning as examples');
-      const skills = await getSkillsService().promptFor(query).catch(() => '');
+      // Matched on the request alone: the listener's "(Note for ALICE: this message also goes to
+      // Nexus, trellis, Orbit…)" is all Trellis-and-agents words, and with it every channel request
+      // matched run-standard-agent-test (0.77-0.84). On card 21 #1574 ("test reapption and send
+      // me your link") that skill took the run to card 209 and reapption was never called.
+      const request = stripListenerNotes(query);
+      const skills = await getSkillsService().promptFor(request).catch(() => '');
       if (skills) logger.info('ReAct: following a matching skill');
       // A request from a shared Trellis channel only makes sense with that conversation: "do you
       // all agree on the steps?" is about cards and messages ReAct otherwise never sees. On card
       // 21 #1255 (2026-10-01) it answered that it could not see the steps of a test it had run
       // and signed the day before.
       const channel = context.trellis?.recent
-        ? `This request came from a shared Trellis channel (card ${context.trellis.card}). The conversation there, oldest first (your own messages are signed ${this.agent?.config?.name || 'ALICE'}):\n${String(context.trellis.recent).slice(-4000)}\n\nCards it mentions ("#209", "the test", "the card in this workspace") are in the Trellis workspace: find them with the trellis-notes search and read actions before saying you cannot see them.`
+        ? `This request came from a shared Trellis channel (card ${context.trellis.card}). The conversation there, oldest first (your own messages are signed ${this.agent?.config?.name || 'ALICE'}):\n${String(context.trellis.recent).slice(-4000)}\n\nCards it mentions ("#209", "the test", "the card in this workspace") are in the Trellis workspace: find them with the trellis-notes search and read actions before saying you cannot see them. A Trellis feature none of the trellis-notes commands covers (a new route or field from a release note) is reachable with trellis-notes.api: read GET /api (the route index) for the route and its body, then call it.`
         : '';
       const guidance = { relevant, pastExamples, skills, todo, channel };
       let freeTodoSteps = 0;
@@ -230,10 +369,58 @@ export class ReActAgent extends EventEmitter {
           if (todo.revision !== before && !thought.action?.tool && !thought.finalAnswer) await progress('');
         }
 
+        // An action and a final answer in the same step: the action runs, the answer waits for
+        // its result. Answer-first, "No verification checks were completed" ended a run at step
+        // 1 with its testClip action never run (2026-10-02).
+        if (thought.finalAnswer && thought.action?.tool) {
+          logger.info('ReAct: step had both an action and a final answer; running the action first');
+          thought.finalAnswer = null;
+        }
+
+        // A final answer that says a message was posted or a card written, when no step did it:
+        // "The results were posted to Trellis channel 21" with no post (card 21, 2026-10-02). Sent
+        // back once to actually do it; a second unbacked claim is corrected in the answer.
+        if (thought.finalAnswer) {
+          const claim = unbackedWriteClaim(thought.finalAnswer, thoughts);
+          if (claim && !run.claimChecked) {
+            run.claimChecked = true;
+            logger.info(`ReAct: final answer claims ${claim} but no step did it; sending it back`);
+            thoughts.push({ type: 'observation', iteration, timestamp: new Date(), content: {
+              tool: 'check', command: 'verify', success: false,
+              error: `Your answer says ${claim}, but no step did that. Do it now with the tool (a Trellis channel message is trellis-notes.replyChannel with the card and text; a card write is trellis-notes.appendNote), then give the final answer.`
+            } });
+            continue;
+          }
+          // Claims the write check cannot see: "I fetched reaction details and receipts for both
+          // ready tasks" after one receipt fetch and no reaction fetch (card 21 #1591). One cheap
+          // model call compares the answer with the steps; once per run.
+          if (!claim && !run.answerAudited && thoughts.some(t => t.type === 'action')) {
+            run.answerAudited = true;
+            const unsupported = await auditAnswer(this.agent?.providerManager, thought.finalAnswer, thoughts);
+            if (unsupported.length) {
+              run.answerFlagged = true;
+              logger.info(`ReAct: final answer has ${unsupported.length} claim(s) no step supports; sending it back`);
+              thoughts.push({ type: 'observation', iteration, timestamp: new Date(), content: {
+                tool: 'check', command: 'verify', success: false,
+                error: `Your answer claims things no step in this run did: ${unsupported.map(u => `"${u}"`).join('; ')}. Either do them now with tools, or give a final answer that states only what the steps show and says plainly what was not done.`
+              } });
+              continue;
+            }
+          }
+          if (claim) {
+            // Twice unbacked: the answer is not trusted at all (card 21 #1583 posted another
+            // agent's findings as its own under a correction line). Say what really ran.
+            const ran = thoughts.filter(t => t.type === 'action').map(t => `${t.content.tool}.${t.content.command}`);
+            thought.finalAnswer = `I have not finished this. My draft answer said ${claim}, but no step did that, so I am not reporting it.` +
+              (ran.length ? ` What actually ran: ${[...new Set(ran)].join(', ')}.` : ' No tool ran.');
+            thought.unfinished = true;
+          }
+        }
+
         // Check if we have a final answer
         if (thought.finalAnswer) {
           const result = withTodo({
-            success: true,
+            success: !thought.unfinished,
             answer: thought.finalAnswer,
             thoughts,
             iterations: iteration,
@@ -246,7 +433,13 @@ export class ReActAgent extends EventEmitter {
           }
 
           // Turn a multi-step success into a reusable skill (best effort, not awaited)
-          learnSkillFromTask({ providerManager: this.agent.providerManager, query, thoughts, answer: result.answer });
+          // Only a clean run teaches: one the claim checks sent back, refused a post or a repeat
+          // in, or that ended unfinished is not a procedure to repeat. "react-to-task-status" was
+          // learned from such a run (2026-10-02) with an invented step.
+          const clean = result.success && !run.claimChecked && !run.answerFlagged
+            && !thoughts.some(t => t.type === 'observation' && (t.content?.refused || t.content?.tool === 'check'));
+          if (clean) learnSkillFromTask({ providerManager: this.agent.providerManager, query, thoughts, answer: result.answer });
+          else logger.info('ReAct: not learning a skill from this run (it was corrected or unfinished)');
 
           this.emit('complete', result);
           return result;
@@ -280,6 +473,43 @@ export class ReActAgent extends EventEmitter {
         if (thought.action && thought.action.tool) {
           this._checkBudget(run);
           const action = thought.action;
+
+          // A side effect that already succeeded in this run is never repeated: on 2026-10-02 a
+          // run rewrote its to-do list from scratch after each post and created 6 reapption tasks
+          // and 5 channel posts for one request. The refusal tells it what it already did.
+          // A report posted as a step is checked like a final answer, before it goes out: #1616
+          // (2026-10-02) posted reaction sizes for tasks it never fetched, copied from other
+          // agents' messages, and only the final answer was being checked. Once per run.
+          const reportText = action.tool === 'trellis-notes' && /^(replyChannel|say|appendNote)$/.test(String(action.command))
+            ? String(action.params?.text || '') : '';
+          if (reportText.length > 120 && !run.writeAudited && thoughts.some(t => t.type === 'action')) {
+            run.writeAudited = true;
+            const known = (this.tools || []).flatMap(t => (t.commands || []).map(c => c.command));
+            const unrun = unrunCommandsNamed(reportText, thoughts, known).map(c => `${c} (named, never run successfully)`);
+            const unsupported = unrun.length ? unrun : await auditAnswer(this.agent?.providerManager, reportText, thoughts);
+            if (unsupported.length) {
+              logger.info(`ReAct: a ${action.command} text has ${unsupported.length} claim(s) no step supports; not posting it`);
+              thoughts.push({ type: 'action', content: action, iteration, timestamp: new Date() });
+              thoughts.push({ type: 'observation', iteration, timestamp: new Date(), content: {
+                tool: action.tool, command: action.command, success: false, refused: true,
+                error: `Not posted: the text claims things no step in this run did: ${unsupported.map(u => `"${u}"`).join('; ')}. ` +
+                  'Numbers, sizes and ids from other agents\' messages are theirs, not results of yours. Fetch what you need first, or rewrite the text to state only what your steps returned and what you did not check.'
+              } });
+              continue;
+            }
+          }
+
+          const repeat = repeatedSideEffect(action, thoughts);
+          if (repeat) {
+            logger.info(`ReAct: refused a repeat of ${action.tool}.${action.command} (already done at step ${repeat.iteration})`);
+            thoughts.push({ type: 'action', content: action, iteration, timestamp: new Date() });
+            thoughts.push({ type: 'observation', iteration, timestamp: new Date(), content: {
+              tool: action.tool, command: action.command, success: false, refused: true,
+              error: `Not run: this run already did this successfully at step ${repeat.iteration} (${repeat.summary}). Doing it again would duplicate it. ` +
+                'If the request is complete, give the final answer now with what those steps returned. (Set "allowRepeat": true in params only if a second one was explicitly asked for.)'
+            } });
+            continue;
+          }
           thoughts.push({ type: 'action', content: action, iteration, timestamp: new Date() });
           this.emit('action', { iteration, action });
 
@@ -386,9 +616,12 @@ export class ReActAgent extends EventEmitter {
     try {
       // No retry wrapper here: generateResponse already retries and fails over, and its
       // wall-clock budget is longer than any fixed per-thought race could safely be.
+      // context.reasoningModel: one run on another model of the same provider (a model
+      // comparison), without touching the agent's model or its provider lock.
       const response = await this.agent.providerManager.generateResponse(prompt, {
         maxTokens: 1000,
-        temperature: 0.3
+        temperature: 0.3,
+        ...(context?.reasoningModel ? { model: context.reasoningModel } : {})
       });
 
       const content = response.content || response;
@@ -407,7 +640,7 @@ export class ReActAgent extends EventEmitter {
     const prompt = this.buildThinkingPrompt(query, history, guidance) +
       '\n\nYou have no steps left. Do not call a tool. Reply with {"finalAnswer": "..."} only: say plainly what you ' +
       'actually did (only what the observations show succeeded) and what is still not done.';
-    const response = await this.agent.providerManager.generateResponse(prompt, { maxTokens: 700, temperature: 0.2 });
+    const response = await this.agent.providerManager.generateResponse(prompt, { maxTokens: 700, temperature: 0.2, ...(context?.reasoningModel ? { model: context.reasoningModel } : {}) });
     const answer = this.parseThought(response?.content || response || '').finalAnswer;
     return answer ? String(answer) : null;
   }
@@ -421,8 +654,18 @@ export class ReActAgent extends EventEmitter {
 
     // Format history
     const lastObservation = [...history].reverse().find(h => h.type === 'observation');
+    // The newest read of each target (one card, one URL) is the copy worth keeping in full; an
+    // earlier read of the same target is superseded. Card 250 (~6 KB) cut at 3,000 characters
+    // lost its second half, so the run read it four more times instead of testing (2026-10-02).
+    const readKey = (c) => {
+      if (!c || !/^(read\w*|export\w*|get\w*)$/i.test(String(c.command || ''))) return null;
+      const id = c.result?.card?.id ?? c.result?.card ?? c.result?.id ?? null;
+      return id === null || typeof id === 'object' ? null : `${c.tool}.${c.command}:${id}`;
+    };
+    const newestRead = new Map();
+    history.forEach((h, i) => { if (h.type === 'observation') { const k = readKey(h.content); if (k) newestRead.set(k, i); } });
     const historyText = history.length > 0
-      ? history.map(h => {
+      ? history.map((h, idx) => {
           switch (h.type) {
             case 'thought':
               return `Thought: ${h.content.reasoning || JSON.stringify(h.content)}`;
@@ -436,7 +679,14 @@ export class ReActAgent extends EventEmitter {
               // a file's text), so it is kept long; older ones are context and stay short. At a
               // flat 500 characters a card read lost all but its first steps.
               const obs = typeof h.content === 'string' ? h.content : JSON.stringify(h.content);
-              const limit = h === lastObservation ? 4000 : 500;
+              // Instructions read earlier (a walkthrough card, a docs page) are what later steps
+              // follow; cut to 500 they were gone a step later and the run re-read card 251 three
+              // times out of ten steps (2026-10-02).
+              const key = readKey(h.content);
+              const superseded = key && newestRead.get(key) !== idx;
+              const reference = /^(read\w*|export\w*|get\w*|search\w*|request)$/i.test(String(h.content?.command || ''));
+              const limit = superseded ? 200 : h === lastObservation ? 8000 : reference ? 8000 : 1200;
+              if (superseded) return `Observation: (an earlier read of the same thing; the newer read below replaces it)`;
               return `Observation: ${obs.substring(0, limit)}${obs.length > limit ? '...' : ''}`;
             default:
               return '';
@@ -444,14 +694,15 @@ export class ReActAgent extends EventEmitter {
         }).join('\n')
       : 'No previous steps.';
 
-    return `You are a reasoning agent that thinks step-by-step to solve tasks. You have access to tools that can help you gather information and take actions.
+    const modelLine = typeof this.agent?.currentModelLabel === 'function' ? `\nYou are ${this.agent?.config?.name || 'the agent'}, running on the language model ${this.agent.currentModelLabel()}.` : '';
+    return `You are a reasoning agent that thinks step-by-step to solve tasks. You have access to tools that can help you gather information and take actions.${modelLine}
 
 ## Available Tools:
 ${toolDescriptions}
 
 ${TODO_TOOL_PROMPT}
 
-${skills ? `## Skills (known procedures for this kind of task; follow them where they apply):\n${skills}\n\n` : ''}${pastExamples ? `## Similar Tasks That Worked Before:\n${pastExamples}\n\n` : ''}## Previous Steps:
+${skills ? `## Skills (known procedures; follow one only if it is for THIS request, otherwise ignore it):\n${skills}\n\n` : ''}${pastExamples ? `## Similar Tasks That Worked Before:\n${pastExamples}\n\n` : ''}## Previous Steps:
 ${historyText}
 
 ${todo && !todo.empty ? `## ${todo.promptBlock()}\nKeep it current: mark items done as you finish them.\n\n` : ''}${channel ? `## Where This Came From:\n${channel}\n\n` : ''}## Current Task:
@@ -462,7 +713,10 @@ Think about what you need to do next. You can either:
 1. Use a tool to get information or take an action
 2. Provide a final answer if you have enough information
 3. Ask for clarification only as a last resort
-Be decisive. When the operator asked for something, do it: never ask them to confirm or restate a request they already made, and never stop to ask permission for an ordinary, reversible action (reading, searching, writing or appending to a card, posting a message). Fill gaps from the conversation, the workspace and sensible defaults. Ask only when the request is genuinely ambiguous AND a wrong guess would be costly or impossible to undo (spending money, deleting, sending something outside).
+Be decisive. When the operator asked for something, do it: never ask them to confirm or restate a request they already made, and never stop to ask permission for an ordinary, reversible action (reading, searching, writing or appending to a card, posting a message). Fill gaps from the conversation, the workspace and sensible defaults. Calling a web API, signing up for a service, creating test data there or uploading a file you were asked to is ordinary work: do it, do not ask. Ask only when the request is genuinely ambiguous AND a wrong guess would be costly or impossible to undo (spending money, deleting the operator's data).
+A tool result exists only as an Observation after you call the tool. Never say a tool failed, is not callable or "returned no results" unless an Observation below shows exactly that; earlier messages in a channel (including your own) saying a tool was unavailable are not evidence. Call the tool.
+Know your tools before you rule one out: never say you lack a capability (web, HTTP, POST, browser, upload, shell) until a ${SEARCH_TOOL} for it came back empty. Any HTTP method, header or body goes through the http tool (http.request). A credential an API returns is saved for you and shown as {{secret:<host>.<field>}}: put that placeholder where the key goes and never write a key, token or password into a reply or a card.
+Your final answer reports what ran and what it returned (status codes, ids, links), not what you intend to do. Report only results from YOUR steps in this run: what other agents posted in a channel is theirs; never present it as yours, and when you have not done a part, say so.
 
 Respond in this JSON format:
 {

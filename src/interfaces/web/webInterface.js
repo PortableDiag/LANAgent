@@ -898,10 +898,14 @@ export class WebInterface {
     // Command execution
     this.app.post('/api/command/execute', authenticateToken, async (req, res) => {
       try {
-        const { command } = req.body;
+        const { command, reasoningModel } = req.body;
+        // reasoningModel: run this request's reasoning on another model of the current provider
+        // (e.g. "deepseek/deepseek-v4.1-flash"), to compare models on real tasks.
+        const model = typeof reasoningModel === 'string' && /^[\w.-]+\/[\w.:-]+$/.test(reasoningModel) ? reasoningModel : null;
         const result = await this.agent.processNaturalLanguage(command, {
           userId: 'web-user',
-          interface: 'web'
+          interface: 'web',
+          ...(model ? { reasoningModel: model } : {})
         });
         res.json({ success: true, data: result });
       } catch (error) {

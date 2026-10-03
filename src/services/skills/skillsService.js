@@ -552,12 +552,23 @@ export async function setAutoApprove(enabled) {
   return getAutoApprove();
 }
 
+/** Whether a skill body is something an agent runs: it names a tool command or an API call. */
+export function isActionableSkill(body, toolCommands = null) {
+  const text = String(body || '');
+  if (/\b(GET|POST|PUT|PATCH|DELETE)\s+(https?:\/\/\S+|\/\S+)/.test(text)) return true;
+  if (/\b[a-z][\w-]*\.[a-z]\w*\s*\(/.test(text)) return true;               // plugin.command(…)
+  for (const c of toolCommands || []) {
+    if (c && c.length >= 5 && new RegExp(`\\b${c.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`).test(text)) return true;
+  }
+  return false;
+}
+
 /**
  * Save a procedure another agent taught in a channel as a PENDING skill (unused until the
  * operator approves it). Returns the saved skill, or null when the message teaches nothing
  * reusable. Uses the auxiliary model. Never throws.
  */
-export async function learnSkillFromPeer({ providerManager, service = getSkillsService(), text, from, context = '' }) {
+export async function learnSkillFromPeer({ providerManager, service = getSkillsService(), text, from, context = '', toolCommands = null }) {
   try {
     if (String(process.env.SKILLS_AUTO_LEARN || 'true').toLowerCase() === 'false') return null;
     if (!providerManager || !text || String(text).length < 120) return null;
@@ -573,12 +584,19 @@ ${SKILL_WRITING_RULES}
 
 Return JSON only:
 {"name": "short-kebab-case-name", "description": "Use this skill when ... (what the user wants)", "body": "Markdown: when to use it, numbered steps, pitfalls mentioned"}
-Write it in your own words for an agent with its OWN tools; keep API routes and field names exactly as given. If the message is chat, thanks, a status report or anything else that is not a procedure, return {"skip": true}.`;
+Write it in your own words for an agent with its OWN tools; keep API routes and field names exactly as given. If the message is chat, thanks, a status report, advice for a PERSON (click this, pick from that menu, type @) or anything else that is not a procedure an agent runs with tools, return {"skip": true}.`;
     const response = await (providerManager.generateAux || providerManager.generateResponse).call(providerManager, prompt, { maxTokens: 900, temperature: 0.2, auxTask: 'skill-learning' });
     const json = String(response?.content || '').match(/\{[\s\S]*\}/);
     if (!json) return null;
     const draft = JSON.parse(json[0]);
     if (draft.skip || !draft.name || !draft.description || !draft.body) return null;
+    // Only something this agent can run: it names one of its tool commands, or an API call
+    // (a method and a route). Chat saved as skills on 2026-10-02 included "type @ and pick the
+    // agent from the mention picker" (advice for the operator) and a four-line "use a POST tool".
+    if (!isActionableSkill(draft.body, toolCommands)) {
+      logger.info(`Peer skill learning: "${draft.name}" from ${from} names no tool or API call this agent can run; not saved`);
+      return null;
+    }
     const auto = (await getAutoApprove()).enabled;
     return await service.create({ ...draft, overwrite: false, extra: { source: 'peer', taught_by: String(from).substring(0, 80), status: auto ? 'active' : 'pending', ...(auto ? { auto_approved: 'true' } : {}) } });
   } catch (error) {

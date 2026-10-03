@@ -857,10 +857,10 @@ export class AIIntentDetector {
       // Voice/TTS
       72: {
         name: 'speakText',
-        description: 'Convert text to speech',
+        description: 'Speak text aloud as audio (a voice message) — only when the user asks to hear it, not "say X" as a reply',
         plugin: 'voice',
         action: 'speak',
-        examples: ['say hello', 'speak this text', 'read this out loud']
+        examples: ['say this out loud', 'speak this text', 'read this out loud', 'send me a voice message saying hello']
       },
       
       // Missing Software Management Intents
@@ -4249,7 +4249,9 @@ Respond with JSON: {"suggestion": "extracted_suggestion"}`;
       // Extract text after "say" or "speak"
       const textMatch = query.match(/(?:say|speak)\s+(.+)/i);
       if (textMatch) {
-        return { text: textMatch[1] };
+        // "say good evening out loud" speaks "good evening", not the instruction around it.
+        const text = textMatch[1].replace(/\s+(out loud|aloud|as (a )?voice (message|note)|in (your|a) voice)\s*[.!]?\s*$/i, '').trim();
+        return { text: text || textMatch[1] };
       }
       return { text: query };
     } catch (error) {

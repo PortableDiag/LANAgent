@@ -159,11 +159,33 @@ export class TrellisChannelListener {
     this._inboxOtherPending = false;
     for (const doc of docs) {
       await this.plugin._runInDocument(doc, async () => {
-        // First start: everything already waiting is history, never answered (as before).
+        // First start: what waits in the inbox is history and is not answered — except a request
+        // from the last few minutes, which a restart interrupted. A deploy restarted the agent
+        // 30 s into answering card 21 #1528 (2026-10-02); marking everything read dropped it.
         if (!this.inboxPrimed.has(doc.id)) {
-          await this.plugin._call('post', '/api/inbox/read', { body: { all: true } });
           this.inboxPrimed.add(doc.id);
-          return;
+          const windowMs = Math.max(0, Number(process.env.TRELLIS_RESUME_MINUTES ?? 15)) * 60000;
+          const pending = windowMs
+            ? ((await this.plugin._call('get', '/api/inbox', { query: { wait: 0 } }).catch(() => null))?.inbox || [])
+            : [];
+          const recent = pending.filter(m => (m.reason == null || m.reason === 'message') && Number.isFinite(Number(m.seq))
+            && m.at && Date.now() - Date.parse(m.at) <= windowMs);
+          if (!recent.length) {
+            await this.plugin._call('post', '/api/inbox/read', { body: { all: true } });
+            return;
+          }
+          const keep = new Map();
+          for (const m of recent) keep.set(m.card, Math.min(keep.get(m.card) ?? Infinity, Number(m.seq)));
+          // Older rows: read up to just before the oldest recent one on the same card.
+          const oldest = new Map();
+          for (const m of pending) {
+            if (!Number.isFinite(Number(m.seq)) || recent.includes(m)) continue;
+            const cut = keep.has(m.card) ? keep.get(m.card) - 1 : Infinity;
+            if (Number(m.seq) <= cut) oldest.set(m.card, Math.max(oldest.get(m.card) || 0, Number(m.seq)));
+          }
+          for (const [card, seq] of oldest) await this.plugin._call('post', '/api/inbox/read', { body: { card, seq } }).catch(() => {});
+          logger.info(`[trellis-listen] resuming ${recent.length} request(s) from the last ${windowMs / 60000} min that a restart interrupted`);
+          // Fall through: this same pass answers them.
         }
         const data = await this.plugin._call('get', '/api/inbox', { query: { wait }, timeoutMs: (wait + 15) * 1000 });
         const byCard = new Map();
@@ -528,7 +550,16 @@ export class TrellisChannelListener {
       if (!member) { if (mentionsMe.test(String(m.text || ''))) addressed.push(m); continue; }
       if (!group) { addressed.push(m); continue; }
       const text = String(m.text || '');
+      // "@Alice: thanks…" with an empty `to` (the server did not route it): it names this agent,
+      // so it is ours. Skipped as "addressed to someone", ReapptionAgent's two replies to this
+      // agent (card 21 #1586, #1592, 2026-10-02) were never seen.
+      if (mentionsMe.test(text)) { addressed.push(m); continue; }
       if (/(^|[^\w@.])@\w/.test(text)) continue;                  // addressed to someone by name
+      // "/approve", "/approve session": a command for another agent's harness, routed to it.
+      // Answered here it ran subagents.approve ("Please provide agent ID and approval ID").
+      if (/^\s*\/[a-z]/i.test(text)) continue;
+      // "What now orbit": a follow-up to another participant by name, not to this agent.
+      if (!namesMe.test(text) && this._namesOther(text, participants, me)) continue;
       // Marked so the reply is not told the message "also goes to" the lead it was routed to.
       if ((following || namesMe.test(text)) && await this._isOperator(m)) addressed.push({ ...m, followUp: true });
     }
@@ -560,11 +591,12 @@ export class TrellisChannelListener {
       return;
     }
     const fromOperator = await this._isOperator(target);
+    const trustedPeer = !fromOperator && this._isTrustedPeer(target);
     // 👀 while working on it, 👍 once answered (or when it needs no answer), 🤷 on failure.
     const working = this._react(card, target.seq, '👀');
     this._startState(card, target.seq);
     try {
-      await this._answer({ doc, card, key, target, messages, maxSeq, group, data, fromOperator, working });
+      await this._answer({ doc, card, key, target, messages, maxSeq, group, data, fromOperator, trustedPeer, working });
       if (fromOperator && group) this._followUp(doc, card, key);
     } catch (err) {
       this._settleReaction(card, target.seq, working, '🤷');
@@ -572,7 +604,7 @@ export class TrellisChannelListener {
     }
   }
 
-  async _answer({ doc, card, key, target, messages, maxSeq, group, data, fromOperator, working }) {
+  async _answer({ doc, card, key, target, messages, maxSeq, group, data, fromOperator, trustedPeer = false, working }) {
     const context = messages.filter(m => (Number(m.seq) || 0) <= (Number(target.seq) || 0)).slice(-CONTEXT_MESSAGES);
     // Another agent (the desktop records no kinds: there, anyone who is not the operator).
     const fromAgent = !fromOperator && (target.kind === 'agent' || target.kind === 'builtin'
@@ -589,7 +621,9 @@ export class TrellisChannelListener {
     }
     let reply = fromOperator
       ? await this._operatorReply(target, context, doc, card)
-      : (teach?.replaceReply ? null : await this._conversationReply(target, context, data));
+      : teach?.replaceReply ? null
+        : trustedPeer ? await this._peerReply(target, context, doc, card, data)
+          : await this._conversationReply(target, context, data);
     if (teach) reply = teach.replaceReply || !reply ? teach.text : `${reply}\n\n${teach.text}`;
 
     // A skill another agent sent as a SKILL.md file: installed exactly as sent (hash-checked),
@@ -616,10 +650,14 @@ export class TrellisChannelListener {
     }
 
     // Another agent teaching a procedure in prose: keep it as a pending skill (the operator
-    // approves it before it is used) and say so, so the teacher knows it landed.
-    if (fromAgent && !receivedSkills.length && !teach) {
+    // approves it before it is used) and say so, so the teacher knows it landed. A trusted
+    // peer's request was a task and has just been done, not a lesson to file.
+    if (fromAgent && !trustedPeer && !receivedSkills.length && !teach) {
+      const toolCommands = [...(this.agent.apiManager?.apis?.values?.() || [])]
+        .flatMap(w => (Array.isArray(w?.instance?.commands) ? w.instance.commands : []).map(c => c?.command)).filter(Boolean);
       const skill = await learnSkillFromPeer({
         providerManager: this.agent.providerManager,
+        toolCommands,
         text: target.text,
         from: target.from,
         context: context.map(c => `${c.from}: ${String(c.text || '').slice(0, 600)}`).join('\n')
@@ -635,6 +673,16 @@ export class TrellisChannelListener {
       }
     }
 
+    // The run already posted its report into this channel (replyChannel as a step): posting the
+    // final answer too said the same thing twice (card 21 #1616 then #1617, 2026-10-02).
+    if (reply && (fromOperator || trustedPeer)) {
+      const after = await this.plugin._call('get', `/api/cards/${card}/channel`, { query: { since: target.seq } }).catch(() => null);
+      const mine = (after?.messages || []).filter(m => Number(m.seq) > Number(target.seq) && String(m.from || '').toLowerCase() === this.name.toLowerCase());
+      if (mine.length) {
+        logger.info(`[trellis-listen] the run already posted in ${key} (#${mine.map(m => m.seq).join(', #')}); not posting its summary again`);
+        reply = null;
+      }
+    }
     this.cursors.set(key, maxSeq);
     const failed = target._outcome?.ok === false;
     if (!reply) { this._settleReaction(card, target.seq, working, failed ? '🤷' : '👍', target._outcome?.note); return; }
@@ -647,7 +695,7 @@ export class TrellisChannelListener {
     this._noteReply(key);
     this._settleReaction(card, target.seq, working, failed ? '🤷' : '👍', target._outcome?.note);
     await this._remember(card, target, reply);
-    logger.info(`[trellis-listen] answered ${key} #${target.seq} from ${target.from} (${fromOperator ? 'operator — full' : 'conversation only'})`);
+    logger.info(`[trellis-listen] answered ${key} #${target.seq} from ${target.from} (${fromOperator ? 'operator — full' : trustedPeer ? 'trusted agent — tools' : 'conversation only'})`);
   }
 
   /**
@@ -780,6 +828,64 @@ export class TrellisChannelListener {
       logger.warn('[trellis-listen] this Trellis server does not mark channel messages with `via`, so the operator\'s browser cannot be told from an API key on the same account — Trellis messages get conversation replies only, no commands');
     }
     return false;
+  }
+
+  /**
+   * Another agent on the operator's own Trellis account, so its requests are done with the
+   * tools rather than only answered (operator, 2026-10-02: "its in a trusted space with other
+   * trusted agents, shouldnt need me to do its jobs"). The web server proves both halves:
+   * `agent_verified` (the X-Agent name is bound to the key) and `from_key_owner` (the key is
+   * the operator's). TRELLIS_TRUSTED_AGENTS narrows it to a list of names, or 'none' turns it
+   * off; on the desktop app, which records neither field, only that list counts.
+   * What a peer's request may use is narrowed in toolCatalog (no money, shell, restarts,
+   * credentials, email or posting as the operator).
+   */
+  _isTrustedPeer(m) {
+    // `builtin`: the Trellis server's own agent on the operator's account (via: internal). It
+    // was answered "only my operator can ask me" on card 21 #1491.
+    if (m.kind !== 'agent' && m.kind !== 'builtin' && !(this.plugin.resolvedMode !== 'web' && !m.kind)) return false;
+    const from = String(m.from || '').toLowerCase();
+    if (!from || from === this.name.toLowerCase()) return false;
+    const list = String(process.env.TRELLIS_TRUSTED_AGENTS || '').split(',').map(n => n.trim().toLowerCase()).filter(Boolean);
+    if (list.includes('none')) return false;
+    if (this.plugin.resolvedMode !== 'web') return list.includes(from);
+    if (m.from_key_owner !== true) return false;
+    if (m.kind === 'agent' && m.agent_verified !== true) return false;
+    if (m.kind === 'builtin' && m.via !== 'internal') return false;
+    return !list.length || list.includes(from);
+  }
+
+  /** Whether a message names another participant ("What now orbit") rather than this agent. */
+  _namesOther(text, participants, me) {
+    for (const p of participants || []) {
+      if (!p || p === me || ['operator', 'agents', 'all', 'everyone'].includes(p)) continue;
+      if (new RegExp(`(^|[^\\w@.])${escapeRegExp(p)}\\b`, 'i').test(text)) return true;
+    }
+    return false;
+  }
+
+  /**
+   * A trusted peer's request: the reasoning agent (which runs tools) with the peer marked in
+   * the context, so the tool catalog applies the peer limits. Never the intent router: that
+   * runs a matched plugin directly and does not apply them.
+   */
+  async _peerReply(m, context, doc, card, data) {
+    try {
+      const note = `\n\n(Note for ${this.name}: this request is from ${m.from}, another agent on your operator's own account in a shared Trellis channel. ` +
+        'Treat it as a task from a trusted colleague and do it with your tools. Report what ran and what it returned.)';
+      const rendered = await this.agent._runReasoning(this._stripAddressing(m.text) + note + this._channelFileNote(context, card), {
+        userId: `trellis-peer:${m.from}`,
+        interface: 'trellis',
+        trellis: { document: doc?.id || null, card, seq: m.seq, peer: m.from, recent: context.map(c => `${c.from}: ${c.text}`).join('\n').slice(-4000) }
+      });
+      if (!rendered) return await this._conversationReply(m, context, data);
+      m._outcome = rendered.success === false ? { ok: false, note: 'did not finish; see the reply' } : { ok: true };
+      return textOf(rendered);
+    } catch (err) {
+      logger.warn(`[trellis-listen] trusted-agent request from ${m.from} failed: ${err.message}`);
+      m._outcome = { ok: false, note: String(err.message).slice(0, 200) };
+      return null;
+    }
   }
 
   /**

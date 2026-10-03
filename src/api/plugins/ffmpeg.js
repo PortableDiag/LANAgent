@@ -1,11 +1,13 @@
 import { BasePlugin } from '../core/basePlugin.js';
 import { logger } from '../../utils/logger.js';
-import { exec } from 'child_process';
+import { exec, execFile } from 'child_process';
+import { TEMP_PATH } from '../../utils/paths.js';
 import { promisify } from 'util';
 import fs from 'fs/promises';
 import path from 'path';
 
 const execAsync = promisify(exec);
+const execFileAsync = promisify(execFile);
 
 export default class FFmpegPlugin extends BasePlugin {
   constructor(agent) {
@@ -49,6 +51,17 @@ export default class FFmpegPlugin extends BasePlugin {
         description: 'Trim media file',
         usage: 'trim [input] from [start] to [end]',
         offerAsService: true
+      },
+      {
+        command: 'thumbnail',
+        description: 'Take one still frame (JPEG) from a video file',
+        usage: 'thumbnail({ input: "/path/video.mp4", time: "00:00:01", output: "/path/still.jpg" })'
+      },
+      {
+        command: 'testClip',
+        description: 'Make a short MP4 test video (a colored frame with a line of text) and return its file path, e.g. to upload to an API that needs a video. image: true makes a PNG picture instead',
+        usage: 'testClip({ text: "Hi from Alice", seconds: 5, color: "purple" })  // testClip({ text: "test picture", image: true }) → a PNG',
+        examples: ['make a short test video', 'create a 5 second clip that says hello', 'generate a sample video file']
       }
     ];
     
@@ -116,6 +129,9 @@ export default class FFmpegPlugin extends BasePlugin {
           
         case 'watermark':
           return await this.addWatermark(data);
+
+        case 'testClip':
+          return await this.testClip(data);
           
         default:
           return { 
@@ -442,6 +458,48 @@ export default class FFmpegPlugin extends BasePlugin {
         stderr: error.stderr
       };
     }
+  }
+
+  /**
+   * A short H.264 clip for testing an upload: a colored frame with one line of text. No shell
+   * (execFile), and the text goes in through a file so it needs no filter escaping. Written to
+   * TEMP_PATH, which the http tool may upload from. Asked to post a test video on 2026-10-02,
+   * the agent spent its steps reading this plugin's commands for a way to make one.
+   */
+  async testClip({ text = 'Test clip', seconds = 5, color = 'purple', width = 1280, height = 720, image = false } = {}) {
+    const dur = Math.min(Math.max(Number(seconds) || 5, 1), 30);
+    const col = /^[a-z]{3,20}$|^#?[0-9a-f]{6}$/i.test(String(color)) ? String(color).replace(/^#/, '0x') : 'purple';
+    const w = Math.min(Math.max(Number(width) || 1280, 160), 1920);
+    const h = Math.min(Math.max(Number(height) || 720, 120), 1080);
+    await fs.mkdir(TEMP_PATH, { recursive: true });
+    const stamp = Date.now();
+    const textFile = path.join(TEMP_PATH, `clip-${stamp}.txt`);
+    const output = path.join(TEMP_PATH, image ? `test-image-${stamp}.png` : `test-clip-${stamp}.mp4`);
+    await fs.writeFile(textFile, String(text).slice(0, 80));
+    if (image) {
+      const draw = `drawtext=textfile=${textFile}:fontcolor=white:fontsize=${Math.round(h / 10)}:x=(w-text_w)/2:y=(h-text_h)/2`;
+      await execFileAsync('ffmpeg', ['-f', 'lavfi', '-i', `color=c=${col}:s=${w}x${h}`, '-vf', draw, '-frames:v', '1', '-y', output], { timeout: 60000 })
+        .catch(() => execFileAsync('ffmpeg', ['-f', 'lavfi', '-i', `color=c=${col}:s=${w}x${h}`, '-frames:v', '1', '-y', output], { timeout: 60000 }))
+        .finally(() => fs.unlink(textFile).catch(() => {}));
+      const st = await fs.stat(output);
+      return { success: true, output, path: output, bytes: st.size, result: `Made a ${w}x${h} PNG test picture: ${output} (${st.size} bytes)` };
+    }
+    try {
+      await execFileAsync('ffmpeg', [
+        '-f', 'lavfi', '-i', `color=c=${col}:s=${w}x${h}:d=${dur}`,
+        '-f', 'lavfi', '-i', `anullsrc=r=44100:cl=stereo`,
+        '-vf', `drawtext=textfile=${textFile}:fontcolor=white:fontsize=${Math.round(h / 10)}:x=(w-text_w)/2:y=(h-text_h)/2`,
+        '-t', String(dur), '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-shortest', '-y', output
+      ], { timeout: 60000 });
+    } catch (err) {
+      // No font for drawtext on this host: the plain colored clip still serves as a test video.
+      await execFileAsync('ffmpeg', ['-f', 'lavfi', '-i', `color=c=${col}:s=${w}x${h}:d=${dur}`, '-t', String(dur),
+        '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-y', output], { timeout: 60000 });
+    } finally {
+      await fs.unlink(textFile).catch(() => {});
+    }
+    const st = await fs.stat(output);
+    return { success: true, output, path: output, bytes: st.size, seconds: dur, result: `Made a ${dur}s ${w}x${h} test clip: ${output} (${st.size} bytes)` };
   }
 
   async generateThumbnail(data) {

@@ -2,6 +2,30 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.464] - 2026-10-02
+
+### Added
+- **Generic HTTP tool (`http` plugin).** `http.request` sends any method with headers, a query, and a JSON, form, raw or multipart file-upload body, so POST-only agent APIs (sign-ups, task creation, uploads) are reachable. Credentials in a response (`api_key`, `*_secret`, `password`, `access_token`…) are stored encrypted and returned as `{{secret:<host>.<field>}}` placeholders. A placeholder is filled in only for that same host, so keys never reach the model, a channel or another site. Public addresses only, checked on every redirect hop (`HTTP_TOOL_ALLOW_PRIVATE=true` opens the LAN for the operator's own requests). Also `listSecrets`, `saveSecret`, `forgetSecret`.
+- **Trusted agents in Trellis get their requests done.** A message from another agent on the operator's own Trellis account, verified by the server (`agent_verified` + `from_key_owner`, or the server's built-in agent), goes to the reasoning agent with tools. Money, shell, restart, credential, email and posting tools are excluded (`PEER_EXCLUDED_PLUGINS` extends the list). `TRELLIS_TRUSTED_AGENTS` limits trust to a list of names, or `none` turns it off.
+- **`trellis-notes.api`:** call any Trellis `/api/...` route with the agent's key, so a new server feature is usable the day it ships. `GET /api` is the route index. There is no DELETE, no key, account, sharing or billing routes, and another agent's request may only read.
+- **Trellis web v0.88 / v0.89 support:** reply threading (`replyChannel` `replyTo`), pictures in messages, kind changes with `dropped`, `readChannel` by addressee (`to`) or `thread` with the room's `quiet` / `statesNow`, and `propertiesRemoved` on edits.
+- **`ffmpeg.testClip`** (a short MP4, or a PNG with `image: true`) and `ffmpeg.thumbnail` are listed. **`voice.speak`** speaks text in the configured voice and returns the audio file.
+- **`reasoningModel` on `POST /api/command/execute`** runs one request's reasoning on another model of the current provider, to compare models on real tasks.
+
+### Changed
+- **The reasoning agent acts instead of asking:** calling an API, signing up, creating test data or uploading a requested file is ordinary work. It searches its tools before saying a capability is missing, and is told which model it runs on. The step budget is 20 (was 10). The newest read of each card or file stays in the prompt, up to 8,000 characters.
+- **Routing:** a loose single-command match on an instruction with several actions, an unmatched Trellis or web request, and any web/API task go to the step-by-step reasoning agent, not the one-shot planners. Creating a task agent, approving a sub-agent action and text-to-speech run only when asked for by name.
+- **Skill learning:** only from clean runs (finished, never corrected by the claim checks), and another agent's message becomes a skill only if it names a tool or API call the agent can run. Skills match the request without listener notes.
+
+### Fixed
+- **Claims about work that never ran.** A channel post, a card write or a final answer is checked against the steps that ran before it is accepted. A named tool command that did not run is refused without a model call. The remaining claims are compared with the step results by the main model. A run is sent back once to do the work or say what was not done.
+- **Repeated side effects:** a run never repeats a post, a create or a POST/PUT/PATCH/DELETE that already succeeded, unless a later step failed or `allowRepeat` is set.
+- **A step with both an action and a final answer** now runs the action first.
+- **Trellis listener:** a mention of the agent with an empty `to` reaches it. Slash commands and follow-ups meant for another agent are left alone. A request interrupted by a restart is answered after it (`TRELLIS_RESUME_MINUTES`). A run that posted its own report is not summarised twice.
+- **A provider's 5xx is retried** (the status on `error.status` / `statusCode` was ignored, so one empty response ended a run).
+- **`agentstats`, `coingecko`, `news`, `alphavantage` and `mqtt` accept the object-form call** every caller makes. Every call had failed with "Unknown action: [object Object]".
+- **"Say hello…" is a reply, not text-to-speech,** unless voice is asked for.
+
 ## [2.25.463] - 2026-10-01
 
 ### Fixed

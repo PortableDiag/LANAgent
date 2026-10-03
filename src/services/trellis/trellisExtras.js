@@ -171,8 +171,8 @@ export const EXTRA_COMMANDS = [
     usage: 'layoutFlow({ basket: 5, dir: "right" })',
     examples: ['lay out the trellis diagram left to right', 'tidy the trellis flowchart', 'arrange the connected trellis cards as a flow'] },
   // editing
-  { command: 'editCard', description: 'Change a Trellis card\'s title, body or colour (replaces the body; use appendNote to add to it)',
-    usage: 'editCard({ card: 1391, title: "New title", body: "..." })', examples: ['rename the trellis card', 'rewrite the body of that trellis note', 'change the trellis card title'] },
+  { command: 'editCard', description: 'Change a Trellis card\'s title, body, colour or kind (replaces the body; use appendNote to add to it). kind "checklist" with items turns a text card into a checklist; the server lists any prose it dropped',
+    usage: 'editCard({ card: 1391, title: "New title", body: "..." })  // or editCard({ card: 1391, kind: "checklist", items: ["first", "second"] })', examples: ['rename the trellis card', 'rewrite the body of that trellis note', 'change the trellis card title'] },
   { command: 'addChecklistItem', description: 'Add a line to a checklist card in Trellis',
     usage: 'addChecklistItem({ card: 1391, text: "Buy milk" })', examples: ['add an item to the trellis checklist', 'put milk on my trellis shopping list'] },
   { command: 'setChecklistItem', description: 'Tick, untick or retype one checklist line in Trellis, by its id or its text',
@@ -243,6 +243,9 @@ export const EXTRA_COMMANDS = [
     usage: 'removeChecklistItem({ card: 1391, item: "Buy milk" })', examples: ['remove milk from the trellis checklist', 'delete that checklist line in trellis'] },
   { command: 'removeFile', description: 'Remove one attached file or picture from a Trellis card, by index; needs its name as confirmName',
     usage: 'removeFile({ card: 1391, index: 0, kind: "file", confirmName: "old.pdf" })', examples: ['remove the attachment from the trellis card', 'delete that picture from the trellis note'] },
+  { command: 'api', description: 'Call any Trellis API route directly with this agent\'s Trellis key, for a feature newer than the other trellis-notes commands (a release note names a route or field). GET /api is the route index (every route with its body fields); /api/reference describes the rest. No DELETE (use deleteCard); no key, account or billing routes',
+    usage: 'api({ method: "GET", path: "/api/cards/21/channel", query: { to: "Alice" } })  // or api({ method: "POST", path: "/api/cards/66/say", body: { text: "hi", reply_to: 22 } })',
+    examples: ['call the new trellis route from the release note', 'use the trellis api directly', 'try the new trellis endpoint'] },
   { command: 'listTrash', description: 'What was deleted from the Trellis document in the last 30 days (web)',
     usage: 'listTrash', examples: ['what is in the trellis trash', 'show deleted trellis cards'] },
   // skills
@@ -528,15 +531,28 @@ const actions = {
   },
 
   // ---- editing
-  async editCard({ title, body, color, ...ref }) {
+  async editCard({ title, body, color, kind, items, ...ref }) {
     const c = await this._card(ref);
     const patch = {};
     if (title !== undefined) patch.title = String(title);
     if (body !== undefined) patch.body = String(body);
     if (color !== undefined) patch.color = color;
-    if (!Object.keys(patch).length) throw new Error('editCard needs a title, body or color to change.');
-    await this._call('patch', `/api/cards/${c.id}`, { body: patch });
-    return { success: true, updated: { card: c.id, fields: Object.keys(patch) } };
+    // A kind change (web v0.88.0 keeps `key:: value` lines as checklist lines and lists other
+    // prose in `dropped`); items are plain strings or {text, done}.
+    if (kind !== undefined) patch.kind = String(kind);
+    if (items !== undefined) {
+      const list = Array.isArray(items) ? items : [items];
+      patch.items = list.map(i => (typeof i === 'string' ? { text: i } : { text: String(i?.text ?? ''), ...(i?.done !== undefined ? { done: !!i.done } : {}) }));
+    }
+    if (!Object.keys(patch).length) throw new Error('editCard needs a title, body, color, kind or items to change.');
+    const r = await this._call('patch', `/api/cards/${c.id}`, { body: patch });
+    return {
+      success: true, updated: { card: c.id, fields: Object.keys(patch) },
+      ...(r && Array.isArray(r.dropped) ? { dropped: r.dropped } : {}),
+      // Web v0.89.0: a PATCH that removed a property says which.
+      ...(r && Array.isArray(r.properties_removed) ? { propertiesRemoved: r.properties_removed } : {}),
+      ...(r?.card?.kind || r?.kind ? { kind: r.card?.kind ?? r.kind } : {})
+    };
   },
 
   async addChecklistItem({ text, ...ref }) {
@@ -862,6 +878,24 @@ const actions = {
     this.logger.warn(`[trellis-notes] removing ${kind} ${index} "${f.name}" from card ${c.id}`);
     await this._call('delete', kind === 'image' ? `/api/cards/${c.id}/images/${Number(index)}` : `/api/cards/${c.id}/attachments/${Number(index)}`);
     return { success: true, card: c.id, removed: { kind, index: Number(index), name: f.name } };
+  },
+
+  /**
+   * Any /api route, so a Trellis release is usable the day it ships instead of after a plugin
+   * update (v0.88, v0.89 and v0.91 each landed in one day on 2026-10-02 and the agent could not
+   * test them). Guarded: no DELETE, no key/account/auth/billing routes, read-only for a peer.
+   */
+  async api({ method = 'GET', path: route, query = {}, body = null, _peer = null } = {}) {
+    const m = String(method || 'GET').toUpperCase();
+    const p = String(route || '');
+    if (!/^\/api(\/[\w\-./{}%]*)?$/.test(p) || p.includes('..')) throw new Error('path must be a Trellis /api/... route');
+    if (!['GET', 'POST', 'PATCH', 'PUT'].includes(m)) throw new Error(`${m} is not allowed here${m === 'DELETE' ? '; deleting a card goes through deleteCard (it asks for the title)' : ''}`);
+    if (/^\/api\/(keys|account|auth|billing|tokens|users|admin|share|shares)(\/|$)/i.test(p)) throw new Error('key, account, auth, sharing and billing routes are the operator\'s');
+    if (_peer && m !== 'GET') throw new Error(`a request from ${_peer} may only read (GET) through the generic Trellis call`);
+    const q = query && typeof query === 'object' ? query : {};
+    const r = await this._call(m.toLowerCase(), p, { query: q, body: m === 'GET' ? null : (body ?? {}) });
+    const text = JSON.stringify(r);
+    return { success: true, method: m, path: p, result: text.length > 12000 ? `${text.slice(0, 12000)}…(${text.length - 12000} more chars)` : r };
   },
 
   async listTrash() {

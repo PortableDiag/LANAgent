@@ -231,14 +231,14 @@ export default class TrellisNotesPlugin extends BasePlugin {
       },
       {
         command: 'readChannel',
-        description: 'Read the messages in one channel card, optionally only those after a sequence number',
-        usage: 'readChannel({ card: 2119, since: 40 })  // or card: "<document-uuid>:2119"',
+        description: 'Read the messages in one channel card, optionally only those after a sequence number, only those addressed to an agent (to), or one thread (thread). Also returns the room state: quiet / quietWhy and statesNow (who is working on which message)',
+        usage: 'readChannel({ card: 2119, since: 40 })  // to: "Alice" = only what names Alice plus what Alice said; thread: 1621 = that message and its replies; card may be "<document-uuid>:2119"',
         examples: ['read the trellis channel', 'what did the operator say in the channel', 'show the channel conversation']
       },
       {
         command: 'replyChannel',
         description: 'Post a reply in a channel card, signed as this agent',
-        usage: 'replyChannel({ card: 2119, text: "Done — deployed v2.25.352.", files: ["/path/report.pdf"] })  // files optional; card may be "<document-uuid>:2119"',
+        usage: 'replyChannel({ card: 2119, text: "Done — deployed v2.25.352.", files: ["/path/report.pdf"], replyTo: 1621 })  // files optional (a PNG/JPEG/GIF/WebP shows as a picture in the message); replyTo threads it under that message seq; card may be "<document-uuid>:2119"',
         examples: ['reply in the trellis channel', 'answer the operator in the channel', 'post in the notes channel']
       },
       {
@@ -341,6 +341,8 @@ export default class TrellisNotesPlugin extends BasePlugin {
     // operator asked in a channel. Never forwarded to the server.
     const channel = data._trellis && typeof data._trellis === 'object' ? data._trellis : null;
     delete data._trellis;
+    // Another agent's request (trusted peer): the generic `api` call is read-only for it.
+    if (channel?.peer) data._peer = String(channel.peer);
     if (channel?.document && data.document == null && !(typeof data.card === 'string' && data.card.includes(':'))) {
       data.document = channel.document;
     }
@@ -1376,11 +1378,15 @@ export default class TrellisNotesPlugin extends BasePlugin {
     };
   }
 
-  async readChannel({ card, since = null, limit = MAX_MESSAGES } = {}) {
+  async readChannel({ card, since = null, limit = MAX_MESSAGES, to = null, thread = null } = {}) {
     if (!(typeof card === 'number' || /^\d+$/.test(String(card ?? '')))) {
       throw new Error('readChannel needs the channel card id (listChannels shows them).');
     }
     const query = since !== null && since !== undefined && since !== '' ? { since: Number(since) } : {};
+    // Web v0.89.0: `to=<name>` = what names that agent in `to` plus what it said; `thread=<seq>` =
+    // that message and every reply under it.
+    if (to) query.to = String(to);
+    if (thread !== null && thread !== undefined && thread !== '') query.thread = Number(thread);
     const data = await this._call('get', `/api/cards/${Number(card)}/channel`, { query });
     const messages = Array.isArray(data) ? data : (data.messages || []);
     const tail = messages.slice(-Math.min(Number(limit) || MAX_MESSAGES, 100));
@@ -1400,6 +1406,11 @@ export default class TrellisNotesPlugin extends BasePlugin {
       // server computes them, plus the channel's lead.
       group: data.group ?? null,
       lead: data.lead ?? null,
+      // Web v0.89.0: the room's state, said rather than inferred.
+      ...(data.quiet !== undefined ? { quiet: data.quiet, quietWhy: data.quiet_why ?? null } : {}),
+      ...(data.states_now ? { statesNow: data.states_now } : {}),
+      ...(to ? { filteredTo: String(to) } : {}),
+      ...(thread ? { thread: Number(thread) } : {}),
       messages: tail.map(m => ({
         seq: m.seq ?? null,
         from: m.from ?? m.agent ?? m.author ?? null,
@@ -1412,6 +1423,9 @@ export default class TrellisNotesPlugin extends BasePlugin {
         // Web v0.59.3+: how it was posted (`session` = a signed-in person, `api` = a key,
         // `internal` = a built-in agent) and, for `api`, the key's label (own account only).
         ...(m.via ? { via: m.via } : {}),
+        // Web v0.88.0: threading and pictures in the conversation.
+        ...(m.reply_to ? { replyTo: m.reply_to } : {}),
+        ...(Array.isArray(m.files) && m.files.length ? { files: m.files.map(f => ({ name: f.name ?? null, kind: f.kind ?? null })) } : {}),
         ...(m.key_label ? { keyLabel: m.key_label } : {}),
         // Web v0.59.2+: the tools a built-in agent's reply actually ran. A claimed action
         // whose tool is not listed did not happen (built-in models invent them).
@@ -1424,7 +1438,7 @@ export default class TrellisNotesPlugin extends BasePlugin {
     };
   }
 
-  async replyChannel({ card, text, files = null } = {}) {
+  async replyChannel({ card, text, files = null, replyTo = null, reply_to = null } = {}) {
     if (!(typeof card === 'number' || /^\d+$/.test(String(card ?? '')))) {
       throw new Error('replyChannel needs the channel card id.');
     }
@@ -1433,10 +1447,18 @@ export default class TrellisNotesPlugin extends BasePlugin {
     // Files travel in the message itself: {name, data_base64}, up to 40 MB each.
     const attached = [];
     for (const p of paths) attached.push(await this._readLocalFile(p));
-    const body = { text: String(text || '').trim(), ...(attached.length ? { files: attached } : {}) };
+    // Web v0.88.0 / desktop v0.215.0: reply threading. `reply_to` is a numbered message's seq in
+    // this channel; 0 or a seq that does not exist yet is a 400 with nothing written.
+    const thread = replyTo ?? reply_to;
+    if (thread !== null && thread !== undefined && !(Number(thread) > 0)) throw new Error('replyTo must be the seq of a message in this channel.');
+    const body = { text: String(text || '').trim(), ...(attached.length ? { files: attached } : {}), ...(thread ? { reply_to: Number(thread) } : {}) };
     const data = await this._call('post', `/api/cards/${Number(card)}/say`, { body, timeoutMs: attached.length ? 120000 : null });
     const doc = this.resolvedMode === 'web' ? this._currentDoc() : null;
-    return { success: true, card: Number(card), document: doc?.name ?? null, seq: data?.seq ?? null, as: this._agentName() };
+    return {
+      success: true, card: Number(card), document: doc?.name ?? null, seq: data?.seq ?? null, as: this._agentName(),
+      ...(data?.reply_to !== undefined ? { replyTo: data.reply_to } : {}),
+      ...(Array.isArray(data?.files) ? { files: data.files.map(f => ({ name: f.name, kind: f.kind ?? null })) } : {})
+    };
   }
 
   getPluginConfig() {

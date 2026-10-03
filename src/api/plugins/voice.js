@@ -15,6 +15,12 @@ export default class VoicePlugin extends BasePlugin {
     this.version = '1.3.0'; // Updated version for provider support
     this.commands = [
       {
+        command: 'speak',
+        description: 'Say text out loud: an audio/voice message of the text in the configured voice',
+        usage: 'speak({ text: "Good morning" })',
+        examples: ['say this out loud', 'read this aloud', 'send me a voice message saying good morning', 'speak this text']
+      },
+      {
         command: 'settings',
         description: 'Get current voice and TTS settings',
         usage: 'settings()'
@@ -133,6 +139,9 @@ export default class VoicePlugin extends BasePlugin {
         
       case 'test':
         return this.testVoice(params);
+
+      case 'speak':
+        return this.speak(params);
         
       case 'create-profile':
         return this.createVoiceProfile(params);
@@ -324,6 +333,39 @@ export default class VoicePlugin extends BasePlugin {
         success: false,
         error: error.message
       };
+    }
+  }
+
+  /**
+   * Speak text aloud: an audio file in the configured voice, returned as `file` so the
+   * interface delivers it (a Telegram voice note, a download on the web). The AI intent
+   * table routed "say …" here as `speak`, an action this plugin never had, so every such
+   * request failed with "Unknown voice action: speak" (DELTA, 2026-10-02).
+   */
+  async speak(data = {}) {
+    const text = String(data.text || data.message || '').replace(/\s+(out loud|aloud)\s*[.!]?\s*$/i, '').trim();
+    if (!text) return { success: false, error: 'speak needs the text to say' };
+    try {
+      const result = await this.agent.ttsService.generateSpeech(text.slice(0, 4000), {
+        ...(data.voice ? { voice: data.voice } : {}),
+        ...(data.language ? { language: data.language } : {}),
+        ...(data.provider ? { provider: data.provider } : {})
+      });
+      const tempDir = path.join(__dirname, '../../../temp');
+      if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir, { recursive: true });
+      const filename = `speech-${Date.now()}.${result.format}`;
+      const filepath = path.join(tempDir, filename);
+      await fs.promises.writeFile(filepath, result.buffer);
+      this.cleanupOldTestFiles(tempDir);
+      return {
+        success: true,
+        result: `Spoke ${text.length} characters in the ${result.voice} voice (${result.format}, ${result.size} bytes).`,
+        file: { path: filepath, filename, mimeType: `audio/${result.format === 'mp3' ? 'mpeg' : result.format}` },
+        data: { voice: result.voice, model: result.model, duration: result.duration, size: result.size, audioUrl: `/api/voice/audio/${filename}` }
+      };
+    } catch (error) {
+      logger.error('Error speaking text:', error);
+      return { success: false, error: error.message };
     }
   }
 

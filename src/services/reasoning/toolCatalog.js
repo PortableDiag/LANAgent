@@ -25,16 +25,25 @@ export const SEARCH_TOOL = 'search_tools';
 const DEFAULT_SEARCH_LIMIT = 10;
 const MAX_SEARCH_LIMIT = 50;
 
-export function excludedPlugins() {
+// A trusted peer agent's request (another agent on the operator's own Trellis account) runs
+// with the tools, minus anything that restarts, reconfigures or opens a shell on this host, or
+// holds the operator's credentials. Money is already out via DEFAULT_EXCLUDED. Extend with
+// PEER_EXCLUDED_PLUGINS.
+const PEER_EXCLUDED = ['system', 'systemAdmin', 'ssh', 'vpn', 'apikeys', 'oauthmanager', 'selfHealing', 'software', 'devenv', 'development', 'docker', 'backupStrategy', 'email', 'twitter', 'subagents'];
+
+export function excludedPlugins(context = null) {
   const extra = (process.env.REASONING_EXCLUDED_PLUGINS || '').split(',').map(s => s.trim()).filter(Boolean);
-  return new Set([...DEFAULT_EXCLUDED, ...extra]);
+  const peer = context?.trellis?.peer
+    ? [...PEER_EXCLUDED, ...(process.env.PEER_EXCLUDED_PLUGINS || '').split(',').map(s => s.trim()).filter(Boolean)]
+    : [];
+  return new Set([...DEFAULT_EXCLUDED, ...extra, ...peer]);
 }
 
 /** Enabled, non-excluded plugins as { name, description, commands[] }. */
-export function listTools(agent) {
+export function listTools(agent, context = null) {
   const apis = agent?.apiManager?.apis;
   if (!apis) return [];
-  const excluded = excludedPlugins();
+  const excluded = excludedPlugins(context);
   const tools = [];
   for (const [name, wrapper] of apis) {
     if (!wrapper?.enabled || excluded.has(name)) continue;
@@ -187,7 +196,7 @@ export function formatToolsForPrompt(tools, relevantNames = [], order = null, { 
  * is NOT retried: a plugin command can have side effects that must not be repeated.
  */
 export async function executeTool(agent, tool, command, params = {}, context = null) {
-  const tools = listTools(agent);
+  const tools = listTools(agent, context);
 
   if (tool === DESCRIBE_TOOL) {
     const target = tools.find(t => t.name === params?.name);
@@ -225,6 +234,8 @@ export async function executeTool(agent, tool, command, params = {}, context = n
   try {
     // The Trellis channel a request came from, for trellis-notes only (see executePluginWithLogging).
     const channel = tool === 'trellis-notes' && context?.trellis ? { _trellis: context.trellis } : {};
+    // The http plugin narrows what a peer's request may reach (no LAN, no uploads outside data dirs).
+    if (tool === 'http' && context?.trellis?.peer) channel._peer = context.trellis.peer;
     const result = await agent.apiManager.executeAPI(tool, 'execute', { ...(params || {}), ...channel, action: command });
     return { success: result?.success !== false, result };
   } catch (error) {

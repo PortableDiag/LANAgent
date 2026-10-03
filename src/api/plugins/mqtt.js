@@ -103,6 +103,8 @@ export default class MqttPlugin extends BasePlugin {
    * Execute a plugin command
    */
   async execute(command, params = {}) {
+    // Callers pass one object ({ action, ...params }); the two-argument form saw an object as the action.
+    if (command && typeof command === 'object') { params = { ...command }; command = params.action; }
     switch (command) {
       case 'get-devices':
         return this.getDevices(params);

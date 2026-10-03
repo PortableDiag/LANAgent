@@ -49,6 +49,10 @@ export default class AgentStatsPlugin extends BasePlugin {
   }
 
   async execute(action, params = {}) {
+    // Callers pass one object ({ action, ...params }), as for every other plugin. The two-argument
+    // form left `action` an object, so every call failed with "Unknown action: [object Object]"
+    // and a reasoning run spent 13 steps retrying it (2026-10-02).
+    if (action && typeof action === 'object') { params = { ...action }; action = params.action; }
     switch (action) {
       case 'stats':
         return this.getAgentStats(params);

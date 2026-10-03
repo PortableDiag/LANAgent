@@ -51,6 +51,7 @@ const ACT_MARKER = 'ACT_ON_IT';
 import { BackgroundReview } from '../services/skills/backgroundReview.js';
 import { getUserProfile } from '../services/skills/userProfile.js';
 import { Curator, scheduleCurator } from '../services/skills/curator.js';
+import { looksMultiStep } from './multiStep.js';
 
 const execAsync = promisify(exec);
 const __filename = fileURLToPath(import.meta.url);
@@ -65,6 +66,8 @@ try {
 } catch (error) {
   logger.warn('Could not read package.json version:', error.message);
 }
+
+
 
 export class Agent extends EventEmitter {
   constructor() {
@@ -516,7 +519,7 @@ export class Agent extends EventEmitter {
       const reasoningConfig = this.agentModel?.serviceConfigs?.reasoning || {
         enabled: true,
         mode: 'auto',
-        maxIterations: 10,
+        maxIterations: 20,
         enableReplanning: true,
         showThoughts: false,
         thoughtPersistence: true
@@ -946,7 +949,11 @@ export class Agent extends EventEmitter {
       reasoningResult = await this.planExecuteAgent.run(input, context);
     } else if (this.reasoningMode === 'auto') {
       // Auto mode: use ReAct for exploratory tasks, Plan-Execute for structured tasks
-      const isStructured = /\b(step|sequence|order|first|then|finally)\b/i.test(input);
+      // Plan-Execute writes every step before seeing any result, so it cannot answer what a
+      // service asks back (a signup challenge) and it invented tools ("reapption",
+      // "shell_or_http") for one on 2026-10-02. Web/API work and Trellis requests go to ReAct.
+      const adaptive = /\b(api|https?|url|endpoint|sign ?up|register|login|upload|post|\w+\.(?:com|net|org|io|ai|dev|app))\b/i.test(input) || !!context?.trellis;
+      const isStructured = !adaptive && /\b(step|sequence|order|first|then|finally)\b/i.test(input);
       if (isStructured && this.planExecuteAgent) {
         reasoningResult = await this.planExecuteAgent.run(input, context);
       } else if (this.reactAgent) {
@@ -1211,7 +1218,36 @@ If the user is telling you to DO something (retry, go ahead, write it, add it, f
           logger.warn('Vector intent detection error:', error);
         }
       }
+
+      // Several actions in one instruction, matched loosely to ONE command: the vector router can
+      // only run that one. "Register at reapption.net …, then create one test task there and record
+      // the ids on card 252" ran trellis-notes.replyChannel (0.64) and nothing else (2026-10-02);
+      // "register … and make a test task" ran subagents.createTaskAgent (0.66). A strong match is
+      // left alone ("download this song and send me the mp3" is one command that does both).
+      if (intentResult && (intentResult.confidence ?? 1) < 0.75 && intentResult.plugin !== '_system' && looksMultiStep(input)) {
+        logger.info(`Several actions matched loosely to ${intentResult.plugin}.${intentResult.action} (${Number(intentResult.confidence).toFixed(2)}); handing the task to the reasoning agent`);
+        try {
+          const rendered = await this._runReasoning(input, context);
+          if (rendered) return rendered;
+        } catch (reasoningError) {
+          logger.warn(`Reasoning for a multi-step instruction failed, using the single match: ${reasoningError.message}`);
+        }
+      }
       
+      // A Trellis request or a web/API task that no single command matched goes to the reasoning
+      // agent, not the chain planner below: the chain writes every step before running any, so it
+      // planned "recheck … using the URL from card 250" as `URL_FROM_CARD_250` and stopped on
+      // "Not a valid URL" (card 21 #1488, 2026-10-02).
+      if (!intentResult && (context.trellis || /\b(api|https?|url|endpoint|sign ?up|register|upload|\w+\.(?:com|net|org|io|ai|dev|app))\b/i.test(input))) {
+        try {
+          logger.info('No single command matched a Trellis or web task; handing it to the reasoning agent');
+          const rendered = await this._runReasoning(input, context);
+          if (rendered) return rendered;
+        } catch (reasoningError) {
+          logger.warn(`Reasoning for an unmatched Trellis/web task failed, trying the chain: ${reasoningError.message}`);
+        }
+      }
+
       // If vector detection didn't match, try multi-step chain analysis
       // This runs AFTER vector detection so known single intents aren't split into chains
       if (!intentResult && this.pluginChainProcessor && this.aiIntentDetector) {
@@ -3061,6 +3097,31 @@ Return ONLY a valid JSON object with the extracted parameters, nothing else.`;
             }
           }
 
+          // Commands that only make sense when asked for by name. "register at reapption.net and
+          // make a test task" matched subagents.createTaskAgent (0.66) three times on 2026-10-02:
+          // each spun up a background agent whose result went nowhere and answered only "Task
+          // Agent created and started!". "/approve" typed for another agent's harness matched
+          // subagents.approve and answered "Please provide agent ID and approval ID". Without
+          // the explicit wording, the task goes to the reasoning agent, which has the tools.
+          const EXPLICIT_ONLY = {
+            'subagents.createTaskAgent': /\b(task[- ]?agent|sub-?agent|delegate|background agent)\b/i,
+            'subagents.approve': /\b(approv\w*)\b[\s\S]*\b(sub-?agent|agent \w+|approval \w+|[0-9a-f]{24})\b/i,
+            'subagents.reject': /\b(reject\w*)\b[\s\S]*\b(sub-?agent|agent \w+|approval \w+|[0-9a-f]{24})\b/i,
+            // "say hello in five words" is a reply, not text-to-speech (DELTA, 2026-10-02).
+            'voice.speak': /\b(out loud|aloud|voice (message|note)|audio|speak|spoken|tts|text[- ]to[- ]speech|read (it|this|that|them) (out|to me))\b/i
+          };
+          const explicitRule = EXPLICIT_ONLY[`${intentResult.plugin}.${intentResult.action}`];
+          if (explicitRule && !explicitRule.test(input)) {
+            logger.info(`[intent-guard] ${intentResult.plugin}.${intentResult.action} needs to be asked for by name; handing "${input.slice(0, 80)}" to the reasoning agent`);
+            try {
+              const rendered = await this._runReasoning(input, context);
+              if (rendered) return rendered;
+            } catch (reasoningError) {
+              logger.warn(`Reasoning after a guarded intent failed: ${reasoningError.message}`);
+            }
+            return { type: 'text', content: `I did not run ${intentResult.plugin}.${intentResult.action} for that: it only runs when asked for by name, and working the request out step by step failed.` , success: false };
+          }
+
           // Log what we're about to execute for debugging
           logger.info('Executing plugin from intent:', {
             plugin: intentResult.plugin,
@@ -4808,6 +4869,19 @@ Return ONLY a valid JSON object with the extracted parameters, nothing else.`;
   /**
    * Get the current system prompt (always regenerated to reflect current plugin state)
    */
+  /**
+   * The model actually answering, as "<model> via <provider>". Asked "how did the model swap
+   * go?", the agent had no way to know and went looking for another agent's config file
+   * (card 21 #1847, 2026-10-02).
+   */
+  currentModelLabel() {
+    const p = this.providerManager?.activeProvider;
+    if (!p) return 'unknown';
+    const provider = this.providerManager.providerNameOf?.(p) || p.name || 'unknown provider';
+    const model = p.models?.chat || p.model || 'default model';
+    return `${model} via ${provider}`;
+  }
+
   getSystemPrompt() {
     // Dynamic configuration values (no hardcoding)
     // No fallback address. This used to default to one specific instance's mailbox, so every
@@ -4826,6 +4900,7 @@ Return ONLY a valid JSON object with the extracted parameters, nothing else.`;
     systemPrompt += `🤖 IDENTITY & SELF-AWARENESS:\n`;
     systemPrompt += `- Name: ${this.config.name} (AI-powered personal assistant)\n`;
     systemPrompt += `- System: LANAgent v${packageVersion}\n`;
+    systemPrompt += `- Language model: ${this.currentModelLabel()}\n`;
     systemPrompt += agentEmail
       ? `- Your Email: ${agentEmail} (YOU send emails as yourself, not on behalf of users)\n`
       : `- Your Email: none — email is not configured on this instance. Never state or invent an email address for yourself.\n`;

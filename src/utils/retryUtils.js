@@ -434,11 +434,16 @@ export function isRetryableError(error) {
     return true;
   }
   
-  // HTTP errors that are typically transient
-  if (error.response) {
-    const status = error.response.status;
-    // Retry on 5xx errors and specific 4xx errors
-    return status >= 500 || status === 429 || status === 408;
+  // HTTP errors that are typically transient. Provider clients put the status on the error
+  // itself (`status` / `statusCode`), not on `response`: an OpenRouter 502 "Provider returned an
+  // empty response" was classified permanent and ended a whole reasoning run (2026-10-02).
+  const status = error.response?.status ?? error.status ?? error.statusCode;
+  if (Number.isFinite(Number(status)) && Number(status) > 0) {
+    const s = Number(status);
+    return s >= 500 || s === 429 || s === 408;
+  }
+  if (/empty response|upstream (error|timed out)|bad gateway|service unavailable|overloaded/i.test(error.message || '')) {
+    return true;
   }
   
   // MongoDB/Database errors that are retryable
