@@ -426,11 +426,11 @@ export async function retryWithCondition(operation, shouldRetry, options = {}) {
  * @returns {boolean} Whether the error is retryable
  */
 export function isRetryableError(error) {
-  // Network errors
-  if (error.code === 'ECONNRESET' || 
-      error.code === 'ETIMEDOUT' || 
-      error.code === 'ECONNREFUSED' ||
-      error.code === 'ENOTFOUND') {
+  // Network errors. ethers v6 names its own transient failures (an RPC that timed out is
+  // code 'TIMEOUT', "request timeout"): a Chainlink BNB/USD read was given up after one
+  // attempt as "non-retryable" on 2026-10-03 because only Node's ETIMEDOUT was known.
+  if (['ECONNRESET', 'ETIMEDOUT', 'ECONNREFUSED', 'ENOTFOUND', 'EAI_AGAIN', 'ECONNABORTED',
+       'TIMEOUT', 'NETWORK_ERROR', 'SERVER_ERROR'].includes(error.code)) {
     return true;
   }
   

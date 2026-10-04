@@ -4,7 +4,7 @@
     "name": "LANAgent API Collection",
     "description": "LANAgent API v2.25.149 — Stale Chromium singleton locks are now actually cleared before browser launches: the cleaner used existsSync, which follows symlinks, so the always-dangling SingletonLock symlink was reported absent and browser-tier scraping stayed wedged after any unclean shutdown. Detection now uses lstat; a running browser is never evicted. No HTTP surface change.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
-    "version": "2.25.465"
+    "version": "2.25.468"
   },
   "auth": {
     "type": "bearer",
@@ -18985,6 +18985,36 @@
               ]
             },
             "description": "Check job status"
+          }
+        },
+        {
+          "name": "Batch Job Status (v2.25.467)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\"jobIds\": [1, 2, 3]}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/external/jobs/batch/status",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "external",
+                "jobs",
+                "batch",
+                "status"
+              ]
+            },
+            "description": "Status of up to 50 jobs from this agent's records in one read. Unknown ids come back not_found; GET /api/external/jobs/:jobId also checks the chain."
           }
         },
         {

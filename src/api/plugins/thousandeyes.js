@@ -28,6 +28,16 @@ export default class ThousandEyesPlugin extends BasePlugin {
         ]
       },
       {
+        command: 'refreshAgents',
+        description: 'Invalidate the cached agent list and retrieve current agents from ThousandEyes',
+        usage: 'refreshAgents()',
+        examples: [
+          'refresh the available agents',
+          'get the current agent list',
+          'reload agents from ThousandEyes'
+        ]
+      },
+      {
         command: 'getAgentStatus',
         description: 'Get details of a specific agent by ID',
         usage: 'getAgentStatus({ agentId: "12345" })',
@@ -45,6 +55,16 @@ export default class ThousandEyesPlugin extends BasePlugin {
           'show me the available tests',
           'list all tests',
           'retrieve test list'
+        ]
+      },
+      {
+        command: 'refreshTests',
+        description: 'Invalidate the cached test list and retrieve current tests from ThousandEyes',
+        usage: 'refreshTests()',
+        examples: [
+          'refresh the configured tests',
+          'get the current test list',
+          'reload tests from ThousandEyes'
         ]
       },
       {
@@ -72,6 +92,16 @@ export default class ThousandEyesPlugin extends BasePlugin {
         ]
       },
       {
+        command: 'refreshAlerts',
+        description: 'Invalidate the cached alert list and retrieve current alerts from ThousandEyes',
+        usage: 'refreshAlerts()',
+        examples: [
+          'refresh the current alerts',
+          'get the latest alert list',
+          'reload alerts from ThousandEyes'
+        ]
+      },
+      {
         command: 'getAlertDetails',
         description: 'Get details of a specific alert by ID',
         usage: 'getAlertDetails({ alertId: "12345" })',
@@ -79,6 +109,16 @@ export default class ThousandEyesPlugin extends BasePlugin {
           'check details of alert 12345',
           'get information for alert with ID 67890',
           'alert details for ID 54321'
+        ]
+      },
+      {
+        command: 'refreshAll',
+        description: 'Clear all cached ThousandEyes data and retrieve current agents, tests, and alerts',
+        usage: 'refreshAll()',
+        examples: [
+          'refresh all ThousandEyes data',
+          'reload the current ThousandEyes configuration',
+          'get all current ThousandEyes resources'
         ]
       }
     ];
@@ -147,6 +187,43 @@ export default class ThousandEyesPlugin extends BasePlugin {
   }
 
   /**
+   * Invalidate cached entries belonging to one or more ThousandEyes
+   * resource scopes.
+   * @param {string[]} scopes - Resource scopes to invalidate
+   * @returns {{scopes: string[], keys: string[]}}
+   */
+  _invalidateCacheScopes(scopes) {
+    const prefixesByScope = {
+      agents: ['agents_list'],
+      tests: ['tests_list'],
+      alerts: ['alerts_list'],
+      agentDetails: ['agent_status_'],
+      testDetails: ['test_details_'],
+      alertDetails: ['alert_details_']
+    };
+
+    const keysToDelete = new Set();
+    for (const scope of scopes) {
+      const prefixes = prefixesByScope[scope] || [];
+      for (const key of this.cache.keys()) {
+        if (prefixes.some(prefix => key === prefix || key.startsWith(prefix))) {
+          keysToDelete.add(key);
+        }
+      }
+    }
+
+    const keys = [...keysToDelete];
+    if (keys.length > 0) {
+      this.cache.del(keys);
+    }
+
+    return {
+      scopes: [...scopes],
+      keys
+    };
+  }
+
+  /**
    * Fetch a ThousandEyes resource with auth + retry, returning response.data.
    * Caching response.data (not the raw axios response) avoids stashing the
    * Authorization header in the in-memory cache.
@@ -178,16 +255,24 @@ export default class ThousandEyesPlugin extends BasePlugin {
       switch (action) {
         case 'listAgents':
           return await this.listAgents();
+        case 'refreshAgents':
+          return await this.refreshAgents();
         case 'getAgentStatus':
           return await this.getAgentStatus(data);
         case 'listTests':
           return await this.listTests();
+        case 'refreshTests':
+          return await this.refreshTests();
         case 'getTestDetails':
           return await this.getTestDetails(data);
         case 'listAlerts':
           return await this.listAlerts();
+        case 'refreshAlerts':
+          return await this.refreshAlerts();
         case 'getAlertDetails':
           return await this.getAlertDetails(data);
+        case 'refreshAll':
+          return await this.refreshAll();
         default:
           throw new Error(`Unknown action: ${action}`);
       }
@@ -208,6 +293,22 @@ export default class ThousandEyesPlugin extends BasePlugin {
       this.logger.error('listAgents failed:', error);
       return { success: false, error: error.message };
     }
+  }
+
+  /**
+   * Invalidate and immediately reload the ThousandEyes agent list.
+   * @returns {Promise<{success: boolean, data?: any, error?: string, cacheScopesInvalidated: string[], cacheKeysInvalidated: string[]}>}
+   */
+  async refreshAgents() {
+    const invalidation = this._invalidateCacheScopes(['agents']);
+    this.logger.info(`Refreshing ThousandEyes agents; invalidated ${invalidation.keys.length} cache entries`);
+
+    const result = await this.listAgents();
+    return {
+      ...result,
+      cacheScopesInvalidated: invalidation.scopes,
+      cacheKeysInvalidated: invalidation.keys
+    };
   }
 
   async getAgentStatus({ agentId }) {
@@ -232,6 +333,22 @@ export default class ThousandEyesPlugin extends BasePlugin {
       this.logger.error('listTests failed:', error);
       return { success: false, error: error.message };
     }
+  }
+
+  /**
+   * Invalidate and immediately reload the ThousandEyes test list.
+   * @returns {Promise<{success: boolean, data?: any, error?: string, cacheScopesInvalidated: string[], cacheKeysInvalidated: string[]}>}
+   */
+  async refreshTests() {
+    const invalidation = this._invalidateCacheScopes(['tests']);
+    this.logger.info(`Refreshing ThousandEyes tests; invalidated ${invalidation.keys.length} cache entries`);
+
+    const result = await this.listTests();
+    return {
+      ...result,
+      cacheScopesInvalidated: invalidation.scopes,
+      cacheKeysInvalidated: invalidation.keys
+    };
   }
 
   /**
@@ -290,6 +407,22 @@ export default class ThousandEyesPlugin extends BasePlugin {
     }
   }
 
+  /**
+   * Invalidate and immediately reload the ThousandEyes alert list.
+   * @returns {Promise<{success: boolean, data?: any, error?: string, cacheScopesInvalidated: string[], cacheKeysInvalidated: string[]}>}
+   */
+  async refreshAlerts() {
+    const invalidation = this._invalidateCacheScopes(['alerts']);
+    this.logger.info(`Refreshing ThousandEyes alerts; invalidated ${invalidation.keys.length} cache entries`);
+
+    const result = await this.listAlerts();
+    return {
+      ...result,
+      cacheScopesInvalidated: invalidation.scopes,
+      cacheKeysInvalidated: invalidation.keys
+    };
+  }
+
   async getAlertDetails({ alertId, alertRuleId }) {
     this.validateParams({ alertId }, {
       alertId: { required: true, type: 'string' }
@@ -313,6 +446,55 @@ export default class ThousandEyesPlugin extends BasePlugin {
       this.logger.error('getAlertDetails failed:', error);
       return { success: false, error: error.message };
     }
+  }
+
+  /**
+   * Clear all cached ThousandEyes resource and detail entries, then reload
+   * each resource list so callers receive current configuration immediately.
+   * @returns {Promise<{success: boolean, data: Object, errors?: Object, cacheScopesInvalidated: string[], cacheKeysInvalidated: string[]}>}
+   */
+  async refreshAll() {
+    const cacheKeysInvalidated = this.cache.keys();
+    this.cache.flushAll();
+
+    const cacheScopesInvalidated = [
+      'agents',
+      'tests',
+      'alerts',
+      'agentDetails',
+      'testDetails',
+      'alertDetails'
+    ];
+
+    this.logger.info(`Refreshing all ThousandEyes resources; invalidated ${cacheKeysInvalidated.length} cache entries`);
+
+    const [agents, tests, alerts] = await Promise.all([
+      this.listAgents(),
+      this.listTests(),
+      this.listAlerts()
+    ]);
+
+    const data = {
+      agents: agents.data,
+      tests: tests.data,
+      alerts: alerts.data
+    };
+
+    const results = { agents, tests, alerts };
+    const errors = Object.entries(results).reduce((acc, [resource, result]) => {
+      if (!result.success) {
+        acc[resource] = result.error;
+      }
+      return acc;
+    }, {});
+
+    return {
+      success: Object.keys(errors).length === 0,
+      data,
+      ...(Object.keys(errors).length > 0 ? { errors } : {}),
+      cacheScopesInvalidated,
+      cacheKeysInvalidated
+    };
   }
 
   async extractParameters(input, action) {

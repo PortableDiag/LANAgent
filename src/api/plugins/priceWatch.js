@@ -19,6 +19,9 @@ export default class PriceWatchPlugin extends BasePlugin {
       { command: 'check', description: 'Read the current price on a product page (any shop that publishes its price; a CSS selector helps on the rest)',
         usage: 'check({ url: "https://shop.example.com/item/123" })',
         examples: ['what is the price on this product page', 'how much is this item right now', 'check the price of https://shop.example.com/item/123'] },
+      { command: 'compare', description: 'Compare current prices across multiple product retailer pages without creating watches',
+        usage: 'compare({ urls: ["https://shop.example.com/item/123", { url: "https://other.example.com/item/123", name: "Other shop", selector: ".price" }] })',
+        examples: ['compare these product prices', 'which retailer has the lowest price'] },
       { command: 'watch', description: 'Watch a product page\'s price and alert when it falls to a target price, or moves by a percentage',
         usage: 'watch({ url: "https://shop.example.com/item/123", targetPrice: 199.99, changePct: 10, name: "Monitor", interval: 360 })',
         examples: ['tell me when this drops below 200', 'watch the price of this product', 'alert me if this item goes on sale', 'track the price of this laptop and let me know when it is under $900'] },
@@ -46,12 +49,13 @@ export default class PriceWatchPlugin extends BasePlugin {
     try {
       switch (action) {
         case 'check': return asksToWatch(p.originalInput || p._context?.originalInput) ? await this.watch(p) : await this.check(p);
+        case 'compare': return await this.compare(p);
         case 'watch': return await this.watch(p);
         case 'unwatch': return await this.unwatch(p);
         case 'list': return await this.list();
         case 'recheck': return await this.recheck(p);
         case 'trend': return await this.trend(p);
-        default: return { success: false, error: `Unknown action '${action}'. Use: check, watch, unwatch, list, recheck, trend` };
+        default: return { success: false, error: `Unknown action '${action}'. Use: check, compare, watch, unwatch, list, recheck, trend` };
       }
     } catch (error) {
       this.logger.warn(`priceWatch ${action} failed: ${error.message}`);
@@ -68,6 +72,109 @@ export default class PriceWatchPlugin extends BasePlugin {
     const r = await readPrice(await assertPublicUrl(url), { selector, scraper: this.scraper() });
     const note = r.confidence === 'low' ? ' (read from the page text, not the shop\'s price data — confirm it)' : '';
     return { success: true, ...r, url, result: `${r.title ? `${r.title}: ` : ''}${r.currency ? `${r.currency} ` : ''}${r.price}${r.availability ? ` — ${r.availability}` : ''}${note}` };
+  }
+
+  /**
+   * Compare current prices from multiple retailer pages without creating persistent watches.
+   * Prices are ranked only against others in the same currency, and a price guessed from the
+   * page text keeps check()'s "confirm it" note, so a guess is never presented as the cheapest
+   * without the warning. (_readPrice/_assertPublicUrl are test seams; production uses the
+   * shared webWatchService functions.)
+   */
+  async compare({ urls }) {
+    const read = this._readPrice || readPrice;
+    const assertUrl = this._assertPublicUrl || assertPublicUrl;
+    if (!Array.isArray(urls)) throw new Error('urls must be an array');
+    if (urls.length === 0) throw new Error('at least one retailer url is required');
+    if (urls.length > 10) throw new Error('a maximum of 10 retailer urls can be compared at once');
+
+    const items = urls.map((item, index) => {
+      if (typeof item === 'string') return { url: item, name: undefined, selector: undefined, index };
+      if (item && typeof item === 'object') {
+        return { url: item.url, name: item.name, selector: item.selector, index };
+      }
+      return { url: undefined, name: undefined, selector: undefined, index };
+    });
+
+    const settled = await Promise.allSettled(items.map(async (item) => {
+      const validatedUrl = await assertUrl(item.url, `urls[${item.index}]`);
+      const reading = await read(validatedUrl, {
+        selector: item.selector,
+        scraper: this.scraper()
+      });
+
+      return {
+        url: item.url,
+        title: reading.title,
+        price: reading.price,
+        currency: reading.currency,
+        availability: reading.availability,
+        confidence: reading.confidence
+      };
+    }));
+
+    const results = [];
+    const failures = [];
+    const successfulForDisplay = [];
+
+    settled.forEach((outcome, index) => {
+      const item = items[index];
+      if (outcome.status === 'fulfilled') {
+        results.push(outcome.value);
+        successfulForDisplay.push({ ...outcome.value, name: item.name });
+      } else {
+        const error = outcome.reason instanceof Error ? outcome.reason.message : String(outcome.reason);
+        failures.push({ url: item.url, name: item.name, error });
+      }
+    });
+
+    // readPrice returns numbers; anything else is left unranked rather than guessed at
+    // ("1.299,00" read as 1.299 would rank a 1,299 item as the cheapest).
+    const numericPrice = (price) => (typeof price === 'number' && Number.isFinite(price) ? price : null);
+    const byPrice = (a, b) => {
+      const left = numericPrice(a.price);
+      const right = numericPrice(b.price);
+      if (left == null && right == null) return 0;
+      if (left == null) return 1;
+      if (right == null) return -1;
+      return left - right;
+    };
+
+    // Rank within each currency only: USD 10 and EUR 9 are not comparable numbers.
+    const groups = new Map();
+    for (const reading of successfulForDisplay) {
+      const key = reading.currency || '';
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(reading);
+    }
+    const mixed = groups.size > 1;
+    const lines = [];
+    if (mixed) lines.push('Prices are in different currencies, so each currency is ranked on its own:');
+    for (const [currency, readings] of groups) {
+      readings.sort(byPrice);
+      if (mixed) lines.push('', currency || 'Currency unknown');
+      readings.forEach((reading, index) => {
+        const label = reading.name || reading.title || reading.url;
+        const amount = `${reading.currency ? `${reading.currency} ` : ''}${reading.price ?? 'price unavailable'}`;
+        const availability = reading.availability ? ` — ${reading.availability}` : '';
+        const note = reading.confidence === 'low' ? ' (read from the page text, not the shop\'s price data — confirm it)' : '';
+        lines.push(`${index + 1}. ${label}: ${amount}${availability}${note} (${reading.url})`);
+      });
+    }
+
+    if (failures.length) {
+      lines.push('', 'Unable to read:');
+      failures.forEach((failure) => {
+        lines.push(`• ${failure.name || failure.url || 'Retailer'}: ${failure.error}`);
+      });
+    }
+
+    return {
+      success: results.length > 0,
+      results,
+      failures,
+      result: lines.length ? lines.join('\n') : 'No retailer prices could be read.'
+    };
   }
 
   async watch({ url, targetPrice, target, price, changePct, name, selector, interval: every }) {

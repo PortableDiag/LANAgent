@@ -646,14 +646,7 @@ class AgenticCommerceService {
     /** Public status: never the deliverable itself. */
     async getJobStatus(jobId) {
         const job = await AgenticCommerceJob.findOne({ jobId: Number(jobId) });
-        if (job) {
-            return {
-                jobId: job.jobId, status: job.status, serviceType: job.serviceType, client: job.client,
-                budget: job.budgetFormatted, currency: job.paymentToken, expiredAt: job.expiredAt,
-                executionStarted: job.executionStarted, executionCompleted: job.executionCompleted,
-                deliverableHash: job.deliverableHash || null, error: job.errorMessage || null
-            };
-        }
+        if (job) return publicStatus(job);
         if (!this._initialized) return null;
         try {
             const onChain = await (await this._view()).getJob(Number(jobId));
@@ -663,6 +656,18 @@ class AgenticCommerceService {
         }
     }
 
+    /**
+     * Status of many jobs in ONE database read, never the chain. A batch that fell back to an
+     * RPC call per unknown id would turn one rate-limited request into 50 chain reads, and job
+     * ids are sequential, so it would also scan every job's client address. Unknown ids are
+     * simply absent; the single-job route still has the on-chain fallback.
+     */
+    async getJobStatuses(jobIds) {
+        const ids = [...new Set(jobIds.map(Number))];
+        const jobs = await AgenticCommerceJob.find({ jobId: { $in: ids } }).lean();
+        return new Map(jobs.map(j => [j.jobId, publicStatus(j)]));
+    }
+
     async getDeliverable(jobId) {
         const job = await AgenticCommerceJob.findOne({ jobId: Number(jobId) });
         if (!job || job.status !== 'Completed') return null;
@@ -670,5 +675,15 @@ class AgenticCommerceService {
     }
 }
 
-export const _internals = { canonical, publicResult, SIGN_ABI };
+/** The public fields of a job this agent holds (shared by single and batch status). */
+function publicStatus(job) {
+    return {
+        jobId: job.jobId, status: job.status, serviceType: job.serviceType, client: job.client,
+        budget: job.budgetFormatted, currency: job.paymentToken, expiredAt: job.expiredAt,
+        executionStarted: job.executionStarted, executionCompleted: job.executionCompleted,
+        deliverableHash: job.deliverableHash || null, error: job.errorMessage || null
+    };
+}
+
+export const _internals = { canonical, publicResult, SIGN_ABI, publicStatus };
 export default new AgenticCommerceService();

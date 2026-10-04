@@ -2,6 +2,9 @@ import { EventEmitter } from "events";
 import { logger } from "../utils/logger.js";
 import { retryOperation } from '../utils/retryUtils.js';
 
+const RECENT_WINDOW = 20;                 // calls the response-time alert looks at
+const ALERT_REPEAT_MS = 60 * 60 * 1000;   // a lasting condition is repeated at most hourly
+
 export class BaseProvider extends EventEmitter {
   constructor(name, config = {}) {
     super();
@@ -24,10 +27,16 @@ export class BaseProvider extends EventEmitter {
       tokensByModel: {},
       costEstimate: 0
     };
+    // Model calls take seconds, not milliseconds: the old 1000 ms default, checked against the
+    // lifetime average, was crossed for good after the first few calls and then warned on every
+    // call (934 "High response time" warnings on 2026-10-02). Alerts now judge the last
+    // RECENT_WINDOW calls and fire on a change (and at most hourly while it stays high).
     this.alertThresholds = {
-      responseTime: config.responseTimeThreshold || 1000, // default 1000ms
-      errorRate: config.errorRateThreshold || 0.1 // default 10%
+      responseTime: config.responseTimeThreshold || Number(process.env.PROVIDER_ALERT_RESPONSE_MS) || 60000,
+      errorRate: config.errorRateThreshold || 0.1 // 10%
     };
+    this.recentResponseTimes = [];
+    this.alertState = {};
     // Token usage batching — flush via insertMany instead of per-request create
     this.tokenUsageQueue = [];
     this.queueThreshold = config.queueThreshold || 10;
@@ -161,6 +170,9 @@ export class BaseProvider extends EventEmitter {
       this.metrics.costEstimate = this.calculateCost(this.metrics);
     }
     
+    this.recentResponseTimes.push(requestTime);
+    if (this.recentResponseTimes.length > RECENT_WINDOW) this.recentResponseTimes.shift();
+
     const prevAvg = this.metrics.averageResponseTime;
     this.metrics.averageResponseTime = 
       (prevAvg * (this.metrics.totalRequests - 1) + requestTime) / this.metrics.totalRequests;
@@ -187,12 +199,28 @@ export class BaseProvider extends EventEmitter {
   }
 
   checkAlerts() {
-    const errorRate = this.metrics.errors / this.metrics.totalRequests;
-    if (this.metrics.averageResponseTime > this.alertThresholds.responseTime) {
-      this.emitAlert('High response time', `Average response time exceeded threshold: ${this.metrics.averageResponseTime}ms`);
-    }
-    if (errorRate > this.alertThresholds.errorRate) {
-      this.emitAlert('High error rate', `Error rate exceeded threshold: ${(errorRate * 100).toFixed(2)}%`);
+    const times = this.recentResponseTimes || [];
+    const recentAvg = times.length ? times.reduce((a, b) => a + b, 0) / times.length : 0;
+    this._alertOnChange('High response time', times.length >= 5 && recentAvg > this.alertThresholds.responseTime,
+      `${this.name}: the last ${times.length} calls averaged ${Math.round(recentAvg)} ms (threshold ${this.alertThresholds.responseTime} ms)`);
+    const total = this.metrics.totalRequests + this.metrics.errors;
+    const errorRate = total ? this.metrics.errors / total : 0;
+    this._alertOnChange('High error rate', total >= 10 && errorRate > this.alertThresholds.errorRate,
+      `${this.name}: ${(errorRate * 100).toFixed(1)}% of calls failed (threshold ${(this.alertThresholds.errorRate * 100).toFixed(0)}%)`);
+  }
+
+  /** Warn when a condition starts (and hourly while it lasts); note once when it clears. */
+  _alertOnChange(title, on, message) {
+    const st = this.alertState[title] || (this.alertState[title] = { firing: false, at: 0 });
+    const now = Date.now();
+    if (on) {
+      if (!st.firing || now - st.at >= ALERT_REPEAT_MS) {
+        st.firing = true; st.at = now;
+        this.emitAlert(title, message);
+      }
+    } else if (st.firing) {
+      st.firing = false;
+      logger.info(`Alert cleared: ${title} - ${message}`);
     }
   }
 

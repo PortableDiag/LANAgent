@@ -32,9 +32,38 @@ export function shouldReact(ctx) {
 }
 
 class NoopAck {
-  constructor() { this.settled = false; this.emojis = []; }
-  ok() { this.settled = true; }
-  fail() { this.settled = true; }
+  constructor() {
+    this.settled = false;
+    this.emojis = [];
+    this.attemptedEmojis = [];
+    this.failedPhases = [];
+  }
+
+  ok() {
+    this.settled = true;
+  }
+
+  fail() {
+    this.settled = true;
+  }
+
+  /**
+   * Resolve with the outcome shape used by active reaction acknowledgements.
+   *
+   * @returns {Promise<{settled: boolean, attemptedEmojis: string[], emojis: string[], failedPhases: string[]}>}
+   */
+  flush() {
+    return Promise.resolve(this._outcome());
+  }
+
+  _outcome() {
+    return {
+      settled: this.settled,
+      attemptedEmojis: [...this.attemptedEmojis],
+      emojis: [...this.emojis],
+      failedPhases: [...this.failedPhases],
+    };
+  }
 }
 
 export class ReactionAck {
@@ -44,33 +73,66 @@ export class ReactionAck {
     this.messageId = ctx.message.message_id;
     this.settled = false;
     this.emojis = []; // reactions actually applied, for tests and logs
+    this.attemptedEmojis = [];
+    this.failedPhases = [];
     this.chain = Promise.resolve();
   }
 
-  _set(emoji) {
-    this.chain = this.chain.then(async () => {
+  _set(emoji, phase) {
+    const operation = this.chain.then(async () => {
+      this.attemptedEmojis.push(emoji);
+
       try {
         await this.telegram.setMessageReaction(this.chatId, this.messageId, [{ type: 'emoji', emoji }]);
         this.emojis.push(emoji);
       } catch (err) {
-        logger.debug(`[telegram] reaction ${emoji} on message ${this.messageId} failed: ${err?.description || err?.message || err}`);
+        this.failedPhases.push(phase);
+        try {
+          logger.debug(`[telegram] reaction ${emoji} on message ${this.messageId} failed: ${err?.description || err?.message || err}`);
+        } catch {
+          // Logging must not turn a best-effort reaction into a rejected lifecycle promise.
+        }
       }
     });
-    return this.chain;
+
+    this.chain = operation;
+    return operation;
   }
 
-  start() { this._set(REACTION_WORKING); return this; }
+  start() {
+    this._set(REACTION_WORKING, 'working');
+    return this;
+  }
 
   /** The reply was sent. First settlement wins; later calls are ignored. */
-  ok() { this._settle(REACTION_DONE); }
+  ok() {
+    this._settle(REACTION_DONE, 'done');
+  }
 
   /** Processing failed or produced nothing useful. */
-  fail() { this._settle(REACTION_FAILED); }
+  fail() {
+    this._settle(REACTION_FAILED, 'failed');
+  }
 
-  _settle(emoji) {
+  _settle(emoji, phase) {
     if (this.settled) return;
     this.settled = true;
-    this._set(emoji);
+    this._set(emoji, phase);
+  }
+
+  /**
+   * Wait for all reactions queued so far and return their best-effort outcome.
+   * Reaction failures are absorbed and reported in failedPhases.
+   *
+   * @returns {Promise<{settled: boolean, attemptedEmojis: string[], emojis: string[], failedPhases: string[]}>}
+   */
+  flush() {
+    return this.chain.then(() => ({
+      settled: this.settled,
+      attemptedEmojis: [...this.attemptedEmojis],
+      emojis: [...this.emojis],
+      failedPhases: [...this.failedPhases],
+    }));
   }
 }
 

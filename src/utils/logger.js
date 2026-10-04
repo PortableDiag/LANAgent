@@ -3,6 +3,7 @@ import Transport from 'winston-transport';
 import path from 'path';
 import fs from 'fs';
 import { FilteredFileTransport } from './filteredTransport.js';
+import { SystemLogTransport } from './systemLogTransport.js';
 
 // Ensure logs directory exists
 const logDir = 'logs';
@@ -397,6 +398,16 @@ const logger = winston.createLogger({
     })
   ]
 });
+
+// 5. QUERYABLE HISTORY - warnings and errors in the SystemLog collection (systemLogTransport.js),
+// read by the systemLogs plugin and the scheduler's error/operations reports. Same splat merge
+// and redaction as the files. Off in module load checks and tests (a test must never write a
+// real database) and with SYSTEMLOG_DISABLED=true.
+if (process.env.SYSTEMLOG_DISABLED !== 'true' && process.env.SELFMOD_LOAD_CHECK !== '1' && !process.env.NODE_TEST_CONTEXT && process.env.NODE_ENV !== 'test') {
+  logger.add(new SystemLogTransport({
+    format: winston.format.combine(appendSplat(), redactFormat(), winston.format.errors({ stack: true }))
+  }));
+}
 
 // Add console output in development
 if (process.env.NODE_ENV !== 'production') {

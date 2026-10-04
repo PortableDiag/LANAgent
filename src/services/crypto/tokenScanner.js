@@ -10,7 +10,7 @@ import swapService from './swapService.js';
 import { strategyRegistry } from './strategies/StrategyRegistry.js';
 import { PluginSettings } from '../../models/PluginSettings.js';
 import { encrypt, decrypt } from '../../utils/encryption.js';
-import { alchemyAvailable, alchemyTokenBalances } from '../../utils/alchemy.js';
+import { alchemyAvailable, alchemyTokenBalances, alchemyRpc } from '../../utils/alchemy.js';
 
 const logger = baseLogger.child({ service: 'token-scanner' });
 
@@ -191,6 +191,13 @@ const SCAN_RPCS = {
 // eth.drpc.org accepts the full 5000-block scan window in one call — fewer
 // requests matters because drpc rate-limits ALICE's VPN exit IP intermittently
 const SCAN_CHUNK_LIMITS = { bsc: 9999, ethereum: 5000, polygon: 2000 };
+// An RPC that refused getLogs is not asked again for this long: they refuse by policy (403,
+// "upgrade to paid plan"), and retrying three of them every 5 minutes was ~900 failed calls a day.
+const SCAN_RPC_PARK_MS = 6 * 60 * 60 * 1000;
+// Alchemy fallback for incoming transfers: at most one read per network per 30 minutes (~144
+// calls/day for three networks), covering at most this many blocks behind the scan window.
+const ALCHEMY_TRANSFERS_MIN_MS = 30 * 60 * 1000;
+const ALCHEMY_TRANSFERS_MAX_GAP = 200000;
 // Chain IDs for the scan networks. Pinning staticNetwork on scan providers is
 // REQUIRED: without it, ethers runs an internal network-detection retry loop that
 // console.log()s "failed to detect network ... retry in 1s" every second FOREVER
@@ -223,6 +230,12 @@ class TokenScanner {
         this.explorerApiKeys = {}; // cached API keys from DB
         this.moralisApiKey = null; // optional Moralis key for enhanced token discovery
         this.scanProviders = new Map(); // network -> { provider, url, ts } getLogs-capable RPC
+        // RPCs that refused an address-less getLogs, skipped until the time stored (url or 'primary:<net>').
+        this.scanRpcParkedUntil = new Map();
+        // network -> { at, toBlock } of the last Alchemy transfers read (scanViaAlchemyTransfers).
+        this.alchemyTransfers = new Map();
+        // network -> time of the last "Network scan failed" warning (one per hour per network).
+        this.scanWarnedAt = new Map();
     }
 
     /**
@@ -257,15 +270,19 @@ class TokenScanner {
      * cached provider that starts failing is evicted.
      */
     async _getTransferLogs(network, provider, fromBlock, toBlock, topics) {
+        const parked = (id) => (this.scanRpcParkedUntil.get(id) || 0) > Date.now();
+        const park = (id) => this.scanRpcParkedUntil.set(id, Date.now() + SCAN_RPC_PARK_MS);
         try {
+            if (parked(`primary:${network}`)) throw new Error('default RPC refused getLogs recently (parked)');
             return await provider.getLogs({ fromBlock, toBlock, topics });
         } catch (primaryErr) {
+            if (!parked(`primary:${network}`)) park(`primary:${network}`);
             const chunkSize = SCAN_CHUNK_LIMITS[network] || 2000;
             const cached = this.scanProviders.get(network);
             const candidates = [
                 ...(cached ? [cached.url] : []),
                 ...(SCAN_RPCS[network] || []).filter(u => u !== cached?.url)
-            ];
+            ].filter(u => !parked(u));
 
             for (const rpcUrl of candidates) {
                 const reuseCached = cached?.url === rpcUrl;
@@ -281,6 +298,7 @@ class TokenScanner {
                     logger.info(`[TokenScanner] ${network}: default RPC getLogs failed (${primaryErr.shortMessage || primaryErr.message}), recovered via ${rpcUrl} (${logs.length} logs)`);
                     return logs;
                 } catch (e) {
+                    park(rpcUrl);
                     if (reuseCached) this.scanProviders.delete(network);
                     // Destroy a freshly-created (uncached) provider so no timer/socket leaks.
                     else { try { scanProvider?.destroy(); } catch { /* ignore */ } }
@@ -623,11 +641,21 @@ class TokenScanner {
             const transferTopic = ethers.id('Transfer(address,address,uint256)');
             const toAddressPadded = ethers.zeroPadValue(this.walletAddress.toLowerCase(), 32);
 
-            const logs = await this._getTransferLogs(network, provider, fromBlock, currentBlock, [
-                transferTopic,
-                null, // from (any)
-                toAddressPadded // to (our address)
-            ]);
+            let logs;
+            try {
+                logs = await this._getTransferLogs(network, provider, fromBlock, currentBlock, [
+                    transferTopic,
+                    null, // from (any)
+                    toAddressPadded // to (our address)
+                ]);
+            } catch (logsErr) {
+                // No free RPC serves an address-less getLogs any more (2026-10-03: Binance dataseed
+                // "limit exceeded" even at 500 blocks, publicnode wants an address, dRPC/POKT 400/403),
+                // so every 5-minute scan of bsc/ethereum/polygon failed and incoming tokens went
+                // unseen. Alchemy's transfer index answers the same question in one call.
+                logs = await this.recentTransfersViaAlchemy(network, fromBlock, currentBlock, transferTopic);
+                if (logs === null) throw logsErr;
+            }
 
             // Filter out tokens sent by flagged scammer addresses
             let scammerRegistry = null;
@@ -669,10 +697,52 @@ class TokenScanner {
                 }
             }
         } catch (error) {
-            logger.warn(`Network scan failed for ${network}: ${error.message || error.code || JSON.stringify(error).slice(0, 200)}`);
+            // Every 5 minutes on three networks: one warning per network per hour, the rest debug.
+            const text = `Network scan failed for ${network}: ${(error.shortMessage || error.message || error.code || JSON.stringify(error)).toString().slice(0, 200)}`;
+            const last = this.scanWarnedAt.get(network) || 0;
+            if (Date.now() - last >= 60 * 60 * 1000) { this.scanWarnedAt.set(network, Date.now()); logger.warn(text); }
+            else logger.debug(text);
         }
 
         return results;
+    }
+
+    /**
+     * ERC-20 transfers TO the wallet in [fromBlock, toBlock], from Alchemy's transfer index, shaped
+     * like getLogs results ({ address, topics: [Transfer, from] }) for scanNetwork. Alchemy is
+     * pay-as-you-go, so this runs at most once per ALCHEMY_TRANSFERS_MIN_MS per network and reads
+     * incrementally from the last block it covered; between runs it returns [] (nothing new to
+     * analyse yet). Returns null when Alchemy is not available or fails, so the caller can report
+     * the original getLogs error.
+     */
+    async recentTransfersViaAlchemy(network, fromBlock, toBlock, transferTopic) {
+        if (!this.walletAddress || !alchemyAvailable(network)) return null;
+        const prev = this.alchemyTransfers.get(network);
+        if (prev && Date.now() - prev.at < ALCHEMY_TRANSFERS_MIN_MS) return [];
+        const start = prev ? Math.max(prev.toBlock + 1, fromBlock - ALCHEMY_TRANSFERS_MAX_GAP) : fromBlock;
+        if (start > toBlock) return [];
+        const logs = [];
+        let pageKey;
+        for (let page = 0; page < 3; page++) {
+            const q = {
+                toAddress: this.walletAddress, category: ['erc20'],
+                fromBlock: ethers.toQuantity(start), toBlock: ethers.toQuantity(toBlock),
+                withMetadata: false, excludeZeroValue: false, maxCount: '0x3e8',
+                ...(pageKey ? { pageKey } : {})
+            };
+            const r = await alchemyRpc(network, 'alchemy_getAssetTransfers', [q]);
+            if (!r) return page === 0 ? null : logs;
+            for (const t of r.transfers || []) {
+                const address = t.rawContract?.address;
+                if (!address || !t.from) continue;
+                logs.push({ address, topics: [transferTopic, ethers.zeroPadValue(t.from.toLowerCase(), 32)] });
+            }
+            pageKey = r.pageKey;
+            if (!pageKey) break;
+        }
+        this.alchemyTransfers.set(network, { at: Date.now(), toBlock });
+        logger.info(`[TokenScanner] ${network}: free RPCs refuse getLogs; read ${logs.length} incoming transfer(s) in blocks ${start}-${toBlock} via Alchemy`);
+        return logs;
     }
 
     /**

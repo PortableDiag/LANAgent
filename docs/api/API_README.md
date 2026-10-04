@@ -3104,7 +3104,7 @@ Multi-agent coordination protocol (ERC-8001) with intent-based propose/accept/ex
 |--------|----------|-------------|
 | GET | `/api/coordination/types` | List available coordination types |
 | GET | `/api/coordination/active` | Get active/pending coordination intents |
-| GET | `/api/coordination/history` | Past coordinations with filters |
+| GET | `/api/coordination/history` | Past coordinations; `status`, `type`, `limit` (≤200), `offset`, `sortBy`, `sortOrder`; returns `pagination` |
 | GET | `/api/coordination/stats` | Success rate, avg time to ready |
 | POST | `/api/coordination/propose` | Create new coordination intent |
 | POST | `/api/coordination/:intentHash/accept` | Accept a coordination intent |
@@ -3172,6 +3172,7 @@ ERC-8183 agentic commerce endpoints on the external gateway (`/api/external`).
 | GET | `/api/external/jobs/services` | List available job types and pricing |
 | POST | `/api/external/jobs/create` | Create a new job with escrow |
 | GET | `/api/external/jobs/:jobId/status` | Check job status |
+| POST | `/api/external/jobs/batch/status` | Status of up to 50 jobs `{ jobIds: [int…] }` in one read; unknown ids come back `not_found` |
 | POST | `/api/external/jobs/:jobId/fund` | Fund a created job |
 | GET | `/api/external/jobs/:jobId/deliverable` | Get job deliverable |
 | GET | `/api/external/admin/jobs/active` | Admin: list active jobs |

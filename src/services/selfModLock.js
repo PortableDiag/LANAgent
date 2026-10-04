@@ -26,12 +26,22 @@ export class SelfModLock extends EventEmitter {
     this._keepAliveTimer = null;
     this._keepAliveStartedAt = null;
     this._keepAliveService = null;
+    // FIFO waiting queue for callers that want to wait instead of polling
+    this._waitQueue = [];
+    this._processingQueue = false;
   }
   
   /**
    * Try to acquire the lock
    * @param {string} service - Name of the service trying to acquire lock
-   * @returns {Promise<boolean>} - True if lock acquired, false if already locked
+   * @param {Object} [options] - Acquisition options
+   * @param {boolean} [options.wait] - If true and the lock is held, wait in a FIFO queue
+   *   instead of returning false at once. The wait is always bounded.
+   * @param {number} [options.waitTimeoutMs] - Maximum wait (default: the lock timeout,
+   *   30 min). When it runs out the promise resolves false, like a failed acquire.
+   * @param {boolean|Object} [options.keepAlive] - Enable automatic lease renewal
+   * @returns {Promise<boolean>} - True if lock acquired, false if it is held (and, with
+   *   wait, was not released in time). Never rejects.
    */
   async acquire(service, options = {}) {
     try {
@@ -46,6 +56,11 @@ export class SelfModLock extends EventEmitter {
         const processAlive = lockData.pid ? this.isProcessAlive(lockData.pid) : false;
         
         if (lockAge < this.lockTimeout && processAlive) {
+          // Lock is validly held (live pid, inside the timeout)
+          if (options.wait) {
+            // Caller opted to wait: queue it (bounded) instead of failing now
+            return this._enqueueWaiter(service, options);
+          }
           logger.warn(`Lock is held by ${lockData.service} since ${lockData.timestamp}. Cannot acquire for ${service}.`);
           return false;
         }
@@ -128,6 +143,9 @@ export class SelfModLock extends EventEmitter {
         this.stopKeepAlive();
         logger.info(`Lock released by ${service}`);
         this.emit('lockReleased', service);
+        
+        // Process the waiting queue — grant the lock to the next waiter
+        this._processQueue();
       } else {
         logger.warn(`${service} tried to release lock but it was held by ${lockData?.service || 'unknown'}`);
       }
@@ -198,6 +216,9 @@ export class SelfModLock extends EventEmitter {
       this.cache.del('lock');
       logger.warn('Lock forcefully cleared');
       this.emit('lockForceCleared');
+      
+      // The lock is free now: hand it to the next waiter, if any
+      this._processQueue();
     } catch (error) {
       if (error.code !== 'ENOENT') {
         logger.error('Failed to force clear lock:', error);
@@ -403,6 +424,87 @@ export class SelfModLock extends EventEmitter {
       this._keepAliveService = null;
       logger.info('KeepAlive stopped.');
     }
+  }
+
+  // ---------------------------------------------------------------------------
+  //  FIFO waiting queue (opt-in via acquire(service, { wait: true }))
+  //
+  //  Waiters are woken by release()/forceClear() in THIS process. A lock held by
+  //  another process, or one that simply ages past lockTimeout without a release,
+  //  wakes nobody — which is why every wait is bounded and makes one last acquire
+  //  attempt (which honours the timeout / dead-pid rules) before giving up.
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Queue a caller until the lock is released or the wait runs out.
+   * @param {string} service
+   * @param {Object} options - the caller's acquire() options
+   * @returns {Promise<boolean>} resolves true once acquired, false on timeout
+   * @private
+   */
+  _enqueueWaiter(service, options = {}) {
+    const { wait, waitTimeoutMs, ...acquireOptions } = options;
+    const timeoutMs = (typeof waitTimeoutMs === 'number' && waitTimeoutMs > 0) ? waitTimeoutMs : this.lockTimeout;
+
+    return new Promise((resolve) => {
+      const waiter = { service, acquireOptions, resolve, timer: null };
+
+      waiter.timer = safeTimeout(async () => {
+        waiter.timer = null;
+        const idx = this._waitQueue.indexOf(waiter);
+        if (idx === -1) return; // already being granted by _processQueue
+        this._waitQueue.splice(idx, 1);
+        this.emit('queuePosition', this._waitQueue.length);
+        // Last attempt: the holder may have died or its lease expired without a release
+        let acquired = false;
+        try { acquired = await this.acquire(service, acquireOptions); } catch { acquired = false; }
+        if (!acquired) logger.warn(`Lock wait for ${service} timed out after ${timeoutMs}ms`);
+        resolve(acquired);
+      }, timeoutMs, 'selfModLock-waiterTimeout');
+
+      this._waitQueue.push(waiter);
+      this.emit('queuePosition', this._waitQueue.length);
+      logger.info(`Service ${service} added to lock wait queue (position ${this._waitQueue.length})`);
+    });
+  }
+
+  /**
+   * Grant the lock to the next waiter, if any. Called after release()/forceClear().
+   * If the lock was taken by someone else in the meantime, the waiter goes back to the
+   * head of the queue and keeps waiting (its timeout still applies).
+   * @private
+   */
+  async _processQueue() {
+    if (this._processingQueue || this._waitQueue.length === 0) return;
+    this._processingQueue = true;
+    try {
+      const waiter = this._waitQueue.shift();
+      this.emit('queuePosition', this._waitQueue.length);
+      let acquired = false;
+      try {
+        acquired = await this.acquire(waiter.service, waiter.acquireOptions);
+      } catch (err) {
+        logger.error(`Lock queue: acquire failed for ${waiter.service}:`, err);
+      }
+      if (acquired) {
+        if (waiter.timer) clearTimeout(waiter.timer);
+        waiter.timer = null;
+        waiter.resolve(true);
+      } else if (waiter.timer) {
+        // Still within its wait: back to the front of the line
+        this._waitQueue.unshift(waiter);
+        this.emit('queuePosition', this._waitQueue.length);
+      } else {
+        waiter.resolve(false);
+      }
+    } finally {
+      this._processingQueue = false;
+    }
+  }
+
+  /** Number of callers waiting for the lock. */
+  getQueueLength() {
+    return this._waitQueue.length;
   }
 }
 

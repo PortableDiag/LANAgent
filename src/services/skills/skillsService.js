@@ -260,7 +260,13 @@ export class SkillsService {
     if (!overwrite) {
       const exists = await fs.access(file).then(() => true, () => false);
       // a learned skill must not silently shadow a bundled one of the same name
-      if (exists || (await this.scan(), this.skills.get(slug)?.bundled)) throw new Error(`Skill "${slug}" already exists`);
+      // Say what to do instead: on 2026-10-03 ReAct answered a bare "already exists" by DELETING
+      // the skill to recreate it, which throws away its history and rollback.
+      if (exists || (await this.scan(), this.skills.get(slug)?.bundled)) {
+        throw new Error(this.skills.get(slug)?.bundled
+          ? `Skill "${slug}" already exists (built in). Choose another name; built-in skills cannot be replaced.`
+          : `Skill "${slug}" already exists. To change it use skills.update({ name: "${slug}", body, description }) — that keeps its history and rollback. Do not delete it to recreate it.`);
+      }
     }
     await fs.mkdir(dir, { recursive: true });
     await fs.writeFile(file, renderSkill({ name: slug, description, body: String(body).substring(0, MAX_BODY), extra }), 'utf8');

@@ -836,6 +836,14 @@ Respond with ONLY the rephrased message, no explanation:`;
       //
       // Set AUTO_DEPLOY_MERGED=false to opt an instance out; it then reports what
       // is undeployed instead of deploying it.
+      // Record what happened to self-mod PRs (merged/rejected) so improvement
+      // metrics stop reading every PR as still pending. Independent of deploying.
+      try {
+        await selfModService.reconcileImprovementStatuses?.();
+      } catch (error) {
+        logger.warn(`Improvement status reconcile failed: ${error.message}`);
+      }
+
       if (process.env.AUTO_DEPLOY_MERGED === 'false') {
         try {
           const result = await selfModService.deployMergedChanges({ dryRun: true });

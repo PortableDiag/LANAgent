@@ -29,7 +29,7 @@ const MAX_SEARCH_LIMIT = 50;
 // with the tools, minus anything that restarts, reconfigures or opens a shell on this host, or
 // holds the operator's credentials. Money is already out via DEFAULT_EXCLUDED. Extend with
 // PEER_EXCLUDED_PLUGINS.
-const PEER_EXCLUDED = ['system', 'systemAdmin', 'ssh', 'vpn', 'apikeys', 'oauthmanager', 'selfHealing', 'software', 'devenv', 'development', 'docker', 'backupStrategy', 'email', 'twitter', 'subagents'];
+const PEER_EXCLUDED = ['system', 'systemAdmin', 'ssh', 'vpn', 'apikeys', 'oauthmanager', 'selfHealing', 'software', 'devenv', 'development', 'docker', 'backupStrategy', 'email', 'twitter', 'subagents', 'systemLogs'];
 
 export function excludedPlugins(context = null) {
   const extra = (process.env.REASONING_EXCLUDED_PLUGINS || '').split(',').map(s => s.trim()).filter(Boolean);

@@ -4261,6 +4261,16 @@ Return ONLY the post text, nothing else.`;
       Object.assign(data, extracted);
     }
 
+    // Actions on one post take `postId`. Models name it their own way ({ id }, { post_id },
+    // { replyTo }), and a renamed id became "Required field 'postId' is missing" (reply,
+    // 2026-10-03). Accept the usual spellings for those actions only.
+    if (data.postId == null || data.postId === '') {
+      const takesPostId = this.commands.find(c => c.command === action)?.usage?.includes('postId:');
+      const alias = takesPostId && ['id', 'post_id', 'postID', 'post', 'replyTo', 'parentId'].find(k => data[k] != null && data[k] !== '');
+      if (alias) data.postId = typeof data[alias] === 'object' ? (data[alias].id ?? data[alias]._id) : data[alias];
+    }
+    if (data.postId != null && typeof data.postId !== 'string') data.postId = String(data.postId);
+
     try {
       switch (action) {
         // Auth

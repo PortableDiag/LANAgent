@@ -32,10 +32,71 @@ const quoteLimiter = rateLimit({
     message: { success: false, error: 'Too many quotes, please try again later.' }
 });
 
+const MAX_BATCH_SIZE = 50;
+
 const jobIdOf = (req) => {
     const id = Number(req.params.jobId);
     return Number.isInteger(id) && id > 0 ? id : null;
 };
+
+/**
+ * POST /api/external/jobs/batch/status
+ * Body: { jobIds: [1, 2, 3] }
+ * Returns public status data for up to 50 distinct jobs without exposing deliverables.
+ */
+const batchStatus = async (req, res) => {
+    const { jobIds } = req.body || {};
+
+    if (!Array.isArray(jobIds) || jobIds.length === 0) {
+        return res.status(400).json({
+            success: false,
+            error: 'jobIds must be a non-empty array of positive integer IDs',
+            errorCode: 'invalid_job_ids'
+        });
+    }
+
+    if (jobIds.length > MAX_BATCH_SIZE) {
+        return res.status(400).json({
+            success: false,
+            error: `A maximum of ${MAX_BATCH_SIZE} job IDs is allowed per request`,
+            errorCode: 'batch_too_large'
+        });
+    }
+
+    if (jobIds.some((jobId) => !Number.isInteger(jobId) || jobId <= 0)) {
+        return res.status(400).json({
+            success: false,
+            error: 'jobIds must contain only positive integer IDs',
+            errorCode: 'invalid_job_ids'
+        });
+    }
+
+    const uniqueJobIds = [...new Set(jobIds)];
+
+    // One database read for the whole batch, never a chain call per id (see getJobStatuses).
+    let found;
+    try {
+        found = await agenticCommerceService.getJobStatuses(uniqueJobIds);
+    } catch (err) {
+        logger.warn(`POST /jobs/batch/status lookup failed: ${err.message}`);
+        return res.status(500).json({ success: false, error: 'Status lookup failed', errorCode: 'status_lookup_failed' });
+    }
+
+    const results = uniqueJobIds.map((jobId) => found.has(jobId)
+        ? { jobId, status: 'found', job: found.get(jobId) }
+        : {
+            jobId,
+            status: 'not_found',
+            error: 'job_not_found',
+            errorCode: 'job_not_found',
+            hint: `Not a job this agent has accepted. GET /api/external/jobs/${jobId} also checks the chain.`
+        });
+
+    return res.json({ success: true, results });
+};
+
+// Keep the batch route before the parameterized job route.
+router.post('/batch/status', batchStatus);
 
 // --- Public ---
 

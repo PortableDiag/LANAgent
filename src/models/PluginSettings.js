@@ -10,7 +10,7 @@ import { jsonClone } from '../utils/jsonUtils.js';
  * - Replace PluginSettings.findOne() with PluginSettings.getCached()
  * - Replace PluginSettings.findOneAndUpdate() with PluginSettings.setCached()
  * - Cache is automatically invalidated on updates
- * 
+ *
  * Example:
  *   const settings = await PluginSettings.getCached('email', 'notificationSettings');
  *   await PluginSettings.setCached('email', 'notificationSettings', newSettings);
@@ -232,6 +232,136 @@ pluginSettingsSchema.statics.setCached = async function(pluginName, settingsKey,
 
   // Cache will be cleared by the post hook
   return doc;
+};
+
+/**
+ * Atomically update settings when the stored version matches the expected version.
+ *
+ * A missing document can be created by passing expectedVersion 0. Creation uses
+ * the existing unique compound index to protect against duplicate documents
+ * created by concurrent workers.
+ *
+ * @param {string} pluginName - Plugin name
+ * @param {string} settingsKey - Settings key
+ * @param {any} settingsValue - New settings value
+ * @param {number} expectedVersion - Version the caller read before updating
+ * @param {object} options - Optional operation metadata
+ * @param {string} options.operationId - Identifier for the update operation
+ * @param {object} options.metadata - Additional operation metadata
+ * @returns {Promise<object>} Result containing updated, conflict, and currentVersion
+ */
+pluginSettingsSchema.statics.updateIfVersion = async function(
+  pluginName,
+  settingsKey,
+  settingsValue,
+  expectedVersion,
+  options = {}
+) {
+  if (!Number.isInteger(expectedVersion) || expectedVersion < 0) {
+    throw new TypeError('expectedVersion must be a non-negative integer');
+  }
+
+  const now = new Date();
+  const cacheKey = `${pluginName}:${settingsKey}`;
+  const historyEntry = {
+    version: '$version',
+    settingsValue: '$settingsValue',
+    updatedAt: '$updatedAt'
+  };
+
+  if (options.operationId !== undefined) {
+    historyEntry.operationId = { $literal: options.operationId };
+  }
+  if (options.metadata !== undefined) {
+    historyEntry.metadata = { $literal: options.metadata };
+  }
+
+  const updatePipeline = [{
+    $set: {
+      pluginName: { $literal: pluginName },
+      settingsKey: { $literal: settingsKey },
+      settingsValue: { $literal: settingsValue },
+      updatedAt: { $literal: now },
+      // Mongoose's timestamps plugin only appends `updatedAt` to an update
+      // PIPELINE, and schema defaults are not applied to one, so an upsert
+      // (expectedVersion 0) would otherwise insert a document with no createdAt.
+      createdAt: { $ifNull: ['$createdAt', { $literal: now }] },
+      version: {
+        $add: [
+          { $ifNull: ['$version', 0] },
+          1
+        ]
+      },
+      history: {
+        $cond: [
+          { $ne: [{ $type: '$settingsValue' }, 'missing'] },
+          {
+            $slice: [
+              {
+                $concatArrays: [
+                  { $ifNull: ['$history', []] },
+                  [historyEntry]
+                ]
+              },
+              -1000
+            ]
+          },
+          { $ifNull: ['$history', []] }
+        ]
+      }
+    }
+  }];
+
+  try {
+    // Deliberately NOT wrapped in a retry: a compare-and-set is not idempotent.
+    // If the first attempt commits but its reply is lost, a retry no longer
+    // matches `version: expectedVersion` and would report the caller's own write
+    // as someone else's conflict. Surface the error and let the caller re-read.
+    const updatedDocument = await this.findOneAndUpdate(
+      {
+        pluginName,
+        settingsKey,
+        version: expectedVersion
+      },
+      updatePipeline,
+      {
+        new: true,
+        upsert: expectedVersion === 0
+      }
+    );
+
+    if (updatedDocument) {
+      return {
+        updated: true,
+        conflict: false,
+        currentVersion: updatedDocument.version,
+        document: updatedDocument
+      };
+    }
+
+    const currentDocument = await this.findOne({ pluginName, settingsKey });
+    return {
+      updated: false,
+      conflict: true,
+      currentVersion: currentDocument ? currentDocument.version : null
+    };
+  } catch (error) {
+    // Concurrent first-time creators may race on the unique compound index.
+    // Treat the duplicate-key result as a version conflict rather than leaking
+    // an implementation-specific MongoDB error to the caller.
+    if (error?.code === 11000) {
+      const currentDocument = await this.findOne({ pluginName, settingsKey });
+      logger.debug(`Concurrent creation conflict for ${cacheKey}`);
+      return {
+        updated: false,
+        conflict: true,
+        currentVersion: currentDocument ? currentDocument.version : null
+      };
+    }
+
+    logger.error(`Atomic settings update failed for ${cacheKey}: ${error.message}`);
+    throw error;
+  }
 };
 
 /**

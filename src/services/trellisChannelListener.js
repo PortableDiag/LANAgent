@@ -606,7 +606,7 @@ export class TrellisChannelListener {
     const trustedPeer = !fromOperator && this._isTrustedPeer(target);
     // 👀 while working on it, 👍 once answered (or when it needs no answer), 🤷 on failure.
     const working = this._react(card, target.seq, '👀');
-    this._startState(card, target.seq);
+    this._startState(card, target.seq, target);
     try {
       await this._answer({ doc, card, key, target, messages, maxSeq, group, data, fromOperator, trustedPeer, working });
       if (fromOperator && group) this._followUp(doc, card, key);
@@ -778,15 +778,24 @@ export class TrellisChannelListener {
       });
   }
 
-  _startState(card, seq) {
-    this.statePromises.set(`${card}:${seq}`, this._state(card, seq, 'working'));
+  /**
+   * Only an addressee may set a state: a message this agent answers because it was @named with
+   * an empty `to`, or as an operator follow-up, is someone else's (403, "only an addressee sets
+   * its state" — 38 of them in 3 hours on trellis-web card 21, relay 2754 #354). A message with
+   * no `to` at all (older desktop) is still tried.
+   */
+  _startState(card, seq, msg = null) {
+    const to = msg && Array.isArray(msg.to) ? msg.to.map(n => String(n).toLowerCase()) : null;
+    const working = to && !to.includes(this.name.toLowerCase()) ? null : this._state(card, seq, 'working');
+    this.statePromises.set(`${card}:${seq}`, working);
   }
 
   /** The final state, sent after "working" has landed so it cannot be overwritten by it. */
   _settleState(card, seq, state, note = '') {
     const key = `${card}:${seq}`;
-    const started = this.statePromises.get(key) || Promise.resolve();
+    const started = this.statePromises.get(key);
     this.statePromises.delete(key);
+    if (started === null) return Promise.resolve(false);
     return Promise.resolve(started).then(() => this._state(card, seq, state, note)).catch(() => false);
   }
 
@@ -936,7 +945,14 @@ export class TrellisChannelListener {
       m._outcome = result && result.success === false
         ? { ok: false, note: String(result.error || 'did not finish; see the reply').slice(0, 200) }
         : { ok: true };
-      return textOf(result);
+      const text = textOf(result);
+      // A shared message whose task is another agent's: say nothing rather than post "No action
+      // taken: … directed at trellis, not ALICE" into the room (card 21 #2087, 2026-10-02).
+      if (m._outcome.ok && /^\s*NO_REPLY\b/.test(String(text || ''))) {
+        logger.info(`[trellis-listen] nothing for me in #${m.seq} (${NO_REPLY})`);
+        return null;
+      }
+      return text;
     } catch (err) {
       logger.warn(`[trellis-listen] operator request failed: ${err.message}`);
       m._outcome = { ok: false, note: String(err.message).slice(0, 200) };
@@ -957,7 +973,8 @@ export class TrellisChannelListener {
     if (!shared) return '';
     const others = to.length ? to.join(', ') : 'the other agents in this channel';
     return `\n\n(Note for ${this.name}: this message also goes to ${others}. Do only your own part, as ${this.name}: ` +
-      'act for yourself, not for the other agents, and do not list or describe your own internal sub-agents in this channel.)';
+      'act for yourself, not for the other agents, and do not list or describe your own internal sub-agents in this channel. ' +
+      `If nothing in it is for you (it asks another agent to do something), answer with exactly ${NO_REPLY} and nothing else.)`;
   }
 
   /**

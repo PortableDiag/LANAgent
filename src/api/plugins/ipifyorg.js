@@ -23,7 +23,7 @@ export default class ipifyorgPlugin extends BasePlugin {
       {
         command: 'getPublicIp',
         description: 'Get the current public IP address',
-        usage: 'getPublicIp()',
+        usage: 'getPublicIp({ forceRefresh: true, cacheTtlSeconds: 60 })',
         examples: [
           'what is my public IP address?',
           'show me my external IP',
@@ -34,7 +34,7 @@ export default class ipifyorgPlugin extends BasePlugin {
       {
         command: 'getFormattedIp',
         description: 'Get the public IP in a specific format (json, text)',
-        usage: 'getFormattedIp({ format: "json" })',
+        usage: 'getFormattedIp({ format: "json", forceRefresh: true })',
         examples: [
           'get my IP in JSON format',
           'show IP as plain text',
@@ -44,11 +44,21 @@ export default class ipifyorgPlugin extends BasePlugin {
       {
         command: 'getPublicIpByProtocol',
         description: 'Get the public IPv4, IPv6, or dual-stack addresses',
-        usage: 'getPublicIpByProtocol({ protocol: "v4"|"v6"|"dual" })',
+        usage: 'getPublicIpByProtocol({ protocol: "v4"|"v6"|"dual", forceRefresh: true })',
         examples: [
           'get my IPv4 address',
           'show my IPv6 address',
           'detect both public IP addresses'
+        ]
+      },
+      {
+        command: 'clearCache',
+        description: 'Invalidate cached public IP results',
+        usage: 'clearCache({ scope: "all"|"v4"|"v6"|"formatted" })',
+        examples: [
+          'clear all cached public IP results',
+          'refresh my IPv4 lookup cache',
+          'invalidate formatted IP results'
         ]
       }
     ];
@@ -121,6 +131,8 @@ export default class ipifyorgPlugin extends BasePlugin {
           return await this.getFormattedIp(data);
         case 'getPublicIpByProtocol':
           return await this.getPublicIpByProtocol(data);
+        case 'clearCache':
+          return await this.clearCache(data);
         default:
           throw new Error(`Unknown action: ${action}`);
       }
@@ -142,7 +154,8 @@ export default class ipifyorgPlugin extends BasePlugin {
     Examples:
     - For getPublicIp: {}
     - For getFormattedIp: {"format": "json"} or {"format": "text"}
-    - For getPublicIpByProtocol: {"protocol": "v4"}, {"protocol": "v6"}, or {"protocol": "dual"}`;
+    - For getPublicIpByProtocol: {"protocol": "v4"}, {"protocol": "v6"}, or {"protocol": "dual"}
+    - For clearCache: {"scope": "all"}, {"scope": "v4"}, {"scope": "v6"}, or {"scope": "formatted"}`;
 
     const response = await this.agent.providerManager.generateResponse(prompt, {
       temperature: 0.3,
@@ -167,10 +180,28 @@ export default class ipifyorgPlugin extends BasePlugin {
   // Implementation methods for each action
   async getPublicIp(params = {}) {
     try {
+      const {
+        forceRefresh = false,
+        cacheTtlSeconds
+      } = params;
+
+      this.validateParams({ forceRefresh, cacheTtlSeconds }, {
+        forceRefresh: {
+          required: false,
+          type: 'boolean'
+        },
+        cacheTtlSeconds: {
+          required: false,
+          type: 'number',
+          // NodeCache treats a TTL of 0 as never-expire; that is not a refresh.
+          min: 1
+        }
+      });
+
       const cacheKey = 'public-ip';
-      const cached = this.cache.get(cacheKey);
+      const cached = forceRefresh ? undefined : this.cache.get(cacheKey);
       
-      if (cached) {
+      if (cached !== undefined) {
         this.logger.debug('Returning cached public IP');
         return {
           success: true,
@@ -192,11 +223,20 @@ export default class ipifyorgPlugin extends BasePlugin {
       );
       
       const ip = response.data.ip;
-      this.cache.set(cacheKey, ip);
+      if (!ip || net.isIP(ip) === 0) {
+        throw new Error('ipify returned an invalid public IP address');
+      }
+
+      if (cacheTtlSeconds === undefined) {
+        this.cache.set(cacheKey, ip);
+      } else {
+        this.cache.set(cacheKey, ip, cacheTtlSeconds);
+      }
       
       return {
         success: true,
-        data: { ip }
+        data: { ip },
+        source: 'fetched'
       };
     } catch (error) {
       this.logger.error('Failed to get public IP:', error);
@@ -206,20 +246,34 @@ export default class ipifyorgPlugin extends BasePlugin {
   
   async getFormattedIp(params = {}) {
     try {
-      const { format = 'json' } = params;
+      const {
+        format = 'json',
+        forceRefresh = false,
+        cacheTtlSeconds
+      } = params;
       
-      this.validateParams({ format }, {
+      this.validateParams({ format, forceRefresh, cacheTtlSeconds }, {
         format: {
           required: false,
           type: 'string',
           enum: ['json', 'text']
+        },
+        forceRefresh: {
+          required: false,
+          type: 'boolean'
+        },
+        cacheTtlSeconds: {
+          required: false,
+          type: 'number',
+          // NodeCache treats a TTL of 0 as never-expire; that is not a refresh.
+          min: 1
         }
       });
       
       const cacheKey = `formatted-ip-${format}`;
-      const cached = this.cache.get(cacheKey);
+      const cached = forceRefresh ? undefined : this.cache.get(cacheKey);
       
-      if (cached) {
+      if (cached !== undefined) {
         this.logger.debug(`Returning cached formatted IP (${format})`);
         return {
           success: true,
@@ -246,12 +300,22 @@ export default class ipifyorgPlugin extends BasePlugin {
       } else {
         result = { ip: response.data.trim() };
       }
+
+      const ip = result?.ip;
+      if (!ip || net.isIP(ip) === 0) {
+        throw new Error('ipify returned an invalid formatted IP address');
+      }
       
-      this.cache.set(cacheKey, result);
+      if (cacheTtlSeconds === undefined) {
+        this.cache.set(cacheKey, result);
+      } else {
+        this.cache.set(cacheKey, result, cacheTtlSeconds);
+      }
       
       return {
         success: true,
-        data: result
+        data: result,
+        source: 'fetched'
       };
     } catch (error) {
       this.logger.error('Failed to get formatted IP:', error);
@@ -263,13 +327,27 @@ export default class ipifyorgPlugin extends BasePlugin {
    * Get the public address for IPv4, IPv6, or both protocols.
    */
   async getPublicIpByProtocol(params = {}) {
-    const { protocol = 'dual' } = params;
+    const {
+      protocol = 'dual',
+      forceRefresh = false,
+      cacheTtlSeconds
+    } = params;
 
-    this.validateParams({ protocol }, {
+    this.validateParams({ protocol, forceRefresh, cacheTtlSeconds }, {
       protocol: {
         required: true,
         type: 'string',
         enum: ['v4', 'v6', 'dual']
+      },
+      forceRefresh: {
+        required: false,
+        type: 'boolean'
+      },
+      cacheTtlSeconds: {
+        required: false,
+        type: 'number',
+        // NodeCache treats a TTL of 0 as never-expire; that is not a refresh.
+        min: 1
       }
     });
 
@@ -281,16 +359,19 @@ export default class ipifyorgPlugin extends BasePlugin {
     const protocols = protocol === 'dual' ? ['v4', 'v6'] : [protocol];
     const results = {};
     const failures = {};
+    const sources = [];
 
     await Promise.all(protocols.map(async currentProtocol => {
       const cacheKey = `public-ip-${currentProtocol}`;
-      const cached = this.cache.get(cacheKey);
+      const cached = forceRefresh ? undefined : this.cache.get(cacheKey);
 
-      if (cached) {
+      if (cached !== undefined) {
         results[currentProtocol] = {
           protocol: currentProtocol,
-          address: cached
+          address: cached,
+          source: 'cache'
         };
+        sources.push('cache');
         return;
       }
 
@@ -320,11 +401,18 @@ export default class ipifyorgPlugin extends BasePlugin {
           throw new Error(`ipify returned an address with an unexpected protocol: ${detectedProtocol}`);
         }
 
-        this.cache.set(cacheKey, address);
+        if (cacheTtlSeconds === undefined) {
+          this.cache.set(cacheKey, address);
+        } else {
+          this.cache.set(cacheKey, address, cacheTtlSeconds);
+        }
+
         results[currentProtocol] = {
           protocol: currentProtocol,
-          address
+          address,
+          source: 'fetched'
         };
+        sources.push('fetched');
       } catch (error) {
         failures[currentProtocol] = error.message;
       }
@@ -338,6 +426,8 @@ export default class ipifyorgPlugin extends BasePlugin {
       throw new Error(`Unable to detect public addresses: ${Object.values(failures).join('; ')}`);
     }
 
+    const uniqueSources = [...new Set(sources)];
+
     return {
       success: true,
       data: {
@@ -345,7 +435,45 @@ export default class ipifyorgPlugin extends BasePlugin {
         addresses: results,
         ...(Object.keys(failures).length > 0 ? { unavailable: failures } : {})
       },
+      source: uniqueSources.length === 1 ? uniqueSources[0] : 'mixed',
       ...(Object.keys(failures).length > 0 ? { partial: true } : {})
+    };
+  }
+
+  /**
+   * Clear cached public IP results without restarting the plugin.
+   *
+   * @param {Object} params Cache invalidation options.
+   * @param {'all'|'v4'|'v6'|'formatted'} [params.scope='all'] Cache scope to clear.
+   * @returns {Promise<Object>} Cache invalidation result.
+   */
+  async clearCache(params = {}) {
+    const { scope = 'all' } = params;
+
+    this.validateParams({ scope }, {
+      scope: {
+        required: false,
+        type: 'string',
+        enum: ['all', 'v4', 'v6', 'formatted']
+      }
+    });
+
+    if (scope === 'all') {
+      this.cache.flushAll();
+    } else if (scope === 'formatted') {
+      this.cache.del(['formatted-ip-json', 'formatted-ip-text']);
+    } else {
+      this.cache.del(`public-ip-${scope}`);
+    }
+
+    this.logger.info(`Cleared ${scope} public IP cache`);
+    return {
+      success: true,
+      data: {
+        scope,
+        cleared: true
+      },
+      source: 'cache'
     };
   }
   

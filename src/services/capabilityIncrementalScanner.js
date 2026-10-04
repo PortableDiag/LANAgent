@@ -384,6 +384,9 @@ export class CapabilityIncrementalScanner {
         // Exclude certain directories to avoid duplicates and unnecessary files
         exclude: [
           'api/plugins', // Already scanned as plugins
+          // Browser code, much of it vendored (three.js). Selected on 2026-10-02 as an "upgrade"
+          // target, rewritten, then failed the Node load check on `window is not defined`.
+          'interfaces/web/public',
           'test',
           'tests',
           '__tests__',

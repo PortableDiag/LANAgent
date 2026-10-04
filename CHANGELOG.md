@@ -2,6 +2,39 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.468] - 2026-10-03
+
+### Fixed
+- **Incoming tokens on BSC, Ethereum and Polygon went unseen.** Every 5-minute token scan on those chains failed (~300 a day each). No free RPC still answers an address-less `eth_getLogs`: Binance dataseed answers "limit exceeded" even for 500 blocks, publicnode requires an address, and dRPC and POKT refuse with 400/403. When they refuse, the scanner now reads incoming ERC-20 transfers from Alchemy's transfer index (`alchemy_getAssetTransfers`), from the last block it covered. That is at most one read per chain every 30 minutes (~144 calls a day). An RPC that refuses is not asked again for 6 hours, and the failure is warned about once an hour per chain instead of on every scan.
+- **"High response time" warned on every AI call (934 a day).** The threshold was 1 second, checked against the lifetime average, so it was crossed for good after a few calls. Alerts now look at the last 20 calls with a 60 s threshold (`PROVIDER_ALERT_RESPONSE_MS`). They fire when the condition starts, at most hourly while it lasts, and log once when it clears. Error-rate alerts work the same way.
+- **An RPC timeout was treated as permanent.** ethers reports a timeout as `code: 'TIMEOUT'`, and only Node's `ETIMEDOUT` was retried, so a Chainlink price read gave up after one attempt. `TIMEOUT`, `NETWORK_ERROR`, `SERVER_ERROR`, `EAI_AGAIN` and `ECONNABORTED` are now retryable.
+- **`trellis-notes.readCard {"id":"307"}` was refused five times in 30 seconds.** Only `card`/`cardId` were read. A bare `id` is now the action's own target: the card for card actions, the basket for basket actions.
+- **MindSwarm `reply` failed with "Required field 'postId' is missing".** Actions on one post now accept `id`, `post_id`, `post`, `replyTo` or `parentId` for `postId`, and a numeric id is converted to a string.
+- **Creating a skill that exists led the agent to delete it.** The bare "already exists" error was answered by deleting the skill and recreating it, losing its history and rollback. The error now says to use `skills.update`, and not to delete.
+
+## [2.25.467] - 2026-10-03
+
+### Added
+- **The agent can read its own warnings and errors (`systemLogs` plugin).** `recent` lists them newest first (filter by level, category, service, hours), `search` finds words or a literal string (an address, a URL), `summary` counts them by level, category and service and lists what repeats most, and `entry` shows one in full with details and stack. Questions like "what went wrong in the last hour" or "what keeps failing" no longer need anyone to read log files. Kept from other agents (`PEER_EXCLUDED`): logs describe this host.
+- **SystemLog is a real log store.** A logger transport (`utils/systemLogTransport.js`) writes warnings and errors to the `systemlogs` collection, redacted like the files. Inserts are batched every 2 s, held (up to 1,000) while the database is down, and never thrown. The same message more than 3 times a minute is stored once with a count. An info entry is stored when it names a category or sets `systemLog: true`. `SYSTEMLOG_LEVEL` (default `warn`) and `SYSTEMLOG_DISABLED=true` control it. Off in tests and module load checks. The collection is capped at 100 MB / 100k entries, which is the retention.
+- **Paid-job status for many jobs at once.** `POST /api/external/jobs/batch/status` with `{ jobIds }` (1–50) answers every id from one database read. Ids this agent never accepted come back `not_found`. As first proposed, each unknown id fell back to an on-chain read, so one request could make 50 chain calls and scan client addresses by sequential id.
+- **`ups incidents`** (`days` 1–31, optional `upsName`): power incidents with how long each lasted. "Power restored" ends the whole outage; an outage with no recorded recovery is unresolved only when it is the newest one and the window reaches now.
+- **Self-improvement records now follow their PRs.** Every record stayed at `pr_created`, so merged counts and success rate read 0. The hourly deploy-merged-changes job marks records merged or rejected from the PR list (up to 1,000 of each), and skips a run when a list comes back empty, so a failed lookup cannot mark merged PRs as rejected.
+- **`GET /api/coordination/history`** pages and sorts (`limit` ≤200, `offset`, `sortBy`, `sortOrder`, `pagination` in the answer). Filters accept strings only, so an operator object cannot reach the query.
+- **`priceWatch` compare** ranks offers per currency and says when a read is low confidence; **contracts batch read** (`/read/batch`) with its own retry context; `PluginSettings.updateIfVersion` (write only if unchanged); `reactionAck.flush()`; an optional bounded wait queue for the self-mod lock; thousandeyes refresh commands; ipify `clearCache`.
+
+### Fixed
+- **ipify cache lifetime 0 meant "never expire".** The minimum is now 1 second.
+- **The scheduler's error statistics and recent-operations analysis always read zero.** Both counted from SystemLog, which nothing wrote. They now see real data.
+- **`load-check.sh` could not check a change before it was deployed.** It imports production's copies, so a new file "could not be found" and a changed file was checked as its old version. `--staged` loads your working-tree copies in a throwaway tree on production (its code and node_modules, never the live files) before you deploy.
+
+## [2.25.466] - 2026-10-03
+
+### Fixed
+- **Self-improvement rewrote a vendored browser library, then failed it on `window is not defined`.** The capability scan walked all of `src/` and picked `interfaces/web/public/lib/three.r183.module.js` (a three.js wrapper), spent an hour-long cycle rewriting it, and the pre-PR load check imported it in Node. `src/interfaces/web/public` is no longer an upgrade target, and the load check gives browser files a syntax check only.
+- **Trellis request states were sent for messages addressed to other agents.** The listener answers an @mention with an empty `to` and operator follow-ups, then set `working`/`completed` on them; the server lets only an addressee set a state and refused 38 in three hours on one channel. States are now set only when the message's `to` names this agent (or carries no `to`).
+- **A shared message whose task was another agent's got a "No action taken" post.** "@agents good job, @trellis add them all to a card" reached the agent as an operator request, and with no way to stay quiet it posted that the request was for trellis. The shared-task note now says to answer exactly `NO_REPLY` when nothing in the message is for this agent, and the operator path posts nothing for it.
+
 ## [2.25.465] - 2026-10-02
 
 ### Added

@@ -4810,6 +4810,12 @@ Provide only the corrected code line(s).`;
       return { ok: false, fatal: true, message: `syntax: ${firstLine(stderr)}` };
     }
 
+    // Browser code (src/interfaces/web/public) touches window/document at load, so Node can
+    // only check its syntax: three.r183.module.js failed here on `window is not defined`.
+    if (rel.split(path.sep).join('/').startsWith('src/interfaces/web/public/')) {
+      return { ok: true, fatal: false, message: '' };
+    }
+
     const fileUrl = pathToFileURL(absPath).href;
     const script = `import(${JSON.stringify(fileUrl)}).then(() => process.exit(0), (e) => { console.error(e && (e.stack || String(e))); process.exit(1); });`;
     try {
@@ -5657,6 +5663,38 @@ ${newCapsBlock}${reviewFlagsBlock}
     };
   }
   
+  /**
+   * Move pr_created Improvement records to merged/rejected from the git host's
+   * view of their pull requests. Without this every Improvement stays
+   * 'pr_created' and the improvement metrics report 0 merged forever.
+   *
+   * listMergeRequests() swallows errors and returns []. GitHub's 'closed' list
+   * includes merged PRs, so a failed 'merged' read beside a good 'closed' read
+   * would mark every merged PR rejected: an empty list on either side skips
+   * the run instead.
+   */
+  async reconcileImprovementStatuses() {
+    const provider = await this.getGitHostingProvider();
+    if (!provider?.listMergeRequests) return { skipped: 'no git hosting provider' };
+
+    const [merged, closed] = await Promise.all([
+      provider.listMergeRequests({ state: 'merged', limit: 1000 }),
+      provider.listMergeRequests({ state: 'closed', limit: 1000 })
+    ]);
+    if (!merged?.length || !closed?.length) {
+      return { skipped: 'empty pull request listing' };
+    }
+
+    const counts = await Improvement.reconcilePullRequestStates({
+      merged: merged.map(pr => pr.number),
+      closed: closed.map(pr => pr.number)
+    });
+    if (counts.merged || counts.rejected) {
+      logger.info(`Improvement status reconcile: ${counts.merged} merged, ${counts.rejected} rejected`);
+    }
+    return counts;
+  }
+
   /**
    * Get improvement statistics
    */

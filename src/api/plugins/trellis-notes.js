@@ -92,7 +92,19 @@ const PARAM_ALIASES = {
   basket: ['basketId', 'basket_id', 'basketID', 'node', 'nodeId', 'node_id'],
   confirmTitle: ['confirm_title', 'title_confirmation']
 };
-function normalizeParamAliases(data) {
+// A bare `id` is the action's own target: the card for card actions, the basket for basket
+// actions. ReAct sent readCard {"id":"307"} five times in 30 s and was refused each time
+// (2026-10-03), because only card/cardId/card_id were read. No action has an `id` of its own.
+const ID_TARGET = {
+  readCard: 'card', appendNote: 'card', setTaskStatus: 'card', readChannel: 'card', replyChannel: 'card',
+  readBasket: 'basket', createNote: 'basket', createTask: 'basket'
+};
+function normalizeParamAliases(data, action = null) {
+  const target = ID_TARGET[action];
+  if (target && (data[target] === undefined || data[target] === null || data[target] === '') && data.id !== undefined && data.id !== null && data.id !== '') {
+    data[target] = data.id;
+  }
+  if (target) delete data.id;
   for (const [name, aliases] of Object.entries(PARAM_ALIASES)) {
     if (data[name] !== undefined && data[name] !== null && data[name] !== '') continue;
     const hit = aliases.find(a => data[a] !== undefined && data[a] !== null && data[a] !== '');
@@ -392,7 +404,7 @@ export default class TrellisNotesPlugin extends BasePlugin {
         action: { required: true, type: 'string', enum: this.commands.map(c => c.command) }
       });
 
-      normalizeParamAliases(data);
+      normalizeParamAliases(data, action);
       return describeWrite(await channelCall.run(channel, () => this._inDocument(data, () => this._dispatch(action, data))));
     } catch (error) {
       this.logger.error(`${action} failed:`, error);

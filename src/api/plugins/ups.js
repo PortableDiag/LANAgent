@@ -46,6 +46,12 @@ export default class UpsPlugin extends BasePlugin {
         examples: ['test ups battery', 'run ups test']
       },
       {
+        command: 'incidents',
+        description: 'Group power events into incidents (outage start, related events, recovery, duration)',
+        usage: 'incidents({ days: 7, upsName: "ups" })',
+        examples: ['show ups incidents', 'power outage timeline', 'how long was the last outage']
+      },
+      {
         command: 'acknowledge',
         description: 'Acknowledge a power event',
         usage: 'acknowledge({ eventId: "xxx" })',
@@ -73,6 +79,8 @@ export default class UpsPlugin extends BasePlugin {
         return await this.configure(data);
       case 'test':
         return await this.testUps(data);
+      case 'incidents':
+        return await this.getIncidents(data);
       case 'acknowledge':
         return await this.acknowledgeEvent(data);
       case 'stats':
@@ -176,6 +184,26 @@ export default class UpsPlugin extends BasePlugin {
           acknowledged: e.acknowledged
         }))
       };
+    } catch (error) {
+      return { success: false, error: error.message };
+    }
+  }
+
+  /**
+   * Get power events grouped into incidents
+   */
+  async getIncidents(params = {}) {
+    try {
+      const days = Math.min(Math.max(Number(params.days) || 7, 1), 31);
+      const end = new Date();
+      const start = new Date(end.getTime() - days * 24 * 60 * 60 * 1000);
+      const incidents = await UpsEvent.buildIncidentTimeline({
+        upsName: params.upsName || undefined,
+        start,
+        end,
+        ...(params.proximityMinutes !== undefined ? { proximityMinutes: params.proximityMinutes } : {})
+      });
+      return { success: true, days, count: incidents.length, incidents };
     } catch (error) {
       return { success: false, error: error.message };
     }

@@ -11,6 +11,7 @@ import { retryOperation } from '../utils/retryUtils.js';
 
 const router = express.Router();
 const cache = new NodeCache({ stdTTL: 300, checkperiod: 60 });
+const MAX_BATCH_READS = 20;
 
 // In-flight request tracking to prevent stampedes (shared by getCachedData below)
 const inFlight = new Map();
@@ -32,10 +33,9 @@ router.use(compression());
  * Get cached data with in-flight dedup + stale-while-revalidate.
  *
  * Entries are stored as `{ data, expiresAt, swrTtl }`. While `now < expiresAt`,
- * fresh data is returned synchronously. When expired but within
- * `expiresAt + swrTtl`, stale data is returned immediately and a background
- * refresh fires (deduped via inFlight). Past the SWR window, callers wait
- * on a fresh fetch. Legacy primitive cache entries are also accepted.
+ * fresh data is returned synchronously. When expired but within `expiresAt + swrTtl`,
+ * stale data is returned immediately and a background refresh fires (deduped via inFlight).
+ * Past the SWR window, callers wait on a fresh fetch. Legacy primitive cache entries are also accepted.
  *
  * @param {string} key
  * @param {Function} fetchFunc
@@ -129,6 +129,102 @@ router.get('/networks/:network/tokens', async (req, res) => {
     res.json(tokens);
   } catch (error) {
     logger.error('Tokens error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * Read multiple independent contract functions in one request.
+ *
+ * Each item is processed independently so a failed RPC call does not prevent
+ * other reads from completing. Results retain their original input index.
+ */
+router.post('/read/batch', async (req, res) => {
+  try {
+    const requests = Array.isArray(req.body)
+      ? req.body
+      : req.body?.requests;
+
+    if (!Array.isArray(requests)) {
+      return res.status(400).json({
+        error: 'Request body must be an array of read requests'
+      });
+    }
+
+    if (requests.length > MAX_BATCH_READS) {
+      return res.status(400).json({
+        error: `Batch size cannot exceed ${MAX_BATCH_READS} requests`,
+        maxBatchSize: MAX_BATCH_READS
+      });
+    }
+
+    const settled = await Promise.allSettled(requests.map(async (request, index) => {
+      if (!request || typeof request !== 'object' || Array.isArray(request)) {
+        throw new Error('Read request must be an object');
+      }
+
+      const {
+        address,
+        network,
+        functionName,
+        params = []
+      } = request;
+
+      if (typeof address !== 'string' || !address.trim()) {
+        throw new Error('Missing required field: address');
+      }
+      if (typeof network !== 'string' || !network.trim()) {
+        throw new Error('Missing required field: network');
+      }
+      if (typeof functionName !== 'string' || !functionName.trim()) {
+        throw new Error('Missing required field: functionName');
+      }
+      if (!Array.isArray(params)) {
+        throw new Error('Field params must be an array');
+      }
+
+      // Own retry context: a batch is up to 20 reads, and the shared default context would let
+      // its failures skew the dynamic retry tuning of every other caller.
+      const result = await retryOperation(() => contractService.readContract(
+        address,
+        network,
+        functionName,
+        params
+      ), { context: 'contractBatchRead' });
+
+      return {
+        index,
+        success: true,
+        result,
+        network,
+        address,
+        function: functionName
+      };
+    }));
+
+    const results = settled.map((outcome, index) => {
+      if (outcome.status === 'fulfilled') {
+        return outcome.value;
+      }
+
+      return {
+        index,
+        success: false,
+        error: outcome.reason?.message || 'Contract read failed',
+        request: requests[index]
+      };
+    });
+
+    const succeeded = results.filter(result => result.success).length;
+
+    res.json({
+      total: results.length,
+      succeeded,
+      failed: results.length - succeeded,
+      results
+    });
+  } catch (error) {
+    logger.error('Batch contract read error:', error);
     res.status(500).json({ error: error.message });
   }
 });

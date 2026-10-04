@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { authenticateToken } from '../interfaces/web/auth.js';
 import { cryptoLogger as logger } from '../utils/logger.js';
 import agentCoordinationService from '../services/crypto/agentCoordinationService.js';
+import AgentCoordination from '../models/AgentCoordination.js';
 
 const router = Router();
 
@@ -32,16 +33,59 @@ router.get('/active', async (req, res) => {
 
 /**
  * GET /api/coordination/history
- * Coordination history with optional filters
+ * Coordination history with optional filters, pagination, and sorting.
+ *
+ * Query parameters:
+ *   - status: filter by status
+ *   - type: filter by coordinationType
+ *   - limit: number of records per page (default 50, max 200)
+ *   - offset: number of records to skip (default 0)
+ *   - sortBy: field to sort by (allowed: createdAt, status, coordinationType, updatedAt; default createdAt)
+ *   - sortOrder: 'asc' or 'desc' (default desc)
  */
 router.get('/history', async (req, res) => {
     try {
+        // Coerce to strings: a query like ?status[$ne]=x arrives as an object and would
+        // otherwise be passed to Mongo as an operator.
         const filters = {};
-        if (req.query.status) filters.status = req.query.status;
-        if (req.query.type) filters.coordinationType = req.query.type;
-        const history = await agentCoordinationService.getHistory(filters);
-        res.json({ success: true, history });
+        if (req.query.status) filters.status = String(req.query.status);
+        if (req.query.type) filters.coordinationType = String(req.query.type);
+
+        // Pagination and sorting parameters
+        let limit = parseInt(req.query.limit, 10);
+        if (isNaN(limit) || limit < 1) limit = 50;
+        if (limit > 200) limit = 200;
+
+        let offset = parseInt(req.query.offset, 10);
+        if (isNaN(offset) || offset < 0) offset = 0;
+
+        const allowedSortFields = ['createdAt', 'status', 'coordinationType', 'updatedAt'];
+        const sortBy = allowedSortFields.includes(req.query.sortBy) ? req.query.sortBy : 'createdAt';
+        const sortOrder = req.query.sortOrder === 'asc' ? 1 : -1;
+
+        // Query the database directly for efficient pagination
+        const [total, history] = await Promise.all([
+            AgentCoordination.countDocuments(filters),
+            AgentCoordination.find(filters)
+                .sort({ [sortBy]: sortOrder })
+                .skip(offset)
+                .limit(limit)
+                .lean()
+        ]);
+
+        res.json({
+            success: true,
+            history,
+            pagination: {
+                total,
+                limit,
+                offset,
+                sortBy,
+                sortOrder: sortOrder === 1 ? 'asc' : 'desc'
+            }
+        });
     } catch (err) {
+        logger.error('Get coordination history error:', err);
         res.status(500).json({ success: false, error: err.message });
     }
 });
