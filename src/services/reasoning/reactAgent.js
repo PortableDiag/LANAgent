@@ -656,9 +656,27 @@ export class ReActAgent extends EventEmitter {
     const prompt = this.buildThinkingPrompt(query, history, guidance) +
       '\n\nYou have no steps left. Do not call a tool. Reply with {"finalAnswer": "..."} only: say plainly what you ' +
       'actually did (only what the observations show succeeded) and what is still not done.';
-    const response = await this.agent.providerManager.generateResponse(prompt, { maxTokens: 700, temperature: 0.2, ...(context?.reasoningModel ? { model: context.reasoningModel } : {}) });
-    const answer = this.parseThought(response?.content || response || '').finalAnswer;
-    return answer ? String(answer) : null;
+    const options = { maxTokens: 700, temperature: 0.2, ...(context?.reasoningModel ? { model: context.reasoningModel } : {}) };
+    const response = await this.agent.providerManager.generateResponse(prompt, options);
+    const raw = String(response?.content || response || '').trim();
+    const answer = this.parseThought(raw).finalAnswer;
+    if (answer) return String(answer);
+    // Plain prose is the answer. JSON without a finalAnswer is the model taking another step:
+    // the full prompt still lists every tool. Ask once more with the steps alone and no tools
+    // (card 21 #2298, 2026-10-03: this returned nothing and "Max iterations reached" was posted).
+    if (raw && !ReActAgent.jsonObjects(raw).length) return raw;
+    const steps = (history || []).filter(h => h.type === 'action' || h.type === 'observation').slice(-24).map(h => {
+      const c = typeof h.content === 'string' ? h.content : JSON.stringify(h.content);
+      return `${h.type === 'action' ? 'Did' : 'Got'}: ${String(c).slice(0, 400)}`;
+    }).join('\n');
+    const retry = await this.agent.providerManager.generateResponse(
+      `Task: ${query}\n\nWhat was done so far:\n${steps || '(nothing)'}\n\n` +
+      'You cannot take any more steps. In plain text (no JSON, no tool calls), say what was done, what it found, ' +
+      'and what is still not done. Keep it short.', options);
+    const text = String(retry?.content || retry || '').trim();
+    if (text && !ReActAgent.jsonObjects(text).length) return text;
+    logger.warn('ReAct: no closing answer after running out of steps');
+    return null;
   }
 
   /**

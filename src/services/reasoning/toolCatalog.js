@@ -60,6 +60,29 @@ export function listTools(agent, context = null) {
 }
 
 /**
+ * Enabled plugins this request may not use, whose name the query names. Without this a search
+ * for one answers "no match" and the model searches again: ReAct looked for mindswarm eight
+ * times in one run (2026-10-03).
+ */
+function withheldNamed(agent, query, context = null) {
+  const apis = agent?.apiManager?.apis;
+  if (!apis) return [];
+  const words = normalizedText(String(query || '')).split(' ').filter(w => w.length >= 3);
+  const excluded = excludedPlugins(context);
+  const names = [];
+  for (const [name, wrapper] of apis) {
+    if (!wrapper?.enabled || !excluded.has(name)) continue;
+    const plain = normalizedText(name).replace(/ /g, '');
+    if (words.some(w => plain === w || plain.includes(w) || w.includes(plain))) names.push(name);
+  }
+  return names;
+}
+
+const withheldText = (names) =>
+  `${names.join(', ')} ${names.length > 1 ? 'are' : 'is'} installed but not available to multi-step reasoning ` +
+  `(it can move funds or act on this host). Do not search for it again: say it has to be run as a direct command.`;
+
+/**
  * Plugin names most relevant to a task, best first, from the vector intent index
  * (the same embeddings intent detection uses). Empty when the index is unavailable.
  */
@@ -117,7 +140,7 @@ export function searchTools(agent, query, options = {}) {
 
   const normalizedQuery = normalizedText(queryText);
   const entries = [];
-  for (const plugin of listTools(agent)) {
+  for (const plugin of listTools(agent, options.context ?? null)) {
     for (const command of plugin.commands) {
       const commandText = String(command.command || '');
       const description = String(command.description || '');
@@ -200,7 +223,10 @@ export async function executeTool(agent, tool, command, params = {}, context = n
 
   if (tool === DESCRIBE_TOOL) {
     const target = tools.find(t => t.name === params?.name);
-    if (!target) return { success: false, error: `No available tool named "${params?.name}"` };
+    if (!target) {
+      const withheld = withheldNamed(agent, params?.name, context);
+      return { success: false, error: withheld.length ? withheldText(withheld) : `No available tool named "${params?.name}"` };
+    }
     return { success: true, result: `${target.name}: ${target.description}\n${commandLines(target)}` };
   }
 
@@ -212,15 +238,17 @@ export async function executeTool(agent, tool, command, params = {}, context = n
     try {
       const matches = searchTools(agent, query, {
         ...(params?.options || {}),
-        ...(params?.max !== undefined ? { max: params.max } : {})
+        ...(params?.max !== undefined ? { max: params.max } : {}),
+        context
       });
+      const withheld = matches.length ? [] : withheldNamed(agent, query, context);
       // Text, like describe_tool, so the observation reads the same in the next prompt.
       return {
         success: true,
         matches,
         result: matches.length
           ? matches.map(m => `- ${m.plugin}.${m.command}: ${m.description}${m.usage ? ` (usage: ${m.usage})` : ''}`).join('\n')
-          : `No commands match "${String(query).trim()}".`
+          : withheld.length ? withheldText(withheld) : `No commands match "${String(query).trim()}".`
       };
     } catch (error) {
       logger.debug(`Tool search failed: ${error.message}`);

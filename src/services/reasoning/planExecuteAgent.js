@@ -88,6 +88,11 @@ export class PlanExecuteAgent extends EventEmitter {
         const step = sortedSteps[i];
         const stepNumber = i + 1;
 
+        // Cancelled (the operator said stop in the channel the task came from): no further steps.
+        if ((context.signal || context.abortSignal)?.aborted) {
+          return { success: false, cancelled: true, error: 'Execution was cancelled', plan, results, duration: Date.now() - startTime };
+        }
+
         this.emit('stepStart', { stepNumber, step, totalSteps: sortedSteps.length });
 
         // The plan is the task's to-do list: shown as a checklist with every step

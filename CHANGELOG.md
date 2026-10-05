@@ -2,6 +2,56 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.477] - 2026-10-04
+
+### Fixed
+- **The scraper tried to turn on a VPN that is off on purpose.** On a blocked page the scrape route rotates the VPN exit, which means connecting it. An instance that runs with its VPN disconnected by design was trying to connect it for every blocked page, timing out after 30 s each time and eating the request's budget. Rotation now happens only when the VPN is already connected; `SCRAPE_VPN_ROTATION=false` turns it off entirely.
+
+## [2.25.476] - 2026-10-04
+
+### Fixed
+- **Live pages were reported as blocked to link checkers.** Two causes, both found from a consumer's report that the render tier "fails on bot-protected sites":
+  - **Page text was cut to the first small content box.** The extractor took the first `main`/`article`/`#content`/`.content` element even when it held almost nothing. congress.gov (59 KB of text) came out as 1.3 KB and 4plebs (94 KB) as 464 B, and both were judged JavaScript shells after every bypass tier had fetched them fine. When that element holds under 15% of the page, the whole body is used. This applies to the plain, FlareSolverr and browser tiers.
+  - **"verify you are over 13" counted as a human-verification challenge.** A nysenate.gov bill page (10 KB of text) was failed as a challenge. The pattern now requires the word "human".
+- **Cloudflare Turnstile is named as a challenge.** "Checking your connection … to prevent automated abuse" (phys.org) is reported as `challenge-marker` instead of an app shell. It is still a real block: FlareSolverr cannot solve Turnstile.
+
+## [2.25.475] - 2026-10-04
+
+### Fixed
+- **A height-capped download (`quality: "480p"`) failed on a site with nothing at or under that height.** The format selector now ends in `/best`, so something is always downloaded.
+
+## [2.25.474] - 2026-10-04
+
+### Fixed
+- **Rumble downloads still failed on Cloudflare's random refusals.** The 2.25.473 fingerprint list ran once; it now repeats with a fresh cookie (see 2.25.473).
+
+## [2.25.473] - 2026-10-04
+
+### Fixed
+- **Rumble downloads failed about half the time ("HTTP Error 403").** yt-dlp was pinned to one browser fingerprint (`--impersonate chrome-131`), and Cloudflare started refusing it intermittently: the same link failed and then worked three minutes later. A Telegram user's pasted Rumble links were tried automatically and failed. Now the plugin tries `chrome-136`, `chrome-133`, `chrome` and then `chrome-131`, moving to the next on a 403, for Cloudflare sites (Rumble, BitChute) and for TikTok, Instagram and Facebook. Cloudflare also refuses at random (with the same cookie, one fingerprint passed and then failed a second later), so the list is run up to 3 times, with a freshly solved Cloudflare cookie before each repeat. Configure with `YTDLP_IMPERSONATE_TARGETS` and `YTDLP_IMPERSONATE_PASSES`.
+
+## [2.25.472] - 2026-10-04
+
+### Changed
+- **Orders the operator sends from the Trellis phone app will count.** On trellis-web the operator is a person message from the account owner sent through a signed-in session or the linked Telegram chat. The Android app sends a plain key, which is stored as `via: api`, so the agent ignored phone orders. trellis-web is adding `via: "app"` for a device key minted from a signed-in session; such a key cannot carry an agent name. The channel listener and the skills basket now accept `app` too. `api` still never counts.
+
+## [2.25.471] - 2026-10-04
+
+### Fixed
+- **The 2.25.470 stop could not reach a running task.** It was read from the event stream, but the stream hands over one event at a time and waits on the run in progress. A stop therefore queued behind the task it was meant to stop, and the inbox pass blocks the same way. While a run is answering in a channel, the listener now reads that channel itself every 10 s (`TRELLIS_STOP_POLL_MS`) for the operator's stop.
+
+## [2.25.470] - 2026-10-04
+
+### Fixed
+- **The operator's "pause" did not stop a running task in a Trellis channel.** On card 21 the other agents stopped at once; ALICE ran two more minutes and then posted a failure. The listener now holds a cancel handle for each run. A stop from the operator (stop, pause, cancel, hold on, wait) that is addressed to the agent, to @agents, or to nobody in particular cancels the run in progress, and the agent answers "Stopped." The stop message itself is never run as a task. Multi-step plans check for the cancel between steps.
+- **"Max iterations reached without finding an answer" was posted into shared channels.** When a run runs out of steps, the model writes one closing answer. If the model answered with another tool step instead, the closing answer was lost. It now gets one plain-text retry built from the steps taken, without the tool list. If that also fails, the internal error is never posted: the operator gets a plain sentence saying the task did not finish, and another agent gets only the 🤷 reaction.
+
+## [2.25.469] - 2026-10-04
+
+### Fixed
+- **Searching for a withheld tool looped.** Multi-step reasoning searched its tools for "mindswarm" eight times in one run and got "No commands match" each time, because MindSwarm is deliberately withheld from it. A search or describe that names an installed but withheld plugin now says so and tells the model to stop searching and report that it must run as a direct command.
+- **A trusted peer's tool search listed tools it may not run.** The search catalog was built without the request context, so another agent's search showed host tools (ssh, system, docker) that were then refused on use. The search now applies the same exclusions as execution.
+
 ## [2.25.468] - 2026-10-03
 
 ### Fixed

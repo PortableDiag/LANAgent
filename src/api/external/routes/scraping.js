@@ -61,8 +61,11 @@ const CHALLENGE_FINGERPRINTS = [
   // archive.ph leans on). Pattern: "One more step / Please complete the
   // security check to access" + "Why do I have to complete a CAPTCHA?"
   /please complete the security check|completing the captcha proves you/i,
-  // Generic human-verification wording used by several anti-bot vendors
-  /human verification|verify (you are|that you('re| are) a human)/i,
+  // Generic human-verification wording used by several anti-bot vendors. "human" is required:
+  // the old alternation matched a bare "verify you are", so a live nysenate.gov bill page
+  // ("…you agree to the Terms of Participation and verify you are over 13") was reported as a
+  // challenge to a link checker (2026-10-04).
+  /human verification|verify (that )?you('re| are) (a )?human/i,
   // federalregister.gov / eCFR.gov rolled out an explicit anti-scraping wall
   // ("Request Access — Due to aggressive automated scraping … programmatic
   // access to these sites …") that returns 200 with ~13KB of block text. It's
@@ -77,6 +80,9 @@ function looksLikeChallengePage(result) {
   // Short text that's mostly captcha-shaped JS object literals (cid/hsh/host/cookie fields)
   const text = String(result.content.text || '');
   if (text.length < 1000 && /['"](cid|hsh|host|cookie)['"]\s*:/.test(text)) return true;
+  // Cloudflare Turnstile interstitial ("Checking your connection … to prevent automated abuse"),
+  // which FlareSolverr cannot solve (phys.org). Only on a short page: the words alone are not a block.
+  if (text.length < 3000 && /checking your connection[\s\S]{0,200}automated abuse/i.test(haystack)) return true;
   return CHALLENGE_FINGERPRINTS.some(re => re.test(haystack));
 }
 
@@ -1311,9 +1317,22 @@ async function executeScrapeWithVpnRotation(req, params, tier) {
     return result;
   }
 
+  // Rotation means CONNECTING the VPN to another exit. An instance that runs with its VPN
+  // disconnected on purpose was having the scraper try to turn it on for every blocked page,
+  // 30 s per timed-out attempt (2026-10-04). Rotate only a VPN that is already up;
+  // SCRAPE_VPN_ROTATION=false turns rotation off entirely.
+  if (String(process.env.SCRAPE_VPN_ROTATION || '').toLowerCase() === 'false') {
+    recordBlockEvent('vpnUnavailable', tier);
+    return result;
+  }
   let currentLocation = '';
   try {
     const status = await vpn.getVPNStatus();
+    if (status?.connected === false) {
+      logger.info(`[ExternalScrape] Block on tier=${tier} for ${params.url}, but the VPN is disconnected on this host — not rotating`);
+      recordBlockEvent('vpnUnavailable', tier);
+      return result;
+    }
     currentLocation = status?.location || status?.smartLocation || '';
   } catch { /* unknown — proceed with rotation */ }
 

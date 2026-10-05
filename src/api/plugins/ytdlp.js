@@ -94,6 +94,17 @@ export default class YtDlpPlugin extends BasePlugin {
     // code change. Override via YTDLP_YOUTUBE_CLIENTS (comma-separated).
     this.youtubeClients = (process.env.YTDLP_YOUTUBE_CLIENTS || 'default,tv,web_safari,mweb')
       .split(',').map(s => s.trim()).filter(Boolean);
+    // Browser fingerprints for --impersonate, tried in order on a 403. Cloudflare's acceptance
+    // of a fingerprint drifts: chrome-131 was the one Rumble took, and on 2026-10-04 it was
+    // refused about half the time (the same URL failed at 10:05 and worked at 10:08) while
+    // chrome-133, chrome-136 and the curl-cffi default all passed. Pinning one target broke the
+    // Telegram bot's automatic downloads whenever it drifted.
+    this.impersonateTargets = (process.env.YTDLP_IMPERSONATE_TARGETS || 'chrome-136,chrome-133,chrome,chrome-131')
+      .split(',').map(s => s.trim()).filter(Boolean);
+    // Cloudflare also refuses at random: with one cookie, the same fingerprint passed and then
+    // 403'd a second later. A refusal costs ~1 s, so the list is run up to this many times, with
+    // a freshly solved cookie before each repeat.
+    this.impersonatePasses = Math.max(1, Number(process.env.YTDLP_IMPERSONATE_PASSES) || 3);
     this.commands = [
       {
         command: 'download',
@@ -689,7 +700,8 @@ export default class YtDlpPlugin extends BasePlugin {
         command += ` -f worst`;
       } else if (quality.includes('p')) {
         // Specific resolution like 720p, 1080p
-        command += ` -f "bestvideo[height<=${quality.replace('p', '')}]+bestaudio/best[height<=${quality.replace('p', '')}]"`;
+        // "/best" last: a site with nothing at or under that height still downloads something.
+        command += ` -f "bestvideo[height<=${quality.replace('p', '')}]+bestaudio/best[height<=${quality.replace('p', '')}]/best"`;
       } else if (format) {
         command += ` -f ${format}`;
       }
@@ -721,11 +733,28 @@ export default class YtDlpPlugin extends BasePlugin {
     // format/extraction failure (YouTube breaks whichever client currently
     // serves clean media). Other sites make a single attempt.
     const isYouTube = /(?:youtube\.com|youtu\.be)\//i.test(url);
-    const clients = isYouTube && this.youtubeClients.length ? this.youtubeClients : [null];
+    // Sites behind an anti-bot wall rotate the browser fingerprint the same way.
+    const impersonating = !isYouTube && this.impersonateTargets.length > 1 &&
+      (this._needsImpersonate(url) || (data._cookieFile && this._needsFlareSolverr(url)));
+    const clients = isYouTube && this.youtubeClients.length ? this.youtubeClients
+      : impersonating ? Array.from({ length: this.impersonatePasses }, () => this.impersonateTargets).flat() : [null];
 
     try {
       for (let i = 0; i < clients.length; i++) {
-        if (clients[i]) data._ytClient = clients[i];
+        if (clients[i]) {
+          if (isYouTube) data._ytClient = clients[i];
+          else data._impersonate = clients[i];
+        }
+        // A new pass through the fingerprints starts with a freshly solved Cloudflare cookie.
+        if (impersonating && i > 0 && i % this.impersonateTargets.length === 0 && this._needsFlareSolverr(url)) {
+          const fresh = await this._getCookieContext(url).catch(err => { logger.warn(`[ytdlp] re-solving the Cloudflare cookie failed: ${err.message}`); return null; });
+          if (fresh) {
+            if (cookieCtx?.cleanup) await cookieCtx.cleanup();
+            cookieCtx = fresh;
+            data._cookieFile = fresh.cookieFile;
+            data._cookieUserAgent = fresh.userAgent;
+          }
+        }
         const command = buildCommand();
 
         try {
@@ -801,6 +830,9 @@ export default class YtDlpPlugin extends BasePlugin {
           if (isYouTube && clients[i] && clients[i] !== this.youtubeClients[0]) {
             logger.info(`[ytdlp] YouTube download succeeded on fallback client "${clients[i]}" for ${url}`);
           }
+          if (impersonating && i > 0) {
+            logger.info(`[ytdlp] download succeeded with fingerprint "${clients[i]}" for ${url}`);
+          }
 
           return {
             success: true,
@@ -824,6 +856,10 @@ export default class YtDlpPlugin extends BasePlugin {
           // Try the next client before giving up on YouTube.
           if (isYouTube && recoverable && i < clients.length - 1) {
             logger.warn(`[ytdlp] YouTube client "${clients[i]}" failed for ${url} (${(error.message || '').slice(0, 120)}); falling back to "${clients[i + 1]}"`);
+            continue;
+          }
+          if (impersonating && /HTTP Error 403/i.test(detail) && !stopped && i < clients.length - 1) {
+            logger.warn(`[ytdlp] fingerprint "${clients[i]}" refused (403) for ${url}; trying "${clients[i + 1]}"`);
             continue;
           }
 
@@ -1464,10 +1500,10 @@ export default class YtDlpPlugin extends BasePlugin {
       }
       // Cloudflare-bypass path needs the matching TLS fingerprint.
       if (this._needsFlareSolverr(data.url)) {
-        cmd += ' --impersonate chrome-131';
+        cmd += ` --impersonate ${data._impersonate || this.impersonateTargets[0]}`;
       }
     } else if (this._needsImpersonate(data.url)) {
-      cmd += ' --impersonate chrome-131';
+      cmd += ` --impersonate ${data._impersonate || this.impersonateTargets[0]}`;
     }
     // Pin the YouTube player client (see this.youtubeClients). A single client
     // is used per attempt — the format selector must not merge multiple clients

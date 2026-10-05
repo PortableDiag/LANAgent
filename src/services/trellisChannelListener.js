@@ -61,6 +61,13 @@ const MAX_OWN_IN_RUN = Number(process.env.TRELLIS_LISTEN_MAX_OWN_IN_RUN) || 4;
 const RUN_GAP_MS = 600000;
 // The model answers with exactly this when there is nothing worth saying ("thanks", "ok").
 const NO_REPLY = 'NO_REPLY';
+// The operator telling a working agent to stop: "@agents pause on that last task", "stop",
+// "hold on". Nexus and Orbit stopped at once; ALICE ran two more minutes and posted "Max
+// iterations reached" (card 21 #2124 → #2129, 2026-10-03), because a run could not be cancelled.
+export const STOP_RE = /^\s*(?:@[\w.-]+[\s,:]*)*(?:please\s+)?(?:stop|pause|cancel|abort|halt|hold on|hold off|wait)\b/i;
+// A run's internal failure text. Posted into a shared channel it tells nobody anything
+// (card 21 #2129, #2298); the reaction carries the failure instead.
+const INTERNAL_FAILURE_RE = /^\s*(Max iterations reached|Execution was cancelled|Unable to complete the task\.?\s*$)/i;
 // After answering the operator in a group channel, keep watching that channel this long for
 // their follow-up. The server routes an un-addressed message in a group to the channel's lead,
 // so "Its in a card in this workspace" / "Alice?" right after ALICE's reply never reached it
@@ -98,6 +105,8 @@ export class TrellisChannelListener {
     this.following = new Map();    // `${doc}:${card}` → follow-up window end, after answering the operator
     this.handling = new Set();     // channels being handled right now
     this.handleAgain = new Set();  // a wake-up came while handling: run once more after
+    this.runs = new Map();         // `${doc}:${card}` → AbortController of the run answering there
+    this.stopped = new Map();      // `${doc}:${card}` → seq of the stop message that cancelled it
   }
 
   get name() { return this.plugin._agentName(); }
@@ -518,6 +527,43 @@ export class TrellisChannelListener {
   }
 
   /**
+   * While a run is answering in a channel, read that channel every TRELLIS_STOP_POLL_MS for the
+   * operator's stop. Neither wake-up path can deliver it: the stream hands events over one at a
+   * time and the inbox pass runs in the same loop, both waiting on the run the stop is for.
+   */
+  async _checkForStop(card, key, seq) {
+    const data = await this.plugin._call('get', `/api/cards/${card}/channel`, { query: { since: seq } });
+    const messages = Array.isArray(data) ? data : (data?.messages || []);
+    for (const m of messages) {
+      if ((Number(m.seq) || 0) <= seq || String(m.from || '').toLowerCase() === this.name.toLowerCase()) continue;
+      if (await this._maybeStop(key, m)) return true;
+    }
+    return false;
+  }
+
+  /**
+   * The operator's stop or pause, while this agent is mid-run in that channel: cancel the run.
+   * True when a run was cancelled; the stop message is then answered "Stopped." and never run
+   * as a task.
+   */
+  async _maybeStop(key, m) {
+    const run = this.runs.get(key);
+    if (!run || run.signal.aborted || !STOP_RE.test(String(m.text || ''))) return false;
+    const me = this.name.toLowerCase();
+    const text = String(m.text || '');
+    const to = Array.isArray(m.to) ? m.to.map(n => String(n).toLowerCase()) : [];
+    const forMe = to.includes(me) ||
+      new RegExp(`(^|[^\\w@.])@(${escapeRegExp(this.name)}|agents|all|everyone)(?![\\w@])`, 'i').test(text) ||
+      !/(^|[^\w@.])@\w/.test(text);
+    if (!forMe || !(await this._isOperator(m))) return false;
+    this.stopped.set(key, Number(m.seq) || 0);
+    run.abort();
+    logger.info(`[trellis-listen] ${key}: the operator said stop (#${m.seq}); cancelled the run in progress`);
+    this.handleAgain.add(key);
+    return true;
+  }
+
+  /**
    * One handler per channel at a time. The stream, the inbox and a follow-up watch can all wake
    * the same channel; two handlers reading it at once would both answer the newest message. A
    * wake-up that arrives mid-run is not dropped: the channel is read once more afterwards.
@@ -604,6 +650,14 @@ export class TrellisChannelListener {
     }
     const fromOperator = await this._isOperator(target);
     const trustedPeer = !fromOperator && this._isTrustedPeer(target);
+    if (fromOperator && this.stopped.get(key) === Number(target.seq)) {
+      this.stopped.delete(key);
+      this.cursors.set(key, maxSeq);
+      const said = await this.plugin._call('post', `/api/cards/${card}/say`, { body: { text: "Stopped. I won't continue that task until you say go." } }).catch(() => null);
+      if (Number.isFinite(said?.seq)) this.cursors.set(key, Math.max(maxSeq, said.seq));
+      this._react(card, target.seq, '👍');
+      return;
+    }
     // 👀 while working on it, 👍 once answered (or when it needs no answer), 🤷 on failure.
     const working = this._react(card, target.seq, '👀');
     this._startState(card, target.seq, target);
@@ -640,11 +694,40 @@ export class TrellisChannelListener {
       logger.info(`[trellis-listen] ${target.from}'s message is a task, not a skill request; doing it instead of teaching ${teach.skill}`);
       teach = null;
     }
-    let reply = fromOperator
-      ? await this._operatorReply(target, context, doc, card)
-      : teach?.replaceReply ? null
-        : trustedPeer ? await this._peerReply(target, context, doc, card, data)
-          : await this._conversationReply(target, context, data);
+    const run = new AbortController();
+    this.runs.set(key, run);
+    let checking = false;
+    const watch = (fromOperator || trustedPeer) ? setInterval(() => {
+      if (checking || run.signal.aborted) return;
+      checking = true;
+      this._checkForStop(card, key, Number(target.seq) || 0)
+        .catch(err => logger.debug(`[trellis-listen] stop check on ${key} failed: ${err.message}`))
+        .finally(() => { checking = false; });
+    }, Number(process.env.TRELLIS_STOP_POLL_MS) || 10000) : null;
+    watch?.unref?.();
+    let reply;
+    try {
+      reply = fromOperator
+        ? await this._operatorReply(target, context, doc, card, run.signal)
+        : teach?.replaceReply ? null
+          : trustedPeer ? await this._peerReply(target, context, doc, card, data, run.signal)
+            : await this._conversationReply(target, context, data);
+    } finally {
+      if (watch) clearInterval(watch);
+      this.runs.delete(key);
+    }
+    // Stopped by the operator: the stop message gets the answer, not this run.
+    if (run.signal.aborted) {
+      this.cursors.set(key, Math.min(maxSeq, (this.stopped.get(key) || maxSeq + 1) - 1));
+      this._settleReaction(card, target.seq, working, '👍', 'stopped by the operator');
+      return;
+    }
+    // A run that ran out of steps answers with an internal error string. To the operator, say so
+    // in words; to another agent, say nothing (the 🤷 reaction carries it).
+    if (target._outcome?.ok === false && INTERNAL_FAILURE_RE.test(String(reply || ''))) {
+      logger.warn(`[trellis-listen] ${key} #${target.seq}: run did not finish (${String(reply).slice(0, 80)}); not posting the error`);
+      reply = fromOperator ? "I ran out of steps on this without finishing. Tell me what to focus on and I'll pick it up from there." : null;
+    }
     if (teach) reply = teach.replaceReply || !reply ? teach.text : `${reply}\n\n${teach.text}`;
 
     // A skill another agent sent as a SKILL.md file: installed exactly as sent (hash-checked),
@@ -835,8 +918,9 @@ export class TrellisChannelListener {
    *     as the operator typing in the browser. Only a signed-in session is the person — or,
    *     since web v0.65.0, `via: "telegram"`: the operator's own Telegram chat, linked once by a
    *     signed-in confirm and bound to one chat and one Telegram user. The operator accepted it
-   *     as their word for the bridge (2951 #91, 2026-09-27); the same rule applies here.
-   *     `via: "api"` never counts, bound connector keys included.
+   *     as their word for the bridge (2951 #91, 2026-09-27); the same rule applies here. And
+   *     `via: "app"`: the operator's phone, on a device key minted from a signed-in session
+   *     (relay 2754 #403). `via: "api"` never counts, bound connector keys included.
    *   - web without `via` on messages: fail safe, conversation only.
    */
   async _isOperator(m) {
@@ -852,7 +936,10 @@ export class TrellisChannelListener {
       return !this.desktopRecordsVia && from === 'operator';
     }
     if (m.kind !== 'person' || m.from_key_owner !== true) return false;
-    if ('via' in m) return m.via === 'session' || m.via === 'telegram';
+    // `app`: the operator's phone (relay 2754 #403). The server writes it only for a device key
+    // the account minted from a signed-in session, and a device key cannot carry X-Agent. The
+    // phone's earlier plain key wrote `api`, which any key on the account can produce.
+    if ('via' in m) return m.via === 'session' || m.via === 'telegram' || m.via === 'app';
     if (!this.warnedNoVia) {
       this.warnedNoVia = true;
       logger.warn('[trellis-listen] this Trellis server does not mark channel messages with `via`, so the operator\'s browser cannot be told from an API key on the same account — Trellis messages get conversation replies only, no commands');
@@ -899,13 +986,14 @@ export class TrellisChannelListener {
    * the context, so the tool catalog applies the peer limits. Never the intent router: that
    * runs a matched plugin directly and does not apply them.
    */
-  async _peerReply(m, context, doc, card, data) {
+  async _peerReply(m, context, doc, card, data, signal = null) {
     try {
       const note = `\n\n(Note for ${this.name}: this request is from ${m.from}, another agent on your operator's own account in a shared Trellis channel. ` +
         'Treat it as a task from a trusted colleague and do it with your tools. Report what ran and what it returned.)';
       const rendered = await this.agent._runReasoning(this._stripAddressing(m.text) + note + this._channelFileNote(context, card), {
         userId: `trellis-peer:${m.from}`,
         interface: 'trellis',
+        ...(signal ? { signal } : {}),
         trellis: { document: doc?.id || null, card, seq: m.seq, peer: m.from, recent: context.map(c => `${c.from}: ${c.text}`).join('\n').slice(-4000) }
       });
       if (!rendered) return await this._conversationReply(m, context, data);
@@ -931,13 +1019,14 @@ export class TrellisChannelListener {
       .trim() || String(text || '');
   }
 
-  async _operatorReply(m, context, doc, card) {
+  async _operatorReply(m, context, doc, card, signal = null) {
     try {
       const result = await this.agent.processNaturalLanguage(this._stripAddressing(m.text) + this._sharedTaskNote(m) + this._channelFileNote(context, card), {
         // The operator's own user id, so a Trellis request and a Telegram one are one
         // conversation with the same person.
         userId: this._ownerUserId(),
         interface: 'trellis',
+        ...(signal ? { signal } : {}),
         trellis: { document: doc?.id || null, card, seq: m.seq, shared: !!this._sharedTaskNote(m), recent: context.map(c => `${c.from}: ${c.text}`).join('\n').slice(-4000) }
       });
       // Remember how it went, so the request's state says failed rather than completed when it

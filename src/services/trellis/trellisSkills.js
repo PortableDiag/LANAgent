@@ -30,7 +30,7 @@ export const basketOrigin = (docId) => `trellis:${docId || 'desktop'}`;
 
 /** Did the operator themself write this (not a key, not a sharee)? */
 export function writtenByOperator(w = {}) {
-  return w.kind === 'person' && (w.via === 'session' || w.via === 'telegram') && w.from_key_owner === true;
+  return w.kind === 'person' && (w.via === 'session' || w.via === 'telegram' || w.via === 'app') && w.from_key_owner === true;
 }
 
 /**

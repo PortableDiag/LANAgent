@@ -169,6 +169,22 @@ const CHROME_NET_ERROR_RE = /\b(ERR_NAME_NOT_RESOLVED|ERR_NAME_RESOLUTION_FAILED
  * status + retry) or null. Requires a STRUCTURAL marker so a genuine article that
  * merely mentions an ERR_ code in prose is never misclassified.
  */
+/**
+ * The page's main text: the first main/article/#content/.content element, unless that element
+ * holds only a sliver of the page. congress.gov (59 KB of text) and 4plebs (94 KB) were cut
+ * to 1.3 KB and 464 B by a small first match, judged "app shell" and reported blocked to a
+ * link checker (2026-10-04). Below 15% of the body, or under 500 characters when the body
+ * has three times as much, the body is the better reading.
+ */
+export function pickMainText(mainText, bodyText) {
+  const main = String(mainText || '');
+  const body = String(bodyText || '');
+  if (!main) return body;
+  if (body.length > 2000 && main.length < body.length * 0.15) return body;
+  if (main.length < 500 && body.length > main.length * 3) return body;
+  return main;
+}
+
 function detectChromeErrorPage(html) {
   if (!html || typeof html !== 'string' || html.length > 200000) return null;
   const structural = /id=["']main-frame-error["']/i.test(html)
@@ -585,7 +601,7 @@ export default class ScraperPlugin extends BasePlugin {
           break;
         }
       }
-      content.text = mainContent || $('body').text().trim();
+      content.text = pickMainText(mainContent, $('body').text().trim());
     }
 
     $('a[href]').each((i, elem) => {
@@ -728,7 +744,7 @@ export default class ScraperPlugin extends BasePlugin {
           }
         }
         
-        content.text = mainContent || $('body').text().trim();
+        content.text = pickMainText(mainContent, $('body').text().trim());
       }
       
       $('a[href]').each((i, elem) => {
@@ -1014,8 +1030,12 @@ export default class ScraperPlugin extends BasePlugin {
           const element = document.querySelector(selector);
           result.text = getTextContent(element);
         } else {
+          // Same rule as pickMainText (this runs in the page, so it is restated here).
           const mainContent = document.querySelector('main, article, [role="main"], #content, .content');
-          result.text = getTextContent(mainContent || document.body);
+          const bodyText = getTextContent(document.body);
+          const mainText = mainContent ? getTextContent(mainContent) : '';
+          result.text = !mainText || (bodyText.length > 2000 && mainText.length < bodyText.length * 0.15) ||
+            (mainText.length < 500 && bodyText.length > mainText.length * 3) ? bodyText : mainText;
         }
         
         document.querySelectorAll('a[href]').forEach(link => {
