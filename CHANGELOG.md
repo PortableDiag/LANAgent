@@ -2,6 +2,11 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.478] - 2026-10-04
+
+### Fixed
+- **A PerimeterX block page was returned as a successful scrape.** "Access to this page has been denied … Press & Hold to confirm you are a human" came back as a 200 with 1.8 KB of text, so a link checker scored a blocked page as live. On a short page that wording is now a challenge, so the next fallback runs and an honest 422 is returned if none works.
+
 ## [2.25.477] - 2026-10-04
 
 ### Fixed

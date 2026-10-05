@@ -83,6 +83,10 @@ function looksLikeChallengePage(result) {
   // Cloudflare Turnstile interstitial ("Checking your connection … to prevent automated abuse"),
   // which FlareSolverr cannot solve (phys.org). Only on a short page: the words alone are not a block.
   if (text.length < 3000 && /checking your connection[\s\S]{0,200}automated abuse/i.test(haystack)) return true;
+  // PerimeterX / HUMAN block page ("Access to this page has been denied … Press & Hold to confirm
+  // you are a human"). It reached a link checker as a 200 with 1.8 KB of text from thehill.com,
+  // so a blocked page was scored live (2026-10-04).
+  if (text.length < 3000 && /access to this page has been denied|press (&|and) hold to confirm you are a human/i.test(haystack)) return true;
   return CHALLENGE_FINGERPRINTS.some(re => re.test(haystack));
 }
 
