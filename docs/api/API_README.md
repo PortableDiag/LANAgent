@@ -563,6 +563,18 @@ Live in-memory snapshot of download-token usage (tokens within their TTL window)
 
 ## Recent Updates (October 2, 2026)
 
+### v2.25.481 — Signatures and digests (`cryptotools` plugin)
+Each action is `POST /api/plugin` (JWT) with `{"plugin": "cryptotools", "action": "...", ...}`, or in plain words.
+
+| Action | Params | Returns |
+|---|---|---|
+| `verifyJws` | `jws`, one of `jwks_url` / `jwk` / `public_key` (PEM), `expect?` (e.g. `{typ, iss}`) | `valid`, `signatureValid`, `alg`, `kid`, `checks` (`exp`, `nbf`, each expected claim), `header`, `claims`. EdDSA, ES256/384, RS256/384/512, PS256; `alg: none` is refused |
+| `decodeJws` | `jws` | `header`, `claims`, `verified: false` |
+| `hmac` | `key` (or a `{{secret:<host>.<field>}}` placeholder), `message`, `algorithm?` (sha256), `encoding?` (hex/base64), `expect?` (`sha256=…`) | `digest`, `header`, `matches` when `expect` is given. A peer agent cannot use a saved secret |
+| `sha256` | one of `text` / `base64` / `file` (data, temp, upload, workspace folders) / `url` (public, ≤110 MB), `expect?` | `sha256`, `bytes`, `matches` when `expect` is given |
+
+trellis-notes `createNote` and `createTask` (v2.25.480) also take `pos: [x, y]` and `size: [w, h]`.
+
 ### v2.25.465 — Follow-ups, media analysis
 
 | Plugin / route | What |

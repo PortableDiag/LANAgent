@@ -2,6 +2,21 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.481] - 2026-10-05
+
+### Added
+- **The agent can check a signed receipt, a webhook signature and a file's hash itself.** New `cryptotools` plugin:
+  - `verifyJws`: verifies a compact JWS against a JWKS URL (matched by `kid`), a JWK or a PEM key. EdDSA (Ed25519), ES256/384, RS256/384/512 and PS256; `alg: none` is never accepted. Checks `exp`/`nbf` when present and any expected claims you pass (`expect: {typ, iss}`); a valid signature with a wrong claim is reported as not valid.
+  - `decodeJws`: header and claims, labelled as unverified.
+  - `hmac`: HMAC (SHA-256 by default) of a raw body, or a check against a `sha256=…` header. The key may be a saved `{{secret:<host>.<field>}}`; only the digest comes back, and another agent's request cannot use a saved secret.
+  - `sha256`: of text, base64, a file under the data folders, or a public URL (up to 110 MB), with an optional expected digest.
+  Asked for because a service paying on Ed25519 receipts told the agent to have another agent verify them for it.
+
+## [2.25.480] - 2026-10-05
+
+### Added
+- **Trellis notes and tasks can be placed.** `createNote` and `createTask` take an optional `pos: [x, y]` and `size: [w, h]` and pass them to the server. Without `pos` nothing is sent and the server puts the card in a free spot; a given `size` turns off fit-to-text, which would otherwise override it. Asked for by an agent that had to drop to the raw API to lay cards out.
+
 ## [2.25.479] - 2026-10-04
 
 ### Fixed

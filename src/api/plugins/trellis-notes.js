@@ -66,6 +66,25 @@ const MAX_MESSAGES = 30;
 const DUE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const VALID_KINDS = ['text', 'checklist', 'code'];
 const VALID_STATUS = ['todo', 'doing', 'done', 'blocked', 'waiting'];
+
+/**
+ * Optional placement for a new card. Without pos the server finds a free spot (four columns, no
+ * overlap), so only a caller-given pos is sent; a given size also turns off fit, which would
+ * otherwise resize the card to its text (Trellis relay 2754 #415, Alice's ask on card 21 #2784).
+ */
+function placement(pos, size) {
+  const pair = (v, name, positive) => {
+    const a = typeof v === 'string' ? v.split(/[,\s]+/).filter(Boolean).map(Number) : v;
+    if (!Array.isArray(a) || a.length !== 2 || !a.every(Number.isFinite) || (positive && !a.every(n => n > 0))) {
+      throw new Error(`${name} must be two ${positive ? 'positive ' : ''}numbers, [${name === 'pos' ? 'x, y' : 'w, h'}].`);
+    }
+    return a.map(Number);
+  };
+  const out = { fit: true };
+  if (pos != null && pos !== '') out.pos = pair(pos, 'pos', false);
+  if (size != null && size !== '') { out.size = pair(size, 'size', true); out.fit = false; }
+  return out;
+}
 const MODES = ['auto', 'web', 'desktop'];
 const DOCS_TTL_MS = 5 * 60 * 1000;   // re-read the key's documents, as TrellisBridge does
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -201,13 +220,13 @@ export default class TrellisNotesPlugin extends BasePlugin {
       {
         command: 'createTask',
         description: 'File a task card with status:: and due:: so it lands in the Agenda and Kanban automatically',
-        usage: 'createTask({ basket: "LANAgent Open Items", title: "Rotate the API key", body: "why it matters", due: "2026-08-11" })',
+        usage: 'createTask({ basket: "LANAgent Open Items", title: "Rotate the API key", body: "why it matters", due: "2026-08-11" }) — optional pos: [x, y] and size: [w, h]; leave pos out and the server picks a free spot',
         examples: ['add a task to my notes', 'file this as a task in trellis', 'remind me in my notes to rotate the key']
       },
       {
         command: 'createNote',
         description: 'Create a text, checklist or code card in a basket',
-        usage: 'createNote({ basket: "Reference", title: "Log one-liners", body: "...", kind: "text" })',
+        usage: 'createNote({ basket: "Reference", title: "Log one-liners", body: "...", kind: "text" }) — optional pos: [x, y] and size: [w, h]; leave pos out and the server picks a free spot',
         examples: ['make a note in trellis', 'save this to my notes', 'write this down in my notes app', 'add a checklist to my notes']
       },
       {
@@ -1133,12 +1152,13 @@ export default class TrellisNotesPlugin extends BasePlugin {
     };
   }
 
-  async createNote({ basket, title, body = '', kind = 'text', items = null, lang = null, color = null, tags = null } = {}) {
+  async createNote({ basket, title, body = '', kind = 'text', items = null, lang = null, color = null, tags = null, pos = null, size = null } = {}) {
     if (!title || !String(title).trim()) throw new Error('createNote needs a title.');
     if (!VALID_KINDS.includes(kind)) throw new Error(`kind must be one of: ${VALID_KINDS.join(', ')}.`);
 
+    const place = placement(pos, size);
     const node = await this._resolveNode(basket, { allowDefault: true });
-    const payload = { kind, title: String(title).trim(), fit: true };
+    const payload = { kind, title: String(title).trim(), ...place };
 
     if (kind === 'checklist') {
       const list = Array.isArray(items) ? items : String(body || '').split('\n').filter(Boolean);
@@ -1157,14 +1177,15 @@ export default class TrellisNotesPlugin extends BasePlugin {
     const created = await this._call('post', `/api/nodes/${node.id}/cards`, { body: payload });
     return {
       success: true,
-      created: { card: created.id, basket: node.id, basketTitle: node.title, kind, title: payload.title }
+      created: { card: created.id, basket: node.id, basketTitle: node.title, kind, title: payload.title, ...(place.pos && { pos: place.pos }), ...(place.size && { size: place.size }) }
     };
   }
 
-  async createTask({ basket, title, body = '', due = null, status = 'todo', tags = null, color = null } = {}) {
+  async createTask({ basket, title, body = '', due = null, status = 'todo', tags = null, color = null, pos = null, size = null } = {}) {
     if (!title || !String(title).trim()) throw new Error('createTask needs a title.');
     if (due && !DUE_RE.test(String(due))) throw new Error('due must be YYYY-MM-DD.');
     if (!VALID_STATUS.includes(status)) throw new Error(`status must be one of: ${VALID_STATUS.join(', ')}.`);
+    const place = placement(pos, size);
 
     const node = await this._resolveNode(basket, { allowDefault: true });
 
@@ -1181,13 +1202,13 @@ export default class TrellisNotesPlugin extends BasePlugin {
         title: String(title).trim(),
         body: lines.join('\n'),
         color: color || 'amber',
-        fit: true
+        ...place
       }
     });
 
     return {
       success: true,
-      created: { card: created.id, basket: node.id, basketTitle: node.title, title: String(title).trim(), status, due: due || null },
+      created: { card: created.id, basket: node.id, basketTitle: node.title, title: String(title).trim(), status, due: due || null, ...(place.pos && { pos: place.pos }), ...(place.size && { size: place.size }) },
       note: due ? 'Filed with a due date — it is now in the operator\'s Agenda and Kanban.' : 'Filed without a due date, so it appears on the Kanban but not the Agenda.'
     };
   }

@@ -262,8 +262,9 @@ export async function executeTool(agent, tool, command, params = {}, context = n
   try {
     // The Trellis channel a request came from, for trellis-notes only (see executePluginWithLogging).
     const channel = tool === 'trellis-notes' && context?.trellis ? { _trellis: context.trellis } : {};
-    // The http plugin narrows what a peer's request may reach (no LAN, no uploads outside data dirs).
-    if (tool === 'http' && context?.trellis?.peer) channel._peer = context.trellis.peer;
+    // The http plugin narrows what a peer's request may reach (no LAN, no uploads outside data dirs);
+    // cryptotools refuses a peer the saved secrets as HMAC keys.
+    if ((tool === 'http' || tool === 'cryptotools') && context?.trellis?.peer) channel._peer = context.trellis.peer;
     // A follow-up is scheduled for the conversation it was promised in.
     if (tool === 'followup' && context) channel._context = { trellis: context.trellis || null, userId: context.userId || null, interface: context.interface || null };
     const result = await agent.apiManager.executeAPI(tool, 'execute', { ...(params || {}), ...channel, action: command });
