@@ -253,9 +253,52 @@ export const EXTRA_COMMANDS = [
     usage: 'teachSkill({ card: 2119, skill: "humanizer", to: "Orbit" })  // to optional: @mentions that agent in a group channel', examples: ['teach the humanizer skill to orbit in the trellis channel', 'share your inbox triage skill with the other agent in trellis card 2119', 'send the debugging skill to hermes in trellis'] },
   { command: 'restoreFromTrash', description: 'Put deleted Trellis cards or baskets back from the trash, with their original ids — by the batch listTrash shows (web, document owner)',
     usage: 'restoreFromTrash({ batch: "<batch id from listTrash>" })', examples: ['restore the deleted trellis card', 'undelete that trellis basket'] },
+  // tasks, Todoist-shaped (web v0.104): relay 2754 #431
+  { command: 'quickAdd', description: 'Add a task from one line of plain text, read the way a to-do app reads it: dates in words ("tomorrow", "fri", "in 3 days", "oct 12"), "at 5pm", "every mon", "!1"-"!4" priority, "@Name" assignee, "#tag", "^Basket", "remind 30m". dry: true shows the reading without creating it',
+    usage: 'quickAdd({ text: "Renew the domain fri at 5pm !2 @ALICE ^\\"LANAgent Open Items\\" remind 1d", dry: false })  // basket optional (else the channel\'s basket or ^Basket in the text)',
+    examples: ['add a task to pay the bill every month on the 1st', 'quick add: call the vet tomorrow at 3pm', 'remind me friday to renew the domain', 'add a recurring task every monday'] },
+  { command: 'getTodo', description: 'The to-do list: every open task (cards and checklist lines) with due date, time, deadline, repeat, priority, reminder and assignee. Filter by due (today, overdue, week, or a date) and assignee',
+    usage: 'getTodo({ due: "today", assignee: "ALICE" })  // due: today | overdue | week | YYYY-MM-DD; includeDone: true to include finished ones',
+    examples: ['what is on my todo list today', 'what tasks are overdue', 'what is assigned to me', 'show my tasks for this week'] },
+  { command: 'updateTask', description: 'Set or clear task properties on a card or one checklist line: due, time, deadline, every (repeat), priority 1-4, remind, assignee, status. null clears one',
+    usage: 'updateTask({ card: 412, item: "Water plants", set: { due: "2026-10-12", every: "3 days after done", priority: 2, assignee: "ALICE", remind: null } })',
+    examples: ['make that task repeat every week', 'set the priority of that task to 1', 'assign that task to me', 'move the due date of that task to friday'] },
+  { command: 'completedTasks', description: 'What was finished recently, by day, and the current streak',
+    usage: 'completedTasks({ days: 7 })', examples: ['what tasks did I finish this week', 'what got done today'] },
   // the document's shared Skills basket (web): src/services/trellis/trellisSkills.js
   ...SKILL_BASKET_COMMANDS
 ];
+
+// Task property keys the server reads (GET /api/reference, Tasks). Values are written as text.
+export const TASK_KEYS = ['due', 'time', 'deadline', 'every', 'priority', 'remind', 'assignee', 'status'];
+
+/** The shape of a todo row an agent needs; the server's full row is wider. */
+function todoRow(t) {
+  const out = { card: t.card ?? null, title: t.title ?? null, done: !!t.done };
+  if (t.item != null) out.item = t.item;
+  for (const k of ['due', 'time', 'deadline', 'every', 'priority', 'remind', 'assignee', 'status']) if (t[k] != null && t[k] !== '') out[k] = t[k];
+  if (t.node_path) out.path = t.node_path;
+  return out;
+}
+
+/** today / overdue / week / a YYYY-MM-DD, against the server's own `today`. */
+export function filterTodo(tasks, { due = null, assignee = null, includeDone = false, today } = {}) {
+  const day = (d) => (typeof d === 'string' ? d.slice(0, 10) : null);
+  const plus = (iso, n) => { const t = new Date(`${iso}T00:00:00Z`); t.setUTCDate(t.getUTCDate() + n); return t.toISOString().slice(0, 10); };
+  const who = assignee ? String(assignee).replace(/^@/, '').trim().toLowerCase() : null;
+  const when = due ? String(due).trim().toLowerCase() : null;
+  return tasks.filter(t => {
+    if (!includeDone && t.done) return false;
+    if (who && !String(t.assignee || '').toLowerCase().startsWith(who)) return false;
+    if (!when) return true;
+    const d = day(t.due);
+    if (!d) return false;
+    if (when === 'today') return d <= today;          // today's, plus anything overdue
+    if (when === 'overdue') return d < today;
+    if (when === 'week') return d <= plus(today, 7);
+    return d === when.slice(0, 10);
+  });
+}
 
 export const EXTRA_ACTIONS = new Set(EXTRA_COMMANDS.map(c => c.command));
 
@@ -273,6 +316,22 @@ const helpers = {
       .filter(([, v]) => v !== undefined && v !== null && v !== '')
       .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`).join('&');
     return this._request(method, `/api/documents/${id}${sub}${qs ? `?${qs}` : ''}`, body);
+  },
+
+  /**
+   * Complete a task through the web's task route, so a repeating one rolls on (`every::`) and the
+   * completion is logged once (web v0.104). `item` names one checklist line (id or its text).
+   */
+  async _completeOnWeb({ item = null, done = true, ...ref }) {
+    const c = await this._card(ref);
+    const body = { done: done !== false };
+    if (item !== null && item !== undefined && item !== '') body.item = await this._itemId(c, item);
+    const r = await this._call('post', `/api/cards/${c.id}/complete`, { body });
+    return {
+      success: true,
+      completed: { card: c.id, title: c.title, ...(body.item ? { item: body.item } : {}), done: r?.done ?? body.done },
+      ...(r?.rolled ? { rolled: true, nextDue: r.next_due ?? null, result: `"${c.title}" repeats: done for now, next due ${r.next_due}.` } : {})
+    };
   },
 
   /** GET a routed path as bytes. */
@@ -333,6 +392,56 @@ const helpers = {
 // ---------------------------------------------------------------- actions (mixed in)
 
 const actions = {
+  async quickAdd({ text, basket = null, dry = false } = {}) {
+    if (!text || !String(text).trim()) throw new Error('quickAdd needs the task as one line of text.');
+    const body = { text: String(text).trim(), ...(dry ? { dry: true } : {}) };
+    // A basket named here wins; otherwise ^Basket in the text, else the channel's basket.
+    if (basket !== null && basket !== undefined && basket !== '') body.node = (await this._resolveNode(basket)).id;
+    else if (!/\^/.test(body.text)) {
+      const node = await this._resolveNode(null, { allowDefault: true }).catch(() => null);
+      if (node) body.node = node.id;
+    }
+    const r = await this._docRoute('post', '/quickadd', { body });
+    const parsed = r?.parsed || {};
+    const card = r?.card?.id ?? r?.card ?? null;
+    const bits = ['due', 'time', 'every', 'priority', 'assignee', 'remind', 'deadline'].filter(k => parsed[k] != null && parsed[k] !== '').map(k => `${k} ${parsed[k]}`);
+    return {
+      success: true,
+      dry: !!dry,
+      parsed,
+      basket: r?.node ?? null,
+      basketTitle: r?.node_title ?? null,
+      ...(card != null ? { card } : {}),
+      result: `${dry ? 'Would add' : 'Added'} "${parsed.title ?? body.text}"${r?.node_title ? ` in ${r.node_title}` : ''}${bits.length ? ` (${bits.join(', ')})` : ''}${card != null ? `, card #${card}` : ''}.`
+    };
+  },
+
+  async getTodo({ due = null, assignee = null, includeDone = false, limit = 50 } = {}) {
+    const r = await this._docRoute('get', '/todo');
+    const tasks = Array.isArray(r?.tasks) ? r.tasks : [];
+    const today = r?.today || new Date().toISOString().slice(0, 10);
+    const hits = filterTodo(tasks, { due, assignee, includeDone, today });
+    return { success: true, today, total: tasks.length, count: hits.length, tasks: hits.slice(0, Math.min(Number(limit) || 50, 200)).map(todoRow) };
+  },
+
+  async updateTask({ item = null, set = null, ...ref } = {}) {
+    const fields = typeof set === 'string' ? JSON.parse(set) : set;
+    if (!fields || typeof fields !== 'object' || !Object.keys(fields).length) throw new Error('updateTask needs set: { key: value }, e.g. { due: "2026-10-12", priority: 2 }.');
+    const bad = Object.keys(fields).filter(k => !TASK_KEYS.includes(k));
+    if (bad.length) throw new Error(`Not task properties: ${bad.join(', ')}. Use ${TASK_KEYS.join(', ')}.`);
+    const c = await this._card(ref);
+    const body = { set: Object.fromEntries(Object.entries(fields).map(([k, v]) => [k, v === null ? null : String(v)])) };
+    if (item !== null && item !== undefined && item !== '') body.item = await this._itemId(c, item);
+    await this._call('post', `/api/cards/${c.id}/task`, { body });
+    return { success: true, card: c.id, title: c.title, ...(body.item ? { item: body.item } : {}), set: body.set };
+  },
+
+  async completedTasks({ days = 7 } = {}) {
+    const r = await this._docRoute('get', '/completed', { query: { days: Math.min(Math.max(Number(days) || 7, 1), 365) } });
+    const items = Array.isArray(r?.items) ? r.items : [];
+    return { success: true, today: r?.today ?? null, streak: r?.streak ?? null, count: items.length, byDay: r?.by_day ?? null, items: items.slice(0, 100).map(todoRow) };
+  },
+
   async teachSkill({ card, skill, to = null } = {}) {
     if (!(typeof card === 'number' || /^\d+$/.test(String(card ?? '')))) throw new Error('teachSkill needs the channel card id.');
     if (!skill || !String(skill).trim()) throw new Error('teachSkill needs the skill name (see: list skills).');

@@ -2,6 +2,19 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.484] - 2026-10-05
+
+### Added
+- **Trellis tasks the way a to-do app does them** (trellis-web v0.104). New trellis-notes actions:
+  - `quickAdd`: one line of plain text becomes a task. The server reads dates in words ("fri", "in 3 days", "oct 12"), "at 5pm", "every mon", `!1`–`!4`, `@Name`, `#tag`, `^Basket` and "remind 30m". `dry: true` shows how it was read and creates nothing.
+  - `getTodo`: open tasks (cards and checklist lines) with due, time, deadline, repeat, priority, reminder and assignee. Filter by `due` (`today` includes overdue, `overdue`, `week`, or a date) and `assignee`.
+  - `updateTask`: set or clear task properties on a card or one checklist line.
+  - `completedTasks`: what was finished recently, and the streak.
+- `createTask` takes `time`, `deadline`, `every`, `priority` (1–4), `remind` and `assignee`.
+
+### Changed
+- **`completeTask` on trellis-web uses the task route.** A repeating task rolls on to its next date and the answer says so. A checklist line can be completed by its text (`item`). The desktop still writes `status:: done`.
+
 ## [2.25.483] - 2026-10-05
 
 ### Fixed

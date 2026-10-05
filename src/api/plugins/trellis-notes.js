@@ -132,8 +132,8 @@ const PARAM_ALIASES = {
 // actions. ReAct sent readCard {"id":"307"} five times in 30 s and was refused each time
 // (2026-10-03), because only card/cardId/card_id were read. No action has an `id` of its own.
 const ID_TARGET = {
-  readCard: 'card', appendNote: 'card', setTaskStatus: 'card', readChannel: 'card', replyChannel: 'card',
-  readBasket: 'basket', createNote: 'basket', createTask: 'basket'
+  readCard: 'card', appendNote: 'card', setTaskStatus: 'card', completeTask: 'card', updateTask: 'card', readChannel: 'card', replyChannel: 'card',
+  readBasket: 'basket', createNote: 'basket', createTask: 'basket', quickAdd: 'basket'
 };
 function normalizeParamAliases(data, action = null) {
   const target = ID_TARGET[action];
@@ -237,7 +237,7 @@ export default class TrellisNotesPlugin extends BasePlugin {
       {
         command: 'createTask',
         description: 'File a task card with status:: and due:: so it lands in the Agenda and Kanban automatically',
-        usage: 'createTask({ basket: "LANAgent Open Items", title: "Rotate the API key", body: "why it matters", due: "2026-08-11" }) — optional pos: [x, y] and size: [w, h]; leave pos out and the server picks a free spot',
+        usage: 'createTask({ basket: "LANAgent Open Items", title: "Rotate the API key", body: "why it matters", due: "2026-08-11" }) — optional time: "17:30", deadline, every: "2 weeks", priority: 1-4, remind: "1d", assignee; pos: [x, y] and size: [w, h] (leave pos out and the server picks a free spot)',
         examples: ['add a task to my notes', 'file this as a task in trellis', 'remind me in my notes to rotate the key']
       },
       {
@@ -267,8 +267,8 @@ export default class TrellisNotesPlugin extends BasePlugin {
       },
       {
         command: 'completeTask',
-        description: 'Mark a task card done (status:: done)',
-        usage: 'completeTask({ basket: "LANAgent Open Items", card: "Rotate the API key" })',
+        description: 'Mark a task done: a card, or one checklist line (item). A repeating task (every::) rolls on to its next date and stays open',
+        usage: 'completeTask({ basket: "LANAgent Open Items", card: "Rotate the API key" })  // item: "line text" or its id for one checklist line',
         examples: ['mark that task done in my notes', 'complete the task in trellis', 'tick that item off']
       },
       {
@@ -527,7 +527,10 @@ export default class TrellisNotesPlugin extends BasePlugin {
         case 'appendNote':      return await this.appendNote(data);
         case 'createBasket':    return await this.createBasket(data);
         case 'setTaskStatus':   return await this.setTaskStatus(data);
-        case 'completeTask':    return await this.setTaskStatus({ ...data, status: 'done' });
+        // Web v0.104: the task route rolls a repeating task on and takes a checklist line;
+        // the desktop has only the status property.
+        case 'completeTask':    await this._ensureTarget();
+          return this.resolvedMode === 'web' ? await this._completeOnWeb(data) : await this.setTaskStatus({ ...data, status: 'done' });
         case 'listChannels':    return await this.listChannels(data);
         case 'readChannel':     return await this.readChannel(data);
         case 'replyChannel':    return await this.replyChannel(data);
@@ -1198,7 +1201,7 @@ export default class TrellisNotesPlugin extends BasePlugin {
     };
   }
 
-  async createTask({ basket, title, body = '', due = null, status = 'todo', tags = null, color = null, pos = null, size = null } = {}) {
+  async createTask({ basket, title, body = '', due = null, status = 'todo', tags = null, color = null, pos = null, size = null, time = null, deadline = null, every = null, priority = null, remind = null, assignee = null } = {}) {
     if (!title || !String(title).trim()) throw new Error('createTask needs a title.');
     if (due && !DUE_RE.test(String(due))) throw new Error('due must be YYYY-MM-DD.');
     if (!VALID_STATUS.includes(status)) throw new Error(`status must be one of: ${VALID_STATUS.join(', ')}.`);
@@ -1210,6 +1213,12 @@ export default class TrellisNotesPlugin extends BasePlugin {
     // Kanban parsers read, and it keeps them visible in the rendered card.
     const lines = [`status:: ${status}`];
     if (due) lines.push(`due:: ${due}`);
+    // Web v0.104 task properties; the desktop keeps them as plain properties.
+    if (deadline && !DUE_RE.test(String(deadline))) throw new Error('deadline must be YYYY-MM-DD.');
+    if (priority !== null && priority !== undefined && priority !== '' && !/^[1-4]$/.test(String(priority))) throw new Error('priority must be 1 (highest) to 4.');
+    for (const [k, v] of [['time', time], ['deadline', deadline], ['every', every], ['priority', priority], ['remind', remind], ['assignee', assignee]]) {
+      if (v !== null && v !== undefined && String(v).trim() !== '') lines.push(`${k}:: ${String(v).trim()}`);
+    }
     if (Array.isArray(tags) && tags.length) lines.push(tags.map(t => (t.startsWith('#') ? t : `#${t}`)).join(' '));
     lines.push('', String(body || ''));
 

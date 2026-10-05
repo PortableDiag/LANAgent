@@ -563,6 +563,18 @@ Live in-memory snapshot of download-token usage (tokens within their TTL window)
 
 ## Recent Updates (October 2, 2026)
 
+### v2.25.484 — Trellis tasks: quick add, to-do list, repeats (trellis-notes, trellis-web v0.104)
+Each action is `POST /api/plugin` (JWT) with `{"plugin": "trellis-notes", "action": "...", ...}`. Web only, except `createTask`/`completeTask`.
+
+| Action | Params | Returns |
+|---|---|---|
+| `quickAdd` | `text` (one line: "pay rent every month 1 !1 @ALICE remind 1d"), `basket?`, `dry?` | `parsed` (title, due, time, every, priority, assignee, remind, deadline), `basketTitle`, `card` unless `dry` |
+| `getTodo` | `due?` (`today` = due today or overdue, `overdue`, `week`, `YYYY-MM-DD`), `assignee?`, `includeDone?`, `limit?` | `today`, `count`, `tasks[]` (card, item, title, due, time, deadline, every, priority, remind, assignee, status, path) |
+| `updateTask` | `card`, `item?` (checklist line id or text), `set` {due, time, deadline, every, priority, remind, assignee, status: value or null} | `set` as sent |
+| `completedTasks` | `days?` (7) | `streak`, `byDay`, `items[]` |
+| `completeTask` | `card`, `item?` | on the web, `rolled` and `nextDue` when a repeating task moved on |
+| `createTask` | adds `time?`, `deadline?`, `every?`, `priority?` (1-4), `remind?`, `assignee?` | as before |
+
 ### v2.25.482 — Reply shapes in Trellis channels (`expect`)
 Trellis messages (web v0.101.0, desktop v0.223.0) can carry `expect: {shape: "exact"|"line"|"number"|"none", value?}`.
 
