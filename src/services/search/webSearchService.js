@@ -78,10 +78,25 @@ class WebSearchService {
       if (hit) return { ...hit, cached: true };
     }
 
+    // DuckDuckGo's front ends refuse a connection now and then (ECONNREFUSED on one of its
+    // addresses, 11 times on 2026-10-04); a paying caller got a 500 each time although a
+    // second try a moment later reaches another address. One retry, on network errors only.
+    const transient = (err) => /ECONNREFUSED|ECONNRESET|ETIMEDOUT|EAI_AGAIN|socket hang up/i.test(`${err?.code || ''} ${err?.message || ''}`);
+    const searchOnce = async (provider) => {
+      try {
+        return await provider.search(q, { ...opts, count });
+      } catch (err) {
+        if (!transient(err)) throw err;
+        logger.info(`Web search backend ${provider.name}: ${err.message}; retrying once`);
+        await new Promise(r => setTimeout(r, opts.retryDelayMs ?? 1000));
+        return provider.search(q, { ...opts, count });
+      }
+    };
+
     const failures = [];
     for (const provider of available) {
       try {
-        const { results, tookMs } = await provider.search(q, { ...opts, count });
+        const { results, tookMs } = await searchOnce(provider);
         // An empty result set is a legitimate answer, not a failure — do not
         // fall through to the next backend and spend its quota on it.
         const payload = { success: true, provider: provider.name, results, tookMs, cached: false };

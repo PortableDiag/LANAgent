@@ -2,6 +2,11 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.479] - 2026-10-04
+
+### Fixed
+- **Web searches failed whenever DuckDuckGo refused one connection.** Its front ends refuse now and then (`ECONNREFUSED` on one address, 11 times on 2026-10-04), and each refusal was a failed paid search. A network error (refused, reset, timed out, DNS) is now retried once after a second; other errors are not.
+
 ## [2.25.478] - 2026-10-04
 
 ### Fixed
