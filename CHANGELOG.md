@@ -2,6 +2,20 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.483] - 2026-10-05
+
+### Fixed
+- **A shaped answer the agent posted itself went unchecked.** When a run answers through its own channel reply step, as it usually does, the reply bypassed the listener: right answer ("42"), but no `reply_to`, so the server could not check the shape. A reply posted in the channel the request came from is now threaded under the request and fitted to its shape. For an FYI (`none`) it is not posted at all. An explicit `replyTo`, or a post in another channel, is left alone.
+
+## [2.25.482] - 2026-10-05
+
+### Added
+- **Trellis channel messages can say what reply they want, and the agent follows it.** Trellis (web v0.101.0, desktop v0.223.0) added `expect` to a message: exactly a text, one line, a number, or no reply at all.
+  - The agent is told the shape. A reply that wraps the asked-for text in a sentence is cut to it; a multi-line answer to a one-line ask is joined; a lone number is pulled out of a sentence. A reply that cannot be fitted is posted as it is, and the server's `expect_missed` is logged.
+  - A shaped ask is answered as a reply to it (`reply_to`), so the server can check the shape.
+  - `none` (an FYI): the request still runs, but nothing is posted; the 👍 reaction says it was handled.
+  - trellis-notes `readChannel` returns each message's `expect`; `replyChannel` takes an optional `expect` and returns `expectMissed`.
+
 ## [2.25.481] - 2026-10-05
 
 ### Added

@@ -55,7 +55,7 @@ import { BasePlugin } from '../core/basePlugin.js';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import axios from 'axios';
 import { PluginSettings } from '../../models/PluginSettings.js';
-import { TrellisChannelListener } from '../../services/trellisChannelListener.js';
+import { TrellisChannelListener, fitToExpect } from '../../services/trellisChannelListener.js';
 import { EXTRA_COMMANDS, EXTRA_ACTIONS, installTrellisExtras } from '../../services/trellis/trellisExtras.js';
 import { syncAllBasketSkills, SKILLS_SYNC_MS } from '../../services/trellis/trellisSkills.js';
 
@@ -72,6 +72,23 @@ const VALID_STATUS = ['todo', 'doing', 'done', 'blocked', 'waiting'];
  * overlap), so only a caller-given pos is sent; a given size also turns off fit, which would
  * otherwise resize the card to its text (Trellis relay 2754 #415, Alice's ask on card 21 #2784).
  */
+/**
+ * The reply a channel message asks for (web v0.101.0 / desktop v0.223.0): {shape, value?}.
+ * `exact` needs a value, `number` may carry one that parses, `line` and `none` take none.
+ * Checked here so a bad shape is an error the caller can read, not a server 400.
+ */
+export const EXPECT_SHAPES = ['exact', 'line', 'number', 'none'];
+export function normalizeExpect(expect) {
+  const e = typeof expect === 'string' ? (expect.trim().startsWith('{') ? JSON.parse(expect) : { shape: expect }) : expect;
+  const shape = String(e?.shape || '').toLowerCase();
+  if (!EXPECT_SHAPES.includes(shape)) throw new Error(`expect.shape must be one of ${EXPECT_SHAPES.join(', ')}.`);
+  const value = e.value === undefined || e.value === null ? null : String(e.value);
+  if (shape === 'exact' && !(value && value.trim())) throw new Error('expect.shape "exact" needs a value: the exact reply wanted.');
+  if (shape === 'number' && value !== null && !Number.isFinite(Number(value.trim()))) throw new Error(`expect.value "${value}" is not a number.`);
+  if ((shape === 'line' || shape === 'none') && value !== null) throw new Error(`expect.shape "${shape}" takes no value.`);
+  return value === null ? { shape } : { shape, value };
+}
+
 function placement(pos, size) {
   const pair = (v, name, positive) => {
     const a = typeof v === 'string' ? v.split(/[,\s]+/).filter(Boolean).map(Number) : v;
@@ -269,7 +286,7 @@ export default class TrellisNotesPlugin extends BasePlugin {
       {
         command: 'replyChannel',
         description: 'Post a reply in a channel card, signed as this agent',
-        usage: 'replyChannel({ card: 2119, text: "Done — deployed v2.25.352.", files: ["/path/report.pdf"], replyTo: 1621 })  // files optional (a PNG/JPEG/GIF/WebP shows as a picture in the message); replyTo threads it under that message seq; card may be "<document-uuid>:2119"',
+        usage: 'replyChannel({ card: 2119, text: "Done — deployed v2.25.352.", files: ["/path/report.pdf"], replyTo: 1621 })  // files optional (a PNG/JPEG/GIF/WebP shows as a picture in the message); replyTo threads it under that message seq; expect: {shape: "exact"|"line"|"number"|"none", value?} asks for that kind of reply; card may be "<document-uuid>:2119"',
         examples: ['reply in the trellis channel', 'answer the operator in the channel', 'post in the notes channel']
       },
       {
@@ -1458,6 +1475,9 @@ export default class TrellisNotesPlugin extends BasePlugin {
         ...(m.via ? { via: m.via } : {}),
         // Web v0.88.0: threading and pictures in the conversation.
         ...(m.reply_to ? { replyTo: m.reply_to } : {}),
+        // Web v0.101.0 / desktop v0.223.0: the reply this message asks for ({shape: exact|line|
+        // number|none, value?}); `none` = an FYI, no reply wanted.
+        ...(m.expect ? { expect: m.expect } : {}),
         ...(Array.isArray(m.files) && m.files.length ? { files: m.files.map(f => ({ name: f.name ?? null, kind: f.kind ?? null })) } : {}),
         ...(m.key_label ? { keyLabel: m.key_label } : {}),
         // Web v0.59.2+: the tools a built-in agent's reply actually ran. A claimed action
@@ -1471,7 +1491,7 @@ export default class TrellisNotesPlugin extends BasePlugin {
     };
   }
 
-  async replyChannel({ card, text, files = null, replyTo = null, reply_to = null } = {}) {
+  async replyChannel({ card, text, files = null, replyTo = null, reply_to = null, expect = null } = {}) {
     if (!(typeof card === 'number' || /^\d+$/.test(String(card ?? '')))) {
       throw new Error('replyChannel needs the channel card id.');
     }
@@ -1482,14 +1502,30 @@ export default class TrellisNotesPlugin extends BasePlugin {
     for (const p of paths) attached.push(await this._readLocalFile(p));
     // Web v0.88.0 / desktop v0.215.0: reply threading. `reply_to` is a numbered message's seq in
     // this channel; 0 or a seq that does not exist yet is a 400 with nothing written.
-    const thread = replyTo ?? reply_to;
+    let thread = replyTo ?? reply_to;
     if (thread !== null && thread !== undefined && !(Number(thread) > 0)) throw new Error('replyTo must be the seq of a message in this channel.');
-    const body = { text: String(text || '').trim(), ...(attached.length ? { files: attached } : {}), ...(thread ? { reply_to: Number(thread) } : {}) };
+    // A run answering, in its own channel, a message that asked for a shape of reply (expect):
+    // thread it under that message so the server checks the shape, and fit it as the listener
+    // would. The run posts its own answer this way, and the listener's fitting never saw it
+    // (card 21 #3011, 2026-10-05: right answer, no reply_to, unchecked).
+    const asked = channelCall.getStore();
+    if (asked?.expect && Number(asked.card) === Number(card) && Number(asked.seq) > 0) {
+      // An FYI (expect none) wants no answer in its channel; the listener's 👍 says it was handled.
+      if (String(asked.expect.shape).toLowerCase() === 'none' && !paths.length) {
+        return { success: true, card: Number(card), posted: false, result: `Not posted: message #${asked.seq} asked for no reply.` };
+      }
+      if (thread === null || thread === undefined) thread = Number(asked.seq);
+      if (Number(thread) === Number(asked.seq) && text) text = fitToExpect(text, asked.expect);
+    }
+    const ask = expect ? normalizeExpect(expect) : null;
+    const body = { text: String(text || '').trim(), ...(attached.length ? { files: attached } : {}), ...(thread ? { reply_to: Number(thread) } : {}), ...(ask ? { expect: ask } : {}) };
     const data = await this._call('post', `/api/cards/${Number(card)}/say`, { body, timeoutMs: attached.length ? 120000 : null });
     const doc = this.resolvedMode === 'web' ? this._currentDoc() : null;
     return {
       success: true, card: Number(card), document: doc?.name ?? null, seq: data?.seq ?? null, as: this._agentName(),
       ...(data?.reply_to !== undefined ? { replyTo: data.reply_to } : {}),
+      // The server says when this reply misses the shape its parent asked for (never a refusal).
+      ...(data?.expect_missed ? { expectMissed: data.expect_missed } : {}),
       ...(Array.isArray(data?.files) ? { files: data.files.map(f => ({ name: f.name, kind: f.kind ?? null })) } : {})
     };
   }

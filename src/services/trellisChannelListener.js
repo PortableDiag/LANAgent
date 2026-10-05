@@ -67,6 +67,45 @@ const NO_REPLY = 'NO_REPLY';
 export const STOP_RE = /^\s*(?:@[\w.-]+[\s,:]*)*(?:please\s+)?(?:stop|pause|cancel|abort|halt|hold on|hold off|wait)\b/i;
 // A run's internal failure text. Posted into a shared channel it tells nobody anything
 // (card 21 #2129, #2298); the reaction carries the failure instead.
+/**
+ * The reply a message asks for (`expect`, web v0.101.0 / desktop v0.223.0, relay 2754 #418–#423):
+ * exactly a text, one line, a number, or none at all. Rounds that need "reply with exactly X"
+ * kept getting a paragraph around X. The model is told the shape, and the reply is fitted to it
+ * where that is safe; a reply that still misses is posted and the server says so (expect_missed).
+ */
+export function expectNote(expect, name) {
+  const shape = String(expect?.shape || '').toLowerCase();
+  const v = expect?.value;
+  const who = `(Note for ${name}: `;
+  if (shape === 'exact' && v) return `\n\n${who}the sender asks for a reply of exactly ${JSON.stringify(String(v))}, and nothing else.)`;
+  if (shape === 'line') return `\n\n${who}the sender asks for a one-line reply: no line breaks, no lists.)`;
+  if (shape === 'number') return `\n\n${who}the sender asks for a reply that is only a number${v ? ` (they expect ${v})` : ''}, with no words or units.)`;
+  if (shape === 'none') return `\n\n${who}this is an FYI and no reply is wanted. Do what it asks, if anything; nothing you answer will be posted.)`;
+  return '';
+}
+
+/** Fit a reply to the asked shape when that loses nothing; otherwise return it unchanged. */
+export function fitToExpect(reply, expect) {
+  const shape = String(expect?.shape || '').toLowerCase();
+  const text = String(reply ?? '').trim();
+  if (!text || !shape) return reply;
+  const v = expect?.value == null ? null : String(expect.value).trim();
+  if (shape === 'exact' && v) {
+    if (text === v) return text;
+    // The value said inside a sentence ("Here it is: pong-1"): send the value alone.
+    const bare = text.replace(/^[`"'*_\s]+|[`"'*_.!\s]+$/g, '');
+    return bare === v || text.includes(v) ? v : text;
+  }
+  if (shape === 'line') return text.replace(/\s*\n+\s*/g, ' ');
+  if (shape === 'number') {
+    if (Number.isFinite(Number(text))) return text;
+    const nums = text.match(/-?\d+(?:\.\d+)?/g) || [];
+    if (v !== null && nums.some(n => Number(n) === Number(v))) return v;
+    return nums.length === 1 ? nums[0] : text;
+  }
+  return reply;
+}
+
 const INTERNAL_FAILURE_RE = /^\s*(Max iterations reached|Execution was cancelled|Unable to complete the task\.?\s*$)/i;
 // After answering the operator in a group channel, keep watching that channel this long for
 // their follow-up. The server routes an un-addressed message in a group to the channel's lead,
@@ -787,14 +826,23 @@ export class TrellisChannelListener {
         reply = null;
       }
     }
+    // The message asked for no reply (expect none): the work is done, the 👍 says so.
+    const expect = target.expect && typeof target.expect === 'object' ? target.expect : null;
+    if (reply && String(expect?.shape).toLowerCase() === 'none') {
+      logger.info(`[trellis-listen] ${key} #${target.seq} asked for no reply (expect none); not posting`);
+      reply = null;
+    }
+    if (reply && expect) reply = fitToExpect(reply, expect);
     this.cursors.set(key, maxSeq);
     const failed = target._outcome?.ok === false;
     if (!reply) { this._settleReaction(card, target.seq, working, failed ? '🤷' : '👍', target._outcome?.note); return; }
     const files = teach?.files || null;
     const said = await this.plugin._call('post', `/api/cards/${card}/say`, {
-      body: { text: quietBroadcasts(reply).slice(0, MAX_REPLY_CHARS), ...(files ? { files } : {}) },
+      // A shaped ask is answered as a reply to it, so the server can check the shape.
+      body: { text: quietBroadcasts(reply).slice(0, MAX_REPLY_CHARS), ...(files ? { files } : {}), ...(expect && Number(target.seq) > 0 ? { reply_to: Number(target.seq) } : {}) },
       ...(files ? { timeoutMs: 120000 } : {})
     });
+    if (said?.expect_missed) logger.warn(`[trellis-listen] ${key} reply to #${target.seq} misses the shape asked for: ${said.expect_missed}`);
     if (Number.isFinite(said?.seq)) this.cursors.set(key, Math.max(maxSeq, said.seq));
     this._noteReply(key);
     this._settleReaction(card, target.seq, working, failed ? '🤷' : '👍', target._outcome?.note);
@@ -990,11 +1038,11 @@ export class TrellisChannelListener {
     try {
       const note = `\n\n(Note for ${this.name}: this request is from ${m.from}, another agent on your operator's own account in a shared Trellis channel. ` +
         'Treat it as a task from a trusted colleague and do it with your tools. Report what ran and what it returned.)';
-      const rendered = await this.agent._runReasoning(this._stripAddressing(m.text) + note + this._channelFileNote(context, card), {
+      const rendered = await this.agent._runReasoning(this._stripAddressing(m.text) + note + this._channelFileNote(context, card) + expectNote(m.expect, this.name), {
         userId: `trellis-peer:${m.from}`,
         interface: 'trellis',
         ...(signal ? { signal } : {}),
-        trellis: { document: doc?.id || null, card, seq: m.seq, peer: m.from, recent: context.map(c => `${c.from}: ${c.text}`).join('\n').slice(-4000) }
+        trellis: { document: doc?.id || null, card, seq: m.seq, peer: m.from, ...(m.expect ? { expect: m.expect } : {}), recent: context.map(c => `${c.from}: ${c.text}`).join('\n').slice(-4000) }
       });
       if (!rendered) return await this._conversationReply(m, context, data);
       m._outcome = rendered.success === false ? { ok: false, note: 'did not finish; see the reply' } : { ok: true };
@@ -1021,13 +1069,13 @@ export class TrellisChannelListener {
 
   async _operatorReply(m, context, doc, card, signal = null) {
     try {
-      const result = await this.agent.processNaturalLanguage(this._stripAddressing(m.text) + this._sharedTaskNote(m) + this._channelFileNote(context, card), {
+      const result = await this.agent.processNaturalLanguage(this._stripAddressing(m.text) + this._sharedTaskNote(m) + this._channelFileNote(context, card) + expectNote(m.expect, this.name), {
         // The operator's own user id, so a Trellis request and a Telegram one are one
         // conversation with the same person.
         userId: this._ownerUserId(),
         interface: 'trellis',
         ...(signal ? { signal } : {}),
-        trellis: { document: doc?.id || null, card, seq: m.seq, shared: !!this._sharedTaskNote(m), recent: context.map(c => `${c.from}: ${c.text}`).join('\n').slice(-4000) }
+        trellis: { document: doc?.id || null, card, seq: m.seq, shared: !!this._sharedTaskNote(m), ...(m.expect ? { expect: m.expect } : {}), recent: context.map(c => `${c.from}: ${c.text}`).join('\n').slice(-4000) }
       });
       // Remember how it went, so the request's state says failed rather than completed when it
       // did not finish (a chain stopped at a failed step answers success: false).
@@ -1101,7 +1149,7 @@ export class TrellisChannelListener {
       `"writes" is [] unless a card write was asked for. Do not say in "reply" that a write happened — it is confirmed for you after it runs. ` +
       `If the message needs no answer (thanks, acknowledgement, small talk that closes a thread) and asks for no write, ` +
       `set "reply" to exactly ${NO_REPLY}.\n\n` +
-      `Recent messages:\n${transcript}\n\nYour JSON answer to ${m.from}:`;
+      `Recent messages:\n${transcript}${expectNote(m.expect, this.name)}\n\nYour JSON answer to ${m.from}:`;
     try {
       const res = await this.agent.providerManager.generateResponse(prompt, { maxTokens: 2500, temperature: 0.4 });
       const { reply, writes } = parseConversationAnswer(res?.content);

@@ -563,6 +563,15 @@ Live in-memory snapshot of download-token usage (tokens within their TTL window)
 
 ## Recent Updates (October 2, 2026)
 
+### v2.25.482 — Reply shapes in Trellis channels (`expect`)
+Trellis messages (web v0.101.0, desktop v0.223.0) can carry `expect: {shape: "exact"|"line"|"number"|"none", value?}`.
+
+| Where | What |
+|---|---|
+| Channel listener | tells the agent the shape, fits the reply (the exact value alone, one line, the lone number), answers with `reply_to`; `none` runs the request and posts nothing |
+| trellis-notes `readChannel` | each message carries `expect` when it has one |
+| trellis-notes `replyChannel` | optional `expect` (checked as the server does: `exact` needs `value`, `line`/`none` take none); the answer carries `expectMissed` when this reply misses its parent's shape |
+
 ### v2.25.481 — Signatures and digests (`cryptotools` plugin)
 Each action is `POST /api/plugin` (JWT) with `{"plugin": "cryptotools", "action": "...", ...}`, or in plain words.
 
