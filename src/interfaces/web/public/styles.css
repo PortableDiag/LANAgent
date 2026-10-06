@@ -14292,6 +14292,11 @@ input[type="checkbox"]:not(.toggle-label input[type="checkbox"]) {
     .tab-content div:has(> svg), .tab-content [id$="-chart"] { max-width: 100%; overflow-x: auto; }
     /* The usage chart draws to its box's width (app.js renderOverallUsageChart); a 500px floor made it wider than the screen */
     #overall-usage-chart { min-width: 0; }
+    /* Provider usage charts: the grid's 1fr column grew to the widest chart (600px floors) and .usage-charts
+       clips with overflow:hidden, so the right side was cut off. Let the column shrink; the charts draw to it. */
+    .usage-charts { grid-template-columns: minmax(0, 1fr); }
+    .usage-charts .chart-container { min-width: 0; padding: 0.75rem; }
+    #daily-usage-chart, #cost-chart, #model-usage-chart { min-width: 0; }
 
     /* Grids whose minimum column is wider than a phone */
     .info-grid, .projects-grid { grid-template-columns: minmax(0, 1fr); }
@@ -14315,3 +14320,13 @@ input[type="checkbox"]:not(.toggle-label input[type="checkbox"]) {
     /* Any row of buttons wraps instead of running off the screen */
     .tab-content .btn-group, .tab-content [class*="actions"], .tab-content [class*="-buttons"] { flex-wrap: wrap; }
 }
+
+/* Provider usage charts at every width (2026-10-05): the grid's 1fr columns grew to the charts' 500-600px
+   floors and .usage-charts clips (overflow: hidden), so the right side was cut off on a phone and in the
+   2-column desktop layout. Columns may shrink; the charts draw to their box (app.js). */
+.usage-charts { grid-template-columns: minmax(0, 1fr); }
+@media (min-width: 1200px) {
+    .usage-charts { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+.usage-charts .chart-container { min-width: 0; }
+#daily-usage-chart, #cost-chart, #model-usage-chart, #overall-usage-chart { min-width: 0; }

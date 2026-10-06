@@ -3464,7 +3464,7 @@ class LANAgentDashboard {
 
         // Create D3 chart
         const margin = { top: 20, right: 20, bottom: 50, left: 70 };
-        const width = Math.max(container.clientWidth - margin.left - margin.right, 500);
+        const width = Math.max(container.clientWidth - margin.left - margin.right, 160);  // draw to the box: a 500px floor ran off the right edge (phone, and 2-column desktop)
         const height = 350 - margin.top - margin.bottom;
 
         const svg = d3.select(container)
@@ -3487,7 +3487,7 @@ class LANAgentDashboard {
         svg.append('g')
             .attr('transform', `translate(0,${height})`)
             .attr('class', 'axis')
-            .call(d3.axisBottom(x).tickFormat(d3.timeFormat('%m/%d')));
+            .call(d3.axisBottom(x).ticks(width < 360 ? 4 : null).tickFormat(d3.timeFormat('%m/%d')));  // fewer dates on a phone, or they overlap
 
         // Add Y axis
         svg.append('g')
@@ -3688,7 +3688,7 @@ class LANAgentDashboard {
 
         // Create horizontal bar chart
         const margin = { top: 20, right: 60, bottom: 50, left: 100 };
-        const width = Math.max(container.clientWidth - margin.left - margin.right, 500);
+        const width = Math.max(container.clientWidth - margin.left - margin.right, 160);  // draw to the box: a 500px floor ran off the right edge (phone, and 2-column desktop)
         const height = 350 - margin.top - margin.bottom;
 
         const svg = d3.select(container)
@@ -3715,7 +3715,7 @@ class LANAgentDashboard {
         svg.append('g')
             .attr('transform', `translate(0,${height})`)
             .attr('class', 'axis')
-            .call(d3.axisBottom(x).tickFormat(d => `$${d.toFixed(2)}`));
+            .call(d3.axisBottom(x).ticks(width < 360 ? 3 : 10).tickFormat(d => `$${d.toFixed(2)}`));  // fewer ticks on a phone, or they overlap
 
         // Add bars
         svg.selectAll('.bar')

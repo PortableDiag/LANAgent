@@ -2,6 +2,11 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.487] - 2026-10-05
+
+### Fixed
+- **The AI usage charts were cut off on the right.** The Daily Token Usage and Cost Estimate charts had a 600 px minimum (CSS) and a 500 px minimum plot width (d3). The chart grid's columns grew to fit them, and the grid clips its overflow, so the right side was hidden on a phone (600 px of chart on a 390 px screen) and in the two-column desktop layout. All four charts now draw to the width of their box, the grid columns may shrink, and on narrow charts the date and dollar axes use fewer ticks so the labels don't overlap. Checked at 360, 390, 820, 1280 and 1920 px.
+
 ## [2.25.486] - 2026-10-05
 
 ### Changed
