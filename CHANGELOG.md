@@ -2,6 +2,11 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.488] - 2026-10-06
+
+### Fixed
+- **A command sent to the wrong tool now says which tool has it.** In multi-step reasoning the model sometimes called a command on the wrong plugin (for example `listSecrets`, an `http` command, on `trellis-notes`). The plugin's validation error lists only its own commands, so the model retried the same wrong call. When a command fails on a tool that does not declare it, the error now names the tool(s) that do.
+
 ## [2.25.487] - 2026-10-05
 
 ### Fixed

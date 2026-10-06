@@ -268,10 +268,28 @@ export async function executeTool(agent, tool, command, params = {}, context = n
     // A follow-up is scheduled for the conversation it was promised in.
     if (tool === 'followup' && context) channel._context = { trellis: context.trellis || null, userId: context.userId || null, interface: context.interface || null };
     const result = await agent.apiManager.executeAPI(tool, 'execute', { ...(params || {}), ...channel, action: command });
+    if (result?.success === false) {
+      const hint = elsewhereHint(tools, tool, command);
+      if (hint) return { success: false, error: `${result.error || 'plugin reported failure'}. ${hint}`, result };
+    }
     return { success: result?.success !== false, result };
   } catch (error) {
-    return { success: false, error: error.message };
+    const hint = elsewhereHint(tools, tool, command);
+    return { success: false, error: hint ? `${error.message}. ${hint}` : error.message };
   }
+}
+
+/**
+ * When a command failed on a tool that does not declare it, name the tool(s) that do. The model
+ * called trellis-notes.listSecrets (an http command) six times on 2026-10-05 and retried the same
+ * call after the validation error, which lists only trellis-notes' own actions.
+ */
+function elsewhereHint(tools, tool, command) {
+  const own = tools.find(t => t.name === tool);
+  if (!own || own.commands.some(c => c.command === command)) return '';
+  const owners = tools.filter(t => t.name !== tool && t.commands.some(c => c.command === command)).map(t => t.name);
+  if (!owners.length) return '';
+  return `"${command}" is not a ${tool} command; it belongs to ${owners.map(n => `tool "${n}"`).join(' or ')}. Call it there.`;
 }
 
 /**
