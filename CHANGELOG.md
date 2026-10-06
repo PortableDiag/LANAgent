@@ -2,6 +2,11 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.490] - 2026-10-06
+
+### Fixed
+- **The agent posted another agent's work as its own.** Asked whether the agents had agreed a plan, it answered at its first step with another agent's assignment, design and next step written in the first person. It had copied them from the channel, where most of the recent text was that agent's. The check that runs before a channel post was skipped when no step had run yet. That check also didn't know who was writing, or what the other participants had said. It now runs on a first-step channel post too. It is told the agent's name and sees the channel, and it refuses a post that presents another participant's work, assignment or plan as the agent's own.
+
 ## [2.25.489] - 2026-10-06
 
 ### Fixed

@@ -56,7 +56,7 @@ export function stripListenerNotes(text) {
 const AUDIT_RESULT_CHARS = 4000;
 const AUDIT_STEPS_CHARS = 40000;
 
-export async function auditAnswer(providerManager, answer, thoughts = []) {
+export async function auditAnswer(providerManager, answer, thoughts = [], { name = null, conversation = '' } = {}) {
   if (!(providerManager?.generateResponse || providerManager?.generateAux) || !answer) return [];
   const steps = [];
   for (const t of thoughts) {
@@ -74,10 +74,13 @@ export async function auditAnswer(providerManager, answer, thoughts = []) {
   }))];
   const prompt = 'You check an AI agent\'s report against the steps it actually ran.\n\nEVERYTHING IT CALLED (nothing else was fetched or checked):\n' + targets.join('\n').slice(0, 3000) +
     '\n\nSTEPS (in order):\n' + steps.join('\n').slice(-AUDIT_STEPS_CHARS) +
-    '\n\nREPORT:\n' + String(answer).slice(0, 3000) +
+    // Who is who: card 21 #3268 (2026-10-06) posted Nexus's item, design and "I'll wire the Hermes
+    // adapter" in the first person, at step 1, from a channel tail that was mostly Nexus's messages.
+    (conversation ? `\n\nTHE CHANNEL THIS REPORT GOES TO (other participants' words, not the agent's results):\n${String(conversation).slice(-6000)}` : '') +
+    '\n\nREPORT' + (name ? ` (written by ${name})` : '') + ':\n' + String(answer).slice(0, 3000) +
     '\n\nList each statement in the REPORT that says the agent itself did, fetched, checked, created, sent or found something that NO step above shows ' +
     '(e.g. "checked both tasks" when only one was fetched, or a size/number for an item whose URL is not in the list above). Counts, ids, sizes and status codes must come from the RESULTS. Statements about what others did, plans, or ' +
-    'admissions of what was not done are fine. Reply with JSON only: {"unsupported": ["<short quote>", ...]} — an empty list if every claim is backed.';
+    'admissions of what was not done are fine' + (name ? `, EXCEPT another participant's work, assignment, design or plan restated as ${name}'s own ("my item 4", "I'll wire the adapter" when the channel shows another agent owns it): list those` : '') + '. Reply with JSON only: {"unsupported": ["<short quote>", ...]} — an empty list if every claim is backed.';
   try {
     // The main model: the auxiliary one passed #1744's invented delete and picture post.
     const generate = providerManager.generateResponse ? providerManager.generateResponse.bind(providerManager) : providerManager.generateAux.bind(providerManager);
@@ -339,6 +342,7 @@ export class ReActAgent extends EventEmitter {
       // all agree on the steps?" is about cards and messages ReAct otherwise never sees. On card
       // 21 #1255 (2026-10-01) it answered that it could not see the steps of a test it had run
       // and signed the day before.
+      const auditWho = { name: this.agent?.config?.name || 'ALICE', conversation: context.trellis?.recent || '' };
       const channel = context.trellis?.recent
         ? `This request came from a shared Trellis channel (card ${context.trellis.card}). The conversation there, oldest first (your own messages are signed ${this.agent?.config?.name || 'ALICE'}):\n${String(context.trellis.recent).slice(-4000)}\n\nCards it mentions ("#209", "the test", "the card in this workspace") are in the Trellis workspace: find them with the trellis-notes search and read actions before saying you cannot see them. A Trellis feature none of the trellis-notes commands covers (a new route or field from a release note) is reachable with trellis-notes.api: read GET /api (the route index) for the route and its body, then call it.`
         : '';
@@ -402,7 +406,7 @@ export class ReActAgent extends EventEmitter {
           // model call compares the answer with the steps; once per run.
           if (!claim && !run.answerAudited && thoughts.some(t => t.type === 'action')) {
             run.answerAudited = true;
-            const unsupported = await auditAnswer(this.agent?.providerManager, thought.finalAnswer, thoughts);
+            const unsupported = await auditAnswer(this.agent?.providerManager, thought.finalAnswer, thoughts, auditWho);
             if (unsupported.length) {
               run.answerFlagged = true;
               logger.info(`ReAct: final answer has ${unsupported.length} claim(s) no step supports; sending it back`);
@@ -503,11 +507,12 @@ export class ReActAgent extends EventEmitter {
           // agents' messages, and only the final answer was being checked. Once per run.
           const reportText = action.tool === 'trellis-notes' && /^(replyChannel|say|appendNote)$/.test(String(action.command))
             ? String(action.params?.text || '') : '';
-          if (reportText.length > 120 && !run.writeAudited && thoughts.some(t => t.type === 'action')) {
+          // Also at step 1 in a channel: a reply composed from the transcript alone has no step behind it.
+          if (reportText.length > 120 && !run.writeAudited && (thoughts.some(t => t.type === 'action') || context.trellis?.recent)) {
             run.writeAudited = true;
             const known = (this.tools || []).flatMap(t => (t.commands || []).map(c => c.command));
             const unrun = unrunCommandsNamed(reportText, thoughts, known).map(c => `${c} (named, never run successfully)`);
-            const unsupported = unrun.length ? unrun : await auditAnswer(this.agent?.providerManager, reportText, thoughts);
+            const unsupported = unrun.length ? unrun : await auditAnswer(this.agent?.providerManager, reportText, thoughts, auditWho);
             if (unsupported.length) {
               logger.info(`ReAct: a ${action.command} text has ${unsupported.length} claim(s) no step supports; not posting it`);
               thoughts.push({ type: 'action', content: action, iteration, timestamp: new Date() });
