@@ -1,5 +1,5 @@
 import { BasePlugin } from '../core/basePlugin.js';
-import { exec } from 'child_process';
+import { exec, execFile } from 'child_process';
 import { promisify } from 'util';
 import { logger } from '../../utils/logger.js';
 import fs from 'fs/promises';
@@ -7,6 +7,31 @@ import path from 'path';
 import { resolveGitRemote } from '../../utils/gitRemote.js';
 
 const execAsync = promisify(exec);
+const execFileAsync = promisify(execFile);
+
+// system.run: read-only system information, run WITHOUT a shell. The old check matched only the
+// start of the string and then ran it in a shell, so "cat <the agent's .env>" passed ("cat"
+// is the start of "cat /proc/cpuinfo") and "ls; <anything>" ran anything (verified 2026-10-06,
+// router-threat plan #401: a secret a tool can read is one injected call from leaving).
+const RUN_ALLOWED = new Set(['ls', 'pwd', 'date', 'whoami', 'hostname', 'uname', 'df', 'free', 'uptime', 'ps',
+  'netstat', 'ss', 'ip', 'ifconfig', 'route', 'lsblk', 'lscpu', 'lsmem', 'lspci', 'lsusb', 'journalctl', 'dmesg',
+  'sensors', 'nvidia-smi', 'vnstat', 'du', 'iostat', 'vmstat', 'mpstat', 'w', 'who', 'last', 'lastlog', 'top', 'systemctl', 'cat']);
+const RUN_CAT_FILES = new Set(['/proc/cpuinfo', '/proc/meminfo', '/proc/loadavg', '/proc/uptime', '/proc/version']);
+
+/** argv for an allowed read-only command, or an error string. */
+export function parseSafeCommand(command) {
+  const text = String(command || '').trim();
+  if (/[;&|`$<>(){}\\'"\n\r*?~!]/.test(text)) return { error: 'Command not allowed: no shell syntax (pipes, ;, &&, $, redirects, quotes, globs). Give one read-only command and its arguments.' };
+  const argv = text.split(/\s+/).filter(Boolean);
+  const cmd = argv[0] || '';
+  if (!RUN_ALLOWED.has(cmd)) return { error: `Command not allowed. Only read-only system information commands are permitted: ${[...RUN_ALLOWED].join(', ')}.` };
+  if (cmd === 'cat' && !(argv.length === 2 && RUN_CAT_FILES.has(argv[1]))) return { error: `cat is allowed only for ${[...RUN_CAT_FILES].join(', ')}` };
+  if (cmd === 'systemctl' && argv[1] !== 'status') return { error: 'systemctl is allowed only as "systemctl status"' };
+  // BSD-style "ps e" / "ps eww" prints every process's environment, i.e. the .env secrets.
+  if (cmd === 'ps' && argv.slice(1).some(a => !a.startsWith('-'))) return { error: 'ps takes dash options only, e.g. ps -ef or ps -eo pid,cmd' };
+  if (cmd === 'top') return { argv: ['top', '-b', '-n', '1'] };
+  return { argv };
+}
 
 export default class SystemPlugin extends BasePlugin {
   constructor(agent) {
@@ -642,41 +667,12 @@ export default class SystemPlugin extends BasePlugin {
       };
     }
     
-    // Safety checks - allow only safe read commands
-    const safeCommands = [
-      'ls', 'pwd', 'date', 'whoami', 'hostname', 'uname',
-      'df', 'free', 'uptime', 'ps', 'top', 'htop',
-      'netstat', 'ss', 'ip', 'ifconfig', 'route',
-      'cat /proc/cpuinfo', 'cat /proc/meminfo',
-      'lsblk', 'lscpu', 'lsmem', 'lspci', 'lsusb',
-      'systemctl status', 'journalctl', 'dmesg',
-      'sensors', 'nvidia-smi', 'vnstat', 'iftop',
-      'du', 'ncdu', 'iostat', 'vmstat', 'mpstat',
-      'w', 'who', 'last', 'lastlog'
-    ];
-    
-    // Check if command starts with any safe command
-    const isSafe = safeCommands.some(safe => 
-      command.toLowerCase().startsWith(safe.toLowerCase())
-    );
-    
-    // Also allow piped commands if the base is safe
-    const baseCmdMatch = command.match(/^(\S+)/);
-    const baseCmd = baseCmdMatch ? baseCmdMatch[1].toLowerCase() : '';
-    const isBaseSafe = safeCommands.some(safe => 
-      safe.toLowerCase().startsWith(baseCmd)
-    );
-    
-    if (!isSafe && !isBaseSafe) {
-      return {
-        success: false,
-        error: 'Command not allowed. Only safe read-only system information commands are permitted.'
-      };
-    }
-    
+    const parsed = parseSafeCommand(command);
+    if (parsed.error) return { success: false, error: parsed.error };
+
     try {
-      logger.info(`Running system command: ${command}`);
-      const result = await execAsync(command, {
+      logger.info(`Running system command: ${parsed.argv.join(' ')}`);
+      const result = await execFileAsync(parsed.argv[0], parsed.argv.slice(1), {
         timeout: 30000, // 30 second timeout
         maxBuffer: 5 * 1024 * 1024 // 5MB buffer
       });

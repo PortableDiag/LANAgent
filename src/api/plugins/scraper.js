@@ -10,6 +10,9 @@ import * as cheerio from 'cheerio';
 import http from 'http';
 import https from 'https';
 import jsonld from 'jsonld';
+import dns from 'dns';
+import net from 'net';
+import { isPrivateAddress } from '../../utils/publicUrl.js';
 
 // Title fragments seen on JS interstitials we want to wait out before doing
 // anything user-visible (HTML extraction, screenshot, PDF). Cloudflare's
@@ -313,6 +316,24 @@ export default class ScraperPlugin extends BasePlugin {
       httpAgent: new http.Agent({ keepAlive: true }),
       httpsAgent: new https.Agent({ keepAlive: true, rejectUnauthorized: false }),
       maxRedirects: 5
+    });
+    // For paid callers (options.publicOnly): every connection, including each redirect, must
+    // resolve to a public address, so a public page that redirects to the LAN is refused too.
+    const publicLookup = (hostname, opts, cb) => dns.lookup(hostname, { ...opts, all: true }, (err, addrs) => {
+      if (err) return cb(err);
+      if (addrs.some(a => isPrivateAddress(a.address))) return cb(new Error(`${hostname} is a private or local address`));
+      return opts && opts.all ? cb(null, addrs) : cb(null, addrs[0].address, addrs[0].family);
+    });
+    this.publicAxiosInstance = axios.create({
+      timeout: 30000,
+      httpAgent: new http.Agent({ keepAlive: true, lookup: publicLookup }),
+      httpsAgent: new https.Agent({ keepAlive: true, rejectUnauthorized: false, lookup: publicLookup }),
+      maxRedirects: 5,
+      // An IP-literal host never goes through lookup.
+      beforeRedirect: (o) => {
+        const h = String(o.hostname || '').replace(/^\[|\]$/g, '');
+        if (net.isIP(h) && isPrivateAddress(h)) throw new Error(`redirect to a private or local address (${h}) refused`);
+      }
     });
   }
 
@@ -713,7 +734,7 @@ export default class ScraperPlugin extends BasePlugin {
     }
     
     try {
-      const html = await this._fetchHtml(url, headers, cacheKey, bodyCacheKey);
+      const html = await this._fetchHtml(url, headers, cacheKey, bodyCacheKey, options.publicOnly === true);
 
       const $ = cheerio.load(html);
       
@@ -801,9 +822,9 @@ export default class ScraperPlugin extends BasePlugin {
   // the server answers 304 and there is nothing to serve. That was the live bug: the
   // validators were cached, the body never was, and `content_<url>` had no writer at
   // all, so any re-scrape of an ETag-serving site threw outright.
-  async _fetchHtml(url, headers, headerCacheKey, bodyCacheKey) {
+  async _fetchHtml(url, headers, headerCacheKey, bodyCacheKey, publicOnly = false) {
     try {
-      const response = await this.axiosInstance.get(url, { headers });
+      const response = await (publicOnly ? this.publicAxiosInstance : this.axiosInstance).get(url, { headers });
       const html = response.data;
 
       const newHeaders = {};

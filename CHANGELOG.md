@@ -2,6 +2,15 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.491] - 2026-10-06
+
+### Security
+- **`system.run` could read any file and run any command.** It was meant for read-only system information, but it checked only the start of the command and then ran the whole string in a shell. So `cat` of any file passed (because "cat" begins "cat /proc/cpuinfo"), and `ls; <anything>` ran anything. A request that had read injected text (a scraped page, a channel message) was one tool call away from reading the agent's `.env`. Commands now run without a shell, from a fixed list of read-only tools: no pipes, `;`, `&&`, `$`, redirects, quotes or globs. `cat` reads only a few `/proc` files, `systemctl` only `status`, and `ps` takes dash options only, since `ps e` prints process environments.
+- **A paid scrape could reach the agent's own network.** The external `/scrape` and `/scrape/batch` routes fetched any http(s) URL, including loopback, LAN and cloud-metadata addresses. They now refuse those before taking credits. A paid caller's fetch uses a client that refuses a host resolving to a private address and a redirect to one. The agent's own scrapes for its operator keep LAN access.
+- **A server that echoed a request could hand back a saved secret.** The `http` tool fills `{{secret:…}}` placeholders only for their own host, but a response that echoed the filled-in value returned it in plain text. Every value a request filled in is now put back as its placeholder in the response body and headers.
+
+These implement the LANAgent part (D) of the agents' plan against malicious intermediaries (arXiv 2604.08407): no secret enters a tool result, and a proxy refuses destinations it must not reach.
+
 ## [2.25.490] - 2026-10-06
 
 ### Fixed

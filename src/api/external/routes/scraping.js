@@ -8,6 +8,7 @@ import ExternalCreditBalance from '../../../models/ExternalCreditBalance.js';
 import ScrapeBlockStats, { recordBlockEvent } from '../../../models/ScrapeBlockStats.js';
 import { adminKeyAuth } from '../middleware/adminKeyAuth.js';
 import NodeCache from 'node-cache';
+import { assertPublicUrl } from '../../../utils/publicUrl.js';
 
 const router = Router();
 const scrapeCache = new NodeCache({ stdTTL: 600, checkperiod: 120 });
@@ -634,7 +635,8 @@ async function executeScrape(req, { url, selectors, extractType = 'text', userAg
   }
 
   const action = extractType === 'structured' ? 'extract' : 'scrape';
-  const options = { bypassCache: true };
+  // publicOnly: a paid caller's scrape never reaches the agent's LAN, including by redirect.
+  const options = { bypassCache: true, publicOnly: true };
   if (userAgent) options.userAgent = userAgent;
   if (selectors) options.selector = selectors;
   if (usePuppeteer) options.usePuppeteer = true;
@@ -1438,6 +1440,11 @@ router.post('/',
     if (!/^https?:\/\//i.test(url)) {
       return res.status(400).json({ success: false, error: 'url must start with http:// or https://' });
     }
+    // The agent runs on a home LAN: a paid caller asking for http://192.168.0.1/ would be reading
+    // it. Refused before any credit is taken (router-threat plan #401, item D3, 2026-10-06).
+    try { await assertPublicUrl(url); } catch (e) {
+      return res.status(400).json({ success: false, error: e.message });
+    }
 
     // Credit-based payment
     if (req.wallet) {
@@ -1556,6 +1563,12 @@ router.post('/batch',
 
     if (urls.length > 100) {
       return res.status(400).json({ success: false, error: 'Maximum 100 URLs per batch' });
+    }
+
+    for (const u of urls) {
+      try { await assertPublicUrl(u); } catch (e) {
+        return res.status(400).json({ success: false, error: `${String(u).slice(0, 200)}: ${e.message}` });
+      }
     }
 
     const creditCost = TIER_COSTS[tier] || TIER_COSTS.basic;

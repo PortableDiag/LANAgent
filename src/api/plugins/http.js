@@ -293,6 +293,26 @@ export default class HttpPlugin extends BasePlugin {
       const shownHeaders = {};
       for (const h of SHOWN_HEADERS) if (res.headers.get(h)) shownHeaders[h] = res.headers.get(h);
 
+      // A server that echoes the request (an echo endpoint, a debug page, or a hop chosen by an
+      // injected call) would hand the filled-in secret back into the model's context. Every value
+      // this request filled in is put back as its placeholder (router-threat plan #401, D2).
+      const blank = (v) => {
+        if (!used.size || v === null || v === undefined) return v;
+        if (typeof v === 'string') {
+          let out = v;
+          for (const name of used) {
+            const plain = decrypt((this.secrets || {})[name]?.value || '');
+            if (plain && plain.length >= 4) out = out.split(plain).join(`{{secret:${name}}}`);
+          }
+          return out;
+        }
+        if (Array.isArray(v)) return v.map(blank);
+        if (typeof v === 'object') return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, blank(x)]));
+        return v;
+      };
+      if (data !== null) data = blank(data);
+      if (text !== null) text = blank(text);
+      for (const h of Object.keys(shownHeaders)) shownHeaders[h] = blank(shownHeaders[h]);
       const bodyText = data !== null ? JSON.stringify(data, null, 2) : String(text);
       const clipped = bodyText.length > MAX_BODY_CHARS ? `${bodyText.slice(0, MAX_BODY_CHARS)}\n…(${bodyText.length - MAX_BODY_CHARS} more chars)` : bodyText;
       this.logger.info(`[http] ${method} ${host}${url.pathname} → ${res.status}${saved.length ? ` (saved ${saved.join(', ')})` : ''}`);
