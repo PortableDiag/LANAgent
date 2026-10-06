@@ -94,6 +94,15 @@ export async function auditAnswer(providerManager, answer, thoughts = [], { name
 }
 
 
+/** Iterations of earlier steps that made exactly this call (same tool, command and params). */
+export function identicalCalls(action, thoughts = []) {
+  const key = (a) => `${a?.tool}.${a?.command}:${JSON.stringify(a?.params || {})}`;
+  const k = key(action);
+  return thoughts.filter((t, i) => t.type === 'action' && key(t.content) === k &&
+    !(thoughts[i + 1]?.type === 'observation' && thoughts[i + 1].content?.refused)).map(t => t.iteration);
+}
+
+
 /**
  * An earlier successful step this action would duplicate: a second channel post or card write
  * to the same card, or a second POST/PUT/PATCH/DELETE to the same URL. Null when the action is
@@ -536,6 +545,21 @@ export class ReActAgent extends EventEmitter {
             } });
             continue;
           }
+          // The same call, same params, twice already: a third returns the same thing. Card 21 #3335
+          // (2026-10-06) read /api and /api/reference 13 times, hoping to see past the cut, until
+          // the step budget ran out. Polling a job can pass allowRepeat.
+          const sameCalls = identicalCalls(action, thoughts);
+          if (sameCalls.length >= 2 && action.params?.allowRepeat !== true) {
+            logger.info(`ReAct: refused a third identical ${action.tool}.${action.command} (steps ${sameCalls.join(', ')})`);
+            thoughts.push({ type: 'action', content: action, iteration, timestamp: new Date() });
+            thoughts.push({ type: 'observation', iteration, timestamp: new Date(), content: {
+              tool: action.tool, command: action.command, success: false, refused: true,
+              error: `Not run: this exact call already ran at steps ${sameCalls.join(' and ')}, and running it again returns the same result. ` +
+                'If you need a part that was cut off, ask for that part narrowly (a specific path, id, query or field). Otherwise do the next step, or give the final answer with what you have. ' +
+                '(To poll something that changes, set "allowRepeat": true in params.)'
+            } });
+            continue;
+          }
           thoughts.push({ type: 'action', content: action, iteration, timestamp: new Date() });
           this.emit('action', { iteration, action });
 
@@ -675,14 +699,21 @@ export class ReActAgent extends EventEmitter {
     // the full prompt still lists every tool. Ask once more with the steps alone and no tools
     // (card 21 #2298, 2026-10-03: this returned nothing and "Max iterations reached" was posted).
     if (raw && !ReActAgent.jsonObjects(raw).length) return raw;
-    const steps = (history || []).filter(h => h.type === 'action' || h.type === 'observation').slice(-24).map(h => {
+    // Every call, one line each, and the newest results in more detail: with only the last 24
+    // entries a /hops call at step 5 dropped out and the summary said it was never made (card 21
+    // #3335, 2026-10-06).
+    const all = (history || []).filter(h => h.type === 'action' || h.type === 'observation');
+    const recent = new Set(all.slice(-12));
+    const steps = all.map(h => {
       const c = typeof h.content === 'string' ? h.content : JSON.stringify(h.content);
-      return `${h.type === 'action' ? 'Did' : 'Got'}: ${String(c).slice(0, 400)}`;
-    }).join('\n');
+      if (h.type === 'action') return `Did: ${String(c).slice(0, 200)}`;
+      const failed = h.content?.success === false;
+      return `Got${failed ? ' (failed)' : ''}: ${String(c).slice(0, recent.has(h) ? 400 : 120)}`;
+    }).join('\n').slice(-14000);
     const retry = await this.agent.providerManager.generateResponse(
       `Task: ${query}\n\nWhat was done so far:\n${steps || '(nothing)'}\n\n` +
-      'You cannot take any more steps. In plain text (no JSON, no tool calls), say what was done, what it found, ' +
-      'and what is still not done. Keep it short.', options);
+      `You cannot take any more steps. In plain text (no JSON, no tool calls), in the first person as ${this.agent?.config?.name || 'the agent'} ` +
+      '("I read…", not "the agent…"), say what you did, what it found, and what is still not done. Count a call as made if it is listed above. Keep it short.', options);
     const text = String(retry?.content || retry || '').trim();
     if (text && !ReActAgent.jsonObjects(text).length) return text;
     logger.warn('ReAct: no closing answer after running out of steps');
@@ -731,7 +762,7 @@ export class ReActAgent extends EventEmitter {
               const reference = /^(read\w*|export\w*|get\w*|search\w*|request)$/i.test(String(h.content?.command || ''));
               const limit = superseded ? 200 : h === lastObservation ? 8000 : reference ? 8000 : 1200;
               if (superseded) return `Observation: (an earlier read of the same thing; the newer read below replaces it)`;
-              return `Observation: ${obs.substring(0, limit)}${obs.length > limit ? '...' : ''}`;
+              return `Observation: ${obs.substring(0, limit)}${obs.length > limit ? `… [display cut here: ${obs.length - limit} more characters not shown. Fetching the same thing again shows the same cut; ask for the part you need narrowly]` : ''}`;
             default:
               return '';
           }

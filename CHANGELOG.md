@@ -2,6 +2,12 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.492] - 2026-10-06
+
+### Fixed
+- **A run spent its steps fetching the same thing over and over.** A long API page is shown to the model cut at 8,000 characters and ended in "...". The model fetched it again to see the rest, 13 times in one run, until it ran out of steps. The cut now says how much is not shown and that fetching again shows the same cut. A third identical call (same tool, command and parameters) is refused with a note to ask for the needed part narrowly. Polling can pass `allowRepeat`.
+- **The out-of-steps summary said a call was never made when it was.** It saw only the last 24 entries, so an early call dropped out. The summary also referred to "the agent" in the third person. It now lists every call, with the newest results in more detail, and is written in the first person.
+
 ## [2.25.491] - 2026-10-06
 
 ### Security
