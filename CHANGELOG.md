@@ -2,6 +2,13 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.494] - 2026-10-06
+
+### Security
+- **Prompts could be served by an upstream that keeps them.** OpenRouter serves one model from many hosts. For DeepSeek V4 Pro that is 15, some of which retain or log prompts. The agent asked for no data policy, so a request carrying its context (tool results, channel messages, wallet and trading state) could land on any of them. Every OpenRouter chat, streaming and vision request now requires zero data retention (`provider.zdr`), including requests that set their own routing. A model with no zero-retention upstream falls back to `OPENROUTER_ZDR_FALLBACK_MODEL` (default `openai/gpt-5.6-luna`) rather than to a host that keeps data. Turn it off with `OPENROUTER_ZDR=false`.
+
+2.25.493 (browser-tier redirect guard for paid scrapes) was reverted the same day: its request interception stalled every guarded page. It will return once fixed.
+
 ## [2.25.492] - 2026-10-06
 
 ### Fixed

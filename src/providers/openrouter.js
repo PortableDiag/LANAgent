@@ -68,6 +68,17 @@ export class OpenRouterProvider extends BaseProvider {
     ).toLowerCase() !== 'false';
     this.providerOrder = (config.providerOrder || process.env.OPENROUTER_PROVIDER_ORDER || '')
       .split(',').map(x => x.trim()).filter(Boolean);
+    // Zero data retention: only upstreams OpenRouter lists as keeping nothing (prompts, tool
+    // results, wallet context). Unset, deepseek-v4-pro could land on any of 15 hosts, several
+    // that retain (2026-10-06, after the malicious-router paper, arXiv 2604.08407). A model
+    // with no ZDR endpoint falls back to zdrFallbackModel rather than to a retaining host.
+    this.zdr = String(config.zdr ?? process.env.OPENROUTER_ZDR ?? 'true').toLowerCase() !== 'false';
+    this.zdrFallbackModel = config.zdrFallbackModel || process.env.OPENROUTER_ZDR_FALLBACK_MODEL || 'openai/gpt-5.6-luna';
+  }
+
+  /** OpenRouter's answer when no upstream for the model satisfies the routing (ZDR) policy. */
+  _noPolicyEndpoint(error) {
+    return this.zdr && (error?.status === 404 || /no endpoints? found|data policy|zero data retention/i.test(String(error?.message || '')));
   }
 
   /**
@@ -78,12 +89,15 @@ export class OpenRouterProvider extends BaseProvider {
    * with allow_fallbacks the router just ignores an order it cannot satisfy.
    */
   _providerRouting(model) {
-    if (!this.pinUpstream) return null;
-    const order = this.providerOrder.length
-      ? this.providerOrder
-      : [String(model).split('/')[0]].filter(Boolean);
-    if (order.length === 0) return null;
-    return { order, allow_fallbacks: true };
+    const routing = {};
+    if (this.pinUpstream) {
+      const order = this.providerOrder.length
+        ? this.providerOrder
+        : [String(model).split('/')[0]].filter(Boolean);
+      if (order.length) Object.assign(routing, { order, allow_fallbacks: true });
+    }
+    if (this.zdr) routing.zdr = true;
+    return Object.keys(routing).length ? routing : null;
   }
 
   /**
@@ -387,6 +401,9 @@ export class OpenRouterProvider extends BaseProvider {
     if (params.provider === undefined) {
       const routing = this._providerRouting(model);
       if (routing) params.provider = routing;
+    } else if (this.zdr && params.provider && params.provider.zdr === undefined) {
+      // A caller's own routing keeps its order, but not a way around zero retention.
+      params.provider = { ...params.provider, zdr: true };
     }
 
     if (options.enableWebSearch === true) {
@@ -428,11 +445,20 @@ export class OpenRouterProvider extends BaseProvider {
     const startTime = Date.now();
 
     try {
-      const { model, params } = this._buildParams(prompt, options);
-      const completion = await this.client.chat.completions.create(
-        { ...params, stream: false },
-        { timeout: this._generationTimeoutMs(params.max_tokens) }
+      let { model, params } = this._buildParams(prompt, options);
+      const create = (p) => this.client.chat.completions.create(
+        { ...p, stream: false },
+        { timeout: this._generationTimeoutMs(p.max_tokens) }
       );
+      let completion;
+      try {
+        completion = await create(params);
+      } catch (error) {
+        if (!this._noPolicyEndpoint(error) || model === this.zdrFallbackModel) throw error;
+        logger.warn(`OpenRouter: no zero-retention upstream for ${model}; using ${this.zdrFallbackModel}`);
+        ({ model, params } = this._buildParams(prompt, { ...options, model: this.zdrFallbackModel }));
+        completion = await create(params);
+      }
       this._assertUsableCompletion(completion, model);
 
       const responseTime = Date.now() - startTime;
@@ -488,10 +514,19 @@ export class OpenRouterProvider extends BaseProvider {
     let servedModel = options.model || this.models.chat;
 
     try {
-      const { model, params } = this._buildParams(prompt, options);
-      servedModel = model;
-      const stream = await this.client.chat.completions.create({ ...params, stream: true },
+      let { model, params } = this._buildParams(prompt, options);
+      const open = (p) => this.client.chat.completions.create({ ...p, stream: true },
         options.signal ? { signal: options.signal } : undefined);
+      let stream;
+      try {
+        stream = await open(params);
+      } catch (error) {
+        if (!this._noPolicyEndpoint(error) || model === this.zdrFallbackModel) throw error;
+        logger.warn(`OpenRouter: no zero-retention upstream for ${model}; streaming with ${this.zdrFallbackModel}`);
+        ({ model, params } = this._buildParams(prompt, { ...options, model: this.zdrFallbackModel }));
+        stream = await open(params);
+      }
+      servedModel = model;
 
       let usage = null;
 
@@ -553,8 +588,10 @@ export class OpenRouterProvider extends BaseProvider {
         ? imageBuffer.toString("base64")
         : String(imageBuffer);
 
+      const routing = this._providerRouting(model);
       const completion = await this.client.chat.completions.create({
         model,
+        ...(routing ? { provider: routing } : {}),
         messages: [{
           role: "user",
           content: [
