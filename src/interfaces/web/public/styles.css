@@ -14258,3 +14258,60 @@ input[type="checkbox"]:not(.toggle-label input[type="checkbox"]) {
 .voice-preset button.voice-preset-delete:hover { opacity: 1; }
 .voice-preset.active { border-color: var(--primary-color, #4a9eff); background: rgba(74, 158, 255, 0.15); }
 .voice-preset.active .voice-preset-name::before { content: "\2713  "; }
+
+/* =====================================================================
+   Phone layout (2026-10-05). A headless audit at 390x844 found the header
+   taking 240px of the screen and 18 pages wider than it: wide tables, fixed
+   chart widths, a 700px calendar, log rows that never wrap, button rows.
+   Rule: nothing is wider than the screen; what cannot shrink scrolls inside
+   its own box, never the page. Kept last so it wins over earlier blocks.
+   ===================================================================== */
+@media (max-width: 768px) {
+    /* Header: one short row each for the title and the status/logout bar */
+    .header-top { padding: 0.5rem 0.75rem; }
+    .header-left { gap: 0.5rem; min-width: 0; }
+    .header-left h1 { font-size: 1.1rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+    .header-bottom { flex-direction: row; align-items: center; gap: 0.5rem; padding: 0.35rem 0.75rem; }
+    .connection-status { justify-content: flex-start; flex-wrap: wrap; min-width: 0; font-size: 0.8rem; }
+    #logout-btn { width: auto; flex-shrink: 0; padding: 0.35rem 0.75rem; }
+    #refresh-text { display: none; }   /* icon + countdown say it; the label wrapped the bar onto two lines */
+    .dashboard-content { height: calc(100vh - 100px); }
+
+    /* Content uses the width it has */
+    .main-content { padding: 1rem 0.75rem; }
+    .tab-content h2 { font-size: 1.35rem; margin-bottom: 1rem; }
+    .tab-content, .tab-content * { overflow-wrap: break-word; }
+    .tab-content pre { white-space: pre-wrap; }
+    .tab-content img, .tab-content video, .tab-content canvas { max-width: 100%; height: auto; }
+
+    /* Wide tables scroll sideways inside their card */
+    .tab-content table { display: block; max-width: 100%; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+    .tab-content table th, .tab-content table td { overflow-wrap: normal; }
+
+    /* Fixed-width charts (d3 svg) scroll inside their box */
+    .tab-content div:has(> svg), .tab-content [id$="-chart"] { max-width: 100%; overflow-x: auto; }
+    /* The usage chart draws to its box's width (app.js renderOverallUsageChart); a 500px floor made it wider than the screen */
+    #overall-usage-chart { min-width: 0; }
+
+    /* Grids whose minimum column is wider than a phone */
+    .info-grid, .projects-grid { grid-template-columns: minmax(0, 1fr); }
+    .info-card, .project-card { padding: 1rem; min-width: 0; }
+
+    /* Calendar: seven columns that fit, not seven of 100px */
+    .calendar-header, .calendar-grid { min-width: 0; grid-template-columns: repeat(7, minmax(0, 1fr)); }
+    .calendar-day-header { padding: 0.4rem 0.1rem; font-size: 0.75rem; }
+    .calendar-day { min-height: 56px; padding: 0.25rem; font-size: 0.75rem; }
+
+    /* Log rows wrap: time and type on one line, the rest beneath */
+    .log-entry { flex-wrap: wrap; row-gap: 0.15rem; }
+    .log-time, .log-type, .log-plugin, .log-status { min-width: 0; }
+    .log-action, .log-command { flex: 1 1 100%; }
+
+    /* Background jobs: label and value may wrap; values are not cut at 150px */
+    .background-stats .stat-card { padding: 0.85rem; }
+    .background-stats .stat-card p { white-space: normal; flex-wrap: wrap; gap: 0.25rem; font-size: 0.9rem; }
+    .background-stats .stat-card p span { max-width: 100%; }
+
+    /* Any row of buttons wraps instead of running off the screen */
+    .tab-content .btn-group, .tab-content [class*="actions"], .tab-content [class*="-buttons"] { flex-wrap: wrap; }
+}

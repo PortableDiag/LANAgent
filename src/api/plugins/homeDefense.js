@@ -813,7 +813,7 @@ export default class HomeDefensePlugin extends BasePlugin {
       <style>
         .hd-wrap { padding: 1rem; }
         .hd-head { display:flex; justify-content:space-between; align-items:center; margin-bottom:0.75rem; flex-wrap:wrap; gap:0.75rem; }
-        .hd-actions { display:flex; gap:0.5rem; }
+        .hd-actions { display:flex; gap:0.5rem; flex-wrap:wrap; }
         .hd-status { display:flex; gap:0.75rem; flex-wrap:wrap; margin-bottom:0.75rem; }
         .hd-pill { padding:0.4rem 0.7rem; border-radius:8px; background:var(--bg-tertiary); font-size:0.8rem; }
         .hd-pill .dot { display:inline-block; width:8px; height:8px; border-radius:50%; margin-right:6px; }

@@ -2,6 +2,16 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.485] - 2026-10-05
+
+### Fixed
+- **The web dashboard was hard to use on a phone.** A headless check of every page at phone size (390×844) found the header taking 240 px of the screen and 18 pages wider than it. On Skills, each skill's seven buttons squeezed its name and description into a 60 px column and ran off the edge.
+  - The header is now two short rows: the title on one line, and the connection status beside Logout.
+  - Pages use the screen width, and nothing is wider than the screen: wide tables (API keys, contacts, emails, guests) and charts scroll inside their own box, and the calendar fits seven columns.
+  - Log rows wrap, button rows wrap, background-job stats are no longer cut at 150 px, and info and project cards stack.
+  - Skills: buttons go under the skill's name on a phone; heading buttons no longer float over the text. Home Defense's action buttons wrap.
+- **Opening External Services logged you out of the dashboard.** The admin-key check for `/api/external/admin/wallets`, `/download-tokens` and `/payments/recent|summary` was applied to every `/api/external/admin/*` request, so the dashboard's own routes (dashboard, payments, audit, services, kill switch) were refused with "Invalid admin key", and the dashboard treats any refusal as an expired session. The admin key now guards only its own routes. The dashboard also now logs out only when the session itself is refused: a 401/403 from one endpoint is checked against a plain signed-in route first.
+
 ## [2.25.484] - 2026-10-05
 
 ### Added

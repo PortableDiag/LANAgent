@@ -2750,6 +2750,26 @@ class LANAgentDashboard {
     }
 
     // API helpers
+    /**
+     * A 401/403 from one endpoint is not proof the session is over: a route with its own auth
+     * (an admin key, a role) refuses a perfectly good login. Logging out on every refusal made
+     * opening External Services sign you out. Ask a plain JWT route; log out only if it refuses too.
+     */
+    async _authRefused(response) {
+        let detail = '';
+        try { detail = (await response.clone().json())?.error || ''; } catch { /* not JSON */ }
+        const now = Date.now();
+        if (!this._sessionCheck || now - this._sessionCheck.at > 30000) {
+            this._sessionCheck = { at: now, ok: fetch('/api/agent/info', { headers: { 'Authorization': `Bearer ${this.token}` } })
+                .then(r => !(r.status === 401 || r.status === 403)).catch(() => true) };
+        }
+        if (!(await this._sessionCheck.ok)) {
+            this.logout();
+            throw new Error('Session expired');
+        }
+        throw new Error(detail || `Not authorized (${response.status})`);
+    }
+
     async apiGet(url) {
         const response = await fetch(url, {
             headers: {
@@ -2757,8 +2777,7 @@ class LANAgentDashboard {
             }
         });
         if (response.status === 401 || response.status === 403) {
-            this.logout();
-            throw new Error('Session expired');
+            return this._authRefused(response);
         }
         return await response.json();
     }
@@ -2773,8 +2792,7 @@ class LANAgentDashboard {
             body: JSON.stringify(data)
         });
         if (response.status === 401 || response.status === 403) {
-            this.logout();
-            throw new Error('Session expired');
+            return this._authRefused(response);
         }
         return await response.json();
     }

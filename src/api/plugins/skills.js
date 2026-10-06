@@ -542,6 +542,18 @@ Message: "${input}"`;
         .sk-form input, .sk-form textarea { width: 100%; margin-bottom: .5rem; padding: .5rem; border-radius: 6px; }
         .sk-filter { width: 100%; padding: .45rem; border-radius: 6px; margin-bottom: .5rem; }
         .sk-err { color: #ef4444; }
+        .sk-name, .sk-desc, .sk-body { overflow-wrap: anywhere; }
+        .sk-card h3 { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; }
+        .sk-card h3 .btn { float: none !important; margin-left: auto; }
+        /* Phone: a skill's buttons go under its name instead of squeezing it to a 60px column. */
+        @media (max-width: 640px) {
+          .sk-card { padding: .85rem; }
+          .sk-row { flex-direction: column; gap: .5rem; }
+          .sk-actions { justify-content: flex-start; width: 100%; }
+          .sk-actions .btn { flex: 1 1 auto; min-height: 36px; }
+          .sk-settings { grid-template-columns: minmax(0, 1fr); }
+          .sk-settings label { align-items: flex-start; }
+        }
       </style>
 
       <div class="plugin-header"><h2>Skills</h2></div>

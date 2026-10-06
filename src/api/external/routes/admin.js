@@ -6,7 +6,11 @@ import { adminKeyAuth } from '../middleware/adminKeyAuth.js';
 
 const router = Router();
 
-router.use(adminKeyAuth);
+// The admin key guards THIS router's paths only. As a blanket router.use it also caught every
+// other /api/external/admin/* request — the dashboard's JWT routes (dashboard, payments, audit,
+// services, kill-switch), mounted after this router — and refused them with "Invalid admin key",
+// which logged the web UI out whenever External Services was opened (since 2026-05-09).
+router.use(['/wallets', '/download-tokens', '/payments/recent', '/payments/summary'], adminKeyAuth);
 
 router.get('/wallets', async (req, res) => {
   try {
