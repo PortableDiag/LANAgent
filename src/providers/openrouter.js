@@ -562,16 +562,25 @@ export class OpenRouterProvider extends BaseProvider {
             { type: "image_url", image_url: { url: `data:${mimeType};base64,${base64}` } }
           ]
         }],
-        max_tokens: options.maxTokens || 1000,
+        // A reasoning vision model spends the budget thinking first: at 1000 tokens
+        // "describe and transcribe" on a tall screenshot came back "" (card 21, 2026-10-06),
+        // the same floor _buildParams applies to chat.
+        max_tokens: this._isReasoningModel(model)
+          ? Math.max(options.maxTokens || 1000, 4000)
+          : (options.maxTokens || 1000),
         usage: { include: true }
       });
       this._assertUsableCompletion(completion, model);
 
       const responseTime = Date.now() - startTime;
       await this.updateMetrics(responseTime, this._usagePayload(completion, model, { requestType: "vision" }));
+      const choice = completion.choices[0];
+      if (!choice.message?.content && choice.finish_reason === "length") {
+        throw new Error(`${model} used its whole ${completion.usage?.completion_tokens ?? "token"} budget before answering (finish_reason: length)`);
+      }
 
       return {
-        analysis: completion.choices[0].message?.content || "",
+        analysis: choice.message?.content || "",
         model: completion.model || model,
         usage: completion.usage,
         provider: this.name

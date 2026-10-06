@@ -53,6 +53,9 @@ export function stripListenerNotes(text) {
  * Statements in a final answer that no step supports, by one auxiliary-model call. Best effort:
  * no model, a failed call or an unreadable reply returns [] and the answer stands.
  */
+const AUDIT_RESULT_CHARS = 4000;
+const AUDIT_STEPS_CHARS = 40000;
+
 export async function auditAnswer(providerManager, answer, thoughts = []) {
   if (!(providerManager?.generateResponse || providerManager?.generateAux) || !answer) return [];
   const steps = [];
@@ -60,7 +63,9 @@ export async function auditAnswer(providerManager, answer, thoughts = []) {
     if (t.type === 'action') steps.push(`ACTION ${t.content.tool}.${t.content.command} ${JSON.stringify(t.content.params || {}).slice(0, 300)}`);
     else if (t.type === 'observation' && t.content?.tool !== 'check') {
       const c = t.content || {};
-      steps.push(`RESULT ${c.success === false ? 'FAILED ' + String(c.error || '').slice(0, 150) : 'ok ' + JSON.stringify(c.result ?? c).slice(0, 900)}`);
+      // 900 chars per result hid most of a paper, a picture's description and a channel read, so
+      // facts taken from them were refused as unsupported (card 21 #3259, 2026-10-06).
+      steps.push(`RESULT ${c.success === false ? 'FAILED ' + String(c.error || '').slice(0, 150) : 'ok ' + JSON.stringify(c.result ?? c).slice(0, AUDIT_RESULT_CHARS)}`);
     }
   }
   const targets = [...new Set(thoughts.filter(t => t.type === 'action').map(t => {
@@ -68,7 +73,7 @@ export async function auditAnswer(providerManager, answer, thoughts = []) {
     return `${t.content?.tool}.${t.content?.command} ${q.url || (q.card !== undefined ? `card ${q.card}` : '')}`.trim();
   }))];
   const prompt = 'You check an AI agent\'s report against the steps it actually ran.\n\nEVERYTHING IT CALLED (nothing else was fetched or checked):\n' + targets.join('\n').slice(0, 3000) +
-    '\n\nSTEPS (in order):\n' + steps.join('\n').slice(-12000) +
+    '\n\nSTEPS (in order):\n' + steps.join('\n').slice(-AUDIT_STEPS_CHARS) +
     '\n\nREPORT:\n' + String(answer).slice(0, 3000) +
     '\n\nList each statement in the REPORT that says the agent itself did, fetched, checked, created, sent or found something that NO step above shows ' +
     '(e.g. "checked both tasks" when only one was fetched, or a size/number for an item whose URL is not in the list above). Counts, ids, sizes and status codes must come from the RESULTS. Statements about what others did, plans, or ' +

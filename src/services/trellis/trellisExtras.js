@@ -33,6 +33,7 @@ import { TEMP_PATH, UPLOADS_PATH, WORKSPACE_PATH, DEPLOY_PATH } from '../../util
 const MAX_FILE_BYTES = 40 * 1024 * 1024;      // the server's limit per file
 const MAX_TEXT_CHARS = 20000;                 // extracted text returned to the caller
 const DOWNLOAD_DIR = path.join(TEMP_PATH, 'trellis-files');
+const TYPE_EXT = { 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp', 'image/gif': 'gif', 'audio/webm': 'webm', 'video/webm': 'webm', 'audio/mpeg': 'mp3', 'audio/ogg': 'ogg', 'video/mp4': 'mp4', 'application/pdf': 'pdf', 'text/plain': 'txt' };
 // Files the agent may upload from. Not DATA_PATH: it holds keys (wireguard, wallet cache).
 const UPLOAD_ROOTS = [TEMP_PATH, UPLOADS_PATH, WORKSPACE_PATH, path.join(DEPLOY_PATH, 'downloads')];
 
@@ -542,7 +543,11 @@ const actions = {
       : kind === 'inline' ? `/api/cards/${c.id}/inline/${Number(index)}`
       : `/api/cards/${c.id}/attachments/${Number(index)}`;
     const got = await this._download(route);
-    const safe = String(got.name || `${kind}-${index}`).replace(/[^\w.\- ]+/g, '_').slice(0, 120);
+    let safe = String(got.name || `${kind}-${index}`).replace(/[^\w.\- ]+/g, '_').slice(0, 120);
+    // A channel picture comes with no filename, and without an extension the vision tool
+    // refuses the saved file ("not an image"): card 21, 2026-10-06, four steps lost renaming it.
+    const ext = TYPE_EXT[String(got.contentType || '').split(';')[0].trim().toLowerCase()];
+    if (ext && !/\.\w{2,4}$/.test(safe)) safe += `.${ext}`;
     await fs.mkdir(DOWNLOAD_DIR, { recursive: true });
     const file = path.join(DOWNLOAD_DIR, `${c.id}-${kind}${index}-${safe}`);
     await fs.writeFile(file, got.bytes);

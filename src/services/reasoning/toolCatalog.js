@@ -287,9 +287,13 @@ export async function executeTool(agent, tool, command, params = {}, context = n
 function elsewhereHint(tools, tool, command) {
   const own = tools.find(t => t.name === tool);
   if (!own || own.commands.some(c => c.command === command)) return '';
-  const owners = tools.filter(t => t.name !== tool && t.commands.some(c => c.command === command)).map(t => t.name);
+  // Describe, don't redirect: a common name can mean something else elsewhere (system.exec was
+  // pointed at docker.exec, which runs a command inside a container).
+  const owners = tools.filter(t => t.name !== tool).flatMap(t => t.commands
+    .filter(c => c.command === command)
+    .map(c => `${t.name}.${command}${c.description ? ` (${String(c.description).substring(0, 80)})` : ''}`));
   if (!owners.length) return '';
-  return `"${command}" is not a ${tool} command; it belongs to ${owners.map(n => `tool "${n}"`).join(' or ')}. Call it there.`;
+  return `"${command}" is not a ${tool} command. Other tools have a command by that name: ${owners.slice(0, 3).join('; ')}.`;
 }
 
 /**

@@ -2,6 +2,14 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.489] - 2026-10-06
+
+### Fixed
+- **Reading a picture returned nothing on a reasoning vision model.** The OpenRouter vision call capped the answer at 1000 tokens. A vision model that reasons first spent the budget thinking, and "describe and transcribe the text" on a tall screenshot came back empty, while "describe this image" fit. Reasoning models now get at least 4000 tokens for a picture, like chat already did, and a reply that ran out of budget says so instead of returning blank.
+- **A downloaded channel picture had no file extension.** A picture posted in a Trellis channel has no filename, so `downloadFile` saved it as `inline-2`, and the vision tool refused it as "not an image". Files are now saved with the extension of their type.
+- **The answer check refused facts the agent had read.** Before a channel reply goes out, a check compares it with the run's steps. It saw only the first 900 characters of each result, so figures from a paper, a picture's description or a channel read looked unsupported and a correct reply was withheld. It now sees up to 4000 characters per result and 40,000 in all.
+- **The wrong-tool hint (2.25.488) describes instead of redirecting.** A common command name can mean something else in another tool (`system.exec` was pointed at `docker.exec`, which runs inside a container). The hint now lists the other tools' commands with their descriptions and leaves the choice to the model.
+
 ## [2.25.488] - 2026-10-06
 
 ### Fixed
