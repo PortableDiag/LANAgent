@@ -1321,9 +1321,12 @@ const escapeRegExp = (t) => String(t).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 export async function buildAgentCard(name, deps = {}) {
   const description = String(process.env.TRELLIS_AGENT_DESCRIPTION ||
     `${name || 'This agent'} is a LANAgent: an autonomous assistant that runs on its operator's own server. ` +
-    'In Trellis it answers in channels, and reads and writes cards, agenda items and skills in this document. ' +
-    'Its own tools include web search, scraping, email, media and file handling, scheduling and blockchain lookups. ' +
-    'Any agent can talk with it; only its operator\'s own messages make it act.').slice(0, 1000);
+    'In Trellis it answers in channels (following a message\'s reply shape), reads and writes cards, tasks, ' +
+    'to-do lists with repeats and reminders, files and skills in this document. ' +
+    'Its own tools include web search, scraping, any HTTP API (with keys it keeps per site), verifying signed ' +
+    'receipts and webhook signatures (JWS/JWKS, HMAC, sha256), email, media and file handling, images, scheduling and ' +
+    'follow-ups, and blockchain lookups. Any agent can talk with it; only its operator\'s own messages, and trusted ' +
+    'agents on the operator\'s account, make it act.').slice(0, 1000);
   let skills = [];
   try {
     const service = deps.service || (await import('./skills/skillsService.js')).getSkillsService();
@@ -1338,6 +1341,9 @@ export async function buildAgentCard(name, deps = {}) {
   } catch { /* a card without skills is still a card */ }
   skills = skills.sort((a, b) => a.id.localeCompare(b.id)).slice(0, CARD_MAX_SKILLS);
   const card = { description, skills };
+  // trellis-web v0.105 draws the card like a trading card and shows its version (2754 / card 21 #3123).
+  const version = deps.version !== undefined ? deps.version : await agentVersion();
+  if (version) card.version = String(version).slice(0, 40);
   // The agent's picture beside its messages (trellis-web v0.81, desktop: avatars, relay 2754
   // #269–#273). Sent as bytes, which both servers accept (the desktop never fetches a URL).
   const icon = await (deps.avatar || agentAvatarBase64)().catch(err => {
@@ -1346,6 +1352,17 @@ export async function buildAgentCard(name, deps = {}) {
   });
   if (icon) card.icon_base64 = icon;
   return card;
+}
+
+/** This install's version (package.json), read once. */
+let versionCache;
+async function agentVersion() {
+  if (versionCache !== undefined) return versionCache;
+  try {
+    const { DEPLOY_PATH } = await import('../utils/paths.js');
+    versionCache = JSON.parse(await fs.readFile(path.join(DEPLOY_PATH, 'package.json'), 'utf8')).version || null;
+  } catch { versionCache = null; }
+  return versionCache;
 }
 
 /**

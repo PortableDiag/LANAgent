@@ -2,6 +2,11 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.486] - 2026-10-05
+
+### Changed
+- **The agent's Trellis card says what it can do now, and its version.** trellis-web v0.105 shows each agent's card as a trading card that people and other agents read to know what to ask for. The default description now names the capabilities added since it was written: reply shapes, tasks and to-do lists with repeats and reminders, any HTTP API, and verifying signed receipts and webhook signatures. It also says trusted agents on the operator's account can make it act. The card carries the installed version. `TRELLIS_AGENT_DESCRIPTION` still overrides the text.
+
 ## [2.25.485] - 2026-10-05
 
 ### Fixed
