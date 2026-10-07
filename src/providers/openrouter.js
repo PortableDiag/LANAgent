@@ -670,14 +670,28 @@ export class OpenRouterProvider extends BaseProvider {
    */
   async transcribeAudio(audioBuffer, options = {}) {
     const startTime = Date.now();
-    const model = options.model || process.env.OPENROUTER_TRANSCRIPTION_MODEL || "openai/gpt-transcribe";
+    // The operator's voice messages. openai/gpt-transcribe (the old default) has no zero-retention
+    // upstream; microsoft/mai-transcribe-2 does, and transcribed a test clip exactly (2026-10-06).
+    let model = options.model || process.env.OPENROUTER_TRANSCRIPTION_MODEL || (this.zdr ? "microsoft/mai-transcribe-2" : "openai/gpt-transcribe");
     try {
       const format = options.format || OpenRouterProvider.detectAudioFormat(audioBuffer);
-      const { data } = await axios.post(`${BASE_URL}/audio/transcriptions`, {
-        model,
+      const send = (m) => axios.post(`${BASE_URL}/audio/transcriptions`, {
+        model: m,
         input_audio: { data: Buffer.from(audioBuffer).toString("base64"), format },
-        ...(options.language ? { language: options.language } : {})
+        ...(options.language ? { language: options.language } : {}),
+        ...(this.zdr ? { provider: { zdr: true } } : {})
       }, { headers: this._authHeaders(), timeout: this.requestTimeoutMs });
+      const fallback = process.env.OPENROUTER_ZDR_TRANSCRIPTION_FALLBACK || "openai/whisper-large-v3";
+      let data;
+      try {
+        ({ data } = await send(model));
+      } catch (error) {
+        const e = { status: error.response?.status, message: error.response?.data?.error?.message || error.message };
+        if (!this._noPolicyEndpoint(e) || model === fallback) throw error;
+        logger.warn(`OpenRouter: no zero-retention upstream for ${model}; transcribing with ${fallback}`);
+        model = fallback;
+        ({ data } = await send(model));
+      }
 
       const text = data?.text || "";
       await this.updateMetrics(Date.now() - startTime, {
@@ -748,7 +762,7 @@ export class OpenRouterProvider extends BaseProvider {
     const startTime = Date.now();
     const model = options.model || "google/gemini-3.1-flash-image";
     try {
-      const body = { model, prompt, n: 1 };
+      const body = { model, prompt, n: 1, ...(this.zdr ? { provider: { zdr: true } } : {}) };
       if (options.aspectRatio) body.aspect_ratio = options.aspectRatio;
       if (options.resolution) body.resolution = options.resolution;
       if (options.quality && options.quality !== "auto") body.quality = options.quality;

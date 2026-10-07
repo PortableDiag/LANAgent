@@ -12,7 +12,7 @@ import https from 'https';
 import jsonld from 'jsonld';
 import dns from 'dns';
 import net from 'net';
-import { isPrivateAddress } from '../../utils/publicUrl.js';
+import { isPrivateAddress, assertPublicUrl } from '../../utils/publicUrl.js';
 
 // Title fragments seen on JS interstitials we want to wait out before doing
 // anything user-visible (HTML extraction, screenshot, PDF). Cloudflare's
@@ -672,6 +672,13 @@ export default class ScraperPlugin extends BasePlugin {
     }
 
     const solution = await fsRequestGet(url, fsOptions);
+    // FlareSolverr's own browser follows redirects where no guard can see them: for a paid
+    // caller, a final address on the agent's network is discarded, never returned.
+    if (options.publicOnly === true && solution.url && solution.url !== url) {
+      await assertPublicUrl(solution.url, 'redirect target').catch(err => {
+        throw new Error(`FlareSolverr was redirected off the public internet; result discarded (${err.message})`);
+      });
+    }
     const html = solution.response || '';
     const httpStatus = solution.status;
 
@@ -932,12 +939,50 @@ export default class ScraperPlugin extends BasePlugin {
     ]);
   }
 
+  /**
+   * For a paid caller (options.publicOnly): the browser aborts every request (the page, its
+   * redirects, frames, images) whose host resolves to a private or local address, so a public
+   * page that redirects or embeds a LAN address cannot read or picture the agent's network.
+   *
+   * ONE plain (non-cooperative) handler per page. Cooperative interception (priorities +
+   * enqueueInterceptAction) never ran its queued action under puppeteer-extra on
+   * rebrowser-puppeteer-core 23.10, so every request hung (2.25.493, reverted). A second plain
+   * handler would race this one and win while the DNS lookup runs, so a path that needs its own
+   * blocking adds resource types through page._publicOnly.blockTypes instead.
+   */
+  async _guardPublicOnly(page) {
+    const verdicts = new Map();
+    const allowed = (u) => {
+      if (!/^https?:/i.test(u)) return Promise.resolve(true);    // data:, blob:, about:
+      let host;
+      try { host = new URL(u).hostname.replace(/^\[|\]$/g, ''); } catch { return Promise.resolve(false); }
+      if (!verdicts.has(host)) {
+        verdicts.set(host, (async () => {
+          const addrs = net.isIP(host) ? [host] : (await dns.promises.lookup(host, { all: true }).catch(() => [])).map(a => a.address);
+          return !addrs.some(a => isPrivateAddress(a));
+        })());
+      }
+      return verdicts.get(host);
+    };
+    page._publicOnly = { blockTypes: new Set() };
+    await page.setRequestInterception(true);
+    page.on('request', async (req) => {
+      try {
+        if (page._publicOnly.blockTypes.has(req.resourceType())) return await req.abort('aborted');
+        if (await allowed(req.url())) return await req.continue();
+        logger.warn(`[scraper] public-only: refused ${req.resourceType()} request to ${String(req.url()).slice(0, 120)}`);
+        return await req.abort('blockedbyclient');
+      } catch { /* already handled (page closing) */ }
+    });
+  }
+
   async scrapeWithPuppeteer(url, options) {
     const { selector, waitForSelector, viewport, userAgent } = options;
 
     await this._ensureBrowser();
 
     const page = await this.browser.newPage();
+    if (options.publicOnly === true) await this._guardPublicOnly(page);
 
     try {
       // v2.25.89: stealth plugin (puppeteer-extra-plugin-stealth) handles
@@ -1128,6 +1173,7 @@ export default class ScraperPlugin extends BasePlugin {
     await this._ensureScreenshotBrowser();
 
     const page = await this.ssBrowser.newPage();
+    if (options.publicOnly === true) await this._guardPublicOnly(page);
 
     try {
       // v2.25.89: stealth plugin owns webdriver/chrome/etc. evasions globally;
@@ -1185,17 +1231,18 @@ export default class ScraperPlugin extends BasePlugin {
         // budget killed the whole capture. That was the residual screenshot-loss
         // after the viewport fix (wikipedia/congress timed out; federalregister,
         // script-light, captured in 417ms). CSS+images still paint a faithful shot.
+        const SS_BLOCKED = ['script', 'xhr', 'fetch', 'websocket', 'eventsource', 'media', 'font', 'manifest'];
         try {
-          await page.setRequestInterception(true);
-          page.on('request', (req) => {
-            const t = req.resourceType();
-            if (t === 'script' || t === 'xhr' || t === 'fetch' || t === 'websocket' ||
-                t === 'eventsource' || t === 'media' || t === 'font' || t === 'manifest') {
-              req.abort().catch(() => {});
-            } else {
-              req.continue().catch(() => {});
-            }
-          });
+          if (page._publicOnly) {
+            // The public-only guard owns interception on this page; a second handler would race it.
+            SS_BLOCKED.forEach(t => page._publicOnly.blockTypes.add(t));
+          } else {
+            await page.setRequestInterception(true);
+            page.on('request', (req) => {
+              if (SS_BLOCKED.includes(req.resourceType())) req.abort().catch(() => {});
+              else req.continue().catch(() => {});
+            });
+          }
         } catch { /* interception best-effort */ }
 
         const baseTag = `<base href="${url}">`;
@@ -1342,6 +1389,7 @@ export default class ScraperPlugin extends BasePlugin {
     await this._ensureBrowser();
 
     const page = await this.browser.newPage();
+    if (options?.publicOnly === true) await this._guardPublicOnly(page);
     
     try {
       // Set custom user agent if provided

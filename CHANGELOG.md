@@ -2,6 +2,12 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.495] - 2026-10-06
+
+### Security
+- **Voice messages went to a transcription model that keeps data.** The default OpenRouter transcription model, `openai/gpt-transcribe`, has no zero-data-retention upstream. Transcription now asks for zero retention. The default becomes `microsoft/mai-transcribe-2` (zero-retention, and exact on a test clip), and a model without a zero-retention upstream falls back to `OPENROUTER_ZDR_TRANSCRIPTION_FALLBACK` (default `openai/whisper-large-v3`). Image generation asks for zero retention too. Speech synthesis ignores routing preferences, so it cannot be held to the policy; its default model's only host is Azure.
+- **Paid browser-tier scrapes cannot be redirected onto the agent's network (2.25.493, rebuilt).** For a paid caller, the browser aborts every request (the page, its redirects, frames, images) whose host resolves to a private or local address. This covers the stealth/render scrape, screenshots and PDFs. A FlareSolverr result is discarded when its final address after redirects is not public. The first version used cooperative request interception, whose queued step never ran under this browser stack, so every page hung. It is now one plain handler per page, and the screenshot path's resource blocking runs through it rather than as a second, racing handler.
+
 ## [2.25.494] - 2026-10-06
 
 ### Security

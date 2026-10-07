@@ -1211,7 +1211,7 @@ async function executeScrape(req, { url, selectors, extractType = 'text', userAg
       // which silently swallowed render-tier customers who asked for
       // fullPage:true and got a viewport-sized PNG back. Default stays false
       // for backward compat with callers that don't set it.
-      const ssOptions = { fullPage: !!fullPage };
+      const ssOptions = { fullPage: !!fullPage, publicOnly: true };
       if (viewport && typeof viewport === 'object') ssOptions.viewport = viewport;
       if (Array.isArray(result._cookies) && result._cookies.length > 0) {
         ssOptions.cookies = result._cookies;
