@@ -563,6 +563,9 @@ Live in-memory snapshot of download-token usage (tokens within their TTL window)
 
 ## Recent Updates (October 2, 2026)
 
+### v2.25.496 — Agent card picture (trellis-notes)
+`POST /api/plugin` `{"plugin": "trellis-notes", "action": "publishAgentCard", "icon": "telegram"}` publishes this agent's Trellis card (skills and version filled in). Optional `description` (kept for this run; `TRELLIS_AGENT_DESCRIPTION` keeps it), `icon: "telegram"` (the bot's profile photo) or `path` (a local picture, shrunk to 256×256). `describeImage {card, index}` with no `kind` now also finds a channel's inline picture at that index.
+
 ### v2.25.484 — Trellis tasks: quick add, to-do list, repeats (trellis-notes, trellis-web v0.104)
 Each action is `POST /api/plugin` (JWT) with `{"plugin": "trellis-notes", "action": "...", ...}`. Web only, except `createTask`/`completeTask`.
 

@@ -2,6 +2,17 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.496] - 2026-10-07
+
+### Fixed
+- **Photos were misread at full size.** A 3000×4000 phone photo of a brand name came back as a different word every time, at about ten times the tokens. The same photo at 1280 px read it correctly three times out of three. Every picture is now shrunk before a vision model reads it: photos fit inside `VISION_MAX_SIDE` (default 1280 px); a tall or wide screenshot keeps a 1280 px short side so its text stays legible. EXIF rotation is applied first.
+- **A picture's read could overrule the person who posted it.** The reply told the operator they had misremembered their own brand on the strength of that misread. A picture read now carries a note: if the text disagrees with what the person said, report both.
+- **`describeImage` with an index missed pictures posted in a channel.** It always looked among the card's attachments, so `{ card: 21, index: 0 }` was a 404 while the photo was the channel's inline picture 0. It now reads the attachment if there is one at that index, otherwise the inline or image-card picture.
+
+### Added
+- **The Trellis agent card wears the Telegram bot's profile picture.** When a Telegram bot token is set, the card's picture is the bot's own profile photo (largest size, 256×256), refreshed when it changes. `TRELLIS_AGENT_AVATAR` still wins; `data/agent/avatar.*` is the fallback. `TRELLIS_AGENT_AVATAR_TELEGRAM=false` turns it off.
+- **trellis-notes `publishAgentCard`.** Publishes or refreshes the agent's own card on request, with an optional description and a picture from the Telegram bot (`icon: "telegram"`) or a local file (`path`).
+
 ## [2.25.495] - 2026-10-06
 
 ### Security

@@ -10,6 +10,7 @@ import { UncensoredProvider } from "../providers/uncensored.js";
 import { OpenRouterProvider } from "../providers/openrouter.js";
 import { retryOperation, estimateRetryWallClockMs } from '../utils/retryUtils.js';
 import NodeCache from 'node-cache';
+import { fitForVision } from '../utils/visionImage.js';
 
 // Attempts allowed for one generation call are `GENERATION_RETRIES + 1`. Named because
 // getGenerationTimeoutMs() has to report a budget covering the whole loop, and a literal
@@ -721,8 +722,11 @@ export class ProviderManager extends EventEmitter {
 
   async analyzeImage(imageBuffer, prompt, options = {}) {
     const provider = await this.getCurrentProvider();
+    // A full-size photo misreads small text and costs ~10× the tokens (see fitForVision).
+    const fitted = await fitForVision(imageBuffer, options.mimeType);
+    if (fitted.resized) options = { ...options, mimeType: fitted.mimeType };
     // options.mimeType: the real type of the picture (OpenRouter labels it image/jpeg otherwise).
-    return await retryOperation(() => provider.analyzeImage(imageBuffer, prompt, options), { retries: 3 });
+    return await retryOperation(() => provider.analyzeImage(fitted.buffer, prompt, options), { retries: 3 });
   }
 
   async tryFallbackProviders(prompt, options) {

@@ -943,7 +943,7 @@ export class TrellisChannelListener {
     try {
       const api = await this.plugin._call('get', '/api').catch(() => null);
       if (!api?.features?.agent_cards) return false;
-      const card = await buildAgentCard(this.name, this.cardDeps || {});
+      const card = { ...(await buildAgentCard(this.name, this.cardDeps || {})), ...(this.plugin.cardOverrides || {}) };
       const hash = JSON.stringify(card);
       if (hash === this.cardHash) return false;
       await this.plugin._call('post', '/api/agents/card', { body: card });
@@ -1371,7 +1371,16 @@ async function agentVersion() {
  * 128×128, while ALICE's avatar is a 460 KB 1024×1024 PNG. Cached by file and mtime.
  */
 let avatarCache = null;
-export async function agentAvatarBase64() {
+export async function agentAvatarBase64({ telegram = telegramBotPhoto } = {}) {
+  // The operator asked every agent to wear its Telegram profile picture (relay 2754 #442,
+  // 2026-10-06). An explicit TRELLIS_AGENT_AVATAR still wins; the local file is the fallback.
+  if (!process.env.TRELLIS_AGENT_AVATAR && String(process.env.TRELLIS_AGENT_AVATAR_TELEGRAM || 'true').toLowerCase() !== 'false') {
+    const photo = await telegram().catch(err => {
+      logger.debug(`[trellis-listen] Telegram profile photo not used: ${err.message}`);
+      return null;
+    });
+    if (photo) return photo;
+  }
   const candidates = process.env.TRELLIS_AGENT_AVATAR
     ? [process.env.TRELLIS_AGENT_AVATAR]
     : [path.join(DATA_PATH, 'agent', 'avatar.png'), path.join(DATA_PATH, 'agent', 'avatar.jpg')];
@@ -1387,4 +1396,30 @@ export async function agentAvatarBase64() {
     return avatarCache.data;
   }
   return null;
+}
+
+/**
+ * The Telegram bot's own profile picture as a 256×256 PNG (base64), or null when there is no
+ * bot token or the bot has no picture. Bot API: getUserProfilePhotos for the bot's id (the
+ * token's prefix), getFile on the largest size, then the file bytes. Cached by the photo's
+ * file_unique_id, so a changed picture is picked up on the next card check.
+ */
+let telegramPhotoCache = null;
+export async function telegramBotPhoto({ token = process.env.TELEGRAM_BOT_TOKEN, http = null } = {}) {
+  if (!token || !/^\d+:/.test(token)) return null;
+  const get = http || (await import('axios')).default.get;
+  const api = `https://api.telegram.org/bot${token}`;
+  const photos = (await get(`${api}/getUserProfilePhotos`, { params: { user_id: token.split(':')[0], limit: 1 }, timeout: 15000 })).data;
+  const sizes = photos?.result?.photos?.[0];
+  if (!Array.isArray(sizes) || !sizes.length) return null;
+  const largest = sizes.reduce((a, b) => ((b.width || 0) * (b.height || 0) > (a.width || 0) * (a.height || 0) ? b : a));
+  if (telegramPhotoCache?.id === largest.file_unique_id) return telegramPhotoCache.data;
+  const file = (await get(`${api}/getFile`, { params: { file_id: largest.file_id }, timeout: 15000 })).data?.result;
+  if (!file?.file_path) return null;
+  const bytes = (await get(`https://api.telegram.org/file/bot${token}/${file.file_path}`, { responseType: 'arraybuffer', timeout: 30000 })).data;
+  const { default: sharp } = await import('sharp');
+  const png = await sharp(Buffer.from(bytes)).resize(256, 256, { fit: 'cover' }).png().toBuffer();
+  if (png.length > 256 * 1024) return null;
+  telegramPhotoCache = { id: largest.file_unique_id, data: png.toString('base64') };
+  return telegramPhotoCache.data;
 }

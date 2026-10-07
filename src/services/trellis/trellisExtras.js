@@ -252,6 +252,8 @@ export const EXTRA_COMMANDS = [
   // skills
   { command: 'teachSkill', description: 'Teach one of this agent\'s skills to another agent in a Trellis channel: posts a summary with the skill attached as a SKILL.md file (sanitized; a LANAgent installs it, any agent can read it)',
     usage: 'teachSkill({ card: 2119, skill: "humanizer", to: "Orbit" })  // to optional: @mentions that agent in a group channel', examples: ['teach the humanizer skill to orbit in the trellis channel', 'share your inbox triage skill with the other agent in trellis card 2119', 'send the debugging skill to hermes in trellis'] },
+  { command: 'publishAgentCard', description: 'Publish or refresh this agent\'s own Trellis agent card (the trading-card BIO people and agents read): skills and version are filled in; optionally a new description, and a picture from the Telegram bot\'s profile photo or a local file',
+    usage: 'publishAgentCard({ icon: "telegram" })  // or description: "…", path: "/path/to/picture.png"', examples: ['refresh your trellis agent card', 'use your telegram profile picture as your trellis agent picture', 'update your agent card in trellis', 'publish your agent card'] },
   { command: 'restoreFromTrash', description: 'Put deleted Trellis cards or baskets back from the trash, with their original ids — by the batch listTrash shows (web, document owner)',
     usage: 'restoreFromTrash({ batch: "<batch id from listTrash>" })', examples: ['restore the deleted trellis card', 'undelete that trellis basket'] },
   // tasks, Todoist-shaped (web v0.104): relay 2754 #431
@@ -460,6 +462,38 @@ const actions = {
     };
   },
 
+  /**
+   * This agent's own card (relay 2754 #441/#442). The card the listener publishes, plus what
+   * was asked: a description, or a picture from the Telegram bot or a local file. A description
+   * set here stays for this run (the listener re-applies it); TRELLIS_AGENT_DESCRIPTION keeps it.
+   */
+  async publishAgentCard({ description = null, icon = null, path: p = null } = {}) {
+    const { buildAgentCard, telegramBotPhoto } = await import('../trellisChannelListener.js');
+    const card = await buildAgentCard(this._agentName(), this.listener?.cardDeps || {});
+    if (description && String(description).trim()) {
+      this.cardOverrides = { ...(this.cardOverrides || {}), description: String(description).trim().slice(0, 1000) };
+    }
+    Object.assign(card, this.cardOverrides || {});
+    let picture = card.icon_base64 ? 'kept' : 'none';
+    if (p) {
+      const f = await this._readLocalFile(p);
+      const { default: sharp } = await import('sharp');
+      const png = await sharp(Buffer.from(f.data_base64, 'base64')).resize(256, 256, { fit: 'cover' }).png().toBuffer();
+      if (png.length > 256 * 1024) throw new Error('That picture is still over 256 KB at 256×256.');
+      card.icon_base64 = png.toString('base64');
+      picture = `from ${f.name}`;
+    } else if (String(icon || '').toLowerCase() === 'telegram') {
+      const photo = await telegramBotPhoto();
+      if (!photo) throw new Error('The Telegram bot has no profile picture (or no bot token is set); nothing was published.');
+      card.icon_base64 = photo;
+      picture = 'Telegram profile photo';
+    }
+    await this._call('post', '/api/agents/card', { body: card, timeoutMs: 60000 });
+    if (this.listener) this.listener.cardHash = JSON.stringify(card);
+    return { success: true, skills: card.skills.length, version: card.version || null, picture,
+      result: `Published my Trellis agent card: ${card.skills.length} skills, version ${card.version || 'unset'}, picture ${picture}.` };
+  },
+
   // ---- files
   async listFiles(data) {
     const c = await this._card(data);
@@ -514,7 +548,10 @@ const actions = {
       const pick = typeof out === 'string' ? out : (out?.analysis ?? out?.content ?? out?.text ?? out?.description ?? out?.caption);
       const text = (typeof pick === 'string' ? pick : (pick == null ? '' : JSON.stringify(pick))).trim();
       if (!text) return { success: false, card: c.id, name, error: `The vision model returned nothing for ${name}.` };
-      return { success: true, card: c.id, name, kind: 'image', read: 'vision', chars: text.length, text: this._trim(text) };
+      // The model read "WESN" off a photo of WONSIM clippers, and the reply told the operator they
+      // had misremembered their own brand (card 21, 2026-10-07). A vision read is not a fact.
+      return { success: true, card: c.id, name, kind: 'image', read: 'vision', chars: text.length, text: this._trim(text),
+        note: 'Text read from a photo can be wrong, especially small or stylised lettering. If it disagrees with what the person said, report both; do not tell them they are mistaken on the strength of this read.' };
     }
     if (type.startsWith('audio/') || type.startsWith('video/') || /\.(mp3|m4a|wav|ogg|mp4|mov|webm)$/i.test(name)) {
       return { success: false, card: c.id, name, error: `${name} is audio or video. Use transcribeFile({ card: ${c.id}, index: ${i} }) to get its words.` };
@@ -527,8 +564,18 @@ const actions = {
     const c = await this._card(ref);
     if (kind) return this.readFile({ card: c.id, index: index ?? 0, kind });
     if (c.kind === 'image' && index == null) return this.readFile({ card: c.id, index: 0, kind: 'image' });
-    if (index != null) return this.readFile({ card: c.id, index, kind: 'file' });
     const att = await this._call('get', `/api/cards/${c.id}/attachments`).catch(() => ({}));
+    if (index != null) {
+      // An index with no kind: an attachment if the card has one there, else a picture posted in
+      // the channel or on an image card. Card 21, 2026-10-07: { card: 21, index: 0 } went to
+      // attachments/0, a 404, while the operator's photo was inline picture 0.
+      const i = Number(index);
+      if ((att.attachments || []).some((a, n) => (a.index ?? n) === i)) return this.readFile({ card: c.id, index: i, kind: 'file' });
+      const img = await this._call('get', `/api/cards/${c.id}/images`).catch(() => ({}));
+      if ((img.inline_images || []).length > i) return this.readFile({ card: c.id, index: i, kind: 'inline' });
+      if ((img.images || []).length > i) return this.readFile({ card: c.id, index: i, kind: 'image' });
+      return this.readFile({ card: c.id, index: i, kind: 'file' });
+    }
     const pic = (att.attachments || []).find(a => /\.(png|jpe?g|gif|webp|bmp)$/i.test(String(a.name || '')) || String(a.type || a.content_type || '').startsWith('image/'));
     if (pic) return this.readFile({ card: c.id, index: pic.index ?? 0, kind: 'file' });
     const img = await this._call('get', `/api/cards/${c.id}/images`).catch(() => ({}));
