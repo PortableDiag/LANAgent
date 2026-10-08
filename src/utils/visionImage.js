@@ -36,7 +36,10 @@ export async function fitForVision(imageBuffer, mimeType = null, { maxSide = VIS
     const target = visionTargetSize(w, h, maxSide);
     if (!target) return { buffer: imageBuffer, mimeType, resized: false };
     const keepPng = meta.format === 'png' || meta.format === 'gif' || meta.format === 'webp';
-    let img = sharp(imageBuffer).rotate().resize(target.width, target.height, { fit: 'fill' });
+    // kernel 'linear': sharp's default lanczos3 sharpens, and the sharpened lettering misread.
+    // Same photo, 10 reads each on gpt-5.6-luna: lanczos3 3/10, mitchell 4/10, cubic 6/10,
+    // linear 9/10 (twice), PIL's thumbnail 10/10 (2026-10-07).
+    let img = sharp(imageBuffer).rotate().resize(target.width, target.height, { fit: 'fill', kernel: 'linear' });
     img = keepPng ? img.png() : img.jpeg({ quality: 90 });
     const buffer = await img.toBuffer();
     logger.info(`[vision] picture ${w}×${h} (${imageBuffer.length} B) shrunk to ${target.width}×${target.height} (${buffer.length} B) before reading`);

@@ -2,6 +2,12 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.498] - 2026-10-07
+
+### Fixed
+- **Shrunk photos still misread lettering.** 2.25.496 shrank pictures with sharp's default resampling, which sharpens; the sharpened lettering misread. Ten reads each of the same photo: default 3/10, mitchell 4/10, cubic 6/10, linear 9/10 (twice). Pictures are now shrunk with linear resampling. A comparison across eight zero-retention vision models found the current one reads the photo and a stylised label correctly every time once the picture is resized well, so the model stays.
+- **A skill meant for one thing was followed for unrelated requests.** Skills are matched by meaning, which cannot honour "only for card 209": "did you determine a plan?" matched a skill for one specific test. A skill can now list `match_requires` (comma-separated terms) in its frontmatter; it is considered only when the request contains one of them. Id-like terms match whole words, so `209` does not match `2090`.
+
 ## [2.25.496] - 2026-10-07
 
 ### Fixed

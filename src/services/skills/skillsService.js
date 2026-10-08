@@ -47,6 +47,14 @@ const MAX_BODY = 20000;
 const RESCAN_MS = 60 * 1000;
 
 /** Parse SKILL.md frontmatter: `key: value`, quoted values, and `>` / `|` block values. */
+/** True when a skill has no `match_requires`, or the request contains one of its terms. */
+export function requiredTermPresent(requires, query) {
+  const terms = String(requires || '').split(',').map(t => t.trim().toLowerCase()).filter(Boolean);
+  if (!terms.length) return true;
+  const q = String(query || '').toLowerCase();
+  return terms.some(t => (/^[\w-]+$/.test(t) ? new RegExp(`(^|[^\\w-])${t.replace(/[-]/g, '\\-')}($|[^\\w-])`).test(q) : q.includes(t)));
+}
+
 export function parseSkill(text) {
   const match = String(text).match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/);
   if (!match) return null;
@@ -214,7 +222,12 @@ export class SkillsService {
   async match(query, { limit = 2, minSimilarity = Number(process.env.SKILLS_MIN_SIMILARITY) || 0.5, minLift = Number(process.env.SKILLS_MIN_LIFT) || 0.05, withScores = false, skills: pool = null } = {}) {
     await this.scan();
     // Pending skills (taught by another agent, not yet approved) are never used.
-    const skills = (pool || [...this.skills.values()]).filter(s => (s.meta?.status || 'active') !== 'pending');
+    // A skill scoped to one thing names it in `match_requires` (comma-separated terms) and is
+    // eligible only when the request contains one. Embeddings cannot honour "only for card 209":
+    // "did you determine a plan?" matched run-standard-agent-test at 0.79 (card 21 #3266).
+    const skills = (pool || [...this.skills.values()])
+      .filter(s => (s.meta?.status || 'active') !== 'pending')
+      .filter(s => requiredTermPresent(s.meta?.match_requires, query));
     if (!skills.length || !query) return [];
     try {
       const q = await this.embed(query);
