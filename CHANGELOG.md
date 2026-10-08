@@ -2,6 +2,14 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.499] - 2026-10-07
+
+### Added
+- **Assigning a Trellis task to the agent makes it act.** When the operator sets `assignee:: <agent name>` on a card or a checklist line (trellis-web), the agent treats it as a request, the way an @mention is: it does the task, marks it complete, and appends what it did to the card. Only the operator's own write counts (the same check as channel messages); anyone else's assignment is ignored, and one write runs once even though the server reports it twice (line and card).
+
+### Fixed
+- **A VPN exit switch took the whole host offline, and switches piled up.** Each switch drops all outbound traffic for several seconds under Network Lock, and two tiers of one blocked scrape each switched: four switches in 90 seconds. Switches are now shared and spaced out: a scrape blocked while a switch is under way joins it, one blocked on an exit that has since been replaced retries on the new one, and none switches again within `SCRAPE_VPN_ROTATION_MIN_GAP_MS` (default 60 s). Throttled rotations are counted (`rotationThrottled` in the block stats).
+
 ## [2.25.498] - 2026-10-07
 
 ### Fixed

@@ -29,7 +29,7 @@ const cryptoExitRecordSchema = new mongoose.Schema({
         type: String,
         required: true,
         index: true,
-        enum: ['trailing_stop', 'downtrend_exit', 'stop_loss', 'tranche_scalp',
+        enum: ['trailing_stop', 'trend_gate_exit', 'downtrend_exit', 'stop_loss', 'tranche_scalp',
                'scale_out', 'grid_sell', 'emergency', 'dump', 'other']
     },
     reason: { type: String },

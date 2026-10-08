@@ -338,6 +338,34 @@ const VPN_ROTATION_POOL = (process.env.SCRAPE_VPN_POOL
 
 const MAX_VPN_ROTATIONS = 2;
 
+// One exit switch at a time, at most one per SCRAPE_VPN_ROTATION_MIN_GAP_MS (default 60 s). A switch
+// drops ALL of the host's egress for ~6-10 s under Network Lock (Trellis, RPC, mail), and two tiers
+// of one blocked scrape each switched: four switches in 90 s on 2026-10-07 12:49-12:50. A scrape
+// blocked while a switch is under way joins it; one blocked on an exit that has since been replaced
+// retries on the new exit; one blocked on the newest exit inside the gap stops rotating.
+const VPN_ROTATION_MIN_GAP_MS = Number(process.env.SCRAPE_VPN_ROTATION_MIN_GAP_MS) || 60000;
+let vpnRotationInFlight = null;
+let lastVpnRotation = { at: 0, location: null };
+export async function rotateVpnShared(vpn, from, next, { now = Date.now } = {}) {
+  if (vpnRotationInFlight) return { ...(await vpnRotationInFlight), shared: true };
+  const since = now() - lastVpnRotation.at;
+  if (since < VPN_ROTATION_MIN_GAP_MS) {
+    if (lastVpnRotation.location && lastVpnRotation.location !== from) return { success: true, location: lastVpnRotation.location, shared: true, reused: true };
+    return { success: false, throttled: true, waitMs: VPN_ROTATION_MIN_GAP_MS - since };
+  }
+  vpnRotationInFlight = (async () => {
+    try {
+      const sw = await vpn.connect({ location: next });
+      if (sw && sw.success !== false) lastVpnRotation = { at: now(), location: sw.location || next };
+      return sw || { success: false, error: 'no result' };
+    } finally {
+      vpnRotationInFlight = null;
+    }
+  })();
+  return vpnRotationInFlight;
+}
+export function _resetVpnRotationForTests() { vpnRotationInFlight = null; lastVpnRotation = { at: 0, location: null }; }
+
 // Overall best-effort wall-clock budget for a single scrape request. The agent
 // has historically run the full fallback ladder + every VPN rotation to
 // completion (observed 350s on hard gov sites), long past the gateway's deadline
@@ -429,7 +457,7 @@ router.get('/block-stats', adminKeyAuth, async (req, res) => {
       },
       byTier: rows.reduce((acc, r) => {
         acc[r.tier] = acc[r.tier] || {};
-        for (const k of ['blocksDetected', 'rotationRefusedAutoConnect', 'rotationAttempted', 'rotationRecovered']) {
+        for (const k of ['blocksDetected', 'rotationRefusedAutoConnect', 'rotationAttempted', 'rotationRecovered', 'rotationThrottled']) {
           acc[r.tier][k] = (acc[r.tier][k] || 0) + (r[k] || 0);
         }
         return acc;
@@ -440,7 +468,8 @@ router.get('/block-stats', adminKeyAuth, async (req, res) => {
         blocksDetected: r.blocksDetected,
         rotationRefusedAutoConnect: r.rotationRefusedAutoConnect,
         rotationAttempted: r.rotationAttempted,
-        rotationRecovered: r.rotationRecovered
+        rotationRecovered: r.rotationRecovered,
+        rotationThrottled: r.rotationThrottled || 0
       }))
     });
   } catch (error) {
@@ -1369,7 +1398,13 @@ async function executeScrapeWithVpnRotation(req, params, tier) {
 
     logger.info(`[ExternalScrape] Block detected on tier=${tier} url=${params.url} — rotating VPN ${currentLocation || '?'} → ${next} (attempt ${i + 1}/${MAX_VPN_ROTATIONS})`);
     try {
-      const sw = await vpn.connect({ location: next });
+      const sw = await rotateVpnShared(vpn, currentLocation, next);
+      if (sw?.throttled) {
+        logger.info(`[ExternalScrape] Still blocked on ${currentLocation || '?'} for ${params.url} (tier=${tier}), and the exit changed ${Math.round((VPN_ROTATION_MIN_GAP_MS - sw.waitMs) / 1000)}s ago — not switching again; returning the best result`);
+        recordBlockEvent('rotationThrottled', tier);
+        break;
+      }
+      if (sw?.shared) logger.info(`[ExternalScrape] ${sw.reused ? 'Exit already changed' : 'Joined the exit switch under way'} → ${sw.location || '?'}; re-scraping ${params.url} there instead of switching again`);
       // Exit-switching is impossible while the box is auto-connect pinned (the
       // common case on the production box). Don't burn the remaining rotations
       // re-scraping the same exit — stop and return the block honestly.
@@ -1395,7 +1430,7 @@ async function executeScrapeWithVpnRotation(req, params, tier) {
       // connectivity; a short settle here covers DNS re-establishing behind it.
       // (The old 2500ms predated that measurement and could re-scrape while the
       // box still had no route.)
-      await new Promise(r => setTimeout(r, 4000));
+      if (!sw.reused) await new Promise(r => setTimeout(r, 4000));
       currentLocation = sw.location || next;
       recordBlockEvent('rotationAttempted', tier);
     } catch (e) {

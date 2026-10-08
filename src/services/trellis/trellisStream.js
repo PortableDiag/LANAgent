@@ -16,6 +16,9 @@ import axios from 'axios';
 import { logger } from '../../utils/logger.js';
 
 export const STREAM_TYPES = ['message', 'mention', 'signoff_requested', 'hello', 'reset', 'replaced', 'auth', 'access'];
+// trellis-web only (v0.104.5, relay 2754 #437): `assignee::` set on a card or checklist line. Not
+// asked of the desktop, whose stream may not know them.
+export const WEB_STREAM_TYPES = ['property', 'task'];
 const ACK_EVERY_MS = 30000;
 const IDLE_LIMIT_MS = 60000;      // keep-alives come every 15 s; a minute of nothing is a dead stream
 const FIRST_BYTE_MS = 20000;      // `hello` comes at once; nothing at all means something buffers the stream
@@ -76,7 +79,7 @@ export class TrellisStream {
     let res;
     try {
       res = await axios.get(`${this.plugin._base()}/api/agent/stream`, {
-        params: { types: STREAM_TYPES.join(',') },
+        params: { types: (this.plugin.resolvedMode === 'desktop' ? STREAM_TYPES : [...STREAM_TYPES, ...WEB_STREAM_TYPES]).join(',') },
         responseType: 'stream',
         signal: controller.signal,
         validateStatus: () => true,

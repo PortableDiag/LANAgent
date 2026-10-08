@@ -401,6 +401,7 @@ export class TrellisChannelListener {
     const inDoc = (fn) => (doc ? this.plugin._runInDocument(doc, fn) : fn());
     if (e.type === 'signoff_requested') return this._noteOtherInboxRows([{ reason: 'signoff', ...e.data, card: e.card }], doc);
     if (e.type === 'mention') return inDoc(() => this._onMention(e, doc));
+    if (e.type === 'task' || e.type === 'property') return inDoc(() => this._onAssignment(e, doc));
     if (e.type !== 'message') return;
     const m = e.data || {};
     if (String(m.from || '').toLowerCase() === this.name.toLowerCase()) return;
@@ -464,6 +465,61 @@ export class TrellisChannelListener {
       logger.info(`[trellis-listen] answered a mention on card ${e.card} from ${by} (operator — full)`);
     } catch (err) {
       logger.warn(`[trellis-listen] could not answer the mention on card ${e.card} there: ${err.message}`);
+    }
+  }
+
+  /**
+   * `assignee:: <this agent>` written by the operator on a card or a checklist line is a request,
+   * the way an @mention is (Trellis 3678, operator 2026-10-07). trellis-web streams a `task` event
+   * per changed field of a checklist line and a card-level `property` event for the same write
+   * (relay 2754 #437); a line's `task` event is the one acted on, so one write runs once.
+   * Anyone else's assignment is ignored. The result is appended to the card.
+   */
+  async _onAssignment(e, doc) {
+    const d = e.data || {};
+    if (String(d.key || '').toLowerCase() !== 'assignee') return;
+    const me = this.name.toLowerCase();
+    const value = String(d.value ?? '').replace(/^@/, '').trim().toLowerCase();
+    if (value !== me || String(d.old ?? '').replace(/^@/, '').trim().toLowerCase() === me) return;
+    const at = Date.parse(d.at || e.at || '');
+    if (Number.isFinite(at) && at < (this.startedAt || 0)) return;   // never act on history
+    const item = d.item ?? null;
+    const key = `${e.card}:${item ?? 'card'}`;
+    if (e.type === 'property') {
+      // The same write may also raise a line's `task` event: give it a moment and stand down if so.
+      await sleep(3000);
+      if ([...(this.assignedRecently?.keys() || [])].some(k => k.startsWith(`${e.card}:`) && Date.now() - this.assignedRecently.get(k) < 60000)) return;
+    }
+    this.assignedRecently ||= new Map();
+    if (Date.now() - (this.assignedRecently.get(key) || 0) < 60000) return;
+    this.assignedRecently.set(key, Date.now());
+    const by = String(d.by || d.from || '');
+    const writer = { from: by, kind: d.kind, via: d.via, from_key_owner: d.from_key_owner, agent_verified: d.agent_verified };
+    if (!(await this._isOperator(writer))) {
+      logger.info(`[trellis-listen] assignment on card ${e.card} by ${by || 'someone'} — not the operator's own write, not acted on`);
+      return;
+    }
+    let cardText = '';
+    let title = '';
+    try {
+      const c = (await this.plugin._call('get', `/api/cards/${e.card}`)).card || {};
+      title = c.title || '';
+      cardText = `Card ${e.card} "${title}" (${c.kind || 'text'}):\n${String(c.body || '').slice(0, 2500)}` +
+        ((c.items || []).length ? `\n${c.items.map(i => `${i.done ? '[x]' : '[ ]'} ${i.text}`).join('\n').slice(0, 1500)}` : '');
+    } catch { /* the task text alone */ }
+    const task = item != null ? String(d.text || `checklist line ${item}`) : (title || `card ${e.card}`);
+    const request = `The operator assigned you this task in Trellis (card ${e.card}${item != null ? `, line ${item}` : ''}): ${task}\n` +
+      `Do it. When it is done, mark it complete (trellis-notes completeTask on card ${e.card}${item != null ? ` with that line` : ''}).`;
+    logger.info(`[trellis-listen] assigned on card ${e.card}${item != null ? ` line ${item}` : ''} by ${by} (operator): ${task.slice(0, 120)}`);
+    const msg = { seq: 0, from: by, kind: d.kind, to: [this.name], text: request };
+    const reply = await this._operatorReply(msg, cardText ? [{ from: 'card', text: cardText }] : [], doc, e.card);
+    const failed = msg._outcome?.ok === false;
+    const text = String(reply || (failed ? `I could not do that: ${msg._outcome?.note || 'it did not finish'}` : '')).trim();
+    if (!text) return;
+    try {
+      await this.plugin.appendNote({ card: e.card, text: `↳ ${this.name} (assigned): ${quietBroadcasts(text).slice(0, 1500)}` });
+    } catch (err) {
+      logger.warn(`[trellis-listen] could not report the assigned task on card ${e.card}: ${err.message}`);
     }
   }
 
