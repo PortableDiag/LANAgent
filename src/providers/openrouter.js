@@ -15,6 +15,30 @@ const MODELS_URL = `${BASE_URL}/models`;
 // pricing lookups between those runs.
 const CATALOG_TTL_MS = 6 * 60 * 60 * 1000;
 
+// A VPN exit switch cuts all of the host's egress for 13-33 s, and the SDK's own two retries are
+// spent in ~2 s. With the provider lock on there is no fallback, so a web search inside a switch
+// failed outright (2026-10-09, six times). A connection error means nothing reached OpenRouter and
+// nothing was billed, so the call is retried until this much time has passed.
+const CONNECTION_WAIT_MS = Number(process.env.OPENROUTER_CONNECTION_WAIT_MS) || 40000;
+
+// Not APIConnectionTimeoutError: a request that timed out may have reached OpenRouter and been billed.
+export function isConnectionError(error) {
+  return error?.constructor?.name === "APIConnectionError" || error?.message === "Connection error.";
+}
+
+export async function withConnectionRetry(call, { waitMs = CONNECTION_WAIT_MS, sleep = (ms) => new Promise(r => setTimeout(r, ms)), signal } = {}) {
+  const deadline = Date.now() + waitMs;
+  for (let delay = 3000; ; delay = Math.min(delay * 2, 10000)) {
+    try {
+      return await call();
+    } catch (error) {
+      if (!isConnectionError(error) || signal?.aborted || Date.now() + delay > deadline) throw error;
+      logger.warn(`OpenRouter: connection failed (${error.cause?.code || error.message}); retrying in ${delay / 1000}s`);
+      await sleep(delay);
+    }
+  }
+}
+
 export class OpenRouterProvider extends BaseProvider {
   // Upstreams do not cache short prompts (OpenAI's floor is ~1024 tokens). Requests below
   // this are excluded from cache statistics entirely rather than counted as misses.
@@ -446,10 +470,10 @@ export class OpenRouterProvider extends BaseProvider {
 
     try {
       let { model, params } = this._buildParams(prompt, options);
-      const create = (p) => this.client.chat.completions.create(
+      const create = (p) => withConnectionRetry(() => this.client.chat.completions.create(
         { ...p, stream: false },
         { timeout: this._generationTimeoutMs(p.max_tokens) }
-      );
+      ));
       let completion;
       try {
         completion = await create(params);
@@ -515,8 +539,8 @@ export class OpenRouterProvider extends BaseProvider {
 
     try {
       let { model, params } = this._buildParams(prompt, options);
-      const open = (p) => this.client.chat.completions.create({ ...p, stream: true },
-        options.signal ? { signal: options.signal } : undefined);
+      const open = (p) => withConnectionRetry(() => this.client.chat.completions.create({ ...p, stream: true },
+        options.signal ? { signal: options.signal } : undefined), { signal: options.signal });
       let stream;
       try {
         stream = await open(params);
