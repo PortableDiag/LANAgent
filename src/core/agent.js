@@ -37,6 +37,7 @@ import mqttService from '../services/mqtt/mqttService.js';
 import eventEngine from '../services/mqtt/eventEngine.js';
 import { ReActAgent, PlanExecuteAgent, ThoughtStore } from '../services/reasoning/index.js';
 import { ClarificationStore, resumePendingClarification, renderReasoningResult } from './clarifications.js';
+import { CONVERSATION_STYLE } from './conversationStyle.js';
 import { getSkillsService, learnSkillFromTask, chainToThoughts } from '../services/skills/skillsService.js';
 import { setGlobalAgent } from './agentAccessor.js';
 import { getServerHost } from '../utils/paths.js';
@@ -4917,6 +4918,7 @@ Return ONLY a valid JSON object with the extracted parameters, nothing else.`;
       systemPrompt += `- Appearance: ${this.agentModel.avatarDescription}\n`;
     }
     systemPrompt += `\n`;
+    systemPrompt += `${CONVERSATION_STYLE}\n\n`;
 
     // The operator profile: a frozen snapshot (refreshed at most daily), so this block does not
     // change between requests and the prompt prefix stays cacheable.
@@ -7454,6 +7456,12 @@ Respond naturally as if you're telling someone about your recent improvements. D
     if (typeof result === 'string' && result.length < 100) {
       return false;
     }
+
+    // A web search answered by a model is already a written answer. Interpreting it appended the
+    // same answer a second time under "What this means", opening with a greeting (2026-10-10).
+    if (typeof result?.result === 'string' && /_web_search$/.test(String(result?.source || ''))) {
+      return false;
+    }
     
     // Always interpret technical outputs
     const technicalPlugins = ['system', 'docker', 'git', 'monitoring', 'network', 'firewall'];
@@ -7513,7 +7521,7 @@ ${trim(rawOutput, 'Raw output')}
 
 Full result data: ${trim(result, 'Result data')}`;
 
-      const interpretPrompt = `As ALICE, provide a friendly, conversational interpretation of this technical output.
+      const interpretPrompt = `As ${this.config.name}, explain this technical output plainly and directly.
 
 ${commandContext}
 
@@ -7525,7 +7533,8 @@ Guidelines:
 - Be helpful and suggest next steps if appropriate
 - Keep it concise but informative
 - Don't repeat the raw output, add value with interpretation
-- Speak in first person as ALICE`;
+- No greeting, no self-introduction, no filler: start with the point
+- Speak in first person`;
 
       const interpretation = await this.processWithAI(interpretPrompt);
       return interpretation;

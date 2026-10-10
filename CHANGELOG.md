@@ -2,6 +2,17 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.504] - 2026-10-10
+
+### Fixed
+- **Web-search answers were printed twice.** A search answered by a model is already a written answer, but it was also sent through output interpretation, which appended the same answer again under "What this means", opening with a greeting. Those answers are no longer interpreted. The interpretation prompt also no longer asks for a "friendly" tone, forbids greetings and self-introductions, and uses the instance's own name instead of a hardcoded one.
+
+## [2.25.503] - 2026-10-10
+
+### Fixed
+- **The agent lectured instead of talking.** Neither the chat system prompt nor the reasoning prompt said anything about how to talk, so the model fell back to its default assistant register: hedging, disclaimers and moral labels on ordinary questions. Other agents on the same model did not do it. Both prompts now carry one shared style block (`src/core/conversationStyle.js`): talk like a peer, discuss any topic on the merits, no moralizing, disclaimers or unrequested labels.
+- **`replyChannel` with a `replyTo` that is not in the channel failed the whole post.** The model picked a seq past the channel's end; the server refused it, nothing was written, and the run spent three steps recovering. It now posts under the message the run is answering, or unthreaded, and says so in the result.
+
 ## [2.25.502] - 2026-10-09
 
 ### Fixed

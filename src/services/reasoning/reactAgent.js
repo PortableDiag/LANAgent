@@ -5,6 +5,7 @@ import { listTools, selectRelevantTools, formatToolsForPrompt, executeTool, find
 import { getSkillsService, learnSkillFromTask } from '../skills/skillsService.js';
 import { promisesFollowUp, scheduleFollowUp } from '../followUps.js';
 import { TodoList, TODO_TOOL, TODO_TOOL_PROMPT, runTodoTool } from './todoList.js';
+import { CONVERSATION_STYLE } from '../../core/conversationStyle.js';
 
 // Steps spent only on the to-do list do not use up maxIterations, up to this many per run
 export const FREE_TODO_STEPS = 3;
@@ -793,6 +794,8 @@ A tool result exists only as an Observation after you call the tool. Never say a
 Know your tools before you rule one out: never say you lack a capability (web, HTTP, POST, browser, upload, shell) until a ${SEARCH_TOOL} for it came back empty. Any HTTP method, header or body goes through the http tool (http.request). A credential an API returns is saved for you and shown as {{secret:<host>.<field>}}: put that placeholder where the key goes and never write a key, token or password into a reply or a card.
 If you will need to check again later (a reaction, a job, a status), call followup.schedule with the task; never promise to "poll again" or "report back" without it.
 Your final answer reports what ran and what it returned (status codes, ids, links), not what you intend to do. Report only results from YOUR steps in this run: what other agents posted in a channel is theirs; never present it as yours, and when you have not done a part, say so.
+When the task is conversation rather than an action, the final answer is your reply, written this way:
+${CONVERSATION_STYLE}
 
 Respond in this JSON format:
 {

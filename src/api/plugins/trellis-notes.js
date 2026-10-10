@@ -1528,11 +1528,26 @@ export default class TrellisNotesPlugin extends BasePlugin {
     }
     const ask = expect ? normalizeExpect(expect) : null;
     const body = { text: String(text || '').trim(), ...(attached.length ? { files: attached } : {}), ...(thread ? { reply_to: Number(thread) } : {}), ...(ask ? { expect: ask } : {}) };
-    const data = await this._call('post', `/api/cards/${Number(card)}/say`, { body, timeoutMs: attached.length ? 120000 : null });
+    const timeoutMs = attached.length ? 120000 : null;
+    let data, threadDropped = null;
+    try {
+      data = await this._call('post', `/api/cards/${Number(card)}/say`, { body, timeoutMs });
+    } catch (err) {
+      // A model-chosen seq that is not in the channel (card 21, 2026-10-10: replyTo 4070 with the
+      // channel at 4067) is a 400 with nothing written, and the run spent three steps re-reading
+      // the channel to recover. Post it anyway: under the message this run answers if there is
+      // one, otherwise unthreaded, and say so.
+      if (!(err.status === 400 && body.reply_to && /reply_to/i.test(err.message))) throw err;
+      threadDropped = body.reply_to;
+      const fallback = Number(asked?.seq) > 0 && Number(asked?.card) === Number(card) && Number(asked.seq) !== threadDropped ? Number(asked.seq) : null;
+      if (fallback) body.reply_to = fallback; else delete body.reply_to;
+      data = await this._call('post', `/api/cards/${Number(card)}/say`, { body, timeoutMs });
+    }
     const doc = this.resolvedMode === 'web' ? this._currentDoc() : null;
     return {
       success: true, card: Number(card), document: doc?.name ?? null, seq: data?.seq ?? null, as: this._agentName(),
       ...(data?.reply_to !== undefined ? { replyTo: data.reply_to } : {}),
+      ...(threadDropped ? { note: `replyTo ${threadDropped} is not a message in this channel; posted ${body.reply_to ? `under #${body.reply_to}` : 'unthreaded'} instead.` } : {}),
       // The server says when this reply misses the shape its parent asked for (never a refusal).
       ...(data?.expect_missed ? { expectMissed: data.expect_missed } : {}),
       ...(Array.isArray(data?.files) ? { files: data.files.map(f => ({ name: f.name, kind: f.kind ?? null })) } : {})
