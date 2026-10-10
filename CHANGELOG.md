@@ -2,6 +2,11 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.502] - 2026-10-09
+
+### Fixed
+- **Trading-indicator work could reach the public auto-post.** The PR squash subject "enhance_plugin_features: TechnicalIndicators.js" passed the commit filter. Indicator terms (technical indicator, moving average, crossover, RSI, MACD, Bollinger, EMA/SMA) are now sensitive. Verified by running the filter over the day's 37 commit subjects: that subject no longer passes, and ordinary subjects still do.
+
 ## [2.25.501] - 2026-10-09
 
 Self-improvement PR sweep: 35 reviewed, 30 merged after repair, 3 closed, 2 held for review.
