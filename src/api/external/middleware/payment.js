@@ -92,11 +92,11 @@ export function paymentMiddleware(serviceId) {
 
       // Verify on-chain
       const contractService = (await import('../../../services/crypto/contractServiceWrapper.js')).default;
-      const provider = await contractService.getProvider('bsc');
+      const bsc = (fn) => contractService.callWithFallback('bsc', fn);
       const { ethers } = await import('ethers');
 
       const tx = await retryOperation(
-        () => provider.getTransaction(txHash),
+        () => bsc(p => p.getTransaction(txHash)),
         { retries: 5, minTimeout: 1000, maxTimeout: 5000, context: `getTransaction(${txHash})` }
       );
 
@@ -108,7 +108,7 @@ export function paymentMiddleware(serviceId) {
       }
 
       const receipt = await retryOperation(
-        () => provider.getTransactionReceipt(txHash),
+        () => bsc(p => p.getTransactionReceipt(txHash)),
         { retries: 5, minTimeout: 1000, maxTimeout: 5000, context: `getReceipt(${txHash})` }
       );
 
@@ -138,7 +138,7 @@ export function paymentMiddleware(serviceId) {
       }
 
       // Check confirmations
-      const currentBlock = await provider.getBlockNumber();
+      const currentBlock = await bsc(p => p.getBlockNumber());
       const confirmations = currentBlock - receipt.blockNumber;
       if (confirmations < 3) {
         return res.status(400).json({

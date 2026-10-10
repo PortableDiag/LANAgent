@@ -286,11 +286,11 @@ class SkynetServiceExecutor {
 
       // Get on-chain data
       const contractService = (await import('../crypto/contractServiceWrapper.js')).default;
-      const provider = await contractService.getProvider('bsc');
+      const bsc = (fn) => contractService.callWithFallback('bsc', fn);
       const { ethers } = await import('ethers');
 
       const receipt = await retryOperation(
-        () => provider.getTransactionReceipt(txHash),
+        () => bsc(p => p.getTransactionReceipt(txHash)),
         { retries: 2, context: `getReceipt(${txHash})` }
       );
 
@@ -299,7 +299,7 @@ class SkynetServiceExecutor {
       }
 
       // Check confirmations (minimum 3)
-      const currentBlock = await provider.getBlockNumber();
+      const currentBlock = await bsc(p => p.getBlockNumber());
       const confirmations = currentBlock - receipt.blockNumber;
       if (confirmations < 3) {
         return { success: false, error: `Insufficient confirmations: ${confirmations}/3` };

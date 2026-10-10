@@ -267,6 +267,19 @@ class ContractService {
   }
 
   /**
+   * Run fn(provider) on `network`, trying every configured RPC before giving up.
+   * Use this instead of holding one getProvider() result: that provider stays on
+   * whatever endpoint the last rotation left, and bsc.publicnode.com (the last BSC
+   * entry) answers getTransactionReceipt with 403 "Archive requests require a
+   * personal token" — every credit purchase failed on it 2026-10-10.
+   */
+  async callWithFallback(network, fn) {
+    const rpc = NETWORKS[network]?.rpc;
+    const total = Array.isArray(rpc) ? rpc.length : 1;
+    return this.withRpcFallback(network, async () => fn(await this.getProvider(network)), total);
+  }
+
+  /**
    * Execute an RPC call with automatic fallback on rate limiting or errors
    */
   async withRpcFallback(network, operation, maxRetries = 3) {

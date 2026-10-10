@@ -2,6 +2,11 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.506] - 2026-10-10
+
+### Fixed
+- **Credit purchases failed with HTTP 500 while the BSC RPC sat on publicnode.** `bsc.publicnode.com` now answers `getTransactionReceipt` with 403 "Archive requests require a personal token". The credit-purchase route, the payment middleware, the P2P service executor and payment reconciliation each held one provider, so once rotation had left BSC on publicnode every receipt lookup failed and the gateway's credit top-ups to this agent were refused. These lookups now go through `callWithFallback`, which tries every configured BSC RPC before failing.
+
 ## [2.25.505] - 2026-10-10
 
 ### Fixed

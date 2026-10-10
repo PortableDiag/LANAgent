@@ -110,11 +110,12 @@ skynetPaymentSchema.statics.reconcilePayment = async function(txHash) {
   }
 
   const contractService = (await import('../services/crypto/contractServiceWrapper.js')).default;
-  const provider = await contractService.getProvider(localRecord.chain || 'bsc');
+  const chain = localRecord.chain || 'bsc';
+  const rpc = (fn) => contractService.callWithFallback(chain, fn);
   const { ethers } = await import('ethers');
 
   const receipt = await retryOperation(
-    () => provider.getTransactionReceipt(txHash),
+    () => rpc(p => p.getTransactionReceipt(txHash)),
     { retries: 2, context: `reconcile.getReceipt(${txHash})` }
   );
   if (!receipt) {
@@ -122,7 +123,7 @@ skynetPaymentSchema.statics.reconcilePayment = async function(txHash) {
   }
 
   const currentBlock = await retryOperation(
-    () => provider.getBlockNumber(),
+    () => rpc(p => p.getBlockNumber()),
     { retries: 2, context: 'reconcile.getBlockNumber' }
   );
   const confirmations = Math.max(0, currentBlock - receipt.blockNumber);

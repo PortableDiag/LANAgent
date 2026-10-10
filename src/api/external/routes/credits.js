@@ -340,11 +340,11 @@ router.post('/purchase', creditAuth(true), async (req, res) => {
 
     // Verify on-chain
     const contractService = (await import('../../../services/crypto/contractServiceWrapper.js')).default;
-    const provider = await contractService.getProvider('bsc');
+    const bsc = (fn) => contractService.callWithFallback('bsc', fn);
     const { ethers } = await import('ethers');
 
     const tx = await retryOperation(
-      () => provider.getTransaction(txHash),
+      () => bsc(p => p.getTransaction(txHash)),
       { retries: 2, context: `getTransaction(${txHash})` }
     );
 
@@ -353,7 +353,7 @@ router.post('/purchase', creditAuth(true), async (req, res) => {
     }
 
     const receipt = await retryOperation(
-      () => provider.getTransactionReceipt(txHash),
+      () => bsc(p => p.getTransactionReceipt(txHash)),
       { retries: 2, context: `getReceipt(${txHash})` }
     );
 
@@ -362,7 +362,7 @@ router.post('/purchase', creditAuth(true), async (req, res) => {
     }
 
     // Check confirmations
-    const currentBlock = await provider.getBlockNumber();
+    const currentBlock = await bsc(p => p.getBlockNumber());
     const confirmations = currentBlock - receipt.blockNumber;
     const requiredConfirmations = normalizedCurrency === 'SKYNET' ? 3 : 1;
 
