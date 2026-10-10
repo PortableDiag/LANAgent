@@ -416,5 +416,33 @@ externalServiceConfigSchema.statics.selectFallbackService = async function(curre
   }
 };
 
+/**
+ * Atomically record usage for a service, incrementing totalRequests and updating lastUsed.
+ * Uses findOneAndUpdate with $inc and $set to avoid race conditions.
+ * @param {string} serviceId - The ID of the service to record usage for
+ * @returns {object|null} The updated service document, or null if not found
+ */
+externalServiceConfigSchema.statics.recordUsage = async function(serviceId) {
+  // A string only: an object here ({ $ne: null }) would be a query operator and
+  // bump an arbitrary service's counters.
+  if (typeof serviceId !== 'string' || !serviceId) {
+    throw new TypeError('serviceId must be a non-empty string');
+  }
+  try {
+    const updated = await this.findOneAndUpdate(
+      { serviceId },
+      {
+        $inc: { totalRequests: 1 },
+        $set: { lastUsed: new Date() }
+      },
+      { new: true }
+    );
+    return updated;
+  } catch (error) {
+    logger.error(`Error recording usage for service ${serviceId}:`, error);
+    throw error;
+  }
+};
+
 const ExternalServiceConfig = mongoose.model('ExternalServiceConfig', externalServiceConfigSchema);
 export default ExternalServiceConfig;

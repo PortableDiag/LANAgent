@@ -205,6 +205,81 @@ developmentItemSchema.statics.addMilestone = async function(itemId, milestone) {
   return updated;
 };
 
+/**
+ * Valid lifecycle transitions for development items.
+ * Maps current status to allowed next statuses.
+ * pending → completed is the path the development plugin actually uses
+ * (completeItem never passes through in-progress), so it must stay legal;
+ * in-progress → pending lets a started item be put back.
+ */
+developmentItemSchema.statics.transitionMap = {
+  pending: ['in-progress', 'completed'],
+  'in-progress': ['pending', 'completed'],
+  completed: ['archived'],
+  archived: []
+};
+
+/**
+ * Atomically transition a development item to a new status, enforcing the
+ * valid lifecycle (see transitionMap).
+ * Uses findOneAndUpdate with a $and condition to ensure the current status
+ * allows the transition, preventing race conditions.
+ *
+ * @param {string} itemId - The ID of the development item.
+ * @param {string} newStatus - The target status.
+ * @returns {Promise<Object>} The updated development item document.
+ * @throws {Error} If the transition is not allowed or the item is not found.
+ */
+developmentItemSchema.statics.transitionStatus = async function(itemId, newStatus) {
+  if (!itemId || !newStatus) {
+    throw new Error('itemId and newStatus are required');
+  }
+
+  const validStatuses = Object.keys(this.transitionMap);
+  if (!validStatuses.includes(newStatus)) {
+    throw new Error(`Invalid status: ${newStatus}. Must be one of ${validStatuses.join(', ')}`);
+  }
+
+  // Determine which current statuses can transition to newStatus
+  const allowedCurrentStatuses = validStatuses.filter(
+    current => this.transitionMap[current].includes(newStatus)
+  );
+
+  if (allowedCurrentStatuses.length === 0) {
+    throw new Error(`No status can transition to ${newStatus}`);
+  }
+
+  // Atomic update: only update if current status is one of the allowed ones
+  const update = { status: newStatus };
+  if (newStatus === 'completed') {
+    update.completedAt = new Date();
+  }
+
+  const updated = await retryOperation(
+    () => this.findOneAndUpdate(
+      {
+        $and: [
+          { _id: itemId },
+          { status: { $in: allowedCurrentStatuses } }
+        ]
+      },
+      { $set: update },
+      { new: true, runValidators: true }
+    ).exec(),
+    { retries: 3 }
+  );
+
+  if (!updated) {
+    throw new Error(
+      `Transition to ${newStatus} failed for item ${itemId}. ` +
+      `Current status must be one of: ${allowedCurrentStatuses.join(', ')}`
+    );
+  }
+
+  logger.info(`DevelopmentPlan: item ${itemId} transitioned to ${newStatus}`);
+  return updated;
+};
+
 const DevelopmentPlan = mongoose.model('DevelopmentPlan', developmentItemSchema);
 
 DevelopmentPlan.commands = [
@@ -212,7 +287,8 @@ DevelopmentPlan.commands = [
   { command: 'archiveOldCompletedItems', description: 'Archive completed items older than N days', usage: 'archiveOldCompletedItems(days)' },
   { command: 'archiveOldCompletedItemsBatch', description: 'Archive completed items older than N days in batches', usage: 'archiveOldCompletedItemsBatch({ days, batchSize })' },
   { command: 'updateProgress', description: 'Update progress of a development item', usage: 'updateProgress(itemId, percentage)' },
-  { command: 'addMilestone', description: 'Add a milestone to a development item', usage: 'addMilestone(itemId, { title, description?, dueDate? })' }
+  { command: 'addMilestone', description: 'Add a milestone to a development item', usage: 'addMilestone(itemId, { title, description?, dueDate? })' },
+  { command: 'transitionStatus', description: 'Atomically transition a development item to a new status', usage: 'transitionStatus(itemId, newStatus)' }
 ];
 
 DevelopmentPlan.execute = async function(command, params) {
@@ -223,6 +299,12 @@ DevelopmentPlan.execute = async function(command, params) {
       return await this.archiveOldCompletedItems(params?.days ?? 30);
     case 'archiveOldCompletedItemsBatch':
       return await this.archiveOldCompletedItemsBatch(params?.days ?? 30, params?.batchSize ?? 100);
+    case 'updateProgress':
+      return await this.updateProgress(params?.itemId, params?.percentage);
+    case 'addMilestone':
+      return await this.addMilestone(params?.itemId, params?.milestone);
+    case 'transitionStatus':
+      return await this.transitionStatus(params?.itemId, params?.newStatus);
     default:
       throw new Error(`Unknown command: ${command}`);
   }

@@ -13,6 +13,11 @@
  * Optional "preset" supplies DEFAULTS for target/quality/effort/lossless. Any
  * field sent explicitly always wins, so adding a preset can never change the
  * result for a caller that already specifies its own parameters.
+ *
+ * Optional "autoOrient" (default false, so existing output is unchanged) applies
+ * the EXIF orientation tag before encoding. Transcoded output never carries
+ * metadata (sharp drops EXIF/XMP/IPTC on encode), so without it a rotated phone
+ * photo comes back sideways. Passthrough results are the source bytes, untouched.
  */
 import { Router } from 'express';
 import multer from 'multer';
@@ -117,7 +122,8 @@ router.post('/',
       effort: has('effort') ? num(body.effort) : preset?.effort,
       maxPixels: num(body.maxPixels),
       lossless: has('lossless') ? bool(body.lossless) : (preset?.lossless ?? false),
-      passthroughBytes: !(body.passthroughBytes === false || body.passthroughBytes === 'false')
+      passthroughBytes: !(body.passthroughBytes === false || body.passthroughBytes === 'false'),
+      autoOrient: has('autoOrient') ? bool(body.autoOrient) : false
     };
 
     if (req.file?.buffer) params._buffer = req.file.buffer;

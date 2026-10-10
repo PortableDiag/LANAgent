@@ -229,6 +229,77 @@ cryptoWalletSchema.statics.healthCheck = async function() {
     }
 };
 
+/**
+ * Allowed status transitions for transactions.
+ * Maps current status to array of valid next statuses.
+ */
+cryptoWalletSchema.statics.transitionMap = {
+    pending: ['confirmed', 'failed'],
+    confirmed: [],
+    failed: []
+};
+
+/**
+ * Atomically transition a transaction's status, enforcing valid lifecycle.
+ * Uses findOneAndUpdate with a condition that checks the current status
+ * against the allowed transitions, preventing invalid state changes.
+ *
+ * @param {string} walletId - The wallet's _id.
+ * @param {string} transactionHash - The transaction hash.
+ * @param {string} newStatus - The target status ('pending', 'confirmed', 'failed').
+ * @returns {Promise<Object>} The updated transaction subdocument.
+ * @throws {Error} If the transition is invalid or the transaction/wallet is not found.
+ */
+cryptoWalletSchema.statics.transitionStatus = async function(walletId, transactionHash, newStatus) {
+    const validStatuses = Object.keys(this.transitionMap);
+    if (!validStatuses.includes(newStatus)) {
+        throw new Error(`Invalid status: ${newStatus}. Must be one of ${validStatuses.join(', ')}`);
+    }
+
+    // Determine which current statuses allow transition to newStatus
+    const allowedCurrentStatuses = Object.entries(this.transitionMap)
+        .filter(([_, targets]) => targets.includes(newStatus))
+        .map(([status]) => status);
+
+    if (allowedCurrentStatuses.length === 0) {
+        throw new Error(`No transitions allowed to status '${newStatus}'`);
+    }
+
+    // $elemMatch so hash AND status are checked on the SAME array element. Two
+    // separate 'transactions.x' conditions can each be satisfied by different
+    // elements, and the positional $ would then update whichever matched first —
+    // possibly a different transaction than the one named.
+    const filter = {
+        _id: walletId,
+        transactions: { $elemMatch: { hash: transactionHash, status: { $in: allowedCurrentStatuses } } }
+    };
+
+    const update = { $set: { 'transactions.$.status': newStatus } };
+
+    try {
+        const updatedWallet = await retryOperation(
+            async () => this.findOneAndUpdate(filter, update, { new: true }),
+            { retries: 3 }
+        );
+
+        if (!updatedWallet) {
+            throw new Error(`Transaction ${transactionHash} not found or invalid transition from current status`);
+        }
+
+        const transaction = updatedWallet.transactions.find(tx => tx.hash === transactionHash);
+        if (!transaction) {
+            // Should not happen if findOneAndUpdate succeeded, but safety
+            throw new Error(`Transaction ${transactionHash} not found after update`);
+        }
+
+        logger.info(`Transaction ${transactionHash} status transitioned to ${newStatus}`);
+        return transaction;
+    } catch (error) {
+        logger.error(`Failed to transition transaction ${transactionHash} to ${newStatus}: ${error.message}`);
+        throw error;
+    }
+};
+
 const CryptoWallet = mongoose.model('CryptoWallet', cryptoWalletSchema);
 
 export default CryptoWallet;

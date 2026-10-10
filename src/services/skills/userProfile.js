@@ -108,6 +108,42 @@ export class UserProfile {
   }
 
   /**
+   * Undo a change: restore the profile to the state it had BEFORE history
+   * entry `index` (0 = the most recent change, same order as history()).
+   * The restore is itself recorded in the history log, so it can be undone.
+   * @param {number} index - 0 = most recent entry, 1 = one before that, etc.
+   * @returns {Promise<string>} The restored profile text.
+   */
+  async restore(index = 0) {
+    return this._serial(async () => {
+      if (!Number.isInteger(index) || index < 0) {
+        throw new Error(`Invalid history index: ${index}`);
+      }
+      let raw;
+      try {
+        raw = await fs.readFile(`${this.file}.history.jsonl`, 'utf8');
+      } catch (err) {
+        throw new Error(`Profile history unavailable: ${err.code || err.message}`);
+      }
+      const entries = raw.trim().split('\n').filter(Boolean)
+        .map(l => { try { return JSON.parse(l); } catch { return null; } })
+        .filter(Boolean)
+        .reverse(); // most recent first
+      if (index >= entries.length) {
+        throw new Error(`Invalid history index: ${index}. ${entries.length ? `Available entries: 0-${entries.length - 1}` : 'History is empty'}`);
+      }
+      const entry = entries[index];
+      if (typeof entry.before !== 'string') {
+        throw new Error('Selected history entry has no "before" state');
+      }
+      await this._write(entry.before, { source: 'operator', action: 'restore' });
+      await this.refreshSnapshot();
+      logger.info(`[profile] Restored the state before history entry ${index} (${entry.at})`);
+      return entry.before.trim();
+    });
+  }
+
+  /**
    * Compact the profile with the side-model once it grows past its budget: merge duplicates,
    * drop what later lines contradict, keep it under ~1400 characters. Then refresh the snapshot.
    */

@@ -81,6 +81,13 @@ const BugReportSchema = new mongoose.Schema({
   fixPrUrl: {
     type: String
   },
+  // Written by selfModification when it fixes a bug; without these paths Mongoose dropped them.
+  fixedDate: {
+    type: Date
+  },
+  fixedBy: {
+    type: String
+  },
   processedAt: {
     type: Date
   },
@@ -405,6 +412,86 @@ BugReportSchema.statics.advancedSearch = async function(criteria = {}) {
     logger.error('Error executing advanced search:', error);
     throw error;
   }
+};
+
+/**
+ * Allowed status transitions for bug lifecycle.
+ * Any open status may go straight to 'fixed' — self-modification marks bugs
+ * fixed without passing through analyzing/in-progress. Closed statuses can be
+ * reopened to 'new' (a regression, or an ignore/duplicate call that was wrong).
+ * @type {Object<string, string[]>}
+ */
+BugReportSchema.statics.transitionMap = {
+  'new': ['analyzing', 'in-progress', 'fixed', 'ignored', 'duplicate'],
+  'analyzing': ['new', 'in-progress', 'fixed', 'ignored', 'duplicate'],
+  'in-progress': ['new', 'analyzing', 'fixed', 'ignored', 'duplicate'],
+  'fixed': ['new'],
+  'ignored': ['new'],
+  'duplicate': ['new']
+};
+
+/**
+ * Atomically transition a bug report to a new status if the transition is allowed.
+ * Uses findOneAndUpdate with a condition that the current status is in the allowed list.
+ * Logs and notifies on successful transition.
+ *
+ * @param {string} bugId - The bug report ID.
+ * @param {string} newStatus - The target status.
+ * @returns {Promise<Object|null>} The updated bug report document, or null if transition not allowed or bug not found.
+ */
+BugReportSchema.statics.transitionStatus = async function(bugId, newStatus) {
+  const allowed = this.transitionMap;
+  // Build list of statuses that can transition to newStatus
+  const allowedFromStatuses = Object.entries(allowed)
+    .filter(([_, targets]) => targets.includes(newStatus))
+    .map(([status]) => status);
+
+  if (allowedFromStatuses.length === 0) {
+    // No status can transition to newStatus, so it's invalid.
+    logger.warn(`Transition to '${newStatus}' is not allowed from any status for bug ${bugId}`);
+    return null;
+  }
+
+  const updatedDoc = await this.findOneAndUpdate(
+    {
+      bugId,
+      status: { $in: allowedFromStatuses }
+    },
+    {
+      $set: { status: newStatus },
+      $push: { history: { status: newStatus, changedAt: new Date() } }
+    },
+    { new: true, runValidators: true }
+  );
+
+  if (!updatedDoc) {
+    logger.warn(`Failed to transition bug ${bugId} to '${newStatus}': either bug not found or current status not allowed`);
+    return null;
+  }
+
+  logger.info(`Bug ${bugId} transitioned to '${newStatus}'`);
+
+  // Notify about the status change
+  try {
+    const agent = global.agent;
+    if (agent && agent.notify) {
+      const message = `🐛 **Bug Report Status Update**\n\n` +
+                     `**Bug ID:** ${updatedDoc.bugId}\n` +
+                     `**Title:** ${updatedDoc.title}\n` +
+                     `**File:** ${updatedDoc.file}:${updatedDoc.line || 'unknown'}\n` +
+                     `**Severity:** ${updatedDoc.severity}\n` +
+                     `**Status:** → ${newStatus}\n` +
+                     (updatedDoc.githubIssueUrl ? `**GitHub Issue:** ${updatedDoc.githubIssueUrl}\n` : '') +
+                     (updatedDoc.fixPrUrl ? `**Fix PR:** ${updatedDoc.fixPrUrl}\n` : '');
+
+      await retryOperation(() => agent.notify(message), { retries: 3, context: 'BugReport transition notification' });
+      logger.info(`Notified about bug report status transition: ${updatedDoc.bugId} → ${newStatus}`);
+    }
+  } catch (error) {
+    logger.error('Failed to notify about bug report status transition:', error);
+  }
+
+  return updatedDoc;
 };
 
 export const BugReport = mongoose.model('BugReport', BugReportSchema);

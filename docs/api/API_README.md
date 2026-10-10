@@ -563,6 +563,11 @@ Live in-memory snapshot of download-token usage (tokens within their TTL window)
 
 ## Recent Updates (October 2, 2026)
 
+### v2.25.501 — Self-improvement sweep: image orientation, plugin additions
+- **`POST /imageTools/transcode` — `autoOrient: true`** (default off) rotates the image upright from its EXIF orientation before transcoding; the reported width/height are the rotated ones.
+- **`HEAD` on a download link** returns its headers (410 for a revoked or spent token) without using up a download.
+- **Plugins:** `aviationstack` multiple flights per call (max 10); `xueqiu` `screener`; `whois` SSL-certificate expiry alerts; `cryptotools` JWS verification with a detached payload; `maps` `elevation` (lat/lon or place).
+
 ### v2.25.496 — Agent card picture (trellis-notes)
 `POST /api/plugin` `{"plugin": "trellis-notes", "action": "publishAgentCard", "icon": "telegram"}` publishes this agent's Trellis card (skills and version filled in). Optional `description` (kept for this run; `TRELLIS_AGENT_DESCRIPTION` keeps it), `icon: "telegram"` (the bot's profile photo) or `path` (a local picture, shrunk to 256×256). `describeImage {card, index}` with no `kind` now also finds a channel's inline picture at that index.
 

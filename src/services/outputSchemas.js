@@ -478,11 +478,115 @@ export function adjustSchema(schemaName, context) {
  */
 export function validateData(schemaName, data, context) {
   const adjustedSchema = adjustSchema(schemaName, context);
-  const validationResult = validateJsonSchema(data, adjustedSchema);
-  if (!validationResult.valid) {
-    logger.error(`Validation failed for schema ${schemaName}: ${validationResult.errors}`);
+  // validateJsonSchema returns an array of errors (empty when valid), not {valid, errors}.
+  const errors = validateJsonSchema(data, adjustedSchema);
+  if (errors.length) {
+    logger.error(`Validation failed for schema ${schemaName}: ${errors.map(e => e.message).join('; ')}`);
   }
-  return validationResult.valid;
+  return errors.length === 0;
+}
+
+/**
+ * Generate an example object that validates against a named schema.
+ * Useful for few-shot examples that show an LLM the expected structure.
+ * Honours default, enum, minimum/maximum, minLength, minItems and the
+ * email/date/date-time/uri formats, so the result passes validation.
+ * @param {string} schemaName - The name of the schema to generate example for
+ * @param {object} [overrides={}] - Optional overrides to customize specific fields (deep-merged)
+ * @returns {object} - Example object conforming to the schema
+ */
+export function generateExample(schemaName, overrides = {}) {
+  const schema = schemas[schemaName];
+  if (!schema) {
+    logger.error(`Schema ${schemaName} not found`);
+    throw new Error(`Schema ${schemaName} not found`);
+  }
+
+  const example = exampleForSchema(schema);
+  if (!overrides || typeof overrides !== 'object' || Array.isArray(overrides)) return example;
+  return deepMerge(example, overrides);
+}
+
+const FORMAT_EXAMPLES = {
+  email: 'user@example.com',
+  uri: 'https://example.com',
+  url: 'https://example.com',
+  date: '2026-01-01',
+  'date-time': '2026-01-01T00:00:00.000Z',
+  time: '00:00:00'
+};
+
+/**
+ * Produce an example value for any (sub)schema.
+ * @param {object} propSchema - JSON schema fragment
+ * @returns {*} - Example value
+ */
+function exampleForSchema(propSchema) {
+  if (!propSchema || typeof propSchema !== 'object') return null;
+  if (propSchema.default !== undefined) return JSON.parse(JSON.stringify(propSchema.default));
+  if (Array.isArray(propSchema.enum) && propSchema.enum.length > 0) return propSchema.enum[0];
+
+  const type = Array.isArray(propSchema.type) ? propSchema.type[0] : propSchema.type;
+  switch (type) {
+    case 'string': {
+      let str = FORMAT_EXAMPLES[propSchema.format] || 'example string';
+      if (Number.isInteger(propSchema.minLength) && str.length < propSchema.minLength) {
+        str = str.padEnd(propSchema.minLength, 'x');
+      }
+      if (Number.isInteger(propSchema.maxLength) && str.length > propSchema.maxLength) {
+        str = str.slice(0, propSchema.maxLength);
+      }
+      return str;
+    }
+    case 'number':
+    case 'integer': {
+      let n = typeof propSchema.minimum === 'number' ? propSchema.minimum
+        : typeof propSchema.exclusiveMinimum === 'number' ? propSchema.exclusiveMinimum + 1
+        : 0;
+      if (typeof propSchema.maximum === 'number' && n > propSchema.maximum) n = propSchema.maximum;
+      return type === 'integer' ? Math.ceil(n) : n;
+    }
+    case 'boolean':
+      return false;
+    case 'array': {
+      const count = Math.max(1, Number.isInteger(propSchema.minItems) ? propSchema.minItems : 1);
+      if (!propSchema.items) return [];
+      return Array.from({ length: count }, () => exampleForSchema(propSchema.items));
+    }
+    case 'object': {
+      const obj = {};
+      for (const [key, sub] of Object.entries(propSchema.properties || {})) {
+        obj[key] = exampleForSchema(sub);
+      }
+      return obj;
+    }
+    default:
+      // 'null' and unknown types
+      return null;
+  }
+}
+
+/**
+ * Deep merge two plain objects, with source overriding target.
+ * Prototype-polluting keys are ignored.
+ * @param {object} target - The base object
+ * @param {object} source - The overrides to apply
+ * @returns {object} - Merged object
+ */
+function deepMerge(target, source) {
+  const output = { ...target };
+  for (const key of Object.keys(source)) {
+    if (key === '__proto__' || key === 'constructor' || key === 'prototype') continue;
+    const sv = source[key];
+    const tv = target[key];
+    if (sv && typeof sv === 'object' && !Array.isArray(sv) &&
+        tv && typeof tv === 'object' && !Array.isArray(tv)) {
+      output[key] = deepMerge(tv, sv);
+    } else {
+      output[key] = sv;
+    }
+  }
+  return output;
 }
 
 export default schemas;

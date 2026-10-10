@@ -43,6 +43,16 @@ export default class WhoisPlugin extends BasePlugin {
         command: 'cancelExpirationAlert',
         description: 'Cancel any pending expiration alerts for a domain',
         usage: 'cancelExpirationAlert({ domain: "example.com" })'
+      },
+      {
+        command: 'setSslExpirationAlert',
+        description: 'Schedule a notification N days before an SSL certificate expires',
+        usage: 'setSslExpirationAlert({ domain: "example.com", daysBefore: 30 })'
+      },
+      {
+        command: 'cancelSslExpirationAlert',
+        description: 'Cancel any pending SSL certificate expiration alerts for a domain',
+        usage: 'cancelSslExpirationAlert({ domain: "example.com" })'
       }
     ];
 
@@ -66,6 +76,8 @@ export default class WhoisPlugin extends BasePlugin {
           logger.error('Failed to dispatch whois-expiration-alert:', error.message);
         }
       });
+
+      this.scheduler.agenda.define('whois-ssl-expiration-alert', (job) => this.handleSslExpirationAlert(job));
     }
   }
 
@@ -100,7 +112,12 @@ export default class WhoisPlugin extends BasePlugin {
   }
 
   async execute(params) {
-    const { action, domain, daysBefore } = params;
+    const { action, domain } = params;
+    // AI parameter extraction returns numbers as strings ("30"); the alert
+    // methods validate type 'number', so coerce a numeric string here.
+    const daysBefore = typeof params.daysBefore === 'string' && params.daysBefore.trim() !== '' && !isNaN(Number(params.daysBefore))
+      ? Number(params.daysBefore)
+      : params.daysBefore;
 
     if (!this.whoisjson) {
       await this.initialize();
@@ -122,8 +139,12 @@ export default class WhoisPlugin extends BasePlugin {
           return await this.setExpirationAlert(domain, daysBefore);
         case 'cancelExpirationAlert':
           return await this.cancelExpirationAlert(domain);
+        case 'setSslExpirationAlert':
+          return await this.setSslExpirationAlert(domain, daysBefore);
+        case 'cancelSslExpirationAlert':
+          return await this.cancelSslExpirationAlert(domain);
         default:
-          return { success: false, error: 'Unknown action. Use: lookup, dns, ssl, availability, bulkLookup, setExpirationAlert, or cancelExpirationAlert' };
+          return { success: false, error: 'Unknown action. Use: lookup, dns, ssl, availability, bulkLookup, setExpirationAlert, cancelExpirationAlert, setSslExpirationAlert, or cancelSslExpirationAlert' };
       }
     } catch (error) {
       logger.error('Whois plugin error:', error);
@@ -341,5 +362,104 @@ export default class WhoisPlugin extends BasePlugin {
     }
     const cancelled = await this.scheduler.agenda.cancel({ name: 'whois-expiration-alert', 'data.domain': domain });
     return { success: true, cancelled, message: `Cancelled ${cancelled || 0} alert(s) for ${domain}` };
+  }
+
+  /**
+   * Schedule a one-shot Agenda job that fires N days before the SSL certificate's
+   * expiration date (read from SSL info). Persisted via Agenda's MongoDB store,
+   * so alerts survive restarts.
+   */
+  async setSslExpirationAlert(domain, daysBefore, { excludeJobId } = {}) {
+    this.validateParams({ domain, daysBefore }, {
+      domain: { required: true, type: 'string' },
+      daysBefore: { required: true, type: 'number' }
+    });
+
+    if (!(daysBefore > 0)) {
+      return { success: false, error: 'daysBefore must be a positive number of days' };
+    }
+
+    if (!this.scheduler?.agenda) {
+      return { success: false, error: 'Scheduler not available — cannot persist alert' };
+    }
+
+    const sslResult = await this.getSslInfo(domain);
+    if (!sslResult.success || !sslResult.data?.validTo) {
+      return { success: false, error: `Failed to read SSL expiration date for ${domain}: ${sslResult.error || 'no validTo field in SSL data'}` };
+    }
+
+    const expirationDate = new Date(sslResult.data.validTo);
+    if (isNaN(expirationDate.getTime())) {
+      return { success: false, error: `SSL validTo field is not a valid date: ${sslResult.data.validTo}` };
+    }
+
+    const alertDate = new Date(expirationDate.getTime() - daysBefore * 24 * 60 * 60 * 1000);
+    if (alertDate <= new Date()) {
+      return { success: false, error: 'Alert date is in the past. Choose a smaller daysBefore or this certificate is already too close to expiry.' };
+    }
+
+    // Cancel any existing alert for this domain to avoid duplicates. When called
+    // from the firing job (renewal reschedule), leave that running job alone.
+    const dupQuery = { name: 'whois-ssl-expiration-alert', 'data.domain': domain };
+    if (excludeJobId) dupQuery._id = { $ne: excludeJobId };
+    await this.scheduler.agenda.cancel(dupQuery);
+
+    await this.scheduler.agenda.schedule(alertDate, 'whois-ssl-expiration-alert', {
+      domain,
+      expiresAt: expirationDate.toISOString(),
+      daysBefore
+    });
+
+    return {
+      success: true,
+      message: `SSL expiration alert scheduled for ${domain} at ${alertDate.toISOString()} (${daysBefore} days before ${expirationDate.toISOString()}).`
+    };
+  }
+
+  /**
+   * Fires for a scheduled SSL alert. Most certificates auto-renew (ACME renews
+   * ~30 days before expiry), so the stored expiry is usually stale by now:
+   * re-read the live certificate first and, if it was renewed, move the alert
+   * to the new expiry instead of warning about a certificate that no longer
+   * exists. If the re-check fails, alert anyway — a missed warning is worse.
+   */
+  async handleSslExpirationAlert(job) {
+    const { domain, expiresAt, daysBefore } = job.attrs.data || {};
+    try {
+      if (!this.whoisjson) await this.initialize();
+      this.cache.del(`ssl:${domain}`);
+      const live = await this.getSslInfo(domain);
+      const liveExpiry = live?.success ? new Date(live.data?.validTo) : null;
+      if (liveExpiry && !isNaN(liveExpiry.getTime()) && liveExpiry.getTime() > new Date(expiresAt).getTime() + 24 * 60 * 60 * 1000) {
+        const next = await this.setSslExpirationAlert(domain, daysBefore, { excludeJobId: job.attrs._id });
+        logger.info(`whois-ssl-expiration-alert: ${domain} renewed (now expires ${liveExpiry.toISOString()}); ${next.success ? 'rescheduled' : `not rescheduled: ${next.error}`}`);
+        if (next.success) return;
+      }
+    } catch (error) {
+      logger.warn(`whois-ssl-expiration-alert: live re-check for ${domain} failed, alerting on stored expiry: ${error.message}`);
+    }
+
+    const message = `🔔 SSL certificate expiration warning: ${domain} certificate expires on ${expiresAt} (~${daysBefore} days from this alert).`;
+    try {
+      if (this.agent?.notify) {
+        await this.agent.notify(message);
+      } else {
+        logger.warn(`whois-ssl-expiration-alert fired but agent.notify is not available — ${message}`);
+      }
+    } catch (error) {
+      logger.error('Failed to dispatch whois-ssl-expiration-alert:', error.message);
+    }
+  }
+
+  /**
+   * Cancel any pending SSL certificate expiration alerts for a domain.
+   */
+  async cancelSslExpirationAlert(domain) {
+    this.validateParams({ domain }, { domain: { required: true, type: 'string' } });
+    if (!this.scheduler?.agenda) {
+      return { success: false, error: 'Scheduler not available' };
+    }
+    const cancelled = await this.scheduler.agenda.cancel({ name: 'whois-ssl-expiration-alert', 'data.domain': domain });
+    return { success: true, cancelled, message: `Cancelled ${cancelled || 0} SSL alert(s) for ${domain}` };
   }
 }

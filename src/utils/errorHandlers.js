@@ -309,15 +309,73 @@ export async function safePromiseAll(promises, options = {}) {
   return fulfilled;
 }
 
+// Severity mapping for automatic error classification
+const severityMap = {};
+
+// Sentry levels and the winston method each one logs through locally. Winston
+// (npm levels) has no `warning` or `fatal` method — calling logger['warning']
+// would throw a TypeError from inside the error handler itself.
+const SENTRY_LEVELS = new Set(['fatal', 'error', 'warning', 'log', 'info', 'debug']);
+const LOGGER_METHOD = { fatal: 'error', error: 'error', warning: 'warn', log: 'info', info: 'info', debug: 'debug' };
+
+/** Normalize a level to a Sentry level ('warn' → 'warning'); null if unknown. */
+function toSentryLevel(level) {
+  if (level === 'warn') return 'warning';
+  return SENTRY_LEVELS.has(level) ? level : null;
+}
+
+/**
+ * Set or update the severity mapping for automatic error classification.
+ * The map keys are error names (e.g., 'ValidationError', 'TimeoutError') or custom
+ * severity strings, and the values are Sentry levels ('fatal', 'error', 'warning',
+ * 'log', 'info', 'debug'; 'warn' is accepted as 'warning').  When captureError is
+ * called without an explicit level, the error's name (or a custom error.severity
+ * property) is looked up in this map.
+ *
+ * @param {Object} map - Object mapping error names/severity strings to Sentry levels
+ * @param {Object} [options]
+ * @param {boolean} [options.replace=false] - Replace the whole map instead of merging
+ * @example
+ * setSeverityMap({ ValidationError: 'warning', TimeoutError: 'error' });
+ */
+export function setSeverityMap(map, { replace = false } = {}) {
+  if (typeof map !== 'object' || map === null || Array.isArray(map)) {
+    throw new TypeError('severityMap must be a non-null object');
+  }
+  const normalized = {};
+  for (const [key, value] of Object.entries(map)) {
+    const lvl = toSentryLevel(value);
+    if (!lvl) {
+      throw new TypeError(`severityMap["${key}"]: "${value}" is not a Sentry level (${[...SENTRY_LEVELS].join(', ')})`);
+    }
+    normalized[key] = lvl;
+  }
+  if (replace) {
+    for (const k of Object.keys(severityMap)) delete severityMap[k];
+  }
+  Object.assign(severityMap, normalized);
+}
+
 /**
  * Capture an error to Sentry with custom context
- * @param {Error} error - The error to capture
- * @param {Object} context - Additional context
- * @param {string} level - Error level (error, warning, info)
+ * If no explicit level is provided, the error's name (or a custom error.severity
+ * property) is checked against the severity map set via setSeverityMap().  Falls
+ * back to 'error' when no mapping is found (or an unknown level is passed).
+ *
+ * @param {Error|string} error - The error to capture
+ * @param {Object} [context={}] - Additional context
+ * @param {string} [level] - Explicit level (error, warning, info, ...); overrides automatic classification
  */
-export function captureError(error, context = {}, level = 'error') {
+export function captureError(error, context = {}, level) {
+  // Effective level: explicit argument, then map by name, then map by severity, then 'error'
+  const mapped = error && typeof error === 'object'
+    ? (Object.hasOwn(severityMap, error.name) ? severityMap[error.name]
+      : (Object.hasOwn(severityMap, error.severity) ? severityMap[error.severity] : undefined))
+    : undefined;
+  const effectiveLevel = toSentryLevel(level ?? mapped) || 'error';
+
   // Always log locally
-  logger[level](`Captured ${level}:`, error, context);
+  logger[LOGGER_METHOD[effectiveLevel]](`Captured ${effectiveLevel}:`, error, context);
   
   // Send to Sentry if enabled
   if (sentryEnabled) {
@@ -332,13 +390,13 @@ export function captureError(error, context = {}, level = 'error') {
       });
       
       // Set level
-      scope.setLevel(level);
+      scope.setLevel(effectiveLevel);
       
       // Capture
       if (error instanceof Error) {
         Sentry.captureException(error);
       } else {
-        Sentry.captureMessage(String(error), level);
+        Sentry.captureMessage(String(error), effectiveLevel);
       }
     });
   }

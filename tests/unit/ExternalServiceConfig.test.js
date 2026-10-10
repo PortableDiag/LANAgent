@@ -204,3 +204,68 @@ test('selectFallbackService ignores chain entries that do not exist', async (t) 
   assert.equal(await ExternalServiceConfig.selectFallbackService('a'), 'real',
     'a chain naming a deleted service must degrade, not throw');
 });
+
+// --- recordUsage ----------------------------------------------------------
+
+test('recordUsage increments totalRequests and sets lastUsed atomically', async () => {
+  const now = new Date();
+  const updatedDoc = {
+    serviceId: 'svc-1',
+    totalRequests: 5,
+    lastUsed: now
+  };
+  const origFindOneAndUpdate = ExternalServiceConfig.findOneAndUpdate;
+  ExternalServiceConfig.findOneAndUpdate = async (filter, update, options) => {
+    assert.deepStrictEqual(filter, { serviceId: 'svc-1' });
+    assert.deepStrictEqual(update.$inc, { totalRequests: 1 });
+    assert.ok(update.$set.lastUsed instanceof Date);
+    assert.ok(Math.abs(update.$set.lastUsed.getTime() - now.getTime()) < 5000);
+    assert.deepStrictEqual(options, { new: true });
+    return updatedDoc;
+  };
+  try {
+    const result = await ExternalServiceConfig.recordUsage('svc-1');
+    assert.equal(result, updatedDoc);
+  } finally {
+    ExternalServiceConfig.findOneAndUpdate = origFindOneAndUpdate;
+  }
+});
+
+test('recordUsage returns null if service not found', async () => {
+  const origFindOneAndUpdate = ExternalServiceConfig.findOneAndUpdate;
+  ExternalServiceConfig.findOneAndUpdate = async () => null;
+  try {
+    const result = await ExternalServiceConfig.recordUsage('nonexistent');
+    assert.equal(result, null);
+  } finally {
+    ExternalServiceConfig.findOneAndUpdate = origFindOneAndUpdate;
+  }
+});
+
+test('recordUsage throws on database error', async () => {
+  const origFindOneAndUpdate = ExternalServiceConfig.findOneAndUpdate;
+  ExternalServiceConfig.findOneAndUpdate = async () => {
+    throw new Error('DB connection lost');
+  };
+  try {
+    await assert.rejects(
+      () => ExternalServiceConfig.recordUsage('svc-1'),
+      /DB connection lost/
+    );
+  } finally {
+    ExternalServiceConfig.findOneAndUpdate = origFindOneAndUpdate;
+  }
+});
+
+test('recordUsage rejects a non-string serviceId (no query-operator objects)', async () => {
+  const orig = ExternalServiceConfig.findOneAndUpdate;
+  let called = false;
+  ExternalServiceConfig.findOneAndUpdate = async () => { called = true; return null; };
+  try {
+    await assert.rejects(() => ExternalServiceConfig.recordUsage({ $ne: null }), TypeError);
+    await assert.rejects(() => ExternalServiceConfig.recordUsage(''), TypeError);
+    assert.equal(called, false);
+  } finally {
+    ExternalServiceConfig.findOneAndUpdate = orig;
+  }
+});

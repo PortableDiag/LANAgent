@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import path from 'path';
 import fs from 'fs';
-import { verifyDownloadToken, consumeDownload } from '../services/downloadTokenService.js';
+import { verifyDownloadToken, consumeDownload, inspectDownloadToken } from '../services/downloadTokenService.js';
 import { logger } from '../../../utils/logger.js';
 
 const router = Router();
@@ -126,6 +126,57 @@ router.get('/:token/metadata', (req, res) => {
       contentType: contentType
     }
   });
+});
+
+/**
+ * HEAD request handler – returns the same headers as a GET without consuming
+ * a download attempt. Clients can inspect file size, type and availability
+ * before deciding to download.
+ *
+ * Without this route Express answers HEAD with the GET handler below, which
+ * calls consumeDownload() — so a client (or proxy) probing the link with HEAD
+ * silently burned one of the token's allotted downloads.
+ */
+router.head('/:token', (req, res) => {
+  const { token } = req.params;
+
+  const decoded = verifyDownloadToken(token);
+  if (!decoded) {
+    return res.status(401).json({
+      success: false,
+      error: 'Invalid or expired download token'
+    });
+  }
+
+  const filePath = decoded.filePath;
+  const filename = decoded.filename || path.basename(filePath);
+
+  // Stat the file to get metadata
+  let stat;
+  try {
+    stat = fs.statSync(filePath);
+  } catch (err) {
+    logger.warn(`Download file missing: ${filePath} (${err.code})`);
+    return res.status(404).json({
+      success: false,
+      error: 'File no longer available'
+    });
+  }
+
+  // Mirror GET: a revoked or used-up token is 410 there, so it must not look
+  // downloadable here. Read-only — the counter is not touched.
+  if (!inspectDownloadToken(token).usable) {
+    return res.status(410).end();
+  }
+
+  const contentType = detectContentType(filePath);
+  const contentDisposition = buildContentDisposition(filename);
+
+  res.setHeader('Accept-Ranges', 'bytes');
+  res.setHeader('Content-Length', stat.size);
+  res.setHeader('Content-Type', contentType);
+  res.setHeader('Content-Disposition', contentDisposition);
+  res.status(200).end();
 });
 
 router.get('/:token', (req, res) => {

@@ -1,6 +1,6 @@
 import { BasePlugin } from '../core/basePlugin.js';
 import { extractParams } from '../../services/webtools/extractParams.js';
-import { geocode, reverse, route, timezone, nearby, resolvePoint, haversine } from '../../services/webtools/osm.js';
+import { geocode, reverse, route, timezone, nearby, resolvePoint, haversine, elevation } from '../../services/webtools/osm.js';
 
 const MAX_BATCH_SIZE = 25;
 const BATCH_CONCURRENCY = 4;
@@ -54,7 +54,7 @@ export default class MapsPlugin extends BasePlugin {
     super(agent);
     this.name = 'maps';
     this.version = '1.0.0';
-    this.description = 'OpenStreetMap maps: geocode places, directions and travel time, nearby places, distances and time zones';
+    this.description = 'OpenStreetMap maps: geocode places, directions and travel time, nearby places, distances, time zones and elevation';
     this.commands = [
       { command: 'geocode', description: 'Find a place or address and give its coordinates',
         usage: 'geocode({ query: "Eiffel Tower" })', examples: ['where is the eiffel tower', 'get the coordinates of 10 downing street', 'find this address on the map'] },
@@ -73,7 +73,9 @@ export default class MapsPlugin extends BasePlugin {
       { command: 'distance', description: 'Straight-line distance between two places',
         usage: 'distance({ from: "London", to: "Paris" })', examples: ['how far is london from paris as the crow flies', 'distance between these two cities'] },
       { command: 'timezone', description: 'What time it is right now in a city, country or place: current local time, date and time zone',
-        usage: 'timezone({ place: "Tokyo" })  // or lat/lon', examples: ['what time is it in tokyo right now', 'what time is it in London', 'what\'s the time in Paris', 'current time in Sydney', 'what time zone is denver in', 'local time at these coordinates'] }
+        usage: 'timezone({ place: "Tokyo" })  // or lat/lon', examples: ['what time is it in tokyo right now', 'what time is it in London', 'what\'s the time in Paris', 'current time in Sydney', 'what time zone is denver in', 'local time at these coordinates'] },
+      { command: 'elevation', description: 'Ground elevation (height above sea level) of a place or coordinate',
+        usage: 'elevation({ place: "Denver" })  // or lat/lon', examples: ['what is the elevation of denver', 'how high above sea level is this address', 'altitude at 46.5763, 7.9904'] }
     ];
   }
 
@@ -182,8 +184,15 @@ export default class MapsPlugin extends BasePlugin {
           const r = await timezone(pt.lat, pt.lon);
           return { success: true, place: pt.name, ...r, result: `${pt.name}: ${r.timezone} (${r.utcOffset}) — ${r.localTime}` };
         }
+        case 'elevation': {
+          const pt = p.lat != null || p.latitude != null
+            ? await resolvePoint({ lat: p.lat ?? p.latitude, lon: p.lon ?? p.lng ?? p.longitude })
+            : await resolvePoint(p.place || p.location || p.query);
+          const m = await elevation(pt.lat, pt.lon);
+          return { success: true, place: pt.name, lat: pt.lat, lon: pt.lon, elevationM: m, elevationFt: Math.round(m * 3.28084), result: `${pt.name}: ${Math.round(m)} m (${Math.round(m * 3.28084)} ft) above sea level` };
+        }
         default:
-          return { success: false, error: `Unknown action '${action}'. Use: geocode, reverse, geocodeBatch, reverseBatch, route, nearby, distance, timezone` };
+          return { success: false, error: `Unknown action '${action}'. Use: geocode, reverse, geocodeBatch, reverseBatch, route, nearby, distance, timezone, elevation` };
       }
     } catch (error) {
       this.logger.warn(`maps ${action} failed: ${error.message}`);

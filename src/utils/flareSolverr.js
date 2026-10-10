@@ -45,13 +45,13 @@ export async function isFlareSolverrAvailable() {
 }
 
 /**
- * Fetch a URL through FlareSolverr.
- * Returns the FlareSolverr `solution` object (url, status, response (HTML),
- * cookies, userAgent, headers) or throws on failure.
+ * Send one request.* command to FlareSolverr and return its `solution`.
+ * Shared by fsRequestGet / fsRequestPost. No retries: a FlareSolverr call can
+ * take maxTimeout+15s, and paid scrape callers have their own deadlines.
  */
-export async function fsRequestGet(url, options = {}) {
+async function fsSolve(cmd, url, options, extraBody, logLabel) {
   const maxTimeout = options.maxTimeout || DEFAULT_MAX_TIMEOUT_MS;
-  const body = { cmd: 'request.get', url, maxTimeout };
+  const body = { cmd, url, ...extraBody, maxTimeout };
   if (options.userAgent) body.userAgent = options.userAgent;
   if (options.cookies) body.cookies = options.cookies;
   if (options.session) body.session = options.session;
@@ -81,8 +81,30 @@ export async function fsRequestGet(url, options = {}) {
   if (!solution) {
     throw new Error('FlareSolverr returned ok but no solution');
   }
-  logger.info(`[FlareSolverr] ${solution.status} ${url} (${(solution.response || '').length} bytes, ${(solution.cookies || []).length} cookies)`);
+  logger.info(`[FlareSolverr] ${logLabel}${solution.status} ${url} (${(solution.response || '').length} bytes, ${(solution.cookies || []).length} cookies)`);
   return solution;
+}
+
+/**
+ * Fetch a URL through FlareSolverr.
+ * Returns the FlareSolverr `solution` object (url, status, response (HTML),
+ * cookies, userAgent, headers) or throws on failure.
+ */
+export async function fsRequestGet(url, options = {}) {
+  return fsSolve('request.get', url, options, {}, '');
+}
+
+/**
+ * Send a POST through FlareSolverr (request.post command) for form submissions
+ * behind a Cloudflare challenge. postData is an application/x-www-form-urlencoded
+ * string (FlareSolverr's only supported POST encoding). Same options and return
+ * shape as fsRequestGet.
+ */
+export async function fsRequestPost(url, postData, options = {}) {
+  if (typeof postData !== 'string') {
+    throw new Error('fsRequestPost: postData must be a urlencoded string');
+  }
+  return fsSolve('request.post', url, options, { postData }, 'POST ');
 }
 
 /**

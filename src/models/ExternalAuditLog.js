@@ -424,5 +424,92 @@ externalAuditLogSchema.statics.getTopIPAddresses = async function({ days = 30, l
   return await this.aggregate(pipeline).exec();
 };
 
+/**
+ * Compute response-time percentiles (p50, p95, p99, ...) over a time window with
+ * optional filters. `duration` is written by the external audit middleware.
+ *
+ * Tries MongoDB's $percentile accumulator (7.0+) first; if the server rejects it,
+ * falls back to computing nearest-rank percentiles in JavaScript from the
+ * matching durations. No version probe: the aggregation error is the probe.
+ *
+ * @param {Object} options
+ * @param {Date|string} options.startDate - Start of the time window (inclusive)
+ * @param {Date|string} options.endDate   - End of the time window (inclusive)
+ * @param {string} [options.agentId]      - Filter by agent identifier
+ * @param {string} [options.path]         - Filter by request path
+ * @param {string} [options.method]       - Filter by HTTP method
+ * @param {number[]} [options.percentiles=[50, 95, 99]] - Percentiles in (0, 100]
+ * @returns {Promise<{count: number|null, percentiles: Object<number, number|null>}>}
+ *   Each percentile maps to a duration in ms, or null when no requests matched
+ *   (an empty window has no latency; 0 would read as "instant").
+ */
+externalAuditLogSchema.statics.getDurationPercentiles = async function({
+  startDate,
+  endDate,
+  agentId,
+  path,
+  method,
+  percentiles = [50, 95, 99]
+} = {}) {
+  if (!startDate || !endDate) {
+    throw new TypeError('startDate and endDate are required');
+  }
+  const start = new Date(startDate);
+  const end = new Date(endDate);
+  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) {
+    throw new TypeError('startDate and endDate must be valid dates');
+  }
+  if (!Array.isArray(percentiles) || percentiles.length === 0 ||
+      !percentiles.every(p => typeof p === 'number' && p > 0 && p <= 100)) {
+    throw new TypeError('percentiles must be a non-empty array of numbers in (0, 100]');
+  }
+
+  const matchFilter = {
+    timestamp: { $gte: start, $lte: end },
+    duration: { $type: 'number' }
+  };
+  if (agentId !== undefined) matchFilter.agentId = agentId;
+  if (path !== undefined) matchFilter.path = path;
+  if (method !== undefined) matchFilter.method = method;
+
+  const empty = () => Object.fromEntries(percentiles.map(p => [p, null]));
+
+  try {
+    const [result] = await this.aggregate([
+      { $match: matchFilter },
+      {
+        $group: {
+          _id: null,
+          count: { $sum: 1 },
+          values: { $percentile: { input: '$duration', p: percentiles.map(p => p / 100), method: 'approximate' } }
+        }
+      }
+    ]).exec();
+    if (!result || !result.count) return { count: 0, percentiles: empty() };
+    return {
+      count: result.count,
+      percentiles: Object.fromEntries(percentiles.map((p, i) => [p, result.values?.[i] ?? null]))
+    };
+  } catch (aggErr) {
+    logger.warn('$percentile aggregation unavailable, computing percentiles in JS', { error: aggErr?.message });
+  }
+
+  const docs = await this.aggregate([
+    { $match: matchFilter },
+    { $project: { _id: 0, duration: 1 } },
+    { $sort: { duration: 1 } }
+  ]).exec();
+  const sorted = docs.map(d => d.duration);
+  const n = sorted.length;
+  if (n === 0) return { count: 0, percentiles: empty() };
+  return {
+    count: n,
+    percentiles: Object.fromEntries(percentiles.map(p => {
+      const idx = Math.ceil((p / 100) * n) - 1; // nearest-rank
+      return [p, sorted[Math.max(0, Math.min(idx, n - 1))]];
+    }))
+  };
+};
+
 const ExternalAuditLog = mongoose.model('ExternalAuditLog', externalAuditLogSchema);
 export default ExternalAuditLog;

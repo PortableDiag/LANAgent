@@ -1,6 +1,7 @@
 import mongoose from 'mongoose';
 import NodeCache from 'node-cache';
 import { retryOperation } from '../utils/retryUtils.js';
+import { logger } from '../utils/logger.js';
 
 const systemReportSchema = new mongoose.Schema({
   reportType: {
@@ -439,6 +440,118 @@ systemReportSchema.statics.getPerformanceComparison = async function(
     },
     metrics: comparisonResults
   };
+};
+
+/**
+ * Detect anomalies in system metrics across reports within a given number of days.
+ *
+ * Each report is compared against the OTHER reports of the same reportType
+ * (leave-one-out): a daily report's counts are not comparable to a weekly
+ * report's, and an outlier included in its own baseline inflates the stddev
+ * enough to hide itself (with population stddev, max |z| for n points is
+ * (n-1)/sqrt(n), so a small window could never exceed 2.0).
+ * Cumulative series (e.g. cryptoActivity.totalPnL) are excluded — they trend
+ * by construction and would always look anomalous at the ends.
+ *
+ * @param {number} days - Number of days to look back (default 30)
+ * @param {number} threshold - Z-score threshold for flagging anomalies (default 2.0)
+ * @param {number} minSamples - Minimum baseline reports per type+metric (default 5)
+ * @returns {Promise<Array<{reportId, reportType: string, metric: string, observedValue: number, zScore: number, expectedRange: {min: number, max: number}, timestamp: Date}>>}
+ */
+systemReportSchema.statics.detectAnomalies = async function(days = 30, threshold = 2.0, minSamples = 5) {
+  const endDate = new Date();
+  const startDate = new Date(endDate.getTime() - days * 24 * 60 * 60 * 1000);
+
+  const reports = await this.getReportsInRange(startDate, endDate);
+
+  if (!reports || reports.length === 0) {
+    logger.info('No reports found for anomaly detection in the specified range');
+    return [];
+  }
+
+  // Numeric, per-period metrics (paths into content). Cumulative totals are
+  // deliberately absent.
+  const metricPaths = [
+    ['performance', 'avgResponseTime'],
+    ['performance', 'peakMemoryUsage'],
+    ['performance', 'jobSuccessRate'],
+    ['issues', 'errorsLogged'],
+    ['issues', 'criticalIssues'],
+    ['issues', 'systemRestarts'],
+    ['aiActivity', 'conversations'],
+    ['aiActivity', 'newMemories'],
+    ['aiActivity', 'totalRequests'],
+    ['aiActivity', 'totalTokens'],
+    ['aiActivity', 'totalCost'],
+    ['emailActivity', 'received'],
+    ['emailActivity', 'sent'],
+    ['emailActivity', 'autoReplies'],
+    ['emailActivity', 'processingRate'],
+    ['cryptoActivity', 'dailyPnL'],
+    ['cryptoActivity', 'tradesExecuted'],
+    ['cryptoActivity', 'tradesProposed'],
+    ['mediaActivity', 'sonarr', 'downloaded'],
+    ['mediaActivity', 'radarr', 'downloaded'],
+    ['selfImprovement', 'total'],
+    ['selfImprovement', 'merged'],
+    ['selfImprovement', 'rejected'],
+    ['selfImprovement', 'successRate']
+  ];
+
+  // Group values by reportType + metric
+  const series = {};
+  for (const report of reports) {
+    const type = report.reportType || 'unknown';
+    for (const path of metricPaths) {
+      let value = report.content;
+      for (const key of path) {
+        value = (value && typeof value === 'object') ? value[key] : undefined;
+        if (value === undefined) break;
+      }
+      if (!Number.isFinite(value)) continue;
+      const key = `${type}|${path.join('.')}`;
+      (series[key] ||= []).push({ reportId: report._id, value, timestamp: report.createdAt });
+    }
+  }
+
+  const anomalies = [];
+
+  for (const [key, points] of Object.entries(series)) {
+    // leave-one-out baseline needs minSamples OTHER points
+    if (points.length < minSamples + 1) continue;
+    const [reportType, metric] = key.split('|');
+
+    for (let i = 0; i < points.length; i++) {
+      const others = points.filter((_, j) => j !== i).map(p => p.value);
+      const mean = others.reduce((sum, v) => sum + v, 0) / others.length;
+      const variance = others.reduce((sum, v) => sum + (v - mean) ** 2, 0) / (others.length - 1);
+      const stddev = Math.sqrt(variance);
+      if (stddev === 0) continue; // flat baseline: no scale to judge deviation by
+
+      const zScore = (points[i].value - mean) / stddev;
+      if (Math.abs(zScore) > threshold) {
+        anomalies.push({
+          reportId: points[i].reportId,
+          reportType,
+          metric,
+          observedValue: points[i].value,
+          zScore: Math.round(zScore * 100) / 100,
+          expectedRange: { min: mean - threshold * stddev, max: mean + threshold * stddev },
+          timestamp: points[i].timestamp
+        });
+      }
+    }
+  }
+
+  if (anomalies.length > 0) {
+    logger.info(`Detected ${anomalies.length} anomalies across ${Object.keys(series).length} report-type metrics`, {
+      days,
+      threshold,
+      anomalyCount: anomalies.length
+    });
+  }
+
+  return anomalies;
 };
 
 export const SystemReport = mongoose.model('SystemReport', systemReportSchema);

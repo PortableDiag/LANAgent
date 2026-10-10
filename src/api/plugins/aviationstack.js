@@ -73,6 +73,15 @@ export default class AviationstackPlugin extends BasePlugin {
         description: 'Retrieve the live position for a specific flight number',
         usage: 'getLiveFlightPosition({ flightNumber: "BA2490", date: "2026-05-22" })',
         examples: ['Where is BA2490 right now?', 'Get current position of UA1234']
+      },
+      {
+        command: 'getMultipleFlightStatus',
+        description: 'Retrieve status for multiple flights in a single API call',
+        usage: 'getMultipleFlightStatus({ flightNumbers: ["BA2490", "UA1234"], date: "2023-10-12" })',
+        examples: [
+          'Check status for flights BA2490 and UA1234',
+          'Get status for multiple flights on October 12th'
+        ]
       }
     ];
 
@@ -155,6 +164,8 @@ export default class AviationstackPlugin extends BasePlugin {
           return await this.getAirlineFlights(data);
         case 'getLiveFlightPosition':
           return await this.getLiveFlightPosition(data);
+        case 'getMultipleFlightStatus':
+          return await this.getMultipleFlightStatus(data);
         default:
           throw new Error(`Unknown action: ${action}`);
       }
@@ -414,6 +425,52 @@ export default class AviationstackPlugin extends BasePlugin {
       this.logger.error('Error fetching live flight position:', error);
       return { success: false, error: error.message };
     }
+  }
+
+  /**
+   * Status for several flights at once. aviationstack's flight_iata filter takes
+   * ONE code (a comma-joined list matches nothing), so this issues one /flights
+   * request per flight, sequentially to respect the plan's rate limit, capped at
+   * MAX_BATCH_FLIGHTS. Accepts an array or a comma/space separated string (AI
+   * parameter extraction often returns the latter).
+   * Returns { success, data: { [flight]: flights[] }, notFound: [], errors: { [flight]: msg } };
+   * success is false only when every lookup failed.
+   */
+  async getMultipleFlightStatus({ flightNumbers, date } = {}) {
+    const MAX_BATCH_FLIGHTS = 10;
+    const list = Array.isArray(flightNumbers)
+      ? flightNumbers
+      : (typeof flightNumbers === 'string' ? flightNumbers.split(/[\s,;]+/) : []);
+    const codes = [...new Set(list.map(f => String(f || '').trim().toUpperCase()).filter(Boolean))];
+    if (codes.length === 0) {
+      return { success: false, error: 'flightNumbers must be a non-empty array of flight codes' };
+    }
+    if (codes.length > MAX_BATCH_FLIGHTS) {
+      return { success: false, error: `At most ${MAX_BATCH_FLIGHTS} flights per request (got ${codes.length})` };
+    }
+
+    const data = {};
+    const notFound = [];
+    const errors = {};
+    for (const code of codes) {
+      try {
+        const params = { access_key: this.config.apiKey, flight_iata: code };
+        if (date) params.flight_date = date;
+        const response = await this.requestFlights(params, 'aviationstack getMultipleFlightStatus');
+        const flights = Array.isArray(response?.data?.data) ? response.data.data : [];
+        if (flights.length) data[code] = flights;
+        else notFound.push(code);
+      } catch (error) {
+        this.logger.error(`Error fetching flight status for ${code}:`, error);
+        errors[code] = error.message;
+      }
+    }
+
+    const failed = Object.keys(errors).length;
+    if (failed === codes.length) {
+      return { success: false, error: `All ${failed} lookups failed: ${Object.values(errors)[0]}`, errors };
+    }
+    return { success: true, data, notFound, errors };
   }
 
   async cleanup() {

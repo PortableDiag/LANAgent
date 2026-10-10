@@ -58,15 +58,23 @@ test('buildDeterministicSummary handles single entry and empty text', () => {
   assert.ok(empty.includes('0 entries'), 'zero entries');
 });
 
-test('Journal.close stores the precomputed summary passed by the plugin', () => {
-  // Exercise the close() contract without a live DB by stubbing save().
+test('Journal.close stores the precomputed summary passed by the plugin', async () => {
+  // Exercise the close() contract without a live DB: stub the atomic
+  // active→closed claim and save().
   const journal = new Journal({ userId: 'u1', title: 'T', status: 'active' });
-  journal.save = async () => journal; // avoid hitting MongoDB
+  let saved = false;
+  journal.save = async () => { saved = true; return journal; }; // avoid hitting MongoDB
+  const originalTransition = Journal.transitionStatus;
+  Journal.transitionStatus = async () => ({ status: 'closed', metadata: { closedAt: new Date() } });
+  try {
+    const result = await journal.close('Auto-summary: 2 entries, 4 words.');
 
-  const result = journal.close('Auto-summary: 2 entries, 4 words.');
-
-  assert.equal(journal.status, 'closed');
-  assert.equal(journal.summary, 'Auto-summary: 2 entries, 4 words.');
-  assert.ok(journal.metadata.closedAt instanceof Date);
-  assert.ok(result && typeof result.then === 'function', 'close() returns the save() promise');
+    assert.equal(journal.status, 'closed');
+    assert.equal(journal.summary, 'Auto-summary: 2 entries, 4 words.');
+    assert.ok(journal.metadata.closedAt instanceof Date);
+    assert.equal(result, journal, 'close() resolves to the saved document');
+    assert.ok(saved, 'close() persists via save()');
+  } finally {
+    Journal.transitionStatus = originalTransition;
+  }
 });

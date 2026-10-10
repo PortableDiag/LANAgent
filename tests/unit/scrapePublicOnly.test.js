@@ -10,7 +10,7 @@ import { assertPublicUrl, publicUrlErrorBody } from '../../src/utils/publicUrl.j
 import ScraperPlugin from '../../src/api/plugins/scraper.js';
 
 test('LAN, loopback and metadata URLs are refused', async () => {
-  for (const u of ['http://192.168.1.10/admin', 'http://127.0.0.1:3000/', 'http://10.8.0.1/', 'http://169.254.169.254/latest/meta-data/', 'http://localhost/']) {
+  for (const u of ['http://192.168.1.10/admin', 'http://127.0.0.1:3000/', 'http://10.0.0.1/', 'http://169.254.169.254/latest/meta-data/', 'http://localhost/']) {
     await assert.rejects(() => assertPublicUrl(u), /private or local/, u);
   }
 });

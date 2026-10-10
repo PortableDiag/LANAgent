@@ -34,7 +34,7 @@ export class OperationLogger {
       status: operation.status || 'unknown',
       userId: operation.userId || 'system',
       interface: operation.interface || 'unknown',
-      duration: operation.duration || null
+      duration: Number.isFinite(operation.duration) ? operation.duration : null
     };
 
     this.operations.push(entry);
@@ -172,7 +172,8 @@ export class OperationLogger {
   }
 
   /**
-   * Get operations summary
+   * Get operations summary including latency percentiles for performance monitoring
+   * @returns {Object} summary object with counts and latencyPercentiles (p50, p95, p99)
    */
   getSummary() {
     const summary = {
@@ -182,12 +183,16 @@ export class OperationLogger {
       byStatus: {},
       byInterface: {},
       last24Hours: 0,
-      lastHour: 0
+      lastHour: 0,
+      latencyPercentiles: { p50: null, p95: null, p99: null }
     };
 
     const now = new Date();
     const hourAgo = new Date(now - 60 * 60 * 1000);
     const dayAgo = new Date(now - 24 * 60 * 60 * 1000);
+
+    // Collect durations for percentile calculation
+    const durations = [];
 
     this.operations.forEach(op => {
       // Count by type
@@ -211,7 +216,27 @@ export class OperationLogger {
       if (op.timestamp >= hourAgo) {
         summary.lastHour++;
       }
+
+      // Collect non-null durations for latency percentiles
+      if (Number.isFinite(op.duration)) {
+        durations.push(op.duration);
+      }
     });
+
+    // Compute latency percentiles if we have any durations
+    if (durations.length > 0) {
+      durations.sort((a, b) => a - b);
+      const N = durations.length;
+
+      // Simple percentile calculation: index = ceil(percentile/100 * N) - 1
+      const p50Index = Math.ceil(0.50 * N) - 1;
+      const p95Index = Math.ceil(0.95 * N) - 1;
+      const p99Index = Math.ceil(0.99 * N) - 1;
+
+      summary.latencyPercentiles.p50 = durations[Math.max(0, Math.min(p50Index, N - 1))];
+      summary.latencyPercentiles.p95 = durations[Math.max(0, Math.min(p95Index, N - 1))];
+      summary.latencyPercentiles.p99 = durations[Math.max(0, Math.min(p99Index, N - 1))];
+    }
 
     return summary;
   }

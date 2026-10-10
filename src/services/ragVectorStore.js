@@ -21,6 +21,9 @@ import fs from 'fs/promises';
  * default) with the memory store, but uses its own table 'rag_documents'.
  */
 export class RAGVectorStore {
+  /** Returned by _buildFilterClause for a filter that must match no rows. */
+  static NEVER_MATCH = '1 = 0';
+
   constructor() {
     this.db = null;
     this.table = null;
@@ -155,6 +158,83 @@ export class RAGVectorStore {
   }
 
   /**
+   * Build a SQL condition clause for a single filter field.
+   *
+   * Supports plain equality as well as advanced operators:
+   *   - $gt, $lt, $gte, $lte: numeric or string comparisons
+   *   - $ne: not equal
+   *   - $in: value must be an array; generates IN (...)
+   *
+   * Multiple operators on the same field are AND-combined.
+   * Values are sanitized to prevent SQL injection.
+   *
+   * @param {string} field - column name
+   * @param {*} value - filter value (plain or operator object)
+   * @returns {string|null} SQL condition string; null when the value is
+   *   null/undefined (field skipped); RAGVectorStore.NEVER_MATCH for an
+   *   unsupported operator object (callers must match nothing).
+   */
+  _buildFilterClause(field, value) {
+    if (value === null || value === undefined) return null;
+
+    // Only quote the column name when it isn't a plain lowercase
+    // identifier — DataFusion treats "source" = 'x' differently from
+    // source = 'x' in some builds (the quoted form ends up comparing
+    // literal strings on the LHS). camelCase columns still need
+    // quoting to preserve case.
+    const colSql = /^[a-z][a-z0-9_]*$/.test(field)
+      ? field
+      : `"${String(field).replace(/"/g, '""')}"`;
+
+    // Every filterable column (id, content, type, source, ingestedAt) is a
+    // string, so literals are quoted strings. Dates become ISO strings, which
+    // is how ingestedAt is stored, so range operators compare correctly.
+    const quote = (v) => {
+      const s = v instanceof Date ? v.toISOString() : String(v);
+      return `'${s.replace(/'/g, "''")}'`;
+    };
+    // Operator values: a finite number stays unquoted for callers comparing
+    // numeric expressions; everything else is a quoted string.
+    const operand = (v) => (typeof v === 'number' && Number.isFinite(v) ? String(v) : quote(v));
+
+    // Plain value (or Date) = equality, exactly as before operators existed.
+    if (typeof value !== 'object' || value instanceof Date) {
+      return `${colSql} = ${quote(value)}`;
+    }
+
+    const SQL_OPS = { $gt: '>', $lt: '<', $gte: '>=', $lte: '<=', $ne: '!=' };
+    const keys = Object.keys(value);
+
+    // Fail closed: an object that isn't purely recognised operators (a typo
+    // like $gtt, a nested object, an empty or non-array $in) must not be
+    // dropped — dropping a clause BROADENS the match, and deleteByFilter would
+    // then delete more than asked. Return the never-match sentinel instead.
+    if (!keys.length || keys.some(k => k !== '$in' && !(k in SQL_OPS))) {
+      logger.warn(`RAGVectorStore: unsupported filter for field "${field}" (keys: ${keys.join(', ') || 'none'}), matching nothing`);
+      return RAGVectorStore.NEVER_MATCH;
+    }
+
+    const parts = [];
+    for (const op of keys) {
+      const opVal = value[op];
+      if (opVal === null || opVal === undefined) {
+        logger.warn(`RAGVectorStore: ${op} for field "${field}" has no value, matching nothing`);
+        return RAGVectorStore.NEVER_MATCH;
+      }
+      if (op === '$in') {
+        if (!Array.isArray(opVal) || opVal.length === 0) {
+          logger.warn(`RAGVectorStore: $in for field "${field}" requires a non-empty array, matching nothing`);
+          return RAGVectorStore.NEVER_MATCH;
+        }
+        parts.push(`${colSql} IN (${opVal.map(quote).join(', ')})`);
+      } else {
+        parts.push(`${colSql} ${SQL_OPS[op]} ${operand(opVal)}`);
+      }
+    }
+    return parts.length === 1 ? parts[0] : `(${parts.join(' AND ')})`;
+  }
+
+  /**
    * Vector similarity search.
    * Matches the signature retriever.js calls: search(queryEmbedding, k, filter).
    * Returns rows with .similarity (1 - distance), .pageContent (= content),
@@ -170,15 +250,9 @@ export class RAGVectorStore {
       if (filter && typeof filter === 'object') {
         const clauses = [];
         for (const [field, value] of Object.entries(filter)) {
-          if (value === null || value === undefined) continue;
-          const esc = String(value).replace(/'/g, "''");
-          // Only quote the column name when it isn't a plain lowercase
-          // identifier — DataFusion treats "source" = 'x' differently from
-          // source = 'x' in some builds (the quoted form ends up comparing
-          // literal strings on the LHS). camelCase columns still need
-          // quoting to preserve case.
-          const colSql = /^[a-z][a-z0-9_]*$/.test(field) ? field : `"${field}"`;
-          clauses.push(`${colSql} = '${esc}'`);
+          const clause = this._buildFilterClause(field, value);
+          if (clause === RAGVectorStore.NEVER_MATCH) return [];
+          if (clause) clauses.push(clause);
         }
         if (clauses.length) q = q.where(clauses.join(' AND '));
       }
@@ -227,10 +301,9 @@ export class RAGVectorStore {
 
     const clauses = [];
     for (const [field, value] of Object.entries(filter)) {
-      if (value === null || value === undefined) continue;
-      const esc = String(value).replace(/'/g, "''");
-      const colSql = /^[a-z][a-z0-9_]*$/.test(field) ? field : `"${field}"`;
-      clauses.push(`${colSql} = '${esc}'`);
+      const clause = this._buildFilterClause(field, value);
+      if (clause === RAGVectorStore.NEVER_MATCH) return 0;
+      if (clause) clauses.push(clause);
     }
     if (!clauses.length) return 0;
 

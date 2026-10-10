@@ -188,14 +188,33 @@ class MCPTransport extends EventEmitter {
   async close() {
     this.connected = false;
     // Clear pending requests
+    this._failPending(new TransportClosedError());
+  }
+
+  /**
+   * Reject every in-flight request with `error` and forget it.
+   * @param {Error} error
+   */
+  _failPending(error) {
     for (const [, pending] of this.pendingRequests) {
       clearTimeout(pending.timeout);
       if (pending.signal && pending.abortListener) {
         pending.signal.removeEventListener?.('abort', pending.abortListener);
       }
-      pending.reject(new TransportClosedError());
+      pending.reject(error);
     }
     this.pendingRequests.clear();
+  }
+
+  /**
+   * The remote side went away (process exited / SSE stream ended). In-flight
+   * requests can never be answered, so fail them now instead of letting each
+   * wait out its timeout (30 s by default). Reconnection stays with
+   * mcpClient, which redoes the MCP initialize handshake on a new transport.
+   */
+  _onRemoteClosed() {
+    this.connected = false;
+    this._failPending(new TransportClosedError('Transport closed by remote'));
   }
 }
 
@@ -246,14 +265,23 @@ export class StdioTransport extends MCPTransport {
           }
         });
 
+        let exited = false;
         this.process.on('close', (code) => {
           logger.info(`MCP server process closed with code: ${code}`);
+          exited = true;
+          const wasConnected = this.connected;
           this.connected = false;
           this.emit('close', code);
+          this._onRemoteClosed();
+          if (!wasConnected) {
+            // Died inside the startup window: don't report a dead process as connected.
+            reject(new TransportClosedError(`MCP server exited during startup (code ${code})`));
+          }
         });
 
         // Consider connected after a short delay (or after first successful message)
         setTimeout(() => {
+          if (exited) return;
           this.connected = true;
           resolve();
         }, 500);
@@ -318,6 +346,8 @@ export class SSETransport extends MCPTransport {
     this.headers = options.headers || {};
     this.eventSource = null;
     this.sessionUrl = null;
+    this.reader = null; // SSE response body, destroyed on close()
+    this.closing = false;
   }
 
   /**
@@ -350,6 +380,7 @@ export class SSETransport extends MCPTransport {
 
           // Handle SSE stream
           const reader = response.body;
+          this.reader = reader;
           let buffer = '';
 
           reader.on('data', (chunk) => {
@@ -363,6 +394,7 @@ export class SSETransport extends MCPTransport {
           });
 
           reader.on('error', (error) => {
+            if (this.closing) return; // our own close() tore the stream down
             logger.error('SSE connection error:', error);
             // Guard — `'error'` emit without listeners synchronously throws.
             if (this.listenerCount('error') > 0) {
@@ -374,9 +406,11 @@ export class SSETransport extends MCPTransport {
           });
 
           reader.on('end', () => {
+            if (this.closing) return;
             logger.info('SSE connection closed');
             this.connected = false;
             this.emit('close');
+            this._onRemoteClosed();
           });
 
           // Get the session URL from the first event
@@ -486,8 +520,18 @@ export class SSETransport extends MCPTransport {
    * Close the SSE connection
    */
   async close() {
+    this.closing = true;
     await super.close();
-    // EventSource cleanup would happen here
+    // Release the SSE socket: without this the stream stayed open (and kept
+    // receiving) after close().
+    if (this.reader) {
+      try {
+        this.reader.destroy();
+      } catch (e) {
+        logger.debug(`Error destroying SSE stream during close: ${e?.message}`);
+      }
+      this.reader = null;
+    }
     this.sessionUrl = null;
   }
 }

@@ -43,6 +43,19 @@ export function clip(text, limit = TELEGRAM_TEXT_LIMIT) {
   return s.length > limit ? `${s.slice(0, limit - 1)}…` : s;
 }
 
+/**
+ * Ten-cell text progress bar, e.g. "███░░░░░░░ indexing 30%". Plain text: no Markdown
+ * characters are added (the label is passed through as given).
+ * @returns {string} '' when percent is not a finite number
+ */
+export function progressBar(percent, label) {
+  const n = Number(percent);
+  if (percent === null || percent === '' || !Number.isFinite(n)) return '';
+  const p = Math.max(0, Math.min(100, Math.round(n)));
+  const filled = Math.round(p / 10);
+  return `${'█'.repeat(filled)}${'░'.repeat(10 - filled)} ${label ? `${label} ` : ''}${p}%`;
+}
+
 export class DraftStream {
   /**
    * @param {object} telegram Telegraf `ctx.telegram` (callApi, sendMessage, editMessageText, deleteMessage)
@@ -104,6 +117,18 @@ export class DraftStream {
         logger.debug(`[telegram] could not update status message: ${err.message}`);
       }
     }
+  }
+
+  /**
+   * Show a progress bar as the status (draft or fallback status message), until the
+   * answer starts streaming. Non-numeric percents are ignored.
+   * @param {number} percent 0–100
+   * @param {string} [label] optional label before the percentage
+   */
+  async progress(percent, label) {
+    if (this.stopped) return;
+    const bar = progressBar(percent, label);
+    if (bar) await this.status(bar);
   }
 
   /** Stream callback for providerManager.generateStreamingResponse (delta, fullText). */
@@ -255,6 +280,9 @@ export class EditStream {
 
   async start() { byId.set(this.id, this); return this; }
   async status() { /* the chat action already says "typing…"; no message until there is text */ }
+
+  /** Same contract as DraftStream.progress; like status(), nothing is shown before text. */
+  async progress(percent, label) { await this.status(progressBar(percent, label)); }
 
   async chunk(_delta, fullText) {
     this.streaming = true;

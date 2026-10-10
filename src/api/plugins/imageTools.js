@@ -188,6 +188,12 @@ export default class ImageToolsPlugin extends BasePlugin {
       const effort = params.effort != null ? Math.min(9, Math.max(0, Math.round(params.effort))) : 2;
       const lossless = !!params.lossless;
       let pipeline = sharp(buf, { limitInputPixels: false });
+      // Opt-in EXIF auto-orient. Encoding drops metadata, so without this an
+      // orientation-tagged source comes out sideways. Orientations 5-8 swap axes.
+      const orient = (params.autoOrient === true || params.autoOrient === 'true') && (meta.orientation || 1) > 1;
+      if (orient) pipeline = pipeline.rotate();
+      const outWidth = orient && meta.orientation >= 5 ? height : width;
+      const outHeight = orient && meta.orientation >= 5 ? width : height;
       switch (target) {
         case 'avif': pipeline = pipeline.avif({ quality, effort, lossless, chromaSubsampling: '4:4:4' }); break;
         case 'webp': pipeline = pipeline.webp({ quality, effort: Math.min(6, effort), lossless }); break;
@@ -200,7 +206,8 @@ export default class ImageToolsPlugin extends BasePlugin {
         data: {
           image: out.toString('base64'),
           outputFormat: target, passthrough: false,
-          sourceFormat, width, height, pixels, bytes: out.length
+          sourceFormat, width: outWidth, height: outHeight, pixels, bytes: out.length,
+          ...(orient ? { autoOriented: true, sourceOrientation: meta.orientation } : {})
         }
       };
     } catch (e) {

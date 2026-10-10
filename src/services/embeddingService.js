@@ -141,6 +141,66 @@ class EmbeddingService {
     return this.defaultModel;
   }
 
+  /**
+   * Conservative token estimate for OpenAI embedding models (no tokenizer
+   * dependency). Takes the larger of two heuristics so it errs HIGH:
+   *   - word/number/punctuation pieces (each is at least one BPE token)
+   *   - ~3 ASCII chars per token, and one token per non-ASCII char (CJK,
+   *     emoji and accented text tokenize far denser than English)
+   * @param {string} text - The text to estimate
+   * @returns {number} Estimated token count (0 for non-strings)
+   */
+  estimateTokenCount(text) {
+    if (typeof text !== 'string' || !text) return 0;
+    const pieces = (text.match(/[\w']+|[^\w\s]/g) || []).length;
+    let ascii = 0;
+    let nonAscii = 0;
+    for (const ch of text) {
+      if (ch.codePointAt(0) < 128) ascii++;
+      else nonAscii++;
+    }
+    return Math.max(pieces, Math.ceil(ascii / 3) + nonAscii);
+  }
+
+  /**
+   * Truncate text so its estimated token count fits the model's maxTokens.
+   * Returns a PREFIX of the original string (whitespace and punctuation
+   * preserved, cut at a word boundary when one is near), so text within the
+   * limit is returned unchanged and embeds exactly as before.
+   * @param {string} text - The text to truncate
+   * @param {string} modelId - The model identifier to get maxTokens from
+   * @returns {string} Truncated text (or the original if within limit)
+   */
+  truncateToTokenLimit(text, modelId) {
+    const modelConfig = this.models[modelId];
+    if (!modelConfig) {
+      throw new Error(`Model ${modelId} not found`);
+    }
+    if (typeof text !== 'string') return text;
+    const maxTokens = modelConfig.maxTokens;
+    const tokenCount = this.estimateTokenCount(text);
+    if (tokenCount <= maxTokens) {
+      return text;
+    }
+
+    // Binary-search the longest prefix (by code point) that fits.
+    const chars = Array.from(text);
+    let lo = 0;
+    let hi = chars.length;
+    while (lo < hi) {
+      const mid = Math.ceil((lo + hi) / 2);
+      if (this.estimateTokenCount(chars.slice(0, mid).join('')) <= maxTokens) lo = mid;
+      else hi = mid - 1;
+    }
+    let cut = chars.slice(0, lo).join('');
+    // Prefer ending on whitespace rather than mid-word, if one is close.
+    const ws = cut.search(/\s\S*$/);
+    if (ws > cut.length * 0.9) cut = cut.slice(0, ws);
+
+    logger.warn(`Truncating embedding input from ~${tokenCount} to ~${this.estimateTokenCount(cut)} estimated tokens (limit ${maxTokens}) for model ${modelId}`);
+    return cut;
+  }
+
   async generateEmbedding(text, options = {}) {
     if (!this.initialized) {
       throw new Error('EmbeddingService not initialized');
@@ -154,8 +214,11 @@ class EmbeddingService {
         throw new Error(`Model configuration for ${modelId} not found`);
       }
 
+      // Truncate text to model's token limit to avoid API errors
+      const truncatedText = this.truncateToTokenLimit(text, modelId);
+
       const cacheDimensions = options.dimensions || modelConfig.dimension;
-      const cacheKey = `embedding:${modelId}:${cacheDimensions}:${text}`;
+      const cacheKey = `embedding:${modelId}:${cacheDimensions}:${truncatedText}`;
       const cachedEmbedding = this.cache.get(cacheKey);
       if (cachedEmbedding) {
         return cachedEmbedding;
@@ -164,7 +227,7 @@ class EmbeddingService {
       let response;
       switch (modelConfig.provider) {
         case 'openai':
-          const createOpts = { input: text, model: modelConfig.model };
+          const createOpts = { input: truncatedText, model: modelConfig.model };
           if (modelConfig.model !== 'text-embedding-ada-002' && (options.dimensions || modelConfig.dimension !== 1536)) {
             createOpts.dimensions = options.dimensions || modelConfig.dimension;
           }
@@ -199,11 +262,14 @@ class EmbeddingService {
         throw new Error(`Model configuration for ${modelId} not found`);
       }
 
+      // Truncate each text to model's token limit
+      const truncatedTexts = texts.map(t => this.truncateToTokenLimit(t, modelId));
+
       const batchSize = 100;
       const promises = [];
       
-      for (let i = 0; i < texts.length; i += batchSize) {
-        const batch = texts.slice(i, i + batchSize);
+      for (let i = 0; i < truncatedTexts.length; i += batchSize) {
+        const batch = truncatedTexts.slice(i, i + batchSize);
         let promise;
         
         switch (modelConfig.provider) {

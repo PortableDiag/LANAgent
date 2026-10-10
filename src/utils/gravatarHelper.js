@@ -309,13 +309,76 @@ export async function batchEnrichContacts(contacts) {
 }
 
 /**
+ * Lightweight check if an email has a custom Gravatar avatar.
+ * Uses a HEAD request to the avatar URL with d=404, avoiding full profile API calls.
+ * @param {string} email - Email address to check
+ * @returns {Promise<boolean>} True if a custom avatar exists (HTTP 200), false otherwise
+ */
+export async function checkAvatarExists(email) {
+  if (!email) return false;
+
+  const hash = crypto
+    .createHash('md5')
+    .update(email.toLowerCase().trim())
+    .digest('hex');
+  const cacheKey = `avatar_exists_${hash}`;
+
+  // Check cache first
+  const cached = gravatarCache.get(cacheKey);
+  if (cached !== undefined) {
+    logger.debug(`Cache hit for avatar existence check of ${email}: ${cached}`);
+    return cached;
+  }
+
+  const url = `https://www.gravatar.com/avatar/${hash}?d=404&s=1`;
+
+  try {
+    const response = await retryOperation(
+      () => fetch(url, { method: 'HEAD', signal: AbortSignal.timeout(5000) }),
+      { retries: 3, context: 'Gravatar avatar existence check' }
+    );
+
+    if (response.status === 200) {
+      logger.debug(`Custom Gravatar avatar found for ${email}`);
+      gravatarCache.set(cacheKey, true);
+      return true;
+    }
+
+    if (response.status === 404) {
+      logger.debug(`No custom Gravatar avatar for ${email}`);
+      gravatarCache.set(cacheKey, false);
+      return false;
+    }
+
+    // Unexpected status (429, 5xx, ...) is NOT an answer — don't cache it as
+    // "no avatar" for an hour; throw so the caller can fall back.
+    throw new Error(`Unexpected status ${response.status} from Gravatar avatar HEAD`);
+  } catch (error) {
+    logger.warn(`Avatar existence check failed for ${email}: ${error.message}`);
+    // Do not cache failures — let the caller decide fallback
+    throw error;
+  }
+}
+
+/**
  * Check if an email has a Gravatar avatar (not just default)
+ * Uses a fast HEAD request first, falling back to profile fetch on failure.
  * @param {string} email - Email address to check
  * @returns {boolean} True if email has a custom Gravatar avatar
  */
 export async function hasGravatarAvatar(email) {
-  const profile = await fetchGravatarProfile(email);
-  return !!(profile?.avatar_url);
+  try {
+    // Fast path: lightweight HEAD request
+    const exists = await checkAvatarExists(email);
+    if (exists) return true;
+    // If HEAD says no avatar, we trust it (no need for profile fetch)
+    return false;
+  } catch (headError) {
+    // HEAD request failed — fall back to full profile fetch
+    logger.debug(`Avatar existence check failed for ${email}, falling back to profile fetch: ${headError.message}`);
+    const profile = await fetchGravatarProfile(email);
+    return !!(profile?.avatar_url);
+  }
 }
 
 /**

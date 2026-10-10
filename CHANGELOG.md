@@ -2,6 +2,30 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.501] - 2026-10-09
+
+Self-improvement PR sweep: 35 reviewed, 30 merged after repair, 3 closed, 2 held for review.
+
+### Added
+- **Image transcode `autoOrient`** (opt-in, default off): straightens a rotated photo from its EXIF orientation and reports the rotated size.
+- **FlareSolverr POST** (`fsRequestPost`).
+- **Plugins:** aviationstack checks several flights at once (one lookup each, max 10); xueqiu `screener` (validated market, order, paging); whois SSL-certificate expiry alerts that re-check the live certificate before warning; cryptotools verifies JWS with a detached payload (RFC 7797 unencoded form included); maps `elevation` (lat/lon or a place name).
+- **Encryption key rotation:** `ENCRYPTION_KEY_PREVIOUS` (comma-separated, optional) is tried after the current key, and `reEncrypt()` moves a value to the current key. The stored format is unchanged.
+- **Paid-route auth** accepts a per-request cost function; a non-positive or non-numeric cost is refused.
+- **Operation logger** reports p50/p95/p99 durations; **system reports** flag anomalies against their own report type's history; **audit log** latency percentiles.
+- Status-transition helpers on bug reports, development plans, journals, oracle participation, agentic-commerce quotes and wallet transactions; two moving-average crossover indicators; a usage counter on external service configs.
+- **Embedding input** is cut to the model's limit as an exact prefix; text under the limit is unchanged.
+- **Vector-store filters:** an operator it cannot translate now matches nothing instead of being dropped (a dropped filter widened deletes).
+- **Output parser** repairs malformed JSON only after a normal parse fails; output-schema examples now satisfy their schemas.
+- **MCP transport:** in-flight requests fail at once when the server exits or the stream ends, instead of waiting out the timeout.
+- **Telegram progress bar** (plain text) for streamed replies.
+
+### Fixed
+- A HEAD request to a download link used up one of its downloads.
+- Error handlers called logger levels winston does not have (`warning`, `fatal`), so a captured error threw inside the handler.
+- Gravatar lookups cached a rate-limit or server error as "no avatar" for an hour.
+- Bug reports dropped `fixedDate` and `fixedBy` (not in the schema); `validateData` always returned false (it read `.valid` from an error array).
+
 ## [2.25.500] - 2026-10-09
 
 ### Fixed

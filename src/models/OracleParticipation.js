@@ -343,5 +343,90 @@ oracleParticipationSchema.statics.cleanupExpired = async function (retentionDays
     }
 };
 
+/**
+ * Allowed status transitions for oracle participations.
+ * Maps current status to the list of statuses it can transition to.
+ */
+oracleParticipationSchema.statics.transitionMap = {
+    monitoring: ['committed', 'expired'],
+    committed: ['revealed', 'expired'],
+    revealed: ['won', 'lost', 'expired'],
+    won: [],
+    lost: [],
+    judged: [],
+    expired: []
+};
+
+/**
+ * Atomically transition a participation to a new status if the current status allows it.
+ * Uses findOneAndUpdate with a $and condition to ensure the transition is valid.
+ * Returns the updated document or null if the transition is not allowed.
+ *
+ * @param {number} requestId - The request ID of the participation
+ * @param {string} newStatus - The target status to transition to
+ * @returns {Promise<Object|null>} The updated participation document, or null if transition not allowed
+ * @throws {Error} If newStatus is not a valid status enum value
+ */
+oracleParticipationSchema.statics.transitionStatus = async function (requestId, newStatus) {
+    // Validate that newStatus is a valid status value
+    if (!this.schema.path('status').enumValues.includes(newStatus)) {
+        throw new Error(`Invalid status: ${newStatus}`);
+    }
+
+    // Determine which current statuses are allowed to transition to newStatus
+    const allowedPrevious = Object.keys(this.transitionMap).filter(key =>
+        this.transitionMap[key].includes(newStatus)
+    );
+
+    if (allowedPrevious.length === 0) {
+        logger.warn(`No allowed previous statuses for transition to ${newStatus}`, { requestId });
+        return null;
+    }
+
+    try {
+        const updatedDoc = await retryOperation(async () => {
+            return await this.findOneAndUpdate(
+                {
+                    requestId,
+                    status: { $in: allowedPrevious }
+                },
+                {
+                    $set: {
+                        status: newStatus,
+                        updatedAt: new Date()
+                    }
+                },
+                {
+                    new: true,
+                    runValidators: true
+                }
+            );
+        }, { retries: 3 });
+
+        if (!updatedDoc) {
+            logger.warn(`Status transition not allowed for request ${requestId} to ${newStatus}`, {
+                requestId,
+                newStatus,
+                allowedPrevious
+            });
+        } else {
+            logger.info(`Status transitioned for request ${requestId} to ${newStatus}`, {
+                requestId,
+                newStatus
+            });
+        }
+
+        return updatedDoc;
+    } catch (error) {
+        logger.error(`Failed to transition status for request ${requestId} to ${newStatus}`, {
+            error: error.message,
+            stack: error.stack,
+            requestId,
+            newStatus
+        });
+        throw error;
+    }
+};
+
 const OracleParticipation = mongoose.model('OracleParticipation', oracleParticipationSchema);
 export default OracleParticipation;

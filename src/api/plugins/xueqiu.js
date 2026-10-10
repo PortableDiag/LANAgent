@@ -6,6 +6,7 @@ import { retryOperation } from '../../utils/retryUtils.js';
 export default class XueqiuPlugin extends BasePlugin {
   // Each symbol is one live upstream request; the caller supplies the list length.
   static MAX_COMPARE_SYMBOLS = 20;
+  static MAX_SCREENER_SIZE = 90;
 
   constructor(agent) {
     super(agent);
@@ -37,6 +38,11 @@ export default class XueqiuPlugin extends BasePlugin {
         command: 'compare',
         description: 'Compare multiple stock quotes side-by-side',
         usage: 'compare [symbols...] (e.g., compare TSLA AAPL 600519)'
+      },
+      {
+        command: 'screener',
+        description: 'Screen stocks by market, sort field, order, and pagination',
+        usage: 'screener [market: CN|HK|US] [orderBy: volume|percent|...] [order: asc|desc] [page] [size]'
       }
     ];
 
@@ -94,6 +100,12 @@ export default class XueqiuPlugin extends BasePlugin {
             return { success: false, error: 'Missing required param: symbols (array)' };
           }
           const data = await this.compareStocks(symbols);
+          return { success: true, data };
+        }
+
+        case 'screener': {
+          const { market, orderBy, order, page, size } = params;
+          const data = await this.screenerStocks({ market, orderBy, order, page, size });
           return { success: true, data };
         }
 
@@ -405,5 +417,73 @@ export default class XueqiuPlugin extends BasePlugin {
         .filter(r => !r.quote)
         .map(r => ({ symbol: r.symbol, error: r.error }))
     };
+  }
+
+  /**
+   * Screen stocks using the Xueqiu screener endpoint.
+   *
+   * @param {Object} params
+   * @param {string} [params.market='CN'] - Market: CN, HK, US
+   * @param {string} [params.orderBy='volume'] - Sort field (volume, percent, etc.)
+   * @param {string} [params.order='desc'] - Sort order (asc/desc)
+   * @param {number} [params.page=1] - Page number
+   * @param {number} [params.size=10] - Number of results per page
+   * @returns {Promise<Object[]>} Array of stock objects with symbol, name, price, percent, change, volume, market
+   */
+  async screenerStocks(params = {}) {
+    const {
+      market = 'CN',
+      orderBy = 'volume',
+      order = 'desc',
+      page = 1,
+      size = 10
+    } = params;
+
+    // Validate rather than coerce: an unknown market silently became US, and
+    // AI-extracted page/size arrive as strings.
+    const TYPES = { CN: 'sh_sz', HK: 'hk', US: 'us' };
+    const m = String(market || 'CN').trim().toUpperCase();
+    const type = TYPES[m];
+    if (!type) throw new Error(`Invalid market '${market}'. Use: CN, HK, US`);
+    const ord = String(order || 'desc').trim().toLowerCase();
+    if (ord !== 'asc' && ord !== 'desc') throw new Error(`Invalid order '${order}'. Use: asc, desc`);
+    const field = String(orderBy || 'volume').trim();
+    if (!/^[a-z_][a-z0-9_]*$/i.test(field)) throw new Error(`Invalid orderBy '${orderBy}'`);
+    const pg = Number(page ?? 1);
+    const sz = Number(size ?? 10);
+    if (!Number.isInteger(pg) || pg < 1) throw new Error(`Invalid page '${page}'`);
+    if (!Number.isInteger(sz) || sz < 1 || sz > XueqiuPlugin.MAX_SCREENER_SIZE) {
+      throw new Error(`Invalid size '${size}' (1-${XueqiuPlugin.MAX_SCREENER_SIZE})`);
+    }
+
+    const cacheKey = `xq:screener:${m}:${field}:${ord}:${pg}:${sz}`;
+    const cached = this.cache.get(cacheKey);
+    if (cached) return cached;
+
+    const url = `${this.baseUrl}/service/v5/stock/screener/quote/list.json`;
+    const data = await this.doGet(url, {
+      params: {
+        page: pg,
+        size: sz,
+        order: ord,
+        order_by: field,
+        market: m,
+        type
+      }
+    });
+
+    const list = data?.data?.list || [];
+    const mapped = list.map(q => ({
+      symbol: q?.symbol || null,
+      name: q?.name || null,
+      price: q?.current ?? null,
+      percent: q?.percent ?? null,
+      change: q?.chg ?? null,
+      volume: q?.volume ?? null,
+      market: q?.exchange ?? q?.market?.region ?? null
+    }));
+
+    this.cache.set(cacheKey, mapped, 60);
+    return mapped;
   }
 }

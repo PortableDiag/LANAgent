@@ -1,5 +1,6 @@
 import axios from 'axios';
 import NodeCache from 'node-cache';
+import { retryOperation } from '../../utils/retryUtils.js';
 
 /**
  * OpenStreetMap services, all keyless:
@@ -12,11 +13,11 @@ import NodeCache from 'node-cache';
 
 const UA = `LANAgent/${process.env.npm_package_version || '2'} (+https://lanagent.net)`;
 const cache = new NodeCache({ stdTTL: 24 * 3600, maxKeys: 2000 });
-const cached = async (key, fn) => {
+const cached = async (key, fn, ttl) => {
   const hit = cache.get(key);
   if (hit !== undefined) return hit;
   const v = await fn();
-  try { cache.set(key, v); } catch { cache.flushAll(); }
+  try { cache.set(key, v, ttl); } catch { cache.flushAll(); }
   return v;
 };
 
@@ -182,4 +183,25 @@ export function haversine(lat1, lon1, lat2, lon2) {
   const R = 6371000, rad = d => (d * Math.PI) / 180;
   const a = Math.sin(rad(lat2 - lat1) / 2) ** 2 + Math.cos(rad(lat1)) * Math.cos(rad(lat2)) * Math.sin(rad(lon2 - lon1) / 2) ** 2;
   return 2 * R * Math.asin(Math.sqrt(a));
+}
+
+/**
+ * Ground elevation in metres (Open-Meteo Elevation API, Copernicus 90 m DEM, keyless).
+ * Cached 7 days per point rounded to 4 decimals (~11 m, finer than the DEM grid).
+ * @returns {Promise<number>} metres above sea level
+ */
+export async function elevation(lat, lon) {
+  const [la, lo] = coords(lat, lon);
+  return cached(`elev:${la.toFixed(4)},${lo.toFixed(4)}`, async () => {
+    const res = await retryOperation(() => axios.get('https://api.open-meteo.com/v1/elevation', {
+      params: { latitude: la, longitude: lo },
+      headers: { 'User-Agent': UA },
+      timeout: 10000
+    }), { retries: 2, context: 'osm elevation' });
+    const value = Array.isArray(res.data?.elevation) ? res.data.elevation[0] : undefined;
+    if (typeof value !== 'number' || !Number.isFinite(value)) {
+      throw new Error('no elevation data for that point');
+    }
+    return value;
+  }, 7 * 24 * 3600);
 }

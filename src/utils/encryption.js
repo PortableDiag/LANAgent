@@ -25,6 +25,9 @@ const getEncryptionKey = () => {
 // Cache the key after first retrieval
 let encryptionKey = null;
 
+// Previous encryption keys for key rotation
+let previousKeys = null;
+
 // Initialize cache for derived keys with 5-minute TTL
 const keyCache = new NodeCache({ 
   stdTTL: 300, // 5 minutes
@@ -39,6 +42,52 @@ keyCache.on('expired', (key, value) => {
     value.fill(0); // Zero out the buffer
   }
 });
+
+/**
+ * Get a short fingerprint of a key for cache differentiation
+ * @param {Buffer} keyBuffer - The key buffer
+ * @returns {string} - Hex fingerprint (first 8 bytes of SHA-256)
+ */
+function getKeyFingerprint(keyBuffer) {
+  return crypto.createHash('sha256').update(keyBuffer).digest('hex').substring(0, 16);
+}
+
+/**
+ * Get previous encryption keys from environment variable
+ * @returns {Buffer[]} - Array of previous key buffers
+ */
+function getPreviousKeys() {
+  if (previousKeys) return previousKeys;
+  const prevKeysEnv = process.env.ENCRYPTION_KEY_PREVIOUS;
+  if (!prevKeysEnv) {
+    previousKeys = [];
+    return previousKeys;
+  }
+  const keyStrings = prevKeysEnv.split(',').map(s => s.trim()).filter(Boolean);
+  previousKeys = keyStrings.map((hex, i) => {
+    // Never log the value itself — only its position and shape.
+    if (!/^[0-9a-fA-F]{64}$/.test(hex)) {
+      logger.warn(`ENCRYPTION_KEY_PREVIOUS entry #${i + 1} ignored: expected 64 hex chars`);
+      return null;
+    }
+    return Buffer.from(hex, 'hex');
+  }).filter(Boolean);
+  return previousKeys;
+}
+
+/**
+ * Clear previous keys from memory (zero out buffers)
+ */
+function clearPreviousKeys() {
+  if (previousKeys) {
+    for (const key of previousKeys) {
+      if (Buffer.isBuffer(key)) {
+        key.fill(0);
+      }
+    }
+    previousKeys = null;
+  }
+}
 
 /**
  * Encrypt sensitive data
@@ -59,7 +108,8 @@ export function encrypt(text) {
     const iv = crypto.randomBytes(ivLength);
 
     // Check cache for derived key
-    const cacheKey = `enc_${salt.toString('hex')}`;
+    const fingerprint = getKeyFingerprint(encryptionKey);
+    const cacheKey = `${fingerprint}_${salt.toString('hex')}`;
     let key = keyCache.get(cacheKey);
     
     if (!key) {
@@ -94,9 +144,12 @@ export function encrypt(text) {
 /**
  * Decrypt sensitive data
  * @param {string} encryptedData - Base64 encoded encrypted data
+ * @param {Buffer[]} [previousKeysParam] - Optional previous master keys to try if the current key fails
+ *   (defaults to ENCRYPTION_KEY_PREVIOUS, comma-separated hex). The current key is ALWAYS tried first
+ *   and the ciphertext format is unchanged, so existing data decrypts exactly as before.
  * @returns {string} - Decrypted text
  */
-export function decrypt(encryptedData) {
+export function decrypt(encryptedData, previousKeysParam) {
   if (!encryptedData) return '';
 
   try {
@@ -114,30 +167,68 @@ export function decrypt(encryptedData) {
     const tag = combined.slice(saltLength + ivLength, saltLength + ivLength + tagLength);
     const encrypted = combined.slice(saltLength + ivLength + tagLength);
 
-    // Check cache for derived key
-    const cacheKey = `enc_${salt.toString('hex')}`;
-    let key = keyCache.get(cacheKey);
-    
-    if (!key) {
-      // Derive the key from the master key and salt
-      key = crypto.pbkdf2Sync(encryptionKey, salt, pbkdf2Iterations, keyLength, 'sha256');
-      keyCache.set(cacheKey, key);
+    // Determine which previous keys to try (an explicit array overrides env).
+    // Anything that is not an array of Buffers is ignored, so a stray second
+    // argument (e.g. an index from `list.map(decrypt)`) can never break decryption.
+    const prevKeys = Array.isArray(previousKeysParam)
+      ? previousKeysParam.filter(Buffer.isBuffer)
+      : getPreviousKeys();
+
+    // Build list of keys to try: current key first, then previous keys
+    const keysToTry = [encryptionKey, ...prevKeys];
+
+    let lastError = null;
+    for (const keyBuffer of keysToTry) {
+      try {
+        // Check cache for derived key
+        const fingerprint = getKeyFingerprint(keyBuffer);
+        const cacheKey = `${fingerprint}_${salt.toString('hex')}`;
+        let key = keyCache.get(cacheKey);
+        
+        if (!key) {
+          // Derive the key from the master key and salt
+          key = crypto.pbkdf2Sync(keyBuffer, salt, pbkdf2Iterations, keyLength, 'sha256');
+          keyCache.set(cacheKey, key);
+        }
+
+        // Create decipher
+        const decipher = crypto.createDecipheriv(algorithm, key, iv);
+        decipher.setAuthTag(tag);
+
+        // Decrypt
+        const decrypted = Buffer.concat([
+          decipher.update(encrypted),
+          decipher.final()
+        ]);
+
+        return decrypted.toString('utf8');
+      } catch (err) {
+        lastError = err;
+        // Continue to next key
+      }
     }
 
-    // Create decipher
-    const decipher = crypto.createDecipheriv(algorithm, key, iv);
-    decipher.setAuthTag(tag);
-
-    // Decrypt
-    const decrypted = Buffer.concat([
-      decipher.update(encrypted),
-      decipher.final()
-    ]);
-
-    return decrypted.toString('utf8');
+    // If we get here, all keys failed
+    throw lastError || new Error('Decryption failed with all available keys');
   } catch (error) {
     logger.error('Decryption failed:', error);
     throw new Error('Failed to decrypt data');
+  }
+}
+
+/**
+ * Re-encrypt data that was encrypted with a previous key using the current key
+ * @param {string} encryptedData - Base64 encoded encrypted data (possibly from old key)
+ * @returns {string} - New encrypted data with current key
+ */
+export function reEncrypt(encryptedData) {
+  if (!encryptedData) return '';
+  try {
+    const decrypted = decrypt(encryptedData, getPreviousKeys());
+    return encrypt(decrypted);
+  } catch (error) {
+    logger.error('Re-encryption failed:', error);
+    throw new Error('Failed to re-encrypt data');
   }
 }
 
@@ -269,7 +360,8 @@ export function isEncryptionConfigured() {
  */
 export function clearKeyCache() {
   keyCache.flushAll();
-  logger.info('Encryption key cache cleared');
+  clearPreviousKeys();
+  logger.info('Encryption key cache and previous keys cleared');
 }
 
 /**

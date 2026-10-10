@@ -27,18 +27,44 @@ const HMAC_ALGS = ['sha256', 'sha384', 'sha512', 'sha1'];
 const FILE_ROOTS = [DATA_PATH, TEMP_PATH, UPLOADS_PATH, WORKSPACE_PATH, '/tmp'];
 
 const b64urlDecode = (s) => Buffer.from(String(s).replace(/-/g, '+').replace(/_/g, '/'), 'base64');
+const b64urlEncode = (buf) => Buffer.from(buf).toString('base64url');
 
-/** Split a compact JWS into its parts, parsed. Throws on anything that is not one. */
-export function parseJws(jws) {
+/**
+ * Split a compact JWS into its parts, parsed. Throws on anything that is not one.
+ *
+ * Detached payloads (RFC 7515 Appendix F): the JWS carries an empty payload part
+ * ("header..signature") and the payload travels separately as externalPayload.
+ * The signing input is then header + "." + base64url(payload), or, when the
+ * header sets "b64": false (RFC 7797), header + "." + the raw payload bytes.
+ * An externalPayload alongside a JWS that already embeds one is refused rather
+ * than silently substituted, so the claims reported are always the signed ones.
+ */
+export function parseJws(jws, externalPayload = null) {
   const parts = String(jws || '').trim().split('.');
   if (parts.length !== 3 || parts.some(p => !/^[A-Za-z0-9_-]*$/.test(p)) || !parts[0] || !parts[2]) {
     throw new Error('jws must be a compact JWS: three base64url parts joined by dots');
   }
-  let header, payload;
+  let header, payload, signingInput;
   try { header = JSON.parse(b64urlDecode(parts[0]).toString('utf8')); } catch { throw new Error('the JWS header is not JSON'); }
-  const raw = b64urlDecode(parts[1]).toString('utf8');
-  try { payload = JSON.parse(raw); } catch { payload = raw; }
-  return { header, payload, signingInput: Buffer.from(`${parts[0]}.${parts[1]}`), signature: b64urlDecode(parts[2]) };
+
+  const detached = externalPayload !== null && externalPayload !== undefined;
+  if (detached) {
+    if (parts[1] !== '') throw new Error('this JWS embeds its own payload; omit the separate payload parameter');
+    const payloadBytes = Buffer.isBuffer(externalPayload)
+      ? externalPayload
+      : Buffer.from(typeof externalPayload === 'string' ? externalPayload : JSON.stringify(externalPayload), 'utf8');
+    const encoded = header.b64 === false ? payloadBytes : Buffer.from(b64urlEncode(payloadBytes));
+    signingInput = Buffer.concat([Buffer.from(`${parts[0]}.`), encoded]);
+    const raw = payloadBytes.toString('utf8');
+    try { payload = JSON.parse(raw); } catch { payload = raw; }
+  } else {
+    if (parts[1] === '') throw new Error('JWS has an empty payload (detached); provide the payload separately to verify');
+    const raw = b64urlDecode(parts[1]).toString('utf8');
+    try { payload = JSON.parse(raw); } catch { payload = raw; }
+    signingInput = Buffer.from(`${parts[0]}.${parts[1]}`);
+  }
+
+  return { header, payload, signingInput, signature: b64urlDecode(parts[2]) };
 }
 
 /** Verify a signature with a node KeyObject for the JWS `alg`. Unknown algs and `none` are refused. */
@@ -70,8 +96,8 @@ export default class CryptoToolsPlugin extends BasePlugin {
     this.commands = [
       {
         command: 'verifyJws',
-        description: 'Verify a signed JWS (a receipt or token) against a JWKS URL, a JWK or a PEM public key, and return its header and claims. Optionally check expected claims such as typ and iss.',
-        usage: 'verifyJws({ jws: "eyJ…", jwks_url: "https://reapption.net/.well-known/jwks.json", expect: { typ: "reapption.reaction-receipt.v1", iss: "https://reapption.net" } })  // or jwk: {...} / public_key: "-----BEGIN PUBLIC KEY-----…"',
+        description: 'Verify a signed JWS (a receipt or token) against a JWKS URL, a JWK or a PEM public key, and return its header and claims. Optionally check expected claims such as typ and iss. For detached JWS (payload transmitted separately), provide the payload as the \'payload\' parameter.',
+        usage: 'verifyJws({ jws: "eyJ…", jwks_url: "https://reapption.net/.well-known/jwks.json", expect: { typ: "reapption.reaction-receipt.v1", iss: "https://reapption.net" }, payload: "<detached payload string or JSON>" })  // or jwk: {...} / public_key: "-----BEGIN PUBLIC KEY-----…"',
         examples: [
           'verify this receipt signature',
           'check the JWS against the jwks url',
@@ -148,8 +174,12 @@ export default class CryptoToolsPlugin extends BasePlugin {
     return pick.map(k => ({ kid: k.kid || null, key: crypto.createPublicKey({ key: k, format: 'jwk' }) }));
   }
 
-  async verifyJws({ jws, jwks_url, jwksUrl, jwk, public_key, publicKey, expect = null } = {}) {
-    const { header, payload, signingInput, signature } = parseJws(jws);
+  /**
+   * Verify a JWS. If the optional `payload` parameter is provided, it is used as the detached
+   * payload (the JWS may have an empty payload part). Otherwise the embedded payload is used.
+   */
+  async verifyJws({ jws, jwks_url, jwksUrl, jwk, public_key, publicKey, expect = null, payload = null } = {}) {
+    const { header, payload: parsedPayload, signingInput, signature } = parseJws(jws, payload);
     if (!header.alg || header.alg === 'none') throw new Error('The JWS has no signing algorithm (alg none is never accepted)');
     const keys = await this._candidateKeys({ header, jwks_url: jwks_url || jwksUrl, jwk, public_key: public_key || publicKey });
 
@@ -159,7 +189,7 @@ export default class CryptoToolsPlugin extends BasePlugin {
     }
 
     const checks = {};
-    const claims = payload && typeof payload === 'object' ? payload : null;
+    const claims = parsedPayload && typeof parsedPayload === 'object' ? parsedPayload : null;
     const now = Math.floor(Date.now() / 1000);
     if (claims?.exp != null) checks.exp = Number(claims.exp) > now;
     if (claims?.nbf != null) checks.nbf = Number(claims.nbf) <= now + 60;
@@ -180,7 +210,7 @@ export default class CryptoToolsPlugin extends BasePlugin {
       kid: matched?.kid ?? header.kid ?? null,
       checks,
       header,
-      claims: payload,
+      claims: parsedPayload,
       result: !matched
         ? `Signature INVALID: no ${keys.length > 1 ? 'key' : 'given key'} verifies this ${header.alg} JWS. Do not trust its claims.`
         : failed.length

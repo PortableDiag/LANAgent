@@ -6,24 +6,121 @@ import { logger } from '../utils/logger.js';
  * Base OutputParser class for extracting and validating structured data from LLM responses
  */
 export class OutputParser {
-  constructor(schema = null) {
+  /**
+   * @param {object|null} schema - JSON Schema for validation
+   * @param {object} [options] - Configuration options
+   * @param {boolean} [options.repair=true] - On a JSON.parse failure, retry once after repairJSON()
+   */
+  constructor(schema = null, options = {}) {
     this.schema = schema;
+    this.repair = options.repair !== false; // default true
     this.ajv = new Ajv({ allErrors: true, coerceTypes: true });
     addFormats(this.ajv);
     this.validator = null; // Lazy: compile on first parse
   }
 
   /**
-   * Extract JSON from text that may contain markdown code fences or other formatting
+   * Repair common LLM JSON mistakes: comments, single-quoted strings,
+   * unquoted keys, trailing commas. String-aware: content inside
+   * double-quoted strings (URLs with //, apostrophes) is never touched.
+   * Only used as a fallback after the text failed to parse as-is.
+   * @param {string} text - Raw text to repair
+   * @returns {string} Repaired text
    */
-  extractJSON(text) {
-    if (!text || typeof text !== 'string') {
-      return null;
+  static repairJSON(text) {
+    if (!text || typeof text !== 'string') return text;
+
+    let out = '';
+    let lastSig = ''; // last non-whitespace char emitted outside strings
+    const n = text.length;
+    let i = 0;
+
+    const emit = (str) => {
+      out += str;
+      const t = str.trim();
+      if (t) lastSig = t[t.length - 1];
+    };
+
+    while (i < n) {
+      const ch = text[i];
+
+      // Double-quoted string: copy verbatim, honouring escapes.
+      if (ch === '"') {
+        let j = i + 1;
+        while (j < n && text[j] !== '"') j += text[j] === '\\' ? 2 : 1;
+        emit(text.slice(i, Math.min(j + 1, n)));
+        i = j + 1;
+        continue;
+      }
+
+      // Single-quoted string -> double-quoted, re-escaping as needed.
+      if (ch === "'") {
+        let j = i + 1;
+        let body = '';
+        while (j < n && text[j] !== "'") {
+          if (text[j] === '\\' && j + 1 < n) {
+            body += text[j + 1] === "'" ? "'" : text[j] + text[j + 1];
+            j += 2;
+          } else {
+            body += text[j] === '"' ? '\\"' : text[j];
+            j += 1;
+          }
+        }
+        emit(`"${body}"`);
+        i = j + 1;
+        continue;
+      }
+
+      // Comments.
+      if (ch === '/' && text[i + 1] === '/') {
+        while (i < n && text[i] !== '\n') i++;
+        continue;
+      }
+      if (ch === '/' && text[i + 1] === '*') {
+        const end = text.indexOf('*/', i + 2);
+        i = end === -1 ? n : end + 2;
+        continue;
+      }
+
+      // Trailing comma: drop if the next significant char closes a container.
+      if (ch === ',') {
+        let k = i + 1;
+        while (k < n && /\s/.test(text[k])) k++;
+        if (text[k] === '}' || text[k] === ']') { i++; continue; }
+        emit(ch);
+        i++;
+        continue;
+      }
+
+      // Bare identifier used as an object key ({ key: ... } / , key: ...).
+      if (/[A-Za-z_$]/.test(ch)) {
+        let j = i;
+        while (j < n && /[\w$]/.test(text[j])) j++;
+        const word = text.slice(i, j);
+        let k = j;
+        while (k < n && /\s/.test(text[k])) k++;
+        if (text[k] === ':' && (lastSig === '{' || lastSig === ',')) {
+          emit(`"${word}"`);
+        } else {
+          emit(word);
+        }
+        i = j;
+        continue;
+      }
+
+      emit(ch);
+      i++;
     }
 
-    // Strip all code fences — Claude nests ```javascript inside ```json
-    const cleaned = text.replace(/```\w*\n?/g, '');
+    return out;
+  }
 
+  /**
+   * Locate the outermost JSON object/array in already fence-stripped text.
+   * @param {string} cleaned
+   * @returns {string}
+   */
+  static locateJSON(cleaned) {
     // Try to find JSON object
     const firstBrace = cleaned.indexOf('{');
     const lastBrace = cleaned.lastIndexOf('}');
@@ -43,6 +140,19 @@ export class OutputParser {
   }
 
   /**
+   * Extract JSON from text that may contain markdown code fences or other formatting
+   */
+  extractJSON(text) {
+    if (!text || typeof text !== 'string') {
+      return null;
+    }
+
+    // Strip all code fences — Claude nests ```javascript inside ```json
+    const cleaned = text.replace(/```\w*\n?/g, '');
+    return OutputParser.locateJSON(cleaned);
+  }
+
+  /**
    * Parse text and validate against schema
    */
   parse(text) {
@@ -56,7 +166,24 @@ export class OutputParser {
     try {
       parsed = JSON.parse(jsonStr);
     } catch (error) {
-      throw new ParseError(`Invalid JSON: ${error.message}`, text);
+      // Fallback only: valid JSON is never rewritten. Repair the located
+      // slice first (prose apostrophes around it can't interfere), then the
+      // whole fence-stripped text (a comment may hold a stray brace).
+      let repaired;
+      if (this.repair) {
+        const cleaned = text.replace(/```\w*\n?/g, '');
+        for (const candidate of [jsonStr, cleaned]) {
+          try {
+            repaired = JSON.parse(OutputParser.locateJSON(OutputParser.repairJSON(candidate)));
+            break;
+          } catch { /* try the next candidate, else the original error */ }
+        }
+      }
+      if (repaired === undefined) {
+        throw new ParseError(`Invalid JSON: ${error.message}`, text);
+      }
+      logger.debug('OutputParser: parsed after JSON repair');
+      parsed = repaired;
     }
 
     if (this.schema && !this.validator) {

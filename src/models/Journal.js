@@ -1,6 +1,7 @@
 import mongoose from 'mongoose';
 import NodeCache from 'node-cache';
 import { retryOperation } from '../utils/retryUtils.js';
+import { logger } from '../utils/logger.js';
 
 const journalEntrySchema = new mongoose.Schema({
   content: {
@@ -74,6 +75,58 @@ journalSchema.index({
 // Cache for query results (5 min TTL)
 journalSchema.statics.cache = new NodeCache({ stdTTL: 300, checkperiod: 60 });
 
+/**
+ * Allowed status transitions for journal lifecycle enforcement.
+ * Only active journals can be closed; closed journals cannot transition further.
+ */
+journalSchema.statics.transitionMap = {
+  active: ['closed']
+};
+
+/**
+ * Atomically transition a journal to a new status, enforcing valid lifecycle.
+ * Uses findOneAndUpdate with a status precondition to prevent race conditions
+ * and invalid state changes (e.g., closing an already closed journal).
+ *
+ * @param {string} journalId - The journal's ObjectId
+ * @param {string} newStatus - Target status (must be in transitionMap for current status)
+ * @returns {Promise<Object|null>} Updated journal document, or null if transition invalid
+ */
+journalSchema.statics.transitionStatus = async function(journalId, newStatus) {
+  const allowed = this.transitionMap;
+  // Build a query that only matches if the current status can transition to newStatus
+  const validFromStatuses = Object.keys(allowed).filter(from =>
+    allowed[from].includes(newStatus)
+  );
+
+  if (validFromStatuses.length === 0) {
+    logger.warn(`Journal.transitionStatus: no valid source status for target "${newStatus}"`);
+    return null;
+  }
+
+  const update = { status: newStatus };
+  if (newStatus === 'closed') {
+    update['metadata.closedAt'] = new Date();
+  }
+
+  const result = await retryOperation(() =>
+    this.findOneAndUpdate(
+      { _id: journalId, status: { $in: validFromStatuses } },
+      { $set: update },
+      { new: true }
+    ),
+    { context: 'Journal.transitionStatus' }
+  );
+
+  if (result) {
+    logger.info(`Journal ${journalId} transitioned to ${newStatus}`);
+  } else {
+    logger.warn(`Journal ${journalId} transition to ${newStatus} failed (invalid state or not found)`);
+  }
+
+  return result;
+};
+
 // Instance methods
 journalSchema.methods.addEntry = function(content, source = 'text') {
   this.entries.push({ content, source, timestamp: new Date() });
@@ -87,10 +140,24 @@ journalSchema.methods.addEntry = function(content, source = 'text') {
   return this.save();
 };
 
-journalSchema.methods.close = function(summary = '') {
+/**
+ * Close the journal with an optional summary.
+ * The active→closed flip is claimed atomically via transitionStatus, so two
+ * concurrent stops cannot both close (and both run session post-processing).
+ * Everything else the caller set on the instance (title, tags, mood) plus the
+ * summary and sessionDuration is then persisted with a normal save.
+ * @param {string} [summary=''] - Final summary text
+ * @returns {Promise<Object>} The saved journal document
+ * @throws {Error} If the journal cannot be closed (already closed or not found)
+ */
+journalSchema.methods.close = async function(summary = '') {
+  const updated = await this.constructor.transitionStatus(this._id, 'closed');
+  if (!updated) {
+    throw new Error(`Cannot close journal ${this._id}: invalid state or not found`);
+  }
   this.status = 'closed';
   this.summary = summary;
-  this.metadata.closedAt = new Date();
+  this.metadata.closedAt = updated.metadata?.closedAt || new Date();
   this.metadata.sessionDuration = this.metadata.closedAt - this.createdAt;
   this.constructor.cache.flushAll();
   return this.save();

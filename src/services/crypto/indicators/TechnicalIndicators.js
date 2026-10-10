@@ -121,6 +121,45 @@ export class TechnicalIndicators {
     };
   }
 
+  /**
+   * Detect Moving Average crossover between short and long periods.
+   * Returns 'bullish' if short MA crosses above long MA recently,
+   * 'bearish' if crosses below, otherwise 'neutral'.
+   * @param {number[]} prices - Array of price values
+   * @param {number} shortPeriod - Short moving average period
+   * @param {number} longPeriod - Long moving average period
+   * @returns {string} 'bullish', 'bearish', or 'neutral'
+   */
+  detectMACrossover(prices, shortPeriod, longPeriod) {
+    if (!prices || prices.length < longPeriod + 1) {
+      return 'neutral';
+    }
+
+    // Current MAs (using the most recent prices)
+    const shortCurrent = this.calculateSMA(prices.slice(-shortPeriod), shortPeriod);
+    const longCurrent = this.calculateSMA(prices.slice(-longPeriod), longPeriod);
+
+    // Previous MAs (using prices up to the second-to-last point)
+    const shortPrevious = this.calculateSMA(prices.slice(-(shortPeriod + 1), -1), shortPeriod);
+    const longPrevious = this.calculateSMA(prices.slice(-(longPeriod + 1), -1), longPeriod);
+
+    if (shortCurrent === null || longCurrent === null || shortPrevious === null || longPrevious === null) {
+      return 'neutral';
+    }
+
+    // Bullish crossover: short was <= long, now short > long
+    if (shortCurrent > longCurrent && shortPrevious <= longPrevious) {
+      return 'bullish';
+    }
+
+    // Bearish crossover: short was >= long, now short < long
+    if (shortCurrent < longCurrent && shortPrevious >= longPrevious) {
+      return 'bearish';
+    }
+
+    return 'neutral';
+  }
+
   registerIndicators() {
     // RSI (14-period default)
     this.register('rsi', async (ctx) => {
@@ -321,6 +360,25 @@ export class TechnicalIndicators {
     }, {
       type: 'string',
       description: 'Trend direction (uptrend, downtrend, sideways)',
+      category: 'technical'
+    });
+
+    // MA Crossover signals
+    this.register('ma_crossover_20_50', async (ctx) => {
+      const prices = ctx.marketData?.priceHistory?.[ctx.network] || [];
+      return this.detectMACrossover(prices, 20, 50);
+    }, {
+      type: 'string',
+      description: 'MA crossover signal (20 vs 50): bullish, bearish, or neutral',
+      category: 'technical'
+    });
+
+    this.register('ma_crossover_50_200', async (ctx) => {
+      const prices = ctx.marketData?.priceHistory?.[ctx.network] || [];
+      return this.detectMACrossover(prices, 50, 200);
+    }, {
+      type: 'string',
+      description: 'MA crossover signal (50 vs 200): bullish, bearish, or neutral',
       category: 'technical'
     });
   }

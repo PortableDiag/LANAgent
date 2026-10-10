@@ -185,3 +185,54 @@ test('an unknown address returns zeros rather than throwing', async (t) => {
   assert.strictEqual(b.user.participationFrequency, 0, 'no first participation means no rate');
   assert.strictEqual(b.user.averageReward, 0);
 });
+
+// --- Atomic status transition tests ---
+
+test('transitionStatus throws for invalid newStatus', async (t) => {
+  t.after(() => mock.restoreAll());
+  await assert.rejects(
+    () => OracleParticipation.transitionStatus(1, 'invalid'),
+    { message: 'Invalid status: invalid' }
+  );
+});
+
+test('transitionStatus returns null when current status does not allow transition', async (t) => {
+  t.after(() => mock.restoreAll());
+  const mockFindOneAndUpdate = mock.method(OracleParticipation, 'findOneAndUpdate', () => Promise.resolve(null));
+  const result = await OracleParticipation.transitionStatus(1, 'won');
+  assert.strictEqual(result, null);
+  const callArgs = mockFindOneAndUpdate.mock.calls[0].arguments;
+  assert.deepStrictEqual(callArgs[0], { requestId: 1, status: { $in: ['revealed'] } });
+  assert.strictEqual(callArgs[1].$set.status, 'won');
+  assert.ok(callArgs[1].$set.updatedAt instanceof Date);
+  assert.deepStrictEqual(callArgs[2], { new: true, runValidators: true });
+});
+
+test('transitionStatus successfully transitions and returns updated document', async (t) => {
+  t.after(() => mock.restoreAll());
+  const mockDoc = { requestId: 1, status: 'won' };
+  const mockFindOneAndUpdate = mock.method(OracleParticipation, 'findOneAndUpdate', () => Promise.resolve(mockDoc));
+  const result = await OracleParticipation.transitionStatus(1, 'won');
+  assert.strictEqual(result, mockDoc);
+  const callArgs = mockFindOneAndUpdate.mock.calls[0].arguments;
+  assert.deepStrictEqual(callArgs[0], { requestId: 1, status: { $in: ['revealed'] } });
+  assert.strictEqual(callArgs[1].$set.status, 'won');
+  assert.ok(callArgs[1].$set.updatedAt instanceof Date);
+  assert.deepStrictEqual(callArgs[2], { new: true, runValidators: true });
+});
+
+test('transitionStatus returns null without a DB write when no state can reach the target', async (t) => {
+  t.after(() => mock.restoreAll());
+  const mockFindOneAndUpdate = mock.method(OracleParticipation, 'findOneAndUpdate', () => Promise.resolve({}));
+  const result = await OracleParticipation.transitionStatus(1, 'monitoring');
+  assert.strictEqual(result, null);
+  assert.strictEqual(mockFindOneAndUpdate.mock.callCount(), 0, 'an unreachable target must not touch the DB');
+});
+
+test('transitionStatus to expired accepts every non-terminal state', async (t) => {
+  t.after(() => mock.restoreAll());
+  const mockFindOneAndUpdate = mock.method(OracleParticipation, 'findOneAndUpdate', () => Promise.resolve({}));
+  await OracleParticipation.transitionStatus(7, 'expired');
+  const filter = mockFindOneAndUpdate.mock.calls[0].arguments[0];
+  assert.deepStrictEqual(filter, { requestId: 7, status: { $in: ['monitoring', 'committed', 'revealed'] } });
+});
