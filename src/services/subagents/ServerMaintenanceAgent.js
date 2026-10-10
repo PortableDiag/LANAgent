@@ -463,7 +463,52 @@ export class ServerMaintenanceAgent extends BaseAgentHandler {
       }
     }
 
+    // Usage alone missed a drive that had dropped off the bus: Goliath's USB disk came back as sdj
+    // while /media/Torrents stayed mounted on the dead sdc1, and every read failed with an
+    // input/output error until it was remounted by hand (2026-10-10).
+    try {
+      for (const issue of await this.checkMountHealth()) {
+        status = 'critical';
+        issues.push(issue);
+      }
+    } catch (err) {
+      logger.warn(`ServerMaintenanceAgent: mount health check failed: ${err.message}`);
+    }
+
     return { name: 'disk', status, data: mounts, issues };
+  }
+
+  /**
+   * Mounts whose block device no longer exists, and existing disks logging I/O errors in the last
+   * 15 minutes (a vanished device's errors are already covered by its mount, and stop mattering once
+   * it is remounted).
+   * A gone device whose fstab UUID is present again is named, with the remount that fixes it.
+   */
+  async checkMountHealth() {
+    const output = await this.runSSHCommand(
+      'awk \'$1 ~ "^/dev/" {print $1, $2}\' /proc/mounts | while read dev mp; do ' +
+      '[ -b "$dev" ] && continue; ' +
+      'u=$(awk -v m="$mp" \'$1 !~ /^#/ && $2 == m {print $1}\' /etc/fstab | head -1); ' +
+      'new=""; [ -n "$u" ] && new=$(findfs "$u" 2>/dev/null); echo "GONE $dev $mp ${new:--}"; done; ' +
+      'journalctl -k --since "-15 min" --no-pager 2>/dev/null | grep -oE "I/O error,? (on )?dev [a-z0-9]+" | awk \'{print $NF}\' | sort | uniq -c | while read n d; do [ -b "/dev/$d" ] && echo "IOERR $d $n"; done; true'
+    );
+    const issues = [];
+    const gone = new Set();
+    for (const line of output.trim().split('\n')) {
+      const parts = line.trim().split(/\s+/);
+      if (parts[0] === 'GONE' && parts.length >= 4) {
+        const [, dev, mp, now] = parts;
+        gone.add(dev.replace('/dev/', ''));
+        issues.push(now !== '-'
+          ? `${mp} is mounted on ${dev}, which no longer exists — the disk came back as ${now}. Remount: stop what uses it, then umount -l ${mp} && mount ${mp}`
+          : `${mp} is mounted on ${dev}, which no longer exists — the disk dropped off and has not come back`);
+      } else if (parts[0] === 'IOERR' && parts.length >= 3) {
+        const [, dev, count] = parts;
+        if (gone.has(dev)) continue;
+        issues.push(`/dev/${dev}: ${count} kernel I/O error(s) in the last 15 minutes`);
+      }
+    }
+    return issues;
   }
 
   parseSpaceToGB(str) {

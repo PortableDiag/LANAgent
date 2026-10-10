@@ -2,6 +2,11 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.505] - 2026-10-10
+
+### Fixed
+- **Server maintenance missed a disk that had dropped off the bus.** The disk check read only usage. When a USB disk disconnects and comes back under a new device name, its mount stays on the old, now-missing device and every read fails with an input/output error, while usage still looks normal. The disk check now flags any mount whose device no longer exists (naming the device the disk came back as, from its fstab UUID, and the remount that fixes it) and any existing disk with kernel I/O errors in the last 15 minutes. Both are critical.
+
 ## [2.25.504] - 2026-10-10
 
 ### Fixed
