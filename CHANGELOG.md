@@ -2,6 +2,11 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.507] - 2026-10-10
+
+### Added
+- **Token trader heartbeat: manual tick and health readout** (#2644, merged after repair). `triggerTick(address)` runs one tick for a registered token under the same semaphore, rate limit and swap lock as the scheduled ticks, and `getHealth()` reports started/token count/ticks per minute/tokens in error. Dropped from the PR: a 3x retry around the trade execution (a retry after a broadcast swap trades twice), a 60 s market-data cache (ticks must price on fresh data) and unwired config overrides. #2648 (hot-reloaded RPC error classifier) closed: the static classification already lives in `contractServiceWrapper.withRpcFallback`.
+
 ## [2.25.506] - 2026-10-10
 
 ### Fixed

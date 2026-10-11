@@ -153,7 +153,8 @@ class TokenTraderHeartbeatManager {
   }
 
   /**
-   * Internal tick handler — called by setInterval for each token
+   * Internal tick handler — called by setInterval for each token.
+   * Returns the result of _executeTick if the tick actually ran, otherwise undefined.
    */
   async _tick(address) {
     if (!this.started) return;
@@ -187,12 +188,14 @@ class TokenTraderHeartbeatManager {
     state.running = true;
     state.runningPromise = this._executeTick(address, state);
 
+    let result;
     try {
-      await state.runningPromise;
+      result = await state.runningPromise;
     } finally {
       state.running = false;
       state.runningPromise = null;
     }
+    return result;
   }
 
   /**
@@ -231,7 +234,8 @@ class TokenTraderHeartbeatManager {
       const trader = strategyRegistry.getTokenTrader(address);
       const network = trader?.config?.tokenNetwork || 'bsc';
 
-      // Execute with per-network swap lock (prevents nonce conflicts) and timeout
+      // Execute with per-network swap lock (prevents nonce conflicts) and timeout.
+      // Never retried: a retry after a broadcast swap would trade twice.
       const result = await Promise.race([
         this.withSwapLock(network, () => this.cryptoAgent.executeTokenTrader(decision, marketData)),
         new Promise((_, reject) =>
@@ -298,6 +302,8 @@ class TokenTraderHeartbeatManager {
         logger.debug(`TokenHeartbeat: ${state.symbol} tick complete — hold (${elapsed}ms)`);
       }
 
+      return result;
+
     } catch (error) {
       state.consecutiveErrors++;
       const elapsed = Date.now() - startTime;
@@ -311,6 +317,7 @@ class TokenTraderHeartbeatManager {
           logger.warn(`TokenHeartbeat: ${state.symbol} — backing off to ${backoffInterval / 1000}s after ${state.consecutiveErrors} consecutive errors`);
         }
       }
+      throw error; // rethrow so callers (like triggerTick) can handle it
     } finally {
       this.concurrentTicks--;
     }
@@ -378,6 +385,43 @@ class TokenTraderHeartbeatManager {
   _intervalLabel(ms) {
     if (ms < 60_000) return `${ms / 1000}s`;
     return `${ms / 60_000}m`;
+  }
+
+  /**
+   * Manually trigger a tick for a specific token address.
+   * Validates that the token is registered in the heartbeat manager,
+   * then invokes the internal tick cycle respecting all concurrency,
+   * rate limiting, and swap lock constraints.
+   *
+   * @param {string} address - The token contract address
+   * @returns {Promise<object|undefined>} Resolves with the tick result (or undefined if skipped)
+   * @throws {Error} If the token is not registered or the tick fails
+   */
+  async triggerTick(address) {
+    const key = address.toLowerCase();
+    if (!this.tokens.has(key)) {
+      throw new Error(`Token ${address} is not registered in heartbeat manager`);
+    }
+    // _tick handles semaphore, rate limiter, and returns the result of _executeTick if it runs
+    return await this._tick(key);
+  }
+
+  /**
+   * Health check endpoint data for monitoring.
+   * @returns {object} Health status including token states and error counts
+   */
+  getHealth() {
+    const status = this.getStatus();
+    const errorTokens = Object.values(status.tokens).filter(t => t.consecutiveErrors > 0).length;
+    return {
+      healthy: this.started && status.tokenCount > 0,
+      started: this.started,
+      tokenCount: status.tokenCount,
+      concurrentTicks: status.concurrentTicks,
+      ticksThisMinute: status.ticksThisMinute,
+      tokens: status.tokens,
+      errors: errorTokens
+    };
   }
 }
 
