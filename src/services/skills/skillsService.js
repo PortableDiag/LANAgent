@@ -451,6 +451,14 @@ export class SkillsService {
     return (await this.rejectedPeerSkills()).some(r => r.name === name && (r.origin || '') === (origin || ''));
   }
 
+  /** Record that the operator rejected `name` from `origin`, installed or not, so syncs skip it. */
+  async rejectPeerSkill(name, origin = '') {
+    const list = (await this.rejectedPeerSkills()).filter(r => !(r.name === name && (r.origin || '') === (origin || '')));
+    list.push({ name, origin: origin || '', at: new Date().toISOString() });
+    await fs.mkdir(this.dir, { recursive: true });
+    await fs.writeFile(path.join(this.dir, '.p2p-rejected.json'), JSON.stringify(list.slice(-500), null, 2), 'utf8');
+  }
+
   /** @param {{remember?: boolean}} [opts] remember:false — a sync dropping a skill, not the operator rejecting it */
   async remove(name, { remember = true } = {}) {
     const skill = await this.get(name);
@@ -458,10 +466,7 @@ export class SkillsService {
     if (skill.bundled) throw new Error(`"${name}" ships with LANAgent and cannot be deleted; save a skill of the same name to replace it`);
     if (remember && (skill.meta?.source === 'peer' || skill.meta?.source === 'trellis')) {
       // Remember it, or the next P2P or Skills-basket sync would install it straight back
-      const list = (await this.rejectedPeerSkills()).filter(r => !(r.name === name && (r.origin || '') === (skill.meta.origin || '')));
-      list.push({ name, origin: skill.meta.origin || '', at: new Date().toISOString() });
-      await fs.mkdir(this.dir, { recursive: true });
-      await fs.writeFile(path.join(this.dir, '.p2p-rejected.json'), JSON.stringify(list.slice(-500), null, 2), 'utf8');
+      await this.rejectPeerSkill(name, skill.meta.origin || '');
     }
     await fs.rm(path.dirname(skill.path), { recursive: true, force: true });
     this.embeddings.delete(name);

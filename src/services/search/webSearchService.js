@@ -28,6 +28,9 @@ class WebSearchService {
     this.cache = new NodeCache({ stdTTL: 600, maxKeys: 500 });
     this.providers = [new BraveSearchProvider(env), new YandexSearchProvider(env),
       new SearxngSearchProvider(env), new DuckDuckGoSearchProvider(env)];
+    // WEB_SEARCH_DISABLED_PROVIDERS=duckduckgo,… takes a backend out without removing its key.
+    this.disabledProviders = new Set((env.WEB_SEARCH_DISABLED_PROVIDERS || '')
+      .split(',').map(s => s.trim().toLowerCase()).filter(Boolean));
   }
 
   /**
@@ -38,7 +41,7 @@ class WebSearchService {
     const order = (this.env.WEB_SEARCH_PROVIDER_ORDER || DEFAULT_ORDER.join(','))
       .split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
     const byName = new Map(this.providers.map(p => [p.name, p]));
-    return order.map(n => byName.get(n)).filter(p => p && p.isConfigured() &&
+    return order.map(n => byName.get(n)).filter(p => p && p.isConfigured() && !this.disabledProviders.has(p.name) &&
       (tier === 'all' || (tier === 'keyless') === Boolean(p.keyless)));
   }
 
@@ -53,6 +56,8 @@ class WebSearchService {
    */
   unavailableReason() {
     const names = this.providers.map(p => p.name).join(', ');
+    const off = [...this.disabledProviders].filter(n => this.providers.some(p => p.name === n && p.isConfigured()));
+    if (off.length) return `every configured search backend is disabled by WEB_SEARCH_DISABLED_PROVIDERS (${off.join(', ')})`;
     return `no search backend is configured (set BRAVE_SEARCH_API_KEY, YANDEX_SEARCH_API_KEY + YANDEX_SEARCH_FOLDER_ID or SEARXNG_URL, or leave DUCKDUCKGO_SEARCH on; available backends: ${names})`;
   }
 

@@ -511,5 +511,105 @@ externalAuditLogSchema.statics.getDurationPercentiles = async function({
   };
 };
 
+/**
+ * Get per-endpoint aggregated metrics over a configurable time window.
+ * Computes total requests, average/min/max duration, success/failure/abort counts,
+ * and last request time for each path, with optional filtering by method and agentId.
+ *
+ * @param {Object} options
+ * @param {number} [options.days] - Number of days to look back (default 30 if no explicit dates)
+ * @param {Date|string} [options.startDate] - Start of the time window (inclusive)
+ * @param {Date|string} [options.endDate] - End of the time window (inclusive)
+ * @param {string} [options.agentId] - Filter by agent identifier
+ * @param {string} [options.method] - Filter by HTTP method
+ * @param {number} [options.minRequests] - Minimum total requests a path must have to be included
+ * @returns {Promise<Array>} Array of path statistics objects sorted by totalRequests descending
+ */
+externalAuditLogSchema.statics.getPathStatistics = async function({
+  days,
+  startDate,
+  endDate,
+  agentId,
+  method,
+  minRequests,
+  limit = 100
+} = {}) {
+  // Determine the time window
+  let start, end;
+  if (days !== undefined) {
+    if (typeof days !== 'number' || days <= 0) {
+      throw new TypeError('days must be a positive number');
+    }
+    const now = new Date();
+    start = new Date(now.getTime() - days * 24 * 60 * 60 * 1000);
+    end = now;
+  } else {
+    if (startDate !== undefined) {
+      start = new Date(startDate);
+      if (Number.isNaN(start.getTime())) throw new TypeError('startDate is invalid');
+    }
+    if (endDate !== undefined) {
+      end = new Date(endDate);
+      if (Number.isNaN(end.getTime())) throw new TypeError('endDate is invalid');
+    }
+    // Default to last 30 days if no date parameters provided
+    if (start === undefined && end === undefined) {
+      const now = new Date();
+      start = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
+      end = now;
+    } else {
+      // If only one bound is given, default the other to now or epoch
+      if (start === undefined) start = new Date(0);
+      if (end === undefined) end = new Date();
+    }
+  }
+
+  const matchFilter = {
+    timestamp: { $gte: start, $lte: end }
+  };
+  if (agentId !== undefined) matchFilter.agentId = agentId;
+  if (method !== undefined) matchFilter.method = method;
+
+  const pipeline = [
+    { $match: matchFilter },
+    {
+      $group: {
+        // path is req.originalUrl, query string included: group on the part before '?'
+        // or every distinct query becomes its own "endpoint".
+        _id: { $arrayElemAt: [{ $split: ['$path', '?'] }, 0] },
+        totalRequests: { $sum: 1 },
+        avgDuration: { $avg: '$duration' },
+        minDuration: { $min: '$duration' },
+        maxDuration: { $max: '$duration' },
+        successCount: {
+          $sum: { $cond: [{ $eq: ['$success', true] }, 1, 0] }
+        },
+        failureCount: {
+          $sum: { $cond: [{ $eq: ['$success', false] }, 1, 0] }
+        },
+        abortedCount: {
+          $sum: { $cond: [{ $eq: ['$completionState', 'aborted'] }, 1, 0] }
+        },
+        lastRequestTime: { $max: '$timestamp' }
+      }
+    }
+  ];
+
+  // Apply minRequests filter after grouping if specified
+  if (minRequests !== undefined) {
+    if (typeof minRequests !== 'number' || minRequests < 0) {
+      throw new TypeError('minRequests must be a non-negative number');
+    }
+    pipeline.push({ $match: { totalRequests: { $gte: minRequests } } });
+  }
+
+  if (typeof limit !== 'number' || !Number.isInteger(limit) || limit < 1 || limit > 500) {
+    throw new TypeError('limit must be an integer from 1 to 500');
+  }
+  pipeline.push({ $sort: { totalRequests: -1 } }, { $limit: limit });
+
+  return await this.aggregate(pipeline).exec();
+};
+
 const ExternalAuditLog = mongoose.model('ExternalAuditLog', externalAuditLogSchema);
 export default ExternalAuditLog;

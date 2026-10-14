@@ -2,6 +2,26 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.509] - 2026-10-13
+
+### Fixed
+- **Timed-out self-modification checks left processes running indefinitely.** The deploy-time import check imported each changed file and waited for the process to exit, which a module that starts timers never does. Its timeout then sent SIGTERM, which handlers installed at import catch, so the check survived as an orphan running a second copy of the agent's intervals; its database calls failed with "buffering timed out" errors that looked like a database fault. A self-modification test run was found still alive after 15 days the same way: the test runner forks a child per file, and the timeout reached only the runner. Both checks now run in their own process group and are killed as a group on timeout, and the import check exits as soon as the import settles. The pre-PR load check also kills with SIGKILL.
+
+## [2.25.508] - 2026-10-13
+
+### Added
+- **Batch transaction status** (#2658, merged after repair). `POST /api/transactions/batch-status` takes up to 50 `{ txHash, network }` entries and returns one result per entry, with the single-status route's finalized-only cache. One failed lookup does not fail the batch. The PR accepted any batch size, each entry costing up to two RPC reads; it is now capped and validated.
+- **Per-endpoint statistics for the external API** (#2659, merged after repair). `GET /api/external/admin/audit/paths` reports request count, average/min/max duration and success/failure/aborted counts per endpoint. Paths are grouped without their query string (the audit log stores the full URL), and the result is bounded.
+- **Toggle a chosen set of paid services** (#2662, merged after repair). `POST /p2p/api/skynet/services/bulk` accepts an optional `serviceIds` array with a boolean `skynetEnabled`; without it the global toggle is unchanged.
+- **Job history filters and pagination** (#2656, merged after repair). `GET /api/external/jobs/admin/all` filters by status, service and date range, sorts, and pages. Status is matched to the stored casing (`Completed`, not `completed`) and an unknown value is refused, so a filter can no longer return an empty list that reads as "no jobs". The old route also dropped its own limit.
+- **Reject a Skills-basket skill** (#2653, merged after repair). `rejectBasketSkill` removes an installed basket skill and records the rejection, so later syncs never reinstall it. As submitted it reported success and changed nothing: the next sync put the skill back.
+- **`WEB_SEARCH_DISABLED_PROVIDERS`** (#2661, merged after repair) takes a search backend out of the chain without removing its key; the error names the setting when it leaves no backend. The PR's broader retry rewrite was reverted: search still retries once, on network errors only.
+
+### Fixed
+- **A deleted device alias kept resolving for up to five minutes** (#2654, merged after repair). The web delete route removed the row but not the model's resolve cache; it now goes through `DeviceAlias.deleteAlias`, which clears both caches.
+
+Closed without merging: #2655 (duplicated `mcpClient.discoverTools`, and its stdio path would hang without the MCP handshake), #2657 (to-do list persistence nothing enabled; resumed runs already rebuild the list from the trace), #2660 (a command-pattern registry with no callers).
+
 ## [2.25.507] - 2026-10-10
 
 ### Added

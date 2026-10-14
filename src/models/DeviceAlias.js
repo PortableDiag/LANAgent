@@ -203,6 +203,37 @@ deviceAliasSchema.statics.setAlias = async function(aliasName, deviceName, plugi
   return result;
 };
 
+/**
+ * Delete an alias by name and plugin, clearing caches and returning the deleted document.
+ * @param {string} aliasName - The alias to delete.
+ * @param {string} [plugin='govee'] - The plugin namespace.
+ * @returns {Promise<Object|null>} The deleted alias document, or null if not found.
+ */
+deviceAliasSchema.statics.deleteAlias = async function(aliasName, plugin = 'govee') {
+  const normalized = aliasName.toLowerCase().trim();
+  const cacheKey = `${plugin}:${normalized}`;
+
+  try {
+    const deleted = await retryOperation(
+      () => this.findOneAndDelete({ alias: normalized, plugin }),
+      { retries: 3 }
+    );
+
+    // Clear caches regardless of whether a document was found
+    aliasCache.del(cacheKey);
+    aliasNegativeCache.del(cacheKey);
+
+    if (deleted) {
+      logger.info(`Deleted alias "${normalized}" for plugin "${plugin}"`);
+    }
+
+    return deleted;
+  } catch (error) {
+    logger.error(`Error deleting alias "${normalized}" for plugin "${plugin}":`, error);
+    throw error; // rethrow to let caller handle
+  }
+};
+
 deviceAliasSchema.statics.clearCache = function() {
   aliasCache.flushAll();
   aliasNegativeCache.flushAll();

@@ -6,7 +6,7 @@ import { pathToFileURL } from 'url';
 import { TEMP_PATH } from '../utils/paths.js';
 import fs from 'fs/promises';
 import { existsSync, readdirSync } from 'fs';
-import { execSync, execFileSync } from 'child_process';
+import { execSync, execFileSync, spawn } from 'child_process';
 import { resolveGitRemote } from '../utils/gitRemote.js';
 import crypto from 'crypto';
 import { TestFramework } from './testFramework.js';
@@ -125,6 +125,45 @@ const UPGRADE_TOKENS_PER_CHAR = 1 / 3.5;
 const MAX_REWRITABLE_TOKENS = Math.floor(
   (UPGRADE_OUTPUT_CAP - UPGRADE_REASONING_HEADROOM) / UPGRADE_SIZE_MULTIPLIER
 );
+
+
+/**
+ * Run a command in its own process group and SIGKILL the whole group on timeout.
+ *
+ * exec/execSync time out with SIGTERM to the direct child only. Modules this
+ * codebase imports install SIGTERM handlers, and `node --test` forks a child per
+ * file, so a timed-out check survived as an orphan re-parented to init: one
+ * import check ran as a second copy of production's timers (Mongo "buffering
+ * timed out" errors), and a self-mod test run was found still alive 15 days on
+ * (2026-10-13).
+ *
+ * @returns {Promise<{code: number|null, signal: string|null, timedOut: boolean, stdout: string, stderr: string}>}
+ */
+export function runBounded(cmd, args, { cwd, env, timeout = 60000 } = {}) {
+  return new Promise((resolve) => {
+    const child = spawn(cmd, args, { cwd, env, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
+    let stdout = '';
+    let stderr = '';
+    let timedOut = false;
+    const cap = (buf, chunk) => (buf.length > 200000 ? buf : buf + chunk);
+    child.stdout.on('data', d => { stdout = cap(stdout, d.toString()); });
+    child.stderr.on('data', d => { stderr = cap(stderr, d.toString()); });
+    const timer = setTimeout(() => {
+      timedOut = true;
+      try { process.kill(-child.pid, 'SIGKILL'); } catch { /* already gone */ }
+    }, timeout);
+    child.on('error', (err) => {
+      clearTimeout(timer);
+      resolve({ code: null, signal: null, timedOut, stdout, stderr: stderr || err.message });
+    });
+    child.on('close', (code, signal) => {
+      clearTimeout(timer);
+      // The group leader can exit while a grandchild lingers; take the group down regardless.
+      try { process.kill(-child.pid, 'SIGKILL'); } catch { /* group already empty */ }
+      resolve({ code, signal, timedOut, stdout, stderr });
+    });
+  });
+}
 
 export class SelfModificationService extends EventEmitter {
   constructor(agent) {
@@ -2115,13 +2154,14 @@ Create ${testRelPath} with focused test case(s) that exercise the new behaviour.
         // NODE_TEST_CONTEXT is stripped: a child `node --test` that inherits it from
         // an enclosing test runner reports as a subtest and exits 0 even on failure.
         const { NODE_TEST_CONTEXT, ...parentEnv } = process.env;
-        execSync(`node --test --test-force-exit "${testRelPath}"`, {
-          cwd: this.developmentPath, timeout: 120000, stdio: 'pipe', env: { ...parentEnv, NODE_ENV: 'test' }
+        const run = await runBounded(process.execPath, ['--test', '--test-force-exit', testRelPath], {
+          cwd: this.developmentPath, timeout: 120000, env: { ...parentEnv, NODE_ENV: 'test' }
         });
-        return null;
+        if (run.code === 0 && !run.timedOut) return null;
+        const out = `${run.stdout}\n${run.stderr}`.trim() || `exited ${run.code ?? run.signal}`;
+        return (run.timedOut ? `Test run did not finish within 120s and was killed.\n${out}` : out).slice(-4000);
       } catch (runErr) {
-        const out = `${runErr.stdout?.toString() || ''}\n${runErr.stderr?.toString() || ''}`.trim() || runErr.message;
-        return out.slice(-4000);
+        return String(runErr?.message || runErr).slice(-4000);
       }
     };
 
@@ -4822,6 +4862,8 @@ Provide only the corrected code line(s).`;
       execFileSync(process.execPath, ['--no-warnings', '--input-type=module', '-e', script], {
         cwd: this.developmentPath,
         timeout: 30000,
+        // SIGTERM is caught by handlers some modules install at import; it would not land.
+        killSignal: 'SIGKILL',
         stdio: 'pipe',
         env: { ...process.env, NODE_ENV: 'test', SELFMOD_LOAD_CHECK: '1' }
       });
@@ -5472,10 +5514,16 @@ ${newCapsBlock}${reviewFlagsBlock}
           // so every UI change aborted the whole deploy (2026-09-27, app.js:18910).
           // For them the syntax check is the whole test.
           if (rel.startsWith('src/interfaces/web/public/')) continue;
-          await execAsync(
-            `node --input-type=module -e ${JSON.stringify(`await import(${JSON.stringify(abs)})`)}`,
-            { timeout: 60000, cwd: this.productionPath }
-          );
+          // Exit as soon as the import settles, and kill the whole process group on
+          // timeout: the old bare `await import` never exited on a module with timers,
+          // and the SIGTERM timeout was caught, so every such check left an orphan
+          // running production's intervals beside the real process (2026-10-13).
+          const fileUrl = pathToFileURL(abs).href;
+          const run = await runBounded(process.execPath, ['--no-warnings', '--input-type=module', '-e',
+            `import(${JSON.stringify(fileUrl)}).then(() => process.exit(0), (e) => { console.error(e && (e.stack || String(e))); process.exit(1); });`
+          ], { timeout: 60000, cwd: this.productionPath });
+          if (run.timedOut) throw Object.assign(new Error('import did not settle within 60s'), { killed: true, signal: 'SIGKILL' });
+          if (run.code !== 0) throw Object.assign(new Error(`import exited ${run.code ?? run.signal}`), { stderr: run.stderr });
         } catch (error) {
           // A TIMEOUT IS NOT A FAILURE. What is being tested is whether the
           // module throws while importing — not whether the process exits.

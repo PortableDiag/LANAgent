@@ -18,6 +18,13 @@ const statusLimiter = rateLimit({
   message: { error: 'Too many status requests, please try again later' }
 });
 
+// Rate limiting for batch status endpoint
+const batchLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 30, // lower limit for batch requests
+  message: { error: 'Too many batch status requests, please try again later' }
+});
+
 // Apply authentication middleware to all routes
 router.use(authMiddleware);
 
@@ -239,5 +246,76 @@ router.get('/history', async (req, res) => {
         });
     }
 });
+
+/**
+ * Batch transaction status endpoint
+ * Accepts { transactions: [{ txHash, network }] }
+ * Returns array of status objects with caching and retry per transaction
+ */
+// Each entry costs up to two RPC reads (tx + receipt), times retries, all in parallel.
+export const MAX_BATCH_STATUS = 50;
+
+export async function batchStatusHandler(req, res) {
+    try {
+        const { transactions } = req.body || {};
+
+        if (!Array.isArray(transactions) || transactions.length === 0) {
+            return res.status(400).json({
+                error: 'Missing or empty transactions array'
+            });
+        }
+        if (transactions.length > MAX_BATCH_STATUS) {
+            return res.status(400).json({
+                error: `Too many transactions: ${transactions.length} (max ${MAX_BATCH_STATUS} per request)`
+            });
+        }
+
+        // Validate each entry
+        for (const tx of transactions) {
+            if (!tx || typeof tx.txHash !== 'string' || typeof tx.network !== 'string' || !tx.txHash || !tx.network) {
+                return res.status(400).json({
+                    error: 'Each transaction must have txHash and network'
+                });
+            }
+        }
+
+        const results = await Promise.all(transactions.map(async ({ txHash, network }) => {
+            try {
+                const cacheKey = `tx:${txHash}:${network}`;
+                const cached = txStatusCache.get(cacheKey);
+                if (cached) {
+                    return { txHash, network, status: cached, cached: true };
+                }
+
+                const status = await retryOperation(
+                    () => transactionService.getTransactionStatus(txHash, network),
+                    { retries: 2, context: 'batchGetTransactionStatus' }
+                );
+
+                // Cache finalized statuses
+                if (status.status === 'confirmed' || status.status === 'failed') {
+                    txStatusCache.set(cacheKey, status);
+                }
+
+                return { txHash, network, status };
+            } catch (error) {
+                logger.error(`Batch status error for ${txHash} on ${network}:`, error);
+                return { txHash, network, error: error.message };
+            }
+        }));
+
+        res.json({
+            success: true,
+            results
+        });
+    } catch (error) {
+        logger.error('Batch status endpoint error:', error);
+        res.status(500).json({
+            error: error.message
+        });
+    }
+}
+
+router.post('/batch-status', batchLimiter, batchStatusHandler);
 
 export default router;

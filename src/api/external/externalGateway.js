@@ -323,6 +323,22 @@ router.get('/admin/audit/top-ips', authenticateToken, async (req, res) => {
   }
 });
 
+// Per-endpoint volume, latency and failure counts over a lookback window. Admin-only.
+router.get('/admin/audit/paths', authenticateToken, async (req, res) => {
+  try {
+    const ExternalAuditLog = (await import('../../models/ExternalAuditLog.js')).default;
+    const days = Math.min(Math.max(parseInt(req.query.days) || 30, 1), 90);
+    const limit = Math.min(Math.max(parseInt(req.query.limit) || 50, 1), 500);
+    const method = req.query.method ? String(req.query.method).toUpperCase() : undefined;
+    const minRequests = req.query.minRequests !== undefined ? Math.max(parseInt(req.query.minRequests, 10) || 0, 0) : undefined;
+
+    const paths = await ExternalAuditLog.getPathStatistics({ days, limit, method, minRequests });
+    res.json({ success: true, days, paths });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
 // Seed default service configs
 async function seedServiceConfigs() {
   const defaults = [

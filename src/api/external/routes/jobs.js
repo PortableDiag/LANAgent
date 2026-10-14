@@ -2,6 +2,7 @@ import { Router } from 'express';
 import path from 'path';
 import { logger } from '../../../utils/logger.js';
 import agenticCommerceService from '../../../services/crypto/agenticCommerceService.js';
+import AgenticCommerceJob from '../../../models/AgenticCommerceJob.js';
 import { adminKeyAuth } from '../middleware/adminKeyAuth.js';
 import rateLimit from 'express-rate-limit';
 
@@ -206,12 +207,104 @@ router.get('/:jobId/file/:index', async (req, res) => {
 
 // --- Operator (X-Admin-Key) ---
 
+/**
+ * GET /admin/all — operator view of all jobs with optional filters and pagination.
+ * Query params:
+ *   status   - filter by job status (e.g. completed, failed, pending)
+ *   service  - filter by service type (e.g. youtube, scrape)
+ *   from     - ISO date string, jobs created on or after this date
+ *   to       - ISO date string, jobs created on or before this date
+ *   limit    - number of history records per page (default 20, max 100)
+ *   offset   - number of records to skip (default 0)
+ *   sort     - sort field and direction: createdAt, -createdAt, status, -status (default -createdAt)
+ */
 router.get('/admin/all', adminKeyAuth, async (req, res) => {
     try {
+        // --- Parse query parameters ---
+        // The schema stores the ERC-8183 casing ('Completed'); accept any casing, refuse
+        // an unknown value rather than return an empty list that reads as "no jobs".
+        let statusFilter;
+        if (req.query.status) {
+            const allowed = AgenticCommerceJob.schema.path('status').enumValues;
+            statusFilter = allowed.find(v => v.toLowerCase() === String(req.query.status).trim().toLowerCase());
+            if (!statusFilter) {
+                return res.status(400).json({ success: false, error: `Invalid status. Allowed: ${allowed.join(', ')}` });
+            }
+        }
+        const serviceFilter = req.query.service || undefined;
+
+        let fromDate, toDate;
+        if (req.query.from) {
+            fromDate = new Date(req.query.from);
+            if (isNaN(fromDate.getTime())) {
+                return res.status(400).json({ success: false, error: 'Invalid from date' });
+            }
+        }
+        if (req.query.to) {
+            toDate = new Date(req.query.to);
+            if (isNaN(toDate.getTime())) {
+                return res.status(400).json({ success: false, error: 'Invalid to date' });
+            }
+        }
+
+        let limit = parseInt(req.query.limit, 10);
+        if (isNaN(limit) || limit < 1) limit = 20;
+        if (limit > 100) limit = 100;
+
+        let offset = parseInt(req.query.offset, 10);
+        if (isNaN(offset) || offset < 0) offset = 0;
+
+        // Sort parsing: field and direction, e.g. 'createdAt', '-createdAt', 'status', '-status'
+        let sortField = 'createdAt';
+        let sortDir = -1; // default descending
+        if (req.query.sort) {
+            const raw = req.query.sort.trim();
+            if (raw.startsWith('-')) {
+                sortDir = -1;
+                sortField = raw.substring(1);
+            } else {
+                sortDir = 1;
+                sortField = raw;
+            }
+            // Only allow known sort fields
+            if (!['createdAt', 'status'].includes(sortField)) {
+                return res.status(400).json({ success: false, error: 'Invalid sort field. Allowed: createdAt, status' });
+            }
+        }
+
+        // --- Build MongoDB filter ---
+        const filters = {};
+        if (statusFilter) filters.status = statusFilter;
+        if (serviceFilter) filters.serviceType = serviceFilter;
+        if (fromDate || toDate) {
+            filters.createdAt = {};
+            if (fromDate) filters.createdAt.$gte = fromDate;
+            if (toDate) filters.createdAt.$lte = toDate;
+        }
+
+        // --- Fetch active jobs (unchanged) ---
         const active = await agenticCommerceService.getActiveJobs();
-        const history = await agenticCommerceService.getJobHistory({}, 20);
-        res.json({ success: true, active, history });
+
+        // --- Fetch filtered history with pagination ---
+        const total = await AgenticCommerceJob.countDocuments(filters);
+        const history = await AgenticCommerceJob.find(filters)
+            .sort({ [sortField]: sortDir })
+            .skip(offset)
+            .limit(limit)
+            .lean();
+
+        res.json({
+            success: true,
+            active,
+            history,
+            pagination: {
+                total,
+                limit,
+                offset
+            }
+        });
     } catch (err) {
+        logger.error(`GET /admin/all error: ${err.message}`);
         res.status(500).json({ success: false, error: err.message });
     }
 });

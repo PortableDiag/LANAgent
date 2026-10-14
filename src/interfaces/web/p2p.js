@@ -894,7 +894,20 @@ router.put('/api/skynet/services/:serviceId', authenticateToken, async (req, res
 // Bulk enable/disable all services (global toggle)
 router.post('/api/skynet/services/bulk', authenticateToken, async (req, res) => {
   try {
-    const { skynetEnabled, skynetPrice } = req.body;
+    const { skynetEnabled, skynetPrice, serviceIds } = req.body;
+
+    // Optional subset: toggle only the listed services instead of all of them.
+    if (serviceIds !== undefined) {
+      if (!Array.isArray(serviceIds) || serviceIds.length === 0 || serviceIds.some(id => typeof id !== 'string' || !id)) {
+        return res.status(400).json({ success: false, error: 'serviceIds must be a non-empty array of service ID strings' });
+      }
+      if (typeof skynetEnabled !== 'boolean' || skynetPrice !== undefined) {
+        return res.status(400).json({ success: false, error: 'with serviceIds, send only a boolean skynetEnabled' });
+      }
+      const modified = await SkynetServiceConfig.setServicesEnabled(serviceIds, skynetEnabled);
+      logger.info(`Skynet bulk update: ${serviceIds.length} listed services, ${modified} changed, enabled=${skynetEnabled}`);
+      return res.json({ success: true, updated: modified });
+    }
 
     const update = {};
     if (skynetEnabled !== undefined) update.skynetEnabled = skynetEnabled;

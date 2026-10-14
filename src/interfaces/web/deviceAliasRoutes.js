@@ -333,12 +333,11 @@ router.delete('/:alias', async (req, res) => {
     const alias = normalizeAlias(req.params.alias);
     const { plugin = 'govee' } = req.query;
 
-    const result = await retryOperation(() => DeviceAlias.deleteOne({
-      alias,
-      plugin
-    }));
+    // deleteAlias also clears the model's resolve caches, so a deleted alias
+    // stops resolving immediately instead of for up to the 5-minute TTL.
+    const deleted = await DeviceAlias.deleteAlias(alias, plugin);
 
-    if (result.deletedCount === 0) {
+    if (!deleted) {
       return res.status(404).json({
         success: false,
         error: 'Alias not found'

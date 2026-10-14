@@ -3218,6 +3218,8 @@ ERC-8183 agentic commerce endpoints on the external gateway (`/api/external`).
 | GET | `/api/external/jobs/:jobId/deliverable` | Get job deliverable |
 | GET | `/api/external/admin/jobs/active` | Admin: list active jobs |
 | GET | `/api/external/admin/jobs/revenue` | Admin: revenue stats |
+| GET | `/api/external/jobs/admin/all?status=&service=&from=&to=&limit=20&offset=0&sort=-createdAt` | `X-Admin-Key`: job history with filters + pagination. `status` any casing of Open/Funded/Submitted/Completed/Rejected/Expired (400 otherwise), limit ≤100, sort `createdAt`/`status` (`-` = desc); returns `pagination {total, limit, offset}` |
+| GET | `/api/external/admin/audit/paths?days=30&limit=50&method=&minRequests=` | Admin JWT: per-endpoint request count, avg/min/max duration, success/failure/aborted counts, busiest first (days ≤90, limit ≤500; grouped without query string) |
 
 #### External Gateway — Trust API
 
@@ -3653,6 +3655,7 @@ The memory system's `analyzeGeneralKnowledge()` method has been replaced with `a
 
 - **MongoDB exponential backoff** — Reconnection delay scales from 1s to 30s (`2^attempt * 1000ms`, capped at 30s) instead of fixed 5s intervals. Reduces thundering-herd reconnection storms.
 - **Transaction status smart caching** — `GET /api/transactions/status/:txHash?network=` now has rate limiting (100 req/15min), retry on transient errors, and caches only finalized statuses (confirmed/failed). Pending statuses are always fetched fresh.
+- **Batch transaction status** — `POST /api/transactions/batch-status` with `{ "transactions": [{ "txHash", "network" }] }` (1–50 entries, 30 req/15min) returns `results[]` in request order, each `{ txHash, network, status, cached? }` or `{ txHash, network, error }`. One failed lookup does not fail the batch; same finalized-only cache as the single-status route.
 - **MessageBird MMS** — New `sendMMS` command accepts `originator`, `recipient`, `message`, and `mediaUrl`. Uses the correct `/mms` endpoint (not `/messages`).
 - **ERC-8004 capability fix** — Registration file now only includes enabled plugins. Disabled plugins and those without API keys are no longer listed in the capabilities array.
 
@@ -3935,7 +3938,7 @@ Complete 5-phase SKYNET token economy deployed to production. BEP-20 token on BS
 | GET | `/p2p/api/skynet/stats` | Revenue stats and overview |
 | GET | `/p2p/api/skynet/services` | List available services |
 | PUT | `/p2p/api/skynet/services/:id` | Enable/disable service, set price |
-| POST | `/p2p/api/skynet/services/bulk` | Bulk enable/disable services |
+| POST | `/p2p/api/skynet/services/bulk` | Bulk enable/disable services. Optional `serviceIds: [..]` + boolean `skynetEnabled` toggles only those (returns `updated` = changed count) |
 | POST | `/p2p/api/skynet/services/sync` | Discover services from plugins |
 | GET | `/p2p/api/skynet/payments` | Recent payment history |
 | GET | `/p2p/api/skynet/economy` | Economy stats (bounties + governance) |

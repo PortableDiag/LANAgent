@@ -81,7 +81,9 @@ export const SKILL_BASKET_COMMANDS = [
   { command: 'listBasketSkills', description: 'List the skills in the Trellis document\'s shared Skills basket, with status (live, proposed, changed…) and who wrote each',
     usage: 'listBasketSkills({ active: false })', examples: ['what skills are in the trellis skills basket', 'list trellis skills', 'show the shared skills in trellis'] },
   { command: 'syncBasketSkills', description: 'Install the live skills from the Trellis Skills basket now (hash-checked, under this agent\'s trust rule) and remove ones that are no longer live',
-    usage: 'syncBasketSkills', examples: ['sync skills from trellis', 'install the trellis skills basket', 'refresh skills from the trellis basket'] }
+    usage: 'syncBasketSkills', examples: ['sync skills from trellis', 'install the trellis skills basket', 'refresh skills from the trellis basket'] },
+  { command: 'rejectBasketSkill', description: 'Reject a skill from the Trellis Skills basket so it is not re-installed during future syncs',
+    usage: 'rejectBasketSkill({ skill: "skill-name" })', examples: ['reject the humanizer skill from the trellis basket', 'stop installing that skill from trellis', 'block that basket skill'] }
 ];
 
 export const skillBasketActions = {
@@ -128,6 +130,30 @@ export const skillBasketActions = {
   async syncBasketSkills() {
     const r = await syncBasketSkills(this);
     return { success: true, ...r, result: `Skills basket: ${r.installed.length} installed, ${r.updated.length} updated, ${r.removed.length} removed, ${r.skipped.length} skipped.` };
+  },
+
+  /**
+   * Reject a skill from the Trellis Skills basket so it is not re-installed during future syncs.
+   * @param {object} params
+   * @param {string} [params.skill] - skill name
+   * @param {string} [params.name] - alternative skill name
+   * @param {string} [params.skillName] - alternative skill name
+   * @param {string} [params.query] - natural language query that may contain the skill name
+   * @param {string} [params.originalInput] - original user input
+   * @param {object} [params._context] - execution context
+   */
+  async rejectBasketSkill({ skill, name: named, skillName, query, originalInput, _context } = {}) {
+    const service = getSkillsService();
+    let name = String(skill || named || skillName || '').trim();
+    if (!name) name = (await skillNamedIn(query || originalInput || _context?.originalInput, service)) || '';
+    if (!name) throw new Error('rejectBasketSkill needs the skill name (see: list basket skills).');
+
+    const r = await rejectBasketSkill(this, name, { service });
+    return {
+      success: true,
+      ...r,
+      result: `Rejected \`${name}\` from the Trellis Skills basket${r.removed ? ' and removed the installed copy' : ''}. It will not be installed again.`
+    };
   }
 };
 
@@ -135,6 +161,22 @@ export const skillBasketActions = {
  * Install live basket skills in the current document and drop ones no longer live.
  * @param {object} plugin - the trellis-notes plugin (transport, document context)
  */
+/**
+ * Reject a basket skill so syncs never install it again. The rejection is recorded
+ * whether or not it is installed (syncBasketSkills skips a rejected name only on a
+ * fresh install), and an installed copy from this basket is removed.
+ */
+export async function rejectBasketSkill(plugin, name, { service = getSkillsService() } = {}) {
+  const docId = plugin.resolvedMode === 'web' ? plugin._currentDoc().id : null;
+  const origin = basketOrigin(docId);
+  await service.rejectPeerSkill(name, origin);
+  const existing = await service.get(name);
+  const removed = !!(existing && existing.meta?.source === SOURCE && existing.meta?.origin === origin);
+  if (removed) await service.remove(name, { remember: false });
+  logger.info(`[trellis-skills] rejected ${name} from the Skills basket${removed ? ' and removed the installed copy' : ''}`);
+  return { skill: name, origin, removed };
+}
+
 export async function syncBasketSkills(plugin, { service = getSkillsService() } = {}) {
   const docId = plugin.resolvedMode === 'web' ? plugin._currentDoc().id : null;
   const origin = basketOrigin(docId);

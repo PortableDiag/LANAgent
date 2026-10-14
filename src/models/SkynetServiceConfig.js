@@ -1,4 +1,6 @@
 import mongoose from 'mongoose';
+import { logger } from '../utils/logger.js';
+import { retryOperation } from '../utils/retryUtils.js';
 
 /**
  * SkynetServiceConfig - Per-operation configuration for Skynet P2P paid services.
@@ -238,6 +240,37 @@ skynetServiceConfigSchema.statics.getTopServicesByRevenue = async function({ lim
       totalRevenue: 1,
       lastUsed: 1
     });
+};
+
+/**
+ * Bulk enable/disable Skynet services for a list of service IDs.
+ * Uses a single database operation to toggle skynetEnabled for many services at once.
+ * 
+ * @param {string[]} serviceIds - Array of service IDs to update.
+ * @param {boolean} enabled - Whether the services should be enabled (true) or disabled (false).
+ * @returns {Promise<number>} Number of documents actually modified.
+ */
+skynetServiceConfigSchema.statics.setServicesEnabled = async function(serviceIds, enabled) {
+  if (!Array.isArray(serviceIds) || serviceIds.length === 0) {
+    logger.warn('[SkynetServiceConfig] setServicesEnabled called with empty or non-array serviceIds');
+    return 0;
+  }
+
+  try {
+    const result = await retryOperation(async () => {
+      return this.updateMany(
+        { serviceId: { $in: serviceIds } },
+        { $set: { skynetEnabled: enabled } }
+      );
+    }, { retries: 3 });
+
+    const modifiedCount = result.modifiedCount || 0;
+    logger.info(`[SkynetServiceConfig] Bulk ${enabled ? 'enabled' : 'disabled'} ${modifiedCount} services`);
+    return modifiedCount;
+  } catch (error) {
+    logger.error(`[SkynetServiceConfig] Failed to bulk ${enabled ? 'enable' : 'disable'} services: ${error.message}`);
+    throw error;
+  }
 };
 
 const SkynetServiceConfig = mongoose.model('SkynetServiceConfig', skynetServiceConfigSchema);
