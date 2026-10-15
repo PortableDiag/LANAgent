@@ -2,6 +2,11 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.513] - 2026-10-15
+
+### Fixed
+- **Telegram notifications were lost during VPN exit switches.** An exit switch drops all egress for up to a minute, and a notification sent in that window failed DNS and was gone. A send that never reached Telegram (no DNS, no route, refused) is now retried in the background at 10, 20 and 30 s. The caller is not held up. A send that may have reached Telegram is not retried, so a notice is never delivered twice.
+
 ## [2.25.512] - 2026-10-15
 
 ### Fixed

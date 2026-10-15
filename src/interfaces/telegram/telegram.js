@@ -1358,18 +1358,31 @@ export class TelegramInterface extends EventEmitter {
         }
       };
 
+      const sendOnce = async () => {
+        try {
+          await send(finalOptions);
+        } catch (error) {
+          // Text from outside (a skill's findings, a card title) can hold an unpaired _ or *, and
+          // Telegram then refuses the whole message ("can't parse entities"). The notice mattered
+          // more than its formatting: send the same text plain. 2026-10-01: a skill-audit notice
+          // was lost this way and the operator never saw it.
+          const unparsable = /can't parse entities|can't find end of the entity/i.test(String(error?.description || error?.message || ''));
+          if (!unparsable || !finalOptions.parse_mode) throw error;
+          logger.warn('Telegram refused the formatting of a notification; sending it as plain text');
+          const { parse_mode, ...plain } = finalOptions;
+          await send(plain);
+        }
+      };
+
       try {
-        await send(finalOptions);
+        await sendOnce();
       } catch (error) {
-        // Text from outside (a skill's findings, a card title) can hold an unpaired _ or *, and
-        // Telegram then refuses the whole message ("can't parse entities"). The notice mattered
-        // more than its formatting: send the same text plain. 2026-10-01: a skill-audit notice
-        // was lost this way and the operator never saw it.
-        const unparsable = /can't parse entities|can't find end of the entity/i.test(String(error?.description || error?.message || ''));
-        if (!unparsable || !finalOptions.parse_mode) throw error;
-        logger.warn('Telegram refused the formatting of a notification; sending it as plain text');
-        const { parse_mode, ...plain } = finalOptions;
-        await send(plain);
+        // A VPN exit switch drops all egress for up to a minute (2026-10-15: 12 notices lost in
+        // eight days, every one inside a switch). These errors happen before the request leaves,
+        // so a resend cannot duplicate it. Retry in the background so the caller is not held up.
+        if (!TelegramInterface.isPreSendNetworkError(error)) throw error;
+        this._retryNotificationInBackground(sendOnce);
+        throw error;
       }
 
       logger.info('Telegram notification sent successfully');
@@ -1378,6 +1391,32 @@ export class TelegramInterface extends EventEmitter {
       logger.error('Failed to send Telegram notification:', error);
       return false;
     }
+  }
+
+  /** The request never reached Telegram (no DNS, no route), so sending it again cannot duplicate it. */
+  static isPreSendNetworkError(error) {
+    const code = error?.code || error?.errno || error?.cause?.code;
+    return ['EAI_AGAIN', 'ENOTFOUND', 'ECONNREFUSED', 'ENETUNREACH', 'EHOSTUNREACH'].includes(code)
+      || /getaddrinfo (EAI_AGAIN|ENOTFOUND)/.test(String(error?.message || ''));
+  }
+
+  _retryNotificationInBackground(sendOnce, delaysMs = [10000, 20000, 30000]) {
+    (async () => {
+      for (const [n, ms] of delaysMs.entries()) {
+        await new Promise(r => setTimeout(r, ms));
+        try {
+          await sendOnce();
+          logger.info(`Telegram notification sent on background retry ${n + 1}`);
+          return;
+        } catch (error) {
+          if (!TelegramInterface.isPreSendNetworkError(error)) {
+            logger.error('Telegram notification retry failed:', error?.message || error);
+            return;
+          }
+        }
+      }
+      logger.error(`Telegram notification lost: network still down after ${delaysMs.length} retries`);
+    })();
   }
 
   /**
