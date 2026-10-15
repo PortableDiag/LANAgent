@@ -14,6 +14,7 @@ import fs from 'fs/promises';
 import path from 'path';
 import os from 'os';
 import crypto from 'crypto';
+import dns from 'dns';
 
 const execAsync = promisify(exec);
 
@@ -761,7 +762,7 @@ export default class YtDlpPlugin extends BasePlugin {
           logger.info(`Downloading media: ${command}`);
 
           // Use execAsync to capture all output
-          const { stdout, stderr } = await execAsync(this._bounded(command), { maxBuffer: 50 * 1024 * 1024 });
+          const { stdout, stderr } = await this._execRidingOutages(this._bounded(command), url, { maxBuffer: 50 * 1024 * 1024 });
           const outText = stdout + '\n' + stderr;
           if (YtDlpPlugin.wasLiveSkipped(outText)) {
             logger.info(`[ytdlp] ${url} is a live broadcast — not downloading`);
@@ -1188,7 +1189,7 @@ export default class YtDlpPlugin extends BasePlugin {
 
     try {
       logger.info(`Downloading audio: ${command}`);
-      const { stdout, stderr } = await execAsync(this._bounded(command));
+      const { stdout, stderr } = await this._execRidingOutages(this._bounded(command), url);
       if (YtDlpPlugin.wasLiveSkipped(`${stdout}\n${stderr}`)) {
         logger.info(`[ytdlp] ${url} is a live broadcast — not downloading audio`);
         return YtDlpPlugin.liveResult();
@@ -1481,6 +1482,46 @@ export default class YtDlpPlugin extends BasePlugin {
   /** The download was stopped (time limit, kill, restart) rather than failing on its own. */
   static wasStopped(error) {
     return error?.code === 124 || error?.code === 130 || error?.code === 137 || error?.code === 143 || Boolean(error?.signal);
+  }
+
+  static NETWORK_WAITS = 2;
+
+  /** yt-dlp could not reach the site at all (DNS or connection), as opposed to the site refusing it. */
+  static isNetworkError(detail) {
+    return /Failed to resolve|Temporary failure in name resolution|Name or service not known|Network is unreachable|No route to host|Connection refused|Connection reset by peer|\[Errno (?:-2|-3|101|104|111|113)\]/i.test(String(detail || ''));
+  }
+
+  /**
+   * Poll until the URL's host resolves (up to `maxMs`), so a retry lands after the outage.
+   * @returns {Promise<boolean>} true once it resolves, false on timeout
+   */
+  static async waitForHost(url, { maxMs = 90000, intervalMs = 3000, lookup = dns.promises.lookup } = {}) {
+    let host;
+    try { host = new URL(url).hostname; } catch { return false; }
+    const start = Date.now();
+    do {
+      await new Promise(r => setTimeout(r, intervalMs));
+      try { await lookup(host); return true; } catch { /* still down */ }
+    } while (Date.now() - start < maxMs);
+    return false;
+  }
+
+  /**
+   * Run a download, riding out a network outage (a VPN exit switch, a link flap): when yt-dlp
+   * cannot reach the site at all, wait for the host to resolve and run the SAME command again.
+   * Without this a scrape's exit rotation failed every player client in a second (2026-10-15).
+   */
+  async _execRidingOutages(command, url, opts = {}) {
+    for (let wait = 0; ; wait++) {
+      try {
+        return await execAsync(command, opts);
+      } catch (error) {
+        const detail = `${error.stderr || ''}\n${error.message || ''}`;
+        if (wait >= YtDlpPlugin.NETWORK_WAITS || YtDlpPlugin.wasStopped(error) || !YtDlpPlugin.isNetworkError(detail)) throw error;
+        logger.warn(`[ytdlp] network unavailable for ${url} (wait ${wait + 1}/${YtDlpPlugin.NETWORK_WAITS}); retrying once it resolves`);
+        await YtDlpPlugin.waitForHost(url);
+      }
+    }
   }
 
   static liveResult() {

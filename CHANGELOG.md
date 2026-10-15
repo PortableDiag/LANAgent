@@ -2,6 +2,11 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.512] - 2026-10-15
+
+### Fixed
+- **Media downloads failed whenever the VPN switched exits.** A scrape rotating ALICE's VPN exit takes the network down for up to a minute. A download started in that window failed DNS on every YouTube player client within about a second, and the caller got a 422. Downloads (video and audio) now recognise a network error, wait for the site's host to resolve again, and re-run the same command, up to twice. Refusals such as HTTP 403 still move on to the next client.
+
 ## [2.25.511] - 2026-10-14
 
 ### Added
