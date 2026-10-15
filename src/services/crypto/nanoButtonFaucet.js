@@ -421,6 +421,10 @@ class NanoButtonFaucet {
         return new Promise(r => setTimeout(r, ms));
     }
 
+    get cooldownMs() {
+        return COOLDOWN_MS;
+    }
+
     getStatus() {
         return {
             ...this.stats,

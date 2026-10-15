@@ -44,7 +44,8 @@ export class DCAStrategy extends BaseStrategy {
             lastBuyTime: {},         // Per-network last buy timestamp
             totalInvested: {},       // Per-network total USD invested
             averageBuyPrice: {},     // Per-network average buy price
-            buyCount: {}             // Per-network number of buys
+            buyCount: {},            // Per-network number of buys
+            totalTokensBought: {}    // Per-network total tokens accumulated
         };
     }
 
@@ -262,6 +263,13 @@ export class DCAStrategy extends BaseStrategy {
         // Update buy count
         this.state.buyCount[network] = (this.state.buyCount[network] || 0) + 1;
 
+        // Update total tokens bought. A missing or unparseable amount must not
+        // turn the running total into NaN for good.
+        const tokens = parseFloat(amountToken);
+        if (Number.isFinite(tokens) && tokens > 0) {
+            this.state.totalTokensBought[network] = (this.state.totalTokensBought[network] || 0) + tokens;
+        }
+
         // Update average buy price
         const prevAvg = this.state.averageBuyPrice[network] || 0;
         const prevCount = (this.state.buyCount[network] || 1) - 1;
@@ -280,14 +288,62 @@ export class DCAStrategy extends BaseStrategy {
     }
 
     /**
+     * Get performance metrics for a network
+     * @param {string} network - Network identifier
+     * @param {number} [currentPrice] - Current price of the token (optional)
+     * @returns {Object} Performance metrics including totalInvested, totalTokens, averageBuyPrice,
+     *                   costBasis, and if currentPrice is provided, currentValue, unrealizedPnL, ROI
+     *
+     * averageBuyPrice is the plain mean of the prices paid. With equal-dollar buys
+     * the price actually paid per token is lower (more tokens are bought when the
+     * price is low), so costBasis = totalInvested / totalTokens is the figure to
+     * judge a DCA position by.
+     */
+    getPerformanceMetrics(network, currentPrice) {
+        const totalInvested = this.state.totalInvested[network] || 0;
+        const totalTokens = this.state.totalTokensBought[network] || 0;
+        const averageBuyPrice = this.state.averageBuyPrice[network] || 0;
+        const metrics = {
+            network,
+            totalInvested,
+            totalTokens,
+            averageBuyPrice,
+            costBasis: totalTokens > 0 ? totalInvested / totalTokens : null
+        };
+        if (Number.isFinite(currentPrice) && totalTokens > 0) {
+            const currentValue = totalTokens * currentPrice;
+            const unrealizedPnL = currentValue - totalInvested;
+            const ROI = totalInvested > 0 ? (unrealizedPnL / totalInvested) * 100 : 0;
+            metrics.currentValue = currentValue;
+            metrics.unrealizedPnL = unrealizedPnL;
+            metrics.ROI = ROI;
+        }
+        return metrics;
+    }
+
+    /**
+     * Strategy info plus the DCA accumulation figures, so they show up in
+     * GET /api/crypto/strategy/info/dca (getDCAStats had no caller).
+     */
+    getInfo() {
+        return { ...super.getInfo(), dca: this.getDCAStats() };
+    }
+
+    /**
      * Get DCA statistics
      */
     getDCAStats() {
+        const performanceMetrics = {};
+        for (const network of Object.keys(this.state.totalInvested)) {
+            performanceMetrics[network] = this.getPerformanceMetrics(network);
+        }
         return {
             lastBuyTime: this.state.lastBuyTime,
             totalInvested: this.state.totalInvested,
             averageBuyPrice: this.state.averageBuyPrice,
             buyCount: this.state.buyCount,
+            totalTokensBought: this.state.totalTokensBought,
+            performanceMetrics,
             config: {
                 buyAmountUSD: this.config.buyAmountUSD,
                 intervalHours: this.config.buyIntervalHours,

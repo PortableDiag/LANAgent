@@ -1157,7 +1157,11 @@ export default class ScraperPlugin extends BasePlugin {
     // limiter sheds with QUEUE_FULL when saturated — surfaced as a non-fatal
     // result so the caller still returns content, never an unbounded wait.
     try {
-      return await this.ssLimiter.run(() => this._captureScreenshot(url, options));
+      // A paying caller (publicOnly) goes ahead of the agent's own screenshots in
+      // the queue; it is still shed like anyone else when the queue is full.
+      return await this.ssLimiter.run(() => this._captureScreenshot(url, options), {
+        priority: options?.publicOnly ? 1 : 0
+      });
     } catch (err) {
       if (err && err.code === 'QUEUE_FULL') {
         logger.info(`[Screenshot] shed for ${url} — limiter saturated (${JSON.stringify(this.ssLimiter.stats())})`);

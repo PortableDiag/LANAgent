@@ -2,6 +2,27 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.511] - 2026-10-14
+
+### Added
+- **Cancel a P2P plugin transfer** (#2663, merged after repair). `POST /p2p/api/transfers/:id/cancel` cancels a transfer that is pending, in flight or awaiting approval. The status change is atomic and only allowed from those states. It clears any assembled source and drops the in-memory chunk buffer, so late chunks are ignored. A transition map, rewritten from what the plugin-sharing code actually does, now backs every status change made through `transitionStatus()`.
+- **Faucet cooldown status** (#2664, merged after repair). `GET /api/faucets/cooldown/:network` reports, per faucet, whether a claim is possible now and when the next one is, read from the same claim history the auto-claimer uses.
+- **Inline images for the vision plugin** (#2665, merged after repair). `ask` takes `base64` (raw or a data URL). The type is read from the bytes, a given `mimeType` must match them, and the size is capped at 20 MB.
+- **DCA cost basis** (#2666, merged after repair). The DCA strategy tracks tokens accumulated. `GET /api/crypto/strategy/info/dca` reports invested, tokens, mean buy price and the cost basis (invested ÷ tokens), which is lower than the mean whenever equal-dollar buys caught lower prices.
+- **Priority queueing in the concurrency limiter** (#2667, merged after repair). Queued work runs highest priority first, oldest first within a priority. Paid screenshot requests are queued ahead of the agent's own; a full queue still sheds both.
+- **LP position valuation** (#2668, merged after repair). V2 positions paired with the wrapped native token are valued in BNB from the pool's own reserves on each refresh.
+
+### Fixed
+- **Outgoing plugin transfers were logged as failed.** A finished send sets status `completed`, which the schema did not allow, so the save threw after every successful send.
+- **Multi-faucet claims used the wrong address.** `/api/faucets/claim/multi` read `faucet.apiUrl` where faucets define `api`. It posted to the faucet's web page and recorded the claim where the cooldown check never looks.
+- **The auto-post commit filter let `LPPosition.js` through.** Its LP rule needed a word boundary after "LP", which a camelCase file name does not have. It now also matches LP as a name prefix.
+- **LP reserves could be stored against the wrong token.** Pool reserves come in address-sorted order, but they were saved as tokenA/tokenB as-is, so a position whose tokenA sorted second had its reserves swapped.
+
+## [2.25.510] - 2026-10-14
+
+### Fixed
+- **Server maintenance could not update the *arr apps.** "Update sonarr on <host>" ran an apt upgrade, but Sonarr, Radarr, Lidarr, Readarr and Prowlarr update themselves from a tarball install. A leftover dpkg record from an old install also made the agent report a years-old version (3.0.10 for a host running 4.0.20). The auto-updater skips major versions, so a major release sat uninstalled until it was done by hand. Version checks now ask the app's own API first. Updates now take the app's built-in backup, refuse to continue unless it completes, run the app's updater with major updates allowed, and report the old and new versions with the backup's name.
+
 ## [2.25.509] - 2026-10-13
 
 ### Fixed

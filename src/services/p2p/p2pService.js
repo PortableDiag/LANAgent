@@ -415,6 +415,15 @@ class P2PService extends EventEmitter {
   }
 
   /**
+   * Cancel a stuck or unanswered plugin transfer
+   * @param {string} transferId
+   * @param {string} [reason]
+   */
+  async cancelTransfer(transferId, reason) {
+    return this.pluginSharing.cancelTransfer(transferId, reason);
+  }
+
+  /**
    * Retry a failed incoming plugin transfer by re-requesting the plugin
    * from the same peer. The failed transfer record is left untouched as
    * the audit trail — the peer's fresh offer creates a new transfer doc

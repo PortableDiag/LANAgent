@@ -426,6 +426,24 @@ class PluginSharing {
   }
 
   /**
+   * Cancel a transfer that is stuck mid-flight or was never acted on. Drops the
+   * in-memory chunk buffer too, so late chunks from the peer find no transfer
+   * and are ignored instead of resurrecting it.
+   * @param {string} transferId
+   * @param {string} [reason]
+   * @returns {Promise<boolean>}
+   */
+  async cancelTransfer(transferId, reason) {
+    const updated = await P2PTransfer.transitionStatus(transferId, 'cancelled', { error: reason || 'Cancelled by user' });
+    if (!updated) return false;
+    for (const [key, incoming] of this.incomingTransfers) {
+      if (String(incoming.transfer?._id) === String(updated._id)) this.incomingTransfers.delete(key);
+    }
+    logger.info(`P2P transfer ${updated.pluginName} cancelled: ${updated.error}`);
+    return true;
+  }
+
+  /**
    * Reject a pending plugin transfer
    * @param {string} transferId
    * @returns {Promise<boolean>}

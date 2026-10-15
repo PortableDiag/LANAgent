@@ -401,6 +401,34 @@ router.post('/api/transfers/:transferId/reject', authenticateToken, async (req, 
   }
 });
 
+// Cancel a transfer stuck mid-flight or never acted on. Finished transfers
+// (completed/installed/rejected/failed) cannot be cancelled.
+router.post('/api/transfers/:transferId/cancel', authenticateToken, async (req, res) => {
+  try {
+    const p2p = getP2PService(req);
+    if (!p2p) return res.status(503).json({ success: false, error: 'P2P not enabled' });
+
+    // A malformed id is the caller's mistake: answer 400 here rather than letting
+    // the model's cast error be logged as a server ERROR.
+    if (!/^[a-f0-9]{24}$/i.test(req.params.transferId)) {
+      return res.status(400).json({ success: false, error: 'Invalid transfer id' });
+    }
+    const reason = typeof req.body?.reason === 'string' ? req.body.reason.slice(0, 500) : undefined;
+    const success = await p2p.cancelTransfer(req.params.transferId, reason);
+
+    res.status(success ? 200 : 409).json({
+      success,
+      message: success ? 'Transfer cancelled' : 'Transfer not found or already finished'
+    });
+  } catch (error) {
+    if (error?.name === 'CastError') {
+      return res.status(400).json({ success: false, error: 'Invalid transfer id' });
+    }
+    logger.error('P2P cancel transfer API error:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
 // Retry a failed incoming transfer by re-requesting the plugin from the peer
 router.post('/api/transfers/:transferId/retry', authenticateToken, async (req, res) => {
   try {

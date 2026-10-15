@@ -3,6 +3,39 @@ import LPPosition from '../../models/LPPosition.js';
 import swapService from './swapService.js';
 import contractServiceWrapper from './contractServiceWrapper.js';
 
+/**
+ * getLPInfo returns reserves in PAIR order (token0/token1, sorted by address),
+ * each already scaled by its own token's decimals. A position stores them as
+ * tokenA/tokenB, so map by address — writing reserve0 into reserveA was only
+ * right when tokenA happened to sort first.
+ */
+export function reservesForPosition(position, info) {
+  const aIsToken0 = String(info.token0).toLowerCase() === String(position.tokenA?.address).toLowerCase();
+  return aIsToken0
+    ? { reserveA: info.reserve0, reserveB: info.reserve1 }
+    : { reserveA: info.reserve1, reserveB: info.reserve0 };
+}
+
+/**
+ * Value a V2 position in BNB when one side is the wrapped native token: the
+ * pool's own reserves give the other token's BNB price, so no oracle is needed.
+ * Returns null for any other pair (no price source here).
+ */
+export async function valuePositionInBNB(position, network) {
+  if (position.protocol !== 'v2') return null;
+  const wrapped = String(swapService.getWrappedNative?.(network) || '').toLowerCase();
+  if (!wrapped) return null;
+  const rA = parseFloat(position.reserveA);
+  const rB = parseFloat(position.reserveB);
+  if (!(rA > 0 && rB > 0)) return null;
+  const aIsNative = String(position.tokenA?.address).toLowerCase() === wrapped;
+  const bIsNative = String(position.tokenB?.address).toLowerCase() === wrapped;
+  if (!aIsNative && !bIsNative) return null;
+  const priceA = aIsNative ? 1 : rB / rA;
+  const priceB = bIsNative ? 1 : rA / rB;
+  return position.updatePositionValue(priceA, priceB);
+}
+
 // PancakeSwap V3 contract addresses on BSC
 const V3_POSITION_MANAGER = {
   bsc: '0x46A15B0b27311cedF172AB29E4f4766fbE7F4364',
@@ -73,8 +106,7 @@ class LPManager {
       );
       if (!info) return position;
 
-      position.reserveA = info.reserve0;
-      position.reserveB = info.reserve1;
+      Object.assign(position, reservesForPosition(position, info));
       position.totalSupply = info.totalSupply;
       position.lpBalance = info.lpBalance;
 
@@ -84,7 +116,10 @@ class LPManager {
       position.active = lpBalanceNum > 0;
       position.lastUpdated = new Date();
 
-      await position.save();
+      // updatePositionValue saves the position itself when it can value it
+      if ((await valuePositionInBNB(position, network)) === null) {
+        await position.save();
+      }
       return position;
     } catch (err) {
       logger.error(`Failed to refresh LP position ${pairAddress}: ${err.message}`);
@@ -136,8 +171,7 @@ class LPManager {
     }
 
     position.lpBalance = info.lpBalance;
-    position.reserveA = info.reserve0;
-    position.reserveB = info.reserve1;
+    Object.assign(position, reservesForPosition(position, info));
     position.totalSupply = info.totalSupply;
     const totalSupplyNum = parseFloat(info.totalSupply);
     const lpBalanceNum = parseFloat(info.lpBalance);
@@ -171,8 +205,7 @@ class LPManager {
       const position = await LPPosition.findByPair(info.pairAddress.toLowerCase(), network);
       if (position) {
         position.lpBalance = info.lpBalance;
-        position.reserveA = info.reserve0;
-        position.reserveB = info.reserve1;
+        Object.assign(position, reservesForPosition(position, info));
         position.totalSupply = info.totalSupply;
         const totalSupplyNum = parseFloat(info.totalSupply);
         const lpBalanceNum = parseFloat(info.lpBalance);

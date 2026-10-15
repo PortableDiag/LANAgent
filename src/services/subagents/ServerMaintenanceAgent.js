@@ -19,6 +19,17 @@ import { retryOperation } from '../../utils/retryUtils.js';
 // stay well under it — the surplus opens are refused, not queued.
 const SSH_MAX_CONCURRENT_CHANNELS = 4;
 
+/**
+ * *arr apps update themselves (UpdateMechanism BuiltIn, tarball in /opt), not
+ * through apt. goliath also carries a stale `sonarr 3.0.10` dpkg record from the
+ * old v3 install while v4/v5 runs from /opt/Sonarr, so dpkg is NOT the version.
+ * Their API (key read from config.xml on the host) is the source of truth.
+ */
+const ARR_API_VERSION = { radarr: 'v3', sonarr: 'v3', lidarr: 'v1', readarr: 'v1', prowlarr: 'v1' };
+const ARR_BACKUP_TIMEOUT_MS = 180000;
+const ARR_UPDATE_TIMEOUT_MS = 600000;
+const ARR_POLL_MS = 5000;
+
 export class ServerMaintenanceAgent extends BaseAgentHandler {
   constructor(mainAgent, agentDoc) {
     super(mainAgent, agentDoc);
@@ -1074,37 +1085,91 @@ export class ServerMaintenanceAgent extends BaseAgentHandler {
         if (ctlVer.trim()) return ctlVer.trim();
       }
 
-      // Try dpkg (works for jellyfin, calibre, sonarr, etc.)
+      // *arr apps: the API first — a leftover dpkg record can name a long-gone version
+      if (ARR_API_VERSION[app.name] && app.port) {
+        const status = await this.arrApi(app, 'GET', 'system/status').catch(() => null);
+        if (status?.version) return status.version;
+      }
+
+      // dpkg (jellyfin, calibre, …)
       const output = await this.runSSHCommand(
         `dpkg -l ${app.name} 2>/dev/null | awk '/^ii/{print $3}' || echo ""`
       );
       const ver = output.trim();
       if (ver) return ver;
 
-      // For *arr apps: read API key from config.xml and query local API
-      if (['radarr', 'sonarr', 'lidarr', 'readarr', 'prowlarr'].includes(app.name) && app.port) {
-        const apiVer = ['lidarr', 'readarr', 'prowlarr'].includes(app.name) ? 'v1' : 'v3';
-        const apiKeyOut = await this.runSSHCommand(
-          `sed -n 's/.*<ApiKey>\\(.*\\)<\\/ApiKey>.*/\\1/p' /var/lib/${app.name}/config.xml 2>/dev/null || echo ""`
-        );
-        const apiKey = apiKeyOut.trim();
-        if (apiKey) {
-          const jsonOut = await this.runSSHCommand(
-            `curl -sf http://localhost:${app.port}/api/${apiVer}/system/status?apikey=${apiKey} 2>/dev/null || echo "{}"`
-          );
-          try {
-            const parsed = JSON.parse(jsonOut.trim());
-            if (parsed.version) return parsed.version;
-          } catch {
-            // Failed to parse, skip
-          }
-        }
-      }
-
       return null;
     } catch {
       return null;
     }
+  }
+
+  /**
+   * Call an *arr app's local API on the host. The API key is read from
+   * config.xml inside the remote shell so it never crosses into our logs.
+   * Returns parsed JSON, or null when the app answers nothing parseable.
+   */
+  async arrApi(app, method, path, body) {
+    const apiVer = ARR_API_VERSION[app.name];
+    if (!apiVer || !app.port) return null;
+    const keyCmd = `K=$(sed -n 's/.*<ApiKey>\\(.*\\)<\\/ApiKey>.*/\\1/p' /var/lib/${app.name}/config.xml 2>/dev/null)`;
+    const data = body ? ` -H 'Content-Type: application/json' -d '${JSON.stringify(body).replace(/'/g, "'\\''")}'` : '';
+    const out = await this.runSSHCommand(
+      `${keyCmd}; [ -n "$K" ] && curl -sf -m 30 -X ${method} -H "X-Api-Key: $K"${data} http://localhost:${app.port}/api/${apiVer}/${path} 2>/dev/null || echo ""`
+    );
+    try { return JSON.parse(out.trim()); } catch { return null; }
+  }
+
+  /**
+   * Update an *arr app through its own updater: take the app's built-in backup
+   * (config + database) first, then run ApplicationUpdate. installMajorUpdate is
+   * set because the auto-updater skips major versions, which is what left
+   * sonarr parked on 4.0.20 with 5.0.0 installable (2026-10-14).
+   * Returns a handleCommand-shaped result, or null if the API is unreachable.
+   */
+  async updateArrApp(app, hostname) {
+    const status = await this.arrApi(app, 'GET', 'system/status');
+    if (!status?.version) return null;
+    const preVersion = status.version;
+
+    const updates = await this.arrApi(app, 'GET', 'update');
+    const target = Array.isArray(updates) ? updates.find(u => u.installable && !u.installed) : null;
+    if (!target) {
+      return { success: true, message: `**${hostname}**: ${app.name} is already up to date (${preVersion}, ${status.branch || 'unknown'} branch)` };
+    }
+
+    // 1. Backup — refuse to update without a completed one
+    const backupCmd = await this.arrApi(app, 'POST', 'command', { name: 'Backup' });
+    if (!backupCmd?.id) {
+      return { success: false, message: `**${hostname}**: ${app.name} backup could not be started — update NOT attempted (${preVersion} → ${target.version} pending)` };
+    }
+    let backupState = backupCmd.status;
+    for (let waited = 0; !['completed', 'failed', 'aborted', 'cancelled'].includes(backupState) && waited < ARR_BACKUP_TIMEOUT_MS; waited += ARR_POLL_MS) {
+      await new Promise(r => setTimeout(r, ARR_POLL_MS));
+      backupState = (await this.arrApi(app, 'GET', `command/${backupCmd.id}`))?.status;
+    }
+    if (backupState !== 'completed') {
+      return { success: false, message: `**${hostname}**: ${app.name} backup ended "${backupState || 'unknown'}" — update NOT attempted (${preVersion} → ${target.version} pending)` };
+    }
+    const backups = await this.arrApi(app, 'GET', 'system/backup');
+    const backupName = Array.isArray(backups) && backups.length
+      ? backups.sort((a, b) => new Date(b.time) - new Date(a.time))[0].name
+      : 'built-in backup';
+
+    // 2. Update — the app restarts itself; poll until it answers with a new version
+    logger.info(`ServerMaintenanceAgent: updating ${app.name} on ${hostname} ${preVersion} → ${target.version} (backup ${backupName})`);
+    await this.arrApi(app, 'POST', 'command', { name: 'ApplicationUpdate', installMajorUpdate: true });
+    let postVersion = preVersion;
+    for (let waited = 0; postVersion === preVersion && waited < ARR_UPDATE_TIMEOUT_MS; waited += ARR_POLL_MS) {
+      await new Promise(r => setTimeout(r, ARR_POLL_MS));
+      postVersion = (await this.arrApi(app, 'GET', 'system/status').catch(() => null))?.version || postVersion;
+    }
+    const unitState = (await this.runSSHCommand(`systemctl is-active ${app.unit} 2>/dev/null || echo inactive`).catch(() => 'unknown')).trim();
+
+    if (postVersion === preVersion) {
+      return { success: false, message: `**${hostname}**: ${app.name} update to ${target.version} did not take effect (still ${preVersion}, unit ${unitState}). Backup: ${backupName}. See /var/lib/${app.name}/UpdateLogs/` };
+    }
+    return { success: true, message: `**${hostname}**: Updated ${app.name} (${preVersion} → ${postVersion})\nBackup: ${backupName}\nStatus: ${unitState}` };
   }
 
   // --- Cleanup ---
@@ -1478,6 +1543,15 @@ export class ServerMaintenanceAgent extends BaseAgentHandler {
           if (app.name === 'expressvpn') {
             preStatusCmd = 'expressvpnctl status 2>/dev/null || expressvpn status 2>/dev/null || echo unknown';
           }
+          // *arr apps update through their own updater, backup first
+          if (ARR_API_VERSION[app.name]) {
+            const arrResult = await this.updateArrApp(app, hostname);
+            if (arrResult) {
+              await this.disconnectSSH();
+              return arrResult;
+            }
+          }
+
           const preStatus = await this.runSSHCommand(preStatusCmd).catch(() => 'unknown');
           const preVersion = await this.getAppVersion(app) || 'unknown';
 

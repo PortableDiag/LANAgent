@@ -1,6 +1,7 @@
 import mongoose from 'mongoose';
 import NodeCache from 'node-cache';
 import { retryOperation } from '../utils/retryUtils.js';
+import { logger } from '../utils/logger.js';
 
 /**
  * LPPosition - Tracks liquidity provider positions across DEX pools.
@@ -367,6 +368,65 @@ lpPositionSchema.methods.recommendOptimization = function() {
   }
 
   return recommendations;
+};
+
+/**
+ * Recalculate and persist the current BNB value of the liquidity position
+ * from token prices and pool reserves. Supports V2 constant-product pools.
+ * For V3 positions, update is skipped and a warning is logged.
+ *
+ * @param {number} tokenAPriceBNB - Current price of tokenA in BNB
+ * @param {number} tokenBPriceBNB - Current price of tokenB in BNB
+ * @returns {Promise<number>} The newly computed and saved currentValueBNB
+ * @throws {Error} If inputs are invalid or the save operation fails
+ */
+lpPositionSchema.methods.updatePositionValue = async function(tokenAPriceBNB, tokenBPriceBNB) {
+  // Input validation
+  if (!Number.isFinite(tokenAPriceBNB) || !Number.isFinite(tokenBPriceBNB)) {
+    throw new Error('updatePositionValue: token prices must be numbers');
+  }
+  if (tokenAPriceBNB < 0 || tokenBPriceBNB < 0) {
+    throw new Error('updatePositionValue: token prices cannot be negative');
+  }
+
+  // V3/V4 positions are not yet supported for automated valuation
+  if (this.protocol !== 'v2') {
+    logger.warn(
+      `updatePositionValue: skipping unsupported protocol "${this.protocol}" for pair ${this.pairAddress}`
+    );
+    return this.currentValueBNB;
+  }
+
+  // Reserves are stored as decimal-scaled strings in tokenA/tokenB order
+  // (lpManager.reservesForPosition maps them from the pair's token0/token1).
+  const reserveA = parseFloat(this.reserveA) || 0;
+  const reserveB = parseFloat(this.reserveB) || 0;
+  const totalSupply = parseFloat(this.totalSupply) || 0;
+  const lpBalance = parseFloat(this.lpBalance) || 0;
+
+  // Guard against division by zero and zero balances
+  if (totalSupply <= 0 || lpBalance <= 0) {
+    logger.warn(
+      `updatePositionValue: insufficient pool data (totalSupply=${totalSupply}, lpBalance=${lpBalance}) for pair ${this.pairAddress}`
+    );
+    this.currentValueBNB = 0;
+  } else {
+    const shareFraction = lpBalance / totalSupply;
+    const valueA = reserveA * shareFraction * tokenAPriceBNB;
+    const valueB = reserveB * shareFraction * tokenBPriceBNB;
+    this.currentValueBNB = valueA + valueB;
+  }
+
+  // Persist with retry
+  await retryOperation(
+    () => this.save(),
+    { retries: 3, context: 'LPPosition.updatePositionValue.save' }
+  );
+
+  // Invalidate the active positions cache so stale data isn't served
+  positionCache.del('activePositions');
+
+  return this.currentValueBNB;
 };
 
 const LPPosition = mongoose.model('LPPosition', lpPositionSchema);

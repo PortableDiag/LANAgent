@@ -1,5 +1,7 @@
 import crypto from 'node:crypto';
 import mongoose from 'mongoose';
+import { retryOperation } from '../utils/retryUtils.js';
+import { logger } from '../utils/logger.js';
 
 const p2pTransferSchema = new mongoose.Schema({
   // Which peer the transfer is with
@@ -29,7 +31,10 @@ const p2pTransferSchema = new mongoose.Schema({
   // Transfer status
   status: {
     type: String,
-    enum: ['pending', 'transferring', 'awaiting_approval', 'approved', 'rejected', 'installed', 'failed'],
+    // 'completed' = an OUTGOING transfer whose chunks were all sent (pluginSharing
+    // sets it). It was missing here, so that save() threw and a successful send
+    // was logged as "P2P failed to send plugin".
+    enum: ['pending', 'transferring', 'awaiting_approval', 'approved', 'rejected', 'installed', 'failed', 'completed', 'cancelled'],
     default: 'pending'
   },
 
@@ -98,6 +103,26 @@ p2pTransferSchema.index({ direction: 1, status: 1 });
 p2pTransferSchema.index({ createdAt: -1 });
 
 /**
+ * Allowed status transitions, matching what pluginSharing actually does:
+ * transfers are created 'transferring'; an outgoing one ends 'completed'; an
+ * incoming one goes to 'awaiting_approval', or straight to 'approved' when the
+ * peer is trusted for auto-install; an install can still fail after approval.
+ * A failed transfer is retried by re-requesting it (a NEW doc), so 'failed' is
+ * terminal. Cancel exists for transfers stuck mid-flight or never acted on.
+ */
+p2pTransferSchema.statics.transitionMap = {
+  pending: ['transferring', 'failed', 'cancelled'],
+  transferring: ['awaiting_approval', 'approved', 'completed', 'failed', 'cancelled'],
+  awaiting_approval: ['approved', 'rejected', 'failed', 'cancelled'],
+  approved: ['installed', 'failed'],
+  completed: [],
+  rejected: [],
+  installed: [],
+  failed: [],
+  cancelled: []
+};
+
+/**
  * Get all transfers awaiting user approval
  */
 p2pTransferSchema.statics.getPendingApprovals = function() {
@@ -116,6 +141,91 @@ p2pTransferSchema.statics.getHistory = function(limit = 50) {
  */
 p2pTransferSchema.statics.getForPeer = function(peerFingerprint) {
   return this.find({ peerFingerprint }).sort({ createdAt: -1 });
+};
+
+/**
+ * Lean fetch for the progress endpoint — selects only the fields
+ * needed by the progress methods, returning a hydrated doc so the
+ * instance methods are callable.
+ */
+p2pTransferSchema.statics.getTransferProgress = function(transferId) {
+  return this.findById(transferId)
+    .select('peerFingerprint pluginName direction status totalChunks receivedChunks totalSize startedAt completedAt');
+};
+
+/**
+ * Atomically transition a transfer to a new status.
+ * Uses findOneAndUpdate with a condition on the current status to ensure
+ * only valid transitions are performed. Returns the updated document or
+ * null if the transition is invalid (current status not in allowed set).
+ *
+ * @param {string} transferId - The transfer document ID
+ * @param {string} newStatus - The target status
+ * @param {object} [additionalFields={}] - Additional fields to set (e.g., { error: 'reason' })
+ * @returns {Promise<object|null>} The updated transfer document, or null if transition failed
+ */
+p2pTransferSchema.statics.transitionStatus = async function(transferId, newStatus, additionalFields = {}) {
+  // Validate newStatus is a valid enum value
+  const validStatuses = this.schema.path('status').enumValues;
+  if (!validStatuses.includes(newStatus)) {
+    throw new Error(`Invalid status: ${newStatus}. Must be one of: ${validStatuses.join(', ')}`);
+  }
+
+  // Determine which current statuses allow transition to newStatus
+  const allowedCurrentStatuses = Object.keys(this.transitionMap).filter(
+    currentStatus => this.transitionMap[currentStatus].includes(newStatus)
+  );
+
+  if (allowedCurrentStatuses.length === 0) {
+    logger.warn(`No transitions lead to status '${newStatus}'. Transfer ${transferId} cannot be updated.`);
+    return null;
+  }
+
+  // For approved/installed, verify payload integrity before attempting transition
+  if (['approved', 'installed'].includes(newStatus)) {
+    const doc = await this.findById(transferId);
+    if (!doc) {
+      logger.warn(`Transfer ${transferId} not found for integrity check`);
+      return null;
+    }
+    const verification = doc.verifyPayloadIntegrity();
+    if (!verification.verified) {
+      logger.warn(`Payload integrity check failed for transfer ${transferId} transitioning to ${newStatus}: ${verification.reason}`);
+      return null;
+    }
+  }
+
+  // Build the update object
+  const update = { $set: { status: newStatus, ...additionalFields } };
+  if (['cancelled', 'failed', 'rejected', 'installed', 'completed'].includes(newStatus)) {
+    update.$set.completedAt = new Date();
+  }
+  // A cancelled or rejected transfer must not keep unreviewed code in the DB
+  if (['cancelled', 'rejected'].includes(newStatus)) {
+    update.$set.assembledSource = '';
+  }
+
+  // Atomic update with retry for transient database errors
+  const updateFn = async () => {
+    return this.findOneAndUpdate(
+      { _id: transferId, status: { $in: allowedCurrentStatuses } },
+      update,
+      { new: true, runValidators: true }
+    );
+  };
+
+  try {
+    const updated = await retryOperation(updateFn, { retries: 3, minTimeout: 100, maxTimeout: 500 });
+    if (updated) {
+      logger.info(`Transfer ${transferId} status transitioned to '${newStatus}'`);
+    } else {
+      logger.warn(`Transfer ${transferId} status transition to '${newStatus}' failed: current status not in allowed set or document not found`);
+    }
+    return updated;
+  } catch (error) {
+    logger.error(`Error transitioning transfer ${transferId} to ${newStatus}: ${error.message}`);
+    throw error;
+  }
 };
 
 /**
@@ -186,16 +296,6 @@ p2pTransferSchema.methods.getProgressInfo = function() {
 };
 
 /**
- * Lean fetch for the progress endpoint — selects only the fields
- * needed by the progress methods, returning a hydrated doc so the
- * instance methods are callable.
- */
-p2pTransferSchema.statics.getTransferProgress = function(transferId) {
-  return this.findById(transferId)
-    .select('peerFingerprint pluginName direction status totalChunks receivedChunks totalSize startedAt completedAt');
-};
-
-/**
  * Whether this transfer can be retried. Only failed INCOMING transfers
  * qualify: a retry re-requests the plugin from the peer, and outgoing
  * transfers are peer-initiated (the peer must re-request, we can't force
@@ -237,6 +337,24 @@ p2pTransferSchema.methods.verifyPayloadIntegrity = function() {
         : 'Stored SHA-256 digest is missing or invalid'
     )
   };
+};
+
+/**
+ * Cancel this transfer with an optional reason.
+ * Calls transitionStatus to atomically move to 'cancelled' and sets the error field.
+ *
+ * @param {string} [reason] - Reason for cancellation
+ * @returns {Promise<object|null>} The updated transfer document, or null if cancellation failed
+ */
+p2pTransferSchema.methods.cancel = async function(reason) {
+  const updated = await this.constructor.transitionStatus(this._id, 'cancelled', { error: reason || 'Cancelled by user' });
+  if (updated) {
+    // Update local instance to reflect the change
+    this.status = updated.status;
+    this.error = updated.error;
+    this.completedAt = updated.completedAt;
+  }
+  return updated;
 };
 
 // Defence in depth: pluginSharing verifies the hash when chunks are assembled, but

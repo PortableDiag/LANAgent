@@ -99,6 +99,9 @@ const TESTNET_TOKENS = {
     }
 };
 
+// Most faucets allow one claim per address per 24h
+const CLAIM_COOLDOWN_MS = 24 * 60 * 60 * 1000;
+
 class FaucetService {
     constructor() {
         this.claimHistory = new Map(); // Track claims to avoid rate limits
@@ -156,11 +159,65 @@ class FaucetService {
         
         if (!lastClaim) return true;
         
-        // Most faucets have 24 hour cooldown
-        const cooldownHours = 24;
-        const cooldownMs = cooldownHours * 60 * 60 * 1000;
-        
-        return Date.now() - lastClaim > cooldownMs;
+        return Date.now() - lastClaim > CLAIM_COOLDOWN_MS;
+    }
+
+    /**
+     * Cooldown status for every faucet on a network, from the same claim history
+     * canClaim() and the auto-claimer use, so the three can never disagree.
+     * Nano is claimed through the browser-driven button faucet, which keeps its
+     * own clock (4h), so its status is read from there.
+     * @returns {Promise<{network, address, canClaim, remainingSeconds, nextClaimAt, faucets: Array}>}
+     */
+    async getCooldownStatus(network, address) {
+        const now = Date.now();
+        const faucets = [];
+
+        if (network === 'nano') {
+            const nanoButtonFaucet = (await import('./nanoButtonFaucet.js')).default;
+            const check = nanoButtonFaucet.canClaim();
+            const lastClaim = nanoButtonFaucet.lastClaim || null;
+            const nextAt = lastClaim ? lastClaim + nanoButtonFaucet.cooldownMs : null;
+            faucets.push({
+                faucet: 'TheNanoButton',
+                automated: true,
+                canClaim: check.can,
+                reason: check.can ? null : check.reason,
+                lastClaim: lastClaim ? new Date(lastClaim).toISOString() : null,
+                nextClaimAt: nextAt && nextAt > now ? new Date(nextAt).toISOString() : null,
+                remainingSeconds: nextAt && nextAt > now ? Math.ceil((nextAt - now) / 1000) : 0
+            });
+        } else {
+            for (const faucet of this.getFaucetsForNetwork(network).faucets) {
+                // Same key the claimers write (claimFromApiFaucet / runAutoClaim)
+                const claimKey = faucet.api || faucet.url;
+                const lastClaim = this.claimHistory.get(`${claimKey}:${address}`) || null;
+                const nextAt = lastClaim ? lastClaim + CLAIM_COOLDOWN_MS : null;
+                const onCooldown = !!(nextAt && nextAt > now);
+                faucets.push({
+                    faucet: faucet.name,
+                    automated: !!(faucet.automated && faucet.api),
+                    canClaim: !onCooldown,
+                    lastClaim: lastClaim ? new Date(lastClaim).toISOString() : null,
+                    nextClaimAt: onCooldown ? new Date(nextAt).toISOString() : null,
+                    remainingSeconds: onCooldown ? Math.ceil((nextAt - now) / 1000) : 0
+                });
+            }
+        }
+
+        const waiting = faucets.filter(f => !f.canClaim && f.nextClaimAt);
+        const canClaim = faucets.some(f => f.canClaim);
+        const soonest = canClaim || !waiting.length
+            ? null
+            : waiting.reduce((a, b) => (a.remainingSeconds <= b.remainingSeconds ? a : b));
+        return {
+            network,
+            address,
+            canClaim,
+            remainingSeconds: soonest ? soonest.remainingSeconds : 0,
+            nextClaimAt: soonest ? soonest.nextClaimAt : null,
+            faucets
+        };
     }
 
     /**
@@ -354,7 +411,7 @@ class FaucetService {
                     } else {
                         const key = `${faucet.api || faucet.url}:${address}`;
                         const lastClaim = this.claimHistory.get(key);
-                        const hoursUntilNext = Math.ceil((lastClaim + 24 * 60 * 60 * 1000 - Date.now()) / (60 * 60 * 1000));
+                        const hoursUntilNext = Math.ceil((lastClaim + CLAIM_COOLDOWN_MS - Date.now()) / (60 * 60 * 1000));
                         logger.info(`${faucet.name} on cooldown. Can claim in ${hoursUntilNext} hours`);
                     }
                 }
@@ -379,7 +436,7 @@ class FaucetService {
                         const key = `${faucet.api}:${address}`;
                         const lastClaim = this.claimHistory.get(key);
                         if (lastClaim) {
-                            const hoursUntilNext = Math.ceil((lastClaim + 24 * 60 * 60 * 1000 - Date.now()) / (60 * 60 * 1000));
+                            const hoursUntilNext = Math.ceil((lastClaim + CLAIM_COOLDOWN_MS - Date.now()) / (60 * 60 * 1000));
                             logger.debug(`${faucet.name} (${network}) on cooldown. Can claim in ${hoursUntilNext} hours`);
                         }
                     }
@@ -481,7 +538,7 @@ class FaucetService {
                 faucet: key.split(':')[0],
                 address: key.split(':')[1],
                 lastClaim: new Date(timestamp).toISOString(),
-                canClaimAt: new Date(timestamp + 24 * 60 * 60 * 1000).toISOString()
+                canClaimAt: new Date(timestamp + CLAIM_COOLDOWN_MS).toISOString()
             }))
         };
     }
@@ -527,7 +584,7 @@ class FaucetService {
                 faucet: faucetUrl,
                 address,
                 timestamp,
-                nextClaim: timestamp + (24 * 60 * 60 * 1000)
+                nextClaim: timestamp + CLAIM_COOLDOWN_MS
             });
         }
         

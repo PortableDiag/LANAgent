@@ -203,14 +203,17 @@ router.post('/claim/multi', claimLimiter, async (req, res) => {
             }
 
             const claims = await Promise.all(automatedFaucets.map(async (faucet) => {
-                const canClaim = faucetService.canClaim(faucet.apiUrl || faucet.url, address);
+                // Faucets define `api`, never `apiUrl`: reading apiUrl posted the claim to
+                // the human-facing page and filed it under a key the auto-claimer and
+                // cooldown status never look up.
+                const canClaim = faucetService.canClaim(faucet.api || faucet.url, address);
                 if (!canClaim) {
                     return { faucet: faucet.name, success: false, error: 'Cooldown active' };
                 }
 
                 try {
                     const claimResult = await retryOperation(
-                        () => faucetService.claimFromApiFaucet(faucet.apiUrl || faucet.url, address, network),
+                        () => faucetService.claimFromApiFaucet(faucet.api || faucet.url, address, network),
                         { retries: 2 }
                     );
                     return { faucet: faucet.name, ...claimResult };
@@ -272,6 +275,28 @@ router.get('/nano/status', async (req, res) => {
         res.json({ success: true, ...nanoButtonFaucet.getStatus() });
     } catch (error) {
         res.status(500).json({ error: error.message });
+    }
+});
+
+/**
+ * Cooldown status for a network: whether any faucet can be claimed now, and if
+ * not, the soonest next claim. Read from the service's claim history (the same
+ * record canClaim() and the auto-claimer use). History is in memory, so a
+ * restart forgets past claims and reports them claimable.
+ */
+router.get('/cooldown/:network', async (req, res) => {
+    try {
+        const { network } = req.params;
+        const addresses = await retryOperation(() => faucetService.getWalletAddresses(), { retries: 3 });
+        const address = addresses[network];
+        if (!address) {
+            return res.status(400).json({ success: false, error: `No wallet address found for network: ${network}` });
+        }
+        const status = await faucetService.getCooldownStatus(network, address);
+        res.json({ success: true, ...status });
+    } catch (error) {
+        logger.error('Faucet cooldown status error:', error);
+        res.status(500).json({ success: false, error: error.message });
     }
 });
 

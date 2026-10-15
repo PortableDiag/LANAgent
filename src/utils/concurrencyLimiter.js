@@ -9,13 +9,18 @@
  * If both the active slots AND the queue are full, run() rejects immediately with
  * an Error whose `.code === 'QUEUE_FULL'` so the caller can shed load (503) rather
  * than buffer unbounded work in memory.
+ *
+ * Since v2 the wait queue is organised as a max-heap ordered by task priority
+ * (higher number = higher priority) with insertion-order tie‑breaking, allowing
+ * critical work to jump ahead of lower‑priority work during bursts.
  */
 export class ConcurrencyLimiter {
   constructor({ maxConcurrent = 2, maxQueue = 8 } = {}) {
     this.max = Math.max(1, maxConcurrent);
     this.maxQueue = Math.max(0, maxQueue);
     this.active = 0;
-    this.queue = [];
+    this.queue = [];            // binary max-heap (priority desc, order asc)
+    this._nextOrder = 0;        // monotonically increasing insertion sequence
     this.initialMax = this.max;
     this.initialMaxQueue = this.maxQueue;
     this.cancelled = 0;
@@ -33,12 +38,17 @@ export class ConcurrencyLimiter {
    * @param {Object} [options] - Queue and cancellation options
    * @param {AbortSignal} [options.signal] - Signal used to cancel queued work
    * @param {number} [options.queueTimeoutMs] - Maximum time to remain queued
+   * @param {number} [options.priority] - Task priority (higher = more urgent, default 0)
    * @returns {Promise<*>} The operation result
    */
   run(fn, options = {}) {
     return new Promise((resolve, reject) => {
       const signal = options && options.signal;
       const queueTimeoutMs = options && options.queueTimeoutMs;
+      // NaN would make every comparison false and corrupt the heap order
+      const priority = (options && Number.isFinite(options.priority))
+        ? options.priority
+        : 0;
 
       if (
         queueTimeoutMs !== undefined &&
@@ -67,6 +77,8 @@ export class ConcurrencyLimiter {
         reject,
         signal,
         queueTimeoutMs,
+        priority,
+        order: this._nextOrder++,
         state: 'queued',
         timer: null,
         abortHandler: null
@@ -75,7 +87,7 @@ export class ConcurrencyLimiter {
       if (this.active < this.max) {
         this._start(task);
       } else {
-        this.queue.push(task);
+        this._heapEnqueue(task);
         this._watchQueuedTask(task);
       }
     });
@@ -127,17 +139,14 @@ export class ConcurrencyLimiter {
   }
 
   /**
-   * Remove a task from the bounded queue.
+   * Remove a task from the bounded priority heap.
    *
    * @param {Object} task - Internal queued task
    * @returns {boolean} Whether the task was removed
    * @private
    */
   _removeQueuedTask(task) {
-    const index = this.queue.indexOf(task);
-    if (index === -1) return false;
-    this.queue.splice(index, 1);
-    return true;
+    return this._heapRemoveTask(task);
   }
 
   /**
@@ -221,10 +230,135 @@ export class ConcurrencyLimiter {
   _release() {
     this.active--;
     if (this.queue.length > 0 && this.active < this.max) {
-      const next = this.queue.shift();
-      this._start(next);
+      const next = this._heapDequeue();
+      if (next) this._start(next);
     }
   }
+
+  // --------------------------------------------------------------------------
+  //  Priority heap (max-heap by priority desc, then order asc)
+  // --------------------------------------------------------------------------
+
+  /**
+   * Insert a task into the priority heap.
+   * @param {Object} task
+   * @private
+   */
+  _heapEnqueue(task) {
+    this.queue.push(task);
+    this._siftUp(this.queue.length - 1);
+  }
+
+  /**
+   * Extract the highest-priority task from the heap.
+   * @returns {Object|null} The task, or null if heap empty
+   * @private
+   */
+  _heapDequeue() {
+    if (this.queue.length === 0) return null;
+
+    const root = this.queue[0];
+    const last = this.queue.pop();
+    if (this.queue.length > 0) {
+      this.queue[0] = last;
+      this._siftDown(0);
+    }
+    return root;
+  }
+
+  /**
+   * Remove a specific task from the heap (used for cancellation / timeout).
+   * @param {Object} task
+   * @returns {boolean} true if found and removed
+   * @private
+   */
+  _heapRemoveTask(task) {
+    const idx = this._heapIndexOf(task);
+    if (idx === -1) return false;
+
+    // Replace with last element, then restore heap property
+    const last = this.queue.pop();
+    if (idx < this.queue.length) {
+      this.queue[idx] = last;
+      // After replacement we may need to move up or down; sift both.
+      this._siftUp(idx);
+      this._siftDown(idx);
+    }
+    return true;
+  }
+
+  /**
+   * Linear scan to find task index – acceptable because maxQueue is small.
+   * @param {Object} task
+   * @returns {number}
+   * @private
+   */
+  _heapIndexOf(task) {
+    // tasks are objects; strict reference equality works
+    for (let i = 0; i < this.queue.length; i++) {
+      if (this.queue[i] === task) return i;
+    }
+    return -1;
+  }
+
+  /**
+   * Compare two tasks: higher priority first; if equal, earlier insertion wins.
+   * @param {Object} a
+   * @param {Object} b
+   * @returns {boolean} true if a is "higher priority" than b
+   * @private
+   */
+  _isHigherPriority(a, b) {
+    if (a.priority !== b.priority) return a.priority > b.priority;
+    return a.order < b.order;
+  }
+
+  /**
+   * Sift a node up to maintain the max-heap property.
+   * @param {number} idx
+   * @private
+   */
+  _siftUp(idx) {
+    while (idx > 0) {
+      const parent = Math.floor((idx - 1) / 2);
+      if (this._isHigherPriority(this.queue[idx], this.queue[parent])) {
+        [this.queue[idx], this.queue[parent]] = [this.queue[parent], this.queue[idx]];
+        idx = parent;
+      } else {
+        break;
+      }
+    }
+  }
+
+  /**
+   * Sift a node down to maintain the max-heap property.
+   * @param {number} idx
+   * @private
+   */
+  _siftDown(idx) {
+    const length = this.queue.length;
+    while (true) {
+      let largest = idx;
+      const left = 2 * idx + 1;
+      const right = 2 * idx + 2;
+
+      if (left < length && this._isHigherPriority(this.queue[left], this.queue[largest])) {
+        largest = left;
+      }
+      if (right < length && this._isHigherPriority(this.queue[right], this.queue[largest])) {
+        largest = right;
+      }
+
+      if (largest === idx) break;
+
+      [this.queue[idx], this.queue[largest]] = [this.queue[largest], this.queue[idx]];
+      idx = largest;
+    }
+  }
+
+  // --------------------------------------------------------------------------
+  //  Stats & configuration (unchanged public API)
+  // --------------------------------------------------------------------------
 
   stats() {
     return {
@@ -265,8 +399,8 @@ export class ConcurrencyLimiter {
 
     // Process queued tasks if capacity has increased
     while (this.queue.length > 0 && this.active < this.max) {
-      const next = this.queue.shift();
-      this._start(next);
+      const next = this._heapDequeue();
+      if (next) this._start(next);
     }
 
     return this.getConfig();

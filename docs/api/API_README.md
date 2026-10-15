@@ -1052,6 +1052,22 @@ gained a 30-day TTL; it previously had no retention at all.
   transfer by re-requesting it from the original peer. The failed record stays as audit;
   the peer's fresh offer creates a new transfer doc. 400 for non-retryable states, 404
   unknown id, 503 when P2P is disabled.
+- **`POST /p2p/api/transfers/:transferId/cancel`** (JWT) — cancel a transfer that is pending,
+  transferring or awaiting approval. Optional body `{ "reason": "..." }` (500 chars). Moves the
+  record to `cancelled` atomically (only from those states), clears any assembled source, and
+  drops the in-memory chunk buffer so late chunks are ignored. 200 cancelled, 409 not found or
+  already finished, 400 malformed id, 503 P2P disabled.
+- **`GET /api/faucets/cooldown/:network`** (JWT) — whether any faucet on the network can be
+  claimed now and, if not, the soonest next claim: `{ success, network, address, canClaim,
+  remainingSeconds, nextClaimAt, faucets: [{ faucet, automated, canClaim, lastClaim,
+  nextClaimAt, remainingSeconds }] }`. Read from the same claim history the auto-claimer uses
+  (24h per faucet; Nano uses the button faucet's 4h clock). History is in memory, so a restart
+  reports past claims as claimable. 400 when the agent has no wallet on that network.
+- **`vision` plugin, `ask`** now also takes `base64` (raw or a `data:image/...;base64,` URL) in
+  place of a file path. The type is read from the image bytes (PNG/JPEG/GIF/WebP); an optional
+  `mimeType` must match them. 20 MB decoded cap.
+- **`GET /api/crypto/strategy/info/dca`** now includes a `dca` block: per-network invested,
+  tokens accumulated, mean buy price, `costBasis` (invested ÷ tokens) and buy counts.
 - **`GET /api/crypto/strategy/indicators`** (JWT) — metadata for every registered
   rule-building indicator across all families; optional `?category=` filter.
 - **`POST /api/external/admin/download-tokens/inspect`** (x-admin-key; body `{token}`) —
@@ -4217,6 +4233,7 @@ End-to-end encrypted multi-instance networking. LANAgent instances connect to a 
 | GET | `/p2p/api/transfers/pending` | JWT/API Key | Get plugins awaiting user approval |
 | POST | `/p2p/api/transfers/:transferId/approve` | JWT/API Key | Approve and install a pending plugin |
 | POST | `/p2p/api/transfers/:transferId/reject` | JWT/API Key | Reject a pending plugin transfer |
+| POST | `/p2p/api/transfers/:transferId/cancel` | JWT/API Key | Cancel a stuck or unanswered transfer (`{reason?}`); 409 if already finished, 400 bad id |
 
 ```bash
 # Check federation status
@@ -4246,6 +4263,7 @@ Fixed Nano RPC endpoints (switched to rainstorm.city/api as primary), fixed inva
 New faucet endpoints:
 - `POST /api/faucets/claim/nano` — Trigger Nano faucet claim (browser automation, currently disabled)
 - `GET /api/faucets/nano/status` — Nano faucet status (claims, cooldown, errors)
+- `GET /api/faucets/cooldown/:network` — claimable now / soonest next claim per faucet (v2.25.511)
 
 ### PR Review Batch + Grid Adaptive Spacing + Sandbox Expansion (v2.13.2)
 

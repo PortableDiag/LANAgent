@@ -190,3 +190,152 @@ test('ROI past the threshold suggests compounding', () => {
   assert.equal(rec.details.currentRoi, 50);
   assert.equal(rec.details.rebalanceThreshold, 10);
 });
+
+// --- updatePositionValue ---------------------------------------------------
+// The retryOperation wrapper is real; save is stubbed to succeed at once.
+
+test('updatePositionValue - valid v2 calculation and persistence', async () => {
+  const pos = new LPPosition({
+    protocol: 'v2',
+    pairAddress: '0xabc',
+    reserveA: '1000',
+    reserveB: '2000',
+    totalSupply: '10000',
+    lpBalance: '500',
+    currentValueBNB: 0
+  });
+  let saveCalls = 0;
+  pos.save = async function() {
+    saveCalls++;
+    return pos;
+  };
+
+  const result = await pos.updatePositionValue(0.1, 0.05);
+
+  const expected = (1000 * 500 / 10000 * 0.1) + (2000 * 500 / 10000 * 0.05);
+  assert.equal(pos.currentValueBNB, expected);
+  assert.equal(result, expected);
+  assert.equal(saveCalls, 1, 'save should be called exactly once');
+});
+
+test('updatePositionValue - throws for non‑number prices', async () => {
+  const pos = new LPPosition({ protocol: 'v2' });
+  await assert.rejects(
+    () => pos.updatePositionValue('0.1', 0.05),
+    /token prices must be numbers/
+  );
+  await assert.rejects(
+    () => pos.updatePositionValue(0.1, 'abc'),
+    /token prices must be numbers/
+  );
+});
+
+test('updatePositionValue - throws for negative prices', async () => {
+  const pos = new LPPosition({ protocol: 'v2' });
+  await assert.rejects(
+    () => pos.updatePositionValue(-0.1, 0.05),
+    /token prices cannot be negative/
+  );
+  await assert.rejects(
+    () => pos.updatePositionValue(0.1, -0.05),
+    /token prices cannot be negative/
+  );
+});
+
+test('updatePositionValue - returns current value unchanged for non‑v2 protocols', async () => {
+  const pos = new LPPosition({
+    protocol: 'v3',
+    pairAddress: '0xdef',
+    currentValueBNB: 123.45
+  });
+  // Save should never be invoked for v3; if it is, the test will fail because
+  // the real save would try to talk to MongoDB (no connection).
+  const result = await pos.updatePositionValue(0.1, 0.05);
+  assert.equal(result, 123.45);
+  assert.equal(pos.currentValueBNB, 123.45);
+});
+
+test('updatePositionValue - sets value to zero when totalSupply is 0', async () => {
+  const pos = new LPPosition({
+    protocol: 'v2',
+    pairAddress: '0xabc',
+    reserveA: '1000',
+    reserveB: '2000',
+    totalSupply: '0',
+    lpBalance: '500',
+    currentValueBNB: 50
+  });
+  let saveCalls = 0;
+  pos.save = async function() {
+    saveCalls++;
+    return pos;
+  };
+
+  const result = await pos.updatePositionValue(0.1, 0.05);
+  assert.equal(pos.currentValueBNB, 0);
+  assert.equal(result, 0);
+  assert.equal(saveCalls, 1);
+});
+
+test('updatePositionValue - sets value to zero when lpBalance is 0', async () => {
+  const pos = new LPPosition({
+    protocol: 'v2',
+    pairAddress: '0xabc',
+    reserveA: '1000',
+    reserveB: '2000',
+    totalSupply: '10000',
+    lpBalance: '0',
+    currentValueBNB: 50
+  });
+  let saveCalls = 0;
+  pos.save = async function() {
+    saveCalls++;
+    return pos;
+  };
+
+  const result = await pos.updatePositionValue(0.1, 0.05);
+  assert.equal(pos.currentValueBNB, 0);
+  assert.equal(result, 0);
+  assert.equal(saveCalls, 1);
+});
+
+test('updatePositionValue - rejects NaN / Infinity prices', async () => {
+  const pos = new LPPosition({ protocol: 'v2' });
+  await assert.rejects(() => pos.updatePositionValue(NaN, 0.05), /token prices must be numbers/);
+  await assert.rejects(() => pos.updatePositionValue(0.1, Infinity), /token prices must be numbers/);
+});
+
+// --- lpManager reserve mapping + WBNB-pair valuation -------------------------
+const WBNB = '0xbb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c';
+const TOKEN = '0x0000000000000000000000000000000000000001'; // sorts before WBNB
+
+test('reservesForPosition maps pair-order reserves onto tokenA/tokenB', async () => {
+  const { reservesForPosition } = await import('../../src/services/crypto/lpManager.js');
+  const info = { token0: TOKEN, token1: WBNB, reserve0: '1000', reserve1: '5' };
+  // tokenA is token0: unchanged
+  assert.deepEqual(reservesForPosition({ tokenA: { address: TOKEN } }, info), { reserveA: '1000', reserveB: '5' });
+  // tokenA is token1: swapped (the old code stored reserve0 as reserveA regardless)
+  assert.deepEqual(reservesForPosition({ tokenA: { address: WBNB } }, info), { reserveA: '5', reserveB: '1000' });
+});
+
+test('valuePositionInBNB prices a WBNB pair from its own reserves', async () => {
+  const { valuePositionInBNB } = await import('../../src/services/crypto/lpManager.js');
+  const pos = new LPPosition({
+    protocol: 'v2', network: 'bsc', pairAddress: '0xpair',
+    tokenA: { address: WBNB, symbol: 'WBNB' }, tokenB: { address: TOKEN, symbol: 'TKN' },
+    reserveA: '5', reserveB: '1000', totalSupply: '100', lpBalance: '10'
+  });
+  pos.save = async () => pos;
+  const v = await valuePositionInBNB(pos, 'bsc');
+  // 10% share: 0.5 WBNB + 100 TKN at 0.005 BNB each = 1 BNB (both sides equal, as in any V2 pool)
+  assert.ok(Math.abs(v - 1) < 1e-12, `value ${v}`);
+});
+
+test('valuePositionInBNB declines pairs without WBNB and non-v2 positions', async () => {
+  const { valuePositionInBNB } = await import('../../src/services/crypto/lpManager.js');
+  const base = { network: 'bsc', pairAddress: '0xp', reserveA: '1', reserveB: '1', totalSupply: '1', lpBalance: '1' };
+  const noNative = new LPPosition({ ...base, protocol: 'v2', tokenA: { address: TOKEN }, tokenB: { address: '0x0000000000000000000000000000000000000002' } });
+  const v3 = new LPPosition({ ...base, protocol: 'v3', tokenA: { address: WBNB }, tokenB: { address: TOKEN } });
+  assert.equal(await valuePositionInBNB(noNative, 'bsc'), null);
+  assert.equal(await valuePositionInBNB(v3, 'bsc'), null);
+});
