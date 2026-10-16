@@ -7,6 +7,7 @@ import { MultiUserSupport } from './multiUserSupport.js';
 import { chatActionMiddleware } from './chatActionKeepalive.js';
 import { startReactionAck } from './reactionAck.js';
 import { createReplyStream, handleStopUpdate, handleStopButton } from './draftStream.js';
+import { sendRich } from './richMessage.js';
 import { installConcurrentUpdates } from './updateDispatcher.js';
 import { installButtonStyles } from './buttonStyle.js';
 import { TelegramMediaGenerator } from '../../services/telegramMediaGenerator.js';
@@ -26,6 +27,16 @@ export class TelegramDashboard extends TelegramInterface {
     this.multiUserSupport = new MultiUserSupport(agent);
     this.mediaGenerator = new TelegramMediaGenerator(agent);
     this.pendingOperation = null; // e.g. 'eufy_2fa' — set by plugins via metadata.setOperation
+  }
+
+  /**
+   * The agent's answer: a rich message (tables, headings, code render natively, up to 32768
+   * characters), or the legacy Markdown chunks when rich is off or refused. Model output only;
+   * bot-written notices keep sendLargeMessage, whose *x* means bold.
+   */
+  async sendReply(ctx, content) {
+    const sent = await sendRich(ctx.telegram, ctx.chat.id, content, { threadId: ctx.message?.message_thread_id });
+    if (!sent) await this.sendLargeMessage(ctx, content);
   }
 
   async sendLargeMessage(ctx, outStr, channelId = null) {
@@ -1507,7 +1518,7 @@ export class TelegramDashboard extends TelegramInterface {
               await ctx.reply(replyContent);
             } else {
               // Use sendLargeMessage for handling messages that might exceed Telegram's limit
-              await this.sendLargeMessage(ctx, replyContent);
+              await this.sendReply(ctx, replyContent);
             }
           
             // Generate voice response if enabled (copied from TelegramInterface)
@@ -1670,7 +1681,7 @@ export class TelegramDashboard extends TelegramInterface {
 
         // Send text response
         const replyContent = response.content || response.text || 'I processed your request.';
-        await this.sendLargeMessage(ctx, replyContent);
+        await this.sendReply(ctx, replyContent);
 
         // Generate voice response if TTS is enabled for Telegram
         const hasTtsService = !!this.agent.ttsService;
@@ -1831,7 +1842,7 @@ export class TelegramDashboard extends TelegramInterface {
         if (response?.clarification?.options?.length) {
           await this.sendClarification(ctx, response);
         } else {
-          await this.sendLargeMessage(ctx, response?.content || 'Done.');
+          await this.sendReply(ctx, response?.content || 'Done.');
         }
       } catch (error) {
         logger.error('Clarification answer failed:', error);

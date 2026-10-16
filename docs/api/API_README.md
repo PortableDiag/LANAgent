@@ -799,6 +799,13 @@ Every video and audio download has a hard limit, `YTDLP_DOWNLOAD_TIMEOUT_SEC` (d
 ⏹ Stop button (`TELEGRAM_STREAM_TRANSPORT=edit|draft|off`, default `edit`); approve/deny buttons are
 coloured. Button taps are handled while a long request is still running.
 
+### v2.25.515 — Telegram rich messages
+
+The agent's answers are sent as Bot API rich messages (Rich Markdown, i.e. GitHub-flavored
+Markdown): tables, headings, task lists, code blocks and collapsible `<details>` render natively,
+up to 32768 characters per message. Bot-written notices keep legacy Markdown.
+`TELEGRAM_RICH_MESSAGES=off` returns to legacy Markdown for everything.
+
 ### Skill matching
 
 A skill is added to a prompt only when it scores clearly above the others: `SKILLS_MIN_LIFT`

@@ -1,4 +1,5 @@
 import { logger } from '../../utils/logger.js';
+import { richEnabled, editToRich } from './richMessage.js';
 
 /**
  * A reply that streams into the chat as it is written (Bot API sendMessageDraft).
@@ -255,11 +256,12 @@ export function handleStopButton(data, chatId) {
 }
 
 export class EditStream {
-  constructor(telegram, chatId, { threadId, throttleMs = EDIT_THROTTLE_MS } = {}) {
+  constructor(telegram, chatId, { threadId, throttleMs = EDIT_THROTTLE_MS, rich = richEnabled() } = {}) {
     this.telegram = telegram;
     this.chatId = chatId;
     this.threadId = threadId;
     this.throttleMs = throttleMs;
+    this.rich = rich;         // deliver the final reply as a rich message (richMessage.js)
     this.id = nextId++;
     this.controller = new AbortController();
     this.mode = 'edit';
@@ -371,12 +373,16 @@ export class EditStream {
     await this._settle();
     if (!this.messageId || this.mode !== 'edit') return false;
     const text = String(finalText || '');
+    const clear = { reply_markup: { inline_keyboard: [] } };
+    // Rich first: native tables/headings/code, and up to 32768 characters in place.
+    if (this.rich && await editToRich(this.telegram, this.chatId, this.messageId, text, { replyMarkup: clear.reply_markup })) {
+      return true;
+    }
     if (!text || text.length > TELEGRAM_TEXT_LIMIT) {
       try { await this.telegram.deleteMessage(this.chatId, this.messageId); } catch { /* gone */ }
       this.messageId = null;
       return false;
     }
-    const clear = { reply_markup: { inline_keyboard: [] } };
     try {
       await this.telegram.editMessageText(this.chatId, this.messageId, undefined, text, { parse_mode: 'Markdown', ...clear });
       return true;

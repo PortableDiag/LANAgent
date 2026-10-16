@@ -2,6 +2,11 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.515] - 2026-10-16
+
+### Added
+- **Telegram answers render as rich messages.** The agent's replies now use Telegram's new rich messages (Bot API 10.1+). The Markdown the model already writes is sent as Rich Markdown, so tables, headings, task lists, code blocks and collapsible sections render natively. A reply can be up to 32,768 characters in one message instead of 4,096-character chunks, and a stray `_` or `*` no longer turns the whole reply into plain text. A streamed reply becomes the formatted final message in place. A `<` outside code is sent escaped, because a bare `<` starts HTML and words were dropped (`Array<string>`, `<your-api-key>`). If Telegram refuses a rich message, that message falls back to the old formatting; if the API doesn't support rich messages at all, the bot stops trying until restart. Notices the bot writes itself keep the old formatting. `TELEGRAM_RICH_MESSAGES=off` turns rich messages off.
+
 ## [2.25.514] - 2026-10-15
 
 ### Fixed
