@@ -21,6 +21,8 @@ const SERVICE_CREDIT_COSTS = {
   'media-transcode': 20,
   // Per started minute of audio (routes/transcribe.js); the charge is set by the measured length.
   'audio-transcription': { perMinute: 2, minimum: 2, urlFetch: 5, maxMinutes: 60 },
+  // Per started 1,000 characters by voice tier (routes/tts.js).
+  'text-to-speech': { per1000Chars: { standard: 1, premium: 3 }, minimum: 1, maxChars: 5000 },
   'image-transcode': 2,
   'image-generation': 30,
   'document-processing': 10,

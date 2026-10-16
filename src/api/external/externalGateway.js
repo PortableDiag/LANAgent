@@ -25,6 +25,7 @@ import youtubeRoutes from './routes/youtube.js';
 import socialRoutes from './routes/social.js';
 import transcodeRoutes from './routes/transcode.js';
 import transcribeRoutes from './routes/transcribe.js';
+import ttsRoutes from './routes/tts.js';
 import imageGenRoutes from './routes/imageGen.js';
 import scrapingRoutes from './routes/scraping.js';
 import documentsRoutes from './routes/documents.js';
@@ -83,6 +84,7 @@ router.use('/youtube', youtubeRoutes);
 router.use('/social', socialRoutes);
 router.use('/transcode', transcodeRoutes);
 router.use('/transcribe', transcribeRoutes);
+router.use('/tts', ttsRoutes);
 router.use('/image', imageGenRoutes);
 router.use('/scrape', scrapingRoutes);
 router.use('/documents', documentsRoutes);
@@ -133,6 +135,7 @@ router.get('/admin/dashboard', authenticateToken, async (req, res) => {
       else if (path.includes('/youtube/audio')) serviceId = 'youtube-audio';
       else if (path.includes('/transcode')) serviceId = 'media-transcode';
       else if (path.includes('/transcribe')) serviceId = 'audio-transcription';
+      else if (path.includes('/tts')) serviceId = 'text-to-speech';
       else if (path.includes('/image/')) serviceId = 'image-generation';
       else if (path.includes('/documents/')) serviceId = 'document-processing';
       else if (path.includes('/sandbox/')) serviceId = 'code-sandbox';
@@ -375,6 +378,19 @@ async function seedServiceConfigs() {
       maxFileSize: 524288000,
       estimatedTime: '10 seconds - 3 minutes',
       inputFormat: 'multipart',
+      outputFormat: 'json'
+    },
+    {
+      // Credits only, per started 1,000 characters by voice tier (see routes/tts.js). `price`
+      // is the nominal legacy field the schema requires; the route refuses legacy payment.
+      serviceId: 'text-to-speech',
+      name: 'Text to Speech',
+      description: 'Speech (MP3) from text. Standard voices 1 credit, premium 3 credits per started 1,000 characters, max 5,000 characters',
+      price: '0.00002',
+      enabled: true,
+      rateLimit: { maxPerAgent: 20, windowMinutes: 15 },
+      estimatedTime: '2-30 seconds',
+      inputFormat: 'json',
       outputFormat: 'json'
     },
     {

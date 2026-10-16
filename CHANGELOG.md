@@ -2,6 +2,11 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.516] - 2026-10-16
+
+### Added
+- **Text to speech as a paid API service.** `POST /api/external/tts` with JSON `{ text, model?, voice?, speed? }` returns MP3 audio as base64. It is billed per started 1,000 characters: **standard** voices (Kokoro, the default; Orpheus; Sesame) cost 1 credit, **premium** voices (Microsoft MAI 2.1 Flash, Grok, ElevenLabs Flash v2.5, Voxtral) cost 3. The limit is 5,000 characters per request. The price is known from the text before anything is charged; a reseller's `X-Max-Credits` budget is honored; a failed generation is refunded. A model whose live provider price has risen past 90% of its tier price is refused, uncharged. `GET /api/external/tts/voices` (free) lists the models, tiers and voices. It is on sale at api.lanagent.net as `POST /tts`.
+
 ## [2.25.515] - 2026-10-16
 
 ### Added

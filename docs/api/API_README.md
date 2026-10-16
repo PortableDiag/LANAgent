@@ -799,6 +799,16 @@ Every video and audio download has a hard limit, `YTDLP_DOWNLOAD_TIMEOUT_SEC` (d
 ⏹ Stop button (`TELEGRAM_STREAM_TRANSPORT=edit|draft|off`, default `edit`); approve/deny buttons are
 coloured. Button taps are handled while a long request is still running.
 
+### v2.25.516 — Text to speech
+
+`POST /api/external/tts` — JSON `{ "text": "…", "model": "hexgrad/kokoro-82m", "voice": "af_heart", "speed": 1 }`
+(only `text` required) → `{ success, audio: "<base64 mp3>", format: "mp3", model, voice, tier, characters,
+creditsCharged, creditsRemaining }`. Credits per started 1,000 characters: standard 1 (Kokoro, Orpheus,
+Sesame), premium 3 (MAI 2.1 Flash, Grok, ElevenLabs Flash v2.5, Voxtral); max 5,000 characters. 400 for an
+unknown model/voice (lists the valid ones), 413 over the limit, 402 over `X-Max-Credits`, 503 when a model is
+unavailable — none of these charge. `GET /api/external/tts/voices` (free) lists models, tiers and voices.
+Public: `POST https://api.lanagent.net/tts`, `GET https://api.lanagent.net/tts/voices`.
+
 ### v2.25.515 — Telegram rich messages
 
 The agent's answers are sent as Bot API rich messages (Rich Markdown, i.e. GitHub-flavored
