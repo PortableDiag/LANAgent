@@ -349,25 +349,51 @@ const MAX_VPN_ROTATIONS = 2;
 const VPN_ROTATION_MIN_GAP_MS = Number(process.env.SCRAPE_VPN_ROTATION_MIN_GAP_MS) || 60000;
 let vpnRotationInFlight = null;
 let lastVpnRotation = { at: 0, location: null };
+// Breaker: a failed exit switch leaves the tunnel down until the watchdog restores it (~60-80 s),
+// and the next blocked scrape switched again. On 2026-10-15 nearly every switch failed for an
+// evening, so rotation kept ALICE's tunnel down. After VPN_ROTATION_FAIL_LIMIT failures in a row,
+// stop rotating for VPN_ROTATION_COOLDOWN_MS; any successful switch resets the count.
+const VPN_ROTATION_FAIL_LIMIT = Number(process.env.SCRAPE_VPN_ROTATION_FAIL_LIMIT) || 3;
+const VPN_ROTATION_COOLDOWN_MS = Number(process.env.SCRAPE_VPN_ROTATION_COOLDOWN_MS) || 30 * 60 * 1000;
+let vpnRotationFailures = { count: 0, openUntil: 0 };
 export async function rotateVpnShared(vpn, from, next, { now = Date.now } = {}) {
   if (vpnRotationInFlight) return { ...(await vpnRotationInFlight), shared: true };
+  if (now() < vpnRotationFailures.openUntil) {
+    return { success: false, suspended: true, waitMs: vpnRotationFailures.openUntil - now() };
+  }
   const since = now() - lastVpnRotation.at;
   if (since < VPN_ROTATION_MIN_GAP_MS) {
     if (lastVpnRotation.location && lastVpnRotation.location !== from) return { success: true, location: lastVpnRotation.location, shared: true, reused: true };
     return { success: false, throttled: true, waitMs: VPN_ROTATION_MIN_GAP_MS - since };
   }
   vpnRotationInFlight = (async () => {
+    const failed = () => {
+      vpnRotationFailures.count++;
+      if (vpnRotationFailures.count >= VPN_ROTATION_FAIL_LIMIT) {
+        vpnRotationFailures.openUntil = now() + VPN_ROTATION_COOLDOWN_MS;
+        logger.warn(`[ExternalScrape] ${vpnRotationFailures.count} VPN exit switches failed in a row — suspending rotation for ${Math.round(VPN_ROTATION_COOLDOWN_MS / 60000)} min`);
+        vpnRotationFailures.count = 0;
+      }
+    };
     try {
       const sw = await vpn.connect({ location: next });
-      if (sw && sw.success !== false) lastVpnRotation = { at: now(), location: sw.location || next };
+      if (sw && sw.success !== false) {
+        lastVpnRotation = { at: now(), location: sw.location || next };
+        vpnRotationFailures.count = 0;
+      } else if (!sw?.autoConnect) {
+        failed();
+      }
       return sw || { success: false, error: 'no result' };
+    } catch (e) {
+      failed();
+      throw e;
     } finally {
       vpnRotationInFlight = null;
     }
   })();
   return vpnRotationInFlight;
 }
-export function _resetVpnRotationForTests() { vpnRotationInFlight = null; lastVpnRotation = { at: 0, location: null }; }
+export function _resetVpnRotationForTests() { vpnRotationInFlight = null; lastVpnRotation = { at: 0, location: null }; vpnRotationFailures = { count: 0, openUntil: 0 }; }
 
 // Overall best-effort wall-clock budget for a single scrape request. The agent
 // has historically run the full fallback ladder + every VPN rotation to
@@ -460,7 +486,7 @@ router.get('/block-stats', adminKeyAuth, async (req, res) => {
       },
       byTier: rows.reduce((acc, r) => {
         acc[r.tier] = acc[r.tier] || {};
-        for (const k of ['blocksDetected', 'rotationRefusedAutoConnect', 'rotationAttempted', 'rotationRecovered', 'rotationThrottled']) {
+        for (const k of ['blocksDetected', 'rotationRefusedAutoConnect', 'rotationAttempted', 'rotationRecovered', 'rotationThrottled', 'rotationSuspended']) {
           acc[r.tier][k] = (acc[r.tier][k] || 0) + (r[k] || 0);
         }
         return acc;
@@ -472,7 +498,8 @@ router.get('/block-stats', adminKeyAuth, async (req, res) => {
         rotationRefusedAutoConnect: r.rotationRefusedAutoConnect,
         rotationAttempted: r.rotationAttempted,
         rotationRecovered: r.rotationRecovered,
-        rotationThrottled: r.rotationThrottled || 0
+        rotationThrottled: r.rotationThrottled || 0,
+        rotationSuspended: r.rotationSuspended || 0
       }))
     });
   } catch (error) {
@@ -1402,6 +1429,11 @@ async function executeScrapeWithVpnRotation(req, params, tier) {
     logger.info(`[ExternalScrape] Block detected on tier=${tier} url=${params.url} — rotating VPN ${currentLocation || '?'} → ${next} (attempt ${i + 1}/${MAX_VPN_ROTATIONS})`);
     try {
       const sw = await rotateVpnShared(vpn, currentLocation, next);
+      if (sw?.suspended) {
+        logger.info(`[ExternalScrape] VPN rotation suspended (recent exit switches failed) for another ${Math.round(sw.waitMs / 60000)} min — not rotating for ${params.url}; returning the best result`);
+        recordBlockEvent('rotationSuspended', tier);
+        break;
+      }
       if (sw?.throttled) {
         logger.info(`[ExternalScrape] Still blocked on ${currentLocation || '?'} for ${params.url} (tier=${tier}), and the exit changed ${Math.round((VPN_ROTATION_MIN_GAP_MS - sw.waitMs) / 1000)}s ago — not switching again; returning the best result`);
         recordBlockEvent('rotationThrottled', tier);

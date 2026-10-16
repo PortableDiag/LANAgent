@@ -2,6 +2,11 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.514] - 2026-10-15
+
+### Fixed
+- **Failed VPN exit switches kept the agent offline.** When the VPN provider's switches kept failing, each failure left the tunnel down until the watchdog restored it, and the next blocked scrape switched again. After 3 failed switches in a row, rotation now pauses for 30 minutes (`SCRAPE_VPN_ROTATION_FAIL_LIMIT`, `SCRAPE_VPN_ROTATION_COOLDOWN_MS`). Any successful switch resets the count. Refusals are counted as `rotationSuspended` in the block stats.
+
 ## [2.25.513] - 2026-10-15
 
 ### Fixed

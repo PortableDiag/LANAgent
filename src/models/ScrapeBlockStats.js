@@ -67,6 +67,11 @@ const scrapeBlockStatsSchema = new mongoose.Schema({
   rotationThrottled: {
     type: Number,
     default: 0
+  },
+  // Rotation refused because recent exit switches kept failing (breaker open, 2026-10-15).
+  rotationSuspended: {
+    type: Number,
+    default: 0
   }
 }, {
   timestamps: true
@@ -147,6 +152,7 @@ ScrapeBlockStats.getAggregatedStats = async function ({ days = 30, tier = null }
           totalRotationBudgetExhausted: { $sum: '$rotationBudgetExhausted' },
           totalRotationPoolExhausted: { $sum: '$rotationPoolExhausted' },
           totalRotationThrottled: { $sum: '$rotationThrottled' },
+          totalRotationSuspended: { $sum: '$rotationSuspended' },
           earliestDate: { $min: '$day' },
           latestDate: { $max: '$day' },
           tiers: { $addToSet: '$tier' }
@@ -166,7 +172,8 @@ ScrapeBlockStats.getAggregatedStats = async function ({ days = 30, tier = null }
         vpnUnavailable: 0,
         rotationBudgetExhausted: 0,
         rotationPoolExhausted: 0,
-        rotationThrottled: 0
+        rotationThrottled: 0,
+        rotationSuspended: 0
       },
       // null, not 0. An empty window has no rate; reporting 0% would read as
       // "the auto-connect pin costs nothing", which is the same unknown-vs-zero
@@ -195,7 +202,8 @@ ScrapeBlockStats.getAggregatedStats = async function ({ days = 30, tier = null }
     vpnUnavailable: data.totalVpnUnavailable,
     rotationBudgetExhausted: data.totalRotationBudgetExhausted,
     rotationPoolExhausted: data.totalRotationPoolExhausted,
-    rotationThrottled: data.totalRotationThrottled || 0
+    rotationThrottled: data.totalRotationThrottled || 0,
+    rotationSuspended: data.totalRotationSuspended || 0
   };
   
   // Same contract as GET /block-stats: a zero denominator yields null, never 0.
