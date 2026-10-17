@@ -1,5 +1,5 @@
 import { logger } from '../../utils/logger.js';
-import { richEnabled, editToRich } from './richMessage.js';
+import { richEnabled, editToRich, toRichMarkdown, RICH_TEXT_LIMIT } from './richMessage.js';
 
 /**
  * A reply that streams into the chat as it is written (Bot API sendMessageDraft).
@@ -12,6 +12,10 @@ import { richEnabled, editToRich } from './richMessage.js';
  *              generation through `signal`; the partial answer is kept (keep_on_stop) and the
  *              caller sends it as the real message.
  *  - finish()  cleans up. A draft is ephemeral: the caller's final sendMessage replaces it.
+ *
+ * The answer itself streams as a rich draft (sendRichMessageDraft, Rich Markdown), so tables
+ * and headings take shape while it is written; status text and the placeholder stay plain.
+ * A rich refusal switches this reply back to plain drafts.
  *
  * A draft lives about 30 seconds, so the last text is re-sent every REFRESH_MS while a slow
  * step runs. Drafts are private-chat only; if the first one is refused, this falls back to
@@ -153,7 +157,7 @@ export class DraftStream {
     while (this.pending !== null && !this.stopped && this.mode === 'draft') {
       const text = this.pending;
       this.pending = null;
-      await this._draft(clip(text), { can_stop: true, keep_on_stop: true });
+      await this._draft(text, { can_stop: true, keep_on_stop: true }, { rich: true });
     }
   }
 
@@ -162,7 +166,7 @@ export class DraftStream {
     if (this.mode !== 'draft' || this.stopped || !this.streaming || !fullText) return;
     this.pending = null;
     if (this.trailing) { clearTimeout(this.trailing); this.trailing = null; }
-    await this._draft(clip(fullText));
+    await this._draft(fullText, {}, { rich: true });
   }
 
   /** Drafts are replaced by the caller's own message. */
@@ -193,22 +197,42 @@ export class DraftStream {
     this.refreshTimer = setInterval(() => {
       if (this.mode !== 'draft' || this.stopped || this.inFlight) return;
       if (Date.now() - this.lastSentAt < this.refreshMs) return;
-      this._draft(clip(this.text), this.streaming ? { can_stop: true, keep_on_stop: true } : {}).catch(() => {});
+      this._draft(this.text, this.streaming ? { can_stop: true, keep_on_stop: true } : {}, { rich: this.streaming }).catch(() => {});
     }, Math.min(this.refreshMs, 5000));
     this.refreshTimer.unref?.();
   }
 
-  /** @returns {Promise<boolean>} whether Telegram accepted the draft */
-  async _draft(text, extra = {}) {
+  /**
+   * @param {string} text
+   * @param {object} [extra] can_stop / keep_on_stop
+   * @param {{rich?: boolean}} [opts] rich: send as Rich Markdown (answer text only)
+   * @returns {Promise<boolean>} whether Telegram accepted the draft
+   */
+  async _draft(text, extra = {}, { rich = false } = {}) {
     this.inFlight = true;
     try {
-      await this.telegram.callApi('sendMessageDraft', {
+      const base = {
         chat_id: this.chatId,
         draft_id: this.draftId,
-        text,
         ...(this.threadId ? { message_thread_id: this.threadId } : {}),
         ...extra
-      });
+      };
+      let sentRich = false;
+      if (rich && this.richDrafts !== false && richEnabled() && String(text).trim()) {
+        try {
+          await this.telegram.callApi('sendRichMessageDraft', {
+            ...base, rich_message: { markdown: toRichMarkdown(clip(text, RICH_TEXT_LIMIT)) }
+          });
+          sentRich = true;
+        } catch (err) {
+          // Plain drafts still work; keep this reply on them.
+          logger.warn(`[telegram] rich draft refused, streaming this reply as plain text: ${err.message}`);
+          this.richDrafts = false;
+        }
+      }
+      if (!sentRich) {
+        await this.telegram.callApi('sendMessageDraft', { ...base, text: clip(text) });
+      }
       this.text = text;
       this.lastSentAt = Date.now();
       this.draftsSent++;
@@ -233,6 +257,7 @@ export class DraftStream {
  * Streaming by editing a real message (the default; Hermes's default too). Native drafts
  * (DraftStream) left a large blank area under the reply in the operator's Telegram app until
  * the chat was reopened (2026-09-28), so drafts are opt-in via TELEGRAM_STREAM_TRANSPORT=draft.
+ * Re-tested 2026-10-16 on the operator's app: no blank area; ALICE runs with drafts on.
  *
  *  - Nothing is sent while the agent thinks; the chat action shows "typing…".
  *  - The first answer text is SENT (so it notifies like any reply) with an inline ⏹ Stop

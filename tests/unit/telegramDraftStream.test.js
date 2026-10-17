@@ -5,15 +5,22 @@ import { styleReplyMarkup, installButtonStyles, styleFor } from '../../src/inter
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
-function fakeTelegram({ draftsWork = true } = {}) {
+function fakeTelegram({ draftsWork = true, richDraftsWork = true } = {}) {
   const calls = [];
   return {
     calls,
-    drafts: () => calls.filter(c => c.method === 'sendMessageDraft').map(c => c.payload),
+    // Plain and rich drafts alike; a rich draft's text is its markdown, flagged rich.
+    drafts: () => calls.filter(c => c.method === 'sendMessageDraft' || c.method === 'sendRichMessageDraft').map(c =>
+      c.method === 'sendRichMessageDraft'
+        ? (({ rich_message, ...rest }) => ({ ...rest, text: rich_message.markdown, rich: true }))(c.payload)
+        : c.payload),
     async callApi(method, payload) {
       calls.push({ method, payload });
       if (method === 'sendMessageDraft' && !draftsWork) {
         const e = new Error('Bad Request: method not found'); e.response = { error_code: 400 }; throw e;
+      }
+      if (method === 'sendRichMessageDraft' && !richDraftsWork) {
+        throw new Error('Bad Request: can\'t parse rich message');
       }
       return true;
     },
@@ -44,10 +51,31 @@ test('status → streamed text → complete, all on one draft id; stream carries
   assert.ok(drafts.every(p => p.draft_id === d.draftId));
   assert.equal(drafts[1].text, '🔧 web search');
   assert.equal(drafts[1].can_stop, undefined, 'no Stop button while a tool runs');
+  assert.equal(drafts[1].rich, undefined, 'status text stays a plain draft');
   const streamed = drafts.find(p => p.text === 'Hello');
+  assert.equal(streamed.rich, true, 'the answer streams as a rich draft');
   assert.equal(streamed.can_stop, true);
   assert.equal(streamed.keep_on_stop, true);
   assert.equal(drafts.at(-1).text, 'Hello there');
+  assert.equal(drafts.at(-1).rich, true);
+});
+
+test('rich drafts: < is escaped outside code; a refusal streams the rest of the reply plain', async () => {
+  const tg = fakeTelegram();
+  const d = await new DraftStream(tg, 5, { throttleMs: 0, refreshMs: 0 }).start();
+  await d.chunk('x', 'a<b and `c<d`');
+  assert.equal(tg.drafts().at(-1).text, 'a&lt;b and `c<d`');
+  await d.finish();
+
+  const tg2 = fakeTelegram({ richDraftsWork: false });
+  const d2 = await new DraftStream(tg2, 5, { throttleMs: 0, refreshMs: 0 }).start();
+  await d2.chunk('Hi', 'Hi');
+  await d2.chunk(' there', 'Hi there');
+  const rich = tg2.calls.filter(c => c.method === 'sendRichMessageDraft');
+  assert.equal(rich.length, 1, 'one refused rich try, then plain only');
+  assert.equal(d2.mode, 'draft', 'still streaming');
+  assert.deepEqual(tg2.drafts().filter(p => !p.rich).map(p => p.text).slice(-2), ['Hi', 'Hi there']);
+  await d2.finish();
 });
 
 test('status updates stop once the answer is streaming', async () => {

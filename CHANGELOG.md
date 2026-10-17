@@ -2,6 +2,11 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.520] - 2026-10-16
+
+### Changed
+- **Native Telegram streaming shows formatting as the answer is written.** With `TELEGRAM_STREAM_TRANSPORT=draft`, the answer now streams as a rich draft, so tables, headings and code take shape while the reply is being written instead of showing raw `**` and `|`. The Stop button still works. Status lines and the "Thinking…" placeholder stay plain. If Telegram refuses a rich draft, the rest of that reply streams as plain text. Native streaming was re-tested on 2026-10-16: the blank area seen under replies in September did not come back.
+
 ## [2.25.519] - 2026-10-16
 
 ### Changed
