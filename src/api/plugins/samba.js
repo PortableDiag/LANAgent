@@ -69,6 +69,11 @@ export default class SambaPlugin extends BasePlugin {
         command: 'getShareSpace',
         description: 'Report total/used/available space for a mounted share',
         usage: 'getShareSpace({ mountId: "mount-id" })'
+      },
+      {
+        command: 'getAllShareSpace',
+        description: 'Report space for several mounted shares at once (all saved mounts when mountIds is omitted)',
+        usage: 'getAllShareSpace({ mountIds: ["mount-a", "mount-b"] })'
       }
     ];
     
@@ -127,6 +132,8 @@ export default class SambaPlugin extends BasePlugin {
           return await this.browse(args);
         case 'getShareSpace':
           return await this.getShareSpace(args);
+        case 'getAllShareSpace':
+          return await this.getAllShareSpace(args);
         default:
           throw new Error(`Unknown Samba action: ${action}`);
       }
@@ -665,6 +672,26 @@ export default class SambaPlugin extends BasePlugin {
       return { success: true, space };
     } catch (error) {
       logger.error(`Failed to get share space for ${target}: ${error.message}`);
+      return { success: false, error: error.message };
+    }
+  }
+
+  /**
+   * Space for several saved mounts at once; defaults to every saved mount.
+   * Per-share failures (e.g. not mounted) are reported in `errors`, not thrown.
+   */
+  async getAllShareSpace({ mountIds } = {}) {
+    const ids = Array.isArray(mountIds) && mountIds.length
+      ? mountIds
+      : Array.from(this.mountConfigs.keys());
+    if (ids.length === 0) {
+      return { success: true, results: [], errors: [], message: 'No saved mounts' };
+    }
+    try {
+      const { results, errors } = await SambaMount.getBatchSpace(ids);
+      return { success: true, results, errors };
+    } catch (error) {
+      logger.error(`Failed to get space for mounts: ${error.message}`);
       return { success: false, error: error.message };
     }
   }

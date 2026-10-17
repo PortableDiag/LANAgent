@@ -2,6 +2,28 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.518] - 2026-10-16
+
+### Added
+- **Email:** `waitForVerificationEmail` polls for a verification email until it arrives or a timeout passes.
+- **Samba:** `getAllShareSpace` reports free and used space for every saved mount.
+- **Home Assistant:** `conversation_process` sends a sentence to Home Assistant's conversation agent and returns its reply.
+- **Scheduler:** `pauseJob` and `resumeJob`; paused jobs are marked and counted in `listScheduledTasks`.
+- **Feeds:** a keyword filter on feed reading (title and summary).
+- **Research:** `arxivPapers` fetches several arXiv papers in one call, with OpenAlex as a fallback; ids not found are listed in `missing`.
+- **Skills:** `previewFromUrl` shows what a skill link would install without installing it.
+- **External API admin key:** optional IP allow and block lists (`AGENT_ADMIN_KEY_ALLOWED_IPS`, `AGENT_ADMIN_KEY_BLOCKED_IPS`, IPv4/IPv6 and CIDR; block wins). The key check still runs first; unset means no change; a malformed list denies. An allow list must include the gateway.
+- **External API:** `GET /admin/payments/recent` takes filters (`serviceId`, `chain`, `currency`, `callerAgentId`, `since`, `until`).
+- **DNS:** lookup retry statistics and events; only transient errors are retried and counted.
+- **Telegram dashboard visuals:** sparklines.
+
+### Changed
+- **RSS reading uses conditional requests.** ETag and Last-Modified are kept, and an unchanged feed (HTTP 304) in a web watch is no longer downloaded again.
+- **Peer identity:** on-chain identity reads are cached per wallet and agent id. Cached readings keep their real read time. `P2P_CHAIN_CACHE_TTL_MS=0` disables the cache.
+
+### Fixed
+- **Account sign-up verification re-check read stale results.** Email search results are cached for 5 minutes, so the 2-minute re-check saw the earlier empty search. The re-check now bypasses the cache.
+
 ## [2.25.517] - 2026-10-16
 
 ### Changed

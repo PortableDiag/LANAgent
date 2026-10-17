@@ -137,4 +137,45 @@ sambaMountSchema.statics.getShareSpace = async function(mountId, { runDf = runDf
   };
 };
 
+/**
+ * Space for several mounts in one call, at most `concurrency` df runs at a time.
+ *
+ * Results keep the order of `mountIds`. A mount that fails (unknown id, not
+ * mounted, df unreadable) lands in `errors` and does not fail the batch.
+ * Nothing is retried: getShareSpace's failures are deterministic, and df already
+ * carries its own 10s timeout, so a retry would only multiply the wait on an
+ * unmounted share.
+ *
+ * @param {string[]} mountIds - Mount identifiers
+ * @param {Object} [options]
+ * @param {number} [options.concurrency=3] - Maximum concurrent df calls
+ * @param {Function} [options.runDf] - Injection point for tests; passed through to getShareSpace
+ * @returns {Promise<{results: Object[], errors: {mountId: string, error: string}[]}>}
+ */
+sambaMountSchema.statics.getBatchSpace = async function(mountIds = [], { concurrency = 3, runDf = runDfDefault } = {}) {
+  const ids = [...new Set(mountIds)];
+  const outcomes = new Array(ids.length);
+  let cursor = 0;
+
+  const worker = async () => {
+    while (cursor < ids.length) {
+      const i = cursor++;
+      try {
+        outcomes[i] = { ok: true, value: await this.getShareSpace(ids[i], { runDf }) };
+      } catch (error) {
+        logger.warn(`Batch space check failed for mount ${ids[i]}: ${error.message}`);
+        outcomes[i] = { ok: false, value: { mountId: ids[i], error: error.message } };
+      }
+    }
+  };
+
+  const width = Math.max(1, Math.min(Number(concurrency) || 1, ids.length));
+  await Promise.all(Array.from({ length: width }, worker));
+
+  return {
+    results: outcomes.filter(o => o.ok).map(o => o.value),
+    errors: outcomes.filter(o => !o.ok).map(o => o.value)
+  };
+};
+
 export const SambaMount = mongoose.model('SambaMount', sambaMountSchema);

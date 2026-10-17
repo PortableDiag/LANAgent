@@ -625,7 +625,8 @@ class AccountRegistrationService {
             // Check email for verification
             const verificationData = await emailService.checkForVerification(
                 credentials.email,
-                account.serviceName
+                account.serviceName,
+                { cacheBust: true } // re-checks every 2 min; a 5-min cached miss would hide the email
             );
             
             if (verificationData) {

@@ -118,6 +118,80 @@ export async function getArxivPaper(idOrUrl) {
   return fromOpenAlex(res.data);
 }
 
+const ARXIV_ID = /^(\d{4}\.\d{4,5}|[a-z-]+(\.[A-Z]{2})?\/\d{7})(v\d+)?$/i;
+const cleanArxivId = (v) => String(v || '').trim().replace(/^https?:\/\/(export\.)?arxiv\.org\/(abs|pdf)\//, '').replace(/\.pdf$/, '').replace(/^arxiv:/i, '');
+const baseArxivId = (id) => String(id || '').replace(/v\d+$/i, '').toLowerCase();
+
+/** OpenAlex works for arXiv ids (an OR filter on their arXiv DOIs), keyed by unversioned id. */
+async function openAlexByArxivIds(ids) {
+  const out = new Map();
+  for (let i = 0; i < ids.length; i += 50) {
+    const chunk = ids.slice(i, i + 50);
+    const filter = `doi:${chunk.map(id => `10.48550/arxiv.${baseArxivId(id)}`).join('|')}`;
+    for (const w of await openAlex({ filter, 'per-page': chunk.length })) if (w.id) out.set(baseArxivId(w.id), w);
+  }
+  return out;
+}
+
+/**
+ * Several arXiv papers in one call: the export API's id_list, up to 100 ids per request,
+ * paced like every other arXiv call. When arXiv refuses (406/429 are common for this agent,
+ * see the top of the file) the batch falls back to OpenAlex, as getArxivPaper does.
+ *
+ * arXiv answers with VERSIONED ids (`2305.14314v1`) in its own order, so results are matched
+ * on the unversioned id; a versioned request (`…v2`) must match exactly.
+ *
+ * @param {string[]} ids - arXiv ids or links
+ * @param {{ includeMeta?: boolean }} [options] - includeMeta adds OpenAlex citation counts (citedBy)
+ * @returns {Promise<{ papers: object[], missing: string[] }>} papers in input order (deduplicated)
+ */
+export async function getArxivPapers(ids, { includeMeta = false } = {}) {
+  const list = Array.isArray(ids) ? ids : String(ids || '').split(/[\s,]+/);
+  const cleaned = list.map(cleanArxivId).filter(Boolean);
+  if (!cleaned.length) throw new Error('give one or more arXiv ids (like 2305.14314)');
+  if (cleaned.length > 200) throw new Error('at most 200 arXiv ids per request');
+  for (const id of cleaned) if (!ARXIV_ID.test(id)) throw new Error(`"${id}" is not an arXiv id (like 2305.14314)`);
+
+  const unique = [...new Map(cleaned.map(id => [id.toLowerCase(), id])).values()];
+  const found = new Map(); // requested id (lower-case) -> paper
+  const matches = (req, paper) => (/v\d+$/i.test(req) ? String(paper.id).toLowerCase() === req.toLowerCase() : baseArxivId(paper.id) === baseArxivId(req));
+  // OpenAlex records carry the unversioned id, so a fallback match is on the base id.
+  const place = (batch, papers, loose = false) => { for (const req of batch) { const hit = papers.find(x => (loose ? baseArxivId(x.id) === baseArxivId(req) : matches(req, x))); if (hit) found.set(req.toLowerCase(), hit); } };
+
+  const todo = [];
+  for (const id of unique) {
+    const hit = cache.get(`paper:${id.toLowerCase()}`);
+    if (hit) found.set(id.toLowerCase(), hit); else todo.push(id);
+  }
+  for (let i = 0; i < todo.length; i += 100) {
+    const batch = todo.slice(i, i + 100);
+    try {
+      // max_results defaults to 10 on the export API, which would truncate a larger id_list.
+      place(batch, await arxivApi({ id_list: batch.join(','), max_results: batch.length }));
+    } catch { /* refused: OpenAlex below */ }
+    const left = batch.filter(id => !found.has(id.toLowerCase()));
+    if (left.length) {
+      try { place(left, [...(await openAlexByArxivIds(left)).values()], true); } catch { /* reported as missing */ }
+    }
+    for (const id of batch) { const x = found.get(id.toLowerCase()); if (x) { try { cache.set(`paper:${id.toLowerCase()}`, x); } catch { cache.flushAll(); } } }
+  }
+
+  // Copies, so citation counts are never written into the cached objects.
+  const papers = unique.filter(id => found.has(id.toLowerCase())).map(id => ({ ...found.get(id.toLowerCase()) }));
+  const missing = unique.filter(id => !found.has(id.toLowerCase()));
+
+  if (includeMeta) {
+    const need = papers.filter(x => x.citedBy === undefined);
+    if (need.length) {
+      let oa = null;
+      try { oa = await openAlexByArxivIds(need.map(x => x.id)); } catch { /* unknown, not zero */ }
+      // null = no reading, never 0: a failed lookup is not "never cited".
+      for (const x of need) x.citedBy = oa?.get(baseArxivId(x.id))?.citedBy ?? null;
+    }
+  }
+  return { papers, missing };
+}
+
 /** Newest papers announced in an arXiv category (cs.AI, math.CO, …). */
 export async function latestArxiv(category = 'cs.AI', { max = 15 } = {}) {
   const cat = String(category).trim();

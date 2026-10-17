@@ -76,12 +76,46 @@ export async function parseFeed(xml, baseUrl = '') {
   throw new Error('not a feed (no RSS channel or Atom feed element)');
 }
 
-/** Fetch and parse a feed URL. */
-export async function readFeed(url, { limit = 20 } = {}) {
-  const res = await fetchPublic(url, { headers: { Accept: 'application/rss+xml, application/atom+xml, application/xml;q=0.9, text/xml;q=0.8, */*;q=0.5' } });
+/**
+ * Fetch and parse a feed URL, optionally as a conditional GET.
+ *
+ * @param {string} url - Feed URL.
+ * @param {Object} [opts]
+ * @param {number} [opts.limit=20] - Max items to return (1..100).
+ * @param {{etag?: string, lastModified?: string}} [opts.previousHeaders] - Validators from an
+ *   earlier read's `headers`. When given, they are sent as If-None-Match / If-Modified-Since;
+ *   a 304 then returns `{ notModified: true, items: [], url, headers }` — the caller already
+ *   holds what it read last time (the web watcher keeps its seen ids), so nothing is
+ *   re-downloaded or re-parsed. Pass them back exactly as returned: an ETag is an opaque
+ *   quoted string (W/"…" for weak ones) and a server only matches it verbatim.
+ * @param {Function} [opts.fetch] - Fetch implementation (tests); defaults to fetchPublic.
+ * @returns {Promise<Object>} Parsed feed plus `headers: { etag?, lastModified? }`.
+ */
+export async function readFeed(url, { limit = 20, previousHeaders = null, fetch = fetchPublic } = {}) {
+  const headers = { Accept: 'application/rss+xml, application/atom+xml, application/xml;q=0.9, text/xml;q=0.8, */*;q=0.5' };
+  if (previousHeaders?.etag) headers['If-None-Match'] = previousHeaders.etag;
+  if (previousHeaders?.lastModified) headers['If-Modified-Since'] = previousHeaders.lastModified;
+  const conditional = Boolean(headers['If-None-Match'] || headers['If-Modified-Since']);
+
+  const res = await fetch(url, { headers });
+  if (res.status === 304 && conditional) {
+    // A 304 may omit the validators; keep the ones we sent so the next check still asks.
+    const fresh = extractConditionalHeaders(res.headers);
+    return {
+      notModified: true,
+      url: res.url,
+      items: [],
+      headers: { ...pickValidators(previousHeaders), ...fresh }
+    };
+  }
   if (res.status !== 200) throw new Error(`HTTP ${res.status} from ${url}`);
   const feed = await parseFeed(res.data, res.url);
-  return { ...feed, url: res.url, items: feed.items.slice(0, Math.max(1, Math.min(Number(limit) || 20, 100))) };
+  return {
+    ...feed,
+    url: res.url,
+    items: feed.items.slice(0, Math.max(1, Math.min(Number(limit) || 20, 100))),
+    headers: extractConditionalHeaders(res.headers)
+  };
 }
 
 /**
@@ -114,6 +148,26 @@ export async function discoverFeeds(pageUrl) {
     } catch { /* not there */ }
   }
   return found;
+}
+
+/**
+ * ETag and Last-Modified from a response's headers (axios lower-cases names), kept verbatim
+ * for the next call's `previousHeaders`.
+ */
+function extractConditionalHeaders(resHeaders = {}) {
+  const out = {};
+  const etag = resHeaders.etag ?? resHeaders.ETag;
+  if (etag) out.etag = String(etag);
+  const lastModified = resHeaders['last-modified'] ?? resHeaders['Last-Modified'];
+  if (lastModified) out.lastModified = String(lastModified);
+  return out;
+}
+
+function pickValidators(h) {
+  const out = {};
+  if (h?.etag) out.etag = h.etag;
+  if (h?.lastModified) out.lastModified = h.lastModified;
+  return out;
 }
 
 function dedupe(list) {

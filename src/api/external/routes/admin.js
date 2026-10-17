@@ -3,6 +3,7 @@ import ExternalCreditBalance from '../../../models/ExternalCreditBalance.js';
 import ExternalPayment from '../../../models/ExternalPayment.js';
 import { logger } from '../../../utils/logger.js';
 import { adminKeyAuth } from '../middleware/adminKeyAuth.js';
+import { retryOperation } from '../../../utils/retryUtils.js';
 
 const router = Router();
 
@@ -129,14 +130,74 @@ router.post('/download-tokens/inspect', async (req, res) => {
   }
 });
 
+/**
+ * GET /payments/recent — recent payments with optional filtering.
+ * Query params:
+ *   serviceId      (string)  filter by service identifier
+ *   chain          (string)  filter by blockchain
+ *   currency       (string)  filter by currency symbol
+ *   callerAgentId  (string)  filter by caller agent ID
+ *   since          (ISO date) lower bound on createdAt (inclusive)
+ *   until          (ISO date) upper bound on createdAt (inclusive)
+ *   limit          (number, default 20, max 100) maximum results
+ * All filters are optional; when none are provided the endpoint returns the
+ * most recent payments across all services.
+ */
 router.get('/payments/recent', async (req, res) => {
   const limit = Math.min(parseInt(req.query.limit, 10) || 20, 100);
+
   try {
-    const payments = await ExternalPayment
-      .find({}, { txHash: 1, chain: 1, serviceId: 1, callerAgentId: 1, amount: 1, currency: 1, creditsIssued: 1, usdValue: 1, createdAt: 1, _id: 0 })
-      .sort({ createdAt: -1 })
-      .limit(limit)
-      .lean();
+    // Build MongoDB query from provided filters
+    const query = {};
+
+    // Only plain-string filters are used: Express parses `?chain[$ne]=x` into an object, which would
+    // otherwise reach Mongo as an operator. Values are normalised to how writers store
+    // them (chain 'bsc', currency upper-cased in credits.js), or a filter written the
+    // other way round silently returns nothing.
+    const q = (k) => (typeof req.query[k] === 'string' && req.query[k].trim() ? req.query[k].trim() : null);
+    const escapeRe = (v) => v.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+    if (q('serviceId')) query.serviceId = q('serviceId');
+    if (q('chain')) query.chain = q('chain').toLowerCase();
+    if (q('currency')) query.currency = q('currency').toUpperCase();
+    // Caller ids include wallet addresses, whose stored case depends on the writer.
+    if (q('callerAgentId')) query.callerAgentId = new RegExp(`^${escapeRe(q('callerAgentId'))}$`, 'i');
+
+    // Date range validation
+    if (req.query.since || req.query.until) {
+      const since = req.query.since ? new Date(req.query.since) : null;
+      const until = req.query.until ? new Date(req.query.until) : null;
+
+      if (since && isNaN(since.getTime())) {
+        return res.status(400).json({ success: false, error: 'Invalid since date. Use ISO date format.' });
+      }
+      if (until && isNaN(until.getTime())) {
+        return res.status(400).json({ success: false, error: 'Invalid until date. Use ISO date format.' });
+      }
+      if (since && until && since > until) {
+        return res.status(400).json({ success: false, error: 'since must be before until' });
+      }
+
+      if (since || until) {
+        query.createdAt = {};
+        if (since) query.createdAt.$gte = since;
+        if (until) query.createdAt.$lte = until;
+      }
+    }
+
+    logger.debug('Fetching recent payments with filters', { filters: query, limit });
+
+    // Retry the database query up to 3 times on transient failures
+    const payments = await retryOperation(
+      () =>
+        ExternalPayment
+          .find(query, { txHash: 1, chain: 1, serviceId: 1, callerAgentId: 1, amount: 1, currency: 1, creditsIssued: 1, usdValue: 1, createdAt: 1, _id: 0 })
+          .sort({ createdAt: -1 })
+          .limit(limit)
+          .lean(),
+      { retries: 3, context: 'admin/payments/recent' }
+    );
+
     res.json({ success: true, payments });
   } catch (err) {
     logger.error('admin/payments/recent failed:', err);

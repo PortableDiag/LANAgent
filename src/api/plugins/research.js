@@ -1,6 +1,6 @@
 import { BasePlugin } from '../core/basePlugin.js';
 import { extractParams } from '../../services/webtools/extractParams.js';
-import { searchArxiv, getArxivPaper, latestArxiv, redditPosts, redditSearch, redditThread } from '../../services/webtools/research.js';
+import { searchArxiv, getArxivPaper, getArxivPapers, latestArxiv, redditPosts, redditSearch, redditThread } from '../../services/webtools/research.js';
 
 /** Academic papers (arXiv) and community discussion (Reddit), keyless. */
 export default class ResearchPlugin extends BasePlugin {
@@ -15,6 +15,9 @@ export default class ResearchPlugin extends BasePlugin {
         examples: ['find arxiv papers on retrieval augmented generation', 'search arxiv for the latest papers about diffusion models', 'research papers about llm agents'] },
       { command: 'arxivPaper', description: 'Get one arXiv paper\'s title, authors, abstract and PDF link by id or link',
         usage: 'arxivPaper({ id: "2305.14314" })', examples: ['what is arxiv paper 2305.14314 about', 'summarise this arxiv paper', 'get the abstract of arxiv 1706.03762'] },
+      { command: 'arxivPapers', description: 'Get several arXiv papers at once by id or link, optionally with citation counts',
+        usage: 'arxivPapers({ ids: ["2305.14314", "1706.03762"], includeMeta: true })',
+        examples: ['get arxiv papers 2305.14314 and 1706.03762', 'compare these arxiv papers', 'how often are these arxiv papers cited'] },
       { command: 'arxivLatest', description: 'The newest papers announced in an arXiv category (cs.AI, cs.CL, cs.LG, math.CO …)',
         usage: 'arxivLatest({ category: "cs.AI", max: 15 })', examples: ['what are the newest cs.AI papers on arxiv', 'latest machine learning papers today'] },
       { command: 'redditPosts', description: 'Read a subreddit\'s posts (hot, new, top or rising)',
@@ -41,6 +44,14 @@ export default class ResearchPlugin extends BasePlugin {
           const x = await getArxivPaper(p.id || p.url || p.paper);
           return { success: true, paper: x, result: `${x.title}\n${x.authors.join(', ')} (${x.published})\n${x.url}${x.pdf ? `\nPDF: ${x.pdf}` : ''}\n\n${x.summary}` };
         }
+        case 'arxivPapers': {
+          const meta = p.includeMeta === true || /^(true|yes|1)$/i.test(String(p.includeMeta ?? p.citations ?? ''));
+          const r = await getArxivPapers(p.ids || p.id || p.urls || p.papers, { includeMeta: meta });
+          const cites = (x) => (meta ? ` — cited by ${x.citedBy ?? 'unknown'}` : '');
+          const lines = r.papers.map((x, i) => `${i + 1}. ${x.title} — ${x.authors.slice(0, 3).join(', ')}${x.authors.length > 3 ? ' et al.' : ''} (${x.published})${cites(x)}\n   ${x.url}`);
+          if (r.missing.length) lines.push(`Not found: ${r.missing.join(', ')}`);
+          return { success: r.papers.length > 0, ...r, ...(r.papers.length ? {} : { error: `No arXiv paper found for ${r.missing.join(', ')}` }), result: lines.join('\n') };
+        }
         case 'arxivLatest': {
           const papers = await latestArxiv(p.category || 'cs.AI', { max: p.max || p.limit });
           return { success: true, papers, result: papers.map((x, i) => `${i + 1}. ${x.title}\n   ${x.url}`).join('\n') || 'Nothing announced.' };
@@ -58,7 +69,7 @@ export default class ResearchPlugin extends BasePlugin {
           return { success: true, ...r, result: `${r.post?.title || ''}\n${r.post?.text || ''}\n\n${r.comments.map(c => `— ${c.text}`).join('\n')}`.trim() };
         }
         default:
-          return { success: false, error: `Unknown action '${action}'. Use: arxivSearch, arxivPaper, arxivLatest, redditPosts, redditSearch, redditThread` };
+          return { success: false, error: `Unknown action '${action}'. Use: arxivSearch, arxivPaper, arxivPapers, arxivLatest, redditPosts, redditSearch, redditThread` };
       }
     } catch (error) {
       this.logger.warn(`research ${action} failed: ${error.message}`);

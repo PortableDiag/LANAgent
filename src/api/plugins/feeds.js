@@ -16,9 +16,9 @@ export default class FeedsPlugin extends BasePlugin {
     this.version = '1.0.0';
     this.description = 'Read RSS/Atom feeds, find a website\'s feeds, and watch feeds or blogs for new posts';
     this.commands = [
-      { command: 'read', description: 'Read the latest items of an RSS or Atom feed (or of a website, by finding its feed)',
-        usage: 'read({ url: "https://example.com/feed", limit: 10 })',
-        examples: ['read the rss feed at https://blog.example.com/feed', 'what are the latest posts on the nodejs blog feed', 'show me the newest items in this rss feed'] },
+      { command: 'read', description: 'Read the latest items of an RSS or Atom feed (or of a website, by finding its feed). Optionally keep only items whose title (and summary, with filterDescription: true) contains one of the keywords.',
+        usage: 'read({ url: "https://example.com/feed", limit: 10, filter: "keyword" })  // filter can be a string or array of keywords; optionally add filterDescription: true',
+        examples: ['read the rss feed at https://blog.example.com/feed', 'what are the latest posts on the nodejs blog feed with filter "release"', 'show me the newest items containing security in this rss feed'] },
       { command: 'discover', description: 'Find the RSS/Atom feeds a website publishes',
         usage: 'discover({ url: "https://example.com" })',
         examples: ['find the rss feed for example.com', 'does this site have an rss feed', 'what feeds does this blog publish'] },
@@ -72,9 +72,27 @@ export default class FeedsPlugin extends BasePlugin {
     }
   }
 
-  async read({ url, limit = 10 }) {
+  async read({ url, limit = 10, filter, filterDescription = false }) {
     const feed = await this.resolveFeed(url);
-    const items = feed.items.slice(0, Math.max(1, Math.min(Number(limit) || 10, 50)));
+    // A string may carry several keywords ("release, security"); the extractor may also send
+    // a number or an array. Items are normalised by feedReader to { title, summary, ... }.
+    const keywords = (Array.isArray(filter) ? filter : filter === undefined || filter === null ? [] : String(filter).split(','))
+      .map(k => String(k).trim().toLowerCase()).filter(Boolean);
+    const inSummary = filterDescription === true || /^(true|yes|on|1)$/i.test(String(filterDescription));
+
+    let items = feed.items;
+    if (keywords.length) {
+      items = items.filter(item => {
+        const title = String(item.title || '').toLowerCase();
+        const summary = inSummary ? String(item.summary || '').toLowerCase() : '';
+        return keywords.some(k => title.includes(k) || (inSummary && summary.includes(k)));
+      });
+    }
+
+    items = items.slice(0, Math.max(1, Math.min(Number(limit) || 10, 50)));
+    if (keywords.length && !items.length) {
+      return { success: true, feed: { title: feed.title, url: feed.url, format: feed.format }, items, result: `${feed.title || feed.url}\nNo items ${inSummary ? 'mention' : 'have a title containing'} ${keywords.map(k => `"${k}"`).join(' or ')} (of the latest ${feed.items.length}).` };
+    }
     const result = items.map((i, n) => `${n + 1}. ${i.title}${i.published ? ` (${i.published.slice(0, 10)})` : ''}\n   ${i.link}`).join('\n');
     return { success: true, feed: { title: feed.title, url: feed.url, format: feed.format }, items, result: `${feed.title || feed.url}\n${result}` };
   }

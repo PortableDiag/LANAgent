@@ -70,6 +70,12 @@ export default class HomeAssistantPlugin extends BasePlugin {
         description: 'Toggle a Home Assistant entity',
         usage: 'toggle({ entity: "light.desk" })',
         examples: ['toggle the desk lamp in home assistant']
+      },
+      {
+        command: 'conversation_process',
+        description: 'Send natural language text to Home Assistant\'s built-in conversation agent and return the response',
+        usage: 'conversation_process({ text: "turn on the lights", language: "en", agent_id: null, conversation_id: null })',
+        examples: ['ask home assistant to turn on the lights', 'what is the weather via home assistant conversation']
       }
     ];
 
@@ -181,6 +187,12 @@ export default class HomeAssistantPlugin extends BasePlugin {
           const svcDomain = ['scene', 'script'].includes(domain) ? domain : 'homeassistant';
           const service = ['scene', 'script'].includes(domain) ? 'turn_on' : action;
           return await this.callService(svcDomain, service, entityId, data.data);
+        }
+        case 'conversation_process': {
+          this.validateParams(data, {
+            text: { required: true, type: 'string' }
+          });
+          return await this.conversationProcess(data.text, data.language, data.agent_id, data.conversation_id);
         }
         default:
           throw new Error(`Unknown action: ${action}`);
@@ -303,10 +315,44 @@ export default class HomeAssistantPlugin extends BasePlugin {
     };
   }
 
+  /**
+   * Send natural language text to Home Assistant's built-in conversation agent
+   * (POST /api/conversation/process) and return its spoken reply.
+   *
+   * HA answers { response: { response_type, speech: { plain: { speech } }, data },
+   * conversation_id } — the speech sits under `response`, not at the top level.
+   * Errors propagate to execute(), which maps a 401 to a readable message.
+   *
+   * @param {string} text - The natural language input to process.
+   * @param {string} [language='en'] - Language code for the conversation.
+   * @param {string|null} [agentId=null] - Optional conversation agent ID.
+   * @param {string|null} [conversationId=null] - Continue an earlier conversation.
+   */
+  async conversationProcess(text, language = 'en', agentId = null, conversationId = null) {
+    const payload = { text, language: language || 'en' };
+    if (agentId) payload.agent_id = agentId;
+    if (conversationId) payload.conversation_id = conversationId;
+
+    const body = await this.request('post', '/api/conversation/process', payload);
+    // The agent may have changed device states; drop the cached snapshot.
+    this.cache.del('states');
+    const reply = body?.response || {};
+    const speech = reply.speech?.plain?.speech || '';
+    const failed = reply.response_type === 'error';
+    return {
+      success: !failed,
+      speech,
+      responseType: reply.response_type || null,
+      conversationId: body?.conversation_id || null,
+      result: speech || 'No response',
+      ...(failed ? { error: speech || reply.data?.code || 'Home Assistant could not handle the request' } : {})
+    };
+  }
+
   async extractParameters(input, action) {
     const prompt = `Extract parameters from: "${input}"
 For the Home Assistant action "${action}". Return JSON only, using these keys where relevant:
-entity (entity_id or the device's name as the user said it), domain, service, search, data (object of service data such as brightness_pct, temperature, color_name).`;
+entity (entity_id or the device's name as the user said it), domain, service, search, data (object of service data such as brightness_pct, temperature, color_name), text (for conversation_process: the sentence to hand to Home Assistant's own conversation agent, as the user phrased it), language.`;
     const response = await this.agent.providerManager.generateResponse(prompt, { temperature: 0.2, maxTokens: 200 });
     return safeJsonParse(response.content, {}) || {};
   }

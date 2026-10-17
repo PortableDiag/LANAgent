@@ -99,8 +99,13 @@ class EmailService {
 
     /**
      * Check for verification emails
+     * @param {string} emailAddress - The email address to check
+     * @param {string} serviceName - The service name to filter emails from
+     * @param {Object} [options] - Optional parameters
+     * @param {boolean} [options.cacheBust] - If true, bypass the cache and fetch fresh data
+     * @returns {Promise<Object|null>} Verification data or null if not found
      */
-    async checkForVerification(emailAddress, serviceName) {
+    async checkForVerification(emailAddress, serviceName, options = {}) {
         if (!this.emailPlugin) {
             await this.initialize();
             if (!this.emailPlugin) {
@@ -111,15 +116,18 @@ class EmailService {
         try {
             // Search for emails from the service
             const searchQuery = `from:${serviceName} to:${emailAddress} subject:(verify OR confirm OR activate)`;
-            const emails = await this.getCachedData(searchQuery, async () => {
-                return await retryOperation(async () => {
-                    return await this.emailPlugin.execute({
-                        action: 'search',
-                        query: searchQuery,
-                        limit: 10
-                    });
+            const fetchEmails = () => retryOperation(async () => {
+                return await this.emailPlugin.execute({
+                    action: 'search',
+                    query: searchQuery,
+                    limit: 10
                 });
             });
+            // cacheBust: a poller must not be served the cached empty result of its
+            // previous check (the cache keeps search results for 5 minutes).
+            const emails = options.cacheBust
+                ? await fetchEmails()
+                : await this.getCachedData(searchQuery, fetchEmails);
 
             if (!emails || emails.length === 0) {
                 return null;
@@ -138,6 +146,35 @@ class EmailService {
         } catch (error) {
             logger.error('Failed to check verification email:', error);
             return null;
+        }
+    }
+
+    /**
+     * Poll for a verification email until found or timeout expires.
+     * Repeatedly calls checkForVerification with cache busting to avoid stale results.
+     * @param {string} emailAddress - The email address to check
+     * @param {string} serviceName - The service name to filter emails from
+     * @param {number} [timeoutMs=60000] - Maximum time to wait in milliseconds
+     * @param {number} [pollIntervalMs=5000] - Interval between checks in milliseconds
+     * @returns {Promise<Object|null>} The verification data or null if timeout
+     */
+    async waitForVerificationEmail(emailAddress, serviceName, timeoutMs = 60000, pollIntervalMs = 5000) {
+        // Sequential loop rather than setInterval: a search slower than the poll
+        // interval must not stack up overlapping IMAP searches.
+        const deadline = Date.now() + timeoutMs;
+        while (true) {
+            try {
+                const result = await this.checkForVerification(emailAddress, serviceName, { cacheBust: true });
+                if (result) return result;
+            } catch (error) {
+                // checkForVerification only throws when the email plugin is unavailable,
+                // which retrying within this window will not change.
+                logger.error('Verification email polling stopped:', error.message);
+                return null;
+            }
+            const remaining = deadline - Date.now();
+            if (remaining <= 0) return null;
+            await new Promise(resolve => setTimeout(resolve, Math.min(pollIntervalMs, remaining)));
         }
     }
 

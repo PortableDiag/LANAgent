@@ -23,9 +23,13 @@
 // What this does:
 //   Wraps both the callback-style and promise-style `dns.lookup` to retry
 //   transient resolver errors (EAI_AGAIN, EAI_NODATA, ENOTFOUND when not
-//   final, ETIMEDOUT, ESERVFAIL) up to 4 times with brief exponential backoff
-//   (150ms, 300ms, 600ms, 1200ms — total ~2.25s worst case). Non-transient
-//   errors propagate immediately so genuinely-bad hostnames still fail fast.
+//   final, ETIMEDOUT, ESERVFAIL) up to a configurable number of times with
+//   configurable backoff delays. Non-transient errors propagate immediately
+//   so genuinely-bad hostnames still fail fast.
+//
+//   Emits operational events (`dns:retry`, `dns:success`, `dns:finalFailure`)
+//   and exposes aggregate statistics via `getStats()` so operators can monitor
+//   DNS resilience and adapt the retry policy to their environment.
 //
 // What this does NOT do:
 //   - Cache successful lookups (libc / resolved already do that).
@@ -36,6 +40,8 @@
 //   `install()` is safe to call multiple times. Subsequent calls are no-ops.
 
 import dns from 'dns';
+import EventEmitter from 'events';
+import { logger } from './logger.js';
 
 const TRANSIENT_DNS_ERRORS = new Set([
   'EAI_AGAIN',     // resolver temporarily unavailable (most common during VPN switch)
@@ -45,35 +51,114 @@ const TRANSIENT_DNS_ERRORS = new Set([
   'ECONNREFUSED'   // local resolver socket refused (e.g. systemd-resolved restarting)
 ]);
 
-const MAX_ATTEMPTS = 4;
-const BACKOFFS_MS = [150, 300, 600, 1200];
+// Defaults: 3 retries after the first attempt (4 attempts in total), backoff
+// 150ms, 300ms, 600ms — ~1s worst case before the error propagates.
+const DEFAULT_RETRIES = 3;
+const DEFAULT_BACKOFFS_MS = [150, 300, 600, 1200];
 
 let installed = false;
+
+// Aggregate counters. `finalFailures` counts only TRANSIENT errors that
+// exhausted every retry — a non-transient error (a hostname that genuinely
+// does not exist) is not a resilience failure and is neither counted nor
+// logged here; the scraper resolves dead domains all day.
+const stats = {
+  totalLookups: 0,
+  retries: 0,
+  successesAfterRetry: 0,
+  finalFailures: 0,
+  lastErrorTimestamp: null
+};
+
+// Events fire here unless install({ emitter }) supplies another emitter.
+export const dnsEvents = new EventEmitter();
 
 function isTransient(err) {
   return err && TRANSIENT_DNS_ERRORS.has(err.code);
 }
 
-export function install() {
+// Explicit option > env var > default. A non-integer or negative value falls
+// through to the next source; 0 is a legitimate "do not retry".
+function resolveRetries(optionValue) {
+  if (Number.isInteger(optionValue) && optionValue >= 0) return optionValue;
+  const env = process.env.DNS_RETRIES;
+  if (env !== undefined && env.trim() !== '') {
+    const parsed = Number(env);
+    if (Number.isInteger(parsed) && parsed >= 0) return parsed;
+  }
+  return DEFAULT_RETRIES;
+}
+
+function resolveBackoffs(optionValue) {
+  const valid = (arr) => Array.isArray(arr) && arr.length > 0 && arr.every(n => Number.isFinite(n) && n >= 0);
+  if (valid(optionValue)) return optionValue;
+  if (process.env.DNS_BACKOFF_MS) {
+    const parts = process.env.DNS_BACKOFF_MS.split(',').map(s => Number(s.trim()));
+    if (valid(parts)) return parts;
+  }
+  return DEFAULT_BACKOFFS_MS;
+}
+
+/**
+ * Install the resilient DNS lookup wrapper.
+ *
+ * @param {Object} [options]
+ * @param {number} [options.retries] - Retries after the first attempt (env DNS_RETRIES; default 3).
+ * @param {number[]} [options.backoffDelays] - Delay before each retry in ms; the last value repeats
+ *   (env DNS_BACKOFF_MS as a comma list; default 150,300,600,1200).
+ * @param {EventEmitter} [options.emitter] - Receives the events below (default: exported `dnsEvents`).
+ *
+ * Events:
+ *   - `dns:retry`        (hostname, error, attempt) — before each retry.
+ *   - `dns:success`      (hostname)                 — a lookup succeeded after at least one retry.
+ *   - `dns:finalFailure` (hostname, error)          — a transient error outlasted every retry.
+ */
+export function install(options = {}) {
   if (installed) return;
   installed = true;
+
+  const retries = resolveRetries(options.retries);
+  const backoffDelays = resolveBackoffs(options.backoffDelays);
+  const emitter = options.emitter || dnsEvents;
+  const delayFor = (attempt) => backoffDelays[Math.min(attempt, backoffDelays.length - 1)];
+
+  const onRetry = (hostname, err, attempt) => {
+    stats.retries++;
+    logger.debug(`DNS retry ${attempt}/${retries} for ${hostname}: ${err.code}`);
+    emitter.emit('dns:retry', hostname, err, attempt);
+  };
+  const onDone = (hostname, err, didRetry) => {
+    if (err) {
+      if (!isTransient(err)) return;
+      stats.finalFailures++;
+      stats.lastErrorTimestamp = Date.now();
+      logger.warn(`DNS lookup for ${hostname} still failing after ${retries} retries: ${err.code}`);
+      emitter.emit('dns:finalFailure', hostname, err);
+    } else if (didRetry) {
+      stats.successesAfterRetry++;
+      emitter.emit('dns:success', hostname);
+    }
+  };
 
   const originalLookup = dns.lookup;
   const originalPromiseLookup = dns.promises.lookup;
 
-  // Callback-style (used by core http/https/net)
+  // Callback-style (used by http/https/net/ws under the hood)
   dns.lookup = function patchedLookup(hostname, optionsOrCallback, maybeCallback) {
     const cb = typeof optionsOrCallback === 'function' ? optionsOrCallback : maybeCallback;
     const opts = typeof optionsOrCallback === 'function' ? undefined : optionsOrCallback;
     let attempt = 0;
+    stats.totalLookups++;
     const tryOnce = () => {
       const innerCb = (err, ...args) => {
-        if (err && isTransient(err) && attempt < MAX_ATTEMPTS - 1) {
-          const delay = BACKOFFS_MS[attempt] || 1200;
+        if (err && isTransient(err) && attempt < retries) {
+          const delay = delayFor(attempt);
           attempt++;
+          onRetry(hostname, err, attempt);
           setTimeout(tryOnce, delay);
           return;
         }
+        onDone(hostname, err, attempt > 0);
         cb(err, ...args);
       };
       if (opts === undefined) {
@@ -87,18 +172,30 @@ export function install() {
 
   // Promise-style (used by some libraries that prefer dns.promises)
   dns.promises.lookup = async function patchedPromiseLookup(hostname, opts) {
-    let lastErr;
-    for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+    stats.totalLookups++;
+    for (let attempt = 0; ; attempt++) {
       try {
-        return opts === undefined
+        const result = opts === undefined
           ? await originalPromiseLookup(hostname)
           : await originalPromiseLookup(hostname, opts);
+        onDone(hostname, null, attempt > 0);
+        return result;
       } catch (err) {
-        lastErr = err;
-        if (!isTransient(err) || attempt === MAX_ATTEMPTS - 1) throw err;
-        await new Promise(r => setTimeout(r, BACKOFFS_MS[attempt] || 1200));
+        if (!isTransient(err) || attempt >= retries) {
+          onDone(hostname, err, attempt > 0);
+          throw err;
+        }
+        onRetry(hostname, err, attempt + 1);
+        await new Promise(r => setTimeout(r, delayFor(attempt)));
       }
     }
-    throw lastErr;
   };
+}
+
+/**
+ * Snapshot of the aggregate DNS resilience counters since install().
+ * @returns {{ totalLookups: number, retries: number, successesAfterRetry: number, finalFailures: number, lastErrorTimestamp: number|null }}
+ */
+export function getStats() {
+  return { ...stats };
 }

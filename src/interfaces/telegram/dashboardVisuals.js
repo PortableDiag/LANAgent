@@ -1,6 +1,7 @@
 import { logger } from "../../utils/logger.js";
 import { escapeMarkdown } from "../../utils/markdown.js";
-import { createCanvas } from 'canvas';
+// canvas is a native addon; load it only when an image is actually rendered so the
+// text helpers (charts, sparklines) work on a host where its binding is not built.
 
 export class DashboardVisuals {
   constructor() {
@@ -10,7 +11,8 @@ export class DashboardVisuals {
       { command: 'createTextChart', description: 'Create a text-based chart', usage: 'createTextChart <data> <title>' },
       { command: 'zoomChart', description: 'Zoom into specific data points on the chart', usage: 'zoomChart <start> <end>' },
       { command: 'filterChartData', description: 'Filter chart data by criteria', usage: 'filterChartData <criteria>' },
-      { command: 'exportChartAsImage', description: 'Export chart as an image', usage: 'exportChartAsImage <data> <title>' }
+      { command: 'exportChartAsImage', description: 'Export chart as an image', usage: 'exportChartAsImage <data> <title>' },
+      { command: 'createSparkline', description: 'Create a sparkline from numeric data', usage: 'createSparkline <data> [options]' }
     ];
   }
 
@@ -84,6 +86,7 @@ export class DashboardVisuals {
    * @returns {Buffer} - The image buffer
    */
   async exportChartAsImage(data, title) {
+    const { createCanvas } = await import('canvas');
     const canvas = createCanvas(this.chartWidth, this.chartHeight);
     const ctx = canvas.getContext('2d');
 
@@ -109,6 +112,58 @@ export class DashboardVisuals {
   }
 
   /**
+   * Create a sparkline from numeric data using Unicode block characters.
+   * Maps values to a sequence of ▁▂▃▄▅▆▇█ based on min/max scaling.
+   * @param {number[]} data - Array of numeric values
+   * @param {Object} [options] - Optional configuration
+   * @param {number} [options.width] - Desired number of characters (resamples if needed)
+   * @param {number} [options.min] - Override minimum value for scaling
+   * @param {number} [options.max] - Override maximum value for scaling
+   * @returns {string} Sparkline string of block characters
+   */
+  createSparkline(data, options = {}) {
+    if (!Array.isArray(data)) return '';
+    // Non-numeric entries (null gaps, strings) would scale to NaN and render as
+    // the text "undefined"; drop them.
+    data = data.filter(v => typeof v === 'number' && Number.isFinite(v));
+    if (data.length === 0) return '';
+
+    const { width, min: overrideMin, max: overrideMax } = options || {};
+    const blocks = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+
+    // Resample data if width is specified and smaller than data length
+    let values = data;
+    if (Number.isInteger(width) && width > 0 && width < data.length) {
+      values = [];
+      const bucketSize = data.length / width;
+      for (let i = 0; i < width; i++) {
+        const start = Math.floor(i * bucketSize);
+        const end = Math.floor((i + 1) * bucketSize);
+        const slice = data.slice(start, end);
+        const avg = slice.reduce((sum, v) => sum + v, 0) / slice.length;
+        values.push(avg);
+      }
+    }
+
+    // Determine min and max for scaling
+    const min = Number.isFinite(overrideMin) ? overrideMin : values.reduce((a, b) => Math.min(a, b), Infinity);
+    const max = Number.isFinite(overrideMax) ? overrideMax : values.reduce((a, b) => Math.max(a, b), -Infinity);
+    const range = max - min;
+
+    // Map each value to a block character
+    return values.map(v => {
+      if (range <= 0) {
+        // All values equal – use middle block
+        return blocks[3]; // ▄
+      }
+      // Scale to 0-1, then to index 0-7
+      const scaled = (v - min) / range;
+      const index = Math.min(blocks.length - 1, Math.max(0, Math.round(scaled * (blocks.length - 1))));
+      return blocks[index];
+    }).join('');
+  }
+
+  /**
    * Execute a command
    * @param {string} command - The command to execute
    * @param {Array} params - Parameters for the command
@@ -124,6 +179,8 @@ export class DashboardVisuals {
         return this.filterChartData(params[0], params[1]);
       case 'exportChartAsImage':
         return await this.exportChartAsImage(params[0], params[1]);
+      case 'createSparkline':
+        return this.createSparkline(params[0], params[1] || {});
       default:
         logger.warn(`Unknown command: ${command}`);
         return 'Unknown command';

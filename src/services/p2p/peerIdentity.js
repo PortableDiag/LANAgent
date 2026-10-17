@@ -1,4 +1,5 @@
 import { logger } from '../../utils/logger.js';
+import NodeCache from 'node-cache';
 
 /**
  * Peer identity and reputation: what a peer can PROVE, as opposed to what it announces.
@@ -29,6 +30,21 @@ const PROOF_HEADER = 'LANAgent P2P wallet proof v1';
 const PROOF_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 const PROOF_MAX_SKEW_MS = 10 * 60 * 1000;
 const PROOF_REFRESH_MS = 12 * 60 * 60 * 1000;
+
+// Cache for readChainReputation, so repeated capability exchanges with the same peer do not
+// re-run four RPC reads each time. Keyed by wallet AND agentId: the ERC-8004 owner read only
+// happens when an agentId is given, so a wallet-only key would serve a cached
+// erc8004Owner:null to a later call that asked about an id. Only complete reads are cached.
+// P2P_CHAIN_CACHE_TTL_MS=0 disables it (NodeCache treats stdTTL 0 as "never expire", so 0
+// must not reach it).
+const rawChainTtl = Number.parseInt(process.env.P2P_CHAIN_CACHE_TTL_MS ?? '', 10);
+const P2P_CHAIN_CACHE_TTL_MS = Number.isFinite(rawChainTtl) && rawChainTtl >= 0 ? rawChainTtl : 300000;
+const chainRepCache = new NodeCache({ stdTTL: Math.max(1, Math.ceil(P2P_CHAIN_CACHE_TTL_MS / 1000)), checkperiod: 60 });
+const chainCacheKey = (wallet, agentId) => `${String(wallet).toLowerCase()}|${agentId ?? ''}`;
+
+export function _resetChainCache() {
+  chainRepCache.flushAll();
+}
 
 export function walletProofMessage({ fingerprint, address, issued }) {
   return `${PROOF_HEADER}\nfingerprint: ${fingerprint}\naddress: ${String(address).toLowerCase()}\nissued: ${issued}`;
@@ -109,8 +125,25 @@ async function configuredAddresses() {
 /**
  * Read a proven wallet's on-chain standing. Each field is null when its read failed, so a
  * flaky RPC never turns into "holds nothing" (callers keep the previous value instead).
+ * A complete read is cached per wallet+agentId for P2P_CHAIN_CACHE_TTL_MS; `readAt` says
+ * when the chain was actually read, so callers can stamp the reading's real age.
  */
-export async function readChainReputation(wallet, { agentId = null } = {}) {
+export async function readChainReputation(wallet, { agentId = null, _read = readChainReputationUncached } = {}) {
+  const key = chainCacheKey(wallet, agentId);
+  if (P2P_CHAIN_CACHE_TTL_MS > 0) {
+    const cached = chainRepCache.get(key);
+    if (cached !== undefined) return cached;
+  }
+  const { out, complete } = await _read(wallet, { agentId });
+  const result = { ...out, readAt: Date.now() };
+  if (P2P_CHAIN_CACHE_TTL_MS > 0) {
+    if (complete) chainRepCache.set(key, result);
+    else chainRepCache.del(key);
+  }
+  return result;
+}
+
+async function readChainReputationUncached(wallet, { agentId = null } = {}) {
   const out = { balance: null, stakeAmount: null, stakeEffective: null, sentinel: null, erc8004Owner: null };
   let provider, ethers;
   try {
@@ -119,32 +152,35 @@ export async function readChainReputation(wallet, { agentId = null } = {}) {
     ({ ethers } = await import('ethers'));
   } catch (error) {
     logger.debug(`Peer reputation: no BSC provider (${error.message})`);
-    return out;
+    return { out, complete: false };
   }
   const { token, staking } = await configuredAddresses();
+
+  let hadError = false;
 
   await Promise.all([
     (async () => {
       const c = new ethers.Contract(token, ['function balanceOf(address) view returns (uint256)'], provider);
       out.balance = parseFloat(ethers.formatUnits(await c.balanceOf(wallet), 18));
-    })().catch(e => logger.debug(`Peer reputation: balance read failed: ${e.message}`)),
+    })().catch(e => { hadError = true; logger.debug(`Peer reputation: balance read failed: ${e.message}`); }),
     (async () => {
       const c = new ethers.Contract(staking, ['function getStakeInfo(address) view returns (uint256 amount, uint256 effectiveBalance, uint256 tierId, uint256 lockExpiry, bool locked, uint256 stakedAt)'], provider);
       const info = await c.getStakeInfo(wallet);
       out.stakeAmount = parseFloat(ethers.formatUnits(info.amount, 18));
       out.stakeEffective = parseFloat(ethers.formatUnits(info.effectiveBalance, 18));
-    })().catch(e => logger.debug(`Peer reputation: stake read failed: ${e.message}`)),
+    })().catch(e => { hadError = true; logger.debug(`Peer reputation: stake read failed: ${e.message}`); }),
     (async () => {
       const reg = new ethers.Contract(SENTINEL_REGISTRY, ['function sentinelToken() external view returns (address)'], provider);
       const sentinel = new ethers.Contract(await reg.sentinelToken(), ['function balanceOf(address) view returns (uint256)'], provider);
       out.sentinel = Number(await sentinel.balanceOf(wallet));
-    })().catch(e => logger.debug(`Peer reputation: sentinel read failed: ${e.message}`)),
+    })().catch(e => { hadError = true; logger.debug(`Peer reputation: sentinel read failed: ${e.message}`); }),
     agentId == null ? null : (async () => {
       const reg = new ethers.Contract(ERC8004_REGISTRY, ['function ownerOf(uint256 tokenId) external view returns (address)'], provider);
       out.erc8004Owner = String(await reg.ownerOf(agentId)).toLowerCase();
-    })().catch(e => logger.debug(`Peer reputation: ERC-8004 owner read failed: ${e.message}`))
+    })().catch(e => { hadError = true; logger.debug(`Peer reputation: ERC-8004 owner read failed: ${e.message}`); })
   ]);
-  return out;
+
+  return { out, complete: !hadError };
 }
 
 /**
@@ -190,15 +226,17 @@ export async function applyPeerIdentity(peer, announced, { fingerprint, read = r
   }
 
   const chain = await read(wallet, { agentId });
+  // A cached reading carries the time the chain was really read; stamp that, not "now".
+  const readAt = new Date(Number.isFinite(chain.readAt) ? chain.readAt : now);
   if (chain.balance != null) {
     peer.skynetBalance = chain.balance;
     peer.skynetBalanceVerified = true;
-    peer.skynetBalanceVerifiedAt = new Date(now);
+    peer.skynetBalanceVerifiedAt = readAt;
   }
   if (chain.stakeEffective != null) {
     peer.skynetStaked = chain.stakeAmount || 0;
     peer.skynetStakeEffective = chain.stakeEffective;
-    peer.skynetStakeVerifiedAt = new Date(now);
+    peer.skynetStakeVerifiedAt = readAt;
   }
   if (chain.sentinel != null) {
     peer.sentinelBalance = chain.sentinel;

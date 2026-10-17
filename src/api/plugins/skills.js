@@ -130,6 +130,12 @@ export default class SkillsPlugin extends BasePlugin {
         examples: ['install the skill from this github link', 'add this skill from github', 'install skill from url']
       },
       {
+        command: 'previewFromUrl',
+        description: 'Show what a skill (SKILL.md) at a GitHub link or URL would install, without installing it',
+        usage: 'previewFromUrl({ url: "https://github.com/owner/repo/tree/main/skills/some-skill" })',
+        examples: ['preview the skill at this github link', 'what would this skill link install', 'show me this skill before installing it']
+      },
+      {
         command: 'evaluate',
         description: 'Test whether a skill is used for the right requests: realistic requests that should use it and near-misses that should not, run through the skill matcher',
         usage: 'evaluate({ name: "humanizer" })',
@@ -439,6 +445,19 @@ export default class SkillsPlugin extends BasePlugin {
             ? `It is active (auto-approve is on); Telegram has a Reject button if you don't want it.`
             : `It is PENDING: I won't use it until you approve it (Telegram, "approve skill ${r.name}", or the Skills page).`;
           return { success: true, ...info, result: `Installed "${r.name}" from ${r.source}${r.updated ? ' (updated)' : ''}. ${state} What it does: ${r.description}` };
+        }
+        case 'previewFromUrl': {
+          const { previewSkillFromUrl } = await import('../../services/skills/skillInstall.js');
+          try {
+            const p = await previewSkillFromUrl(data.url || data.source || data.link, { service });
+            const { existingSkill, ...info } = p;
+            const outcome = p.blocked
+              ? `It would NOT install: a skill named "${p.name}" already exists (${existingSkill.bundled ? 'built in' : existingSkill.meta?.source || 'local'}) and is not replaced.`
+              : p.wouldReplace ? `Installing would update the existing "${p.name}" from the same link.` : `Installing would add a new skill "${p.name}".`;
+            return { success: true, ...info, result: `Skill at ${p.source}: "${p.name}" — ${p.description}\n${outcome}` };
+          } catch (e) {
+            return { success: false, error: e.message };
+          }
         }
         case 'evaluate': {
           this.validateParams(data, { name: { required: true, type: 'string' } });

@@ -1,3 +1,4 @@
+import net from 'node:net';
 import { logger } from '../../../utils/logger.js';
 
 /**
@@ -84,6 +85,74 @@ function isWithinTimeWindows(windows) {
   });
 }
 
+// ---------------------------------------------------------------------------
+// IP allow/block lists (memoised, fail-closed)
+//
+// req.ip is the socket peer: the external app does not set `trust proxy`, so a
+// forwarded header cannot spoof it. The flip side: a request relayed through the
+// gateway arrives from the gateway's address, so list the relay, not the end client.
+// ---------------------------------------------------------------------------
+
+let ipListCache = new Map(); // env var name -> { source, list }
+
+/**
+ * Parse comma-separated IPs / CIDR ranges (IPv4 and IPv6) into a net.BlockList.
+ * net.BlockList compares parsed addresses, so `2001:0db8::1` and `2001:db8::1` are
+ * the same entry and an IPv4-mapped client (::ffff:10.0.0.1) matches an IPv4 rule.
+ * A hand-rolled string compare would silently miss a non-canonical BLOCK entry.
+ *
+ * @param {string} listStr
+ * @returns {net.BlockList|null} null when the string is empty (no restriction)
+ * @throws {Error} on any invalid entry, so a typo denies instead of disabling the rule
+ */
+function parseIPList(listStr) {
+  if (!listStr || !listStr.trim()) return null;
+  const list = new net.BlockList();
+  let count = 0;
+  for (const raw of listStr.split(',')) {
+    const str = raw.trim();
+    if (!str) continue;
+    const slash = str.indexOf('/');
+    const base = slash === -1 ? str : str.slice(0, slash);
+    const version = net.isIP(base);
+    if (version === 0) throw new Error(`invalid IP address "${str}"`);
+    const type = version === 4 ? 'ipv4' : 'ipv6';
+    if (slash === -1) {
+      list.addAddress(base, type);
+    } else {
+      const prefixStr = str.slice(slash + 1);
+      const prefix = Number(prefixStr);
+      const max = version === 4 ? 32 : 128;
+      if (!/^\d{1,3}$/.test(prefixStr) || prefix > max) throw new Error(`invalid prefix length in CIDR "${str}"`);
+      list.addSubnet(base, prefix, type);
+    }
+    count++;
+  }
+  // Set but holding no entry (",,") is a typo, not "no restriction": deny.
+  if (!count) throw new Error('the list has no entries');
+  return list;
+}
+
+/** Memoised on the raw env string, like the time windows. @throws from parseIPList */
+function getIPList(envName, listStr) {
+  const cached = ipListCache.get(envName);
+  if (!cached || cached.source !== listStr) {
+    ipListCache.set(envName, { source: listStr, list: parseIPList(listStr) });
+  }
+  return ipListCache.get(envName).list;
+}
+
+/** Does the client IP match the list? An unparseable client IP never matches. */
+function ipMatches(list, clientIP) {
+  const version = net.isIP(String(clientIP || ''));
+  if (version === 0) return false;
+  return list.check(clientIP, version === 4 ? 'ipv4' : 'ipv6');
+}
+
+// ---------------------------------------------------------------------------
+// Operator-only middleware
+// ---------------------------------------------------------------------------
+
 /**
  * Operator-only gate for endpoints on the external gateway.
  *
@@ -106,6 +175,27 @@ export function adminKeyAuth(req, res, next) {
     logger.warn('Invalid admin key provided', { hadKey: !!provided, ip: req.ip });
     return res.status(401).json({ success: false, error: 'Invalid admin key' });
   }
+
+  // --- IP allow/block lists (fail-closed; block wins over allow) ---
+
+  for (const [envName, mode] of [['AGENT_ADMIN_KEY_BLOCKED_IPS', 'block'], ['AGENT_ADMIN_KEY_ALLOWED_IPS', 'allow']]) {
+    const listStr = process.env[envName];
+    if (!listStr || !listStr.trim()) continue;
+    let list;
+    try {
+      list = getIPList(envName, listStr);
+    } catch (error) {
+      logger.error(`${envName} is malformed, denying admin access: ${error.message}`);
+      return res.status(503).json({ success: false, error: `${envName} is misconfigured on this agent` });
+    }
+    const hit = ipMatches(list, req.ip);
+    if (mode === 'block' ? hit : !hit) {
+      logger.warn(`Admin key access denied by ${envName}`, { ip: req.ip });
+      return res.status(403).json({ success: false, error: 'Access denied' });
+    }
+  }
+
+  // --- Time-window restriction ---
 
   const timeWindowsStr = process.env.AGENT_ADMIN_KEY_WINDOWS;
   if (timeWindowsStr && timeWindowsStr.trim()) {

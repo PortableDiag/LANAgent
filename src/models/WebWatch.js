@@ -21,6 +21,10 @@ const webWatchSchema = new mongoose.Schema({
   intervalMin: { type: Number, default: 60, min: 15 },
   // feed: ids of items already seen (newest first, capped) — only unseen ones are reported
   seen: { type: [String], default: [] },
+  // feed: HTTP validators from the last full read, sent back as a conditional GET so an
+  // unchanged feed answers 304 and is neither re-downloaded nor re-parsed
+  etag: { type: String, default: null },
+  lastModified: { type: String, default: null },
   keywords: { type: [String], default: [] },
   // price
   selector: { type: String, default: '' },

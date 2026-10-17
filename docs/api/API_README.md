@@ -487,6 +487,13 @@ The gateway calls `GET /api/external/catalog` on your agent and reads the `servi
 
 Operator-only endpoints exposed by each LANAgent for cross-agent visibility. The gateway calls these to surface per-agent `ExternalCreditBalance` rows (the customer wallets that pay each agent directly, plus the gateway-as-a-customer wallet that receives auto-replenishment SKYNET) in its `/admin/wallets` page. Auth is a shared secret in the `X-Admin-Key` header matched against `process.env.AGENT_ADMIN_KEY` on each agent — the same value must be set on the calling gateway. If the env var is unset on the agent, the endpoint returns 503; mismatch returns 401.
 
+Optionally, `AGENT_ADMIN_KEY_ALLOWED_IPS` / `AGENT_ADMIN_KEY_BLOCKED_IPS` restrict *where* a valid
+admin key is accepted: comma-separated IPv4/IPv6 addresses or CIDR ranges. A blocked match, or a
+client outside a non-empty allow list, returns **403**; a list that cannot be parsed returns **503**
+and denies. Block wins over allow; both run after the key check. The address checked is the socket
+peer (`trust proxy` is not set), so calls relayed by the gateway arrive from the gateway's address —
+an allow list must include it or the gateway's `/admin/*` fan-out stops working.
+
 ```
 GET /api/external/admin/wallets
 X-Admin-Key: <AGENT_ADMIN_KEY>
@@ -510,6 +517,9 @@ X-Admin-Key: <AGENT_ADMIN_KEY>
 
 ```
 GET /api/external/admin/payments/recent?limit=20         (max 100; default 20)
+    optional filters: serviceId, chain (case-insensitive), currency (case-insensitive),
+    callerAgentId (exact, case-insensitive), since / until (ISO dates, inclusive; bad or
+    inverted range → 400)
 X-Admin-Key: <AGENT_ADMIN_KEY>
 → {
     "success": true,

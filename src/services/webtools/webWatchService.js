@@ -94,17 +94,30 @@ export async function readPrice(url, { selector, scraper } = {}) {
 }
 
 export class WebWatchService {
-  constructor({ notify, getScraper } = {}) {
+  constructor({ notify, getScraper, readFeed: readFeedImpl } = {}) {
     this.notify = notify || (async () => {});
     this.getScraper = getScraper || (() => null);
+    this.readFeed = readFeedImpl || readFeed;
     this.running = false;
   }
 
   async checkOne(watch) {
     if (watch.kind === 'feed') {
-      const feed = await readFeed(watch.url, { limit: 50 });
+      // Validators are only trusted once `seen` holds what that read returned; with no seen
+      // ids a 304 would leave the watch unseeded forever, so ask unconditionally.
+      const previousHeaders = watch.seen?.length && (watch.etag || watch.lastModified)
+        ? { etag: watch.etag || undefined, lastModified: watch.lastModified || undefined }
+        : null;
+      const feed = await this.readFeed(watch.url, { limit: 50, previousHeaders });
+      if (feed.notModified) {
+        await WebWatch.updateOne({ _id: watch._id }, { $set: { lastCheckedAt: new Date(), lastError: null, failCount: 0 } });
+        return { kind: 'feed', newItems: 0, firstRun: false, seeded: false, notModified: true, items: [] };
+      }
       const { fresh, nextSeen, firstRun, seeded } = diffFeedItems(watch, feed.items);
-      const set = { seen: nextSeen, lastCheckedAt: new Date(), lastError: null, failCount: 0 };
+      const set = {
+        seen: nextSeen, lastCheckedAt: new Date(), lastError: null, failCount: 0,
+        etag: feed.headers?.etag || null, lastModified: feed.headers?.lastModified || null
+      };
       if (!watch.name && feed.title) set.name = feed.title;
       await WebWatch.updateOne({ _id: watch._id }, { $set: set });
       if (fresh.length) {

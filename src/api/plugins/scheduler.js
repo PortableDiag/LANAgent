@@ -115,6 +115,16 @@ export default class SchedulerPlugin extends BasePlugin {
         command: 'cancelTask',
         description: 'Cancel a scheduled task',
         usage: 'cancelTask [taskId]'
+      },
+      {
+        command: 'pauseJob',
+        description: 'Pause a recurring scheduled job',
+        usage: 'pauseJob [taskId]'
+      },
+      {
+        command: 'resumeJob',
+        description: 'Resume a paused recurring scheduled job',
+        usage: 'resumeJob [taskId]'
       }
     ];
     this.cache = new NodeCache({ stdTTL: 1800 });
@@ -146,10 +156,16 @@ export default class SchedulerPlugin extends BasePlugin {
         case 'cancelTask':
           return await this.cancelTask(taskId);
 
+        case 'pauseJob':
+          return await this.pauseJob(taskId);
+
+        case 'resumeJob':
+          return await this.resumeJob(taskId);
+
         default:
           return { 
             success: false, 
-            error: 'Unknown action. Supported actions: parseCron, nextRun, listScheduledTasks, cancelTask' 
+            error: 'Unknown action. Supported actions: parseCron, nextRun, listScheduledTasks, cancelTask, pauseJob, resumeJob' 
           };
       }
     } catch (error) {
@@ -292,7 +308,10 @@ export default class SchedulerPlugin extends BasePlugin {
         lastRunAt: a.lastRunAt || null,
         lastFinishedAt: a.lastFinishedAt || null,
         failCount: a.failCount || 0,
-        failReason: a.failReason || null
+        failReason: a.failReason || null,
+        // Set by pauseJob. A paused standing job never fires and raises no
+        // error, so it must be visible here or it reads as a healthy schedule.
+        paused: a.disabled === true
       };
     });
 
@@ -300,6 +319,7 @@ export default class SchedulerPlugin extends BasePlugin {
       success: true,
       count: tasks.length,
       recurring: tasks.filter(t => t.recurring).length,
+      paused: tasks.filter(t => t.paused).length,
       tasks
     };
   }
@@ -352,6 +372,107 @@ export default class SchedulerPlugin extends BasePlugin {
       message: numRemoved > 0
         ? `Cancelled '${job.attrs.name}' (${taskId})`
         : `Task ${taskId} was already gone`
+    };
+  }
+
+  /**
+   * Pause a recurring scheduled job without cancelling it.
+   *
+   * Only jobs with a repeatInterval (recurring) can be paused. One-off jobs
+   * cannot be paused because they are not scheduled to run again. Pausing sets
+   * Agenda's `disabled` flag, which survives a restart (every() does not reset
+   * it) and is shown as `paused` by listScheduledTasks; resumeJob clears it.
+   *
+   * @param {string} taskId - The ID of the job to pause.
+   * @returns {Promise<object>} Result with success status and message.
+   */
+  async pauseJob(taskId) {
+    if (!taskId) {
+      throw new Error('Task ID is required');
+    }
+
+    const agenda = this.agent?.scheduler?.agenda;
+    if (!agenda) {
+      return { success: false, error: 'Scheduler is not initialised yet' };
+    }
+
+    let objectId;
+    try {
+      const { ObjectId } = await import('mongodb');
+      objectId = new ObjectId(String(taskId));
+    } catch {
+      return { success: false, error: `'${taskId}' is not a valid task id` };
+    }
+
+    const [job] = await agenda.jobs({ _id: objectId });
+    if (!job) {
+      return { success: false, error: `No scheduled task with id ${taskId}` };
+    }
+
+    if (!job.attrs?.repeatInterval) {
+      return {
+        success: false,
+        error: `Cannot pause a one-off job. '${job.attrs.name}' is not recurring.`
+      };
+    }
+
+    if (job.attrs.disabled === true) {
+      return { success: true, disabled: 0, message: `'${job.attrs.name}' (${taskId}) is already paused` };
+    }
+
+    const numDisabled = await agenda.disable({ _id: objectId });
+    return {
+      success: numDisabled > 0,
+      disabled: numDisabled,
+      message: numDisabled > 0
+        ? `Paused recurring job '${job.attrs.name}' (${taskId})`
+        : `Job ${taskId} was already paused or could not be disabled`
+    };
+  }
+
+  /**
+   * Resume a paused recurring scheduled job.
+   *
+   * Re-enables a job that was previously paused via pauseJob. The job will
+   * resume its normal schedule.
+   *
+   * @param {string} taskId - The ID of the job to resume.
+   * @returns {Promise<object>} Result with success status and message.
+   */
+  async resumeJob(taskId) {
+    if (!taskId) {
+      throw new Error('Task ID is required');
+    }
+
+    const agenda = this.agent?.scheduler?.agenda;
+    if (!agenda) {
+      return { success: false, error: 'Scheduler is not initialised yet' };
+    }
+
+    let objectId;
+    try {
+      const { ObjectId } = await import('mongodb');
+      objectId = new ObjectId(String(taskId));
+    } catch {
+      return { success: false, error: `'${taskId}' is not a valid task id` };
+    }
+
+    const [job] = await agenda.jobs({ _id: objectId });
+    if (!job) {
+      return { success: false, error: `No scheduled task with id ${taskId}` };
+    }
+
+    if (job.attrs.disabled !== true) {
+      return { success: true, enabled: 0, message: `'${job.attrs.name}' (${taskId}) is not paused` };
+    }
+
+    const numEnabled = await agenda.enable({ _id: objectId });
+    return {
+      success: numEnabled > 0,
+      enabled: numEnabled,
+      message: numEnabled > 0
+        ? `Resumed job '${job.attrs.name}' (${taskId})`
+        : `Job ${taskId} was already enabled or could not be resumed`
     };
   }
 
