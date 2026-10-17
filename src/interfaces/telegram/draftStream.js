@@ -14,7 +14,9 @@ import { richEnabled, editToRich, toRichMarkdown, RICH_TEXT_LIMIT } from './rich
  *  - finish()  cleans up. A draft is ephemeral: the caller's final sendMessage replaces it.
  *
  * The answer itself streams as a rich draft (sendRichMessageDraft, Rich Markdown), so tables
- * and headings take shape while it is written; status text and the placeholder stay plain.
+ * and headings take shape while it is written. Status text ("Checking memory…", "🔧 web search")
+ * is shown in Telegram's thinking block (<tg-thinking>, a display element, not model reasoning);
+ * the very first placeholder stays the plain empty draft ("Thinking…").
  * A rich refusal switches this reply back to plain drafts.
  *
  * A draft lives about 30 seconds, so the last text is re-sent every REFRESH_MS while a slow
@@ -42,6 +44,8 @@ export function handleStopUpdate(update) {
   else logger.info(`[telegram] stop pressed for draft ${s.draft_id}, which already finished`);
   return true;
 }
+
+const escapeHtml = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
 export function clip(text, limit = TELEGRAM_TEXT_LIMIT) {
   const s = String(text ?? '');
@@ -113,7 +117,7 @@ export class DraftStream {
   async status(text) {
     if (this.streaming || this.stopped || !text || text === this.text) return;
     if (this.mode === 'draft') {
-      await this._draft(clip(text));
+      await this._draft(text, {}, { thinking: true });
     } else if (this.mode === 'message' && this.statusMessage) {
       try {
         await this.telegram.editMessageText(this.chatId, this.statusMessage.message_id, undefined, clip(text));
@@ -197,7 +201,8 @@ export class DraftStream {
     this.refreshTimer = setInterval(() => {
       if (this.mode !== 'draft' || this.stopped || this.inFlight) return;
       if (Date.now() - this.lastSentAt < this.refreshMs) return;
-      this._draft(this.text, this.streaming ? { can_stop: true, keep_on_stop: true } : {}, { rich: this.streaming }).catch(() => {});
+      this._draft(this.text, this.streaming ? { can_stop: true, keep_on_stop: true } : {},
+        this.streaming ? { rich: true } : { thinking: Boolean(this.text) }).catch(() => {});
     }, Math.min(this.refreshMs, 5000));
     this.refreshTimer.unref?.();
   }
@@ -205,10 +210,11 @@ export class DraftStream {
   /**
    * @param {string} text
    * @param {object} [extra] can_stop / keep_on_stop
-   * @param {{rich?: boolean}} [opts] rich: send as Rich Markdown (answer text only)
+   * @param {{rich?: boolean, thinking?: boolean}} [opts] rich: the answer as Rich Markdown;
+   *   thinking: a status line inside Telegram's thinking block
    * @returns {Promise<boolean>} whether Telegram accepted the draft
    */
-  async _draft(text, extra = {}, { rich = false } = {}) {
+  async _draft(text, extra = {}, { rich = false, thinking = false } = {}) {
     this.inFlight = true;
     try {
       const base = {
@@ -218,11 +224,12 @@ export class DraftStream {
         ...extra
       };
       let sentRich = false;
-      if (rich && this.richDrafts !== false && richEnabled() && String(text).trim()) {
+      if ((rich || thinking) && this.richDrafts !== false && richEnabled() && String(text).trim()) {
         try {
-          await this.telegram.callApi('sendRichMessageDraft', {
-            ...base, rich_message: { markdown: toRichMarkdown(clip(text, RICH_TEXT_LIMIT)) }
-          });
+          const markdown = thinking
+            ? `<tg-thinking>${escapeHtml(clip(text, 1000))}</tg-thinking>`
+            : toRichMarkdown(clip(text, RICH_TEXT_LIMIT));
+          await this.telegram.callApi('sendRichMessageDraft', { ...base, rich_message: { markdown } });
           sentRich = true;
         } catch (err) {
           // Plain drafts still work; keep this reply on them.

@@ -9,11 +9,16 @@ function fakeTelegram({ draftsWork = true, richDraftsWork = true } = {}) {
   const calls = [];
   return {
     calls,
-    // Plain and rich drafts alike; a rich draft's text is its markdown, flagged rich.
-    drafts: () => calls.filter(c => c.method === 'sendMessageDraft' || c.method === 'sendRichMessageDraft').map(c =>
-      c.method === 'sendRichMessageDraft'
-        ? (({ rich_message, ...rest }) => ({ ...rest, text: rich_message.markdown, rich: true }))(c.payload)
-        : c.payload),
+    // Plain and rich drafts alike. A rich draft's text is its markdown, flagged rich; a status in
+    // the thinking block is flagged thinking, with its text unwrapped.
+    drafts: () => calls.filter(c => c.method === 'sendMessageDraft' || c.method === 'sendRichMessageDraft').map(c => {
+      if (c.method !== 'sendRichMessageDraft') return c.payload;
+      const { rich_message, ...rest } = c.payload;
+      const m = /^<tg-thinking>([\s\S]*)<\/tg-thinking>$/.exec(rich_message.markdown);
+      return m
+        ? { ...rest, text: m[1].replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&'), thinking: true }
+        : { ...rest, text: rich_message.markdown, rich: true };
+    }),
     async callApi(method, payload) {
       calls.push({ method, payload });
       if (method === 'sendMessageDraft' && !draftsWork) {
@@ -51,13 +56,23 @@ test('status → streamed text → complete, all on one draft id; stream carries
   assert.ok(drafts.every(p => p.draft_id === d.draftId));
   assert.equal(drafts[1].text, '🔧 web search');
   assert.equal(drafts[1].can_stop, undefined, 'no Stop button while a tool runs');
-  assert.equal(drafts[1].rich, undefined, 'status text stays a plain draft');
+  assert.equal(drafts[1].thinking, true, 'status text is shown in the thinking block');
+  assert.equal(drafts[0].text, '', 'the first placeholder is the plain empty draft');
   const streamed = drafts.find(p => p.text === 'Hello');
   assert.equal(streamed.rich, true, 'the answer streams as a rich draft');
   assert.equal(streamed.can_stop, true);
   assert.equal(streamed.keep_on_stop, true);
   assert.equal(drafts.at(-1).text, 'Hello there');
   assert.equal(drafts.at(-1).rich, true);
+});
+
+test('a status with < or & is escaped inside the thinking block', async () => {
+  const tg = fakeTelegram();
+  const d = await new DraftStream(tg, 5, { throttleMs: 0, refreshMs: 0 }).start();
+  await d.status('a<b & c');
+  const call = tg.calls.find(c => c.method === 'sendRichMessageDraft');
+  assert.equal(call.payload.rich_message.markdown, '<tg-thinking>a&lt;b &amp; c</tg-thinking>');
+  await d.finish();
 });
 
 test('rich drafts: < is escaped outside code; a refusal streams the rest of the reply plain', async () => {

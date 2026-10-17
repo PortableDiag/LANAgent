@@ -2,6 +2,13 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.521] - 2026-10-16
+
+### Changed
+- **Telegram answers start sooner.** A plain "Hey, what's up?" took 26 seconds before the first word, and only 4 seconds of that was the answer itself streaming. Two model checks that decide what kind of request it is ran one after the other; they now run at the same time. The memory, conversation, preference and skill lookups for an answer also ran one after the other; they now run together. No routing decision changed, only the order.
+- **Telegram shows what the agent is doing while you wait.** With native streaming, the "Thinking…" placeholder moves through "Understanding your request…", "Checking memory…" and "Writing…" (and tool steps such as "🔧 web search") in Telegram's thinking block, then the answer streams in.
+- `[latency]` log lines time routing and context gathering for each request.
+
 ## [2.25.520] - 2026-10-16
 
 ### Changed

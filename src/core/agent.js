@@ -1186,6 +1186,8 @@ If the user is telling you to DO something (retry, go ahead, write it, add it, f
       // Try vector intent detection FIRST — it's fast and catches known intents
       // before the chain processor tries to split them into multi-step tasks
       let intentResult;
+      const t0 = Date.now();
+      await context.showThinking?.('Understanding your request…');
 
       if (this.vectorIntentDetector && this.vectorIntentDetector.enabled) {
         try {
@@ -1253,6 +1255,14 @@ If the user is telling you to DO something (retry, go ahead, write it, add it, f
         }
       }
 
+      // The chain analysis and the AI intent classifier are independent model calls (4 s and 8 s on
+      // 2026-10-16, run one after the other: 12 s before a "Hey, what's up?" could start). Start the
+      // classifier now; its result is used exactly as before, only when the chain finds no plan.
+      let intentPromise = null;
+      if (!intentResult && this.aiIntentDetector) {
+        intentPromise = this.aiIntentDetector.detect(input, context).then(r => ({ r }), e => ({ e }));
+      }
+
       // If vector detection didn't match, try multi-step chain analysis
       // This runs AFTER vector detection so known single intents aren't split into chains
       if (!intentResult && this.pluginChainProcessor && this.aiIntentDetector) {
@@ -1315,7 +1325,9 @@ If the user is telling you to DO something (retry, go ahead, write it, add it, f
 
       if (!intentResult && this.aiIntentDetector) {
         try {
-          intentResult = await this.aiIntentDetector.detect(input, context);
+          const settled = await (intentPromise || this.aiIntentDetector.detect(input, context).then(r => ({ r }), e => ({ e })));
+          if (settled.e) throw settled.e;
+          intentResult = settled.r;
           logger.info('Using AI intent detection');
         } catch (error) {
           logger.warn('AI intent detection failed, falling back to regex:', error.message);
@@ -1326,6 +1338,8 @@ If the user is telling you to DO something (retry, go ahead, write it, add it, f
         intentResult = await this.intentDetector.detect(input);
       }
       
+      logger.info(`[latency] request routed in ${Date.now() - t0} ms (${intentResult?.plugin || intentResult?.intent || 'none'})`);
+
       if (intentResult.detected) {
         // Show what is about to run, if the interface shows progress
         if (context.showThinking) {
@@ -3853,16 +3867,23 @@ Return ONLY a valid JSON object with the extracted parameters, nothing else.`;
 
   async handleNaturalQuery(query, context) {
     try {
-      // Get relevant memories for context
-      const memories = await this.memoryManager.recall(query, {
-        userId: context.userId,
-        limit: 5
-      });
-      
+      await context.showThinking?.('Checking memory…');
+      const tCtx = Date.now();
+      // Memories, recent conversation, preferences and matching skills are independent lookups
+      // (an embedding call, Mongo reads, a cached embedding): fetch them together, not in turn.
+      const [memories, recentResult, preferences, skillsText] = await Promise.all([
+        this.memoryManager.recall(query, { userId: context.userId, limit: 5 }),
+        this.memoryManager.getConversationContext(context.userId, 10).then(r => ({ r }), e => ({ e })),
+        this.memoryManager.getUserPreferences(context.userId),
+        getSkillsService().promptFor(query).catch(() => '')
+      ]);
+      logger.info(`[latency] answer context gathered in ${Date.now() - tCtx} ms`);
+
       // Get recent conversation context
       let conversationContext = '';
       try {
-        const recentConversations = await this.memoryManager.getConversationContext(context.userId, 10);
+        if (recentResult.e) throw recentResult.e;
+        const recentConversations = recentResult.r;
         if (recentConversations && recentConversations.length > 0) {
           conversationContext = '\nRecent conversation:\n';
           for (const conv of recentConversations.reverse()) {
@@ -3875,9 +3896,6 @@ Return ONLY a valid JSON object with the extracted parameters, nothing else.`;
       } catch (err) {
         logger.warn('Failed to get conversation context:', err);
       }
-      
-      // Get user preferences
-      const preferences = await this.memoryManager.getUserPreferences(context.userId);
       
       // Build context for AI
       let systemPrompt = this.getSystemPrompt();
@@ -3904,13 +3922,13 @@ Return ONLY a valid JSON object with the extracted parameters, nothing else.`;
       }
 
       // Skills (SKILL.md procedures) that match the question
-      const skillsText = await getSkillsService().promptFor(query).catch(() => '');
       if (skillsText) {
         systemPrompt += `Relevant skills (procedures you know — answer from them when they apply):\n${skillsText}\n\n`;
       }
       
       // Generate response using AI
       logger.info("Generating AI response for query:", query);
+      await context.showThinking?.('Writing…');
       
       // Include conversation context with the query
       const contextualQuery = conversationContext ? 
