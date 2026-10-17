@@ -2,6 +2,7 @@ import { Telegraf, Markup, session } from 'telegraf';
 import { message } from 'telegraf/filters';
 import { logger } from '../../utils/logger.js';
 import { sendRich } from './richMessage.js';
+import { formatStartupNotice, loadHeadlines, LAST_VERSION_SETTING } from './startupNotice.js';
 import { EventEmitter } from 'events';
 
 export class TelegramInterface extends EventEmitter {
@@ -1628,10 +1629,7 @@ export class TelegramInterface extends EventEmitter {
       this.syncBotProfile().catch(err => logger.warn('Could not sync bot profile:', err.message));
 
       // Send startup notification (non-blocking)
-      this.sendNotification(
-        `🚀 *${this.agent.config.name} is online!*\n\n` +
-        `I'm ready to assist you. Type /help to see available commands.`
-      ).catch(error => {
+      this.sendStartupNotice().catch(error => {
         logger.error('Failed to send startup notification:', error);
       });
     } catch (error) {
@@ -1645,6 +1643,47 @@ export class TelegramInterface extends EventEmitter {
       }
       // Don't throw error - allow other interfaces to start
       logger.warn('Telegram interface will be disabled for this session');
+    }
+  }
+
+  /** Buttons under the startup card; the dashboard interface adds its own. */
+  startupNoticeMarkup() {
+    return undefined;
+  }
+
+  /**
+   * One "online" card per boot: version, boot time, and — after an update — what is new since
+   * the last announced version (see startupNotice.js).
+   */
+  async sendStartupNotice() {
+    const version = this.agent.version || 'unknown';
+    let previousVersion = null;
+    let SystemSettings = null;
+    try {
+      ({ SystemSettings } = await import('../../models/SystemSettings.js'));
+      previousVersion = await SystemSettings.getSetting(LAST_VERSION_SETTING, null);
+    } catch (e) {
+      logger.debug(`Startup notice: last version unavailable: ${e.message}`);
+    }
+    const updated = previousVersion && previousVersion !== version;
+    const headlines = updated ? await loadHeadlines(previousVersion, version).catch(() => null) : null;
+    const notice = formatStartupNotice({
+      agentName: this.agent.config?.name,
+      version,
+      previousVersion,
+      headlines,
+      bootSeconds: process.uptime(),
+      provider: this.agent.providerManager?.activeProvider?.name,
+      plugins: this.agent.apiManager?.apis?.size
+    });
+    const sent = await this.sendNotification(notice.text, {
+      parse_mode: undefined,
+      rich: notice.rich,
+      reply_markup: this.startupNoticeMarkup()
+    });
+    if (sent && SystemSettings && previousVersion !== version) {
+      await SystemSettings.setSetting(LAST_VERSION_SETTING, version, 'Last version announced in the Telegram startup notice', 'telegram')
+        .catch(e => logger.debug(`Startup notice: could not record version: ${e.message}`));
     }
   }
 

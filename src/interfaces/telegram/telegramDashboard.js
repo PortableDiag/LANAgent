@@ -3121,20 +3121,10 @@ export class TelegramDashboard extends TelegramInterface {
     return message;
   }
 
-  async start() {
-    await super.start();
-    
-    // Override startup notification (non-blocking)
-    this.sendNotification(
-      `🚀 *${this.agent.config.name} Dashboard is online!*\n\n` +
-      `Access the enhanced dashboard with /dashboard`,
-      {
-        reply_markup: Markup.inlineKeyboard([
-          [Markup.button.callback("📊 Open Dashboard", "open_dashboard")]
-        ]).reply_markup
-      }
-    ).catch(error => {
-      logger.error('Failed to send dashboard startup notification:', error);
-    });
+  /** The startup card (sent once by the base start()) carries the dashboard and help buttons. */
+  startupNoticeMarkup() {
+    return Markup.inlineKeyboard([
+      [Markup.button.callback("📊 Dashboard", "open_dashboard"), Markup.button.callback("❓ Help", "show_help")]
+    ]).reply_markup;
   }
 }

@@ -2,6 +2,11 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.519] - 2026-10-16
+
+### Changed
+- **The startup message on Telegram is one rich card.** Each boot used to send two messages ("is online!" and "Dashboard is online!"). Now there is one card with the agent's name, version, boot time, AI provider and number of plugins, plus **Dashboard** and **Help** buttons. After an update it also lists what is new since the last version it announced, taken from the changelog; a plain restart stays short, and a rollback is labelled as one.
+
 ## [2.25.518] - 2026-10-16
 
 ### Added
