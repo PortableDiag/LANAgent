@@ -2,6 +2,11 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.522] - 2026-10-16
+
+### Fixed
+- **A casual question could get "This action requires approval" instead of an answer.** "Hey, what is up?" matched the read-only `query.explain` pattern weakly, and every weak match was held for approval. A query only produces a written answer, so there is nothing to approve: weak query matches are now answered. Weak matches for commands that act (system, file, network and the rest) still ask first.
+
 ## [2.25.521] - 2026-10-16
 
 ### Changed

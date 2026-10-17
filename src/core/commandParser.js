@@ -151,8 +151,11 @@ export class CommandParser {
           result.confidence = this.calculateConfidence(match, input);
           result.requiresApproval = this.requiresApproval(category, action);
 
-          // Require approval for low-confidence commands to reduce false positives
-          if (result.confidence < this.confidenceThreshold) {
+          // Require approval for low-confidence commands to reduce false positives. A `query`
+          // only produces a written answer (the agent's default branch), so there is nothing to
+          // approve: "Hey, what is up?" matched query.explain at 0.64 and replied with an
+          // approval prompt instead of an answer (2026-10-16).
+          if (result.confidence < this.confidenceThreshold && category !== 'query') {
             result.requiresApproval = true;
             logger.info(`Command requires approval (low confidence ${result.confidence.toFixed(2)}): ${category}.${action}`, result.parameters);
           } else {
