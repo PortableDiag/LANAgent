@@ -14,7 +14,7 @@ import { promisify } from 'util';
 
 const execPromise = promisify(exec);
 import { GitHubFeatureDiscovery } from './githubFeatureDiscovery.js';
-import { escapeMarkdown } from '../utils/markdown.js';
+import { formatPrNotice } from '../interfaces/telegram/prNotice.js';
 
 // Create a child logger with plugin-development service metadata
 const logger = baseLogger.child({ service: 'plugin-development' });
@@ -3986,20 +3986,24 @@ Plugin includes inline documentation and usage examples.
       // Log the notification for visibility
       logger.info(`NOTIFICATION: Plugin Development Complete - ${data.api.name} (${data.prUrl})`);
 
-      const message = `🔌 **Plugin Development Complete**\n\n` +
-                `✅ Successfully created ${escapeMarkdown(data.api.name)} plugin\n` +
-                `📂 Category: ${escapeMarkdown(data.api.category || data.api.focusArea)}\n` +
-                `🌐 Branch: \`${data.branchName}\`\n` +
-                `🔗 Pull Request: ${data.prUrl}\n\n` +
-                `Description: ${escapeMarkdown(data.api.description)}\n\n` +
-                `🤖 Ready for review and testing!`;
+      const notice = formatPrNotice({
+        agentName: process.env.AGENT_NAME || 'LANAgent',
+        title: `New plugin: ${data.api.name}${data.api.category || data.api.focusArea ? ` (${data.api.category || data.api.focusArea})` : ''}`,
+        description: data.api.description,
+        branch: data.branchName,
+        prUrl: data.prUrl,
+        prNumber: Number(String(data.prUrl || '').match(/\/pull\/(\d+)/)?.[1]) || undefined
+      });
+      const message = notice.text;
 
       // Try Telegram notification regardless of timeout issues
       const telegram = this.agent.interfaces?.get('telegram');
       if (telegram && telegram.sendNotification) {
         try {
           await telegram.sendNotification(message, {
-            parse_mode: 'Markdown'
+            parse_mode: undefined,
+            rich: notice.rich,
+            reply_markup: notice.replyMarkup
           });
           logger.info('Telegram notification sent successfully');
         } catch (telegramError) {

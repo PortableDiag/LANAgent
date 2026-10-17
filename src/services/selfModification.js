@@ -16,7 +16,7 @@ import { SystemSettings } from '../models/SystemSettings.js';
 import Improvement from '../models/Improvement.js';
 import { selfModLock } from './selfModLock.js';
 import { GitHubFeatureDiscovery } from './githubFeatureDiscovery.js';
-import { escapeMarkdown } from '../utils/markdown.js';
+import { formatPrNotice, formatDeployNotice, formatSelfModError } from '../interfaces/telegram/prNotice.js';
 import { getProvider, PROVIDER_TYPES } from './gitHosting/index.js';
 import { GitHostingSettings } from '../models/GitHostingSettings.js';
 import { deniedAutonomousTargetReason } from './featureClassifier.js';
@@ -1717,7 +1717,7 @@ Only suggest realistic enhancements. Return empty array if no good opportunities
       await this.applyAICapabilityUpgrade(improvement);
       
       // Step 4: Create PR (this includes push)
-      await this.createUpgradePullRequest(branchName, improvement);
+      const pr = await this.createUpgradePullRequest(branchName, improvement);
       
       // Step 5: Increment daily upgrade count
       this.dailyImprovementCount++;
@@ -1728,7 +1728,7 @@ Only suggest realistic enhancements. Return empty array if no good opportunities
       logger.info(`Saved updated config with dailyImprovementCount: ${this.dailyImprovementCount}`);
       
       // Step 6: Notify about successful upgrade
-      await this.notifyUpgrade(improvement, branchName);
+      await this.notifyUpgrade(improvement, branchName, pr);
       
       // Step 7: Clean up implemented features if needed
       if (improvement.featureRequestId) {
@@ -5115,23 +5115,26 @@ ${newCapsBlock}${reviewFlagsBlock}
   /**
    * Notify about successful capability upgrade
    */
-  async notifyUpgrade(upgrade, branchName) {
+  async notifyUpgrade(upgrade, branchName, pr = {}) {
     try {
       // Always log the notification for visibility
       logger.info(`NOTIFICATION: Capability Upgrade Completed - ${upgrade.type} - ${upgrade.target || upgrade.file}`);
       logger.info(`Branch: ${branchName}, Priority: ${upgrade.priority}, Impact: ${upgrade.impact}`);
       
-      // Prepare the notification message with escaped markdown
-      const message = `🚀 **Capability Upgrade Completed**\n\n` +
-        `**Type**: ${escapeMarkdown(upgrade.type)}\n` +
-        `**Target**: ${escapeMarkdown(upgrade.target || upgrade.file)}\n` +
-        `**Priority**: ${escapeMarkdown(upgrade.priority)}\n` +
-        `**Impact**: ${escapeMarkdown(upgrade.impact)}\n` +
-        `**Branch**: \`${branchName}\`\n\n` +
-        `**Description**: ${escapeMarkdown(upgrade.description)}\n\n` +
-        `**New Capabilities:**\n${upgrade.newCapabilities ? upgrade.newCapabilities.map(cap => `• ${escapeMarkdown(cap)}`).join('\n') : '• Enhanced functionality'}\n\n` +
-        `${upgrade.safeForProduction ? '✅ Safe for production' : '⚠️ Requires review before production'}\n\n` +
-        `Pull request created for review.`;
+      const notice = formatPrNotice({
+        agentName: process.env.AGENT_NAME || 'LANAgent',
+        type: upgrade.type,
+        file: upgrade.targetFile || upgrade.target || upgrade.file,
+        description: upgrade.description,
+        capabilities: upgrade.newCapabilities,
+        priority: upgrade.priority,
+        impact: upgrade.impact,
+        safeForProduction: !!upgrade.safeForProduction,
+        branch: branchName,
+        prUrl: pr?.prUrl,
+        prNumber: pr?.prNumber
+      });
+      const message = notice.text;
       
       // Try Telegram notification regardless of timeout issues.
       // `this.agent?` — a notification must never be the thing that throws; the
@@ -5140,7 +5143,9 @@ ${newCapsBlock}${reviewFlagsBlock}
       if (telegram && telegram.sendNotification) {
         try {
           await telegram.sendNotification(message, {
-            parse_mode: 'Markdown'
+            parse_mode: undefined,
+            rich: notice.rich,
+            reply_markup: notice.replyMarkup
           });
           logger.info('Telegram notification sent successfully');
         } catch (telegramError) {
@@ -5555,6 +5560,7 @@ ${newCapsBlock}${reviewFlagsBlock}
         for (const u of unverifiable) logger.error(`  ${u.file}: ${u.error}`);
         await this.notifyMaster({
           type: 'deployment_blocked',
+          files: unverifiable.map(u => u.file),
           description: `Deploy rolled back: ${unverifiable.map(u => u.file).join(', ')} failed to load`
         });
         return { success: false, deployed: [], skipped: drifted, reason: 'verification failed', unverifiable };
@@ -5571,6 +5577,7 @@ ${newCapsBlock}${reviewFlagsBlock}
 
       await this.notifyMaster({
         type: 'deployment',
+        files: drifted,
         description: `Deployed ${drifted.length} merged file(s): ${drifted.slice(0, 10).join(', ')}${drifted.length > 10 ? '…' : ''}`
       });
 
@@ -5646,25 +5653,38 @@ ${newCapsBlock}${reviewFlagsBlock}
         logger.info(`Branch: ${branchName}, Description: ${improvement.description}`);
       }
       
-      // Prepare the message with escaped markdown
-      let message;
-      if (improvement.error) {
-        message = `⚠️ Self-modification error:\n${escapeMarkdown(improvement.error)}`;
+      const agentName = process.env.AGENT_NAME || 'LANAgent';
+      let notice;
+      if (improvement.error || improvement.stagingTestsFailed) {
+        notice = formatSelfModError({ agentName, error: improvement.error || `Staging tests failed: ${improvement.testResults?.message || 'see the log'}` });
+      } else if (['deployment', 'deployment_blocked', 'production_deployment'].includes(improvement.type)) {
+        notice = formatDeployNotice({
+          agentName,
+          blocked: improvement.type === 'deployment_blocked',
+          files: improvement.files,
+          description: improvement.description
+        });
       } else {
-        message = `🤖 **Self-Improvement Completed**\n\n` +
-          `**Type**: ${escapeMarkdown(improvement.type)}\n` +
-          `**File**: ${escapeMarkdown(improvement.file)}\n` +
-          `**Description**: ${escapeMarkdown(improvement.description)}\n` +
-          `**Branch**: \`${branchName}\`\n\n` +
-          `A pull request has been created for your review.`;
+        notice = formatPrNotice({
+          agentName,
+          type: improvement.type,
+          file: improvement.targetFile || improvement.file,
+          description: improvement.description,
+          branch: branchName,
+          prUrl: improvement.prUrl,
+          prNumber: improvement.prNumber
+        });
       }
+      const message = notice.text;
       
       // Try Telegram notification regardless of timeout issues
       const telegram = this.agent.interfaces?.get('telegram');
       if (telegram && telegram.sendNotification) {
         try {
           await telegram.sendNotification(message, {
-            parse_mode: 'Markdown'
+            parse_mode: undefined,
+            rich: notice.rich,
+            reply_markup: notice.replyMarkup
           });
           logger.info('Telegram notification sent successfully');
         } catch (telegramError) {

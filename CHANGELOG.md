@@ -2,6 +2,11 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.517] - 2026-10-16
+
+### Changed
+- **Pull request notices on Telegram are readable cards.** When the agent opens a pull request, the notice is now a rich message: a heading with the agent's name and the PR number, the kind of change and the file (repo-relative, not the server path), the description, a list of what it adds, a small priority / impact / risk table, and an **Open PR** button. Before, these notices showed literal `**` and a backslash before every bracket, dot and dash, and the self-improvement notice had no link to the PR at all. Plugin PRs, deploys of merged changes, rolled-back deploys and stopped self-improvement runs use the same style. If Telegram refuses a rich message, the notice is sent as clean plain text. `sendNotification()` takes a `rich` option for this.
+
 ## [2.25.516] - 2026-10-16
 
 ### Added

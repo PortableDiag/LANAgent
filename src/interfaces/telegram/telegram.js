@@ -1,6 +1,7 @@
 import { Telegraf, Markup, session } from 'telegraf';
 import { message } from 'telegraf/filters';
 import { logger } from '../../utils/logger.js';
+import { sendRich } from './richMessage.js';
 import { EventEmitter } from 'events';
 
 export class TelegramInterface extends EventEmitter {
@@ -1333,7 +1334,21 @@ export class TelegramInterface extends EventEmitter {
       }
 
       // Ensure options is an object (defensive programming)
-      const safeOptions = options && typeof options === 'object' ? options : {};
+      const { rich, ...safeOptions } = options && typeof options === 'object' ? options : {};
+
+      // `rich`: the same notice as Rich Markdown (headings, tables). When Telegram takes it, that
+      // is the notice; otherwise `message` goes out as before, so it must stand on its own.
+      const hasMedia = ['photo', 'document', 'audio', 'voice', 'animation'].some(k => safeOptions[k]);
+      if (rich && !hasMedia) {
+        const sent = await sendRich(this.bot.telegram, this.authorizedUserId, rich, {
+          replyMarkup: safeOptions.reply_markup,
+          disableNotification: safeOptions.disable_notification
+        });
+        if (sent) {
+          logger.info('Telegram notification sent successfully');
+          return true;
+        }
+      }
 
       const defaultOptions = {
         parse_mode: 'Markdown',
