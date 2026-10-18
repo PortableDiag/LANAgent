@@ -18,8 +18,8 @@ export class MultiUserSupport {
     
     // Define safe commands for other users
     this.safeCommands = [
-      'start', 'help', 'about', 'features', 'dashboard', 
-      'tasks', 'newchat', 'status', 'info'
+      // dashboard/tasks/status/info showed the owner's system and tasks to anyone
+      'start', 'help', 'about', 'features'
     ];
     
     // Track conversations with non-master users
@@ -88,9 +88,7 @@ export class MultiUserSupport {
         `❌ Sorry, that action is restricted. I can only perform system operations for my authorized user.\n\n` +
         `✅ I can help you with:\n` +
         `• General questions and conversations\n` +
-        `• Information about my capabilities\n` +
-        `• Task viewing (read-only)\n` +
-        `• Status information\n\n` +
+        `• Information about my capabilities\n\n` +
         `If you need system-level assistance, please contact my administrator.`
       );
       
@@ -193,8 +191,7 @@ export class MultiUserSupport {
       `• /start - Welcome message\n` +
       `• /help - Get help\n` +
       `• /about - Learn about ALICE\n` +
-      `• /features - See capabilities\n` +
-      `• /dashboard - View system status (read-only)`
+      `• /features - See capabilities`
     );
     
     // Notify master

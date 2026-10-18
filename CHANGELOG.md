@@ -2,6 +2,13 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.528] - 2026-10-17
+
+### Security
+- **A stranger's voice message ran as the owner.** The Telegram voice handler let non-owners through and sent the transcription to the full command router, which runs tools. Voice is now owner-only.
+- **Only the owner can use the agent on Telegram unless you choose otherwise.** With guest mode "only me" (the default), anyone else who messages it gets one short refusal a day, and you are told. With "anyone", others get conversation only (no tools, no private data): plain text, 5 messages an hour, and only /start, /help, /about and /features. Voice, files and buttons from others are dropped.
+- Guests could run /tasks (your task list), /dashboard and /status. They no longer can.
+
 ## [2.25.527] - 2026-10-17
 
 ### Added

@@ -28,7 +28,7 @@ export function formatAgentsCard(f, bot = {}) {
   ].filter(Boolean);
   const rich = [
     '### 🤝 Telegram agents',
-    `| Feature | State |\n|---|---|\n| Bot-to-bot | **${on(f.botToBot)}** |\n| Guest mode (summon me by @mention) | **${GUEST_LABEL[f.guestMode]}** |\n| Topics as separate chats | **${on(f.topics)}** |`,
+    `| Feature | State |\n|---|---|\n| Bot-to-bot | **${on(f.botToBot)}** |\n| Who else may talk to me (DMs and @mentions) | **${GUEST_LABEL[f.guestMode]}** |\n| Topics as separate chats | **${on(f.topics)}** |`,
     `**Trusted agents**\n${peers}`,
     notes.length ? notes.map(n => `> ${n}`).join('\n') : ''
   ].filter(Boolean).join('\n\n');

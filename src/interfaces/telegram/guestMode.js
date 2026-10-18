@@ -38,6 +38,29 @@ export class GuestLimiter {
   }
 }
 
+export const GUEST_COMMANDS = ['start', 'help', 'about', 'features'];
+
+/**
+ * A message from a person who is not the owner, outside a guest-mode summons. guestMode decides:
+ * 'owner' / 'off' → nobody else may use this agent ('refuse' once a day in a private chat,
+ * otherwise 'drop'); 'everyone' → plain text only, rate-limited, a few harmless commands
+ * ('guest'). Voice, files, buttons and every other command are dropped: those handlers run
+ * as the owner.
+ */
+export function strangerGate(ctx, { guestMode, limiter }) {
+  const id = String(ctx.from?.id || '');
+  const isPrivate = ctx.chat?.type === 'private';
+  const refuseOrDrop = () => (isPrivate && limiter.shouldRefuse(id) ? 'refuse' : 'drop');
+  if (guestMode !== 'everyone') return refuseOrDrop();
+  const text = ctx.message?.text;
+  if (typeof text !== 'string' || !text.trim()) return 'drop';
+  if (text.startsWith('/')) {
+    const cmd = text.slice(1).split(/[\s@]/)[0].toLowerCase();
+    return GUEST_COMMANDS.includes(cmd) ? 'guest' : 'drop';
+  }
+  return limiter.allow(id) ? 'guest' : 'drop';
+}
+
 /** The question with the bot's own @mention taken out. */
 export function summonText(text, botUsername) {
   const s = String(text ?? '');

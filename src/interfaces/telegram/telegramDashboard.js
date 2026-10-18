@@ -11,7 +11,7 @@ import { sendRich } from './richMessage.js';
 import { installConcurrentUpdates } from './updateDispatcher.js';
 import { installButtonStyles } from './buttonStyle.js';
 import { AgentLink } from './agentLink.js';
-import { GuestLimiter, handleGuestUpdate } from './guestMode.js';
+import { GuestLimiter, handleGuestUpdate, strangerGate } from './guestMode.js';
 import { TopicTitler } from './topics.js';
 import { installAgentCommands } from './agentCommands.js';
 import { getAgentFeatures } from './agentFeatures.js';
@@ -178,10 +178,22 @@ export class TelegramDashboard extends TelegramInterface {
         return next();
       }
       
-      // Guest users have limited access
+      // Anyone else: refused unless guest mode is "everyone", and then plain text only
       ctx.isMaster = false;
       ctx.isGuest = true;
-      
+      const { guestMode } = await getAgentFeatures().catch(() => ({ guestMode: 'owner' }));
+      const gate = strangerGate(ctx, { guestMode, limiter: this.guestLimiter });
+      if (gate === 'refuse') {
+        logger.info(`Refused Telegram user ${userId} (@${ctx.from.username || '-'}): this agent answers its owner only`);
+        await ctx.reply('This is a private agent. It only answers its owner.').catch(() => {});
+        await this.multiUserSupport.notifyMaster(
+          `🚫 Someone who isn't you messaged me. I didn't answer.\nUser: ${ctx.from.first_name || ''} (@${ctx.from.username || '-'}), ID ${userId}\n` +
+          `To let others chat (conversation only), set guest mode to "everyone" in /agents.`
+        );
+        return;
+      }
+      if (gate !== 'guest') return;
+
       // For commands, check if it's allowed for guests
       if (ctx.message?.text?.startsWith('/')) {
         const command = ctx.message.text.split(' ')[0].substring(1);
@@ -1627,8 +1639,8 @@ export class TelegramDashboard extends TelegramInterface {
 
     // Handle voice messages
     this.bot.on(message('voice'), async (ctx) => {
-      // Check authorization
-      if (!ctx.isAuthorized && !ctx.isGuest) {
+      // Owner only: a transcription goes to the full router, which runs tools
+      if (!ctx.isMaster) {
         return;
       }
 
