@@ -1282,6 +1282,45 @@
                             </div>
                         </div>
 
+                        <div class="settings-section" id="telegram-agents-section">
+                            <h3><i class="fab fa-telegram"></i> Telegram agents</h3>
+                            <p class="setting-description">The same switches as <code>/agents</code> in Telegram. Each feature also has to be enabled for the bot in @BotFather.</p>
+                            <div class="setting-item">
+                                <label>
+                                    <input type="checkbox" id="tg-bot-to-bot">
+                                    <span>Bot-to-bot: let trusted agents' bots talk to this one</span>
+                                </label>
+                                <p class="setting-description">They can ask questions (answered without tools or private data) and exchange skills. Skills they send wait for your approval. Off by default.</p>
+                            </div>
+                            <div class="setting-item">
+                                <label for="tg-guest-mode">Guest mode (summon by @mention in any chat):</label>
+                                <select id="tg-guest-mode">
+                                    <option value="owner">Only me</option>
+                                    <option value="everyone">Anyone (rate-limited)</option>
+                                    <option value="off">Off</option>
+                                </select>
+                                <p class="setting-description">One reply in that chat, which everyone there reads, so it never includes private data.</p>
+                            </div>
+                            <div class="setting-item">
+                                <label>
+                                    <input type="checkbox" id="tg-topics">
+                                    <span>Topics: each private-chat topic is its own conversation</span>
+                                </label>
+                            </div>
+                            <div class="setting-item">
+                                <label>Trusted agents:</label>
+                                <ul id="tg-peers" class="tg-peer-list"></ul>
+                                <div style="display:flex;gap:8px;flex-wrap:wrap;">
+                                    <input type="text" id="tg-peer-add" placeholder="@their_bot" style="flex:1;min-width:160px;">
+                                    <button id="tg-peer-add-btn" class="btn btn-secondary" onclick="dashboard.addTelegramPeer()"><i class="fas fa-plus"></i> Trust</button>
+                                </div>
+                                <p class="setting-description" id="tg-botfather-status"></p>
+                            </div>
+                            <div class="setting-item">
+                                <button class="btn btn-primary" onclick="dashboard.saveTelegramAgentFeatures()"><i class="fas fa-save"></i> Save Telegram agent settings</button>
+                            </div>
+                        </div>
+
                         <div class="settings-section">
                             <h3>System Reports</h3>
                             <div class="setting-item">

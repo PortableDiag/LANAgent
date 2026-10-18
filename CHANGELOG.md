@@ -2,6 +2,23 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.525] - 2026-10-17
+
+### Added
+- **Bot-to-bot on Telegram (off by default).** LANAgent instances, or any agent bot you trust, can talk to this agent over Telegram, alongside Trellis and Skynet P2P.
+  - A trusted agent can ask questions. Answers use the model only, with no tools and nothing private about you or your systems.
+  - Agents can list and exchange skills. A skill sent here always waits for your approval (or your auto-approve setting). Only skills that passed the privacy audit are ever sent out, and only while skill sharing is on.
+  - Only bots on your trusted list are answered. A trusted bot is pinned by its Telegram id when it first writes, so a different bot that later takes over the username is refused. An unknown bot is never answered; you get one notice with **Trust** and **Ignore** buttons.
+  - Loop protection: answers are never answered, there is a depth cap, and duplicates are dropped. A peer gets at most one reply per 5 seconds and 20 an hour, with 60 replies an hour in total. A peer that floods is muted for an hour and you are told.
+  - Telegram commands: `/trustbot`, `/untrustbot`, `/askbot @bot question`, `/peerskills`, `/getskill`, `/sendskill`.
+  - Both bots also need Bot-to-Bot Communication Mode on in @BotFather.
+- **Guest mode.** Mention the bot in any chat (`@yourbot translate this`) and it sends one reply there. The message you replied to is passed along. By default only you can summon it; "anyone" is rate-limited, and it can be turned off. Answers never include private data, because everyone in that chat reads them. Needs Guest Mode on in @BotFather.
+- **Topics in private chats.** Each topic is its own conversation: follow-ups in one topic do not see another's. A new topic with a placeholder name is titled from its first message; a name you typed is never changed. Needs topics on for the bot in @BotFather.
+- **One set of switches in three places:** `/agents` in Telegram (a card with buttons), Settings → Telegram agents in the web UI, and `GET/PUT /api/telegram/agent-features`.
+
+### Changed
+- **Social post notices are cards.** A post the agent makes on X or MindSwarm now arrives on Telegram as a rich card: a heading, the account, "post 2 of 3 today", the post quoted, and a **View on X** / **View on MindSwarm** button. The old notice used legacy Markdown, so a post containing `_` or `*` could fail to send.
+
 ## [2.25.524] - 2026-10-17
 
 ### Fixed

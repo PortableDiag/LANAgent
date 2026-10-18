@@ -10,6 +10,11 @@ import { createReplyStream, handleStopUpdate, handleStopButton } from './draftSt
 import { sendRich } from './richMessage.js';
 import { installConcurrentUpdates } from './updateDispatcher.js';
 import { installButtonStyles } from './buttonStyle.js';
+import { AgentLink } from './agentLink.js';
+import { GuestLimiter, handleGuestUpdate } from './guestMode.js';
+import { TopicTitler } from './topics.js';
+import { installAgentCommands } from './agentCommands.js';
+import { getAgentFeatures } from './agentFeatures.js';
 import { TelegramMediaGenerator } from '../../services/telegramMediaGenerator.js';
 import fs from 'fs/promises';
 
@@ -133,6 +138,24 @@ export class TelegramDashboard extends TelegramInterface {
     // It only aborts a stream in the chat it came from.
     this.bot.use((ctx, next) => (handleStopUpdate(ctx.update) ? undefined : next()));
 
+    // Guest mode: an @mention in a chat the bot is not in. No `from` that the authorization
+    // middleware knows, so before it; who may summon, and what the answer may hold, is guestMode.js.
+    this.guestLimiter = new GuestLimiter();
+    this.bot.use(async (ctx, next) => {
+      const handled = await handleGuestUpdate(ctx, {
+        agent: this.agent, isOwner: (id) => this.multiUserSupport.isMaster(id), limiter: this.guestLimiter
+      }).catch(err => { logger.warn(`[guest] ${err.message}`); return true; });
+      return handled ? undefined : next();
+    });
+
+    // Another bot. Never past this point: as a "guest" it would get model replies, and two
+    // models answering each other never stop. agentLink.js decides (trusted peers only, loop guards).
+    this.agentLink = new AgentLink({ telegram: this.bot.telegram, agent: this.agent, notify: (text, opts) => this.sendNotification(text, opts) });
+    this.bot.use(async (ctx, next) => {
+      if (!ctx.from?.is_bot) return next();
+      await this.agentLink.handle(ctx).catch(err => logger.warn(`[agent-link] ${err.message}`));
+    });
+
     // Green/red approve and reject buttons, on every keyboard this bot sends
     installButtonStyles(this.bot.telegram);
     this.bot.use((ctx, next) => { installButtonStyles(ctx.telegram); return next(); });
@@ -168,6 +191,13 @@ export class TelegramDashboard extends TelegramInterface {
         }
       }
       
+      return next();
+    });
+
+    // Private-chat topics: remember new topics' names, so a placeholder one can be titled
+    this.topicTitler = new TopicTitler({ telegram: this.bot.telegram, generate: (p, o) => this.agent.providerManager.generateResponse(p, o) });
+    this.bot.use((ctx, next) => {
+      if (ctx.isMaster && ctx.message?.forum_topic_created) this.topicTitler.noteCreated(ctx.message);
       return next();
     });
 
@@ -216,6 +246,7 @@ export class TelegramDashboard extends TelegramInterface {
         { command: "chart", description: "📊 Generate system charts" },
         { command: "aidetect", description: "🔍 Detect AI-generated content" },
         { command: "newchat", description: "🆕 Clear chat context" },
+        { command: "agents", description: "🤝 Bot-to-bot, guest mode, topics" },
         { command: "help", description: "❓ Get help" }
       ]);
     } catch (error) {
@@ -227,6 +258,13 @@ export class TelegramDashboard extends TelegramInterface {
   }
 
   setupEnhancedCommands() {
+    // /agents, /trustbot, /askbot, … and their buttons (agentCommands.js). Registered with the
+    // commands: the text handler stops at any "/…" message, so a command added after it never runs.
+    installAgentCommands(this.bot, {
+      isMaster: (ctx) => !!ctx.isMaster,
+      getLink: () => this.agentLink,
+      getBotInfo: () => this.bot.botInfo
+    });
     // Start command
     this.bot.command('start', async (ctx) => {
       const agentName = this.agent.config.name;
@@ -265,7 +303,9 @@ export class TelegramDashboard extends TelegramInterface {
         `/settings - Bot settings\n` +
         `/restart - Restart agent (master only)\n` +
         `/dev - Development planning (master only)\n` +
-        `/diagnostics - System health diagnostics\n\n` +
+        `/diagnostics - System health diagnostics\n` +
+        `/agents - Bot-to-bot, guest mode and topics switches\n` +
+        `/askbot @bot question - Ask a trusted agent\n\n` +
         `*Natural Language Examples:*\n` +
         `• "Show system status"\n` +
         `• "Add task: Deploy new feature"\n` +
@@ -1306,10 +1346,16 @@ export class TelegramDashboard extends TelegramInterface {
         const recentFile = this._lastReceivedFile && (Date.now() - this._lastReceivedFile.receivedAt < 300000)
           ? this._lastReceivedFile : null;
 
+        // A private-chat topic is its own conversation (when topics are on for this agent)
+        const topicsOn = ctx.message?.is_topic_message && (await getAgentFeatures().catch(() => ({ topics: true }))).topics;
+        const threadId = topicsOn ? ctx.message.message_thread_id : undefined;
+        if (threadId) this.topicTitler.maybeTitle(ctx.message, text).catch(() => {});
+
         let response;
         try {
           response = await this.agent.processNaturalLanguage(text, {
             platform: 'telegram',
+            threadId,
             userId: ctx.from.id.toString(),
             userName: ctx.from.username || ctx.from.first_name,
             isMaster: true,

@@ -5,7 +5,7 @@ import { logger } from "../utils/logger.js";
 import { safeJsonStringify } from "../utils/jsonUtils.js";
 import { ProviderManager } from "./providerManager.js";
 import { CommandParser } from "./commandParser.js";
-import { MemoryManager } from "./memoryManager.js";
+import { MemoryManager, conversationKey } from "./memoryManager.js";
 import { ragVectorStore } from "../services/ragVectorStore.js";
 import { SystemExecutor } from "../services/executor/index.js";
 import { TelegramDashboard } from "../interfaces/telegram/telegramDashboard.js";
@@ -1048,7 +1048,7 @@ export class Agent extends EventEmitter {
       // Before intent detection, check if this is a follow-up to the previous exchange.
       // Uses the in-memory conversation buffer (restored from the transcript after a restart).
       const userId = context.userId || 'default';
-      const userBuffer = this.memoryManager?._conversationBuffer?.get(String(userId)) || [];
+      const userBuffer = this.memoryManager?._conversationBuffer?.get(conversationKey(userId, context.threadId)) || [];
 
       // A go-ahead ("yes, take the action") approves something proposed earlier. Resolve it
       // into that request and run it; the text-only follow-up below cannot act.

@@ -752,6 +752,7 @@ class LANAgentDashboard {
                 break;
             case 'settings':
                 this.loadReportSettings();
+                this.loadTelegramAgentFeatures();
                 this.loadAutonomousDeploymentSetting();
                 this.loadTokenThresholds();
                 this.loadAvatarSettings();
@@ -6113,6 +6114,74 @@ class LANAgentDashboard {
     async updateReportTime() {
         const time = document.getElementById('report-time').value;
         this.showNotification(`Report time updated to ${time}`, 'info');
+    }
+
+    async loadTelegramAgentFeatures() {
+        try {
+            const r = await this.apiGet('/api/telegram/agent-features');
+            if (!r.success) return;
+            const f = r.features;
+            document.getElementById('tg-bot-to-bot').checked = !!f.botToBot;
+            document.getElementById('tg-guest-mode').value = f.guestMode || 'owner';
+            document.getElementById('tg-topics').checked = f.topics !== false;
+            const list = document.getElementById('tg-peers');
+            list.innerHTML = '';
+            if (!f.peers.length) list.innerHTML = '<li class="setting-description">None yet.</li>';
+            for (const p of f.peers) {
+                const li = document.createElement('li');
+                li.textContent = `@${p.username}${p.id ? '' : ' (not seen yet)'} `;
+                const b = document.createElement('button');
+                b.className = 'btn btn-sm btn-danger';
+                b.textContent = 'Remove';
+                b.onclick = () => this.removeTelegramPeer(p.username);
+                li.appendChild(b);
+                list.appendChild(li);
+            }
+            const bf = r.botFather;
+            document.getElementById('tg-botfather-status').textContent = bf
+                ? `@${bf.username} in @BotFather: guest mode ${bf.supportsGuestQueries ? 'enabled' : 'not enabled'}, topics ${bf.hasTopicsEnabled ? 'enabled' : 'not enabled'}. Bot-to-bot mode cannot be read from the API; enable it in @BotFather on both bots.`
+                : 'The Telegram bot is not running.';
+        } catch (error) {
+            console.error('Failed to load Telegram agent settings:', error);
+        }
+    }
+
+    async saveTelegramAgentFeatures() {
+        try {
+            const r = await this.apiPut('/api/telegram/agent-features', {
+                botToBot: document.getElementById('tg-bot-to-bot').checked,
+                guestMode: document.getElementById('tg-guest-mode').value,
+                topics: document.getElementById('tg-topics').checked
+            });
+            this.showNotification(r.success ? 'Telegram agent settings saved' : `Not saved: ${r.error}`, r.success ? 'success' : 'error');
+            this.loadTelegramAgentFeatures();
+        } catch (error) {
+            this.showNotification(`Not saved: ${error.message}`, 'error');
+        }
+    }
+
+    async addTelegramPeer() {
+        const input = document.getElementById('tg-peer-add');
+        const username = input.value.trim();
+        if (!username) return;
+        try {
+            const r = await this.apiPost('/api/telegram/agent-features/peers', { username });
+            this.showNotification(r.success ? `Trusted ${username}` : r.error, r.success ? 'success' : 'error');
+            if (r.success) input.value = '';
+        } catch (error) {
+            this.showNotification(`Not trusted: ${error.message}`, 'error');
+        }
+        this.loadTelegramAgentFeatures();
+    }
+
+    async removeTelegramPeer(username) {
+        try {
+            const r = await this.apiDelete(`/api/telegram/agent-features/peers/${encodeURIComponent(username)}`);
+            this.showNotification(r.success ? `@${username} is no longer trusted` : r.error, r.success ? 'success' : 'error');
+        } catch (error) {
+            this.showNotification(`Not removed: ${error.message}`, 'error');
+        }
+        this.loadTelegramAgentFeatures();
     }
 
     async saveReportSettings() {

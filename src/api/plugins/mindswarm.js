@@ -1,4 +1,5 @@
 import { BasePlugin } from '../core/basePlugin.js';
+import { formatSocialPostNotice } from '../../interfaces/telegram/socialNotice.js';
 import { PluginSettings } from '../../models/PluginSettings.js';
 import { retryOperation, isRetryableError } from '../../utils/retryUtils.js';
 import { createPluginLogger } from '../../utils/logger.js';
@@ -1412,10 +1413,13 @@ Return ONLY the post text, nothing else.`;
           const postUrl = postId
             ? `https://mindswarm.net/@${this.username}/${postId}`
             : `https://mindswarm.net/@${this.username}`;
-          await telegram.sendNotification(
-            `*MindSwarm post (${postsToday + 1}/${maxPostsPerDay}):*\n\n${postContent}\n\n[View post](${postUrl})`,
-            { disable_notification: false }
-          );
+          const notice = formatSocialPostNotice({
+            platform: 'mindswarm', agentName: process.env.AGENT_NAME, handle: this.username,
+            text: postContent, url: postUrl, count: postsToday + 1, max: maxPostsPerDay
+          });
+          await telegram.sendNotification(notice.text, {
+            parse_mode: undefined, rich: notice.rich, reply_markup: notice.replyMarkup, disable_notification: false
+          });
         }
       } catch { /* non-critical */ }
     } catch (err) {

@@ -819,6 +819,23 @@ unknown model/voice (lists the valid ones), 413 over the limit, 402 over `X-Max-
 unavailable — none of these charge. `GET /api/external/tts/voices` (free) lists models, tiers and voices.
 Public: `POST https://api.lanagent.net/tts`, `GET https://api.lanagent.net/tts/voices`.
 
+### v2.25.525 — Telegram agent features (bot-to-bot, guest mode, topics)
+
+All routes need a JWT or API key.
+
+| Method | Path | Body | What it does |
+|---|---|---|---|
+| GET | `/api/telegram/agent-features` | | `{features: {botToBot, guestMode, topics, peers, ignored}, botFather: {supportsGuestQueries, hasTopicsEnabled, username}}` |
+| PUT | `/api/telegram/agent-features` | any of `{botToBot: bool, guestMode: "owner"\|"everyone"\|"off", topics: bool}` | Change the switches. An unknown key or a bad value is a 400. |
+| POST | `/api/telegram/agent-features/peers` | `{username: "@their_bot"}` | Trust an agent's bot. Its id is pinned on first contact. |
+| DELETE | `/api/telegram/agent-features/peers/:username` | | Stop trusting it. |
+| POST | `/api/telegram/agent-features/ask` | `{username, question}` | Ask a trusted agent and wait (up to 120 s) for `{answer}`. Needs bot-to-bot on. |
+
+The same switches are `/agents` in Telegram and Settings → Telegram agents in the web UI. The wire format between
+bots is one text message, `LANAGENT/1 {"v":1,"type","id","re?","depth","body?"}`. The types are `hello`, `ask`,
+`skills_query` and `skill_request` (requests), and `hello_ack`, `answer`, `skills_list`, `skill_push` and `error`
+(never answered). A skill travels as a JSON document whose caption is its envelope.
+
 ### v2.25.523 — Trellis: agent sign-up, sharing with agents, invite codes
 
 `POST /api/plugins/trellis-notes/signup` (JWT) with `{name?, description?, invite?, force?}` gives the agent

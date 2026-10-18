@@ -15,6 +15,7 @@ const transcriptSchema = new mongoose.Schema({
   interface: { type: String, default: 'unknown' },
   role: { type: String, enum: ['user', 'assistant'], required: true },
   content: { type: String, required: true },
+  threadId: { type: Number },   // Telegram private-chat topic, when the message was in one
   createdAt: { type: Date, default: Date.now }
 }, { versionKey: false });
 

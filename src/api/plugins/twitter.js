@@ -1,4 +1,5 @@
 import { BasePlugin } from '../core/basePlugin.js';
+import { formatSocialPostNotice } from '../../interfaces/telegram/socialNotice.js';
 import { PluginSettings } from '../../models/PluginSettings.js';
 import { filterSensitiveCommits, getExcludedPathspecs, getSensitiveContentRules, isBadOpener, repetitionConflict, groundingAnchor, foreignScript, recentTopicSummary } from '../../utils/autoPostFilter.js';
 import axios from 'axios';
@@ -909,10 +910,13 @@ Return ONLY the tweet text, nothing else.`;
           const tweetUrl = (username && tweetId)
             ? `https://x.com/${username}/status/${tweetId}`
             : (postResult.data?.url || (username ? `https://x.com/${username}` : 'https://x.com'));
-          await telegram.sendNotification(
-            `*Twitter post (${postsToday + 1}/${maxAutoPostsPerDay}):*\n\n${tweetText}\n\n[View tweet](${tweetUrl})`,
-            { disable_notification: false }
-          );
+          const notice = formatSocialPostNotice({
+            platform: 'x', agentName: process.env.AGENT_NAME, handle: username,
+            text: tweetText, url: tweetUrl, count: postsToday + 1, max: maxAutoPostsPerDay
+          });
+          await telegram.sendNotification(notice.text, {
+            parse_mode: undefined, rich: notice.rich, reply_markup: notice.replyMarkup, disable_notification: false
+          });
         }
       } catch { /* non-critical */ }
     } catch (err) {

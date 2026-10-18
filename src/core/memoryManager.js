@@ -4,6 +4,12 @@ import { logger } from "../utils/logger.js";
 import { safeJsonParse } from "../utils/jsonUtils.js";
 import { memoryVectorStore } from "../services/memoryVectorStore.js";
 
+/** The follow-up buffer's key: the user, or the user in one Telegram private-chat topic. */
+export function conversationKey(userId, threadId) {
+  const uid = String(userId || 'default');
+  return Number.isInteger(threadId) && threadId > 0 ? `${uid}#${threadId}` : uid;
+}
+
 export class MemoryManager {
   constructor(agent) {
     this.agent = agent;
@@ -314,9 +320,10 @@ export class MemoryManager {
       recent.reverse(); // newest 500, replayed in insertion order
       if (!this._conversationBuffer) this._conversationBuffer = new Map();
       for (const m of recent) {
-        const buffer = this._conversationBuffer.get(m.userId) || [];
+        const key = conversationKey(m.userId, m.threadId);
+        const buffer = this._conversationBuffer.get(key) || [];
         buffer.push({ role: m.role, content: m.content.substring(0, 1000), ts: new Date(m.createdAt).getTime() });
-        this._conversationBuffer.set(m.userId, buffer.slice(-10));
+        this._conversationBuffer.set(key, buffer.slice(-10));
       }
       if (recent.length) logger.info(`Restored conversation buffer: ${recent.length} messages across ${this._conversationBuffer.size} user(s)`);
     } catch (error) {
@@ -381,7 +388,9 @@ export class MemoryManager {
     if (!this._conversationBuffer) this._conversationBuffer = new Map();
     // String key: Telegram passes a numeric id, the transcript restore a string one
     const uid = String(userId || 'default');
-    const buffer = this._conversationBuffer.get(uid) || [];
+    // A Telegram private-chat topic is its own conversation (metadata.threadId).
+    const bufKey = conversationKey(uid, metadata?.threadId);
+    const buffer = this._conversationBuffer.get(bufKey) || [];
     const userContent = typeof userMessage === 'string' ? userMessage : (userMessage?.content || String(userMessage || ''));
     const agentContent = typeof agentResponse === 'string' ? agentResponse : (agentResponse?.content || String(agentResponse || ''));
     if (userContent) buffer.push({ role: 'user', content: userContent.substring(0, 1000), ts: Date.now() });
@@ -389,7 +398,7 @@ export class MemoryManager {
     // Keep last 10 messages per user, expire after 30 min
     const now = Date.now();
     const filtered = buffer.filter(m => now - m.ts < 30 * 60 * 1000).slice(-10);
-    this._conversationBuffer.set(uid, filtered);
+    this._conversationBuffer.set(bufKey, filtered);
 
     // Background review of the operator's own turns (not guests, and not another agent's Trellis
     // message recorded here under the operator's id — those carry `from`).
@@ -401,8 +410,9 @@ export class MemoryManager {
     // must never delay a reply, and a failed one only costs searchable history.
     const iface = metadata.interface || 'unknown';
     const docs = [];
-    if (userContent) docs.push({ userId: uid, interface: iface, role: 'user', content: userContent.substring(0, 8000) });
-    if (agentContent) docs.push({ userId: uid, interface: iface, role: 'assistant', content: agentContent.substring(0, 8000) });
+    const thread = Number.isInteger(metadata?.threadId) ? { threadId: metadata.threadId } : {};
+    if (userContent) docs.push({ userId: uid, interface: iface, role: 'user', content: userContent.substring(0, 8000), ...thread });
+    if (agentContent) docs.push({ userId: uid, interface: iface, role: 'assistant', content: agentContent.substring(0, 8000), ...thread });
     if (docs.length) {
       Transcript.insertMany(docs).catch(err => logger.debug(`Transcript write failed: ${err.message}`));
     }

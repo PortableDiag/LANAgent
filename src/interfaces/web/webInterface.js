@@ -3317,6 +3317,43 @@ export class WebInterface {
       }
     });
 
+    // Telegram agent features (bot-to-bot, guest mode, topics): the same switches as
+    // /agents in Telegram and Settings → Telegram agents (interfaces/telegram/agentFeatures.js).
+    const tgFeatures = () => import('../telegram/agentFeatures.js');
+    const tgLink = () => {
+      const link = this.agent.interfaces?.get?.('telegram')?.agentLink;
+      if (!link) throw new Error('The Telegram interface is not running.');
+      return link;
+    };
+    this.app.get('/api/telegram/agent-features', authenticateToken, async (req, res) => {
+      try {
+        const f = await (await tgFeatures()).getAgentFeatures();
+        const botInfo = this.agent.interfaces?.get?.('telegram')?.bot?.botInfo || null;
+        res.json({ success: true, features: f, botFather: botInfo ? { supportsGuestQueries: !!botInfo.supports_guest_queries, hasTopicsEnabled: !!botInfo.has_topics_enabled, username: botInfo.username } : null });
+      } catch (error) { res.status(500).json({ success: false, error: error.message }); }
+    });
+    this.app.put('/api/telegram/agent-features', authenticateToken, async (req, res) => {
+      try {
+        const f = await (await tgFeatures()).setAgentFeatures(req.body || {});
+        logger.info(`Telegram agent features changed via API: ${JSON.stringify(req.body)}`);
+        res.json({ success: true, features: f });
+      } catch (error) { res.status(400).json({ success: false, error: error.message }); }
+    });
+    this.app.post('/api/telegram/agent-features/peers', authenticateToken, async (req, res) => {
+      try { res.json({ success: true, features: await (await tgFeatures()).trustPeer(req.body?.username) }); }
+      catch (error) { res.status(400).json({ success: false, error: error.message }); }
+    });
+    this.app.delete('/api/telegram/agent-features/peers/:username', authenticateToken, async (req, res) => {
+      try { res.json({ success: true, removed: await (await tgFeatures()).untrustPeer(req.params.username) }); }
+      catch (error) { res.status(400).json({ success: false, error: error.message }); }
+    });
+    this.app.post('/api/telegram/agent-features/ask', authenticateToken, async (req, res) => {
+      try {
+        const { username, question } = req.body || {};
+        res.json({ success: true, from: username, answer: await tgLink().ask(username, question) });
+      } catch (error) { res.status(400).json({ success: false, error: error.message }); }
+    });
+
     this.app.delete('/api/plugins/:name/credentials', authenticateToken, async (req, res) => {
       try {
         const pluginName = req.params.name;
