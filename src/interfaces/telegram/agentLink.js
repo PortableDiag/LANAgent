@@ -314,7 +314,12 @@ export class AgentLink {
     } catch (err) {
       clearTimeout(this.pending.get(id)?.timer);
       this.pending.delete(id);
-      throw new Error(`Telegram refused the message to @${u}: ${err.description || err.message}. Both bots need Bot-to-Bot Communication Mode on in @BotFather.`);
+      const why = err.description || err.message;
+      // A bot whose @BotFather access is "only selected users" refuses every bot not on that list.
+      const hint = /BOT_ACCESS_RESTRICTED/.test(why)
+        ? `Access to one of the bots is restricted to selected users in @BotFather. Add the other bot to that bot's allowed users (or lift the restriction).`
+        : `Both bots need Bot-to-Bot Communication Mode on in @BotFather.`;
+      throw new Error(`Telegram refused the message to @${u}: ${why}. ${hint}`);
     }
     return wait;
   }

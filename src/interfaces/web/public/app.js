@@ -1232,14 +1232,17 @@ class LANAgentDashboard {
             });
 
             if (response.success) {
-                this.handleCommandResponse(response.result);
+                // REST answers { data }, the socket path answers { result }: reading only
+                // `result` here threw on every voice command and showed no reply.
+                const result = response.data || response.result;
+                this.handleCommandResponse(result);
 
                 // Play audio response if available
                 if (response.audioUrl) {
                     this.playAudioResponse(response.audioUrl);
-                } else if (response.result?.content) {
+                } else if (result?.content) {
                     // Request TTS for the response
-                    await this.speakResponse(response.result.content);
+                    await this.speakResponse(result.content);
                 }
             } else {
                 this.addTerminalLine(`Error: ${response.error}`, 'error');

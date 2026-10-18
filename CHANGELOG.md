@@ -2,6 +2,12 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.526] - 2026-10-17
+
+### Fixed
+- **Bot-to-bot: a clear reason when Telegram refuses a peer.** If a bot's access is limited to selected users in @BotFather, Telegram refuses other bots with `BOT_ACCESS_RESTRICTED`. The error now says to add the other bot to that bot's allowed users, instead of pointing at Bot-to-Bot Communication Mode.
+- **`/agents` and Settings → Telegram agents show current @BotFather state.** They read the bot's settings fresh, so a toggle made after start-up (topics, Guest Mode) no longer shows as off.
+
 ## [2.25.525] - 2026-10-17
 
 ### Added

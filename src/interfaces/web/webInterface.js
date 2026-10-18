@@ -3328,7 +3328,9 @@ export class WebInterface {
     this.app.get('/api/telegram/agent-features', authenticateToken, async (req, res) => {
       try {
         const f = await (await tgFeatures()).getAgentFeatures();
-        const botInfo = this.agent.interfaces?.get?.('telegram')?.bot?.botInfo || null;
+        // getMe fresh: the boot-time botInfo misses @BotFather toggles made since
+        const bot = this.agent.interfaces?.get?.('telegram')?.bot;
+        const botInfo = bot ? await bot.telegram.getMe().catch(() => bot.botInfo || null) : null;
         res.json({ success: true, features: f, botFather: botInfo ? { supportsGuestQueries: !!botInfo.supports_guest_queries, hasTopicsEnabled: !!botInfo.has_topics_enabled, username: botInfo.username } : null });
       } catch (error) { res.status(500).json({ success: false, error: error.message }); }
     });

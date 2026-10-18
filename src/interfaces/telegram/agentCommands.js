@@ -24,7 +24,7 @@ export function formatAgentsCard(f, bot = {}) {
   const notes = [
     bot.supports_guest_queries === false && f.guestMode !== 'off' ? 'Guest Mode is not enabled for this bot in @BotFather yet.' : null,
     bot.has_topics_enabled === false && f.topics ? 'Topics are not enabled for this bot in @BotFather yet.' : null,
-    f.botToBot ? 'Bot-to-bot also needs Bot-to-Bot Communication Mode in @BotFather, on both bots.' : null
+    f.botToBot ? 'Bot-to-bot also needs Bot-to-Bot Communication Mode in @BotFather, on both bots. If a bot\'s access is limited to selected users, add the other bot to that list.' : null
   ].filter(Boolean);
   const rich = [
     '### 🤝 Telegram agents',
@@ -55,7 +55,7 @@ export function splitBotArg(text) {
 
 export function installAgentCommands(bot, { isMaster, getLink, getBotInfo }) {
   const showCard = async (ctx) => {
-    const card = formatAgentsCard(await getAgentFeatures(), getBotInfo() || {});
+    const card = formatAgentsCard(await getAgentFeatures(), (await getBotInfo()) || {});
     const sent = await sendRich(ctx.telegram, ctx.chat.id, card.rich, { replyMarkup: card.keyboard, threadId: ctx.message?.message_thread_id });
     if (!sent) await ctx.reply(card.text, { reply_markup: card.keyboard });
   };
@@ -110,7 +110,7 @@ export function installAgentCommands(bot, { isMaster, getLink, getBotInfo }) {
       if (what === 'topics') await setAgentFeatures({ topics: value === 'on' });
       if (what === 'guest') await setAgentFeatures({ guestMode: value });
       logger.info(`[agents] owner set ${what} → ${value} from Telegram`);
-      const card = formatAgentsCard(await getAgentFeatures(), getBotInfo() || {});
+      const card = formatAgentsCard(await getAgentFeatures(), (await getBotInfo()) || {});
       await ctx.editMessageReplyMarkup(card.keyboard).catch(() => {});
       await ctx.reply(`⚙️ ${what === 'b2b' ? 'Bot-to-bot' : what === 'topics' ? 'Topics' : 'Guest mode'}: ${what === 'guest' ? GUEST_LABEL[value] : value}.`);
     } catch (err) {

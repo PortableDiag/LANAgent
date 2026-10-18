@@ -263,7 +263,8 @@ export class TelegramDashboard extends TelegramInterface {
     installAgentCommands(this.bot, {
       isMaster: (ctx) => !!ctx.isMaster,
       getLink: () => this.agentLink,
-      getBotInfo: () => this.bot.botInfo
+      // fresh getMe: the boot-time botInfo misses @BotFather toggles made since
+      getBotInfo: () => this.bot.telegram.getMe().catch(() => this.bot.botInfo)
     });
     // Start command
     this.bot.command('start', async (ctx) => {
