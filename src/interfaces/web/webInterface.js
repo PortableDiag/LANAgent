@@ -3355,6 +3355,19 @@ export class WebInterface {
         res.json({ success: true, from: username, answer: await tgLink().ask(username, question) });
       } catch (error) { res.status(400).json({ success: false, error: error.message }); }
     });
+    // Skills over the bot link, same as /peerskills, /getskill and /sendskill in Telegram
+    this.app.get('/api/telegram/agent-features/peers/:username/skills', authenticateToken, async (req, res) => {
+      try { res.json({ success: true, from: req.params.username, skills: await tgLink().listSkills(req.params.username) }); }
+      catch (error) { res.status(400).json({ success: false, error: error.message }); }
+    });
+    this.app.post('/api/telegram/agent-features/peers/:username/skills/request', authenticateToken, async (req, res) => {
+      try { res.json({ success: true, requested: await tgLink().requestSkills(req.params.username, req.body?.names) }); }
+      catch (error) { res.status(400).json({ success: false, error: error.message }); }
+    });
+    this.app.post('/api/telegram/agent-features/peers/:username/skills/send', authenticateToken, async (req, res) => {
+      try { res.json({ success: true, ...(await tgLink().sendSkill(req.params.username, req.body?.name)) }); }
+      catch (error) { res.status(400).json({ success: false, error: error.message }); }
+    });
 
     this.app.delete('/api/plugins/:name/credentials', authenticateToken, async (req, res) => {
       try {

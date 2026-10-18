@@ -830,6 +830,9 @@ All routes need a JWT or API key.
 | POST | `/api/telegram/agent-features/peers` | `{username: "@their_bot"}` | Trust an agent's bot. Its id is pinned on first contact. |
 | DELETE | `/api/telegram/agent-features/peers/:username` | | Stop trusting it. |
 | POST | `/api/telegram/agent-features/ask` | `{username, question}` | Ask a trusted agent and wait (up to 120 s) for `{answer}`. Needs bot-to-bot on. |
+| GET | `/api/telegram/agent-features/peers/:username/skills` | | The skills that agent offers: `{skills: [{name, description, ...}]}`. |
+| POST | `/api/telegram/agent-features/peers/:username/skills/request` | `{names: ["skill-a", "skill-b"]}` | Ask for skills. They arrive as files and wait for your approval (or your auto-approve). |
+| POST | `/api/telegram/agent-features/peers/:username/skills/send` | `{name}` | Send one of your skills. Only skills the privacy audit cleared, and only while skill sharing is on. |
 
 The same switches are `/agents` in Telegram and Settings → Telegram agents in the web UI. The wire format between
 bots is one text message, `LANAGENT/1 {"v":1,"type","id","re?","depth","body?"}`. The types are `hello`, `ask`,

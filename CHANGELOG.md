@@ -2,6 +2,11 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.527] - 2026-10-17
+
+### Added
+- **Telegram peer skills over the API.** `GET /api/telegram/agent-features/peers/:username/skills`, `POST …/skills/request {names}` and `POST …/skills/send {name}` do what `/peerskills`, `/getskill` and `/sendskill` do in Telegram. Skills that arrive still wait for your approval, and only audited skills are sent.
+
 ## [2.25.526] - 2026-10-17
 
 ### Fixed
