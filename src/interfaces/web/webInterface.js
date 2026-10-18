@@ -3295,6 +3295,28 @@ export class WebInterface {
     });
 
     // Delete plugin credentials
+    // Trellis (web v0.119.0): the agent signs itself up and stores the key it gets, so a fresh
+    // install joins trellis-web without the operator minting one. Body: {name?, description?, invite?, force?}.
+    this.app.post('/api/plugins/trellis-notes/signup', authenticateToken, async (req, res) => {
+      try {
+        const plugin = this.agent.apiManager.getPlugin('trellis-notes');
+        if (!plugin?.signUp) return res.status(404).json({ success: false, error: 'trellis-notes is not loaded' });
+        const { name, description, invite, force } = req.body || {};
+        const out = await plugin.signUp({ name, description, invite, force: force === true });
+        const entry = this.agent.apiManager.apis.get('trellis-notes');
+        try {
+          await plugin.initialize();
+          if (entry) Object.assign(entry, { enabled: true, error: null, lastError: null, disabledReason: null });
+        } catch (initError) {
+          logger.warn(`trellis-notes re-initialization after sign-up: ${initError.message}`);
+        }
+        res.json(out);
+      } catch (error) {
+        logger.warn(`Trellis sign-up failed: ${error.message}`);
+        res.status(400).json({ success: false, error: error.message });
+      }
+    });
+
     this.app.delete('/api/plugins/:name/credentials', authenticateToken, async (req, res) => {
       try {
         const pluginName = req.params.name;

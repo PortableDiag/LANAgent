@@ -10,7 +10,7 @@
  *             rename or move a basket
  *   finding   tags, query, properties, backlinks, mentions, links, claims, channel claims
  *   layout    reorder, group, dock, arrange, fold, templates, export, clip, generate image,
- *             sharing (list / invite / revoke)
+ *             sharing (list / invite / revoke; agents by name; agent invite codes)
  *   delete    cards, baskets, checklist lines, files — to the document's TRASH, which keeps
  *             them 30 days — plus listTrash / restore
  *
@@ -187,8 +187,8 @@ export const EXTRA_COMMANDS = [
     usage: 'withdrawSignOff({ card: 1391 })', examples: ['withdraw my sign-off on trellis card 1391', 'take back the approval on that trellis card'] },
   { command: 'editTable', description: 'Change a table card in Trellis with table ops: set_cell, insert_row, remove_row, insert_col, remove_col, set_bg, set_header …',
     usage: 'editTable({ card: 1391, ops: [{ op: "set_cell", row: 1, col: 2, text: "42" }] })', examples: ['update a cell in the trellis table', 'add a row to the trellis table'] },
-  { command: 'moveCard', description: 'Move a Trellis card to another basket, or to the front/back of its basket',
-    usage: 'moveCard({ card: 1391, toBasket: "Archive" })  // or { card, to: "front" | "back" }', examples: ['move the trellis card to the archive basket', 'send that trellis card to the back'] },
+  { command: 'moveCard', description: 'Move a Trellis card to another basket, to the front/back of its basket, or to a basket in another document (web; the card gets a new id there)',
+    usage: 'moveCard({ card: 1391, toBasket: "Archive" })  // or { card, to: "front" | "back" } or { card, toDocument: "Work", toBasket: "Inbox" }', examples: ['move the trellis card to the archive basket', 'send that trellis card to the back'] },
   { command: 'duplicateCard', description: 'Duplicate a Trellis card (not a task — Trellis refuses copying dated tasks)',
     usage: 'duplicateCard({ card: 1391 })', examples: ['duplicate that trellis card', 'make a copy of the trellis note'] },
   { command: 'renameBasket', description: 'Rename a Trellis basket, or set its colour',
@@ -231,10 +231,20 @@ export const EXTRA_COMMANDS = [
     usage: 'generateImage({ basket: "Ideas", prompt: "a lighthouse at dusk" })', examples: ['generate an image in trellis', 'make a picture card in my notes'] },
   { command: 'listShares', description: 'Who the Trellis document is shared with, and its share links (web, owner)',
     usage: 'listShares', examples: ['who can see my trellis notes', 'list trellis sharing'] },
-  { command: 'shareNotes', description: 'Share the Trellis document, a basket or a card with a person by email (read or write), or make a read-only link. Needs confirm: true',
-    usage: 'shareNotes({ email: "x@y.com", scope: "node", basket: "Ideas", permission: "read", confirm: true })', examples: ['share my trellis basket with someone', 'invite a person to my trellis notes'] },
+  { command: 'shareNotes', description: 'Share the Trellis document, a basket or a card with a person by email or with an agent that has a Trellis account, by its name (read or write), or make a read-only link. Needs confirm: true',
+    usage: 'shareNotes({ email: "x@y.com", scope: "node", basket: "Ideas", permission: "read", confirm: true })  // or { agent: "Orbit", … }', examples: ['share my trellis basket with someone', 'invite a person to my trellis notes', 'share the trellis basket with the agent Orbit'] },
   { command: 'unshareNotes', description: 'Revoke a Trellis share (a grant id from listShares)',
     usage: 'unshareNotes({ grant: 12 })', examples: ['stop sharing my trellis notes with them', 'revoke the trellis share'] },
+  { command: 'shareInvite', description: 'Make a Trellis invite code for an agent that has no Trellis account yet: it signs up with the code and starts with the document or basket shared (read, or write). Shown once. Needs confirm: true (web)',
+    usage: 'shareInvite({ basket: "Ideas", permission: "read", uses: 1, expiresInDays: 30, note: "for Scout", confirm: true })', examples: ['make a trellis invite code for another agent', 'invite an agent to my trellis basket'] },
+  { command: 'listInvites', description: 'The Trellis agent invite codes this key made, without the codes: state, uses, who redeemed (web)',
+    usage: 'listInvites', examples: ['list my trellis agent invites', 'who used my trellis invite code'] },
+  { command: 'unshareInvite', description: 'Stop a Trellis agent invite code working (its code, prefix or id); what it already gave stays shared (web)',
+    usage: 'unshareInvite({ invite: "tai_ab12" })', examples: ['cancel the trellis invite code', 'revoke that trellis agent invite'] },
+  { command: 'checkInvite', description: 'What a Trellis agent invite code (tai_…) opens, before taking it up (web)',
+    usage: 'checkInvite({ code: "tai_…" })', examples: ['what does this trellis invite code open'] },
+  { command: 'redeemInvite', description: 'Take up a Trellis agent invite code (tai_…) someone gave this agent: the document or basket is shared to this agent\'s own account (web)',
+    usage: 'redeemInvite({ code: "tai_…" })', examples: ['redeem this trellis invite code', 'join the trellis document with this invite'] },
   // delete & restore
   { command: 'deleteCard', description: 'Delete a Trellis card to the trash (restorable for 30 days). Needs the card id and its exact title as confirmTitle',
     usage: 'deleteCard({ card: 1391, confirmTitle: "Old draft" })', examples: ['delete trellis card 1391', 'move that trellis note to the trash'] },
@@ -803,8 +813,9 @@ const actions = {
     return { success: true, card: c.id, applied: Array.isArray(ops) ? ops.length : 1 };
   },
 
-  async moveCard({ toBasket, to, before, after, ...ref }) {
+  async moveCard({ toBasket, toDocument, to, before, after, ...ref }) {
     const c = await this._card(ref);
+    if (toDocument !== undefined && toDocument !== null && toDocument !== '') return this._moveCardToDocument(c, toDocument, toBasket);
     let body;
     if (toBasket !== undefined && toBasket !== null && toBasket !== '') {
       const node = await this._resolveNode(toBasket);
@@ -815,6 +826,29 @@ const actions = {
     else throw new Error('moveCard needs toBasket, or to: "front" | "back", or before/after a card id.');
     const r = await this._call('post', `/api/cards/${c.id}/move`, { body });
     return { success: true, card: c.id, node: r.node ?? body.node ?? null, index: r.index ?? null };
+  },
+
+  /**
+   * A basket in ANOTHER document (web v0.119.0). Card ids are per document, so it arrives with a
+   * new id; the original goes to this document's trash. A channel is refused (409).
+   */
+  async _moveCardToDocument(c, toDocument, toBasket) {
+    if (this.resolvedMode !== 'web') throw new Error('Moving a card to another document needs trellis-web.');
+    if (toBasket === undefined || toBasket === null || toBasket === '') throw new Error('moveCard to another document needs toBasket: a basket in that document.');
+    const from = this._currentDoc();
+    const target = await this._resolveDocument(toDocument);
+    if (target.id === from.id) return this.moveCard({ card: c.id, toBasket });
+    const node = await this._runInDocument(target, () => this._resolveNode(toBasket));
+    let r;
+    try {
+      r = await this._call('post', `/api/cards/${c.id}/move`, { body: { document: target.id, node: node.id } });
+    } catch (err) {
+      if (err.status === 409) throw new Error(`Card #${c.id} is a channel, and a channel cannot leave its document. Nothing was moved.`);
+      throw err;
+    }
+    const out = { success: true, card: c.id, newId: r.new_id ?? null, document: target.name, node: node.id, originalInTrash: r.in_trash !== false };
+    out.result = `Moved card #${c.id} to "${node.title}" in ${target.name}${out.newId != null ? `, where it is #${out.newId}` : ''}. The original is in this document's trash for 30 days.${r.mirror_dropped ? ' It was a mirror; it keeps its text but no longer follows its source.' : ''}`;
+    return out;
   },
 
   async duplicateCard(data) {
@@ -979,11 +1013,14 @@ const actions = {
     return { success: true, count: r.count ?? (r.grants || []).length, grants: r.grants || [] };
   },
 
-  async shareNotes({ email, scope = 'document', basket, card, permission = 'read', label, expiresInDays, confirm = false }) {
+  async shareNotes({ email, agent, scope = 'document', basket, card, permission = 'read', label, expiresInDays, confirm = false }) {
     if (confirm !== true) {
       throw new Error('Sharing gives someone else access to the operator\'s notes — call again with confirm: true. Nothing was shared.');
     }
-    const body = { scope_kind: scope, permission, ...(email ? { email: String(email) } : {}), ...(label ? { label } : {}), ...(expiresInDays ? { expires_in_days: Number(expiresInDays) } : {}) };
+    if (email && agent) throw new Error('shareNotes takes email (a person) or agent (an agent account\'s name), not both.');
+    // `agent` shares with an agent that has its own Trellis account, by name, with no mail (web v0.119.0).
+    const who = agent ? { agent: String(agent).replace(/^@/, '') } : email ? { email: String(email) } : {};
+    const body = { scope_kind: scope, permission, ...who, ...(label ? { label } : {}), ...(expiresInDays ? { expires_in_days: Number(expiresInDays) } : {}) };
     if (scope === 'node') body.scope_id = (await this._resolveNode(basket)).id;
     if (scope === 'card') body.scope_id = (await this._card({ basket, card })).id;
     const r = await this._docRoute('post', '/grants', { body });
@@ -995,6 +1032,55 @@ const actions = {
     await this._ensureTarget();
     await this._request('delete', `/api/grants/${Number(grant)}`);
     return { success: true, revoked: Number(grant) };
+  },
+
+  // ---- agent invite codes (web v0.119.0): a share for an agent with no account yet, never a key
+
+  async shareInvite({ basket, permission = 'read', uses, expiresInDays, note, confirm = false }) {
+    if (confirm !== true) {
+      throw new Error('An invite code lets an agent that holds it into the operator\'s notes — call again with confirm: true. No code was made.');
+    }
+    if (!['read', 'write'].includes(permission)) throw new Error('permission is "read" or "write".');
+    await this._ensureTarget();
+    if (this.resolvedMode !== 'web') throw new Error('Invite codes need trellis-web.');
+    const body = { document: this._currentDoc().id, permission };
+    if (basket !== undefined && basket !== null && basket !== '') body.node = (await this._resolveNode(basket)).id;
+    if (uses !== undefined && uses !== null && uses !== '') body.uses = Number(uses);
+    if (expiresInDays) body.expires_in_days = Number(expiresInDays);
+    if (note) body.note = String(note);
+    const r = await this._request('post', '/api/agent/invites', body);
+    return { success: true, ...r, hint: 'The code is shown once. Hand it to the agent with the join_url; it signs up with it, or redeems it if it already has an account.' };
+  },
+
+  async listInvites() {
+    await this._ensureTarget();
+    if (this.resolvedMode !== 'web') throw new Error('Invite codes need trellis-web.');
+    const r = await this._request('get', '/api/agent/invites');
+    const invites = r.invites || (Array.isArray(r) ? r : []);
+    return { success: true, count: invites.length, invites };
+  },
+
+  async unshareInvite({ invite, code }) {
+    const ref = String(invite ?? code ?? '').trim();
+    if (!ref) throw new Error('unshareInvite needs the invite: its code, prefix or id (listInvites shows them).');
+    await this._ensureTarget();
+    const r = await this._request('delete', `/api/agent/invites/${encodeURIComponent(ref)}`);
+    return { success: true, stopped: ref, ...r, result: `Invite ${ref} no longer works. Anything it already shared stays shared (unshareNotes revokes that).` };
+  },
+
+  async checkInvite({ code }) {
+    if (!/^tai_\w+/.test(String(code || ''))) throw new Error('checkInvite needs a tai_… code.');
+    await this._ensureTarget();
+    const r = await this._request('get', `/api/agent/invites/${encodeURIComponent(String(code))}`);
+    return { success: true, ...r };
+  },
+
+  async redeemInvite({ code }) {
+    if (!/^tai_\w+/.test(String(code || ''))) throw new Error('redeemInvite needs a tai_… code.');
+    await this._ensureTarget();
+    const r = await this._request('post', `/api/agent/invites/${encodeURIComponent(String(code))}/redeem`);
+    this._docs = null;   // the shared document is reachable now; re-read the list
+    return { success: true, ...r };
   },
 
   // ---- delete & restore (to the trash)

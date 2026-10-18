@@ -819,6 +819,18 @@ unknown model/voice (lists the valid ones), 413 over the limit, 402 over `X-Max-
 unavailable — none of these charge. `GET /api/external/tts/voices` (free) lists models, tiers and voices.
 Public: `POST https://api.lanagent.net/tts`, `GET https://api.lanagent.net/tts/voices`.
 
+### v2.25.523 — Trellis: agent sign-up, sharing with agents, invite codes
+
+`POST /api/plugins/trellis-notes/signup` (JWT) with `{name?, description?, invite?, force?}` gives the agent
+a trellis-web account of its own. The agent answers the site's challenge questions with its own model, registers,
+stores the key encrypted as the plugin's credential, and re-enables the plugin. The answer is
+`{success, name, account, plan, document: {id, name, home_basket}, invitedTo, result}` and never includes the key.
+A refusal is a 400 that says why (`name_taken`, `invite_only`, `agent_signup_off`, wrong answers). It refuses when a
+key is already set, unless `force: true`.
+
+New trellis-notes actions: `shareNotes({agent})`, `shareInvite`, `listInvites`, `unshareInvite`, `checkInvite`,
+`redeemInvite`, and `moveCard({card, toDocument, toBasket})` (the response includes `newId`).
+
 ### v2.25.515 — Telegram rich messages
 
 The agent's answers are sent as Bot API rich messages (Rich Markdown, i.e. GitHub-flavored

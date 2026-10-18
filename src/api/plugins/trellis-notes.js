@@ -37,7 +37,9 @@
  * src/services/trellis/trellisExtras.js.
  *
  * Credentials: TRELLIS_API_KEY (web keys look like tk_…; mint one while signed in,
- *              POST /api/keys — or in Settings → Plugins → trellis-notes).
+ *              POST /api/keys — or in Settings → Plugins → trellis-notes). With no key, the
+ *              agent can sign itself up on trellis-web (signUp below, web v0.119.0): an
+ *              account and document of its own, which people then share into by its name.
  * Base URL:    TRELLIS_BASE_URL, default https://trellis-cards.com. For the desktop
  *              app use its LAN address and port and enable Tools → Settings → LAN access.
  * Documents:   one key can reach many documents (web). The convention is TrellisBridge's,
@@ -55,6 +57,7 @@ import { BasePlugin } from '../core/basePlugin.js';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import axios from 'axios';
 import { PluginSettings } from '../../models/PluginSettings.js';
+import { encrypt } from '../../utils/encryption.js';
 import { TrellisChannelListener, fitToExpect } from '../../services/trellisChannelListener.js';
 import { EXTRA_COMMANDS, EXTRA_ACTIONS, installTrellisExtras } from '../../services/trellis/trellisExtras.js';
 import { syncAllBasketSkills, SKILLS_SYNC_MS } from '../../services/trellis/trellisSkills.js';
@@ -178,7 +181,7 @@ export default class TrellisNotesPlugin extends BasePlugin {
   constructor(agent) {
     super(agent);
     this.name = 'trellis-notes';
-    this.version = '2.0.0';
+    this.version = '2.1.0';
     this.description = 'Read and write the operator\'s Trellis notes (trellis-cards.com or the desktop app): baskets, cards, agenda tasks, the Kanban board and agent channels';
 
     this.requiredCredentials = [
@@ -540,6 +543,92 @@ export default class TrellisNotesPlugin extends BasePlugin {
           if (EXTRA_ACTIONS.has(action)) return await this[action](data);
           throw new Error(`Unknown action: ${action}`);
       }
+  }
+
+  // ---------------------------------------------------------------- sign-up (web v0.119.0)
+
+  /**
+   * Give this agent a trellis-web account of its own, with no person minting a key: answer the
+   * server's three challenge questions (LANAgent's), register under the agent's name, and store
+   * the key it answers with, encrypted, as this plugin's credential. Not an intent action: the
+   * plugin is disabled while it has no key, so this runs from POST /api/plugins/trellis-notes/signup.
+   * The key is shown once by the server and is never returned from here.
+   */
+  async signUp({ name, description, invite, force = false } = {}) {
+    if (this.credentials?.apiKey && force !== true) {
+      throw new Error('trellis-notes already has an API key. Signing up makes a second, separate account; pass force: true if that is what you want.');
+    }
+    const agentName = String(name || this._agentName()).trim();
+    const headers = { 'Content-Type': 'application/json', 'User-Agent': `LANAgent (${agentName}; trellis-notes)` };
+    const post = async (route, body) => {
+      const r = await axios.request({ method: 'post', url: `${this._base()}${route}`, data: body, headers, timeout: 30000, validateStatus: () => true });
+      if (r.status === 404) throw new Error(`${this._base()} has no agent sign-up (${route} is 404). Sign-up is a trellis-web feature; the desktop app needs a key from its settings.`);
+      return r;
+    };
+
+    const ch = await post('/api/agent/challenge', {});
+    if (ch.status >= 400) throw new Error(`Trellis refused a sign-up challenge (${ch.status}): ${ch.data?.error || ch.data?.code || 'no reason given'}.`);
+    const { token, questions = [] } = ch.data || {};
+    if (!token || !questions.length) throw new Error('Trellis answered the challenge without a token or questions.');
+
+    // Three tries per token; two of three right passes. Answer again only after a failed try.
+    let res;
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      const answers = await this._answerChallenge(questions);
+      res = await post('/api/agent/register', {
+        name: agentName, challenge_token: token, challenge_answers: answers,
+        ...(description ? { description: String(description) } : { description: `${agentName}, a LANAgent instance` }),
+        ...(invite ? { invite: String(invite) } : {})
+      });
+      if (res.data?.code !== 'challenge_failed') break;
+      this.logger.warn(`Trellis sign-up: challenge failed (${res.data.score}/${res.data.total}), answering again`);
+    }
+    if (res.status !== 201 || !res.data?.api_key) {
+      const code = res.data?.code;
+      const why = {
+        name_taken: `the name "${agentName}" is taken on ${this._base()}; pass another name`,
+        invite_only: 'sign-up on this server needs an invite code (invite: "tai_…")',
+        invite_invalid: 'that invite code is not valid',
+        agent_signup_off: 'agent sign-up is turned off on this server',
+        challenge_failed: `the challenge answers were wrong (${res.data?.score}/${res.data?.total})`,
+        challenge_expired: 'the challenge expired; try again'
+      }[code] || res.data?.error || `HTTP ${res.status}`;
+      throw new Error(`Trellis sign-up failed: ${why}. Nothing was stored.`);
+    }
+
+    const r = res.data;
+    const stored = (await PluginSettings.findOne({ pluginName: this.name, settingsKey: 'credentials' }).lean())?.settingsValue || {};
+    await PluginSettings.setCached(this.name, 'credentials', { ...stored, apiKey: encrypt(r.api_key) });
+    this.credentials = { ...(this.credentials || {}), apiKey: r.api_key };
+    if (r.document?.id) this.config.document = r.document.id;
+    if (r.document?.home_basket != null && !this.config.defaultBasket) this.config.defaultBasket = r.document.home_basket;
+    this.config.baseUrl = this._base();
+    this._docs = null; this.resolvedMode = null; this.documentId = null;
+    await PluginSettings.setCached(this.name, 'config', this.config);
+    this.logger.info(`Trellis sign-up: account "${r.name}" on ${this._base()}, document ${r.document?.id}, plan ${r.plan}`);
+    return {
+      success: true, name: r.name, account: r.account, plan: r.plan,
+      document: r.document || null, invitedTo: r.invited_to || null,
+      result: `Signed up on ${this._base()} as ${r.name}, with a document of its own${r.invited_to ? ' and the invited one shared in' : ''}. The key is stored encrypted in trellis-notes' settings. People share their documents with it by that name.`
+    };
+  }
+
+  /** The challenge's answers, from the model: [{id, answer}]. Plain words or digits. */
+  async _answerChallenge(questions) {
+    const pm = this.agent?.providerManager;
+    if (!pm?.generateResponse) throw new Error('No AI provider is available to answer the sign-up questions.');
+    const prompt = 'Answer each question with only the answer: a word, a few words or digits, no explanation. ' +
+      'Reply with JSON only, an array like [{"id": 1, "answer": "…"}].\n\n' +
+      questions.map(q => `${q.id}. ${q.question}`).join('\n');
+    const out = await pm.generateResponse(prompt, { maxTokens: 300, temperature: 0 });
+    const text = String(out?.content ?? out ?? '');
+    const m = text.match(/\[[\s\S]*\]/);
+    let parsed = [];
+    try { parsed = m ? JSON.parse(m[0]) : []; } catch { parsed = []; }
+    return questions.map(q => {
+      const hit = Array.isArray(parsed) ? parsed.find(a => String(a?.id) === String(q.id)) : null;
+      return { id: q.id, answer: String(hit?.answer ?? '').trim() };
+    });
   }
 
   // ---------------------------------------------------------------- transport
@@ -1032,9 +1121,12 @@ export default class TrellisNotesPlugin extends BasePlugin {
       list = list.filter(n => n.path.toLowerCase().includes(wanted));
       if (!list.length) throw new Error(`No baskets under a project matching "${project}".`);
     }
+    // The document this call ran against: `document` may name another than the default.
+    let docName = this.documentName;
+    if (this.resolvedMode === 'web') { try { docName = this._currentDoc().name ?? docName; } catch { /* no default */ } }
     return {
       success: true,
-      document: this.documentName,
+      document: docName,
       count: list.length,
       baskets: list.map(({ parent, ...rest }) => rest),
       hint: 'Use path, not title, to tell projects apart — basket names like "Open Items" repeat.'
@@ -1172,7 +1264,10 @@ export default class TrellisNotesPlugin extends BasePlugin {
     };
   }
 
-  async createNote({ basket, title, body = '', kind = 'text', items = null, lang = null, color = null, tags = null, pos = null, size = null } = {}) {
+  async createNote({ basket, title, body = '', text = null, content = null, kind = 'text', items = null, lang = null, color = null, tags = null, pos = null, size = null } = {}) {
+    // `text` and `content` are what callers usually call the body; they were dropped, and the card
+    // was made empty while the call reported success (2026-10-17 live test).
+    if (!body) body = text ?? content ?? '';
     if (!title || !String(title).trim()) throw new Error('createNote needs a title.');
     if (!VALID_KINDS.includes(kind)) throw new Error(`kind must be one of: ${VALID_KINDS.join(', ')}.`);
 
@@ -1201,7 +1296,8 @@ export default class TrellisNotesPlugin extends BasePlugin {
     };
   }
 
-  async createTask({ basket, title, body = '', due = null, status = 'todo', tags = null, color = null, pos = null, size = null, time = null, deadline = null, every = null, priority = null, remind = null, assignee = null } = {}) {
+  async createTask({ basket, title, body = '', text = null, content = null, due = null, status = 'todo', tags = null, color = null, pos = null, size = null, time = null, deadline = null, every = null, priority = null, remind = null, assignee = null } = {}) {
+    if (!body) body = text ?? content ?? '';
     if (!title || !String(title).trim()) throw new Error('createTask needs a title.');
     if (due && !DUE_RE.test(String(due))) throw new Error('due must be YYYY-MM-DD.');
     if (!VALID_STATUS.includes(status)) throw new Error(`status must be one of: ${VALID_STATUS.join(', ')}.`);

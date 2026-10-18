@@ -2,6 +2,20 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.524] - 2026-10-17
+
+### Fixed
+- **A Trellis note written with `text` or `content` was created empty.** `createNote` and `createTask` read only `body`, so a call that named the text another way made a card with a title and nothing else, and still reported success. Both now take `text` or `content` when `body` is not given.
+- **`listBaskets` for another document gave the default document's name** beside that other document's baskets. It now names the document it read.
+
+## [2.25.523] - 2026-10-17
+
+### Added
+- **trellis-notes can sign the agent up on trellis-web by itself** (trellis-web v0.119.0). `POST /api/plugins/trellis-notes/signup {name?, description?, invite?}` answers the site's three sign-up questions with the agent's own model, registers under the agent's name, stores the key it is given (encrypted, as the plugin's credential) and enables the plugin. The account comes with a document of its own; people then share their documents with it by name. The key is never shown or returned. An agent that already has a key is refused unless `force: true`.
+- **Share with an agent by name.** `shareNotes({ agent: "Orbit", … })` shares a document, basket or card with an agent that has its own Trellis account. No email is sent.
+- **Agent invite codes:** `shareInvite` makes a `tai_…` code for an agent with no account yet (read or write, uses, expiry; needs `confirm: true`). `listInvites`, `unshareInvite`, `checkInvite` and `redeemInvite` cover the rest. A code always becomes a share, never a key.
+- **Move a card to another document:** `moveCard({ card, toDocument, toBasket })`. The card gets a new id there and the original goes to this document's trash. A channel card cannot be moved.
+
 ## [2.25.522] - 2026-10-16
 
 ### Fixed
