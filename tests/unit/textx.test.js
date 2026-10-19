@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { newPairing, pairingUri, sealJson, openJson, sealBytes, openBytes, kidFromAuth, ulid, P2A, A2P } from '../../src/services/textx/textxCrypto.js';
-import { TextXHub, envelopeProblem, untrusted, textxRequest, encodeM4a } from '../../src/services/textx/textxHub.js';
+import { TextXHub, envelopeProblem, untrusted, textxRequest, encodeM4a, formatMessage } from '../../src/services/textx/textxHub.js';
 import { memoryStore } from '../../src/services/textx/textxStore.js';
 import { createTransport } from '../../src/services/textx/textxTransport.js';
 import { TextXRelayClient, relaySignature } from '../../src/services/textx/textxRelayClient.js';
@@ -862,4 +862,45 @@ test('max_attachment_bytes from hello: audio over the cap is re-encoded at 16 kb
   assert.equal(Buffer.from(sends[0].attachments[0].data_b64, 'base64').length, 500);
   assert.deepEqual(sends[1], { thread_id: 't2', text: 'Friday works.' });
   assert.ok(p.sent.some(e => e.type === 'message' && /^Replied in "B" \(as text: .*over the phone's 600-byte MMS limit/.test(e.body.text)));
+});
+
+test('formatMessage labels who wrote each SMS from author (TextX 0.3.25), and falls back to "me" without it', () => {
+  const names = { self: 'ALICE', owner: 'Charles' };
+  assert.equal(formatMessage({ date: 'd', from: 'me', author: { role: 'owner', name: 'Charles' }, text: 'hi' }, names), '[d] Charles (owner): hi');
+  assert.equal(formatMessage({ date: 'd', from: 'me', author: { role: 'owner' }, text: 'hi' }, names), '[d] Charles (owner): hi');
+  assert.equal(formatMessage({ date: 'd', from: 'me', author: { role: 'assistant', name: 'Alice' }, text: 'x' }, names), '[d] Alice (you): x');
+  assert.equal(formatMessage({ date: 'd', from: 'me', author: { role: 'assistant', name: 'Orbit' }, text: 'x' }, names), '[d] Orbit (assistant): x');
+  assert.equal(formatMessage({ date: 'd', from: { name: 'Wayne' }, author: { role: 'contact', name: 'Wayne' }, text: 'yo' }, names), '[d] Wayne: yo');
+  assert.equal(formatMessage({ date: 'd', from: 'me', text: 'old' }, names), '[d] me: old');
+});
+
+test('a mention is the owner talking to the agent: the prompt says so and labels the thread by author (2119 #124)', async () => {
+  const prev = process.env.OWNER_NAME;
+  process.env.OWNER_NAME = 'Charles';
+  try {
+    const { r, prompts } = sharedRig('Ha, you caught me.');
+    const p = await pairedPhone(r, { tools: ['read_thread', 'send_sms'] });
+    const phone = setInterval(async () => {
+      for (const e of p.sent.filter(x => x.type === 'tool_call' && !x.answered)) {
+        e.answered = true;
+        const result = e.body.name === 'read_thread' ? [
+          { from: { name: 'Wayne' }, author: { role: 'contact', name: 'Wayne' }, text: 'Where do you live?' },
+          { from: 'me', author: { role: 'assistant', name: 'ALICE' }, text: 'Somewhere near the CRTs.' },
+          { from: 'me', author: { role: 'owner', name: 'Charles' }, text: '@Alice that sounds like something a cop would ask' }
+        ] : { status: 'sent' };
+        await p.say(env('tool_result', { call_id: e.body.call_id, ok: true, result }));
+      }
+    }, 5);
+    await p.say(env('event', { kind: 'mention', thread_id: '7', thread: { title: 'Wayne' },
+      message: { from: 'me', author: { role: 'owner', name: 'Charles' }, text: '@Alice that sounds like something a cop would ask', date: 'd9' } }));
+    for (let i = 0; i < 40 && !p.sent.some(e => e.type === 'message' && /^Replied in/.test(e.body.text)); i++) await tick();
+    clearInterval(phone);
+    assert.match(prompts[0], /These are Charles's own words, said to you/);
+    assert.match(prompts[0], /Reply to Charles/);
+    assert.match(prompts[0], /Wayne: Where do you live\?/);
+    assert.match(prompts[0], /ALICE \(you\): Somewhere near/);
+    assert.match(prompts[0], /Charles \(owner\): @Alice/);
+  } finally {
+    if (prev === undefined) delete process.env.OWNER_NAME; else process.env.OWNER_NAME = prev;
+  }
 });

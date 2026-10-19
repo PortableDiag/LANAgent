@@ -137,6 +137,7 @@ export default class TextXPlugin extends BasePlugin {
   }
 
   get svc() { return getTextX(this.agent); }
+  names() { return { self: this.agent?.config?.name || process.env.AGENT_NAME, owner: process.env.OWNER_NAME }; }
 
   /** How long a request for a phone with no socket may hold the turn before answering "on its way". */
   get offlineGraceMs() { return this._offlineGraceMs ?? 25_000; }
@@ -397,7 +398,7 @@ export default class TextXPlugin extends BasePlugin {
     if (f.error) return { success: false, error: f.error };
     const r = await this.call('read_thread', { thread_id: f.thread.thread_id, limit: Math.min(Number(data.limit) || 20, 100) });
     if (!r.ok) return errorResult(r);
-    const msgs = (r.result || []).map(formatMessage).join('\n');
+    const msgs = (r.result || []).map(m => formatMessage(m, this.names())).join('\n');
     return { success: true, result: `Conversation "${f.thread.title}":\n${untrusted('SMS', msgs || '(no messages)')}` };
   }
 
@@ -412,7 +413,7 @@ export default class TextXPlugin extends BasePlugin {
     }
     const r = await this.call('search_messages', args);
     if (!r.ok) return errorResult(r);
-    const msgs = (r.result || []).map(formatMessage).join('\n');
+    const msgs = (r.result || []).map(m => formatMessage(m, this.names())).join('\n');
     return { success: true, result: msgs ? `Matches for "${query}":\n${untrusted('SMS', msgs)}` : `Nothing in the shared conversations matches "${query}".` };
   }
 

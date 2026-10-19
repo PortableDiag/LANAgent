@@ -93,8 +93,10 @@ Sharing a conversation with the agent in TextX means it is watching it.
 **@-mentions** (TextX 0.3.18+): type `@<agent name>` (or `@` and its first word) in one of your own
 conversations and the agent weighs in there. TextX shares the conversation if it wasn't and sends
 `event {kind:"mention"}`. The agent reads the conversation, writes one reply as itself, sends it into
-that conversation (no card for that one send) and tells you what it said. Someone else typing `@<agent>`
-grants nothing.
+that conversation (no card for that one send) and tells you what it said. The mention is you talking to the
+agent: it answers you, in front of the others, and addresses them only when you ask it to. Someone else typing
+`@<agent>` grants nothing. With TextX 0.3.25+ each message carries `author` (owner, assistant or contact), and the
+agent sees the thread labelled that way ("Charles (owner)", "ALICE (you)", "Orbit (assistant)", "Wayne").
 
 **Auto-reply** is a separate per-conversation toggle in TextX, **off by default**: "Let <assistant> reply on
 its own".

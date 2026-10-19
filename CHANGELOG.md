@@ -2,6 +2,11 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.538] - 2026-10-19
+
+### Fixed
+- **TextX @-mentions answer the owner, not the other person.** The owner wrote "@Alice that sounds like something a cop would ask" in a conversation with a friend. The agent answered as if the friend had said it, and referred to the owner in the third person. A mention is now treated as the owner speaking to the agent in front of the others: the agent answers them directly, and talks to the others only when asked to. Conversations are also shown to the model labelled by who wrote each message. This uses TextX 0.3.25's `author` (owner, assistant or contact) and replaces the bare "me" that the owner's texts and assistants' texts used to share.
+
 ## [2.25.537] - 2026-10-19
 
 ### Added
