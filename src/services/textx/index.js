@@ -121,6 +121,7 @@ export function getTextX(agent) {
   const sweep = setInterval(() => transport.sweepFiles().catch(() => {}), 6 * 3600 * 1000);
   sweep.unref?.();
   ensureRelay().catch(e => logger.warn(`TextX relay not started: ${e.message}`));
+  hub.recoverInterrupted().catch(e => logger.warn(`TextX: could not check for interrupted answers: ${e.message}`));
 
   service = { hub, store, transport, relay, pair, devices, update, revoke, attachServer, ensureRelay,
     status: async () => ({ relay: relayEnabled ? relay.status() : { enabled: false }, devices: await devices() }) };

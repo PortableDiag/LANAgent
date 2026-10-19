@@ -404,3 +404,36 @@ test('the bound phone over HTTP: device header + hello in one batch works', asyn
   await tick();
   assert.equal(r.calls[0].input, 'yo');
 });
+
+test('an answer cut off by a restart is reported after it, not silently lost or re-run (TextX #89)', async () => {
+  const r = rig();
+  let release;
+  r.agent.processNaturalLanguage = () => new Promise(res => { release = res; }); // never finishes: the "restart"
+  const p = await pairedPhone(r);
+  const m = env('message', { text: 'book the table for eight' });
+  await p.say(m);
+  assert.ok(p.sent.some(e => e.type === 'ack' && e.body.of === m.id));
+  assert.equal((await r.store.inboxPending()).length, 1, 'pending before the ack went out');
+  // A new process over the same store.
+  const hub2 = new TextXHub({ store: r.store, agent: r.agent, logger: quiet });
+  await hub2.recoverInterrupted();
+  const outbox = (await r.store.outboxUnacked(p.device.id)).map(x => x.env);
+  const notice = outbox.find(e => e.type === 'message' && /restarted before I finished/.test(e.body.text));
+  assert.ok(notice, 'the user is told');
+  assert.match(notice.body.text, /book the table for eight/);
+  assert.equal(notice.body.reply_to, m.id);
+  assert.equal((await r.store.inboxPending()).length, 0);
+  // A resend of the same id is still not re-run.
+  const before = r.calls.length;
+  await p.say(m);
+  assert.equal(r.calls.length, before);
+  release({ type: 'text', content: 'late' });
+});
+
+test('a normal answer clears the pending mark', async () => {
+  const r = rig({ answer: 'done' });
+  const p = await pairedPhone(r);
+  await p.say(env('message', { text: 'hi' }));
+  for (let i = 0; i < 20 && (await r.store.inboxPending()).length; i++) await tick();
+  assert.equal((await r.store.inboxPending()).length, 0);
+});

@@ -14,6 +14,7 @@ All notable changes to LANAgent will be documented in this file.
     - One-time codes and private conversations never leave the phone.
     - Text from other people is handed to the model as untrusted data, never as instructions. Messages from a watched conversation never reach the command router.
   - Scheduled texts can be listed, cancelled, skipped, edited or sent now. The agent can react to a message, mark a conversation read and block a number (reactions, edits, send-now and blocking are confirmed on the phone). Group conversations are addressed by name.
+  - A message that a restart cuts off mid-answer is not lost silently. After the restart the agent says which message it didn't finish and asks you to send it again. It doesn't re-run it, because the request may already have done something. Found in testing by TextXAgent.
   - **Notifications to TextX:** a per-phone switch sends the agent's notifications to its TextX conversation as well.
   - One pairing is one phone, and Revoke deletes its key. A second device holding the same key is refused on every message, over WebSocket and HTTP (each POST batch leads with the device's hello; GET and files carry `?device=`), and can't disconnect the real phone. Found in testing by TextXAgent. The endpoint is idempotent, with a 7-day replay window: resent or replayed messages are acknowledged and ignored. Messages wait in an outbox while the phone is offline.
   - API: `GET /api/textx/status`, `POST /api/textx/pair`, `PATCH|DELETE /api/textx/devices/:id`. The phone endpoint is `/textx/v1/*`.

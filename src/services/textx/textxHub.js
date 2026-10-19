@@ -206,16 +206,23 @@ export class TextXHub {
     if (env.type === 'pong') return true;
 
     // Dedupe and replay guard: an id seen in the window is acked again and not processed.
-    const seen = await this.store.inboxSeen(device.id, env.id);
+    // A user message is recorded as pending in the same write, before its ack goes out.
+    const seen = await this.store.inboxSeen(device.id, env.id,
+      env.type === 'message' ? { pending: true, preview: String(env.body?.text || '').slice(0, 120) } : undefined);
     if (env.type === 'hello') return this.onHello(device, env, reply, seen);
+    if (seen) { reply(this.envelope('ack', { of: env.id })); return true; }
     reply(this.envelope('ack', { of: env.id }));
-    if (seen) return true;
 
     switch (env.type) {
       case 'ping': reply(this.envelope('pong')); return true;
       // Not awaited: a router run can take minutes and itself waits on tool_results that arrive
       // as later frames of this same queue.
-      case 'message': this.onUserMessage(device, env).catch(e => this.logger.error?.(`TextX: message failed: ${e.message}`)); return true;
+      case 'message':
+        // Marked pending before the ack (above), so an answer a restart cuts off is known afterwards.
+        this.onUserMessage(device, env)
+          .catch(e => this.logger.error?.(`TextX: message failed: ${e.message}`))
+          .finally(() => this.store.inboxDone(device.id, env.id).catch(() => {}));
+        return true;
       case 'tool_result': this.onToolResult(device, env.body || {}); return true;
       case 'event': this.onEvent(device, env.body || {}).catch(e => this.logger.error?.(`TextX: event failed: ${e.message}`)); return true;
       case 'error': this.logger.warn?.(`TextX: phone ${device.name} reported ${env.body?.code}: ${env.body?.message}`); return true;
@@ -247,6 +254,21 @@ export class TextXHub {
     this.logger.info?.(`TextX: ${device.name} hello (app ${patch.appVersion}, tools: ${capabilities.join(', ') || 'none'})`);
     await this.deliver(device, 'welcome', this.welcomeBody(device));
     return true;
+  }
+
+  /**
+   * After a restart: messages that were acked but never answered. They are not re-run, because the
+   * request may already have acted, but the user is told what was cut off.
+   */
+  async recoverInterrupted() {
+    for (const p of await this.store.inboxPending()) {
+      const device = await this.store.getDevice(p.device);
+      await this.store.inboxDone(p.device, p.envId);
+      if (!device || device.revokedAt) continue;
+      const what = p.preview ? `"${p.preview}${p.preview.length >= 120 ? '…' : ''}"` : 'your last message';
+      await this.deliver(device, 'message', { text: `I restarted before I finished answering ${what}. Send it again if you still need it.`, reply_to: p.envId });
+      this.logger.info?.(`TextX: told ${device.name} an answer was cut off by a restart`);
+    }
   }
 
   welcomeBody(device) {

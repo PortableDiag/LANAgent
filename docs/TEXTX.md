@@ -69,7 +69,7 @@ On the agent side:
 - SMS text is wrapped as **untrusted data** and never treated as instructions.
 - Watched-conversation events go to a plain model call, never to the command router.
 
-A send that you haven't tapped yet returns at once ("it's on your phone"). Its outcome (sent,
+If the agent restarts while answering, it says afterwards which message it didn't finish (it doesn't re-run it, since the request may already have acted). A send that you haven't tapped yet returns at once ("it's on your phone"). Its outcome (sent,
 declined, expired) is reported back to the conversation the request came from.
 
 ## Notifications

@@ -43,6 +43,10 @@ outboxSchema.index({ device: 1, envId: 1 });
 const inboxSchema = new mongoose.Schema({
   device: { type: mongoose.Schema.Types.ObjectId, required: true },
   envId: { type: String, required: true },
+  // A user message being answered: set when it is accepted, cleared when the reply is queued.
+  // Still set at start-up means a restart cut the answer off.
+  pending: { type: Boolean, default: false },
+  preview: String,
   createdAt: { type: Date, default: Date.now, expires: WEEK_S } // the replay window (§3.3)
 }, { collection: 'textx_inbox' });
 inboxSchema.index({ device: 1, envId: 1 }, { unique: true });
@@ -114,10 +118,16 @@ export function mongoStore() {
     async outboxAckType(id, type) {
       await TextXOutbox.updateMany({ device: id, 'env.type': type, ackedAt: null }, { $set: { ackedAt: new Date() } });
     },
+    async inboxDone(id, envId) {
+      await TextXInbox.updateOne({ device: id, envId }, { $set: { pending: false }, $unset: { preview: 1 } });
+    },
+    async inboxPending() {
+      return (await TextXInbox.find({ pending: true }).lean()).map(r => ({ device: String(r.device), envId: r.envId, preview: r.preview }));
+    },
     /** True when this id was already seen (a resend or a replay); records it otherwise. */
-    async inboxSeen(id, envId) {
+    async inboxSeen(id, envId, extra = {}) {
       try {
-        await TextXInbox.create({ device: id, envId });
+        await TextXInbox.create({ device: id, envId, ...extra });
         return false;
       } catch (e) {
         if (e?.code === 11000) return true;
@@ -131,6 +141,7 @@ export function memoryStore() {
   const devices = new Map();
   const outbox = [];
   const inbox = new Set();
+  const pending = new Map();
   let n = 0;
   return {
     async createDevice({ name, kid, key, base }) {
@@ -149,7 +160,15 @@ export function memoryStore() {
     async outboxAckThrough(id, seq) { outbox.forEach(r => { if (r.device === String(id) && r.seq <= seq) r.acked = true; }); },
     async outboxAckId(id, envId) { outbox.forEach(r => { if (r.device === String(id) && r.env.id === envId) r.acked = true; }); },
     async outboxAckType(id, type) { outbox.forEach(r => { if (r.device === String(id) && r.env.type === type) r.acked = true; }); },
-    async inboxSeen(id, envId) { const k = `${id}:${envId}`; if (inbox.has(k)) return true; inbox.add(k); return false; },
+    async inboxSeen(id, envId, extra = {}) {
+      const k = `${id}:${envId}`;
+      if (inbox.has(k)) return true;
+      inbox.add(k);
+      if (extra.pending) pending.set(k, { device: String(id), envId, preview: extra.preview });
+      return false;
+    },
+    async inboxDone(id, envId) { pending.delete(`${id}:${envId}`); },
+    async inboxPending() { return [...pending.values()]; },
     _outbox: outbox
   };
 }
