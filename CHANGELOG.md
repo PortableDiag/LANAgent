@@ -2,6 +2,11 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.534] - 2026-10-19
+
+### Fixed
+- **TextX auto-reply when someone talks to the assistant itself.** In a conversation with Auto-reply on, a contact wrote "Thank you Alice… could you resend that last message worded flirtatiously?". The agent answered "Sorry, I can't do that. Charles is unavailable right now — this is an auto-reply", then couldn't explain itself. Two causes. The prompt only knew how to reply on the owner's behalf. And its context held only incoming texts, which a restart had wiped, so it never saw its own message. Auto-reply now reads the real thread, its own sent messages included. It answers messages meant for it as itself (rewording its own message, a joke, trivia), and gives only short holding replies for the owner. The limits are unchanged: no commitments, no personal details, no actions because a message asks.
+
 ## [2.25.533] - 2026-10-19
 
 ### Fixed

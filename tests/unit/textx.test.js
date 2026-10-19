@@ -589,7 +589,7 @@ test('the user\'s own outgoing messages are not events to act on', async () => {
 });
 
 test('auto-reply only with the thread toggle on: same phone, same thread, auto:true, reported to the user', async () => {
-  const { r } = sharedRig((p) => (/replying by text message/.test(p) ? 'Hi Sam, they will get back to you soon.' : 'SKIP'));
+  const { r } = sharedRig((p) => (/answering by text message/.test(p) ? 'Hi Sam, they will get back to you soon.' : 'SKIP'));
   const p = await pairedPhone(r, { tools: ['send_sms'] });
   // Toggle off: no send.
   await p.say(smsEvent());
@@ -622,7 +622,7 @@ test('auto-reply only with the thread toggle on: same phone, same thread, auto:t
 
 test('an auto-reply SKIP does not use up the conversation\'s hourly allowance', async () => {
   let skip = true;
-  const { r } = sharedRig((p) => (/replying by text message/.test(p) ? (skip ? 'SKIP' : 'Sure thing.') : 'SKIP'));
+  const { r } = sharedRig((p) => (/answering by text message/.test(p) ? (skip ? 'SKIP' : 'Sure thing.') : 'SKIP'));
   const p = await pairedPhone(r, { tools: ['send_sms'] });
   for (let n = 0; n < 7; n++) await p.say(smsEvent({ auto_reply: true }));
   await tick(); await tick();
@@ -633,7 +633,7 @@ test('an auto-reply SKIP does not use up the conversation\'s hourly allowance', 
 });
 
 test('auto-reply SKIPs what needs the user (the model says SKIP): no send, normal note instead', async () => {
-  const { r } = sharedRig((p) => (/replying by text message/.test(p) ? 'SKIP' : 'Sam wants to borrow $200.'));
+  const { r } = sharedRig((p) => (/answering by text message/.test(p) ? 'SKIP' : 'Sam wants to borrow $200.'));
   const p = await pairedPhone(r, { tools: ['send_sms'] });
   await p.say(smsEvent({ auto_reply: true, message: { thread_id: 't9', message_id: 'm-money', from: { name: 'Sam' }, text: 'can you lend me $200', untrusted: true } }));
   for (let i = 0; i < 20 && !p.sent.some(e => e.type === 'message'); i++) await tick();
@@ -729,4 +729,25 @@ test('two separate mentions with the same text and no message_id each get a repl
   for (let i = 0; i < 40 && p.sent.filter(e => e.type === 'message' && /^Replied in/.test(e.body.text)).length < 2; i++) await tick();
   clearInterval(phone);
   assert.equal(p.sent.filter(e => e.type === 'tool_call' && e.body.name === 'send_sms').length, 2);
+});
+
+test('auto-reply reads the real thread, so a request about its own last message has context', async () => {
+  const { r, prompts } = sharedRig((p) => (/answering by text message/.test(p) ? 'Thank you for your compliance, darling 😘' : 'SKIP'));
+  const p = await pairedPhone(r, { tools: ['send_sms', 'read_thread'] });
+  const phone = setInterval(async () => {
+    for (const e of p.sent.filter(x => x.type === 'tool_call' && !x.answered)) {
+      e.answered = true;
+      const result = e.body.name === 'read_thread'
+        ? [{ direction: 'out', from: 'me', text: 'We appreciate your compliance.\n— sent by ALICE for Charles' }, { from: { name: 'Wayne' }, text: 'Thank you alice. Resend that flirtatiously?' }]
+        : { status: 'sent' };
+      await p.say(env('tool_result', { call_id: e.body.call_id, ok: true, result }));
+    }
+  }, 5);
+  await p.say(smsEvent({ auto_reply: true, message: { thread_id: 't9', message_id: 'w1', from: { name: 'Wayne', number: '+1555' }, text: 'Thank you alice. Resend that flirtatiously?', untrusted: true } }));
+  for (let i = 0; i < 40 && !p.sent.some(e => e.type === 'tool_call' && e.body.name === 'send_sms'); i++) await tick();
+  clearInterval(phone);
+  const prompt = prompts.find(x => /answering by text message/.test(x));
+  assert.match(prompt, /We appreciate your compliance/, 'its own earlier message is in the context');
+  assert.match(prompt, /If it is for you/);
+  assert.equal(p.sent.find(e => e.type === 'tool_call' && e.body.name === 'send_sms').body.args.text, 'Thank you for your compliance, darling 😘');
 });
