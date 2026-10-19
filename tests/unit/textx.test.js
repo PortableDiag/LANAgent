@@ -690,3 +690,20 @@ test('@mention from the user: reads the thread, replies into it, reports it; the
   assert.match(prompts[0], /UNTRUSTED SMS[\s\S]*When are we doing dinner/);
   assert.ok(p.sent.some(e => e.type === 'message' && /^Replied in "Dinner"/.test(e.body.text)));
 });
+
+test('two separate mentions with the same text and no message_id each get a reply (TextX 2119 #112)', async () => {
+  const { r } = sharedRig('On it.');
+  const p = await pairedPhone(r, { tools: ['send_sms'] });
+  const phone = setInterval(async () => {
+    for (const e of p.sent.filter(x => x.type === 'tool_call' && !x.answered)) {
+      e.answered = true;
+      await p.say(env('tool_result', { call_id: e.body.call_id, ok: true, result: { status: 'sent' } }));
+    }
+  }, 5);
+  const mention = () => env('event', { kind: 'mention', thread_id: 't9', thread: { title: 'Dinner' }, message: { direction: 'out', from: 'me', text: '@alice ?' } });
+  await p.say(mention());
+  await p.say(mention());
+  for (let i = 0; i < 40 && p.sent.filter(e => e.type === 'message' && /^Replied in/.test(e.body.text)).length < 2; i++) await tick();
+  clearInterval(phone);
+  assert.equal(p.sent.filter(e => e.type === 'tool_call' && e.body.name === 'send_sms').length, 2);
+});

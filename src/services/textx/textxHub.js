@@ -556,10 +556,14 @@ export class TextXHub {
     const m = body.message;
     const threadId = String(body.thread_id || m.thread_id || '');
     if (!threadId) return;
-    const key = `${device.id}:mention:${threadId}:${m.message_id || m.date || m.text}`;
+    // A resent envelope is already dropped by its id (receive). The mention's message has no
+    // message_id (TextX tells us before the SMS row exists), so only a dated one is deduped here:
+    // keying on the text alone would swallow a second identical "@ALICE ?" (TextX 2119 #112).
+    const stamp = m.message_id || m.date;
+    const key = stamp ? `${device.id}:mention:${threadId}:${stamp}:${m.text}` : null;
     this.seenEvents = this.seenEvents || new Map();
-    if (this.seenEvents.has(key)) return;
-    this.seenEvents.set(key, this.now());
+    if (key && this.seenEvents.has(key)) return;
+    if (key) this.seenEvents.set(key, this.now());
     this.replyDaily = this.replyDaily || new RateWindow(60, 24 * 3600_000);
     if (this.replyDaily.full(String(device.id), this.now())) return;
     const title = String(body.thread?.title || 'a conversation').slice(0, 80);
