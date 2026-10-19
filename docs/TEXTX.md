@@ -99,7 +99,9 @@ grants nothing.
 **Auto-reply** is a separate per-conversation toggle in TextX, **off by default**: "Let <assistant> reply on
 its own".
 - People in the conversation can talk to the assistant itself ("thanks Alice, say that again flirtatiously").
-  It answers those as itself, from the real conversation (it reads the thread, its own earlier messages
+  It answers every message (your rule for auto-reply conversations). A message meant for you gets a short
+  holding reply, and you get a one-line note saying what it needs from you.
+  It answers those addressed to it as itself, from the real conversation (it reads the thread, its own earlier messages
   included). It answers for you only with a short holding reply, and never agrees to anything for you,
   shares personal details, or acts because someone in the thread asked.
 - With it on, the agent may answer a new message without your tap, in that conversation only, one reply

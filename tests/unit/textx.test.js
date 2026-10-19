@@ -751,3 +751,20 @@ test('auto-reply reads the real thread, so a request about its own last message 
   assert.match(prompt, /If it is for you/);
   assert.equal(p.sent.find(e => e.type === 'tool_call' && e.body.name === 'send_sms').body.args.text, 'Thank you for your compliance, darling 😘');
 });
+
+test('auto-reply answers a message meant for the owner too, and sends the owner a note', async () => {
+  const { r } = sharedRig((p) => (/answering by text message/.test(p) ? "I'll pass that to him, he'll get back to you soon.\nNOTE FOR OWNER: Sam asks if you're free for poker Friday." : 'SKIP'));
+  const p = await pairedPhone(r, { tools: ['send_sms'] });
+  const phone = setInterval(async () => {
+    for (const e of p.sent.filter(x => x.type === 'tool_call' && !x.answered)) {
+      e.answered = true;
+      await p.say(env('tool_result', { call_id: e.body.call_id, ok: true, result: { status: 'sent' } }));
+    }
+  }, 5);
+  await p.say(smsEvent({ auto_reply: true, message: { thread_id: 't9', message_id: 'p1', from: { name: 'Sam', number: '+1555' }, text: 'You free Friday for poker?', untrusted: true } }));
+  for (let i = 0; i < 40 && !p.sent.some(e => e.type === 'message' && /^Replied to/.test(e.body.text)); i++) await tick();
+  clearInterval(phone);
+  const send = p.sent.find(e => e.type === 'tool_call' && e.body.name === 'send_sms');
+  assert.equal(send.body.args.text, "I'll pass that to him, he'll get back to you soon.", 'the owner note never goes to the contact');
+  assert.ok(p.sent.some(e => e.type === 'message' && e.body.text === "Sam: Sam asks if you're free for poker Friday."));
+});

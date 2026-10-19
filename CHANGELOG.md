@@ -2,6 +2,11 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.535] - 2026-10-19
+
+### Changed
+- **TextX auto-reply answers every message.** Per the owner's rule for auto-reply conversations, the agent no longer stays silent on a message meant for the owner. It sends a short holding reply ("I'll let Charles know you're asking about Friday — he'll get back to you"), and the owner gets a one-line note saying what they need to do. The note never goes to the contact.
+
 ## [2.25.534] - 2026-10-19
 
 ### Fixed
