@@ -108,9 +108,14 @@ its own".
   per incoming message, at most 6 per conversation an hour and 60 a day. Only sent replies count; when
   a limit stops one, you get a note.
 - The reply is written by a plain model call with no tools. The incoming text is untrusted data.
-- It never agrees to plans, payments or meetings, never shares codes or personal details, and answers SKIP
-  (no reply, a normal note to you instead) whenever it is unsure.
+- It never agrees to plans, payments or meetings and never shares codes or personal details.
 - Every auto-reply is reported in the agent's conversation ("Replied to Sam: …").
+
+**Voice replies** (TextX 0.3.21+): in TextX, each agent has **Replies: Text · Voice · Both**. The choice
+arrives as `reply_mode` in `hello` and on every `incoming` and `mention` event, and applies to auto-replies
+and @-mention replies. Voice sends the reply spoken in the agent's TTS voice (`reply.m4a`, mono AAC 32 kbps,
+at most 45 s) with no text; Both sends text and audio in one `send_sms`. If speech can't be made, the reply
+goes as text and the report says so ("as text: the voice reply failed: …"). Needs ffmpeg on the agent's host.
 - The phone enforces the toggle and its own limits (TextX 0.3.13: one reply per incoming message within 15 minutes, 6 per conversation an hour); the agent can't widen them.
 
 ## Agent extensions (`x.*`)

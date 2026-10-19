@@ -6,7 +6,7 @@ import { encrypt, decrypt } from '../../utils/encryption.js';
  *   mongoStore()  — production (devices, outbox, 7-day dedupe of inbound ids)
  *   memoryStore() — unit tests
  *
- * A device is { id, name, kid, key, base, deviceId, boundAt, lastSeenAt, appVersion,
+ * A device is { id, name, kid, key, base, deviceId, boundAt, lastSeenAt, appVersion, replyMode,
  * capabilities[], notify, watches[], revokedAt, createdAt }. `key` is the pairing's AES key:
  * the agent must hold it to decrypt, so it is stored encrypted under ENCRYPTION_KEY, never hashed.
  */
@@ -23,6 +23,7 @@ const deviceSchema = new mongoose.Schema({
   lastSeenAt: Date,
   appVersion: String,
   client: String,
+  replyMode: String, // text | voice | both, the phone's per-agent choice (TextX 0.3.21)
   capabilities: { type: [String], default: [] },
   notify: { type: Boolean, default: false },
   watches: { type: [mongoose.Schema.Types.Mixed], default: [] },
@@ -56,8 +57,8 @@ export const TextXDevice = mongoose.models.TextXDevice || mongoose.model('TextXD
 export const TextXOutbox = mongoose.models.TextXOutbox || mongoose.model('TextXOutbox', outboxSchema);
 export const TextXInbox = mongoose.models.TextXInbox || mongoose.model('TextXInbox', inboxSchema);
 
-const PUBLIC_FIELDS = ['name', 'kid', 'base', 'deviceId', 'boundAt', 'lastSeenAt', 'appVersion', 'client', 'capabilities',
-  'notify', 'watches', 'revokedAt', 'createdAt'];
+const PUBLIC_FIELDS = ['name', 'kid', 'base', 'deviceId', 'boundAt', 'lastSeenAt', 'appVersion', 'client', 'replyMode',
+  'capabilities', 'notify', 'watches', 'revokedAt', 'createdAt'];
 
 function toDevice(doc) {
   if (!doc) return null;

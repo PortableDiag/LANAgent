@@ -2,6 +2,11 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.536] - 2026-10-19
+
+### Added
+- **TextX voice replies.** TextX 0.3.21 lets the user choose, per agent, how its replies in other people's conversations go out: Text, Voice or Both. Auto-replies and @-mention replies follow that choice. Voice sends the reply spoken in the agent's own TTS voice as a short mono AAC `.m4a` (at most 45 seconds, the model is asked for under 60 words); Both sends the text and the audio in one message. If the voice can't be made, the reply goes as text and the report to the user says why. Replies to the user in their own conversation with the agent stay text.
+
 ## [2.25.535] - 2026-10-19
 
 ### Changed

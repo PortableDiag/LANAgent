@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { newPairing, pairingUri, sealJson, openJson, sealBytes, openBytes, kidFromAuth, ulid, P2A, A2P } from '../../src/services/textx/textxCrypto.js';
-import { TextXHub, envelopeProblem, untrusted, textxRequest } from '../../src/services/textx/textxHub.js';
+import { TextXHub, envelopeProblem, untrusted, textxRequest, encodeM4a } from '../../src/services/textx/textxHub.js';
 import { memoryStore } from '../../src/services/textx/textxStore.js';
 import { createTransport } from '../../src/services/textx/textxTransport.js';
 import { TextXRelayClient, relaySignature } from '../../src/services/textx/textxRelayClient.js';
@@ -767,4 +767,77 @@ test('auto-reply answers a message meant for the owner too, and sends the owner 
   const send = p.sent.find(e => e.type === 'tool_call' && e.body.name === 'send_sms');
   assert.equal(send.body.args.text, "I'll pass that to him, he'll get back to you soon.", 'the owner note never goes to the contact');
   assert.ok(p.sent.some(e => e.type === 'message' && e.body.text === "Sam: Sam asks if you're free for poker Friday."));
+});
+
+// TextX 0.3.21 (2119 #117): Replies: Text · Voice · Both, per agent, in hello and on every event.
+function voiceRig(answer, { tts = true } = {}) {
+  const s = sharedRig(answer);
+  const spoken = [];
+  if (tts) s.r.agent.ttsService = { generateSpeech: async (t, o) => { spoken.push({ t, o }); return { buffer: Buffer.from('MP3'), format: 'mp3' }; } };
+  s.r.hub.encodeVoice = async (b) => Buffer.from(`M4A:${b}`);
+  return { ...s, spoken };
+}
+function answeringPhone(p) {
+  return setInterval(async () => {
+    for (const e of p.sent.filter(x => x.type === 'tool_call' && !x.answered)) {
+      e.answered = true;
+      await p.say(env('tool_result', { call_id: e.body.call_id, ok: true, result: e.body.name === 'read_thread' ? [] : { status: 'sent' } }));
+    }
+  }, 5);
+}
+
+test('reply_mode voice: auto-reply goes as one spoken m4a with no text, kept off the server speaker, reported "by voice"', async () => {
+  const { r, prompts, spoken } = voiceRig((p) => (/answering by text message/.test(p) ? 'Hi Sam, they will call you back.' : 'SKIP'));
+  const p = await pairedPhone(r, { tools: ['send_sms'] });
+  const phone = answeringPhone(p);
+  await p.say(smsEvent({ auto_reply: true, reply_mode: 'voice' }));
+  for (let i = 0; i < 40 && !p.sent.some(e => e.type === 'message' && /^Replied to "Sam"/.test(e.body.text)); i++) await tick();
+  clearInterval(phone);
+  const call = p.sent.find(e => e.type === 'tool_call' && e.body.name === 'send_sms');
+  assert.deepEqual(call.body.args, { thread_id: 't9', text: '', auto: true,
+    attachments: [{ name: 'reply.m4a', mime: 'audio/mp4', data_b64: Buffer.from('M4A:MP3').toString('base64') }] });
+  assert.equal(spoken[0].t, 'Hi Sam, they will call you back.');
+  assert.equal(spoken[0].o.source, 'voice');
+  assert.match(prompts.find(x => /answering by text message/.test(x)), /spoken aloud/);
+  assert.ok(p.sent.some(e => e.type === 'message' && /^Replied to "Sam" by voice: "Hi Sam/.test(e.body.text)));
+});
+
+test('reply_mode from the last hello applies when the event has none; both = text and audio in one send', async () => {
+  const { r } = voiceRig('Friday works.');
+  const p = await pairedPhone(r, { tools: ['send_sms'] });
+  await p.say(env('hello', { protocol: 1, app: 'TextX', app_version: '0.3.21', capabilities: ['send_sms'], device: 'phone-1', reply_mode: 'both' }));
+  assert.equal((await r.store.getDevice(p.device.id)).replyMode, 'both');
+  const phone = answeringPhone(p);
+  await p.say(env('event', { kind: 'mention', thread_id: 't9', thread: { title: 'Dinner' }, message: { direction: 'out', from: 'me', text: '@alice when?' } }));
+  for (let i = 0; i < 40 && !p.sent.some(e => e.type === 'message' && /^Replied in "Dinner"/.test(e.body.text)); i++) await tick();
+  clearInterval(phone);
+  const sends = p.sent.filter(e => e.type === 'tool_call' && e.body.name === 'send_sms');
+  assert.equal(sends.length, 1);
+  assert.equal(sends[0].body.args.text, 'Friday works.');
+  assert.equal(sends[0].body.args.attachments[0].name, 'reply.m4a');
+  assert.ok(p.sent.some(e => e.type === 'message' && /^Replied in "Dinner" \(text and voice\)/.test(e.body.text)));
+});
+
+test('reply_mode text or unknown stays plain text; voice with no TTS falls back to text and says why', async () => {
+  const { r } = voiceRig('Sure.', { tts: false });
+  const p = await pairedPhone(r, { tools: ['send_sms'] });
+  const phone = answeringPhone(p);
+  await p.say(env('event', { kind: 'mention', thread_id: 't1', thread: { title: 'A' }, reply_mode: 'shout', message: { from: 'me', text: '@alice one', date: 'd1' } }));
+  await p.say(env('event', { kind: 'mention', thread_id: 't2', thread: { title: 'B' }, reply_mode: 'voice', message: { from: 'me', text: '@alice two', date: 'd2' } }));
+  for (let i = 0; i < 40 && p.sent.filter(e => e.type === 'message' && /^Replied in/.test(e.body.text)).length < 2; i++) await tick();
+  clearInterval(phone);
+  const sends = p.sent.filter(e => e.type === 'tool_call' && e.body.name === 'send_sms');
+  assert.deepEqual(sends.map(s => s.body.args), [{ thread_id: 't1', text: 'Sure.' }, { thread_id: 't2', text: 'Sure.' }]);
+  assert.ok(p.sent.some(e => e.type === 'message' && /^Replied in "B" \(as text: the voice reply failed: this agent has no voice set up\)/.test(e.body.text)));
+});
+
+test('encodeM4a makes a mono AAC .m4a with ffmpeg', async (t) => {
+  const { execFileSync } = await import('node:child_process');
+  let mp3;
+  try { mp3 = execFileSync('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-f', 'lavfi', '-i', 'sine=frequency=440:duration=1', '-f', 'mp3', 'pipe:1']); }
+  catch { t.skip('no ffmpeg with an mp3 encoder here'); return; }
+  const m4a = await encodeM4a(mp3);
+  assert.equal(m4a.subarray(4, 8).toString(), 'ftyp');
+  const probe = execFileSync('ffprobe', ['-v', 'error', '-show_entries', 'stream=codec_name,channels', '-of', 'csv=p=0', '-'], { input: m4a }).toString().trim();
+  assert.equal(probe, 'aac,1');
 });
