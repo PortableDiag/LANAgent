@@ -72,6 +72,27 @@ On the agent side:
 If the agent restarts while answering, it says afterwards which message it didn't finish (it doesn't re-run it, since the request may already have acted). A send that you haven't tapped yet returns at once ("it's on your phone"). Its outcome (sent,
 declined, expired) is reported back to the conversation the request came from.
 
+## Shared conversations are watched
+
+Sharing a conversation with the agent in TextX means it is watching it.
+- **It always knows.** Every new incoming message there reaches the agent (`event {shared:true, …}`) and joins
+  your conversation with it, labelled as someone else's words, so "what did Sam just say?" works. Your own
+  outgoing messages are not events.
+- **It tells you only when it needs you:** a question or request for you, plans or a time, something urgent.
+  It stays quiet for chit-chat and thanks, and sends at most 12 such notes an hour.
+- **An explicit watch** ("tell me when the landlord replies about the lease") still works, for its own
+  purpose, up to 7 days.
+
+**Auto-reply** is a separate per-conversation toggle in TextX, **off by default**: "Let <assistant> reply on
+its own".
+- With it on, the agent may answer a new message without your tap, in that conversation only, at most one
+  reply every 2 minutes per conversation and 30 a day.
+- The reply is written by a plain model call with no tools. The incoming text is untrusted data.
+- It never agrees to plans, payments or meetings, never shares codes or personal details, and answers SKIP
+  (no reply, a normal note to you instead) whenever it is unsure.
+- Every auto-reply is reported in the agent's conversation ("Replied to Sam: …").
+- The phone enforces the toggle and its limits; the agent can't widen them.
+
 ## Agent extensions (`x.*`)
 
 Beyond the shared protocol, a paired client can ask this agent for `x.status` (the dashboard's
@@ -133,6 +154,7 @@ What each layer guarantees, and what it doesn't.
 - **Limits:** 20 phone sessions per agent, 120 frames/min per session, 5 MB per request, 20 link attempts/min per IP, and `TEXTX_RELAY_MAX_AGENTS` (default 1000).
 
 ### What a paired device may do
+- **Auto-reply** sends without a tap only in a conversation whose TextX toggle is on, with phone-side limits. The composer has no tools and treats the incoming text as data.
 - **Tools run only on the phone that asked.** A request typed in one pairing's conversation can drive tool calls on that pairing alone, even if another paired phone allows the tool. A request from Telegram or the dashboard picks the paired phone that allows it.
 - Actions that act on someone's behalf (`block*`, `delete*`, `share*` …) need the stricter intent-match threshold, and the plugin refuses a block the user didn't ask for.
 - A pairing is its owner's, so the device talks to the agent as the owner, as on Telegram. Keep pairings to your own phones, and revoke lost ones (Settings → TextX → Revoke, or LANAgent app → Away from home off / sign out).

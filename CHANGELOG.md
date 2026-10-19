@@ -23,6 +23,7 @@ All notable changes to LANAgent will be documented in this file.
     - Phone contacts are also matched by first name when the full name or nickname isn't in the phone.
     - The AI intent step now really sees the recent conversation. It had been reading a store that conversations are never written to, so every follow-up was classified blind on every interface.
     - Email sends reply with a readable summary instead of raw JSON.
+  - **Shared conversations are watched.** The agent knows about every new message in a conversation you shared, and tells you only when it needs you (max 12 notes an hour). An optional per-conversation **auto-reply** toggle in TextX (off by default) lets it answer on its own, with no tools, never committing you to anything, with rate limits enforced by the phone. Every reply is reported to you.
   - **Notifications to TextX:** a per-phone switch sends the agent's notifications to its TextX conversation as well.
   - One pairing is one phone, and Revoke deletes its key. A second device holding the same key is refused on every message, over WebSocket and HTTP (each POST batch leads with the device's hello; GET and files carry `?device=`), and can't disconnect the real phone. Found in testing by TextXAgent. The endpoint is idempotent, with a 7-day replay window: resent or replayed messages are acknowledged and ignored. Messages wait in an outbox while the phone is offline.
   - API: `GET /api/textx/status`, `POST /api/textx/pair`, `PATCH|DELETE /api/textx/devices/:id`. The phone endpoint is `/textx/v1/*`.

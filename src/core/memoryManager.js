@@ -305,6 +305,19 @@ export class MemoryManager {
    * messages, 30 minutes; refilled from the transcript after a restart). Raw conversations are not
    * stored as Memory documents, so getConversationContext() below finds none for them.
    */
+  /**
+   * Put something the user didn't say into their live conversation, so follow-ups can refer to
+   * it ("what did Sam just say?"). Buffer only: no learning, no background review.
+   */
+  addContextTurn(userId, threadId, role, content) {
+    if (!this._conversationBuffer) this._conversationBuffer = new Map();
+    const key = conversationKey(String(userId || 'default'), threadId);
+    const now = Date.now();
+    const buf = (this._conversationBuffer.get(key) || []).filter(m => now - m.ts < 30 * 60 * 1000);
+    buf.push({ role, content: String(content).substring(0, 1000), ts: now });
+    this._conversationBuffer.set(key, buf.slice(-10));
+  }
+
   getRecentTurns(userId, threadId, limit = 6) {
     const buf = this._conversationBuffer?.get(conversationKey(String(userId || 'default'), threadId)) || [];
     return buf.slice(-limit).map(m => ({ role: m.role, content: m.content }));

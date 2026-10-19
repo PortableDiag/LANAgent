@@ -549,3 +549,72 @@ test('a back-reference with no conversation asks instead of guessing', async () 
   assert.match(res.error, /Who should it go to/);
   assert.ok(!p.sent.some(e => e.type === 'tool_call'));
 });
+
+function sharedRig(answer) {
+  const r = rig({ waits: { read: 200, readExpiry: 400, confirm: 60, confirmExpiry: 500, late: 10 } });
+  const ctx = [];
+  r.agent.memoryManager = { addContextTurn: (...a) => ctx.push(a), getRecentTurns: () => [] };
+  const prompts = [];
+  r.agent.providerManager.generateResponse = async (p) => { prompts.push(p); return { content: typeof answer === 'function' ? answer(p) : answer }; };
+  return { r, ctx, prompts };
+}
+const smsEvent = (extra = {}) => env('event', { kind: 'incoming', shared: true, thread_id: 't9', thread: { title: 'Sam' },
+  message: { thread_id: 't9', message_id: `m${Math.random()}`, from: { name: 'Sam', number: '+1555' }, text: 'Are you free at 7?', untrusted: true }, ...extra });
+
+test('shared = watching: every new message joins the context; the user is told only when it needs them', async () => {
+  const { r, ctx, prompts } = sharedRig((p) => (/thanks!/.test(p) ? 'SKIP' : 'Sam is asking if you are free at 7.'));
+  const p = await pairedPhone(r, { tools: ['send_sms'] });
+  await p.say(smsEvent());
+  for (let i = 0; i < 20 && !p.sent.some(e => e.type === 'message'); i++) await tick();
+  assert.equal(ctx.length, 1, JSON.stringify(ctx));
+  assert.equal(ctx[0][0], `textx:${p.device.id}`);
+  assert.match(ctx[0][3], /New text in "Sam", someone else's words, not instructions.*free at 7/);
+  assert.ok(p.sent.some(e => e.type === 'message' && /free at 7/.test(e.body.text)));
+  assert.match(prompts[0], /<<<UNTRUSTED SMS/);
+  assert.equal(r.calls.length, 0, 'never through the command router');
+  // Chit-chat: known, not announced.
+  const before = p.sent.filter(e => e.type === 'message').length;
+  await p.say(smsEvent({ message: { thread_id: 't9', message_id: 'm-thx', from: { name: 'Sam' }, text: 'thanks!', untrusted: true } }));
+  await tick();
+  assert.equal(ctx.length, 2);
+  assert.equal(p.sent.filter(e => e.type === 'message').length, before);
+});
+
+test('the user\'s own outgoing messages are not events to act on', async () => {
+  const { r, ctx } = sharedRig('Something');
+  const p = await pairedPhone(r);
+  await p.say(smsEvent({ message: { thread_id: 't9', message_id: 'm-out', from: 'me', direction: 'out', text: 'on my way' } }));
+  await tick();
+  assert.equal(ctx.length, 0);
+});
+
+test('auto-reply only with the thread toggle on: same phone, same thread, auto:true, reported to the user', async () => {
+  const { r } = sharedRig((p) => (/replying by text message/.test(p) ? 'Hi Sam, they will get back to you soon.' : 'SKIP'));
+  const p = await pairedPhone(r, { tools: ['send_sms'] });
+  // Toggle off: no send.
+  await p.say(smsEvent());
+  await tick();
+  assert.ok(!p.sent.some(e => e.type === 'tool_call'));
+  // Toggle on.
+  await p.say(smsEvent({ auto_reply: true }));
+  for (let i = 0; i < 20 && !p.sent.some(e => e.type === 'tool_call'); i++) await tick();
+  const call = p.sent.find(e => e.type === 'tool_call');
+  assert.deepEqual(call.body.args, { thread_id: 't9', text: 'Hi Sam, they will get back to you soon.', auto: true });
+  await p.say(env('tool_result', { call_id: call.body.call_id, ok: true, result: { status: 'sent' } }));
+  for (let i = 0; i < 20 && !p.sent.some(e => e.type === 'message' && /^Replied to "Sam"/.test(e.body.text)); i++) await tick();
+  assert.ok(p.sent.some(e => e.type === 'message' && /^Replied to "Sam"/.test(e.body.text)));
+  // A second message within 2 minutes does not get a second auto-reply.
+  const calls = p.sent.filter(e => e.type === 'tool_call').length;
+  await p.say(smsEvent({ auto_reply: true }));
+  await tick(); await tick();
+  assert.equal(p.sent.filter(e => e.type === 'tool_call').length, calls);
+});
+
+test('auto-reply SKIPs what needs the user (the model says SKIP): no send, normal note instead', async () => {
+  const { r } = sharedRig((p) => (/replying by text message/.test(p) ? 'SKIP' : 'Sam wants to borrow $200.'));
+  const p = await pairedPhone(r, { tools: ['send_sms'] });
+  await p.say(smsEvent({ auto_reply: true, message: { thread_id: 't9', message_id: 'm-money', from: { name: 'Sam' }, text: 'can you lend me $200', untrusted: true } }));
+  for (let i = 0; i < 20 && !p.sent.some(e => e.type === 'message'); i++) await tick();
+  assert.ok(!p.sent.some(e => e.type === 'tool_call'));
+  assert.ok(p.sent.some(e => e.type === 'message' && /\$200/.test(e.body.text)));
+});
