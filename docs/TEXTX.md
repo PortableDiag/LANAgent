@@ -72,6 +72,14 @@ On the agent side:
 If the agent restarts while answering, it says afterwards which message it didn't finish (it doesn't re-run it, since the request may already have acted). A send that you haven't tapped yet returns at once ("it's on your phone"). Its outcome (sent,
 declined, expired) is reported back to the conversation the request came from.
 
+**From Telegram or the dashboard, with TextX closed on the phone**, the phone has no live
+connection and checks in only every 15 minutes (unless TextX's "Always connected" is on). The
+agent then answers at once ("your phone isn't connected… I'll tell you here how it went") and
+finishes the request when the phone checks in, waiting up to 20 minutes for it. The result (or
+the question it needs answered, such as which of two contacts) arrives as a notification. Opening
+TextX makes the phone check in at once. Before 2.25.530 these requests waited 45 seconds and
+failed with "The phone didn't answer".
+
 ## Shared conversations are watched
 
 Sharing a conversation with the agent in TextX means it is watching it.

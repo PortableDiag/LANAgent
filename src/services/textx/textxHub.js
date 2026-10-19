@@ -109,6 +109,7 @@ export class TextXHub {
       readExpiry: waits.readExpiry ?? 120_000,
       confirm: waits.confirm ?? 25_000,  // after this a send is reported as waiting on the user's tap
       confirmExpiry: waits.confirmExpiry ?? 5 * 60_000,
+      offline: waits.offline ?? 20 * 60_000, // a read for a phone with no socket: its 15-minute check-in plus margin
       late: waits.late ?? 60_000         // grace after expiry for a result still in flight
     };
     this.sessions = new Map();   // deviceId(store id) -> { send(env), close(code, reason) }
@@ -416,7 +417,7 @@ export class TextXHub {
    * that phone and nowhere else. Falling through to another paired phone sent a block_number
    * to the operator's phone for a request typed on a test device (2026-10-18).
    */
-  async callTool(name, args = {}, { onLate, deviceId = null, onlyDevice = null } = {}) {
+  async callTool(name, args = {}, { onLate, deviceId = null, onlyDevice = null, offline = false } = {}) {
     if (!TOOLS.includes(name)) return { ok: false, error: { code: 'unknown_tool', message: name } };
     const device = await this.pickDevice(name, deviceId, onlyDevice);
     if (!device) {
@@ -425,8 +426,10 @@ export class TextXHub {
         : `No paired TextX phone allows ${name}. In TextX: Settings › Assistants › this agent › tools.` } };
     }
     const confirmed = CONFIRMED_TOOLS.has(name);
-    const waitMs = confirmed ? this.waits.confirm : this.waits.read;
-    const expiresMs = confirmed ? this.waits.confirmExpiry : this.waits.readExpiry;
+    // `offline`: the caller is not holding a turn open, so a read waits out the phone's next
+    // check-in (§3.2: within 15 minutes when TextX is closed) instead of 45 s.
+    const waitMs = offline ? this.waits.offline : confirmed ? this.waits.confirm : this.waits.read;
+    const expiresMs = (confirmed ? this.waits.confirmExpiry : offline ? 0 : this.waits.readExpiry) + (offline ? this.waits.offline : 0);
     const call_id = ulid(this.now());
     const expires_at = new Date(this.now() + expiresMs).toISOString();
 

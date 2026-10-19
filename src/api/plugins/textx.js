@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { BasePlugin } from '../core/basePlugin.js';
 import { getTextX } from '../../services/textx/index.js';
 import { textxRequest, untrusted, formatMessage } from '../../services/textx/textxHub.js';
@@ -24,6 +25,16 @@ function errorResult(r) {
   const code = r?.error?.code || 'internal';
   return { success: false, error: ERROR_TEXT[code] || r?.error?.message || code };
 }
+
+// The first phone tool each action needs: whether that phone is connected decides if the
+// request can be answered in this turn.
+const FIRST_TOOL = {
+  send: 'send_sms', schedule: 'schedule_message', threads: 'list_threads', read: 'list_threads',
+  search: 'search_messages', contact: 'contacts_lookup', watch: 'list_threads', scheduled: 'list_scheduled',
+  manageScheduled: 'list_scheduled', react: 'list_threads', markRead: 'list_threads', block: 'block_number'
+};
+// Set while a request runs in the background for a phone with no socket (see execute()).
+const offlineRun = new AsyncLocalStorage();
 
 const numberish = (s) => /^\+?[\d\s().-]{5,}$/.test(String(s).trim());
 // A recipient or a message that points back into the conversation instead of saying it.
@@ -133,6 +144,26 @@ export default class TextXPlugin extends BasePlugin {
   async execute(params = {}) {
     const { action, ...data } = params;
     if (data.needsParameterExtraction) await this._extractArgs(action, data);
+    // From Telegram or the dashboard, with the phone's TextX closed: the phone only checks in
+    // every 15 minutes (protocol §3.2), so a 45 s wait for a contact lookup always failed
+    // ("Send Wayne a text", 2026-10-18). Answer now; finish when the phone checks in.
+    const tool = FIRST_TOOL[action];
+    if (tool && !this.origin()) {
+      const device = await this.svc.hub.pickDevice(tool);
+      if (device && !this.svc.hub.isConnected(device.id)) {
+        offlineRun.run(true, () => this.run(action, data))
+          .then(r => this.agent.notify?.(`TextX: ${r.success ? r.result : r.error}`))
+          .catch(e => this.logger.error(`textx ${action} (phone offline) failed: ${e.message}`));
+        return { success: true, result: `Your phone (${device.name}) isn't connected to me right now, so this waits for TextX to check in, ` +
+          'within about 15 minutes (opening TextX does it at once). I\'ll tell you here how it went.' };
+      }
+    }
+    const res = await this.run(action, data);
+    if (!res.success) this.logger.warn(`textx ${action}: ${res.error}`);
+    return res;
+  }
+
+  async run(action, data) {
     try {
       switch (action) {
         case 'send': return await this.send(data);
@@ -185,7 +216,7 @@ export default class TextXPlugin extends BasePlugin {
   /** A request typed on a paired phone drives tools on that phone only; elsewhere (Telegram, dashboard) on your TextX phone. */
   call(name, args, opts = {}) {
     const origin = this.origin();
-    return this.svc.hub.callTool(name, args, { deviceId: origin, onlyDevice: origin, ...opts });
+    return this.svc.hub.callTool(name, args, { deviceId: origin, onlyDevice: origin, offline: !!offlineRun.getStore(), ...opts });
   }
 
   /** Names → numbers through the phone's contacts. Returns { numbers } or { error }. */

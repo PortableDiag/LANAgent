@@ -2,6 +2,11 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.530] - 2026-10-19
+
+### Fixed
+- **Texting from Telegram when TextX is closed on the phone.** "Send Wayne a text…" from Telegram failed with "The phone didn't answer": with TextX closed the phone checks in only every 15 minutes, but the agent waited 45 seconds for the contact lookup, and a send expired after 5 minutes. When the phone isn't connected, the agent now answers at once, finishes the request when the phone checks in (up to 20 minutes), and reports the outcome as a notification. A failed TextX action now logs its reason.
+
 ## [2.25.529] - 2026-10-18
 
 ### Added

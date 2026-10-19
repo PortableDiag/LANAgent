@@ -640,3 +640,29 @@ test('auto-reply SKIPs what needs the user (the model says SKIP): no send, norma
   assert.ok(!p.sent.some(e => e.type === 'tool_call'));
   assert.ok(p.sent.some(e => e.type === 'message' && /\$200/.test(e.body.text)));
 });
+
+test('from Telegram with the phone not connected: answers at once, finishes when the phone checks in', async () => {
+  const { default: TextXPlugin } = await import('../../src/api/plugins/textx.js');
+  const r = rig({ waits: { read: 30, readExpiry: 60, confirm: 30, confirmExpiry: 60, offline: 2000, late: 10 } });
+  const p = await pairedPhone(r, { tools: ['send_sms', 'contacts_lookup'] });
+  p.handlers.onClose?.();
+  r.hub.sessions.clear(); // TextX closed: no socket, the phone drains over HTTP every 15 minutes
+  const plugin = new TextXPlugin(r.agent);
+  Object.defineProperty(plugin, 'svc', { value: { hub: r.hub } });
+  const res = await plugin.execute({ action: 'send', to: 'Wayne', text: 'Thanks and goodnight' });
+  assert.equal(res.success, true);
+  assert.match(res.result, /isn't connected/);
+  await new Promise(ok => setTimeout(ok, 100)); // longer than the 30 ms read wait: must not time out
+  const answer = async (name, result) => {
+    for (let i = 0; i < 50; i++) {
+      const call = (await r.store.outboxUnacked(p.device.id)).map(x => x.env).find(e => e.type === 'tool_call' && e.body.name === name);
+      if (call) { await r.store.outboxAckId(p.device.id, call.id); return r.hub.onToolResult(p.device, { call_id: call.body.call_id, ok: true, result }); }
+      await tick();
+    }
+    assert.fail(`no ${name} call queued`);
+  };
+  await answer('contacts_lookup', [{ name: 'Wayne Williams', numbers: ['+15550199'] }]);
+  await answer('send_sms', { status: 'sent' });
+  for (let i = 0; i < 30 && !r.calls.some(c => c.notify); i++) await tick();
+  assert.deepEqual(r.calls.filter(c => c.notify).map(c => c.notify), ['TextX: Sent.']);
+});
