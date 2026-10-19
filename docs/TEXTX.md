@@ -86,6 +86,66 @@ when it reaches the agent through the relay; TextX doesn't use them.
 Each paired phone has **"send my notifications here"** in Settings → TextX. With it on, the
 agent's notifications (the ones Telegram gets) also arrive in its TextX conversation.
 
+## Clients
+
+Two kinds of phone app pair with an agent over this protocol. Each pairing is one install of one of them.
+
+| Client | Uses | Notes |
+|---|---|---|
+| **TextX** (SMS app) | chat + phone tools (§5) | Pair by QR, or on the same phone via **Open in TextX** (dashboard) / **Use in TextX** (LANAgent app) |
+| **LANAgent Android** 1.4.0+ | chat + `x.status` / `x.transcribe` / `x.speak` | Pairs itself the first time it reaches the agent at home; uses the relay only when the home address doesn't answer. No phone tools |
+
+## Security model
+
+What each layer guarantees, and what it doesn't.
+
+### Keys and pairing
+- A pairing is a 12-byte public **kid** plus a 32-byte random **key**. The key exists only:
+  - in the pairing QR/link, shown once by the dashboard (or handed by intent to TextX on the same phone);
+  - on the phone: in TextX's Keystore-backed secret store, or the LANAgent app's Keystore-encrypted prefs;
+  - on the agent: in Mongo `textx_devices`, encrypted under the agent's `ENCRYPTION_KEY`. It is never hashed, because the agent needs it to decrypt.
+- The key is never sent anywhere, not even during pairing. `Authorization: Bearer <kid>` grants nothing by itself.
+- Only the agent's owner can mint a pairing (`POST /api/textx/pair` needs the dashboard's JWT or an API key; where the dashboard is limited to trusted networks, so is pairing).
+
+### Encryption and authenticity
+- **Every** body, both ways, is AES-256-GCM under the pairing key with a random 96-bit nonce and AAD `textx1|<kid>|p2a` or `textx1|<kid>|a2p`. This covers WebSocket frames, POST/GET bodies, files and the avatar.
+- So a frame can't be read, can't be forged, can't be moved to another pairing, and can't be reflected back in the other direction.
+- A frame that fails to decrypt is dropped; three on a socket close it (`4400`).
+
+### One pairing, one device
+- The first `hello` binds the pairing to that install's random device id.
+- After that:
+  - A WebSocket is anonymous (no outbox, no frames) until its own hello names the bound device. Another device's hello closes it with `4401`, and the real phone's socket is never touched.
+  - Over HTTP, every POST batch must lead with the bound device's hello, and GET/files/avatar carry `?device=`. Anything else is a plaintext `401` and nothing is acted on.
+- Someone who copies the QR to a second phone gets nothing from it once the first phone has paired.
+
+### Replays and restarts
+- Envelope ids are deduplicated for **7 days**, persisted (`textx_inbox`, TTL), so a captured ciphertext replayed to the agent is acked and ignored. A `ts` older than 7 days, or more than 10 minutes in the future, is dropped.
+- A user message is recorded as pending **before** its ack. If the agent restarts mid-answer, it tells the phone afterwards which message was cut off. It does not re-run it, since the request may already have acted.
+
+### The relay (api.lanagent.net)
+- Agents dial out to it and prove an Ed25519 key, so no port is opened on anyone's network.
+- **It can see:** which agent fingerprint a request is for, the pairing kid (public), request sizes and status codes, client IPs.
+- **It can't:** read any content, forge or alter a frame, or reach a different agent than the fingerprint in the path.
+- **It stores** nothing, and logs only fingerprint, kind, status and size.
+- A compromised relay could drop or delay traffic, or replay old ciphertext (blocked by the dedupe above). It can't impersonate either side.
+- **Tenancy:** a phone session is routed only to the link whose fingerprint is in its URL. Fingerprints come from each agent's own key, proven by signature on every link. One agent can't receive another agent's traffic, and two users' data never share a key, an outbox or a conversation.
+- **Limits:** 20 phone sessions per agent, 120 frames/min per session, 5 MB per request, 20 link attempts/min per IP, and `TEXTX_RELAY_MAX_AGENTS` (default 1000).
+
+### What a paired device may do
+- A pairing is its owner's, so the device talks to the agent as the owner, as on Telegram. Keep pairings to your own phones, and revoke lost ones (Settings → TextX → Revoke, or LANAgent app → Away from home off / sign out).
+- Phone tools (TextX) are off until switched on in TextX, per agent.
+  - **Every send, schedule edit, reaction, delete or block is confirmed by a tap on the phone.**
+  - Reads cover only conversations shared with the agent.
+  - One-time codes and private (vault) conversations never leave the phone.
+- SMS text from other people reaches the model wrapped as **untrusted data**, never as instructions. Watched-conversation events go to a plain model call, never the command router.
+- `x.*` extensions run only for the bound device and never go through the command router.
+
+### Limits to know about
+- The agent holds every pairing key, encrypted under `ENCRYPTION_KEY` in the same `.env` as everything else. Anyone with root on the agent's host can decrypt that traffic. That is the same trust as the rest of the agent.
+- Text the user sends the agent goes to the agent's AI provider, as any chat does. With OpenRouter, the agent requires zero-data-retention routing.
+- The relay is a single point of availability, not of confidentiality. If it's down, phones use the home network (or the agent's own `TEXTX_PUBLIC_URL`).
+
 ## API
 
 | Route | Auth | |
