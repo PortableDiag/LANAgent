@@ -350,19 +350,17 @@ test('a second device on a bound pairing is refused on everything, over HTTP and
   const p = await pairedPhone(r); // bound to phone-1 over WS
   const post = (dev, envs) => r.transport.http({ method: 'POST', path: '/textx/v1/messages', headers: { authorization: `Bearer ${p.kid}`, ...(dev ? { 'x-textx-device': dev } : {}) },
     body: Buffer.from(JSON.stringify(sealJson(p.key, p.kid, P2A, envs))) });
-  // The repro: POST [hello{B}, message] with the same kid.
-  const res = openJson(p.key, p.kid, A2P, (await post('phone-2', [env('hello', { protocol: 1, device: 'phone-2', capabilities: [] }), env('message', { text: 'hi' })])).body.toString());
-  assert.deepEqual(res.acks, []);
-  assert.equal(res.envelopes.length, 2);
-  assert.ok(res.envelopes.every(e => e.type === 'error' && e.body.code === 'auth'));
-  // Claiming to be the bound device in the hello but not in the header is refused too.
-  const spoof = openJson(p.key, p.kid, A2P, (await post('phone-2', [env('hello', { protocol: 1, device: 'phone-1', capabilities: [] })])).body.toString());
-  assert.equal(spoof.envelopes[0].body.code, 'auth');
-  // No header at all.
-  const bare = openJson(p.key, p.kid, A2P, (await post(null, [env('message', { text: 'x' })])).body.toString());
-  assert.equal(bare.envelopes[0].body.code, 'auth');
-  // It cannot drain the outbox either.
-  assert.equal((await r.transport.http({ method: 'GET', path: '/textx/v1/messages', headers: { authorization: `Bearer ${p.kid}`, 'x-textx-device': 'phone-2' } })).status, 403);
+  // The repro: POST [hello{B}, message] with the same kid → plaintext 401, nothing acted on (§3.1).
+  assert.equal((await post(null, [env('hello', { protocol: 1, device: 'phone-2', capabilities: [] }), env('message', { text: 'hi' })])).status, 401);
+  // A batch without a leading hello, and with no header, is refused too.
+  assert.equal((await post(null, [env('message', { text: 'x' })])).status, 401);
+  // The header alias must agree with the batch's hello.
+  assert.equal((await post('phone-2', [env('hello', { protocol: 1, device: 'phone-1', capabilities: [] })])).status, 401);
+  // It cannot drain the outbox, by query or header.
+  const get = (q, h = {}) => r.transport.http({ method: 'GET', path: '/textx/v1/messages', query: q, headers: { authorization: `Bearer ${p.kid}`, ...h } });
+  assert.equal((await get('device=phone-2')).status, 401);
+  assert.equal((await get('')).status, 401);
+  assert.equal((await get('device=phone-1&since=0')).status, 200, 'the bound phone drains with ?device=');
   // WS from the second device: refused and closed, and the real phone's socket keeps working.
   const other = [];
   const h2 = await r.transport.ws({ headers: { authorization: `Bearer ${p.kid}` }, send: (t) => other.push(openJson(p.key, p.kid, A2P, t)), close: (c) => other.push({ closed: c }) });
@@ -376,6 +374,22 @@ test('a second device on a bound pairing is refused on everything, over HTTP and
   await tick();
   assert.equal(r.calls[0].input, 'still me');
   assert.ok(!p.sent.some(e => e.closed), 'the bound phone was not knocked off');
+});
+
+test('the bound phone over HTTP: every batch leads with its hello, no header needed; repeats replace the welcome', async () => {
+  const r = rig({ answer: 'ok' });
+  const { kid, key } = newPairing();
+  const dev = await r.store.createDevice({ name: 'P', kid, key, base: 'https://b' });
+  const post = (envs) => r.transport.http({ method: 'POST', path: '/textx/v1/messages', headers: { authorization: `Bearer ${kid}` }, body: Buffer.from(JSON.stringify(sealJson(key, kid, P2A, envs))) });
+  const hello = () => env('hello', { protocol: 1, device: 'A', capabilities: [] });
+  for (const text of ['one', 'two']) {
+    const res = openJson(key, kid, A2P, (await post([hello(), env('message', { text })])).body.toString());
+    assert.equal(res.acks.length, 2);
+  }
+  await tick();
+  assert.deepEqual(r.calls.map(c => c.input), ['one', 'two']);
+  const welcomes = (await r.store.outboxUnacked(dev.id)).filter(x => x.env.type === 'welcome');
+  assert.equal(welcomes.length, 1, 'a repeated hello replaces the pending welcome');
 });
 
 test('the bound phone over HTTP: device header + hello in one batch works', async () => {

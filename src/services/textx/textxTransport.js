@@ -68,26 +68,33 @@ export function createTransport(hub, { filesDir, avatarFile = () => null, logger
     const device = await auth(headers);
     if (!device) return json(401, { error: 'unknown pairing' });
     const seal = (v) => json(200, sealJson(device.key, device.kid, A2P, v));
-    // Which phone this is (§4: one pairing is one phone). Not secret; useless without the key.
-    const sender = headers['x-textx-device'] ? String(headers['x-textx-device']).slice(0, 128) : null;
-    const isBoundPhone = !device.deviceId || sender === device.deviceId;
+    // Which phone this is (§3.1 device binding; one pairing is one phone). POST: the batch's
+    // leading hello. GET and files: ?device=. X-TextX-Device is accepted as an alias for both.
+    // Not secret, and useless without the key.
+    const params = new URLSearchParams(query);
+    const headerDev = headers['x-textx-device'] ? String(headers['x-textx-device']).slice(0, 128) : null;
+    const askedDev = params.get('device') || headerDev;
+    const refuse = () => json(401, { error: 'this pairing belongs to another device, or the request did not say which device it is' });
     const raw = body ? Buffer.from(body) : Buffer.alloc(0);
     try {
       if (p === '/textx/v1/messages' && method === 'POST') {
         let envelopes;
         try { envelopes = openJson(device.key, device.kid, P2A, raw.toString('utf8')); } catch { return json(400, { error: 'bad_frame' }); }
+        if (!Array.isArray(envelopes)) return json(400, { error: 'body must be an array of envelopes' });
+        const lead = envelopes[0]?.type === 'hello' ? String(envelopes[0].body?.device || '').slice(0, 128) : null;
+        if (lead && headerDev && lead !== headerDev) return refuse();
+        const sender = lead || headerDev;
+        // Nothing in a batch that does not name the bound device is acted on.
+        if (!sender || (device.deviceId && sender !== device.deviceId)) return refuse();
+        if (!device.deviceId && !lead) return refuse();
         return seal(await hub.handlePost(device, envelopes, sender));
       }
       if (p === '/textx/v1/messages' && method === 'GET') {
-        // Only the bound phone drains its outbox.
-        if (device.deviceId && sender !== device.deviceId) return json(403, { error: 'this pairing belongs to another device' });
         if (!device.deviceId) return seal({ envelopes: [], cursor: '0' });
-        const since = new URLSearchParams(query).get('since');
-        return seal(await hub.drain(device, since));
+        if (askedDev !== device.deviceId) return refuse();
+        return seal(await hub.drain(device, params.get('since')));
       }
-      if ((p.startsWith('/textx/v1/files') || p === '/textx/v1/avatar') && (!device.deviceId || !isBoundPhone)) {
-        return json(403, { error: 'this pairing belongs to another device' });
-      }
+      if ((p.startsWith('/textx/v1/files') || p === '/textx/v1/avatar') && (!device.deviceId || askedDev !== device.deviceId)) return refuse();
       if (p === '/textx/v1/files' && method === 'POST') {
         if (raw.length > MAX_FILE + 64) return json(413, { error: 'too large' });
         let data;
@@ -145,6 +152,7 @@ export function createTransport(hub, { filesDir, avatarFile = () => null, logger
       // The device record may have changed (a hello bound it): read it fresh per frame.
       const current = (await hub.deviceByKid(device.kid)) || device;
       if (!session) {
+        if (env.type === 'ack' || env.type === 'pong') return;
         if (env.type !== 'hello') { raw(hub.envelope('error', { code: 'auth', message: 'send hello first' })); return; }
         const ok = await hub.receive(current, env, raw, null).catch(() => false);
         if (!ok) { shut(4401, 'pairing bound to another device'); return; }

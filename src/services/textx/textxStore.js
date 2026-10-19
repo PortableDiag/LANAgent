@@ -111,6 +111,9 @@ export function mongoStore() {
     async outboxAckId(id, envId) {
       if (envId) await TextXOutbox.updateOne({ device: id, envId: String(envId) }, { $set: { ackedAt: new Date() } });
     },
+    async outboxAckType(id, type) {
+      await TextXOutbox.updateMany({ device: id, 'env.type': type, ackedAt: null }, { $set: { ackedAt: new Date() } });
+    },
     /** True when this id was already seen (a resend or a replay); records it otherwise. */
     async inboxSeen(id, envId) {
       try {
@@ -145,6 +148,7 @@ export function memoryStore() {
     async outboxUnacked(id) { return outbox.filter(r => r.device === String(id) && !r.acked); },
     async outboxAckThrough(id, seq) { outbox.forEach(r => { if (r.device === String(id) && r.seq <= seq) r.acked = true; }); },
     async outboxAckId(id, envId) { outbox.forEach(r => { if (r.device === String(id) && r.env.id === envId) r.acked = true; }); },
+    async outboxAckType(id, type) { outbox.forEach(r => { if (r.device === String(id) && r.env.type === type) r.acked = true; }); },
     async inboxSeen(id, envId) { const k = `${id}:${envId}`; if (inbox.has(k)) return true; inbox.add(k); return false; },
     _outbox: outbox
   };

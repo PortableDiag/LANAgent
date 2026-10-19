@@ -19,7 +19,7 @@ textx-agent:<base>#<kid>.<key>
 - `key` is a 32-byte AES key that only the QR carries. Every frame between the phone and the
   agent is AES-256-GCM under it, so nothing in between can read or forge content.
 
-The first phone that says `hello` with a pairing owns it. Anything else holding the same key is refused on every envelope: a WebSocket is answered only after its `hello` names the bound device, and HTTP requests carry `X-TextX-Device: <device>`. A second device never sees a frame and can't knock the real phone's socket off. **Revoke**
+The first phone that says `hello` with a pairing owns it. Anything else holding the same key is refused on every envelope: a WebSocket is answered only after its `hello` names the bound device; over HTTP every `POST /messages` batch starts with the device's `hello`, and `GET /messages` and the file routes carry `?device=` (protocol §3.1; `X-TextX-Device` is accepted too). Anything else gets a plaintext 401. A second device never sees a frame and can't knock the real phone's socket off. **Revoke**
 in the same Settings card deletes the key, which also cuts off any phone using it.
 
 ## How the phone reaches the agent

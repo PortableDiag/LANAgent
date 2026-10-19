@@ -237,6 +237,9 @@ export class TextXHub {
     }
     reply(this.envelope('ack', { of: env.id }));
     if (seen && device.deviceId) return true;
+    // Every HTTP batch leads with a hello (§3.1): a repeat replaces the pending welcome rather
+    // than queueing another.
+    if (device.deviceId) await this.store.outboxAckType(device.id, 'welcome');
     const capabilities = (Array.isArray(b.capabilities) ? b.capabilities : []).filter(t => TOOLS.includes(t));
     const patch = { capabilities, appVersion: String(b.app_version || '').slice(0, 40), lastSeenAt: new Date(this.now()) };
     if (!device.deviceId) Object.assign(patch, { deviceId: phoneId, boundAt: new Date(this.now()) });
