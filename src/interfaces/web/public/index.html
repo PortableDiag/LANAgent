@@ -1335,9 +1335,10 @@
                                     <button class="btn btn-primary" onclick="dashboard.pairTextX()"><i class="fas fa-qrcode"></i> Pair a phone</button>
                                 </div>
                                 <div id="textx-pair-result" style="display:none;margin-top:12px;">
-                                    <p class="setting-description">In TextX: Settings › Assistants › Add › Agent › Scan QR. This code is shown once; anyone who scans it can talk to this agent as you, so don't share it.</p>
+                                    <p class="setting-description">On another phone, in TextX: Settings › Assistants › Add › Agent › Scan QR. On this phone, use Open in TextX (or Menu › Use in TextX in the LANAgent app). This code is shown once; anyone who scans it can talk to this agent as you, so don't share it.</p>
                                     <img id="textx-pair-qr" alt="Pairing QR code" style="background:#fff;padding:8px;border-radius:8px;max-width:260px;width:100%;">
                                     <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap;">
+                                        <a id="textx-pair-open" class="btn btn-primary btn-sm" href="#"><i class="fas fa-mobile-screen"></i> Open in TextX on this phone</a>
                                         <button class="btn btn-secondary btn-sm" onclick="dashboard.copyTextXPairing()"><i class="fas fa-copy"></i> Copy pairing text</button>
                                         <button class="btn btn-secondary btn-sm" onclick="dashboard.hideTextXPairing()">Done</button>
                                     </div>

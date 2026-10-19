@@ -6232,6 +6232,7 @@ class LANAgentDashboard {
             if (!r.success) { this.showNotification(`Not paired: ${r.error}`, 'error'); return; }
             this._textxPairing = r.data.uri;
             document.getElementById('textx-pair-qr').src = r.data.qr;
+            document.getElementById('textx-pair-open').href = r.data.uri;
             document.getElementById('textx-pair-result').style.display = '';
             document.getElementById('textx-pair-name').value = '';
             this.loadTextX();
@@ -6242,17 +6243,29 @@ class LANAgentDashboard {
 
     async copyTextXPairing() {
         if (!this._textxPairing) return;
+        // navigator.clipboard needs a secure context; a LAN dashboard is plain HTTP.
+        let ok = false;
         try {
-            await navigator.clipboard.writeText(this._textxPairing);
-            this.showNotification('Pairing text copied', 'success');
-        } catch (error) {
-            this.showNotification('Copy failed; scan the QR instead', 'error');
+            if (navigator.clipboard && window.isSecureContext) { await navigator.clipboard.writeText(this._textxPairing); ok = true; }
+        } catch (error) { ok = false; }
+        if (!ok) {
+            const ta = document.createElement('textarea');
+            ta.value = this._textxPairing;
+            ta.setAttribute('readonly', '');
+            ta.style.position = 'fixed';
+            ta.style.opacity = '0';
+            document.body.appendChild(ta);
+            ta.select();
+            try { ok = document.execCommand('copy'); } catch (error) { ok = false; }
+            ta.remove();
         }
+        this.showNotification(ok ? 'Pairing text copied' : 'Copy failed; scan the QR or use Open in TextX', ok ? 'success' : 'error');
     }
 
     hideTextXPairing() {
         this._textxPairing = null;
         document.getElementById('textx-pair-qr').removeAttribute('src');
+        document.getElementById('textx-pair-open').href = '#';
         document.getElementById('textx-pair-result').style.display = 'none';
     }
 
