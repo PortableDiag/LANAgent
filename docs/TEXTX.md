@@ -133,6 +133,8 @@ What each layer guarantees, and what it doesn't.
 - **Limits:** 20 phone sessions per agent, 120 frames/min per session, 5 MB per request, 20 link attempts/min per IP, and `TEXTX_RELAY_MAX_AGENTS` (default 1000).
 
 ### What a paired device may do
+- **Tools run only on the phone that asked.** A request typed in one pairing's conversation can drive tool calls on that pairing alone, even if another paired phone allows the tool. A request from Telegram or the dashboard picks the paired phone that allows it.
+- Actions that act on someone's behalf (`block*`, `delete*`, `share*` …) need the stricter intent-match threshold, and the plugin refuses a block the user didn't ask for.
 - A pairing is its owner's, so the device talks to the agent as the owner, as on Telegram. Keep pairings to your own phones, and revoke lost ones (Settings → TextX → Revoke, or LANAgent app → Away from home off / sign out).
 - Phone tools (TextX) are off until switched on in TextX, per agent.
   - **Every send, schedule edit, reaction, delete or block is confirmed by a tap on the phone.**
