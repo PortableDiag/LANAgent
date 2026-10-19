@@ -179,8 +179,10 @@ export default class TextXPlugin extends BasePlugin {
     }
   }
 
+  /** A request typed on a paired phone drives tools on that phone only; elsewhere (Telegram, dashboard) on your TextX phone. */
   call(name, args, opts = {}) {
-    return this.svc.hub.callTool(name, args, { deviceId: this.origin(), ...opts });
+    const origin = this.origin();
+    return this.svc.hub.callTool(name, args, { deviceId: origin, onlyDevice: origin, ...opts });
   }
 
   /** Names → numbers through the phone's contacts. Returns { numbers } or { error }. */
@@ -424,6 +426,12 @@ export default class TextXPlugin extends BasePlugin {
   }
 
   async block(data) {
+    // Only when the user actually said block: a weak intent match once turned "text <number> …"
+    // into a block request (the phone's confirmation caught it).
+    const said = String(data._context?.originalInput ?? data.originalInput ?? '');
+    if (said && !/\b(un)?block/i.test(said)) {
+      return { success: false, error: "That didn't sound like a request to block a number, so I didn't. Say \"block <number>\" if you meant to." };
+    }
     const number = String(data.number || data.to || '').replace(/[^\d+]/g, '');
     if (number.length < 5) return { success: false, error: 'Which number?' };
     return this.confirmed('block_number', { number, ...(data.unblock ? { unblock: true } : {}) });

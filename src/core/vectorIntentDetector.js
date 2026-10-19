@@ -142,9 +142,10 @@ export class VectorIntentDetector {
       // wrong action run on a conversational message ("what's your status?" ran
       // voice.telegram-voice at 0.53, "did you see me in Trellis?" ran trellisStatus
       // at 0.56), while every match from 0.6 up was correct. Below it, AI detection decides.
-      // Destructive or access-granting actions (restart, delete*, remove*, share*) need the
-      // highest threshold, whichever plugin owns them.
-      const isDangerousAction = metadata.action && /^(restart|redeploy|shutdown|stop|delete\w*|remove\w*|share\w*|unshare\w*)$/i.test(metadata.action);
+      // Destructive or access-granting actions (restart, delete*, remove*, share*, block*) need the
+      // highest threshold, whichever plugin owns them. block was missing: "Text 5551234567 …" matched
+      // textx block at 0.60 because its example is a bare number (2026-10-18; the phone's tap held).
+      const isDangerousAction = metadata.action && /^(restart|redeploy|shutdown|stop|delete\w*|remove\w*|share\w*|unshare\w*|block\w*|unblock\w*)$/i.test(metadata.action);
       let threshold = 0.6;
       if (isDangerousAction) threshold = Math.max(threshold, 0.7);
       if (similarity < threshold) {

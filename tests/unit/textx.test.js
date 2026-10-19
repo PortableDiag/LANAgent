@@ -468,3 +468,41 @@ test('agent extensions are refused to a second device like everything else', asy
     body: Buffer.from(JSON.stringify(sealJson(p.key, p.kid, P2A, [env('hello', { protocol: 1, device: 'intruder', capabilities: [] }), env('x.status', {})]))) });
   assert.equal((await post).status, 401);
 });
+
+test('a request from one phone never drives tools on another paired phone (TextX #96)', async () => {
+  const { default: TextXPlugin } = await import('../../src/api/plugins/textx.js');
+  const r = rig({ waits: { read: 100, readExpiry: 200, confirm: 100, confirmExpiry: 300, late: 10 } });
+  const emu = await pairedPhone(r, { tools: ['send_sms', 'contacts_lookup'] });
+  // A second, real phone on the same agent that does allow blocking.
+  const { kid, key } = newPairing();
+  await r.store.createDevice({ name: 'Oneplus15', kid, key, base: 'https://b' });
+  const other = [];
+  const h = await r.transport.ws({ headers: { authorization: `Bearer ${kid}` }, send: (t) => other.push(openJson(key, kid, A2P, t)), close() {} });
+  await h.onMessage(JSONstr(key, kid, env('hello', { protocol: 1, device: 'oneplus', capabilities: ['send_sms', 'block_number'] })));
+  const plugin = new TextXPlugin(r.agent);
+  Object.defineProperty(plugin, 'svc', { value: { hub: r.hub } });
+  const res = await textxRequest.run({ deviceId: emu.device.id }, () =>
+    plugin.execute({ action: 'block', number: '5551234567', _context: { originalInput: 'block 5551234567' } }));
+  assert.equal(res.success, false);
+  assert.match(res.error, /hasn't allowed|not allowed|has not allowed/i);
+  assert.ok(!other.some(e => e.type === 'tool_call'), 'the other phone got no tool call');
+  // From Telegram/dashboard (no originating phone) it may use the phone that allows it.
+  const pending = plugin.execute({ action: 'block', number: '5551234567', _context: { originalInput: 'block 5551234567' } });
+  await tick();
+  assert.ok(other.some(e => e.type === 'tool_call' && e.body.name === 'block_number'));
+  await pending;
+});
+
+test('block refuses when the user did not say block (the "Text <number>" misroute)', async () => {
+  const { default: TextXPlugin } = await import('../../src/api/plugins/textx.js');
+  const r = rig();
+  const p = await pairedPhone(r, { tools: ['block_number'] });
+  const plugin = new TextXPlugin(r.agent);
+  Object.defineProperty(plugin, 'svc', { value: { hub: r.hub } });
+  const res = await plugin.execute({ action: 'block', number: '5551234567', _context: { originalInput: "Text 5551234567 'signed test'" } });
+  assert.equal(res.success, false);
+  assert.match(res.error, /didn't sound like a request to block/);
+  assert.ok(!p.sent.some(e => e.type === 'tool_call'), 'no tool call was sent');
+});
+
+function JSONstr(key, kid, e) { return JSON.stringify(sealJson(key, kid, P2A, e)); }

@@ -118,9 +118,9 @@ export class TextXHub {
   isConnected(deviceId) { return this.sessions.has(String(deviceId)); }
 
   /** The phone a tool call goes to: bound, allowed that tool, connected first, then most recent. */
-  async pickDevice(tool, preferId = null) {
+  async pickDevice(tool, preferId = null, onlyId = null) {
     const all = (await this.store.listDevices()).filter(d => !d.revokedAt && d.deviceId &&
-      (d.capabilities || []).includes(tool));
+      (d.capabilities || []).includes(tool) && (!onlyId || String(d.id) === String(onlyId)));
     const first = (d) => (preferId && String(d.id) === String(preferId) ? 1 : 0);
     all.sort((a, b) => (first(b) - first(a)) || (this.isConnected(b.id) - this.isConnected(a.id)) ||
       (new Date(b.lastSeenAt || 0) - new Date(a.lastSeenAt || 0)));
@@ -402,11 +402,18 @@ export class TextXHub {
    * Run a phone tool. Resolves with the phone's {ok, result|error}. A confirmed send that the
    * user has not tapped yet resolves {ok:true, pending:true}; its outcome goes to `onLate`.
    */
-  async callTool(name, args = {}, { onLate, deviceId = null } = {}) {
+  /**
+   * `onlyDevice`: the request came from that pairing's conversation, so its tool calls may run on
+   * that phone and nowhere else. Falling through to another paired phone sent a block_number
+   * to the operator's phone for a request typed on a test device (2026-10-18).
+   */
+  async callTool(name, args = {}, { onLate, deviceId = null, onlyDevice = null } = {}) {
     if (!TOOLS.includes(name)) return { ok: false, error: { code: 'unknown_tool', message: name } };
-    const device = await this.pickDevice(name, deviceId);
+    const device = await this.pickDevice(name, deviceId, onlyDevice);
     if (!device) {
-      return { ok: false, error: { code: 'not_allowed', message: `No paired TextX phone allows ${name}. In TextX: Settings › Assistants › this agent › tools.` } };
+      return { ok: false, error: { code: 'not_allowed', message: onlyDevice
+        ? `This phone hasn't allowed ${name} for this agent (TextX: Settings › Assistants › this agent › tools).`
+        : `No paired TextX phone allows ${name}. In TextX: Settings › Assistants › this agent › tools.` } };
     }
     const confirmed = CONFIRMED_TOOLS.has(name);
     const waitMs = confirmed ? this.waits.confirm : this.waits.read;
