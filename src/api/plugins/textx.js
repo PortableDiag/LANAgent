@@ -26,6 +26,9 @@ function errorResult(r) {
 }
 
 const numberish = (s) => /^\+?[\d\s().-]{5,}$/.test(String(s).trim());
+// A recipient or a message that points back into the conversation instead of saying it.
+const PRONOUN = /^(him|her|them|they|he|she|this person|that person|the same person)$/i;
+const BACK_REFERENCE = /^(the )?(same|that|it|this)( same)?( thing| message| text| one| email| note)?( again| too)?$/i;
 
 export default class TextXPlugin extends BasePlugin {
   constructor(agent) {
@@ -194,7 +197,21 @@ export default class TextXPlugin extends BasePlugin {
       if (numberish(who)) { numbers.push(who.replace(/[^\d+]/g, '')); continue; }
       const r = await this.call('contacts_lookup', { query: who, limit: 5 });
       if (!r.ok) return { error: r.error?.code === 'not_allowed' ? `I need ${who}'s number: contact lookup is off for this agent in TextX.` : errorResult(r).error };
-      const hits = (r.result || []).filter(c => (c.numbers || []).length);
+      let hits = (r.result || []).filter(c => (c.numbers || []).length);
+      // "Wayne CommanderFog" (a nickname the agent knows) vs "Wayne Williams" in the phone: try
+      // each word, and take it only when exactly one contact answers.
+      if (!hits.length && /\s/.test(who)) {
+        const seen = new Map();
+        for (const word of who.split(/\s+/).filter(w => w.length >= 3)) {
+          const w = await this.call('contacts_lookup', { query: word, limit: 5 });
+          for (const c of (w.ok ? w.result || [] : [])) if ((c.numbers || []).length) seen.set(c.name, c);
+        }
+        if (seen.size === 1) hits = [...seen.values()];
+        else if (seen.size > 1) {
+          const options = [...seen.values()].flatMap(c => c.numbers.map(n => `${c.name}: ${n}`)).slice(0, 8).join('\n');
+          return { error: `"${who}" could be more than one contact; which one?\n${options}` };
+        }
+      }
       if (!hits.length) return { error: `No contact matches "${who}".` };
       const exact = hits.filter(c => c.name?.toLowerCase() === who.toLowerCase());
       const pick = exact.length === 1 ? exact[0] : hits.length === 1 ? hits[0] : null;
@@ -207,8 +224,43 @@ export default class TextXPlugin extends BasePlugin {
     return { numbers };
   }
 
+  /**
+   * "Send him the same thing": who and what come from the live conversation. Returns
+   * { to, text } (either may be unchanged) or { error } asking the user, never a guess.
+   */
+  async fromConversation(data, to, text) {
+    if (!PRONOUN.test(String(to || '').trim()) && !BACK_REFERENCE.test(String(text || '').trim())) return { to, text };
+    const uid = data._context?.userId || (this.origin() ? `textx:${this.origin()}` : null);
+    const turns = uid ? (this.agent.memoryManager?.getRecentTurns?.(uid, data._context?.threadId, 8) || []) : [];
+    if (!turns.length) return { error: "Who should it go to, and what should it say? I don't have the earlier conversation to go on." };
+    const said = String(data._context?.originalInput || '');
+    let got = {};
+    try {
+      const res = await this.agent.providerManager.generateResponse(
+        'Conversation so far (oldest first):\n' + turns.map(t => `${t.role}: ${t.content}`).join('\n') +
+        `\n\nThe user now says: "${said}"\n` +
+        'They want a text message sent. Work out from the conversation who it goes to (a name or number exactly as it ' +
+        'appears) and the exact message text. If they mean an earlier message ("the same thing"), copy that message body ' +
+        'word for word: the body only, no subject line, no email headers, no JSON. Answer one JSON object ' +
+        '{"to": string|null, "text": string|null}, null for anything the conversation does not settle.',
+        { maxTokens: 800, temperature: 0 });
+      const raw = String(res?.content || '');
+      got = JSON.parse(raw.slice(raw.indexOf('{'), raw.lastIndexOf('}') + 1)) || {};
+    } catch (err) {
+      this.logger.warn(`textx: could not resolve the reference from the conversation: ${err.message}`);
+    }
+    const newTo = PRONOUN.test(String(to || '').trim()) ? got.to : to;
+    const newText = BACK_REFERENCE.test(String(text || '').trim()) ? got.text : text;
+    if (!newTo || PRONOUN.test(String(newTo))) return { error: 'Who should I text? Give me their name or number.' };
+    if (!newText || BACK_REFERENCE.test(String(newText))) return { error: 'What should the text say?' };
+    return { to: newTo, text: String(newText).trim() };
+  }
+
   async send(data, scheduled = false) {
-    const text = String(data.text || data.message || '').trim();
+    const ref = await this.fromConversation(data, data.to || data.recipient || data.contact, String(data.text || data.message || '').trim());
+    if (ref.error) return { success: false, error: ref.error };
+    data = { ...data, to: ref.to };
+    const text = String(ref.text || '').trim();
     if (!text) return { success: false, error: 'What should the text say?' };
     if (scheduled && !Number.isFinite(Date.parse(data.at))) return { success: false, error: 'When should it be sent? Give a date and time.' };
     // A named conversation (a group) is addressed by its thread; people by their numbers.

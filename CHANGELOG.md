@@ -17,6 +17,12 @@ All notable changes to LANAgent will be documented in this file.
   - A message that a restart cuts off mid-answer is not lost silently. After the restart the agent says which message it didn't finish and asks you to send it again. It doesn't re-run it, because the request may already have done something. Found in testing by TextXAgent.
   - **Agent extensions** `x.status`, `x.transcribe` and `x.speak` (answered with `x.result`) let a paired client use status and voice. The LANAgent Android app 1.4.0 uses them away from home.
   - **Fixed before release (found live by TextXAgent):** a request typed in one phone's conversation could run a tool on a *different* paired phone, when its own phone hadn't allowed that tool. Tools now run only on the phone that asked; from Telegram or the dashboard, on the phone that allows it. "Text 5551234567 …" was matched to *block* by a weak vector match; `block` now needs the stricter threshold that delete and share already had, and the plugin refuses a block the user didn't ask for. The phone's confirmation had stopped it, and nothing was blocked.
+  - **Context awareness (found by the operator):**
+    - From TextX, "send X a message" means a **text**, unless you say email.
+    - Follow-ups like "send him the same thing via text" now use the conversation for who and what. If it isn't clear, the agent asks instead of guessing.
+    - Phone contacts are also matched by first name when the full name or nickname isn't in the phone.
+    - The AI intent step now really sees the recent conversation. It had been reading a store that conversations are never written to, so every follow-up was classified blind on every interface.
+    - Email sends reply with a readable summary instead of raw JSON.
   - **Notifications to TextX:** a per-phone switch sends the agent's notifications to its TextX conversation as well.
   - One pairing is one phone, and Revoke deletes its key. A second device holding the same key is refused on every message, over WebSocket and HTTP (each POST batch leads with the device's hello; GET and files carry `?device=`), and can't disconnect the real phone. Found in testing by TextXAgent. The endpoint is idempotent, with a 7-day replay window: resent or replayed messages are acknowledged and ignored. Messages wait in an outbox while the phone is offline.
   - API: `GET /api/textx/status`, `POST /api/textx/pair`, `PATCH|DELETE /api/textx/devices/:id`. The phone endpoint is `/textx/v1/*`.

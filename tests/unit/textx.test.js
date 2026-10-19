@@ -506,3 +506,46 @@ test('block refuses when the user did not say block (the "Text <number>" misrout
 });
 
 function JSONstr(key, kid, e) { return JSON.stringify(sealJson(key, kid, P2A, e)); }
+
+test('"send him the same thing via text" resolves who and what from the live conversation', async () => {
+  const { default: TextXPlugin } = await import('../../src/api/plugins/textx.js');
+  const r = rig({ waits: { read: 300, readExpiry: 600, confirm: 60, confirmExpiry: 2000, late: 10 } });
+  const p = await pairedPhone(r, { tools: ['send_sms', 'contacts_lookup'] });
+  const uid = `textx:${p.device.id}`;
+  r.agent.memoryManager = { getRecentTurns: (u) => (u === uid ? [
+    { role: 'user', content: 'Can you send Wayne CommanderFog a message and introduce yourself' },
+    { role: 'assistant', content: 'Emailed Wayne Williams (w@example.com).\nSubject: Hello\n\nHi Wayne, I am ALICE.' }] : []) };
+  let prompt = '';
+  r.agent.providerManager.generateResponse = async (pr) => { prompt = pr; return { content: '{"to":"Wayne CommanderFog","text":"Hi Wayne, I am ALICE."}' }; };
+  const plugin = new TextXPlugin(r.agent);
+  Object.defineProperty(plugin, 'svc', { value: { hub: r.hub } });
+  const answered = new Set();
+  const phone = setInterval(async () => {
+    for (const e of p.sent.filter(x => x.type === 'tool_call' && !answered.has(x.body.call_id))) {
+      answered.add(e.body.call_id);
+      const q = e.body.args.query;
+      if (e.body.name === 'contacts_lookup') await p.say(env('tool_result', { call_id: e.body.call_id, ok: true, result: q === 'Wayne' ? [{ name: 'Wayne Williams', numbers: ['+15550199'] }] : [] }));
+      if (e.body.name === 'send_sms') await p.say(env('tool_result', { call_id: e.body.call_id, ok: true, result: { status: 'sent' } }));
+    }
+  }, 5);
+  const res = await textxRequest.run({ deviceId: p.device.id }, () => plugin.execute({ action: 'send', to: 'him', text: 'the same thing',
+    _context: { userId: uid, originalInput: 'Great send him the same thing via text message' } }));
+  clearInterval(phone);
+  assert.equal(res.success, true, res.error);
+  assert.match(prompt, /Hi Wayne, I am ALICE/);
+  const send = p.sent.find(e => e.type === 'tool_call' && e.body.name === 'send_sms');
+  assert.deepEqual(send.body.args, { to: ['+15550199'], text: 'Hi Wayne, I am ALICE.' });
+});
+
+test('a back-reference with no conversation asks instead of guessing', async () => {
+  const { default: TextXPlugin } = await import('../../src/api/plugins/textx.js');
+  const r = rig();
+  const p = await pairedPhone(r, { tools: ['send_sms'] });
+  r.agent.memoryManager = { getRecentTurns: () => [] };
+  const plugin = new TextXPlugin(r.agent);
+  Object.defineProperty(plugin, 'svc', { value: { hub: r.hub } });
+  const res = await plugin.execute({ action: 'send', to: 'him', text: 'the same thing', _context: { userId: 'u', originalInput: 'send him the same thing' } });
+  assert.equal(res.success, false);
+  assert.match(res.error, /Who should it go to/);
+  assert.ok(!p.sent.some(e => e.type === 'tool_call'));
+});

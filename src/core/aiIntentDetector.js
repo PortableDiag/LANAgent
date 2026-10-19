@@ -3442,19 +3442,22 @@ Respond in JSON format:
       let conversationContext = '';
       if (context.userId && this.agent.memoryManager) {
         try {
-          const recentConversations = await this.agent.memoryManager.getConversationContext(context.userId, 5);
-          if (recentConversations && recentConversations.length > 0) {
-            conversationContext = 'Recent conversation for context:\n';
-            for (const conv of recentConversations.reverse()) {
-              const role = conv.metadata?.role || 'unknown';
-              const message = conv.content.substring(0, 150);
-              conversationContext += `${role}: ${message}\n`;
-            }
-            conversationContext += '\n';
+          // The live follow-up buffer: raw conversations are not Memory documents, so the older
+          // getConversationContext() lookup returned nothing and every follow-up ("send him the
+          // same thing") was classified blind (2026-10-18).
+          const turns = this.agent.memoryManager.getRecentTurns?.(context.userId, context.threadId, 6) || [];
+          if (turns.length) {
+            conversationContext = 'Recent conversation for context:\n' +
+              turns.map(t => `${t.role}: ${String(t.content).substring(0, 300)}`).join('\n') + '\n\n';
           }
         } catch (err) {
           logger.debug('Could not get conversation context for intent detection:', err);
         }
+      }
+      // Where the user is typing changes what "message" means.
+      if (context.platform === 'textx') {
+        conversationContext += 'Channel: the user is typing in their SMS texting app (TextX). "Send X a message", ' +
+          '"message X" or "tell X" means a text message (the textx send intent), unless they say email.\n\n';
       }
       
       // Pre-check: regex hints for intents that get lost in the 400+ intent prompt

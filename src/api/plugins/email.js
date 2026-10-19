@@ -2905,8 +2905,14 @@ Respond with JSON only:
         includeReadme: data.includeReadme
       });
 
+      // A sentence for the person who asked: without it the router showed this object as raw JSON.
+      const who = recipientName ? `${recipientName} (${resolvedEmail})` : resolvedEmail;
+      const summary = result?.success === false
+        ? `The email to ${who} was not sent: ${result.error || 'unknown error'}`
+        : `Emailed ${who}.\nSubject: ${finalSubject}\n\n${emailBody}`;
       return {
         ...result,
+        result: summary,
         aiGenerated: true,
         originalPrompt: data.prompt,
         generatedSubject: composed.subject,

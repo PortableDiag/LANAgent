@@ -1196,12 +1196,19 @@ If the user is telling you to DO something (retry, go ahead, write it, add it, f
             logger.info('Vector intent detector found a match');
             intentResult = vectorResult;
 
+            // From the TextX texting app, "send X a message" is a text. A vector match on email
+            // when the user never said email goes to the AI classifier, which knows the channel.
+            if (context.platform === 'textx' && intentResult.plugin === 'email' && !/\b(e-?mail|mail)\b/i.test(input)) {
+              logger.info('TextX request matched email without saying email: using the AI classifier');
+              intentResult = null;
+            }
+
             // Override: If vector matched a non-schedule Govee intent but input contains
             // schedule-related temporal phrases, fall through to the AI two-step classifier
             // which has better contextual understanding of schedule vs. immediate commands.
             // e.g. "instead of blue I want my toilet light to be red at night" should route
             // to schedules, not color, despite containing color words.
-            if (intentResult.plugin === 'govee' && intentResult.action !== 'schedules') {
+            if (intentResult && intentResult.plugin === 'govee' && intentResult.action !== 'schedules') {
               const schedulePattern = /\b(at night|at midnight|at noon|at dawn|at dusk|in the morning|in the evening|at \d{1,2}\s*(:\d{2})?\s*(am|pm)|every\s*(day|night|morning|evening)|daily|weekday|weekends?|schedule|instead of .+\b(at|every)\b)/i;
               if (schedulePattern.test(input)) {
                 logger.info(`Schedule-related phrase detected in input, overriding vector match (${intentResult.action}) to use Govee two-step classifier directly`);
@@ -3087,6 +3094,10 @@ Return ONLY a valid JSON object with the extracted parameters, nothing else.`;
           // Attach context (file, original input) for plugins
           if (!finalParams._context) finalParams._context = {};
           finalParams._context.originalInput = input;
+          // Who asked, so a plugin can read the live conversation (memoryManager.getRecentTurns) to
+          // resolve "him" / "the same thing".
+          finalParams._context.userId = context.userId;
+          if (context.threadId) finalParams._context.threadId = context.threadId;
           if (context.attachedFile) {
             finalParams._context.attachedFile = context.attachedFile;
           }

@@ -300,6 +300,16 @@ export class MemoryManager {
     }
   }
 
+  /**
+   * The last turns of this user's live conversation (the in-memory follow-up buffer: last 10
+   * messages, 30 minutes; refilled from the transcript after a restart). Raw conversations are not
+   * stored as Memory documents, so getConversationContext() below finds none for them.
+   */
+  getRecentTurns(userId, threadId, limit = 6) {
+    const buf = this._conversationBuffer?.get(conversationKey(String(userId || 'default'), threadId)) || [];
+    return buf.slice(-limit).map(m => ({ role: m.role, content: m.content }));
+  }
+
   async getConversationContext(userId, limit = 20) {
     return await Memory.find({
       type: "conversation",
