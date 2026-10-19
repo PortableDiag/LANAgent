@@ -143,7 +143,8 @@ export class TelegramDashboard extends TelegramInterface {
     this.guestLimiter = new GuestLimiter();
     this.bot.use(async (ctx, next) => {
       const handled = await handleGuestUpdate(ctx, {
-        agent: this.agent, isOwner: (id) => this.multiUserSupport.isMaster(id), limiter: this.guestLimiter
+        agent: this.agent, isOwner: (id) => this.multiUserSupport.isMaster(id), limiter: this.guestLimiter,
+        runAsOwner: (text, from) => this.runAsOwnerRequest(text, from, `📌 You asked me from another chat: "${text.split('\n')[0].slice(0, 200)}"`)
       }).catch(err => { logger.warn(`[guest] ${err.message}`); return true; });
       return handled ? undefined : next();
     });
@@ -279,7 +280,32 @@ export class TelegramDashboard extends TelegramInterface {
       getBotInfo: () => this.bot.telegram.getMe().catch(() => this.bot.botInfo)
     });
     // Start command
+    // Inline mode (@bot <request> in any chat, owner only): Telegram asks on every keystroke and
+    // nothing is run until the owner taps the button, which opens our private chat with
+    // /start do_<id>. Before 2.25.532 inline queries had no handler at all, so "@alice remind me…"
+    // sat on Telegram's inline search placeholder (2026-10-19).
+    this.inlineRequests = new Map();
+    this.bot.on('inline_query', async (ctx) => {
+      const personal = { cache_time: 0, is_personal: true };
+      if (!ctx.isMaster) return ctx.answerInlineQuery([], personal).catch(() => {});
+      const name = this.agent.config.name || 'your agent';
+      const q = String(ctx.inlineQuery?.query || '').replace(/^\/+/, '').trim();
+      if (!q) return ctx.answerInlineQuery([], { ...personal, button: { text: `Type what ${name} should do`, start_parameter: 'inline' } }).catch(() => {});
+      const id = (Date.now().toString(36) + Math.random().toString(36).slice(2, 6)).slice(-12);
+      this.inlineRequests.set(id, { text: q, at: Date.now() });
+      for (const [k, v] of this.inlineRequests) if (Date.now() - v.at > 30 * 60_000 || this.inlineRequests.size > 100) this.inlineRequests.delete(k);
+      await ctx.answerInlineQuery([], { ...personal, button: { text: `✅ ${name}: ${q}`.slice(0, 64), start_parameter: `do_${id}` } })
+        .catch(err => logger.warn(`[inline] answer failed: ${err.description || err.message}`));
+    });
+
     this.bot.command('start', async (ctx) => {
+      const payload = String(ctx.message?.text || '').split(/\s+/)[1] || '';
+      const queued = payload.startsWith('do_') ? this.inlineRequests?.get(payload.slice(3)) : null;
+      if (queued && ctx.isMaster) {
+        this.inlineRequests.delete(payload.slice(3));
+        return this.runAsOwnerRequest(queued.text, ctx.from, null, ctx.message.message_id);
+      }
+      if (payload.startsWith('do_')) return ctx.reply('That request expired. Type it here and I\'ll do it.');
       const agentName = this.agent.config.name;
       await ctx.reply(
         `🤖 Hello! I'm ${agentName}, your personal AI assistant.\n\n` +
@@ -1779,6 +1805,27 @@ export class TelegramDashboard extends TelegramInterface {
         await ctx.reply(`❌ Failed to process voice message: ${error.message}`);
       }
     });
+  }
+
+  /**
+   * Run [text] as if the owner had typed it in our private chat: the same pipeline as a typed
+   * message (router, streaming, files, approvals). Used for requests made elsewhere (an inline
+   * query, a guest summons). [header] is posted first so the request is visible in the chat;
+   * without it, [messageId] is the owner's own message to react to.
+   */
+  async runAsOwnerRequest(text, from, header, messageId = null) {
+    if (!this.multiUserSupport.isMaster(String(from?.id))) throw new Error('owner only');
+    const note = header ? await this.bot.telegram.sendMessage(from.id, header) : null;
+    const message = {
+      message_id: note?.message_id || messageId, date: Math.floor(Date.now() / 1000),
+      chat: { id: from.id, type: 'private', first_name: from.first_name, username: from.username },
+      from: { id: from.id, is_bot: false, first_name: from.first_name, username: from.username },
+      text: String(text).replace(/^\/+/, '')
+    };
+    // Not awaited: the caller may be an update of this same chat, which the per-chat queue would
+    // otherwise make wait on itself.
+    setImmediate(() => this.bot.handleUpdate({ update_id: 0, message })
+      .catch(err => logger.warn(`[telegram] owner request failed: ${err.message}`)));
   }
 
   /**

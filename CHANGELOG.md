@@ -2,6 +2,12 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.532] - 2026-10-19
+
+### Fixed
+- **Telegram: "@ALICE remember what my friend said" now does it.** An @mention in a chat the bot is not in (guest mode) was always chat-only, so a request to remember or remind came back as a suggested reply. When the owner asks for a task (remember, remind, save, schedule…), it now runs as an ordinary request in the owner's private chat, with the message they replied to passed in as data. The shared chat only sees "Got it". Questions ("@ALICE is this true?") are still answered in the chat, and nobody but the owner can trigger a task.
+- **Telegram inline mode works.** The bot advertised inline mode but had no handler, so typing "@bot remind me…" sat on Telegram's search placeholder. For the owner, inline mode now offers a button that opens the private chat and runs the request there. Everyone else gets nothing.
+
 ## [2.25.531] - 2026-10-19
 
 ### Added
