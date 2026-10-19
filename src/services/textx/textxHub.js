@@ -82,6 +82,15 @@ class RateWindow {
     this.hits.set(key, list);
     return true;
   }
+  /** True when [key] has no room left, without using any. */
+  full(key, now = Date.now()) {
+    return (this.hits.get(key) || []).filter(t => t > now - this.windowMs).length >= this.limit;
+  }
+  record(key, now = Date.now()) {
+    const list = (this.hits.get(key) || []).filter(t => t > now - this.windowMs);
+    list.push(now);
+    this.hits.set(key, list);
+  }
 }
 
 export class TextXHub {
@@ -533,15 +542,22 @@ export class TextXHub {
 
   /**
    * Reply on the user's behalf in a shared thread whose auto-reply toggle is on (TextX). A plain
-   * model call, no tools, the incoming text as untrusted data; SKIP whenever unsure. At most one
-   * reply per incoming message and per thread every 2 minutes. Every reply is reported to the
-   * user. Returns true when it replied (or tried to).
+   * model call, no tools, the incoming text as untrusted data; SKIP whenever unsure. One reply per
+   * incoming message (events are deduplicated), at most 6 per conversation an hour (the phone's own
+   * cap) and 60 a day per phone, a guard against two auto-repliers answering each other. A
+   * 1-per-2-minutes cap here used to swallow a real back-and-forth (2026-10-18). Only replies that
+   * are sent count. Every reply is reported to the user. Returns true when it replied (or tried to).
    */
   async autoReply(device, { threadId, title, recent, m }) {
-    this.replyRate = this.replyRate || new RateWindow(1, 120_000);
-    this.replyDaily = this.replyDaily || new RateWindow(30, 24 * 3600_000);
+    this.replyHourly = this.replyHourly || new RateWindow(6, 3600_000);
+    this.replyDaily = this.replyDaily || new RateWindow(60, 24 * 3600_000);
     const tKey = `${device.id}:${threadId}`;
-    if (!threadId || !this.replyRate.allow(tKey, this.now()) || !this.replyDaily.allow(String(device.id), this.now())) return false;
+    if (!threadId) return false;
+    if (this.replyHourly.full(tKey, this.now()) || this.replyDaily.full(String(device.id), this.now())) {
+      this.logger.info?.(`TextX: auto-reply in "${title}" held back (6 an hour per conversation / 60 a day reached)`);
+      await this.deliver(device, 'message', { text: `New message in "${title}" — I didn't auto-reply: the hourly auto-reply limit for this conversation is reached.` });
+      return true;
+    }
     const owner = process.env.OWNER_NAME || 'the person whose phone this is';
     const context = recent.length ? `Earlier messages:\n${untrusted('SMS', recent.join('\n'))}\n` : '';
     let text = '';
@@ -560,6 +576,8 @@ export class TextXHub {
       return false;
     }
     if (!text || /^SKIP\b/i.test(text)) return false;
+    this.replyHourly.record(tKey, this.now());
+    this.replyDaily.record(String(device.id), this.now());
     const report = (r) => this.deliver(device, 'message', {
       text: r?.ok && (r.result?.status === 'sent') ? `Replied to "${title}": "${text}"`
         : r?.ok && r.pending ? `Drafted a reply to "${title}" for you to confirm: "${text}"`

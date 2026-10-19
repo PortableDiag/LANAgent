@@ -85,8 +85,9 @@ Sharing a conversation with the agent in TextX means it is watching it.
 
 **Auto-reply** is a separate per-conversation toggle in TextX, **off by default**: "Let <assistant> reply on
 its own".
-- With it on, the agent may answer a new message without your tap, in that conversation only, at most one
-  reply every 2 minutes per conversation and 30 a day.
+- With it on, the agent may answer a new message without your tap, in that conversation only, one reply
+  per incoming message, at most 6 per conversation an hour and 60 a day. Only sent replies count; when
+  a limit stops one, you get a note.
 - The reply is written by a plain model call with no tools. The incoming text is untrusted data.
 - It never agrees to plans, payments or meetings, never shares codes or personal details, and answers SKIP
   (no reply, a normal note to you instead) whenever it is unsure.

@@ -603,11 +603,33 @@ test('auto-reply only with the thread toggle on: same phone, same thread, auto:t
   await p.say(env('tool_result', { call_id: call.body.call_id, ok: true, result: { status: 'sent' } }));
   for (let i = 0; i < 20 && !p.sent.some(e => e.type === 'message' && /^Replied to "Sam"/.test(e.body.text)); i++) await tick();
   assert.ok(p.sent.some(e => e.type === 'message' && /^Replied to "Sam"/.test(e.body.text)));
-  // A second message within 2 minutes does not get a second auto-reply.
-  const calls = p.sent.filter(e => e.type === 'tool_call').length;
+  // A back-and-forth: the next message seconds later gets its own reply (a 2-minute cap used to swallow it).
+  const answerAll = setInterval(async () => {
+    for (const e of p.sent.filter(x => x.type === 'tool_call' && !x.done)) { e.done = true; await p.say(env('tool_result', { call_id: e.body.call_id, ok: true, result: { status: 'sent' } })); }
+  }, 5);
+  for (let n = 2; n <= 6; n++) {
+    await p.say(smsEvent({ auto_reply: true }));
+    for (let i = 0; i < 20 && p.sent.filter(e => e.type === 'tool_call').length < n; i++) await tick();
+    assert.equal(p.sent.filter(e => e.type === 'tool_call').length, n, `reply ${n} was sent`);
+  }
+  // The 7th within the hour is held back, and the user is told.
   await p.say(smsEvent({ auto_reply: true }));
+  for (let i = 0; i < 20 && !p.sent.some(e => e.type === 'message' && /hourly auto-reply limit/.test(e.body.text)); i++) await tick();
+  clearInterval(answerAll);
+  assert.equal(p.sent.filter(e => e.type === 'tool_call').length, 6);
+  assert.ok(p.sent.some(e => e.type === 'message' && /hourly auto-reply limit/.test(e.body.text)));
+});
+
+test('an auto-reply SKIP does not use up the conversation\'s hourly allowance', async () => {
+  let skip = true;
+  const { r } = sharedRig((p) => (/replying by text message/.test(p) ? (skip ? 'SKIP' : 'Sure thing.') : 'SKIP'));
+  const p = await pairedPhone(r, { tools: ['send_sms'] });
+  for (let n = 0; n < 7; n++) await p.say(smsEvent({ auto_reply: true }));
   await tick(); await tick();
-  assert.equal(p.sent.filter(e => e.type === 'tool_call').length, calls);
+  skip = false;
+  await p.say(smsEvent({ auto_reply: true }));
+  for (let i = 0; i < 20 && !p.sent.some(e => e.type === 'tool_call'); i++) await tick();
+  assert.ok(p.sent.some(e => e.type === 'tool_call'), 'seven SKIPs did not exhaust the cap');
 });
 
 test('auto-reply SKIPs what needs the user (the model says SKIP): no send, normal note instead', async () => {
