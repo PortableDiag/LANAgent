@@ -22,7 +22,7 @@ export function createTextXPhoneRouter(agent) {
       method: req.method,
       path: `/textx/v1${req.path}`,
       query: req.originalUrl.includes('?') ? req.originalUrl.slice(req.originalUrl.indexOf('?') + 1) : '',
-      headers: { authorization: req.headers.authorization },
+      headers: { authorization: req.headers.authorization, 'x-textx-device': req.headers['x-textx-device'] },
       body
     });
     res.status(out.status);

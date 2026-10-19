@@ -68,16 +68,25 @@ export function createTransport(hub, { filesDir, avatarFile = () => null, logger
     const device = await auth(headers);
     if (!device) return json(401, { error: 'unknown pairing' });
     const seal = (v) => json(200, sealJson(device.key, device.kid, A2P, v));
+    // Which phone this is (§4: one pairing is one phone). Not secret; useless without the key.
+    const sender = headers['x-textx-device'] ? String(headers['x-textx-device']).slice(0, 128) : null;
+    const isBoundPhone = !device.deviceId || sender === device.deviceId;
     const raw = body ? Buffer.from(body) : Buffer.alloc(0);
     try {
       if (p === '/textx/v1/messages' && method === 'POST') {
         let envelopes;
         try { envelopes = openJson(device.key, device.kid, P2A, raw.toString('utf8')); } catch { return json(400, { error: 'bad_frame' }); }
-        return seal(await hub.handlePost(device, envelopes));
+        return seal(await hub.handlePost(device, envelopes, sender));
       }
       if (p === '/textx/v1/messages' && method === 'GET') {
+        // Only the bound phone drains its outbox.
+        if (device.deviceId && sender !== device.deviceId) return json(403, { error: 'this pairing belongs to another device' });
+        if (!device.deviceId) return seal({ envelopes: [], cursor: '0' });
         const since = new URLSearchParams(query).get('since');
         return seal(await hub.drain(device, since));
+      }
+      if ((p.startsWith('/textx/v1/files') || p === '/textx/v1/avatar') && (!device.deviceId || !isBoundPhone)) {
+        return json(403, { error: 'this pairing belongs to another device' });
       }
       if (p === '/textx/v1/files' && method === 'POST') {
         if (raw.length > MAX_FILE + 64) return json(413, { error: 'too large' });
@@ -109,35 +118,48 @@ export function createTransport(hub, { filesDir, avatarFile = () => null, logger
    * A phone's WebSocket. `send(text)` and `close(code, reason)` belong to whichever socket
    * carries it. Returns null for an unknown pairing (refuse with 401), else the session's
    * frame and close handlers.
+   *
+   * The socket is anonymous until its hello names the device the pairing is bound to (or binds
+   * it). Only then is it attached to the hub, gets the outbox and is sent anything: a second
+   * device holding the key never sees a frame and cannot replace the real phone's socket.
    */
   async function ws({ headers = {}, send, close }) {
     const device = await auth(headers);
     if (!device) return null;
     let bad = 0;
     let closed = false;
-    const session = await hub.attach(device, {
-      send: (env) => { if (!closed) send(JSON.stringify(sealJson(device.key, device.kid, A2P, env))); },
-      close: (code, reason) => { if (!closed) { closed = true; close(code, reason); } }
-    });
+    let sender = null;   // the device this socket proved, once its hello was accepted
+    let session = null;
+    const raw = (env) => { if (!closed) send(JSON.stringify(sealJson(device.key, device.kid, A2P, env))); };
+    const shut = (code, reason) => { if (!closed) { closed = true; close(code, reason); } };
+
     // Frames are handled in arrival order: a message sent right behind its hello must see the
     // pairing already bound.
     let queue = Promise.resolve();
     const handle = async (text) => {
       let env;
       try { env = openJson(device.key, device.kid, P2A, String(text)); } catch {
-        if (++bad >= BAD_FRAMES_BEFORE_CLOSE) session.close(4400, 'frames do not decrypt');
+        if (++bad >= BAD_FRAMES_BEFORE_CLOSE) shut(4400, 'frames do not decrypt');
         return;
       }
       // The device record may have changed (a hello bound it): read it fresh per frame.
       const current = (await hub.deviceByKid(device.kid)) || device;
-      await hub.onSocketEnvelope(current, env).catch(e => logger.error?.(`TextX frame failed: ${e.message}`));
+      if (!session) {
+        if (env.type !== 'hello') { raw(hub.envelope('error', { code: 'auth', message: 'send hello first' })); return; }
+        const ok = await hub.receive(current, env, raw, null).catch(() => false);
+        if (!ok) { shut(4401, 'pairing bound to another device'); return; }
+        sender = String(env.body.device);
+        session = await hub.attach(current, { send: raw, close: shut });
+        return;
+      }
+      await hub.onSocketEnvelope(current, env, sender).catch(e => logger.error?.(`TextX frame failed: ${e.message}`));
     };
     return {
       onMessage(text) {
         queue = queue.then(() => handle(text));
         return queue;
       },
-      onClose() { closed = true; hub.detach(device, session); }
+      onClose() { closed = true; if (session) hub.detach(device, session); }
     };
   }
 

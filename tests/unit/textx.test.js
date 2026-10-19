@@ -85,7 +85,7 @@ test('hello binds the pairing to one device and gets a welcome', async () => {
   // A second phone with the same pairing is refused.
   await p.say(env('hello', { protocol: 1, device: 'phone-2', capabilities: [] }));
   assert.ok(p.sent.some(e => e.type === 'error' && e.body.code === 'auth'));
-  assert.ok(p.sent.some(e => e.closed === 4401));
+  assert.equal((await r.store.getDevice(p.device.id)).deviceId, 'phone-1', 'the binding is unchanged');
 });
 
 test('a message runs the router as the owner and the reply comes back', async () => {
@@ -142,7 +142,7 @@ test('HTTP: POST returns acks, GET drains the outbox and acks through the cursor
   const r = rig({ answer: 'queued reply' });
   const { kid, key } = newPairing();
   const device = await r.store.createDevice({ name: 'Pixel', kid, key, base: 'https://b' });
-  const auth = { authorization: `Bearer ${kid}` };
+  const auth = { authorization: `Bearer ${kid}`, 'x-textx-device': 'p1' };
   const hello = env('hello', { protocol: 1, device: 'p1', capabilities: [] });
   const msg = env('message', { text: 'hey' });
   const post = await r.transport.http({ method: 'POST', path: '/textx/v1/messages', headers: auth, body: Buffer.from(JSON.stringify(sealJson(key, kid, P2A, [hello, msg]))) });
@@ -162,7 +162,9 @@ test('unacked envelopes are resent when the socket comes back', async () => {
   const p = await pairedPhone(r);
   await r.hub.deliver(await r.store.getDevice(p.device.id), 'message', { text: 'while you were away' });
   const again = [];
-  await r.transport.ws({ headers: { authorization: `Bearer ${p.kid}` }, send: (t) => again.push(openJson(p.key, p.kid, A2P, t)), close() {} });
+  const h = await r.transport.ws({ headers: { authorization: `Bearer ${p.kid}` }, send: (t) => again.push(openJson(p.key, p.kid, A2P, t)), close() {} });
+  assert.ok(!again.some(e => e.body?.text === 'while you were away'), 'nothing before the socket says who it is');
+  await h.onMessage(JSON.stringify(sealJson(p.key, p.kid, P2A, env('hello', { protocol: 1, device: 'phone-1', capabilities: [] }))));
   assert.ok(again.some(e => e.body?.text === 'while you were away'));
 });
 
@@ -341,4 +343,50 @@ test('plugin: a conversation not shared with the agent is refused with how to sh
   assert.equal(res.success, false);
   assert.match(res.error, /Share it in TextX/);
   assert.match(res.error, /Family/);
+});
+
+test('a second device on a bound pairing is refused on everything, over HTTP and WS (TextX #85)', async () => {
+  const r = rig({ answer: 'should not answer' });
+  const p = await pairedPhone(r); // bound to phone-1 over WS
+  const post = (dev, envs) => r.transport.http({ method: 'POST', path: '/textx/v1/messages', headers: { authorization: `Bearer ${p.kid}`, ...(dev ? { 'x-textx-device': dev } : {}) },
+    body: Buffer.from(JSON.stringify(sealJson(p.key, p.kid, P2A, envs))) });
+  // The repro: POST [hello{B}, message] with the same kid.
+  const res = openJson(p.key, p.kid, A2P, (await post('phone-2', [env('hello', { protocol: 1, device: 'phone-2', capabilities: [] }), env('message', { text: 'hi' })])).body.toString());
+  assert.deepEqual(res.acks, []);
+  assert.equal(res.envelopes.length, 2);
+  assert.ok(res.envelopes.every(e => e.type === 'error' && e.body.code === 'auth'));
+  // Claiming to be the bound device in the hello but not in the header is refused too.
+  const spoof = openJson(p.key, p.kid, A2P, (await post('phone-2', [env('hello', { protocol: 1, device: 'phone-1', capabilities: [] })])).body.toString());
+  assert.equal(spoof.envelopes[0].body.code, 'auth');
+  // No header at all.
+  const bare = openJson(p.key, p.kid, A2P, (await post(null, [env('message', { text: 'x' })])).body.toString());
+  assert.equal(bare.envelopes[0].body.code, 'auth');
+  // It cannot drain the outbox either.
+  assert.equal((await r.transport.http({ method: 'GET', path: '/textx/v1/messages', headers: { authorization: `Bearer ${p.kid}`, 'x-textx-device': 'phone-2' } })).status, 403);
+  // WS from the second device: refused and closed, and the real phone's socket keeps working.
+  const other = [];
+  const h2 = await r.transport.ws({ headers: { authorization: `Bearer ${p.kid}` }, send: (t) => other.push(openJson(p.key, p.kid, A2P, t)), close: (c) => other.push({ closed: c }) });
+  await h2.onMessage(JSON.stringify(sealJson(p.key, p.kid, P2A, env('message', { text: 'before hello' }))));
+  await h2.onMessage(JSON.stringify(sealJson(p.key, p.kid, P2A, env('hello', { protocol: 1, device: 'phone-2', capabilities: [] }))));
+  assert.ok(other.some(e => e.closed === 4401));
+  assert.ok(!other.some(e => e.type === 'welcome' || e.type === 'message'), 'the second device sees nothing but errors');
+  await tick();
+  assert.equal(r.calls.length, 0, 'nothing from the second device reached the router');
+  await p.say(env('message', { text: 'still me' }));
+  await tick();
+  assert.equal(r.calls[0].input, 'still me');
+  assert.ok(!p.sent.some(e => e.closed), 'the bound phone was not knocked off');
+});
+
+test('the bound phone over HTTP: device header + hello in one batch works', async () => {
+  const r = rig({ answer: 'ok' });
+  const { kid, key } = newPairing();
+  await r.store.createDevice({ name: 'P', kid, key, base: 'https://b' });
+  const post = (envs) => r.transport.http({ method: 'POST', path: '/textx/v1/messages', headers: { authorization: `Bearer ${kid}`, 'x-textx-device': 'A' }, body: Buffer.from(JSON.stringify(sealJson(key, kid, P2A, envs))) });
+  const m = env('message', { text: 'yo' });
+  const res = openJson(key, kid, A2P, (await post([env('hello', { protocol: 1, device: 'A', capabilities: [] }), m])).body.toString());
+  assert.equal(res.acks.length, 2);
+  assert.deepEqual(res.envelopes, []);
+  await tick();
+  assert.equal(r.calls[0].input, 'yo');
 });

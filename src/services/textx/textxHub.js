@@ -139,22 +139,28 @@ export class TextXHub {
   }
 
   /** A frame on a socket. Acks and pongs go back on the same socket. */
-  async onSocketEnvelope(device, env) {
+  /** A frame on an identified socket (its hello matched the pairing's device). */
+  async onSocketEnvelope(device, env, sender) {
     const s = this.sessions.get(String(device.id));
     const reply = (e) => s?.send(e);
-    await this.receive(device, env, reply);
+    await this.receive(device, env, reply, sender);
   }
 
   // ── HTTP (short wakes) ──────────────────────────────────────────────────────────────────
 
-  /** POST /textx/v1/messages: a JSON array of envelopes → { acks }. */
-  async handlePost(device, envelopes) {
-    if (!Array.isArray(envelopes)) return { error: { code: 'protocol', message: 'body must be an array of envelopes' } };
+  /**
+   * POST /textx/v1/messages: a JSON array of envelopes → { acks, envelopes }. `sender` is the
+   * phone's X-TextX-Device. `envelopes` carries the replies that are not acks (errors, pongs), so
+   * a refusal reaches a phone that has no socket.
+   */
+  async handlePost(device, envelopes, sender) {
+    if (!Array.isArray(envelopes)) return { acks: [], envelopes: [this.envelope('error', { code: 'protocol', message: 'body must be an array of envelopes' })] };
     const acks = [];
+    const out = [];
     for (const env of envelopes.slice(0, 100)) {
-      await this.receive(device, env, (e) => { if (e.type === 'ack') acks.push(e.body.of); });
+      await this.receive(device, env, (e) => { if (e.type === 'ack') acks.push(e.body.of); else out.push(e); }, sender);
     }
-    return { acks };
+    return { acks, envelopes: out };
   }
 
   /** GET /textx/v1/messages?since=<cursor>: acks through the cursor, returns what is newer. */
@@ -172,55 +178,72 @@ export class TextXHub {
     return { v: PROTOCOL, id: ulid(this.now()), type, ts: new Date(this.now()).toISOString(), body };
   }
 
-  async receive(device, env, reply) {
+  /**
+   * One envelope from a phone. `sender` is the device the transport identified: the device of
+   * the socket's hello, or the HTTP request's X-TextX-Device. Only the device the pairing is bound
+   * to is answered (§4): anyone else holding the key gets `auth` on everything but its hello.
+   */
+  async receive(device, env, reply, sender = null) {
     const problem = envelopeProblem(env, this.now());
     if (problem) {
       this.logger.warn?.(`TextX: dropped envelope from ${device.name}: ${problem}`);
       reply(this.envelope('error', { code: 'protocol', message: problem }));
-      return;
+      return false;
     }
-    if (env.type === 'ack') { await this.store.outboxAckId(device.id, env.body?.of); return; }
-    if (env.type === 'pong') return;
+    if (env.type === 'hello') {
+      if (sender && sender !== String(env.body?.device || '')) {
+        reply(this.envelope('error', { code: 'auth', message: 'hello device does not match X-TextX-Device' }));
+        return false;
+      }
+    } else if (!device.deviceId) {
+      reply(this.envelope('error', { code: 'auth', message: 'send hello first' }));
+      return false;
+    } else if (sender !== device.deviceId) {
+      reply(this.envelope('error', { code: 'auth', message: 'this pairing belongs to another device' }));
+      return false;
+    }
+    if (env.type === 'ack') { await this.store.outboxAckId(device.id, env.body?.of); return true; }
+    if (env.type === 'pong') return true;
 
     // Dedupe and replay guard: an id seen in the window is acked again and not processed.
     const seen = await this.store.inboxSeen(device.id, env.id);
+    if (env.type === 'hello') return this.onHello(device, env, reply, seen);
     reply(this.envelope('ack', { of: env.id }));
-    if (seen) return;
-
-    if (env.type !== 'hello' && !device.deviceId) {
-      reply(this.envelope('error', { code: 'auth', message: 'send hello first' }));
-      return;
-    }
+    if (seen) return true;
 
     switch (env.type) {
-      case 'hello': return this.onHello(device, env, reply);
-      case 'ping': return reply(this.envelope('pong'));
+      case 'ping': reply(this.envelope('pong')); return true;
       // Not awaited: a router run can take minutes and itself waits on tool_results that arrive
       // as later frames of this same queue.
-      case 'message': this.onUserMessage(device, env).catch(e => this.logger.error?.(`TextX: message failed: ${e.message}`)); return;
-      case 'tool_result': return this.onToolResult(device, env.body || {});
-      case 'event': this.onEvent(device, env.body || {}).catch(e => this.logger.error?.(`TextX: event failed: ${e.message}`)); return;
-      case 'error': this.logger.warn?.(`TextX: phone ${device.name} reported ${env.body?.code}: ${env.body?.message}`); return;
+      case 'message': this.onUserMessage(device, env).catch(e => this.logger.error?.(`TextX: message failed: ${e.message}`)); return true;
+      case 'tool_result': this.onToolResult(device, env.body || {}); return true;
+      case 'event': this.onEvent(device, env.body || {}).catch(e => this.logger.error?.(`TextX: event failed: ${e.message}`)); return true;
+      case 'error': this.logger.warn?.(`TextX: phone ${device.name} reported ${env.body?.code}: ${env.body?.message}`); return true;
     }
+    return true;
   }
 
-  async onHello(device, env, reply) {
+  /** True when the pairing is (now) bound to this hello's device. A repeated hello re-sends welcome. */
+  async onHello(device, env, reply, seen = false) {
     const b = env.body || {};
     const phoneId = String(b.device || '').slice(0, 128);
-    if (!phoneId) { reply(this.envelope('error', { code: 'protocol', message: 'hello needs device' })); return; }
-    // One pairing is one phone: the first hello binds it (§4).
+    if (!phoneId) { reply(this.envelope('error', { code: 'protocol', message: 'hello needs device' })); return false; }
+    // One pairing is one phone: the first hello binds it (§4). The bound phone's own socket is
+    // left alone: a second device must not be able to knock it off.
     if (device.deviceId && device.deviceId !== phoneId) {
       this.logger.warn?.(`TextX: pairing ${device.name} refused a second device`);
       reply(this.envelope('error', { code: 'auth', message: 'this pairing belongs to another device' }));
-      this.sessions.get(String(device.id))?.close(4401, 'pairing bound to another device');
-      return;
+      return false;
     }
+    reply(this.envelope('ack', { of: env.id }));
+    if (seen && device.deviceId) return true;
     const capabilities = (Array.isArray(b.capabilities) ? b.capabilities : []).filter(t => TOOLS.includes(t));
     const patch = { capabilities, appVersion: String(b.app_version || '').slice(0, 40), lastSeenAt: new Date(this.now()) };
     if (!device.deviceId) Object.assign(patch, { deviceId: phoneId, boundAt: new Date(this.now()) });
     Object.assign(device, await this.store.updateDevice(device.id, patch));
     this.logger.info?.(`TextX: ${device.name} hello (app ${patch.appVersion}, tools: ${capabilities.join(', ') || 'none'})`);
     await this.deliver(device, 'welcome', this.welcomeBody(device));
+    return true;
   }
 
   welcomeBody(device) {
