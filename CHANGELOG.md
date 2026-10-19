@@ -2,6 +2,11 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.531] - 2026-10-19
+
+### Added
+- **@-mention the agent in a text conversation (TextX 0.3.18+).** Type `@ALICE` (or your agent's name) in one of your own SMS conversations and it weighs in there: it reads the conversation, sends one reply into it as itself and tells you what it said. Other people's words in the conversation stay untrusted data; someone else's @-mention grants nothing.
+
 ## [2.25.530] - 2026-10-19
 
 ### Fixed

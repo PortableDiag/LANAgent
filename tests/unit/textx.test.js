@@ -666,3 +666,27 @@ test('from Telegram with the phone not connected: answers at once, finishes when
   for (let i = 0; i < 30 && !r.calls.some(c => c.notify); i++) await tick();
   assert.deepEqual(r.calls.filter(c => c.notify).map(c => c.notify), ['TextX: Sent.']);
 });
+
+test('@mention from the user: reads the thread, replies into it, reports it; the others\' words stay data', async () => {
+  const { r, prompts } = sharedRig('Friday at 7 works for me.');
+  const p = await pairedPhone(r, { tools: ['read_thread', 'send_sms'] });
+  const phone = setInterval(async () => {
+    for (const e of p.sent.filter(x => x.type === 'tool_call' && !x.answered)) {
+      e.answered = true;
+      if (e.body.name === 'read_thread') await p.say(env('tool_result', { call_id: e.body.call_id, ok: true, result: [{ from: { name: 'Sam' }, text: 'When are we doing dinner?' }] }));
+      if (e.body.name === 'send_sms') await p.say(env('tool_result', { call_id: e.body.call_id, ok: true, result: { status: 'sent', auto: 'true' } }));
+    }
+  }, 5);
+  const mention = env('event', { kind: 'mention', thread_id: 't9', thread: { title: 'Dinner' }, reply_without_card: true,
+    message: { direction: 'out', from: 'me', text: '@alice what day works?', date: '2026-10-19' } });
+  await p.say(mention);
+  await p.say(mention); // the same event twice: one reply
+  for (let i = 0; i < 40 && !p.sent.some(e => e.type === 'message' && /^Replied in "Dinner"/.test(e.body.text)); i++) await tick();
+  clearInterval(phone);
+  const sends = p.sent.filter(e => e.type === 'tool_call' && e.body.name === 'send_sms');
+  assert.equal(sends.length, 1);
+  assert.deepEqual(sends[0].body.args, { thread_id: 't9', text: 'Friday at 7 works for me.' });
+  assert.match(prompts[0], /@alice what day works\?/);
+  assert.match(prompts[0], /UNTRUSTED SMS[\s\S]*When are we doing dinner/);
+  assert.ok(p.sent.some(e => e.type === 'message' && /^Replied in "Dinner"/.test(e.body.text)));
+});

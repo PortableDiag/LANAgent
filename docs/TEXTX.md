@@ -91,6 +91,12 @@ Sharing a conversation with the agent in TextX means it is watching it.
 - **An explicit watch** ("tell me when the landlord replies about the lease") still works, for its own
   purpose, up to 7 days.
 
+**@-mentions** (TextX 0.3.18+): type `@<agent name>` (or `@` and its first word) in one of your own
+conversations and the agent weighs in there. TextX shares the conversation if it wasn't and sends
+`event {kind:"mention"}`. The agent reads the conversation, writes one reply as itself, sends it into
+that conversation (no card for that one send) and tells you what it said. Someone else typing `@<agent>`
+grants nothing.
+
 **Auto-reply** is a separate per-conversation toggle in TextX, **off by default**: "Let <assistant> reply on
 its own".
 - With it on, the agent may answer a new message without your tap, in that conversation only, one reply
