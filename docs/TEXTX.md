@@ -91,7 +91,7 @@ its own".
 - It never agrees to plans, payments or meetings, never shares codes or personal details, and answers SKIP
   (no reply, a normal note to you instead) whenever it is unsure.
 - Every auto-reply is reported in the agent's conversation ("Replied to Sam: …").
-- The phone enforces the toggle and its limits; the agent can't widen them.
+- The phone enforces the toggle and its own limits (TextX 0.3.13: one reply per incoming message within 15 minutes, 6 per conversation an hour); the agent can't widen them.
 
 ## Agent extensions (`x.*`)
 
