@@ -46,15 +46,15 @@ export const REPLY_MODES = ['text', 'voice', 'both'];
 // TextX re-encodes for the carrier MMS cap: keep a spoken reply under ~45 s, mono AAC.
 const MAX_VOICE_SECONDS = 45;
 
-/** TTS audio (mp3/wav) → mono 32 kbps AAC .m4a of at most 45 s, as TextX asks. */
-export async function encodeM4a(buffer) {
+/** TTS audio (mp3/wav) → mono AAC .m4a (32 kbps unless told) of at most 45 s, as TextX asks. */
+export async function encodeM4a(buffer, { kbps = 32 } = {}) {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'textx-voice-'));
   try {
     const src = path.join(dir, 'in'), out = path.join(dir, 'reply.m4a');
     await writeFile(src, buffer);
     await new Promise((resolve, reject) => {
       const p = spawn('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-y', '-i', src, '-t', String(MAX_VOICE_SECONDS),
-        '-ac', '1', '-c:a', 'aac', '-b:a', '32k', '-movflags', '+faststart', out], { stdio: ['ignore', 'ignore', 'pipe'] });
+        '-ac', '1', '-c:a', 'aac', '-b:a', `${kbps}k`, '-movflags', '+faststart', out], { stdio: ['ignore', 'ignore', 'pipe'] });
       let err = '';
       p.stderr.on('data', d => { err += d; });
       p.on('error', reject);
@@ -304,7 +304,8 @@ export class TextXHub {
     if (device.deviceId) await this.store.outboxAckType(device.id, 'welcome');
     const capabilities = (Array.isArray(b.capabilities) ? b.capabilities : []).filter(t => TOOLS.includes(t));
     const patch = { capabilities, appVersion: String(b.app_version || '').slice(0, 40), client: String(b.app || '').slice(0, 40),
-      replyMode: REPLY_MODES.includes(b.reply_mode) ? b.reply_mode : 'text', lastSeenAt: new Date(this.now()) };
+      replyMode: REPLY_MODES.includes(b.reply_mode) ? b.reply_mode : 'text',
+      maxAttachmentBytes: Number.isFinite(b.max_attachment_bytes) && b.max_attachment_bytes > 0 ? b.max_attachment_bytes : null, lastSeenAt: new Date(this.now()) };
     if (!device.deviceId) Object.assign(patch, { deviceId: phoneId, boundAt: new Date(this.now()) });
     Object.assign(device, await this.store.updateDevice(device.id, patch));
     this.logger.info?.(`TextX: ${device.name} hello (app ${patch.appVersion}, replies: ${patch.replyMode}, tools: ${capabilities.join(', ') || 'none'})`);
@@ -590,7 +591,7 @@ export class TextXHub {
    * voice = the reply spoken, no text; both = text and audio in one send (one against the
    * phone's 6/hour cap). Audio that cannot be made goes as text, and `voiceError` says why.
    */
-  async replyArgs(threadId, text, mode, extra = {}) {
+  async replyArgs(device, threadId, text, mode, extra = {}) {
     const asText = { thread_id: threadId, text, ...extra };
     if (mode === 'text') return { args: asText, mode };
     try {
@@ -598,7 +599,11 @@ export class TextXHub {
       // source 'voice' keeps it off the server's own speaker.
       const speech = await this.agent.ttsService.generateSpeech(text, { source: 'voice', format: 'mp3' });
       if (!speech?.buffer?.length) throw new Error('the voice service returned no audio');
-      const audio = await this.encodeVoice(speech.buffer);
+      // The carrier's MMS cap, from hello (TextX 0.3.21): one smaller encode, then text.
+      const cap = device.maxAttachmentBytes;
+      let audio = await this.encodeVoice(speech.buffer);
+      if (cap && audio.length > cap) audio = await this.encodeVoice(speech.buffer, { kbps: 16 });
+      if (cap && audio.length > cap) throw new Error(`the audio (${audio.length} bytes) is over the phone's ${cap}-byte MMS limit`);
       const attachments = [{ name: 'reply.m4a', mime: 'audio/mp4', data_b64: audio.toString('base64') }];
       return { args: { thread_id: threadId, text: mode === 'both' ? text : '', attachments, ...extra }, mode };
     } catch (e) {
@@ -663,7 +668,7 @@ export class TextXHub {
       return;
     }
     this.replyDaily.record(String(device.id), this.now());
-    const reply = await this.replyArgs(threadId, text, mode);
+    const reply = await this.replyArgs(device, threadId, text, mode);
     const how = TextXHub.howSent(reply);
     const report = (r) => this.deliver(device, 'message', {
       text: r?.ok && r.result?.status === 'sent' ? `Replied in "${title}"${how}: "${text}"`
@@ -738,7 +743,7 @@ export class TextXHub {
     if (forOwner) await this.deliver(device, 'message', { text: `${title}: ${forOwner}` });
     this.replyHourly.record(tKey, this.now());
     this.replyDaily.record(String(device.id), this.now());
-    const reply = await this.replyArgs(threadId, text, mode, { auto: true });
+    const reply = await this.replyArgs(device, threadId, text, mode, { auto: true });
     const how = TextXHub.howSent(reply);
     const report = (r) => this.deliver(device, 'message', {
       text: r?.ok && (r.result?.status === 'sent') ? `Replied to "${title}"${how}: "${text}"`

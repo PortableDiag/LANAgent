@@ -841,3 +841,25 @@ test('encodeM4a makes a mono AAC .m4a with ffmpeg', async (t) => {
   const probe = execFileSync('ffprobe', ['-v', 'error', '-show_entries', 'stream=codec_name,channels', '-of', 'csv=p=0', '-'], { input: m4a }).toString().trim();
   assert.equal(probe, 'aac,1');
 });
+
+test('max_attachment_bytes from hello: audio over the cap is re-encoded at 16 kbps, then sent as text if still over', async () => {
+  const { r } = voiceRig('Friday works.');
+  const encodes = [];
+  let size = 500;
+  r.hub.encodeVoice = async (b, o = {}) => { encodes.push(o.kbps || 32); return Buffer.alloc(o.kbps === 16 ? size : 900); };
+  const p = await pairedPhone(r, { tools: ['send_sms'] });
+  await p.say(env('hello', { protocol: 1, app: 'TextX', app_version: '0.3.21', capabilities: ['send_sms'], device: 'phone-1', reply_mode: 'voice', max_attachment_bytes: 600 }));
+  assert.equal((await r.store.getDevice(p.device.id)).maxAttachmentBytes, 600);
+  const phone = answeringPhone(p);
+  await p.say(env('event', { kind: 'mention', thread_id: 't1', thread: { title: 'A' }, message: { from: 'me', text: '@alice one', date: 'd1' } }));
+  for (let i = 0; i < 40 && !p.sent.some(e => e.type === 'message' && /^Replied in "A"/.test(e.body.text)); i++) await tick();
+  size = 700;
+  await p.say(env('event', { kind: 'mention', thread_id: 't2', thread: { title: 'B' }, message: { from: 'me', text: '@alice two', date: 'd2' } }));
+  for (let i = 0; i < 40 && !p.sent.some(e => e.type === 'message' && /^Replied in "B"/.test(e.body.text)); i++) await tick();
+  clearInterval(phone);
+  assert.deepEqual(encodes, [32, 16, 32, 16]);
+  const sends = p.sent.filter(e => e.type === 'tool_call' && e.body.name === 'send_sms').map(s => s.body.args);
+  assert.equal(Buffer.from(sends[0].attachments[0].data_b64, 'base64').length, 500);
+  assert.deepEqual(sends[1], { thread_id: 't2', text: 'Friday works.' });
+  assert.ok(p.sent.some(e => e.type === 'message' && /^Replied in "B" \(as text: .*over the phone's 600-byte MMS limit/.test(e.body.text)));
+});

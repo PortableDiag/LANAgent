@@ -115,7 +115,9 @@ its own".
 arrives as `reply_mode` in `hello` and on every `incoming` and `mention` event, and applies to auto-replies
 and @-mention replies. Voice sends the reply spoken in the agent's TTS voice (`reply.m4a`, mono AAC 32 kbps,
 at most 45 s) with no text; Both sends text and audio in one `send_sms`. If speech can't be made, the reply
-goes as text and the report says so ("as text: the voice reply failed: …"). Needs ffmpeg on the agent's host.
+goes as text and the report says so ("as text: the voice reply failed: …"). Audio over the phone's
+`max_attachment_bytes` (the carrier MMS cap, sent in hello) is re-encoded at 16 kbps, then sent as text if
+still over. Needs ffmpeg on the agent's host.
 - The phone enforces the toggle and its own limits (TextX 0.3.13: one reply per incoming message within 15 minutes, 6 per conversation an hour); the agent can't widen them.
 
 ## Agent extensions (`x.*`)

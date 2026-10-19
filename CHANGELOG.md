@@ -2,6 +2,11 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.537] - 2026-10-19
+
+### Added
+- **TextX voice replies respect the carrier's MMS limit.** TextX 0.3.21 reports the SIM's MMS cap in `hello` (`max_attachment_bytes`). A spoken reply over it is re-encoded at 16 kbps; if it is still too big, the reply goes as text and the report says why.
+
 ## [2.25.536] - 2026-10-19
 
 ### Added
