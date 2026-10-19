@@ -437,3 +437,34 @@ test('a normal answer clears the pending mark', async () => {
   for (let i = 0; i < 20 && (await r.store.inboxPending()).length; i++) await tick();
   assert.equal((await r.store.inboxPending()).length, 0);
 });
+
+test('agent extensions: x.status, x.transcribe, x.speak answer with x.result; unknown x.* is unsupported', async () => {
+  const r = rig();
+  r.agent.getSystemStatus = async () => ({ version: '9.9.9', uptime: 42 });
+  r.agent.providerManager.transcribeAudio = async (buf) => `heard ${buf.length} bytes`;
+  r.agent.ttsService = { generateSpeech: async (t) => ({ buffer: Buffer.from(`mp3:${t}`) }) };
+  const p = await pairedPhone(r);
+  assert.deepEqual(p.sent.find(e => e.type === 'welcome').body.extensions, ['x.status', 'x.transcribe', 'x.speak']);
+  const st = env('x.status', {});
+  const tr = env('x.transcribe', { audio_b64: Buffer.from('abcd').toString('base64'), mime: 'audio/ogg' });
+  const sp = env('x.speak', { text: 'hello' });
+  const un = env('x.nope', {});
+  for (const e of [st, tr, sp, un]) await p.say(e);
+  for (let i = 0; i < 20 && p.sent.filter(e => e.type === 'x.result').length < 4; i++) await tick();
+  const res = (e) => p.sent.find(x => x.type === 'x.result' && x.body.of === e.id).body;
+  assert.equal(res(st).data.version, '9.9.9');
+  assert.equal(res(tr).data.text, 'heard 4 bytes');
+  assert.equal(Buffer.from(res(sp).data.audio_b64, 'base64').toString(), 'mp3:hello');
+  assert.equal(res(un).ok, false);
+  assert.equal(res(un).error.code, 'unsupported');
+  assert.equal(r.calls.length, 0, 'extensions never go through the command router');
+});
+
+test('agent extensions are refused to a second device like everything else', async () => {
+  const r = rig();
+  r.agent.getSystemStatus = async () => ({ secret: 'owner only' });
+  const p = await pairedPhone(r);
+  const post = r.transport.http({ method: 'POST', path: '/textx/v1/messages', headers: { authorization: `Bearer ${p.kid}` },
+    body: Buffer.from(JSON.stringify(sealJson(p.key, p.kid, P2A, [env('hello', { protocol: 1, device: 'intruder', capabilities: [] }), env('x.status', {})]))) });
+  assert.equal((await post).status, 401);
+});

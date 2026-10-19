@@ -72,6 +72,15 @@ On the agent side:
 If the agent restarts while answering, it says afterwards which message it didn't finish (it doesn't re-run it, since the request may already have acted). A send that you haven't tapped yet returns at once ("it's on your phone"). Its outcome (sent,
 declined, expired) is reported back to the conversation the request came from.
 
+## Agent extensions (`x.*`)
+
+Beyond the shared protocol, a paired client can ask this agent for `x.status` (the dashboard's
+system status), `x.transcribe {audio_b64, mime}` → `{text}` and `x.speak {text}` → `{mime, audio_b64}`.
+Each is answered with `x.result {of, ok, data|error}`. They follow the same rules as everything
+else on a pairing: only its bound device, sealed end to end, never through the command router.
+`welcome.extensions` lists them. The LANAgent Android app (1.4.0) uses them for Status and voice
+when it reaches the agent through the relay; TextX doesn't use them.
+
 ## Notifications
 
 Each paired phone has **"send my notifications here"** in Settings → TextX. With it on, the

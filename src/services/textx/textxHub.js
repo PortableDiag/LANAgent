@@ -28,6 +28,14 @@ export const CONFIRMED_TOOLS = new Set(['send_sms', 'schedule_message', 'update_
   'react', 'retry_message', 'delete_message', 'block_number']);
 
 const INBOUND_TYPES = new Set(['hello', 'message', 'tool_result', 'event', 'ping', 'pong', 'ack', 'error']);
+// Agent extensions (`x.<name>`): requests a client makes of this agent beyond the shared
+// protocol, answered with `x.result {of, ok, data|error}`. TextX never sends them; the LANAgent
+// Android app uses them for its Status tab and voice when it reaches the agent through the relay.
+const EXTENSION_TYPE = /^x\.[a-z][a-z0-9_.]{0,40}$/;
+export const EXTENSIONS = ['x.status', 'x.transcribe', 'x.speak'];
+const MAX_AUDIO_IN = 3 * 1024 * 1024;
+const MAX_SPEAK_CHARS = 4000;
+
 const REPLAY_WINDOW_MS = 7 * 24 * 3600 * 1000; // = the dedupe window (§3.3)
 const FUTURE_SKEW_MS = 10 * 60 * 1000;
 const MAX_TEXT = 8000;
@@ -56,7 +64,7 @@ export function envelopeProblem(env, now = Date.now()) {
   if (!env || typeof env !== 'object') return 'not an object';
   if (env.v !== PROTOCOL) return `unsupported protocol version ${env.v}`;
   if (typeof env.id !== 'string' || !env.id || env.id.length > 64) return 'missing id';
-  if (!INBOUND_TYPES.has(env.type)) return `unknown type ${env.type}`;
+  if (!INBOUND_TYPES.has(env.type) && !EXTENSION_TYPE.test(String(env.type))) return `unknown type ${env.type}`;
   if (env.body != null && typeof env.body !== 'object') return 'body must be an object';
   const ts = Date.parse(env.ts);
   if (!Number.isFinite(ts)) return 'missing ts';
@@ -227,6 +235,9 @@ export class TextXHub {
       case 'event': this.onEvent(device, env.body || {}).catch(e => this.logger.error?.(`TextX: event failed: ${e.message}`)); return true;
       case 'error': this.logger.warn?.(`TextX: phone ${device.name} reported ${env.body?.code}: ${env.body?.message}`); return true;
     }
+    if (EXTENSION_TYPE.test(env.type)) {
+      this.onExtension(device, env).catch(e => this.logger.error?.(`TextX: ${env.type} failed: ${e.message}`));
+    }
     return true;
   }
 
@@ -248,7 +259,7 @@ export class TextXHub {
     // than queueing another.
     if (device.deviceId) await this.store.outboxAckType(device.id, 'welcome');
     const capabilities = (Array.isArray(b.capabilities) ? b.capabilities : []).filter(t => TOOLS.includes(t));
-    const patch = { capabilities, appVersion: String(b.app_version || '').slice(0, 40), lastSeenAt: new Date(this.now()) };
+    const patch = { capabilities, appVersion: String(b.app_version || '').slice(0, 40), client: String(b.app || '').slice(0, 40), lastSeenAt: new Date(this.now()) };
     if (!device.deviceId) Object.assign(patch, { deviceId: phoneId, boundAt: new Date(this.now()) });
     Object.assign(device, await this.store.updateDevice(device.id, patch));
     this.logger.info?.(`TextX: ${device.name} hello (app ${patch.appVersion}, tools: ${capabilities.join(', ') || 'none'})`);
@@ -278,7 +289,8 @@ export class TextXHub {
       version: this.agent?.version || process.env.npm_package_version || '',
       description: `${name}, your LANAgent. Ask it anything you would ask it on Telegram or the dashboard.`,
       ...(this.avatarUrl ? { avatar_url: this.avatarUrl(device) } : {}),
-      capabilities: TOOLS
+      capabilities: TOOLS,
+      extensions: EXTENSIONS
     };
   }
 
@@ -330,6 +342,39 @@ export class TextXHub {
     const file = result?.path && this.attachFile ? await this.attachFile(device, result).catch(() => null) : null;
     if (file) body.attachments = [file];
     await this.deliver(device, 'message', body);
+  }
+
+  /**
+   * x.status / x.transcribe / x.speak from the bound device of this pairing (already checked in
+   * receive). A pairing is its owner's, so these are the owner's own calls, as on the LAN API.
+   */
+  async onExtension(device, env) {
+    const b = env.body || {};
+    const answer = (ok, payload) => this.deliver(device, 'x.result', { of: env.id, ok, ...(ok ? { data: payload } : { error: payload }) });
+    try {
+      switch (env.type) {
+        case 'x.status':
+          return await answer(true, await this.agent.getSystemStatus());
+        case 'x.transcribe': {
+          const audio = Buffer.from(String(b.audio_b64 || ''), 'base64');
+          if (!audio.length) return await answer(false, { code: 'protocol', message: 'no audio' });
+          if (audio.length > MAX_AUDIO_IN) return await answer(false, { code: 'too_large', message: 'audio over 3 MB' });
+          const text = await this.agent.providerManager.transcribeAudio(audio);
+          return await answer(true, { text: String(text || '') });
+        }
+        case 'x.speak': {
+          const text = String(b.text || '').slice(0, MAX_SPEAK_CHARS);
+          if (!text) return await answer(false, { code: 'protocol', message: 'no text' });
+          if (!this.agent.ttsService) return await answer(false, { code: 'unavailable', message: 'this agent has no voice set up' });
+          const r = await this.agent.ttsService.generateSpeech(text);
+          return await answer(true, { mime: 'audio/mpeg', audio_b64: r.buffer.toString('base64') });
+        }
+        default:
+          return await answer(false, { code: 'unsupported', message: `${env.type} is not supported; this agent knows ${EXTENSIONS.join(', ')}` });
+      }
+    } catch (error) {
+      return answer(false, { code: 'internal', message: error.message });
+    }
   }
 
   /** Typing dots: only worth sending to a phone that is connected now. */

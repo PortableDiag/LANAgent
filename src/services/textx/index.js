@@ -72,7 +72,7 @@ export function getTextX(agent) {
 
   const publicDevice = (d) => ({
     id: d.id, name: d.name, kid: `${d.kid.slice(0, 6)}…`, base: d.base, bound: !!d.deviceId, boundAt: d.boundAt,
-    lastSeenAt: d.lastSeenAt, appVersion: d.appVersion, tools: d.capabilities || [], notify: !!d.notify,
+    lastSeenAt: d.lastSeenAt, appVersion: d.appVersion, client: d.client || null, tools: d.capabilities || [], notify: !!d.notify,
     connected: hub.isConnected(d.id), revoked: !!d.revokedAt,
     watches: (d.watches || []).filter(w => new Date(w.until) > new Date()).map(w => ({ thread: w.title || w.threadId, purpose: w.purpose, until: w.until }))
   });

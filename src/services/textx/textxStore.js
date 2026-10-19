@@ -22,6 +22,7 @@ const deviceSchema = new mongoose.Schema({
   boundAt: Date,
   lastSeenAt: Date,
   appVersion: String,
+  client: String,
   capabilities: { type: [String], default: [] },
   notify: { type: Boolean, default: false },
   watches: { type: [mongoose.Schema.Types.Mixed], default: [] },
@@ -55,7 +56,7 @@ export const TextXDevice = mongoose.models.TextXDevice || mongoose.model('TextXD
 export const TextXOutbox = mongoose.models.TextXOutbox || mongoose.model('TextXOutbox', outboxSchema);
 export const TextXInbox = mongoose.models.TextXInbox || mongoose.model('TextXInbox', inboxSchema);
 
-const PUBLIC_FIELDS = ['name', 'kid', 'base', 'deviceId', 'boundAt', 'lastSeenAt', 'appVersion', 'capabilities',
+const PUBLIC_FIELDS = ['name', 'kid', 'base', 'deviceId', 'boundAt', 'lastSeenAt', 'appVersion', 'client', 'capabilities',
   'notify', 'watches', 'revokedAt', 'createdAt'];
 
 function toDevice(doc) {
