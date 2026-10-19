@@ -138,6 +138,19 @@ export default class TextXPlugin extends BasePlugin {
 
   get svc() { return getTextX(this.agent); }
 
+  /** How long a request for a phone with no socket may hold the turn before answering "on its way". */
+  get offlineGraceMs() { return this._offlineGraceMs ?? 25_000; }
+  set offlineGraceMs(ms) { this._offlineGraceMs = ms; }
+
+  /** What a late outcome is about, for the notification ("Text to Wayne: Sent."). */
+  outcomeLabel(action, data) {
+    const who = data.to || data.recipient || data.contact || data.thread;
+    const named = who && !PRONOUN.test(String(who).trim()) ? ` to ${Array.isArray(who) ? who.join(', ') : who}` : '';
+    if (action === 'send') return `Text${named}`;
+    if (action === 'schedule') return `Scheduled text${named}`;
+    return 'TextX';
+  }
+
   /** The phone this request came from, if it came from TextX. */
   origin() { return textxRequest.getStore()?.deviceId || null; }
 
@@ -146,16 +159,28 @@ export default class TextXPlugin extends BasePlugin {
     if (data.needsParameterExtraction) await this._extractArgs(action, data);
     // From Telegram or the dashboard, with the phone's TextX closed: the phone only checks in
     // every 15 minutes (protocol §3.2), so a 45 s wait for a contact lookup always failed
-    // ("Send Wayne a text", 2026-10-18). Answer now; finish when the phone checks in.
+    // ("Send Wayne a text", 2026-10-18). The request runs with waits that outlast a check-in. If it
+    // finishes within the grace period (a phone often checks in within seconds) the user gets one
+    // normal answer; otherwise a plain "on its way" now and the outcome when it comes. The first
+    // version answered "your phone isn't connected" at once, then "Sent." four seconds later, then
+    // the "isn't connected" voice note: two failure messages for a text that went (2026-10-19).
     const tool = FIRST_TOOL[action];
     if (tool && !this.origin()) {
       const device = await this.svc.hub.pickDevice(tool);
       if (device && !this.svc.hub.isConnected(device.id)) {
-        offlineRun.run(true, () => this.run(action, data))
-          .then(r => this.agent.notify?.(`TextX: ${r.success ? r.result : r.error}`))
+        const job = offlineRun.run(true, () => this.run(action, data));
+        let timer;
+        const early = await Promise.race([job, new Promise(ok => { timer = setTimeout(ok, this.offlineGraceMs, null); })]);
+        clearTimeout(timer);
+        if (early) {
+          if (!early.success) this.logger.warn(`textx ${action}: ${early.error}`);
+          return early;
+        }
+        const label = this.outcomeLabel(action, data);
+        job.then(r => this.agent.notify?.(r.success ? `✅ ${/^Sent to /.test(r.result) ? r.result : `${label}: ${r.result}`}` : `⚠️ ${label}: ${r.error}`))
           .catch(e => this.logger.error(`textx ${action} (phone offline) failed: ${e.message}`));
-        return { success: true, result: `Your phone (${device.name}) isn't connected to me right now, so this waits for TextX to check in, ` +
-          'within about 15 minutes (opening TextX does it at once). I\'ll tell you here how it went.' };
+        return { success: true, result: `${label}: it's going to your phone (${device.name}) and runs as soon as TextX picks it up ` +
+          '(opening TextX does that at once). If TextX asks you to confirm, tap it there. I\'ll tell you here when it\'s done.' };
       }
     }
     const res = await this.run(action, data);
@@ -317,7 +342,8 @@ export default class TextXPlugin extends BasePlugin {
     if (r.pending) {
       return { success: true, result: `It's on your phone (${r.device}) for you to confirm. Tap Send there; I'll tell you when it's done.` };
     }
-    return { success: true, result: this.outcomeText(r.result, scheduled) };
+    const done = this.outcomeText(r.result, scheduled);
+    return { success: true, result: done === 'Sent.' && data.to ? `Sent to ${data.to}: "${text}"` : done };
   }
 
   outcomeText(res, scheduled) {

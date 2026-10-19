@@ -73,12 +73,11 @@ If the agent restarts while answering, it says afterwards which message it didn'
 declined, expired) is reported back to the conversation the request came from.
 
 **From Telegram or the dashboard, with TextX closed on the phone**, the phone has no live
-connection and checks in only every 15 minutes (unless TextX's "Always connected" is on). The
-agent then answers at once ("your phone isn't connected… I'll tell you here how it went") and
-finishes the request when the phone checks in, waiting up to 20 minutes for it. The result (or
-the question it needs answered, such as which of two contacts) arrives as a notification. Opening
-TextX makes the phone check in at once. Before 2.25.530 these requests waited 45 seconds and
-failed with "The phone didn't answer".
+connection and checks in on its own schedule (at most 15 minutes, unless TextX's "Always connected"
+is on). The agent waits up to 25 seconds for it. A phone that checks in by then gets you one normal
+answer ("Sent to Wayne: …"). Otherwise you get "it's going to your phone… I'll tell you here when it's
+done", and the outcome arrives as a notification once the phone picks it up (the agent keeps the
+request open for 20 minutes). Opening TextX makes the phone check in at once.
 
 ## Shared conversations are watched
 

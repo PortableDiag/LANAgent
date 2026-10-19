@@ -641,31 +641,54 @@ test('auto-reply SKIPs what needs the user (the model says SKIP): no send, norma
   assert.ok(p.sent.some(e => e.type === 'message' && /\$200/.test(e.body.text)));
 });
 
-test('from Telegram with the phone not connected: answers at once, finishes when the phone checks in', async () => {
+test('from Telegram with the phone not connected: a quick check-in gets one normal answer, no failure message', async () => {
   const { default: TextXPlugin } = await import('../../src/api/plugins/textx.js');
   const r = rig({ waits: { read: 30, readExpiry: 60, confirm: 30, confirmExpiry: 60, offline: 2000, late: 10 } });
   const p = await pairedPhone(r, { tools: ['send_sms', 'contacts_lookup'] });
-  p.handlers.onClose?.();
-  r.hub.sessions.clear(); // TextX closed: no socket, the phone drains over HTTP every 15 minutes
+  r.hub.sessions.clear(); // TextX closed: no socket, the phone drains over HTTP
   const plugin = new TextXPlugin(r.agent);
+  plugin.offlineGraceMs = 1500;
+  Object.defineProperty(plugin, 'svc', { value: { hub: r.hub } });
+  const phone = drainingPhone(r, p, 100); // checks in after 100 ms, past the 30 ms read wait
+  const res = await plugin.execute({ action: 'send', to: 'Wayne', text: 'Thanks and goodnight' });
+  clearInterval(phone);
+  assert.equal(res.success, true);
+  assert.equal(res.result, 'Sent to Wayne: "Thanks and goodnight"');
+  await new Promise(ok => setTimeout(ok, 50));
+  assert.deepEqual(r.calls.filter(c => c.notify), [], 'no second message');
+});
+
+test('from Telegram with the phone not connected: a slow check-in gets "on its way", then the outcome', async () => {
+  const { default: TextXPlugin } = await import('../../src/api/plugins/textx.js');
+  const r = rig({ waits: { read: 30, readExpiry: 60, confirm: 30, confirmExpiry: 60, offline: 2000, late: 10 } });
+  const p = await pairedPhone(r, { tools: ['send_sms', 'contacts_lookup'] });
+  r.hub.sessions.clear();
+  const plugin = new TextXPlugin(r.agent);
+  plugin.offlineGraceMs = 50;
   Object.defineProperty(plugin, 'svc', { value: { hub: r.hub } });
   const res = await plugin.execute({ action: 'send', to: 'Wayne', text: 'Thanks and goodnight' });
   assert.equal(res.success, true);
-  assert.match(res.result, /isn't connected/);
-  await new Promise(ok => setTimeout(ok, 100)); // longer than the 30 ms read wait: must not time out
-  const answer = async (name, result) => {
-    for (let i = 0; i < 50; i++) {
-      const call = (await r.store.outboxUnacked(p.device.id)).map(x => x.env).find(e => e.type === 'tool_call' && e.body.name === name);
-      if (call) { await r.store.outboxAckId(p.device.id, call.id); return r.hub.onToolResult(p.device, { call_id: call.body.call_id, ok: true, result }); }
-      await tick();
-    }
-    assert.fail(`no ${name} call queued`);
-  };
-  await answer('contacts_lookup', [{ name: 'Wayne Williams', numbers: ['+15550199'] }]);
-  await answer('send_sms', { status: 'sent' });
-  for (let i = 0; i < 30 && !r.calls.some(c => c.notify); i++) await tick();
-  assert.deepEqual(r.calls.filter(c => c.notify).map(c => c.notify), ['TextX: Sent.']);
+  assert.match(res.result, /^Text to Wayne: it's going to your phone/);
+  assert.doesNotMatch(res.result, /isn't connected|didn't answer|failed/i);
+  const phone = drainingPhone(r, p, 0);
+  for (let i = 0; i < 50 && !r.calls.some(c => c.notify); i++) await tick();
+  clearInterval(phone);
+  assert.deepEqual(r.calls.filter(c => c.notify).map(c => c.notify), ['✅ Sent to Wayne: "Thanks and goodnight"']);
 });
+
+/** A phone with TextX closed: after [delayMs] it drains the outbox and answers each tool call. */
+function drainingPhone(r, p, delayMs) {
+  const start = Date.now();
+  return setInterval(async () => {
+    if (Date.now() - start < delayMs) return;
+    for (const { env: e } of await r.store.outboxUnacked(p.device.id)) {
+      await r.store.outboxAckId(p.device.id, e.id);
+      if (e.type !== 'tool_call') continue;
+      const result = e.body.name === 'contacts_lookup' ? [{ name: 'Wayne Williams', numbers: ['+15550199'] }] : { status: 'sent' };
+      r.hub.onToolResult(p.device, { call_id: e.body.call_id, ok: true, result });
+    }
+  }, 5);
+}
 
 test('@mention from the user: reads the thread, replies into it, reports it; the others\' words stay data', async () => {
   const { r, prompts } = sharedRig('Friday at 7 works for me.');

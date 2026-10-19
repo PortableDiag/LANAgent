@@ -2,6 +2,11 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.533] - 2026-10-19
+
+### Fixed
+- **Texting from Telegram no longer reports a failure for a text that went.** With TextX closed on the phone, 2.25.530 answered "your phone isn't connected" at once (as text and again as a voice note), and then "Sent." a few seconds later. The agent now waits up to 25 seconds for the phone. When the phone answers in time you get one answer that says what was sent and to whom. When it doesn't, you get a neutral "it's going to your phone; I'll tell you when it's done", followed by the outcome.
+
 ## [2.25.532] - 2026-10-19
 
 ### Fixed
