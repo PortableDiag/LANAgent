@@ -1321,6 +1321,30 @@
                             </div>
                         </div>
 
+                        <div class="settings-section" id="textx-section">
+                            <h3><i class="fas fa-comment-sms"></i> TextX (texting app)</h3>
+                            <p class="setting-description">Use this agent as a conversation in the TextX SMS app on your phone. It works from anywhere: the phone reaches this agent through the api.lanagent.net relay, which only ever sees encrypted data. In TextX you choose what the agent may do (send texts, read the conversations you share); every text it sends needs your tap on the phone.</p>
+                            <div class="setting-item">
+                                <label>Paired phones:</label>
+                                <ul id="textx-devices" class="tg-peer-list"></ul>
+                                <p class="setting-description" id="textx-relay-status"></p>
+                            </div>
+                            <div class="setting-item">
+                                <div style="display:flex;gap:8px;flex-wrap:wrap;">
+                                    <input type="text" id="textx-pair-name" placeholder="Phone name, e.g. Pixel" style="flex:1;min-width:160px;">
+                                    <button class="btn btn-primary" onclick="dashboard.pairTextX()"><i class="fas fa-qrcode"></i> Pair a phone</button>
+                                </div>
+                                <div id="textx-pair-result" style="display:none;margin-top:12px;">
+                                    <p class="setting-description">In TextX: Settings › Assistants › Add › Agent › Scan QR. This code is shown once; anyone who scans it can talk to this agent as you, so don't share it.</p>
+                                    <img id="textx-pair-qr" alt="Pairing QR code" style="background:#fff;padding:8px;border-radius:8px;max-width:260px;width:100%;">
+                                    <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap;">
+                                        <button class="btn btn-secondary btn-sm" onclick="dashboard.copyTextXPairing()"><i class="fas fa-copy"></i> Copy pairing text</button>
+                                        <button class="btn btn-secondary btn-sm" onclick="dashboard.hideTextXPairing()">Done</button>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
                         <div class="settings-section">
                             <h3>System Reports</h3>
                             <div class="setting-item">

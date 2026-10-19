@@ -819,6 +819,17 @@ unknown model/voice (lists the valid ones), 413 over the limit, 402 over `X-Max-
 unavailable — none of these charge. `GET /api/external/tts/voices` (free) lists models, tiers and voices.
 Public: `POST https://api.lanagent.net/tts`, `GET https://api.lanagent.net/tts/voices`.
 
+### v2.25.529 — TextX (the agent in the TextX SMS app)
+
+Pairing management (JWT or API key). The phone's own endpoint is `/textx/v1/*` (TextX Agent Protocol v1; see `docs/TEXTX.md`): every frame is sealed under the pairing key, so it needs no other auth.
+
+| Method | Endpoint | Body | Description |
+|---|---|---|---|
+| GET | `/api/textx/status` | | `{relay: {url, connected, base}, devices: [{id, name, bound, connected, lastSeenAt, appVersion, tools, notify, watches}]}` |
+| POST | `/api/textx/pair` | `{name}` | `{id, name, base, uri, qr}`. `uri` is `textx-agent:<base>#<kid>.<key>` and `qr` is a PNG data URL. This is the only time the key is returned. |
+| PATCH | `/api/textx/devices/:id` | `{notify?: bool, name?}` | `notify` sends the agent's notifications to that phone too. |
+| DELETE | `/api/textx/devices/:id` | | Revoke: deletes the pairing and its key, and closes the phone's connection. |
+
 ### v2.25.525 — Telegram agent features (bot-to-bot, guest mode, topics)
 
 All routes need a JWT or API key.

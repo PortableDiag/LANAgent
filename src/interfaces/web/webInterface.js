@@ -39,6 +39,8 @@ import deviceAliasRoutes from './deviceAliasRoutes.js';
 import mqttRoutes from './mqtt.js';
 import mcpRoutes from './mcp.js';
 import { createOpenAICompatRouter } from './openaiCompat.js';
+import { createTextXPhoneRouter, createTextXAdminRouter } from './textx.js';
+import { getTextX } from '../../services/textx/index.js';
 import { getMCPServer } from '../../services/mcp/mcpServer.js';
 import subagentsRoutes from './subagents.js';
 import p2pRoutes, { syncServicesFromPlugins } from './p2p.js';
@@ -149,6 +151,13 @@ export class WebInterface {
     
     // Setup WebSocket
     this.setupWebSocket();
+
+    // TextX phones connect at /textx/v1/ws on this server (the relay link dials out separately)
+    try {
+      getTextX(this.agent).attachServer(this.server);
+    } catch (error) {
+      logger.error('TextX endpoint not attached:', error);
+    }
     
     // Hydrate Gravatar API key from DB if not already in env
     try {
@@ -298,6 +307,10 @@ export class WebInterface {
 
     // OpenAI-compatible chat endpoint (Home Assistant Assist, Open WebUI, openai SDK clients)
     this.app.use('/v1', createOpenAICompatRouter(this.agent));
+
+    // TextX SMS app: this agent as a conversation on the phone (docs/TEXTX.md)
+    this.app.use('/textx/v1', createTextXPhoneRouter(this.agent));
+    this.app.use('/api/textx', createTextXAdminRouter(this.agent));
 
     // Setup Sub-Agent Orchestrator routes
     this.app.use('/api/subagents', subagentsRoutes);

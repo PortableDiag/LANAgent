@@ -2,6 +2,22 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.529] - 2026-10-18
+
+### Added
+- **Your agent in the TextX texting app.** TextX is an Android SMS app that can hold AI assistants as conversations. Pair a phone from Settings → TextX (a QR code), and the agent becomes a conversation you can text. It answers like it does on Telegram, with its plugins and memory. Docs: `docs/TEXTX.md`.
+  - **Works from anywhere, end-to-end encrypted.** By default the phone reaches the agent through a relay at api.lanagent.net. The agent dials out with its P2P identity, so no port is opened. Every frame is AES-256-GCM under a key that only the pairing QR carries, so the relay sees no content. Set `TEXTX_RELAY=off` to stay on your own network.
+  - **Texting from the agent (the `textx` plugin), from Telegram or the dashboard too:** send or schedule a text ("text Mom I'm running late"), read and search the conversations you shared with the agent, look up a contact, and watch a conversation for a reply.
+  - **Guards:**
+    - Each tool is off until you turn it on in TextX.
+    - Every send needs your tap on the phone.
+    - One-time codes and private conversations never leave the phone.
+    - Text from other people is handed to the model as untrusted data, never as instructions. Messages from a watched conversation never reach the command router.
+  - Scheduled texts can be listed, cancelled, skipped, edited or sent now. The agent can react to a message, mark a conversation read and block a number (reactions, edits, send-now and blocking are confirmed on the phone). Group conversations are addressed by name.
+  - **Notifications to TextX:** a per-phone switch sends the agent's notifications to its TextX conversation as well.
+  - One pairing is one phone, and Revoke deletes its key. The endpoint is idempotent, with a 7-day replay window: resent or replayed messages are acknowledged and ignored. Messages wait in an outbox while the phone is offline.
+  - API: `GET /api/textx/status`, `POST /api/textx/pair`, `PATCH|DELETE /api/textx/devices/:id`. The phone endpoint is `/textx/v1/*`.
+
 ## [2.25.528] - 2026-10-17
 
 ### Security

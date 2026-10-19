@@ -6106,6 +6106,14 @@ Important:
         await telegramInterface.sendNotification(message, {});
       }
       
+      // TextX phones that opted in to notifications (Settings › TextX)
+      try {
+        const { textxNotify } = await import('../services/textx/index.js');
+        await textxNotify(message);
+      } catch (error) {
+        logger.warn('TextX notification failed:', error.message);
+      }
+
       // Send via email if configured
       if (process.env.EMAIL_OF_MASTER && this.apiManager?.getPlugin('email')) {
         const emailPlugin = this.apiManager.getPlugin('email');

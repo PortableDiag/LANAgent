@@ -753,6 +753,7 @@ class LANAgentDashboard {
             case 'settings':
                 this.loadReportSettings();
                 this.loadTelegramAgentFeatures();
+                this.loadTextX();
                 this.loadAutonomousDeploymentSetting();
                 this.loadTokenThresholds();
                 this.loadAvatarSettings();
@@ -6185,6 +6186,94 @@ class LANAgentDashboard {
             this.showNotification(`Not removed: ${error.message}`, 'error');
         }
         this.loadTelegramAgentFeatures();
+    }
+
+    async loadTextX() {
+        try {
+            const r = await this.apiGet('/api/textx/status');
+            if (!r.success) return;
+            const { relay, devices } = r.data;
+            const list = document.getElementById('textx-devices');
+            list.innerHTML = '';
+            if (!devices.length) list.innerHTML = '<li class="setting-description">None yet.</li>';
+            for (const d of devices) {
+                const li = document.createElement('li');
+                const state = d.connected ? 'connected' : d.bound ? `last seen ${d.lastSeenAt ? new Date(d.lastSeenAt).toLocaleString() : 'never'}` : 'not scanned yet';
+                const tools = d.tools.length ? d.tools.join(', ') : 'chat only';
+                li.appendChild(document.createTextNode(`${d.name} — ${state}; allows ${tools} `));
+                const notify = document.createElement('label');
+                notify.style.marginRight = '8px';
+                const box = document.createElement('input');
+                box.type = 'checkbox';
+                box.checked = d.notify;
+                box.onchange = () => this.setTextXNotify(d.id, box.checked);
+                notify.appendChild(box);
+                notify.appendChild(document.createTextNode(' send my notifications here'));
+                li.appendChild(notify);
+                const b = document.createElement('button');
+                b.className = 'btn btn-sm btn-danger';
+                b.textContent = 'Revoke';
+                b.onclick = () => this.revokeTextX(d.id, d.name);
+                li.appendChild(b);
+                list.appendChild(li);
+            }
+            document.getElementById('textx-relay-status').textContent = relay.enabled === false
+                ? 'Relay off (TEXTX_RELAY=off): phones reach this agent only on its own network or VPN.'
+                : relay.connected ? `Relay connected: ${relay.base}` : (devices.length ? 'Relay connecting…' : 'The relay link starts when you pair a phone.');
+        } catch (error) {
+            console.error('Failed to load TextX settings:', error);
+        }
+    }
+
+    async pairTextX() {
+        const name = document.getElementById('textx-pair-name').value.trim() || 'Phone';
+        try {
+            const r = await this.apiPost('/api/textx/pair', { name });
+            if (!r.success) { this.showNotification(`Not paired: ${r.error}`, 'error'); return; }
+            this._textxPairing = r.data.uri;
+            document.getElementById('textx-pair-qr').src = r.data.qr;
+            document.getElementById('textx-pair-result').style.display = '';
+            document.getElementById('textx-pair-name').value = '';
+            this.loadTextX();
+        } catch (error) {
+            this.showNotification(`Not paired: ${error.message}`, 'error');
+        }
+    }
+
+    async copyTextXPairing() {
+        if (!this._textxPairing) return;
+        try {
+            await navigator.clipboard.writeText(this._textxPairing);
+            this.showNotification('Pairing text copied', 'success');
+        } catch (error) {
+            this.showNotification('Copy failed; scan the QR instead', 'error');
+        }
+    }
+
+    hideTextXPairing() {
+        this._textxPairing = null;
+        document.getElementById('textx-pair-qr').removeAttribute('src');
+        document.getElementById('textx-pair-result').style.display = 'none';
+    }
+
+    async setTextXNotify(id, notify) {
+        try {
+            const r = await this.apiPost(`/api/textx/devices/${encodeURIComponent(id)}`, { notify }, 'PATCH');
+            this.showNotification(r.success ? (notify ? 'Notifications will go to this phone too' : 'Notifications stopped for this phone') : r.error, r.success ? 'success' : 'error');
+        } catch (error) {
+            this.showNotification(`Not saved: ${error.message}`, 'error');
+        }
+    }
+
+    async revokeTextX(id, name) {
+        if (!confirm(`Revoke ${name}? TextX on that phone will no longer reach this agent.`)) return;
+        try {
+            const r = await this.apiDelete(`/api/textx/devices/${encodeURIComponent(id)}`);
+            this.showNotification(r.success ? `${name} revoked` : r.error, r.success ? 'success' : 'error');
+        } catch (error) {
+            this.showNotification(`Not revoked: ${error.message}`, 'error');
+        }
+        this.loadTextX();
     }
 
     async saveReportSettings() {
