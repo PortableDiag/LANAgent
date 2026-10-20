@@ -10515,6 +10515,7 @@ curl -X POST http://localhost:3000/api/plugin \
     }
   }'
 ```
+`jobId` is optional (2.25.548). Without it the one email waiting is cancelled, or the one whose address or text contains `to` (e.g. `{"to": "Sam"}`); when several match, nothing is cancelled and the response lists them with their ids.
 
 #### Schedule Recurring Email
 ```bash

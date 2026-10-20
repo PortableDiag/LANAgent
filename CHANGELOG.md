@@ -2,6 +2,12 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.548] - 2026-10-20
+
+### Fixed
+- **"Send Sam a message at noon" scheduled an email.** "Message" meant a text only when the request was typed in the TextX app; from Telegram the router picked the scheduled-email intent. With a paired phone, "send X a message", "text X" or "tell X", now or at a time, is a text on every channel unless the request says email.
+- **"Cancel the email" could not cancel it.** Cancelling a scheduled email required its internal job id, which a chat request never has, so the cancel failed and the email stayed queued. Without an id it now cancels the one email waiting, or the one to a named recipient (matched on the address or the email itself), and lists them when more than one fits.
+
 ## [2.25.547] - 2026-10-20
 
 ### Fixed

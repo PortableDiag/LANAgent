@@ -93,8 +93,8 @@ export default class EmailPlugin extends BasePlugin {
       },
       {
         command: 'cancelScheduled',
-        description: 'Cancel a scheduled email',
-        usage: 'cancelScheduled({ jobId: "job_id_here" })'
+        description: 'Cancel a scheduled email. Without a jobId it cancels the one waiting (optionally the one to a given recipient)',
+        usage: 'cancelScheduled({ jobId: "job_id_here" }) or cancelScheduled({ to: "Sam" })'
       },
       {
         command: 'scheduleRecurring',
@@ -3151,12 +3151,30 @@ Respond with JSON only:
   /**
    * Cancel a scheduled email
    */
-  async cancelScheduledEmail(data) {
-    this.validateParams(data, {
-      jobId: { required: true, type: 'string' }
-    });
-    
+  async cancelScheduledEmail(data = {}) {
     try {
+      // From chat there is no job id ("cancel the email"): take the one pending email,
+      // narrowed by recipient when one is named; with several, list them instead of guessing.
+      if (!data.jobId) {
+        const jobs = await this.agent.scheduler.agenda.jobs({
+          name: 'send-scheduled-email', nextRunAt: { $gte: new Date() }, lockedAt: null
+        });
+        const who = String(data.to || data.recipient || data.name || '').toLowerCase().trim();
+        const pending = jobs
+          .filter(j => !who || [j.attrs.data.to, j.attrs.data.subject, j.attrs.data.text, j.attrs.data.body]
+            .some(v => String(v || '').toLowerCase().includes(who)))
+          .map(j => ({ id: j.attrs._id.toString(), to: j.attrs.data.to, subject: j.attrs.data.subject, sendAt: j.attrs.nextRunAt }));
+        if (pending.length === 0) {
+          return { success: false, error: who ? `No scheduled email for ${who} is waiting to be sent` : 'There is no scheduled email waiting to be sent' };
+        }
+        if (pending.length > 1) {
+          const lines = pending.map(e => `- ${e.to}: "${e.subject}" at ${new Date(e.sendAt).toLocaleString()} (id ${e.id})`);
+          return { success: false, error: `${pending.length} scheduled emails are waiting. Which one?\n${lines.join('\n')}`, scheduled: pending };
+        }
+        data = { ...data, jobId: pending[0].id };
+        data.description = `to ${pending[0].to}: "${pending[0].subject}"`;
+      }
+
       const { ObjectId } = await import('mongodb');
       const numRemoved = await this.agent.scheduler.agenda.cancel({
         _id: new ObjectId(data.jobId),
@@ -3166,7 +3184,7 @@ Respond with JSON only:
       if (numRemoved > 0) {
         return {
           success: true,
-          message: 'Scheduled email cancelled'
+          message: data.description ? `Scheduled email ${data.description} cancelled` : 'Scheduled email cancelled'
         };
       } else {
         return {

@@ -2671,7 +2671,7 @@ Examples:
 "add contact john@example.com" -> name: null, email: "john@example.com", aliases: [], phone: null, telegram: null
 "save John Smith with email john@example.com" -> name: "John Smith", email: "john@example.com", aliases: [], phone: null, telegram: null
 "add contact Wayne Williams with email wayne@example.com, aliases CommanderFog and WayneW, phone +1-555-0123" -> name: "Wayne Williams", email: "wayne@example.com", aliases: ["CommanderFog", "WayneW"], phone: "+1-555-0123", telegram: null
-"Add a new contact name is Wayne Williams email is mazuda95@gmail.com alias is CommanderFog phone number is +14055746564 telegram username is @VikTsoi74" -> name: "Wayne Williams", email: "mazuda95@gmail.com", aliases: ["CommanderFog"], phone: "+14055746564", telegram: "@VikTsoi74"
+"Add a new contact name is Wayne Williams email is sam@example.com alias is CommanderFog phone number is +1-555-0147 telegram username is @example_user" -> name: "Wayne Williams", email: "sam@example.com", aliases: ["CommanderFog"], phone: "+1-555-0147", telegram: "@example_user"
 "add contact Sarah with email sarah@work.com, telegram @sarahc" -> name: "Sarah", email: "sarah@work.com", aliases: [], phone: null, telegram: "@sarahc"
 "add contact Bob aka Bobby with email bob@company.org" -> name: "Bob", email: "bob@company.org", aliases: ["Bobby"], phone: null, telegram: null
 "update contact wayne@example.com add aliases TheFog and Commander" -> email: "wayne@example.com", addAliases: ["TheFog", "Commander"]
@@ -3455,10 +3455,14 @@ Respond in JSON format:
           logger.debug('Could not get conversation context for intent detection:', err);
         }
       }
-      // Where the user is typing changes what "message" means.
+      // Where the user is typing changes what "message" means. With a paired phone, "message
+      // Sam at noon" from Telegram is a text too: it was scheduled as an email (2026-10-20).
       if (context.platform === 'textx') {
         conversationContext += 'Channel: the user is typing in their SMS texting app (TextX). "Send X a message", ' +
           '"message X" or "tell X" means a text message (the textx send intent), unless they say email.\n\n';
+      } else if (this.agent.apiManager?.apis?.get?.('textx')?.enabled) {
+        conversationContext += 'The user\'s phone is paired (TextX). "Send X a message", "message X", "text X" or ' +
+          '"tell X", now or at a time, means a text message (the textx send or schedule intent), unless they say email.\n\n';
       }
       
       // Pre-check: regex hints for intents that get lost in the 400+ intent prompt
