@@ -30,6 +30,14 @@ function errorResult(r) {
   return { success: false, error: ERROR_TEXT[code] || r?.error?.message || code };
 }
 
+const SEND_WORDS = /\b(?:via|by|in an?|over)\s+(?:text|sms|txt)(?:\s+message)?\b|\b(?:send|shoot|drop)\b[^.?!]*\b(?:text|message|sms|txt)\b|^\s*(?:\w+,?\s+)?(?:please\s+)?(?:do\s+)?(?:text|sms|message|remind|tell|ask)\s+(?!me\b)\w+/i;
+const WATCH_WORDS = /\b(?:let me know|tell me|notify me|alert me|ping me|watch|keep an eye|monitor)\b|\b(?:replies|texts back|writes back|answers)\b/i;
+/** The request asks to send someone a text (not to be told when one arrives). */
+export function asksToSendText(input) {
+  const s = String(input || '');
+  return SEND_WORDS.test(s) && !WATCH_WORDS.test(s);
+}
+
 // The first phone tool each action needs: whether that phone is connected decides if the
 // request can be answered in this turn.
 const FIRST_TOOL = {
@@ -72,7 +80,7 @@ export default class TextXPlugin extends BasePlugin {
         description: "Send an SMS from the user's phone. The phone shows the text and the user taps Send; nothing goes out without that tap",
         usage: 'send({ to: "Mom", text: "Running 10 minutes late" })',
         hint: messageTextRule(),
-        examples: ['text mom that I am running late', 'send a text to 555-0100 saying I am outside', 'reply to Sam by SMS: sounds good', 'text the plumber that tomorrow works']
+        examples: ['text mom that I am running late', 'remind Wayne via text message that the meeting moved to 6', 'send a text to 555-0100 saying I am outside', 'reply to Sam by SMS: sounds good', 'text the plumber that tomorrow works']
       },
       {
         command: 'schedule',
@@ -177,7 +185,15 @@ export default class TextXPlugin extends BasePlugin {
   origin() { return textxRequest.getStore()?.deviceId || null; }
 
   async execute(params = {}) {
-    const { action, ...data } = params;
+    let { action, ...data } = params;
+    // "Remind Wayne via text message that…" matched watch (it reads like "let me know") and the
+    // owner got a permissions error for a text they asked to send (2026-10-20). A request to send
+    // someone a text is a send, whatever the matcher picked.
+    if (action === 'watch' && asksToSendText(data._context?.originalInput)) {
+      this.logger.info(`textx: "${String(data._context.originalInput).slice(0, 80)}" asks to send a text, not to watch; sending`);
+      data = { _context: data._context, to: data.thread || data.contact || data.to, needsParameterExtraction: true };
+      action = 'send';
+    }
     if (data.needsParameterExtraction) await this._extractArgs(action, data);
     // From Telegram or the dashboard, with the phone's TextX closed: the phone only checks in
     // every 15 minutes (protocol §3.2), so a 45 s wait for a contact lookup always failed
@@ -383,6 +399,11 @@ export default class TextXPlugin extends BasePlugin {
     const args = scheduled
       ? { ...target, text, at: new Date(data.at).toISOString(), ...(data.repeat ? { repeat: data.repeat } : {}), ...(data.interval ? { interval: data.interval } : {}), ...(data.endAfter ? { end_after: data.endAfter } : {}), ...(attachments ? { attachments } : {}) }
       : { ...target, text, ...(attachments ? { attachments } : {}) };
+    // TextX 0.4.10: a send the owner ordered has its own cap, not the 6/h auto-reply one (2119 #150).
+    // Never for a reply the agent decided on (those go through the hub, not here), nor for a
+    // Telegram user other than the owner.
+    const uid = data._context?.userId;
+    if (originId || !uid || String(uid) === String(process.env.TELEGRAM_USER_ID || '')) args.requested_by_owner = true;
     const tool = scheduled ? 'schedule_message' : 'send_sms';
     const r = await this.call(tool, args, { onLate: (late) => this.reportLate(originId, late, scheduled) });
     if (!r.ok) return errorResult(r);

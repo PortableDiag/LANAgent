@@ -2,6 +2,16 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.556] - 2026-10-20
+
+### Fixed
+- **"Remind Wayne via text message that…" sends a text.** It was taken as a request to watch Wayne's conversation, and the owner got a permissions error instead of the text. A request to send someone a text now always sends one; "let me know when Sam replies" still watches.
+
+## [2.25.555] - 2026-10-20
+
+### Changed
+- **TextX: texts you ask for are marked as yours (TextX 0.4.10).** With "Text without asking me" on, a text or schedule you ordered from Telegram, the dashboard or the phone counts against its own limit, not the 6-an-hour auto-reply limit, so the phone does not ask you to confirm what you just asked for. Auto-replies and requests from other Telegram users are never marked.
+
 ## [2.25.554] - 2026-10-20
 
 ### Added

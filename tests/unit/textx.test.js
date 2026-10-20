@@ -335,7 +335,7 @@ test('plugin: "text Sam" resolves the contact, waits for the tap, reports the ou
       answered.add(e.body.call_id);
       if (e.body.name === 'contacts_lookup') await p.say(env('tool_result', { call_id: e.body.call_id, ok: true, result: [{ name: 'Sam', numbers: ['+15550100'] }] }));
       if (e.body.name === 'send_sms') {
-        assert.deepEqual(e.body.args, { to: ['+15550100'], text: 'on my way' });
+        assert.deepEqual(e.body.args, { to: ['+15550100'], text: 'on my way', requested_by_owner: true });
         setTimeout(() => p.say(env('tool_result', { call_id: e.body.call_id, ok: true, result: { status: 'sent' } })), 80);
       }
     }
@@ -556,7 +556,7 @@ test('"send him the same thing via text" resolves who and what from the live con
   assert.equal(res.success, true, res.error);
   assert.match(prompt, /Hi Wayne, I am ALICE/);
   const send = p.sent.find(e => e.type === 'tool_call' && e.body.name === 'send_sms');
-  assert.deepEqual(send.body.args, { to: ['+15550199'], text: 'Hi Wayne, I am ALICE.' });
+  assert.deepEqual(send.body.args, { to: ['+15550199'], text: 'Hi Wayne, I am ALICE.', requested_by_owner: true });
 });
 
 test('a back-reference with no conversation asks instead of guessing', async () => {
@@ -1148,4 +1148,37 @@ test('auto-reply uses the phone\'s notes for the conversation (thread.notes)', a
   await p.say(smsEvent({ auto_reply: true, thread: { title: 'Sam', notes: 'Loves Portal: talk like GLaDOS.' } }));
   for (let i = 0; i < 30 && !p.sent.some(e => e.type === 'tool_call' && e.body.name === 'send_sms'); i++) await tick();
   assert.match(prompts.find(x => /answering by text message/.test(x)), /phone's notes for this conversation \(newest; wins on any conflict\): Loves Portal/);
+});
+
+test('requested_by_owner only on sends the owner ordered, never on auto-replies (TextX 0.4.10)', async () => {
+  const { r } = sharedRig((p) => (/answering by text message/.test(p) ? 'Hi Sam.' : 'SKIP'));
+  const p = await pairedPhone(r, { tools: ['send_sms'] });
+  await p.say(smsEvent({ auto_reply: true }));
+  for (let i = 0; i < 30 && !p.sent.some(e => e.type === 'tool_call' && e.body.name === 'send_sms'); i++) await tick();
+  assert.equal(p.sent.find(e => e.type === 'tool_call' && e.body.name === 'send_sms').body.args.requested_by_owner, undefined);
+});
+
+test('plugin: "remind Sam via text message that…" sends a text even when matched as watch', async () => {
+  const { default: TextXPlugin, asksToSendText } = await import('../../src/api/plugins/textx.js');
+  assert.equal(asksToSendText('let me know when Sam replies'), false);
+  const r = rig({ waits: { read: 500, readExpiry: 1000, confirm: 40, confirmExpiry: 2000, late: 10 } });
+  const p = await pairedPhone(r, { tools: ['send_sms', 'contacts_lookup'] });
+  const plugin = new TextXPlugin(r.agent);
+  Object.defineProperty(plugin, 'svc', { value: { hub: r.hub } });
+  const asked = [];
+  plugin._extractArgs = async (action, d) => { asked.push(action); d.text = 'The cake is coming.'; };
+  const phone = setInterval(async () => {
+    for (const e of p.sent.filter(x => x.type === 'tool_call' && !x.done)) {
+      e.done = true;
+      if (e.body.name === 'contacts_lookup') await p.say(env('tool_result', { call_id: e.body.call_id, ok: true, result: [{ name: 'Sam', numbers: ['+15550100'] }] }));
+      if (e.body.name === 'send_sms') await p.say(env('tool_result', { call_id: e.body.call_id, ok: true, result: { status: 'sent' } }));
+    }
+  }, 5);
+  const res = await textxRequest.run({ deviceId: p.device.id }, () => plugin.execute({ action: 'watch', thread: 'Sam', purpose: 'cake',
+    _context: { originalInput: 'do remind Sam via text message that the cake is coming' } }));
+  clearInterval(phone);
+  assert.deepEqual(asked, ['send']);
+  const send = p.sent.find(e => e.type === 'tool_call' && e.body.name === 'send_sms');
+  assert.equal(send.body.args.text, 'The cake is coming.');
+  assert.equal(res.success, true);
 });
