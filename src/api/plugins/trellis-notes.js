@@ -205,7 +205,9 @@ export default class TrellisNotesPlugin extends BasePlugin {
         command: 'listBaskets',
         description: 'List the basket tree — every node with its id, title and card count',
         usage: 'listBaskets({ project: "LANAgent" })',
-        examples: ['list my baskets', 'show the notes tree', 'what projects are in my notes', 'list trellis notebooks']
+        examples: ['list my baskets', 'show the notes tree', 'what projects are in my notes', 'list trellis notebooks',
+          // "show my trellis cards" matched connectCards (draw an arrow) for want of these (2026-10-19)
+          'show my trellis cards', 'what cards do I have in trellis', 'list my trellis cards']
       },
       {
         command: 'readBasket',

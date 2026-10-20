@@ -923,13 +923,17 @@ export class WebInterface {
     // Command execution
     this.app.post('/api/command/execute', authenticateToken, async (req, res) => {
       try {
-        const { command, reasoningModel } = req.body;
+        const { command, reasoningModel, threadId } = req.body;
         // reasoningModel: run this request's reasoning on another model of the current provider
         // (e.g. "deepseek/deepseek-v4.1-flash"), to compare models on real tasks.
         const model = typeof reasoningModel === 'string' && /^[\w.-]+\/[\w.:-]+$/.test(reasoningModel) ? reasoningModel : null;
+        // threadId (a positive integer): a separate conversation, so scripted conversations
+        // (scripts/testing/conversation-check.mjs) don't run into each other.
+        const thread = Number.isInteger(threadId) && threadId > 0 ? threadId : undefined;
         const result = await this.agent.processNaturalLanguage(command, {
           userId: 'web-user',
           interface: 'web',
+          ...(thread ? { threadId: thread } : {}),
           ...(model ? { reasoningModel: model } : {})
         });
         res.json({ success: true, data: result });

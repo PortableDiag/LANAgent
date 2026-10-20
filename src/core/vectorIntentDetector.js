@@ -148,8 +148,17 @@ export class VectorIntentDetector {
       const isDangerousAction = metadata.action && /^(restart|redeploy|shutdown|stop|delete\w*|remove\w*|share\w*|unshare\w*|block\w*|unblock\w*)$/i.test(metadata.action);
       let threshold = 0.6;
       if (isDangerousAction) threshold = Math.max(threshold, 0.7);
+      // A request to see something ("show my trellis cards", "what's on…") matched to an action that
+      // makes or changes something: "show my trellis cards" matched connectCards (draw an arrow) at
+      // 0.69, because every card-editing command's text says "card" (2026-10-19). Such a match must
+      // be near-certain; otherwise the AI classifier, which reads the whole request, decides.
+      const writesSomething = metadata.action && /^(create|add|connect|dock|group|layout|set|update|move|append|post|send|write|make|draw|generate|upload|schedule|reply|react|edit)/i.test(metadata.action);
+      const asksToSee = /^(show|list|what|which|read|display|view|see|get me|tell me|how many|any|do i have|find|search)\b/i.test(String(input).trim()) &&
+        !/\b(create|add|make|draw|connect|send|post|write|set|move|schedule|generate|upload|reply|edit|link)\b/i.test(input);
+      const readVsWrite = writesSomething && asksToSee;
+      if (readVsWrite) threshold = Math.max(threshold, 0.75);
       if (similarity < threshold) {
-        logger.info(`Best match similarity ${similarity.toFixed(3)} below threshold ${threshold}${isDangerousAction ? ' (dangerous action)' : ` (${metadata.plugin || 'system'})`}, falling back to AI`);
+        logger.info(`Best match similarity ${similarity.toFixed(3)} below threshold ${threshold}${isDangerousAction ? ' (dangerous action)' : readVsWrite ? ' (a request to see matched an action that changes)' : ` (${metadata.plugin || 'system'})`}, falling back to AI`);
         return null;
       }
       

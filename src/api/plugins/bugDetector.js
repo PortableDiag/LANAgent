@@ -18,8 +18,10 @@ export default class BugDetectorPlugin extends BasePlugin {
     this.commands = [
       {
         command: 'scan',
-        description: 'Scan code for potential bugs',
-        usage: 'scan [file|directory]'
+        // Its own source only: "scan example.com for vulnerabilities" matched this (2026-10-19).
+        description: "Scan the agent's own source code for potential bugs (not websites, domains or servers)",
+        usage: 'scan [file|directory]',
+        examples: ['scan your code for bugs', 'check the codebase for bugs', 'run the bug detector on src/core']
       },
       {
         command: 'bugs',

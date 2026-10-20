@@ -23,7 +23,8 @@ export default class DomainIntelPlugin extends BasePlugin {
       { command: 'report', description: 'Everything at once: registration, DNS, subdomains and certificate for a domain',
         usage: 'report({ domain: "example.com" })', examples: ['give me a full report on example.com', 'investigate this domain', 'domain intel on this website'] },
       { command: 'securityPosture', description: 'Score a domain\'s public security posture (0-100): certificate trust and expiry, TLS protocol and cipher, certificate chain, SPF, DMARC policy, CAA, DNSSEC, wildcard certificates, DNS health — with fixes',
-        usage: 'securityPosture({ domain: "example.com", includeEvidence: false })', examples: ['how secure is example.com', 'security posture of this domain', 'check the email and certificate security of lanagent.net', 'score the domain security of example.com'] }
+        usage: 'securityPosture({ domain: "example.com", includeEvidence: false })', examples: ['how secure is example.com', 'security posture of this domain', 'check the email and certificate security of lanagent.net', 'score the domain security of example.com',
+          'scan example.com for vulnerabilities', 'check this website for security problems'] }
     ];
   }
 
