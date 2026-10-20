@@ -981,6 +981,22 @@ export class Agent extends EventEmitter {
     return `\nThis came from a shared Trellis channel (card ${context.trellis.card}). The conversation there, oldest first — the operator's requests, other agents' messages and your own earlier replies (signed ${this.config?.name || 'ALICE'}):\n${String(recent).slice(-4000)}\n`;
   }
 
+  /**
+   * What was just said, as a prompt block: the Trellis channel when the request came from one,
+   * otherwise this user's live conversation (their messages, your replies, what your actions
+   * reported). The context-query answer ("questions that require conversation history") ran with
+   * neither outside Trellis, so a reply to the agent's own question was answered as a new topic
+   * (asked a trivia question, "Canberra" got a Canberra encyclopedia entry, 2026-10-19).
+   */
+  _conversationBlock(context = {}, limit = 8) {
+    const channel = this._channelContext(context);
+    if (channel) return channel;
+    const turns = this.memoryManager?.getRecentTurns?.(context.userId || 'default', context.threadId, limit) || [];
+    if (!turns.length) return '';
+    return '\nThe conversation so far, oldest first ("You" is you; your questions and what your actions reported are in it):\n' +
+      turns.map(t => `${t.role === 'user' ? 'User' : 'You'}: ${String(t.content).slice(0, 700)}`).join('\n') + '\n';
+  }
+
   async processNaturalLanguage(input, context = {}, systemPrompt = null) {
     // Anyone who is not the operator gets a model reply and nothing else: this router runs
     // plugins, and the guest path's restrictions used to be ignored here.
@@ -1095,7 +1111,7 @@ export class Agent extends EventEmitter {
         try {
           const agentName = this.config?.name || process.env.AGENT_NAME || 'LANAgent';
           const draft = await this.providerManager.generateResponse(
-            `You are ${agentName}. The user wants to see what you would do before you do it.\n${this._channelContext(context)}\n` +
+            `You are ${agentName}. The user wants to see what you would do before you do it.\n${this._conversationBlock(context)}\n` +
             `Request: ${input}\n\nState exactly what you would do — the action, its target, and the full text you would write or send — ` +
             `then say you will do it when they confirm. You have NOT done it; never say it is done.`,
             { maxTokens: 900, temperature: 0.3, systemPrompt: this.getSystemPrompt() }
@@ -1117,7 +1133,11 @@ export class Agent extends EventEmitter {
           const hasFollowUpSignals = /\b(that|it|this|those|these|what|why|how|really|huh|wtf|hmm|ok|yes|no|yeah|nah|sure|exactly|right|is it|was it|did it|can you|could you|about|more|else|also|too|again|same)\b/i.test(input);
           const isQuestion = /\?$/.test(input.trim());
           const noStrongIntent = !/\b(post|search|send|create|get me|show me|turn|set|check my|configure|login|register|deploy|scan|generate|download|upload|play)\b/i.test(input);
-          let looksLikeFollowUp = isShort && (hasFollowUpSignals || isQuestion) && noStrongIntent;
+          // The agent just asked something ("Which one?", a trivia question, "Want me to reply?"): a short
+          // message is most likely the answer, whatever words it uses ("Canberra", "the blue one", "Bob").
+          const lastReply = [...userBuffer].reverse().find(m => m.role === 'assistant')?.content || '';
+          const weAsked = /\?\s*(\*{0,2}\s*)?$|\?[^?]{0,200}$/.test(String(lastReply).trim());
+          let looksLikeFollowUp = isShort && (hasFollowUpSignals || isQuestion || weAsked) && noStrongIntent;
 
           // Almost every short question passes the checks above, including real
           // commands ("how much free disk space is there?"), which were answered as
@@ -1464,9 +1484,10 @@ If the user is telling you to DO something (retry, go ahead, write it, add it, f
               }
 
               // Include memory context — and, from a Trellis channel, the conversation there
-              const channelCtx = this._channelContext(context);
+              const channelCtx = this._conversationBlock(context);
               const contextualInput = (queryMemoryContext || channelCtx) ?
-                `${channelCtx}${queryMemoryContext}\nUser's question: ${input}` :
+                `${channelCtx}${queryMemoryContext}\nThe user now says: ${input}\n` +
+                  (channelCtx ? 'Read it as part of that conversation: if you asked them something, this is likely their answer.' : '') :
                 input;
 
               let queryResponse;
