@@ -71,7 +71,9 @@ On the agent side:
 
 **Messages for the owner** ("tell Charles…", "ask him…", an alert, or anything else that needs them) go to
 the owner's conversation with the agent in TextX **and** to Telegram, whether or not auto-reply is on for
-that conversation. If one channel fails, the other still delivers.
+that conversation. If one channel fails, the other still delivers. The LANAgent Android app (1.5.0+) gets them
+as phone notifications too: its `hello` carries `notify: "owner" | "all" | "off"` (an agent extension; TextX
+sends none). At `all` it also gets every agent notification. Messages carry `x_kind: "owner" | "notification"`.
 
 **Contacts the agent sees are kept** (`textx_contacts`: name, numbers, email only): every lookup
 result, the people in shared conversations (re-read on connect, at most every 6 hours) and whoever texts

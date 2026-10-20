@@ -23,6 +23,8 @@ import { resultText } from '../../interfaces/web/openaiCompat.js';
  */
 
 export const PROTOCOL = 1;
+/** hello.notify from the LANAgent app: everything the agent notifies, only messages for the owner, or none. */
+export const NOTIFY_LEVELS = ['all', 'owner', 'off'];
 export const TOOLS = ['send_sms', 'schedule_message', 'list_threads', 'read_thread', 'search_messages',
   'contacts_lookup', 'get_attachment', 'watch', 'unwatch',
   // TextX 0.2.19
@@ -361,6 +363,8 @@ export class TextXHub {
     const capabilities = (Array.isArray(b.capabilities) ? b.capabilities : []).filter(t => TOOLS.includes(t));
     const patch = { capabilities, appVersion: String(b.app_version || '').slice(0, 40), client: String(b.app || '').slice(0, 40),
       replyMode: REPLY_MODES.includes(b.reply_mode) ? b.reply_mode : 'text',
+      // The LANAgent app says which of the agent's notes it shows as phone notifications.
+      ...(NOTIFY_LEVELS.includes(b.notify) ? { notifyLevel: b.notify } : {}),
       maxAttachmentBytes: Number.isFinite(b.max_attachment_bytes) && b.max_attachment_bytes > 0 ? b.max_attachment_bytes : null, lastSeenAt: new Date(this.now()) };
     if (!device.deviceId) Object.assign(patch, { deviceId: phoneId, boundAt: new Date(this.now()) });
     Object.assign(device, await this.store.updateDevice(device.id, patch));
@@ -564,6 +568,14 @@ export class TextXHub {
     try { await this.deliver(device, 'message', { text }); sent.push('TextX'); } catch (e) {
       this.logger.warn?.(`TextX: owner note to the phone failed: ${e.message}`);
     }
+    // The owner's LANAgent app, wherever it is (it checks in through the relay and raises a phone notification).
+    for (const d of await this.store.listDevices()) {
+      if (d.id === device.id || d.revokedAt || !d.deviceId || !['all', 'owner'].includes(d.notifyLevel)) continue;
+      try {
+        await this.deliver(d, 'message', { text: `💬 ${title ? `"${title}": ` : ''}${text}`, x_kind: 'owner' });
+        sent.push(d.name);
+      } catch (e) { this.logger.warn?.(`TextX: owner note to ${d.name} failed: ${e.message}`); }
+    }
     const tg = this.agent?.interfaces?.get?.('telegram');
     if (tg?.sendNotification) {
       try {
@@ -576,7 +588,7 @@ export class TextXHub {
 
   async notify(text) {
     for (const d of await this.store.listDevices()) {
-      if (!d.revokedAt && d.deviceId && d.notify) await this.deliver(d, 'message', { text: String(text) });
+      if (!d.revokedAt && d.deviceId && (d.notify || d.notifyLevel === 'all')) await this.deliver(d, 'message', { text: String(text), x_kind: 'notification' });
     }
   }
 

@@ -82,6 +82,7 @@ const deviceSchema = new mongoose.Schema({
   watches: { type: [mongoose.Schema.Types.Mixed], default: [] },
   nextSeq: { type: Number, default: 0 },
   contactsSyncAt: Date, // last full address-book sync (contacts_list); null = none kept
+  notifyLevel: String,  // from the LANAgent app's hello: 'all' | 'owner' | 'off' (TextX sends none)
   revokedAt: Date
 }, { timestamps: true, collection: 'textx_devices' });
 
@@ -124,7 +125,7 @@ export const TextXOutbox = mongoose.models.TextXOutbox || mongoose.model('TextXO
 export const TextXInbox = mongoose.models.TextXInbox || mongoose.model('TextXInbox', inboxSchema);
 
 const PUBLIC_FIELDS = ['name', 'kid', 'base', 'deviceId', 'boundAt', 'lastSeenAt', 'appVersion', 'client', 'replyMode', 'maxAttachmentBytes',
-  'capabilities', 'notify', 'watches', 'contactsSyncAt', 'revokedAt', 'createdAt'];
+  'capabilities', 'notify', 'notifyLevel', 'watches', 'contactsSyncAt', 'revokedAt', 'createdAt'];
 
 function toDevice(doc) {
   if (!doc) return null;
