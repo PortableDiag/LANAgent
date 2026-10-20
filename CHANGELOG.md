@@ -2,6 +2,11 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.546] - 2026-10-20
+
+### Fixed
+- **"What version are you running?" answered with the network interfaces.** When the question was routed to system information (about half the time), the step that picks which kind of information had no "version" choice, so the model picked "network". System information now has a `version` type that answers with the LANAgent version and the OS, and a full report includes the version.
+
 ## [2.25.545] - 2026-10-20
 
 ### Fixed

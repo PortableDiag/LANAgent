@@ -57,10 +57,10 @@ export class AIIntentDetector {
       // System information
       1: {
         name: 'systemInfo',
-        description: 'Get system information (disk space, memory usage, CPU, network)',
+        description: 'Get system information (disk space, memory usage, CPU, network, OS, the agent version)',
         plugin: 'system',
         action: 'info',
-        examples: ['how much disk space?', 'memory usage', 'CPU load', 'system stats']
+        examples: ['how much disk space?', 'memory usage', 'CPU load', 'system stats', 'what version are you running?']
       },
       
       // System commands
@@ -2339,16 +2339,17 @@ Number:`;
   async extractSystemInfoParams(query) {
     const prompt = `Extract the system information type from this query: "${query}"
 
-Types: disk, memory, cpu, network, uptime, os, all
+Types: disk, memory, cpu, network, uptime, os, version, all
+- version: the agent's own software version ("what version are you running?")
 
 Respond with just the type word:`;
 
     try {
       const response = await this.agent.providerManager.generateAux(prompt, { maxTokens: 20 });
-      const type = response.content.trim().toLowerCase();
+      const type = (response.content.trim().toLowerCase().match(/[a-z]+/) || ['all'])[0];
       
       // Validate type
-      const validTypes = ['disk', 'memory', 'cpu', 'network', 'uptime', 'os', 'all'];
+      const validTypes = ['disk', 'memory', 'cpu', 'network', 'uptime', 'os', 'version', 'all'];
       return { type: validTypes.includes(type) ? type : 'all' };
     } catch (error) {
       logger.error('Parameter extraction error:', error);

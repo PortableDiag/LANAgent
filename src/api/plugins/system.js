@@ -65,7 +65,7 @@ export default class SystemPlugin extends BasePlugin {
       },
       {
         command: 'info',
-        description: 'Get system information (disk, cpu, memory, etc)',
+        description: 'Get system information (disk, cpu, memory, network, uptime, os, or the LANAgent version)',
         usage: 'info [type]'
       },
       {
@@ -586,7 +586,13 @@ export default class SystemPlugin extends BasePlugin {
         info.uptime = uptimeResult.stdout.trim();
       }
       
-      if (!type || type === 'all' || type === 'os') {
+      // "What version are you running?" had no type of its own, so the extractor picked one of
+      // the others and the answer was a dump of network interfaces (2026-10-20).
+      if (!type || type === 'all' || type === 'version') {
+        info.version = this.agent?.version || null;
+      }
+
+      if (!type || type === 'all' || type === 'os' || type === 'version') {
         // OS info
         const osResult = await execAsync('cat /etc/os-release | grep -E "^NAME=|^VERSION=" | sed \'s/[^=]*=//;s/"//g\'');
         const kernelResult = await execAsync('uname -r');
@@ -598,6 +604,9 @@ export default class SystemPlugin extends BasePlugin {
       
       // Format the response
       let result = '';
+      if (info.version && type === 'version') {
+        result += `🏷️ **LANAgent:** v${info.version}\n`;
+      }
       if (info.disk) {
         result += `💾 **Disk Usage:**\n`;
         result += `Total: ${info.disk.total} | Used: ${info.disk.used} (${info.disk.usePercent}) | Free: ${info.disk.available}\n\n`;
@@ -628,6 +637,10 @@ export default class SystemPlugin extends BasePlugin {
       
       if (info.os) {
         result += `🐧 **OS:** ${info.os.distribution} (Kernel ${info.os.kernel})\n`;
+      }
+
+      if (info.version && type !== 'version') {
+        result += `🏷️ **LANAgent:** v${info.version}\n`;
       }
       
       return {
