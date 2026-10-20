@@ -2,6 +2,13 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.549] - 2026-10-20
+
+### Fixed
+- **"At noon PST" was scheduled for 1 PM.** The model turned the time into UTC itself and read PST as a fixed UTC-8, but people say PST all year; in October noon Pacific is UTC-7. Scheduled texts and emails now take the time as it was said, and the conversion happens in code: PST, PDT and PT all mean Pacific local time (likewise Mountain, Central, Eastern, Alaska, Hawaii), and a time with no zone is the agent's local time. Texts had a second gap: the prompt gave the current time only in UTC, so "at noon" could mean noon UTC.
+- **"Send … a message in 5 minutes" was refused with "When should it be sent?".** The time reached the texting plugin as the words "in 5 minutes". Relative times ("in 5 minutes", "in an hour", "in half an hour") are now counted from now, and a time that cannot be read is asked of the model again instead of failing.
+- A time with no day named that has already passed today ("at noon", asked at 12:20) means tomorrow.
+
 ## [2.25.548] - 2026-10-20
 
 ### Fixed

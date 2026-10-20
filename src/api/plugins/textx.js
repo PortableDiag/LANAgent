@@ -1,5 +1,6 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { BasePlugin } from '../core/basePlugin.js';
+import { nowInZone, resolveRequestTime } from '../../utils/wallClock.js';
 import { getTextX } from '../../services/textx/index.js';
 import { textxRequest, untrusted, formatMessage } from '../../services/textx/textxHub.js';
 
@@ -238,20 +239,29 @@ export default class TextXPlugin extends BasePlugin {
     const cmd = this.commands.find(c => c.command === action);
     const pm = this.agent?.providerManager;
     if (!request || !cmd?.usage || !pm?.generateResponse) return;
+    // An earlier extractor may have copied the words ("in 5 minutes"): read them, or ask again.
+    if (data.at != null) {
+      const at = resolveRequestTime(data.at, request);
+      if (at) data.at = at.toISOString(); else delete data.at;
+    }
     const composing = action === 'send' || action === 'schedule';
     const textRule = composing ? `${messageTextRule()} ` : 'Copy any message text exactly as the user wants it sent. ';
     try {
       const res = await pm.generateResponse(
         `Extract the arguments for the texting action ${action} from this request.\nCall shape: ${cmd.usage}\n` +
         `Request: ${request}\nUse exactly the argument names in the call shape. ${textRule}` +
-        `Times are ISO-8601 with the offset; now is ${new Date().toISOString()}. Leave out what ` +
+        `Give times as the wall-clock time the user said, YYYY-MM-DDTHH:mm with no offset or Z (a zone ` +
+        `in the request is applied separately: "noon PST" -> T12:00; a time with no date that has already passed today ` +
+        `means tomorrow); local now is ${nowInZone()}. Leave out what ` +
         'the request does not say. Answer with one JSON object only.',
         { maxTokens: 600, temperature: composing ? 0.3 : 0 });
       const raw = String(res?.content || '').replace(/^```(?:json)?\s*|\s*```$/g, '');
       const got = JSON.parse(raw.slice(raw.indexOf('{'), raw.lastIndexOf('}') + 1));
       for (const [k, v] of Object.entries(got || {})) {
         if (k === 'action' || k.startsWith('_')) continue;
-        if ((data[k] == null || data[k] === '') && v != null && v !== '') data[k] = v;
+        if ((data[k] == null || data[k] === '') && v != null && v !== '') {
+          data[k] = k === 'at' ? (resolveRequestTime(v, request)?.toISOString() || v) : v;
+        }
       }
     } catch (err) {
       this.logger.warn(`textx ${action}: argument extraction failed: ${err.message}`);
@@ -351,6 +361,7 @@ export default class TextXPlugin extends BasePlugin {
     data = { ...data, to: ref.to };
     const text = String(ref.text || '').trim();
     if (!text) return { success: false, error: 'What should the text say?' };
+    if (scheduled && data.at != null) data.at = resolveRequestTime(data.at, '')?.toISOString() || data.at;
     if (scheduled && !Number.isFinite(Date.parse(data.at))) return { success: false, error: 'When should it be sent? Give a date and time.' };
     // A named conversation (a group) is addressed by its thread; people by their numbers.
     let target;

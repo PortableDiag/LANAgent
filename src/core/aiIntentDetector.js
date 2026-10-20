@@ -1,5 +1,6 @@
 import { logger } from '../utils/logger.js';
 import { StructuredOutputParser, JSONOutputParser } from '../services/outputParser.js';
+import { nowInZone, resolveRequestTime } from '../utils/wallClock.js';
 import { schemas } from '../services/outputSchemas.js';
 
 export class AIIntentDetector {
@@ -2557,8 +2558,7 @@ Respond in JSON format:
       // Now extract the scheduling time
       const timePrompt = `Extract the scheduled time from this email request: "${query}"
 
-Today's date: ${new Date().toDateString()}
-Current time: ${new Date().toLocaleTimeString()}
+Local now: ${nowInZone()}
 
 Examples:
 "send email to John tomorrow at 9am" -> "tomorrow at 9am"
@@ -2568,13 +2568,14 @@ Examples:
 "email Wayne in 2 hours" -> "in 2 hours"
 "send report at 3pm" -> "at 3pm"
 
-Extract the time/date portion and convert it to ISO 8601 format.
-If no specific time is mentioned, use 9:00 AM.
+Extract the time/date portion as the wall-clock time the user said, YYYY-MM-DDTHH:mm with NO
+offset and no Z (a time zone in the request is handled separately; "noon PST" -> T12:00).
+If no specific time is mentioned, use 9:00 AM. A time with no date that has already passed today means tomorrow.
 
 Respond in JSON format:
 {
   "timePhrase": "the time phrase from the query",
-  "sendAt": "ISO 8601 datetime string (e.g., 2025-01-15T14:00:00Z)"
+  "sendAt": "YYYY-MM-DDTHH:mm"
 }`;
 
       const timeResponse = await this.agent.providerManager.generateAux(timePrompt, { maxTokens: 100 });
@@ -2593,7 +2594,7 @@ Respond in JSON format:
         to: emailParams.to,
         subject: emailParams.subject,
         body: emailParams.text,
-        sendAt: timeData.sendAt,
+        sendAt: resolveRequestTime(timeData.sendAt, query)?.toISOString() || timeData.sendAt,
         action: 'schedule',
         recipientName: emailParams.recipientName,
         timePhrase: timeData.timePhrase
