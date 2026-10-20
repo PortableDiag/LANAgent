@@ -1114,3 +1114,38 @@ test('address book: hellos every few seconds start one sync, not one each (2026-
   clearInterval(phone);
   assert.equal(calls, 1);
 });
+
+test('auto-reply looks up public information on the web and answers from it', async () => {
+  const { r, prompts } = sharedRig((p) => (/Web search results/.test(p) ? 'The parish closed in August, per the diocese site.'
+    : /answering by text message/.test(p) ? 'SEARCH: St Catherine mission Lubbock' : 'SKIP'));
+  const searched = [];
+  r.agent.apiManager = { getPlugin: (n) => (n === 'websearch'
+    ? { enabled: true, execute: async (q) => { searched.push(q); return { success: true, result: '1. Diocese news\n   https://example.org\n   The mission closed.' }; } }
+    : null) };
+  const p = await pairedPhone(r, { tools: ['send_sms'] });
+  await p.say(smsEvent({ auto_reply: true, message: { thread_id: 't9', message_id: 'm-q', from: { name: 'Sam' }, text: 'Alice, what happened to St Catherine mission in Lubbock?', untrusted: true } }));
+  for (let i = 0; i < 30 && !p.sent.some(e => e.type === 'tool_call' && e.body.name === 'send_sms'); i++) await tick();
+  assert.deepEqual(searched, [{ action: 'search', query: 'St Catherine mission Lubbock' }]);
+  const call = p.sent.find(e => e.type === 'tool_call' && e.body.name === 'send_sms');
+  assert.equal(call.body.args.text, 'The parish closed in August, per the diocese site.');
+  assert.match(prompts.find(x => /Web search results/.test(x)), /<<<UNTRUSTED web/);
+});
+
+test('auto-reply follows what the owner told the agent about the sender', async () => {
+  const { r, prompts } = sharedRig((p) => (/answering by text message/.test(p) ? 'Hello, test subject.' : 'SKIP'));
+  r.agent.memoryManager.recall = async () => [{ content: 'When talking with Sam, speak like GLaDOS.' }, { content: 'Mom likes tulips.' }];
+  const p = await pairedPhone(r, { tools: ['send_sms'] });
+  await p.say(smsEvent({ auto_reply: true }));
+  for (let i = 0; i < 30 && !p.sent.some(e => e.type === 'tool_call' && e.body.name === 'send_sms'); i++) await tick();
+  const ask = prompts.find(x => /answering by text message/.test(x));
+  assert.match(ask, /speak like GLaDOS/);
+  assert.doesNotMatch(ask, /tulips/);
+});
+
+test('auto-reply uses the phone\'s notes for the conversation (thread.notes)', async () => {
+  const { r, prompts } = sharedRig((p) => (/answering by text message/.test(p) ? 'The cake is a lie.' : 'SKIP'));
+  const p = await pairedPhone(r, { tools: ['send_sms'] });
+  await p.say(smsEvent({ auto_reply: true, thread: { title: 'Sam', notes: 'Loves Portal: talk like GLaDOS.' } }));
+  for (let i = 0; i < 30 && !p.sent.some(e => e.type === 'tool_call' && e.body.name === 'send_sms'); i++) await tick();
+  assert.match(prompts.find(x => /answering by text message/.test(x)), /phone's notes for this conversation \(newest; wins on any conflict\): Loves Portal/);
+});

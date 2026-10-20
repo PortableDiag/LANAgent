@@ -2,6 +2,21 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.554] - 2026-10-20
+
+### Added
+- **TextX conversation notes (TextX 0.4.9):** the notes you write for a conversation on the phone (Details › Notes for assistants) shape the assistant's auto-replies and its answers when tagged there. When they disagree with something told to the assistant earlier, the phone's note wins.
+
+## [2.25.553] - 2026-10-20
+
+### Fixed
+- **TextX auto-replies follow what you told the assistant about that person.** "When talking with Sam, be playful" saved from Telegram now shapes the replies in Sam's conversation. Only saved notes that name the person are used, and they set tone, never the rules.
+
+## [2.25.552] - 2026-10-20
+
+### Fixed
+- **TextX auto-replies can look things up.** A question about public information in a conversation with auto-reply on (news, people, places, history) now gets a web search, and the reply answers from the results. Before, the reply was written with no tools and told the sender the assistant had no web access. Auto-replies still never act for the owner, contact anyone or share personal details.
+
 ## [2.25.551] - 2026-10-20
 
 ### Fixed
