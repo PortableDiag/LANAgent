@@ -51,7 +51,7 @@ conversations you shared with it.
 | "schedule a text to Dad for 9am tomorrow" | `schedule_message`, confirmed the same way |
 | "any unread texts?", "catch me up on the family chat" | `list_threads`, `read_thread` |
 | "find the text with the gate code" | `search_messages` |
-| "what's Sam's number" | `contacts_lookup`. Names in "text Sam …" are also resolved through it |
+| "what's Sam's number" | `contacts_lookup`. Names in "text Sam …" are also resolved through it. "show my saved contacts" lists what the agent kept |
 | "tell me when the landlord replies about the lease" | `watch` (up to 7 days) |
 | "what texts are scheduled", "cancel the birthday text", "skip the next Friday reminder" | `list_scheduled`, `cancel_scheduled`, `skip_next`, `update_scheduled`, `send_scheduled_now` (the last two confirmed) |
 | "thumbs up Sam's last text", "mark the family chat read" | `react` (confirmed), `mark_read` |
@@ -68,6 +68,18 @@ On the agent side:
 
 - SMS text is wrapped as **untrusted data** and never treated as instructions.
 - Watched-conversation events go to a plain model call, never to the command router.
+
+**Contacts the agent sees are kept** (`textx_contacts`: name, numbers, email only): every lookup
+result, the people in shared conversations (re-read on connect, at most every 6 hours) and whoever texts
+there. A new number also fills the phone field of the one matching card (by name, alias or email) in the
+agent's contact book, never replacing one already set. With the phone offline a saved number is used
+directly; with it connected the live lookup wins. Turning contact lookup off in TextX stops new lookups.
+
+**Whole address book** (TextX 0.3.29 `contacts_list`, its own switch "Share the whole address book", off
+by default): the first connect copies it page by page, then once a day only changes (`since`), dropping
+`deleted` ids; the book's numbers and emails replace older ones. Switched off (gone from `hello`, or
+`not_allowed`) the copy is dropped; contacts seen in shared conversations stay. Emailing someone by name
+falls back to the one phone contact of that exact name with one email.
 
 If the agent restarts while answering, it says afterwards which message it didn't finish (it doesn't re-run it, since the request may already have acted). A send that you haven't tapped yet returns at once ("it's on your phone"). Its outcome (sent,
 declined, expired) is reported back to the conversation the request came from.

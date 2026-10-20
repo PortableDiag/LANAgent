@@ -274,6 +274,21 @@ export class EmailContactManager {
     };
   }
 
+  /** One email for exactly one phone contact of that name (TextX textx_contacts), else null. */
+  async phoneBookEmail(name) {
+    try {
+      const { TextXContact } = await import('../services/textx/textxStore.js');
+      const key = String(name || '').trim().toLowerCase().replace(/\s+/g, ' ');
+      if (!key) return null;
+      const hits = await TextXContact.find({ key, 'emails.0': { $exists: true } }).limit(2).lean();
+      if (hits.length !== 1 || hits[0].emails.length !== 1 || this.isBlocked(hits[0].emails[0])) return null;
+      return { email: hits[0].emails[0], name: hits[0].name };
+    } catch (err) {
+      logger.debug(`Phone address-book lookup skipped: ${err.message}`);
+      return null;
+    }
+  }
+
   async resolveRecipient(searchTerm, requireHighConfidence = true) {
     try {
       // Check if it's an email address
@@ -342,6 +357,13 @@ export class EmailContactManager {
       } else if (exactMatches.length > 1) {
         // Multiple exact matches - this shouldn't happen but needs handling
         throw new Error(`Multiple contacts found with the exact name "${searchTerm}". Please use their email address instead.`);
+      }
+
+      // No card by that exact name: the owner's phone address book (TextX) may have their email.
+      const fromPhone = await this.phoneBookEmail(searchTerm);
+      if (fromPhone) {
+        logger.info(`Found ${fromPhone.name} <${fromPhone.email}> in the phone's address book`);
+        return { ...fromPhone, confidence: 1.0, needsConfirmation: false };
       }
 
       // Handle fuzzy matches

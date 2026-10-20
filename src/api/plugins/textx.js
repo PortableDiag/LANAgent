@@ -112,7 +112,7 @@ export default class TextXPlugin extends BasePlugin {
       {
         command: 'contact',
         description: "Look up a contact's phone numbers on the user's phone",
-        usage: 'contact({ query: "Sam" })',
+        usage: 'contact({ query: "Sam" })  (query "all" lists the contacts saved from the phone)',
         examples: ["what is Sam's number", 'look up the plumber in my contacts']
       },
       {
@@ -250,10 +250,22 @@ export default class TextXPlugin extends BasePlugin {
     const list = (Array.isArray(to) ? to : String(to || '').split(/\s*(?:,|;|\band\b)\s*/)).map(s => String(s).trim()).filter(Boolean);
     if (!list.length) return { error: 'Who should the text go to?' };
     const numbers = [];
+    const hub = this.svc.hub;
+    // A saved number skips the round trip when the phone has no socket (it checks in only every
+    // 15 minutes); with the phone connected its contacts stay the authority.
+    const device = await hub.pickDevice('contacts_lookup', this.origin());
+    const online = device && hub.isConnected(device.id);
     for (const who of list) {
       if (numberish(who)) { numbers.push(who.replace(/[^\d+]/g, '')); continue; }
+      const saved = online ? [] : await hub.savedContacts(who);
+      if (saved.length === 1 && saved[0].numbers.length === 1) { numbers.push(saved[0].numbers[0]); continue; }
       const r = await this.call('contacts_lookup', { query: who, limit: 5 });
-      if (!r.ok) return { error: r.error?.code === 'not_allowed' ? `I need ${who}'s number: contact lookup is off for this agent in TextX.` : errorResult(r).error };
+      if (!r.ok) {
+        const known = await hub.savedContacts(who);
+        if (known.length === 1 && known[0].numbers.length === 1) { numbers.push(known[0].numbers[0]); continue; }
+        return { error: r.error?.code === 'not_allowed' ? `I need ${who}'s number: contact lookup is off for this agent in TextX.` : errorResult(r).error };
+      }
+      await hub.learnContacts(r.result, 'a contact lookup');
       let hits = (r.result || []).filter(c => (c.numbers || []).length);
       // "Wayne CommanderFog" (a nickname the agent knows) vs "Wayne Williams" in the phone: try
       // each word, and take it only when exactly one contact answers.
@@ -261,6 +273,7 @@ export default class TextXPlugin extends BasePlugin {
         const seen = new Map();
         for (const word of who.split(/\s+/).filter(w => w.length >= 3)) {
           const w = await this.call('contacts_lookup', { query: word, limit: 5 });
+          if (w.ok) await hub.learnContacts(w.result, 'a contact lookup');
           for (const c of (w.ok ? w.result || [] : [])) if ((c.numbers || []).length) seen.set(c.name, c);
         }
         if (seen.size === 1) hits = [...seen.values()];
@@ -371,6 +384,7 @@ export default class TextXPlugin extends BasePlugin {
     const r = await this.call('list_threads', { limit: 50 });
     if (!r.ok) return { error: errorResult(r).error };
     const all = r.result || [];
+    await this.svc.hub.learnContacts(all.flatMap(t => t.participants || []), 'a shared conversation');
     if (!thread) return { error: 'Which conversation?' };
     const q = String(thread).toLowerCase();
     const hit = all.find(t => String(t.thread_id) === String(thread)) ||
@@ -388,6 +402,7 @@ export default class TextXPlugin extends BasePlugin {
     const r = await this.call('list_threads', { limit: Math.min(Number(data.limit) || 20, 50), ...(data.unreadOnly ? { unread_only: true } : {}) });
     if (!r.ok) return errorResult(r);
     const list = r.result || [];
+    await this.svc.hub.learnContacts(list.flatMap(t => t.participants || []), 'a shared conversation');
     if (!list.length) return { success: true, result: 'No conversations are shared with me in TextX.' };
     const lines = list.map(t => `- ${t.title || (t.participants || []).map(p => p.name || p.number).join(', ')}${t.unread ? ` (${t.unread} unread)` : ''} — last ${t.last_date || '?'}`);
     return { success: true, result: `Shared conversations:\n${lines.join('\n')}` };
@@ -419,10 +434,22 @@ export default class TextXPlugin extends BasePlugin {
 
   async contact(data) {
     const query = String(data.query || data.name || '').trim();
-    if (!query) return { success: false, error: 'Who should I look up?' };
+    const hub = this.svc.hub;
+    const line = c => `- ${c.name}: ${[...(c.numbers || []), ...(c.emails || [])].join(', ')}`;
+    if (!query || /^(all|everyone|every contact|my contacts|contacts|saved)$/i.test(query)) {
+      const all = await hub.store.contactsList?.() || [];
+      const shown = all.slice(0, 100).map(line).join('\n') + (all.length > 100 ? `\n…and ${all.length - 100} more; ask for one by name.` : '');
+      return all.length ? { success: true, result: `Contacts I've saved from your phone (${all.length}):\n${shown}` }
+        : { success: !!query, ...(query ? { result: "I haven't saved any of your phone's contacts yet." } : { error: 'Who should I look up?' }) };
+    }
     const r = await this.call('contacts_lookup', { query, limit: 10 });
-    if (!r.ok) return errorResult(r);
-    const list = (r.result || []).map(c => `- ${c.name}: ${(c.numbers || []).join(', ')}`);
+    if (!r.ok) {
+      const saved = await hub.savedContacts(query);
+      if (saved.length) return { success: true, result: `${saved.map(line).join('\n')}\n(from what I saved earlier; the phone didn't answer)` };
+      return errorResult(r);
+    }
+    await hub.learnContacts(r.result, 'a contact lookup');
+    const list = (r.result || []).map(line);
     return { success: true, result: list.length ? list.join('\n') : `No contact matches "${query}".` };
   }
 

@@ -4,6 +4,8 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { ulid } from './textxCrypto.js';
+import { linkToContactBook, contactBookNumbers } from './textxContacts.js';
+import { BOOK } from './textxStore.js';
 import { resultText } from '../../interfaces/web/openaiCompat.js';
 
 /**
@@ -25,7 +27,9 @@ export const TOOLS = ['send_sms', 'schedule_message', 'list_threads', 'read_thre
   'contacts_lookup', 'get_attachment', 'watch', 'unwatch',
   // TextX 0.2.19
   'list_scheduled', 'update_scheduled', 'cancel_scheduled', 'skip_next', 'send_scheduled_now', 'react',
-  'retry_message', 'mark_read', 'delete_message', 'block_number'];
+  'retry_message', 'mark_read', 'delete_message', 'block_number',
+  // TextX 0.3.29: the whole address book, behind its own switch
+  'contacts_list'];
 // The † tools of §5: they wait on the user's tap on the phone (§6.5), so their results can come
 // back long after the request that asked for them.
 export const CONFIRMED_TOOLS = new Set(['send_sms', 'schedule_message', 'update_scheduled', 'send_scheduled_now',
@@ -146,8 +150,11 @@ export class TextXHub {
    * @param {object} o.store   persistence (textxStore.js: mongoStore / memoryStore)
    * @param {object} o.agent   the agent: processNaturalLanguage, providerManager, notify, config
    */
-  constructor({ store, agent, logger = console, now = () => Date.now(), waits = {}, encodeVoice = encodeM4a } = {}) {
+  constructor({ store, agent, logger = console, now = () => Date.now(), waits = {}, encodeVoice = encodeM4a,
+    linkContacts = linkToContactBook, bookNumbers = contactBookNumbers } = {}) {
     this.store = store;
+    this.linkContacts = linkContacts;
+    this.bookNumbers = bookNumbers;
     this.encodeVoice = encodeVoice;
     this.agent = agent;
     this.logger = logger;
@@ -163,6 +170,39 @@ export class TextXHub {
     this.sessions = new Map();   // deviceId(store id) -> { send(env), close(code, reason) }
     this.pending = new Map();    // call_id -> { resolve, settled, onLate, timers[] }
     this.messageRate = new RateWindow(30, 60_000);
+  }
+
+  // ── contacts ─────────────────────────────────────────────────────────────────────────────
+
+  /**
+   * Every contact the phone shows ALICE (a lookup, a shared thread's people, an incoming text) is
+   * kept, so a name resolves while the phone is offline and the contact book knows the number.
+   * Never fails the caller: remembering is a side effect.
+   */
+  async learnContacts(list, source) {
+    try {
+      const fresh = await this.store.contactsLearn?.(list, source) || [];
+      if (fresh.length) {
+        this.logger.info?.(`textx: saved ${fresh.length} contact(s) from ${source}: ${fresh.map(c => c.name).join(', ').slice(0, 200)}`);
+        await this.linkContacts(fresh, this.logger);
+      }
+      return fresh;
+    } catch (err) {
+      this.logger.warn?.(`textx: saving contacts from ${source} failed: ${err.message}`);
+      return [];
+    }
+  }
+
+  /** Saved numbers for a name: what TextX showed earlier, then ALICE's contact book. */
+  async savedContacts(name) {
+    try {
+      const hits = await this.store.contactsFind?.(name) || [];
+      if (hits.length) return hits.filter(c => c.numbers?.length);
+      return await this.bookNumbers(name);
+    } catch (err) {
+      this.logger.warn?.(`textx: saved-contact lookup failed: ${err.message}`);
+      return [];
+    }
   }
 
   // ── devices ──────────────────────────────────────────────────────────────────────────────
@@ -324,7 +364,69 @@ export class TextXHub {
     Object.assign(device, await this.store.updateDevice(device.id, patch));
     this.logger.info?.(`TextX: ${device.name} hello (app ${patch.appVersion}, replies: ${patch.replyMode}, tools: ${capabilities.join(', ') || 'none'})`);
     await this.deliver(device, 'welcome', this.welcomeBody(device));
+    this.sweepContacts(device);
     return true;
+  }
+
+  /**
+   * After a hello, never in its way: who is in the shared conversations (at most every 6 hours per
+   * phone) and, when "Share the whole address book" is on, the address book (daily, only what
+   * changed). With that switch off, the saved copy of the book is dropped at once.
+   */
+  sweepContacts(device) {
+    const caps = device.capabilities || [];
+    if (!caps.includes('contacts_list') && device.contactsSyncAt) {
+      this.dropAddressBook(device, 'the "Share the whole address book" switch is off').catch(() => {});
+    }
+    this.contactSweeps ??= new Map();
+    const last = this.contactSweeps.get(device.id) || 0;
+    const bookDue = caps.includes('contacts_list') && !device.contactsSyncAt; // the switch just went on
+    if (this.now() - last < 6 * 3600_000 && !bookDue) return;
+    this.contactSweeps.set(device.id, this.now());
+    const t = setTimeout(async () => {
+      try {
+        if (caps.includes('list_threads')) {
+          const r = await this.callTool('list_threads', { limit: 50 }, { deviceId: device.id, onlyDevice: device.id });
+          if (r.ok) await this.learnContacts((r.result || []).flatMap(t => t.participants || []), 'a shared conversation');
+        }
+        if (caps.includes('contacts_list')) await this.syncAddressBook(device);
+      } catch (err) { this.logger.warn?.(`textx: contact sweep failed: ${err.message}`); }
+    }, 5_000);
+    t.unref?.();
+  }
+
+  /** contacts_list, paged: everything the first time, then only what changed (with deletions). */
+  async syncAddressBook(device) {
+    const prev = device.contactsSyncAt ? new Date(device.contactsSyncAt) : null;
+    if (prev && this.now() - prev.getTime() < 20 * 3600_000) return null;
+    const started = new Date(this.now());
+    let after, pages = 0, seen = 0, fresh = 0, dropped = 0;
+    do {
+      const r = await this.callTool('contacts_list', { limit: 200, ...(after ? { after } : {}), ...(prev ? { since: prev.toISOString() } : {}) },
+        { deviceId: device.id, onlyDevice: device.id });
+      if (!r.ok) {
+        if (r.error?.code === 'not_allowed') return this.dropAddressBook(device, 'TextX no longer shares the address book');
+        this.logger.warn?.(`textx: address-book sync stopped: ${r.error?.code || r.error?.message || 'error'}`);
+        return null;
+      }
+      const res = r.result || {};
+      const list = Array.isArray(res.contacts) ? res.contacts : [];
+      seen += list.length;
+      fresh += (await this.learnContacts(list, BOOK)).length;
+      if (Array.isArray(res.deleted) && res.deleted.length) dropped += await this.store.contactsDropBook(res.deleted);
+      after = res.next || null;
+    } while (after && ++pages < 100);
+    Object.assign(device, await this.store.updateDevice(device.id, { contactsSyncAt: started }));
+    this.logger.info?.(`textx: address book ${prev ? 'updated' : 'synced'} from ${device.name}: ${seen} contact(s), ${fresh} new or changed, ${dropped} removed`);
+    return { seen, fresh, dropped };
+  }
+
+  /** The switch went off: the saved copy of the address book goes (contacts seen elsewhere stay). */
+  async dropAddressBook(device, why) {
+    const n = await this.store.contactsDropBook();
+    Object.assign(device, await this.store.updateDevice(device.id, { contactsSyncAt: null }));
+    this.logger.info?.(`textx: dropped the saved address book (${n} contact(s)): ${why}`);
+    return { dropped: n };
   }
 
   /**
@@ -530,6 +632,7 @@ export class TextXHub {
    * about it only when it needs them.
    */
   async onEvent(device, body) {
+    if (body.message?.from?.name && body.message.from.number) await this.learnContacts([body.message.from], 'a text');
     if (body.kind === 'mention' && body.message) return this.onMention(device, body);
     if (body.kind !== 'incoming' || !body.message) return;
     const m = body.message;
