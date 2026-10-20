@@ -1137,7 +1137,10 @@ export class Agent extends EventEmitter {
           // message is most likely the answer, whatever words it uses ("Canberra", "the blue one", "Bob").
           const lastReply = [...userBuffer].reverse().find(m => m.role === 'assistant')?.content || '';
           const weAsked = /\?\s*(\*{0,2}\s*)?$|\?[^?]{0,200}$/.test(String(lastReply).trim());
-          let looksLikeFollowUp = isShort && (hasFollowUpSignals || isQuestion || weAsked) && noStrongIntent;
+          // A question about stored data ("what are the latest messages in the Wayne convo?") needs a
+          // tool. Answered here from the chat alone, it was invented (2026-10-20).
+          const asksForData = /\b(?:latest|newest|most recent|recent|last|new|unread)\b[^?.!]*\b(?:messages?|texts?|sms|emails?|mail|replies|notifications?|files?|logs?|events?)\b|\b(?:messages?|texts?|emails?)\b[^?.!]*\b(?:from|in|with)\b/i.test(input);
+          let looksLikeFollowUp = isShort && (hasFollowUpSignals || isQuestion || weAsked) && noStrongIntent && !asksForData;
 
           // Almost every short question passes the checks above, including real
           // commands ("how much free disk space is there?"), which were answered as
@@ -1172,7 +1175,8 @@ User: ${input}
 
 Respond conversationally — elaborate, clarify, or answer based on what was just discussed. Be natural, not robotic. Keep it concise.
 This reply is text only: you have not run any tool or taken any action in this turn. Never say you did, sent, wrote, appended, created, changed or completed anything now.
-If the user is telling you to DO something (retry, go ahead, write it, add it, fix it, finish it), do not answer it here and do not ask them to confirm or restate it: reply with exactly ${ACT_MARKER} and nothing else, and it will be done with your tools.`;
+If the user is telling you to DO something (retry, go ahead, write it, add it, fix it, finish it), do not answer it here and do not ask them to confirm or restate it: reply with exactly ${ACT_MARKER} and nothing else, and it will be done with your tools.
+If answering needs information that is not in the conversation above (messages, emails, files, status, anything a tool would look up), never guess or make it up: reply with exactly ${ACT_MARKER} and nothing else.`;
 
             const response = await this.providerManager.generateResponse(followUpPrompt, {
               maxTokens: 400, temperature: 0.7,

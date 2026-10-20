@@ -2,6 +2,11 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.557] - 2026-10-20
+
+### Fixed
+- **Questions about your data are looked up, not guessed.** A short question right after a chat ("what are the latest messages in the Wayne convo?") was answered from the chat alone, with made-up content. Questions about messages, emails, files, logs and the like now go to the tools, and the chat reply is told never to make up what a tool would look up.
+
 ## [2.25.556] - 2026-10-20
 
 ### Fixed
