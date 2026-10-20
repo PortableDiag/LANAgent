@@ -3054,7 +3054,8 @@ export class WebInterface {
         
         // Update plugin state
         if (newState) {
-          await this.agent.apiManager.enablePlugin(pluginName);
+          const result = await this.agent.apiManager.enablePlugin(pluginName);
+          if (!result.success) return res.status(400).json({ success: false, error: result.message });
         } else {
           await this.agent.apiManager.disablePlugin(pluginName);
         }

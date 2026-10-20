@@ -308,7 +308,20 @@ export class APIManager extends EventEmitter {
     if (plugin.enabled) {
       return { success: true, message: `Plugin ${name} is already enabled` };
     }
-    
+
+    // A plugin disabled at load for missing credentials stays disabled until they are added.
+    // The saved plugin states re-enabled four keyless plugins a second after every boot, and
+    // "three quick dinner ideas" was routed to spoonacular with no API key (2026-10-20).
+    const missing = typeof plugin.instance?.missingRequiredCredentials === 'function'
+      ? await plugin.instance.missingRequiredCredentials().catch(() => [])
+      : [];
+    if (missing.length) {
+      const reason = `Missing required credentials: ${missing.join(', ')}`;
+      Object.assign(plugin, { error: reason, lastError: reason, disabledReason: 'missing_credentials' });
+      logger.info(`Not enabling plugin ${name}: ${reason}`);
+      return { success: false, message: `Plugin ${name} needs credentials first (${missing.join(', ')}). Add them in Settings.` };
+    }
+
     plugin.enabled = true;
     logger.info(`Enabled plugin: ${name}`);
     this.emit('plugin:enabled', name);

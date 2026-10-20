@@ -787,6 +787,9 @@ A plugin whose declared required credentials cannot be found is registered **dis
 planner, intent detection and tools never choose it. Saving the credentials in Settings
 (`POST /api/plugins/:name/credentials`) enables it again, but only when every required one is present.
 A plugin with a real keyless mode sets `worksWithoutCredentials = true`.
+Since 2.25.547 enabling such a plugin any other way (the saved plugin states at start-up,
+`POST /api/plugins/:name/toggle`, Telegram, the chat command) is refused while a credential is missing;
+the toggle answers `400 {success:false, error:"Plugin … needs credentials first (apiKey). Add them in Settings."}`.
 
 ### v2.25.407 — Teaching skills in Trellis channels
 

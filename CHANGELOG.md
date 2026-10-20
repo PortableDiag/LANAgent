@@ -2,6 +2,11 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.547] - 2026-10-20
+
+### Fixed
+- **Plugins without their API key came back on at every start.** A plugin missing a required credential is disabled when it loads, but the saved plugin states turned it back on a second later (groq, here, ipstack and spoonacular on the reference install). The router then picked it: "give me three quick dinner ideas" went to the recipe plugin and failed with "API key not configured" before falling back. Enabling a plugin now re-checks its credentials and refuses while one is missing; the dashboard toggle, Telegram and the chat command say so instead of reporting success. Adding the credentials in Settings enables it as before.
+
 ## [2.25.546] - 2026-10-20
 
 ### Fixed

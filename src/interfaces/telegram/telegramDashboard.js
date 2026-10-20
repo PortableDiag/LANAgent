@@ -2723,7 +2723,7 @@ export class TelegramDashboard extends TelegramInterface {
           result = await this.agent.apiManager.disablePlugin(pluginName);
         }
         
-        await ctx.reply(`✅ ${result.message}`);
+        await ctx.reply(`${result.success === false ? "⚠️" : "✅"} ${result.message}`);
         
         // Refresh the plugin management view
         this.bot.handleUpdate({ 

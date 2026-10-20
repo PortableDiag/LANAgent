@@ -4431,7 +4431,7 @@ Return ONLY a valid JSON object with the extracted parameters, nothing else.`;
           const enableResult = await this.apiManager.enablePlugin(enableName);
           return {
             type: "text",
-            content: `✅ ${enableResult.message}`
+            content: `${enableResult.success === false ? '⚠️' : '✅'} ${enableResult.message}`
           };
           
         case 'disable':
