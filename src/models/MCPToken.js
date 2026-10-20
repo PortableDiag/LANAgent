@@ -553,10 +553,16 @@ mcpTokenSchema.methods.isIpAllowed = function(clientIp) {
     return false;
   }
 
+  // Loopback is one host either way: a token limited to 127.0.0.1 refused a local client that
+  // connected to "localhost" over IPv6 (::1).
+  const loopback = clientIp === '::1' || /^127\./.test(clientIp);
+  const addrs = loopback ? [clientIp, clientIp === '::1' ? '127.0.0.1' : '::1'] : [clientIp];
+  const matches = (cidr) => addrs.some(a => isIpInCidr(a, cidr));
+
   // Block list takes precedence
   if (Array.isArray(this.blockedIps) && this.blockedIps.length > 0) {
     for (const cidr of this.blockedIps) {
-      if (isIpInCidr(clientIp, cidr)) {
+      if (matches(cidr)) {
         logger.debug('MCPToken IP blocked by block list', { tokenId: this._id?.toString(), clientIp, cidr });
         return false;
       }
@@ -566,7 +572,7 @@ mcpTokenSchema.methods.isIpAllowed = function(clientIp) {
   // If an allow list is defined, the IP must match at least one entry
   if (Array.isArray(this.allowedIps) && this.allowedIps.length > 0) {
     for (const cidr of this.allowedIps) {
-      if (isIpInCidr(clientIp, cidr)) {
+      if (matches(cidr)) {
         return true;
       }
     }

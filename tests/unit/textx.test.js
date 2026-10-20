@@ -194,6 +194,28 @@ test('a send waits for the tap; a late outcome goes to onLate', async () => {
   assert.equal(late[0].result.status, 'sent');
 });
 
+test('a phone that refuses a tool hands the call to the next paired phone', async () => {
+  const r = rig({ waits: { confirm: 200, confirmExpiry: 1000, late: 10 } });
+  const a = await pairedPhone(r, { tools: ['send_sms'] });
+  const b = await pairedPhone(r, { tools: ['send_sms'] });
+  const res = r.hub.callTool('send_sms', { to: ['5550100'], text: 'hi' });
+  await tick();
+  const [first, second] = a.sent.some(e => e.type === 'tool_call') ? [a, b] : [b, a];
+  const c1 = first.sent.find(e => e.type === 'tool_call');
+  await first.say(env('tool_result', { call_id: c1.body.call_id, ok: false, error: { code: 'not_allowed' } }));
+  await tick();
+  const c2 = second.sent.find(e => e.type === 'tool_call');
+  assert.equal(c2.body.name, 'send_sms');
+  await second.say(env('tool_result', { call_id: c2.body.call_id, ok: true, result: { status: 'sent' } }));
+  assert.equal((await res).result.status, 'sent');
+  // Pinned to one phone (a request typed on it): no fallback.
+  const pinned = r.hub.callTool('send_sms', { to: ['5550100'], text: 'hi' }, { onlyDevice: first.device.id });
+  await tick();
+  const c3 = first.sent.filter(e => e.type === 'tool_call').at(-1);
+  await first.say(env('tool_result', { call_id: c3.body.call_id, ok: false, error: { code: 'not_allowed' } }));
+  assert.equal((await pinned).error.code, 'not_allowed');
+});
+
 test('a tool result from another pairing is ignored', async () => {
   const r = rig({ waits: { read: 80, readExpiry: 200, late: 10 } });
   const a = await pairedPhone(r, { tools: ['list_threads'] });
@@ -766,7 +788,7 @@ test('auto-reply answers a message meant for the owner too, and sends the owner 
   clearInterval(phone);
   const send = p.sent.find(e => e.type === 'tool_call' && e.body.name === 'send_sms');
   assert.equal(send.body.args.text, "I'll pass that to him, he'll get back to you soon.", 'the owner note never goes to the contact');
-  assert.ok(p.sent.some(e => e.type === 'message' && e.body.text === "Sam: Sam asks if you're free for poker Friday."));
+  assert.ok(p.sent.some(e => e.type === 'message' && e.body.text === "Sam asks if you're free for poker Friday."));
 });
 
 // TextX 0.3.21 (2119 #117): Replies: Text · Voice · Both, per agent, in hello and on every event.
@@ -903,4 +925,192 @@ test('a mention is the owner talking to the agent: the prompt says so and labels
   } finally {
     if (prev === undefined) delete process.env.OWNER_NAME; else process.env.OWNER_NAME = prev;
   }
+});
+
+test('contacts: the store keeps name → numbers, one number in any format, nameless ones dropped', async () => {
+  const store = memoryStore();
+  const fresh = await store.contactsLearn([
+    { name: 'Wayne Williams', numbers: ['+1 (405) 555-0100'] },
+    { name: 'wayne williams', number: '4055550100' },
+    { name: '', number: '+15550199' },
+    { name: '(559) 555-0123', number: '(559) 555-0123' },
+    { name: 'Mom', numbers: [] }
+  ], 'a contact lookup');
+  assert.deepEqual(fresh.map(c => c.name), ['Wayne Williams']);
+  assert.deepEqual((await store.contactsFind('Wayne Williams'))[0].numbers, ['+1 (405) 555-0100']);
+  assert.equal((await store.contactsFind('wayne')).length, 1, 'a first name finds it');
+  assert.equal((await store.contactsFind('Sam')).length, 0);
+  assert.equal((await store.contactsList()).length, 1);
+  assert.deepEqual(await store.contactsLearn([{ name: 'Wayne Williams', number: '405-555-0100' }], 'a text'), [], 'nothing new');
+});
+
+test('contacts: a lookup is saved, and with the phone offline "text Sam" uses the saved number with no round trip', async () => {
+  const { default: TextXPlugin } = await import('../../src/api/plugins/textx.js');
+  const linked = [];
+  const r = rig({ waits: { read: 500, readExpiry: 1000, late: 10 } });
+  r.hub.linkContacts = async (recs) => { linked.push(...recs.map(c => c.name)); };
+  r.hub.bookNumbers = async () => [];
+  const p = await pairedPhone(r, { tools: ['send_sms', 'contacts_lookup'] });
+  const plugin = new TextXPlugin(r.agent);
+  Object.defineProperty(plugin, 'svc', { value: { hub: r.hub } });
+  const phone = setInterval(async () => {
+    for (const e of p.sent.filter(x => x.type === 'tool_call' && !x.answered)) {
+      e.answered = true;
+      await p.say(env('tool_result', { call_id: e.body.call_id, ok: true, result: [{ name: 'Sam', numbers: ['+15550100'] }] }));
+    }
+  }, 5);
+  const res = await plugin.execute({ action: 'contact', query: 'Sam' });
+  clearInterval(phone);
+  assert.match(res.result, /Sam: \+15550100/);
+  assert.deepEqual(linked, ['Sam'], 'the new contact goes to the contact book too');
+  // The phone drops its socket: the name still resolves, and nothing is asked of the phone.
+  r.hub.sessions.clear();
+  const before = p.sent.length;
+  assert.deepEqual(await plugin.resolveRecipients('Sam'), { numbers: ['+15550100'] });
+  assert.equal(p.sent.length, before);
+  const all = await plugin.execute({ action: 'contact', query: 'all' });
+  assert.match(all.result, /saved from your phone \(1\)/);
+});
+
+test('contacts: who texts in a shared conversation is saved from the event', async () => {
+  const r = rig();
+  r.hub.linkContacts = async () => {};
+  const p = await pairedPhone(r);
+  await p.say(env('event', { kind: 'incoming', thread_id: '9', shared: true, message: { from: { name: 'Dana', number: '+15550142' }, text: 'hey', date: 'd1' } }));
+  for (let i = 0; i < 10 && !(await r.store.contactsFind('Dana')).length; i++) await tick();
+  assert.deepEqual((await r.store.contactsFind('Dana'))[0].numbers, ['+15550142']);
+});
+
+test('address book: contacts_list is paged, then synced by changes with deletions; the book replaces numbers', async () => {
+  const r = rig({ waits: { read: 500, readExpiry: 1000, late: 10 } });
+  r.hub.linkContacts = async () => {};
+  const p = await pairedPhone(r, { tools: ['contacts_list'] });
+  const asked = [];
+  let round = 1;
+  const phone = setInterval(async () => {
+    for (const e of p.sent.filter(x => x.type === 'tool_call' && !x.answered && x.body.name === 'contacts_list')) {
+      e.answered = true;
+      asked.push(e.body.args);
+      const result = round === 1
+        ? (e.body.args.after ? { contacts: [{ id: '2', name: 'Dana', numbers: ['+15550142'], emails: ['dana@example.com'] }] }
+          : { contacts: [{ id: '1', name: 'Sam', numbers: ['+15550100'] }], next: '1' })
+        : { contacts: [{ id: '1', name: 'Sam', numbers: ['+15550111'] }], deleted: ['2'] };
+      await p.say(env('tool_result', { call_id: e.body.call_id, ok: true, result }));
+    }
+  }, 5);
+  const device = await r.store.getDevice(p.device.id);
+  const first = await r.hub.syncAddressBook(device);
+  assert.deepEqual(first, { seen: 2, fresh: 2, dropped: 0 });
+  assert.deepEqual(asked.map(a => a.after || null), [null, '1']);
+  assert.ok(device.contactsSyncAt, 'the sync time is kept');
+  assert.equal(await r.hub.syncAddressBook(device), null, 'not again within the day');
+  round = 2;
+  device.contactsSyncAt = new Date(Date.now() - 25 * 3600_000);
+  await r.store.updateDevice(device.id, { contactsSyncAt: device.contactsSyncAt });
+  const second = await r.hub.syncAddressBook(device);
+  clearInterval(phone);
+  assert.ok(asked[2].since, 'the daily run asks only for changes');
+  assert.deepEqual(second, { seen: 1, fresh: 1, dropped: 1 });
+  assert.deepEqual((await r.store.contactsFind('Sam'))[0].numbers, ['+15550111'], 'a changed number replaces the old one');
+  assert.equal((await r.store.contactsFind('Dana')).length, 0, 'a contact deleted on the phone is dropped');
+});
+
+test('address book: switched off (not_allowed, or gone from hello) drops the book copy, keeps contacts seen elsewhere', async () => {
+  const r = rig({ waits: { read: 500, readExpiry: 1000, late: 10 } });
+  r.hub.linkContacts = async () => {};
+  const p = await pairedPhone(r, { tools: ['contacts_list'] });
+  await r.store.contactsLearn([{ id: '1', name: 'Sam', numbers: ['+15550100'] }, { id: '2', name: 'Dana', numbers: ['+15550142'] }], 'the address book');
+  await r.store.contactsLearn([{ name: 'Dana', number: '+15550142' }], 'a text');
+  const phone = setInterval(async () => {
+    for (const e of p.sent.filter(x => x.type === 'tool_call' && !x.answered)) {
+      e.answered = true;
+      await p.say(env('tool_result', { call_id: e.body.call_id, ok: false, error: { code: 'not_allowed', message: 'off' } }));
+    }
+  }, 5);
+  const device = await r.store.getDevice(p.device.id);
+  device.contactsSyncAt = new Date(Date.now() - 25 * 3600_000);
+  await r.store.updateDevice(device.id, { contactsSyncAt: device.contactsSyncAt });
+  assert.deepEqual(await r.hub.syncAddressBook(device), { dropped: 1 });
+  clearInterval(phone);
+  assert.equal((await r.store.contactsFind('Sam')).length, 0);
+  assert.equal((await r.store.contactsFind('Dana')).length, 1, 'Dana texted in a shared conversation: kept');
+  assert.equal((await r.store.getDevice(p.device.id)).contactsSyncAt, null);
+  // Gone from the hello's tools: dropped at the next hello, no tool call needed.
+  await r.store.contactsLearn([{ id: '3', name: 'Lee', numbers: ['+15550177'] }], 'the address book');
+  r.hub.sweepContacts({ ...device, capabilities: [], contactsSyncAt: new Date() });
+  for (let i = 0; i < 10 && (await r.store.contactsFind('Lee')).length; i++) await tick();
+  assert.equal((await r.store.contactsFind('Lee')).length, 0);
+});
+
+test('a text asking ALICE to tell the owner something reaches them in TextX and on Telegram', async () => {
+  const { r, prompts } = sharedRig((p) => (/answering by text message/.test(p)
+    ? "Will do, I'll let him know.\nNOTE FOR OWNER: Sam asks you to call Mom tonight, it's about the weekend." : 'Sam asks you to call him back.'));
+  const tg = [];
+  r.agent.interfaces = new Map([['telegram', { sendNotification: async (t) => { tg.push(t); return true; } }]]);
+  const p = await pairedPhone(r, { tools: ['send_sms'] });
+  const phone = answeringPhone(p);
+  await p.say(smsEvent({ auto_reply: true, message: { thread_id: 't9', message_id: 'tell1', from: { name: 'Sam', number: '+1555' }, text: 'Tell Charles to call Mom tonight', untrusted: true } }));
+  for (let i = 0; i < 40 && !p.sent.some(e => e.type === 'message' && /^Replied to/.test(e.body.text)); i++) await tick();
+  clearInterval(phone);
+  assert.match(prompts[0], /asks you to tell, ask, remind or alert/);
+  assert.ok(p.sent.some(e => e.type === 'message' && /call Mom tonight/.test(e.body.text)), 'in TextX');
+  assert.deepEqual(tg, [`💬 Text in "Sam": Sam asks you to call Mom tonight, it's about the weekend.`], 'and on Telegram');
+  // No auto-reply in that thread: the note still goes to both, and a dead Telegram doesn't stop TextX.
+  tg.length = 0;
+  r.agent.interfaces = new Map([['telegram', { sendNotification: async () => { throw new Error('offline'); } }]]);
+  const before = p.sent.filter(e => e.type === 'message').length;
+  await p.say(smsEvent({ message: { thread_id: 't9', message_id: 'tell2', from: { name: 'Sam', number: '+1555' }, text: 'ask him to call me back', untrusted: true } }));
+  for (let i = 0; i < 20 && p.sent.filter(e => e.type === 'message').length === before; i++) await tick();
+  assert.ok(p.sent.some(e => e.type === 'message' && e.body.text === 'Sam asks you to call him back.'));
+  assert.match(prompts.at(-1), /asks you to tell, ask or remind them/);
+});
+
+test('the LANAgent app: hello.notify picks what it gets; owner notes reach it beside TextX and Telegram', async () => {
+  const { r } = sharedRig((p) => (/answering by text message/.test(p) ? 'Sure.\nNOTE FOR OWNER: Sam asks you to call Mom.' : 'SKIP'));
+  r.agent.interfaces = new Map([['telegram', { sendNotification: async () => true }]]);
+  const phone = await pairedPhone(r, { tools: ['send_sms'] });
+  // The app: its own pairing, a hello naming its notification level.
+  const { kid, key } = newPairing();
+  const app = await r.store.createDevice({ name: 'LANAgent app', kid, key, base: 'https://relay.test/r/abc' });
+  const helloApp = (level) => r.transport.http({ method: 'POST', path: '/textx/v1/messages', headers: { authorization: `Bearer ${kid}` },
+    body: Buffer.from(JSON.stringify(sealJson(key, kid, P2A, [env('hello', { protocol: 1, app: 'LANAgent-Android', app_version: '1.5.0', device: 'app-1', capabilities: [], notify: level })]))) });
+  const appQueue = async () => (await r.store.outboxUnacked(app.id)).map(x => x.env).filter(e => e.type === 'message');
+  assert.equal((await helloApp('owner')).status, 200);
+  assert.equal((await r.store.getDevice(app.id)).notifyLevel, 'owner');
+  const answer = answeringPhone(phone);
+  await phone.say(smsEvent({ auto_reply: true, message: { thread_id: 't9', message_id: 'n1', from: { name: 'Sam', number: '+1555' }, text: 'tell him to call mom', untrusted: true } }));
+  for (let i = 0; i < 40 && !(await appQueue()).length; i++) await tick();
+  clearInterval(answer);
+  const got = await appQueue();
+  assert.equal(got.length, 1);
+  assert.equal(got[0].body.text, '💬 "Sam": Sam asks you to call Mom.');
+  assert.equal(got[0].body.x_kind, 'owner');
+  await r.hub.notify('Backup finished');
+  assert.equal((await appQueue()).length, 1, '"owner" leaves general notifications out');
+  await helloApp('all');
+  await r.hub.notify('Backup finished');
+  assert.equal((await appQueue()).at(-1).body.x_kind, 'notification');
+  await helloApp('off');
+  await r.hub.tellOwner(await r.store.getDevice(phone.device.id), 'x', 'Sam');
+  await r.hub.notify('y');
+  assert.equal((await appQueue()).length, 2, '"off" gets nothing');
+});
+
+test('address book: hellos every few seconds start one sync, not one each (2026-10-19: six ran at once)', async () => {
+  const r = rig({ waits: { read: 500, readExpiry: 1000, late: 10 } });
+  r.hub.linkContacts = async () => {};
+  const p = await pairedPhone(r, { tools: ['contacts_list'] });
+  let calls = 0;
+  const phone = setInterval(async () => {
+    for (const e of p.sent.filter(x => x.type === 'tool_call' && !x.answered && x.body.name === 'contacts_list')) {
+      e.answered = true; calls++;
+      setTimeout(() => p.say(env('tool_result', { call_id: e.body.call_id, ok: true, result: { contacts: [{ id: '1', name: 'Sam', numbers: ['+15550100'] }] } })), 60);
+    }
+  }, 5);
+  const device = await r.store.getDevice(p.device.id);
+  const runs = await Promise.all([r.hub.syncAddressBook(device), r.hub.syncAddressBook({ ...device }), r.hub.syncAddressBook({ ...device })]);
+  assert.equal(runs.filter(Boolean).length, 1);
+  assert.equal(await r.hub.syncAddressBook({ ...device, contactsSyncAt: null }), null, 'a stale copy of the device still sees the sync time');
+  clearInterval(phone);
+  assert.equal(calls, 1);
 });

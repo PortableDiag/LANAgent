@@ -658,7 +658,7 @@ Sync covering 2.25.417–2.25.423.
 
 ### v2.25.550 — Self-improvement PR sweep (new parameters and actions)
 
-- `POST /mcp/api/tokens` takes `allowedIps` / `blockedIps` (arrays of IPs or CIDR ranges; a bare IP is one host, `::ffff:` IPv4 is normalised). A call to `POST /mcp/server` from outside the policy gets 403; a bad entry at creation gets 400. The address is the direct peer (`req.ip`, no `trust proxy`).
+- `POST /mcp/api/tokens` takes `allowedIps` / `blockedIps` (arrays of IPs or CIDR ranges; a bare IP is one host, `::ffff:` IPv4 is normalised). A call to `POST /mcp/server` from outside the policy gets 403; a bad entry at creation gets 400. The address is the direct peer (`req.ip`, no `trust proxy`). `::1` and `127.0.0.1` count as the same host (2.25.551). A client relayed through the gateway arrives from the gateway's address, so list that. Tokens with no lists are never checked.
 - `followup.batch({ tasks: [{ task, inMinutes? }, ...] })`: up to 10; `success:false` when none were scheduled.
 - `priceWatch.watch({ ..., cooldownMin })`: minutes between percentage-move alerts; target alerts are exempt. `priceWatch.check` lists every offer when the page's product data has more than one.
 - `systemLogs.trend({ hours?, interval?: "hour"|"day", level?, category? })`: counts per bucket, empty buckets included.

@@ -2,6 +2,12 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.551] - 2026-10-20
+
+### Fixed
+- **TextX: a phone that refuses a request no longer ends it.** With two phones paired, the one with TextX open was picked even when it did not allow the action, and the request failed with "TextX has not allowed that". The request now goes to the next paired phone that allows it, and a refusal names the phone that refused.
+- **MCP token IP limits:** a token limited to `127.0.0.1` now also accepts a local client that connects as `::1` (and the reverse). Tokens with no IP lists are never checked.
+
 ## [2.25.550] - 2026-10-20
 
 ### Added

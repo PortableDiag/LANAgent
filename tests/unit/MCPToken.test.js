@@ -222,3 +222,13 @@ test('generateToken validates and stores IP lists', async (t) => {
   await assert.rejects(MCPToken.generateToken({ name: 'n', blockedIps: ['not-an-ip'] }), TypeError);
   await assert.rejects(MCPToken.generateToken({ name: 'n', allowedIps: '10.0.0.0/8' }), TypeError);
 });
+
+test('isIpAllowed: unrestricted tokens and local clients are never locked out', async (t) => {
+  t.mock.method(logger, 'debug', () => {});
+  const make = (allowedIps) => new MCPToken({ name: 'test', token: 'hash', tokenPrefix: 'mcp_...', allowedIps });
+  assert.equal(make([]).isIpAllowed(undefined), true);
+  assert.equal(make(['127.0.0.1']).isIpAllowed('::1'), true);
+  assert.equal(make(['::1']).isIpAllowed('127.0.0.1'), true);
+  assert.equal(make(['192.168.0.0/24']).isIpAllowed('::ffff:192.168.0.10'), true);
+  assert.equal(make(['127.0.0.1']).isIpAllowed('192.168.0.10'), false);
+});

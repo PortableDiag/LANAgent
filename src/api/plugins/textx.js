@@ -24,6 +24,9 @@ const ERROR_TEXT = {
 
 function errorResult(r) {
   const code = r?.error?.code || 'internal';
+  if (code === 'not_allowed' && r?.device?.name) {
+    return { success: false, error: `TextX on ${r.device.name} has not allowed that. Turn it on there: Settings › Assistants › this agent.` };
+  }
   return { success: false, error: ERROR_TEXT[code] || r?.error?.message || code };
 }
 
