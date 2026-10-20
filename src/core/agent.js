@@ -2992,7 +2992,7 @@ ${actionInfo ? (actionInfo.params || actionInfo.parameters
 
 Examples of this action:
 ${intentResult.metadata?.intentExamples ? JSON.stringify(intentResult.metadata.intentExamples) : 'None available'}
-
+${actionInfo?.hint ? `\nRules for this action (they override the general notes below):\n${actionInfo.hint}\n` : ''}
 Extract the parameters as a JSON object. Be smart about understanding natural language:
 - For email: extract 'to' (recipient name/email), 'subject', and 'text' (body)
 - For device control: extract the FULL 'device' name (e.g. "master toilet light" not just "light"), 'state', color, brightness, or other parameters
@@ -3884,7 +3884,7 @@ Return ONLY a valid JSON object with the extracted parameters, nothing else.`;
       // (an embedding call, Mongo reads, a cached embedding): fetch them together, not in turn.
       const [memories, recentResult, preferences, skillsText] = await Promise.all([
         this.memoryManager.recall(query, { userId: context.userId, limit: 5 }),
-        this.memoryManager.getConversationContext(context.userId, 10).then(r => ({ r }), e => ({ e })),
+        this.memoryManager.getConversationContext(context.userId, 10, context.threadId).then(r => ({ r }), e => ({ e })),
         this.memoryManager.getUserPreferences(context.userId),
         getSkillsService().promptFor(query).catch(() => '')
       ]);
@@ -3896,13 +3896,15 @@ Return ONLY a valid JSON object with the extracted parameters, nothing else.`;
         if (recentResult.e) throw recentResult.e;
         const recentConversations = recentResult.r;
         if (recentConversations && recentConversations.length > 0) {
-          conversationContext = '\nRecent conversation:\n';
+          // Your own replies are in here, and so is what your actions did ("Sent to Wayne: …").
+          conversationContext = '\nRecent conversation (oldest first; "assistant" is you):\n';
           for (const conv of recentConversations.reverse()) {
             const role = conv.metadata?.role || 'unknown';
-            const message = conv.content.substring(0, 200);
+            const message = conv.content.substring(0, 700);
             conversationContext += `${role}: ${message}\n`;
           }
-          conversationContext += '\n';
+          conversationContext += '\nWhen the user asks what you did, sent or said, answer from the conversation above, quoting it ' +
+            'exactly; if it is not there, say you cannot see it. Never guess or deny what an action reported.\n\n';
         }
       } catch (err) {
         logger.warn('Failed to get conversation context:', err);

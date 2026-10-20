@@ -323,13 +323,30 @@ export class MemoryManager {
     return buf.slice(-limit).map(m => ({ role: m.role, content: m.content }));
   }
 
-  async getConversationContext(userId, limit = 20) {
-    return await Memory.find({
-      type: "conversation",
-      "metadata.userId": userId
-    })
-    .sort({ createdAt: -1 })
-    .limit(limit);
+  /**
+   * The user's recent messages and the agent's replies, newest first, shaped like the old
+   * conversation Memory documents ({ content, metadata: { role }, createdAt }).
+   *
+   * This used to query `type: "conversation"` Memory documents, which are never written (raw
+   * conversations are not persisted as memories). It returned nothing on every call, so the
+   * general answer, the plugin chain and the follow-up lookups all ran with no idea what was just
+   * said: asked "did you really send him my instruction?" right after a text went out, the agent
+   * answered blind and denied it (2026-10-19). Now: the live buffer, and the transcript when the
+   * buffer has expired (30 minutes) or been lost.
+   */
+  async getConversationContext(userId, limit = 20, threadId) {
+    const shape = (role, content, ts) => ({ content: String(content || ''), metadata: { role, userId }, createdAt: new Date(ts || Date.now()) });
+    const live = this._conversationBuffer?.get(conversationKey(String(userId || 'default'), threadId)) || [];
+    if (live.length) return live.slice(-limit).reverse().map(m => shape(m.role, m.content, m.ts));
+    if (Transcript.db?.readyState !== 1) return [];
+    try {
+      // Only today's thread of talk: a conversation from yesterday is not "what was just said".
+      const rows = await Transcript.find({ userId: String(userId), createdAt: { $gte: new Date(Date.now() - 6 * 3600_000) } }).sort({ _id: -1 }).limit(Math.min(Number(limit) || 20, 100)).lean();
+      return rows.map(r => shape(r.role, r.content, r.createdAt));
+    } catch (err) {
+      logger.debug(`Conversation context from the transcript failed: ${err.message}`);
+      return [];
+    }
   }
 
   /**

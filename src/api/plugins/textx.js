@@ -36,6 +36,20 @@ const FIRST_TOOL = {
 // Set while a request runs in the background for a phone with no socket (see execute()).
 const offlineRun = new AsyncLocalStorage();
 
+/**
+ * How a send's text is worded, for every extractor that fills `text` (the agent's, and
+ * _extractArgs). "Ask Wayne via text if he needs any help setting up his Hermes instance… gotta
+ * sell him on yourself you know ;)" went to Wayne word for word, aside and all (2026-10-19).
+ */
+export function messageTextRule(owner = process.env.OWNER_NAME || 'the user') {
+  return `"text" is the message the recipient will read, sent from ${owner}'s phone. If the request quotes the message or ` +
+    'says "saying …" / "that says …", copy those words exactly. If it describes the message ("ask Wayne if he needs ' +
+    'help", "tell her I\'m running late", "let him know the game moved"), write that message to the recipient, ' +
+    'addressing them directly ("Do you need any help…?"), never "ask him" or "tell her". Anything the user says to ' +
+    'you about the message (tone, what to stress, "sell it", jokes or asides to you, emoji aimed at you) is guidance: ' +
+    'follow it, and never put it in the text.';
+}
+
 const numberish = (s) => /^\+?[\d\s().-]{5,}$/.test(String(s).trim());
 // A recipient or a message that points back into the conversation instead of saying it.
 const PRONOUN = /^(him|her|them|they|he|she|this person|that person|the same person)$/i;
@@ -53,12 +67,14 @@ export default class TextXPlugin extends BasePlugin {
         command: 'send',
         description: "Send an SMS from the user's phone. The phone shows the text and the user taps Send; nothing goes out without that tap",
         usage: 'send({ to: "Mom", text: "Running 10 minutes late" })',
+        hint: messageTextRule(),
         examples: ['text mom that I am running late', 'send a text to 555-0100 saying I am outside', 'reply to Sam by SMS: sounds good', 'text the plumber that tomorrow works']
       },
       {
         command: 'schedule',
         description: 'Schedule an SMS for later (the user confirms on the phone). `at` is an ISO-8601 time; repeat is optional {every:"day"|"weekdays"|"week"|"month"|"year"}',
         usage: 'schedule({ to: "Dad", text: "Happy birthday!", at: "2026-11-02T09:00:00-05:00" })',
+        hint: messageTextRule(),
         examples: ['schedule a text to dad for tomorrow at 9 saying happy birthday', 'text Alex every friday at 5 to remind them about the game']
       },
       {
@@ -101,7 +117,8 @@ export default class TextXPlugin extends BasePlugin {
         command: 'read',
         description: 'Read recent messages in a shared SMS conversation, by its name or id',
         usage: 'read({ thread: "Family", limit: 20 })',
-        examples: ['read my texts with Sam', 'what did mom text me', 'catch me up on the family group chat']
+        examples: ['read my texts with Sam', 'what did mom text me', 'catch me up on the family group chat',
+          'what did you send Wayne', 'show me the last text you sent Sam', 'what did I text her']
       },
       {
         command: 'search',
@@ -221,13 +238,15 @@ export default class TextXPlugin extends BasePlugin {
     const cmd = this.commands.find(c => c.command === action);
     const pm = this.agent?.providerManager;
     if (!request || !cmd?.usage || !pm?.generateResponse) return;
+    const composing = action === 'send' || action === 'schedule';
+    const textRule = composing ? `${messageTextRule()} ` : 'Copy any message text exactly as the user wants it sent. ';
     try {
       const res = await pm.generateResponse(
         `Extract the arguments for the texting action ${action} from this request.\nCall shape: ${cmd.usage}\n` +
-        `Request: ${request}\nUse exactly the argument names in the call shape. Copy the message text exactly as the ` +
-        `user wants it sent. Times are ISO-8601 with the offset; now is ${new Date().toISOString()}. Leave out what ` +
+        `Request: ${request}\nUse exactly the argument names in the call shape. ${textRule}` +
+        `Times are ISO-8601 with the offset; now is ${new Date().toISOString()}. Leave out what ` +
         'the request does not say. Answer with one JSON object only.',
-        { maxTokens: 600, temperature: 0 });
+        { maxTokens: 600, temperature: composing ? 0.3 : 0 });
       const raw = String(res?.content || '').replace(/^```(?:json)?\s*|\s*```$/g, '');
       const got = JSON.parse(raw.slice(raw.indexOf('{'), raw.lastIndexOf('}') + 1));
       for (const [k, v] of Object.entries(got || {})) {
