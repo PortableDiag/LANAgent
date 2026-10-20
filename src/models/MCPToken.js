@@ -3,11 +3,137 @@ import crypto from 'crypto';
 import bcrypt from 'bcryptjs';
 import { retryOperation } from '../utils/retryUtils.js';
 import { logger } from '../utils/logger.js';
+import net from 'net';
 
 /**
  * MCPToken model for managing access tokens for MCP server mode
  * Allows external MCP clients to access LANAgent tools
  */
+
+// ---------------------------------------------------------------------------
+// CIDR matching helpers (IPv4 and IPv6)
+// ---------------------------------------------------------------------------
+
+/**
+ * Convert an IPv4 address string to a 32-bit unsigned integer.
+ * @param {string} ip - IPv4 address (e.g. "192.168.1.1")
+ * @returns {number}
+ */
+function ipv4ToInt(ip) {
+  const octets = ip.split('.').map(Number);
+  return ((octets[0] << 24) | (octets[1] << 16) | (octets[2] << 8) | octets[3]) >>> 0;
+}
+
+/**
+ * Expand an IPv6 address to its full 8-group hexadecimal representation.
+ * Handles :: abbreviation.
+ * @param {string} ip - IPv6 address (e.g. "2001:db8::1")
+ * @returns {string} Expanded address with 8 groups (e.g. "2001:0db8:0000:0000:0000:0000:0000:0001")
+ */
+function expandIPv6(ip) {
+  // Remove zone index if present
+  const zoneIdx = ip.indexOf('%');
+  if (zoneIdx !== -1) ip = ip.substring(0, zoneIdx);
+
+  const groups = ip.split(':');
+  // Count the number of groups (including empty ones from ::)
+  const emptyIndex = groups.indexOf('');
+  if (emptyIndex !== -1) {
+    // Replace the empty string with the appropriate number of zero groups
+    const missing = 8 - groups.length + 1; // +1 because the empty string is already a placeholder
+    groups.splice(emptyIndex, 1, ...Array(missing).fill('0'));
+  }
+  // Pad each group to 4 hex digits
+  return groups.map(g => g.padStart(4, '0')).join(':');
+}
+
+/**
+ * Convert an IPv6 address string to a BigInt.
+ * @param {string} ip - IPv6 address
+ * @returns {bigint}
+ */
+function ipv6ToBigInt(ip) {
+  const expanded = expandIPv6(ip);
+  const hex = expanded.replace(/:/g, '');
+  return BigInt('0x' + hex);
+}
+
+/**
+ * Check whether an IP address falls within a CIDR range.
+ * Supports both IPv4 and IPv6.
+ * @param {string} ip - The client IP address
+ * @param {string} cidr - CIDR notation (e.g. "192.168.1.0/24", "2001:db8::/32")
+ * @returns {boolean}
+ */
+function normalizeIp(ip) {
+  if (typeof ip !== 'string') return '';
+  let v = ip.trim();
+  // Express reports IPv4 peers on a dual-stack socket as ::ffff:a.b.c.d
+  const mapped = v.match(/^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/i);
+  if (mapped) v = mapped[1];
+  return v;
+}
+
+/**
+ * Parse one allow/block entry: a CIDR range or a bare address (treated as a single host).
+ * Returns { network, prefixLen, version } or null when the entry is not usable.
+ */
+function parseIpEntry(entry) {
+  if (typeof entry !== 'string') return null;
+  const [rawNet, rawPrefix, extra] = entry.trim().split('/');
+  if (extra !== undefined) return null;
+  const network = normalizeIp(rawNet);
+  const version = net.isIP(network);
+  if (version === 0) return null;
+  // IPv6 with an embedded dotted quad is not supported by the BigInt conversion
+  if (version === 6 && network.includes('.')) return null;
+  const maxLen = version === 4 ? 32 : 128;
+  if (rawPrefix === undefined) return { network, prefixLen: maxLen, version };
+  if (!/^\d{1,3}$/.test(rawPrefix)) return null;
+  const prefixLen = Number(rawPrefix);
+  if (prefixLen > maxLen) return null;
+  return { network, prefixLen, version };
+}
+
+/**
+ * Validate and normalise an allow/block list supplied at token creation.
+ * @throws {TypeError} when any entry is not an IP address or CIDR range
+ */
+function normalizeIpList(list, field) {
+  if (list === undefined || list === null) return [];
+  if (!Array.isArray(list)) throw new TypeError(`${field} must be an array of IP addresses or CIDR ranges`);
+  return list.map(entry => {
+    if (!parseIpEntry(entry)) throw new TypeError(`${field} entry is not an IP address or CIDR range: ${entry}`);
+    return entry.trim();
+  });
+}
+
+function isIpInCidr(ip, cidr) {
+  const client = normalizeIp(ip);
+  const parsed = parseIpEntry(cidr);
+  if (!client || !parsed) return false;
+
+  const ipVersion = net.isIP(client);
+  if (ipVersion !== parsed.version) return false;
+  const { network, prefixLen } = parsed;
+
+  if (ipVersion === 4) {
+    const ipInt = ipv4ToInt(client);
+    const netInt = ipv4ToInt(network);
+    const mask = prefixLen === 0 ? 0 : (~0 << (32 - prefixLen)) >>> 0;
+    return (ipInt & mask) === (netInt & mask);
+  }
+
+  if (client.includes('.')) return false;
+  const ipBig = ipv6ToBigInt(client);
+  const netBig = ipv6ToBigInt(network);
+  const mask = prefixLen === 0 ? 0n : ((1n << BigInt(128 - prefixLen)) - 1n) ^ ((1n << 128n) - 1n);
+  return (ipBig & mask) === (netBig & mask);
+}
+
+// ---------------------------------------------------------------------------
+// Schema definition
+// ---------------------------------------------------------------------------
 
 const mcpTokenSchema = new mongoose.Schema({
   // Display name for the token
@@ -55,6 +181,18 @@ const mcpTokenSchema = new mongoose.Schema({
 
   // Specific tools denied (blacklist)
   deniedTools: {
+    type: [String],
+    default: []
+  },
+
+  // IP allow list – if non-empty, only these CIDR ranges are permitted
+  allowedIps: {
+    type: [String],
+    default: []
+  },
+
+  // IP block list – any IP matching these CIDR ranges is denied, even if allowed
+  blockedIps: {
     type: [String],
     default: []
   },
@@ -134,11 +272,16 @@ mcpTokenSchema.statics.generateToken = async function(options = {}) {
     permissions = ['*'],
     allowedTools = [],
     deniedTools = [],
+    allowedIps = [],
+    blockedIps = [],
     expiresIn = null, // milliseconds, null = never expires
     createdBy = 'system',
     description = '',
     usageThreshold = 1000 // Default threshold
   } = options;
+
+  const allowedIpList = normalizeIpList(allowedIps, 'allowedIps');
+  const blockedIpList = normalizeIpList(blockedIps, 'blockedIps');
 
   // Generate random token
   const tokenValue = `mcp_${crypto.randomBytes(32).toString('hex')}`;
@@ -160,6 +303,8 @@ mcpTokenSchema.statics.generateToken = async function(options = {}) {
     permissions,
     allowedTools,
     deniedTools,
+    allowedIps: allowedIpList,
+    blockedIps: blockedIpList,
     expiresAt,
     createdBy,
     description,
@@ -244,6 +389,8 @@ mcpTokenSchema.statics.rotateToken = async function(tokenId, options = {}) {
     permissions: [...(sourceToken.permissions || [])],
     allowedTools: [...(sourceToken.allowedTools || [])],
     deniedTools: [...(sourceToken.deniedTools || [])],
+    allowedIps: [...(sourceToken.allowedIps || [])],
+    blockedIps: [...(sourceToken.blockedIps || [])],
     expiresAt,
     rateLimit: sourceToken.rateLimit
       ? {
@@ -384,6 +531,54 @@ mcpTokenSchema.methods.isToolAllowed = function(toolName, category = null) {
 };
 
 /**
+ * Determine whether a client IP address is permitted to use this token.
+ *
+ * Rules (applied in order):
+ * 1. If `blockedIps` is non-empty and the IP matches any blocked CIDR, deny.
+ * 2. If `allowedIps` is non-empty and the IP does NOT match any allowed CIDR, deny.
+ * 3. Otherwise, allow.
+ *
+ * @param {string} clientIp - The IP address of the client (IPv4 or IPv6)
+ * @returns {boolean} true if the IP is allowed, false otherwise
+ */
+mcpTokenSchema.methods.isIpAllowed = function(clientIp) {
+  const hasBlock = Array.isArray(this.blockedIps) && this.blockedIps.length > 0;
+  const hasAllow = Array.isArray(this.allowedIps) && this.allowedIps.length > 0;
+  // Unrestricted tokens never depend on the caller's address being known
+  if (!hasBlock && !hasAllow) return true;
+
+  clientIp = normalizeIp(clientIp);
+  if (!clientIp || net.isIP(clientIp) === 0) {
+    logger.warn('MCPToken.isIpAllowed called with invalid IP', { tokenId: this._id?.toString(), clientIp });
+    return false;
+  }
+
+  // Block list takes precedence
+  if (Array.isArray(this.blockedIps) && this.blockedIps.length > 0) {
+    for (const cidr of this.blockedIps) {
+      if (isIpInCidr(clientIp, cidr)) {
+        logger.debug('MCPToken IP blocked by block list', { tokenId: this._id?.toString(), clientIp, cidr });
+        return false;
+      }
+    }
+  }
+
+  // If an allow list is defined, the IP must match at least one entry
+  if (Array.isArray(this.allowedIps) && this.allowedIps.length > 0) {
+    for (const cidr of this.allowedIps) {
+      if (isIpInCidr(clientIp, cidr)) {
+        return true;
+      }
+    }
+    logger.debug('MCPToken IP not in allow list', { tokenId: this._id?.toString(), clientIp });
+    return false;
+  }
+
+  // No restrictions
+  return true;
+};
+
+/**
  * Revoke the token
  */
 mcpTokenSchema.methods.revoke = async function() {
@@ -403,6 +598,8 @@ mcpTokenSchema.methods.toDisplay = function() {
     permissions: this.permissions,
     allowedTools: this.allowedTools,
     deniedTools: this.deniedTools,
+    allowedIps: this.allowedIps,
+    blockedIps: this.blockedIps,
     expiresAt: this.expiresAt,
     lastUsed: this.lastUsed,
     usageCount: this.usageCount,
@@ -500,3 +697,4 @@ mcpTokenSchema.methods.checkUsageThreshold = async function() {
 };
 
 export const MCPToken = mongoose.model('MCPToken', mcpTokenSchema);
+export { isIpInCidr, normalizeIpList };

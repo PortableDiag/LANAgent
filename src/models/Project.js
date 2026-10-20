@@ -287,6 +287,71 @@ projectSchema.statics.removeTasksAtomic = async function(projectId, taskIds) {
   }
 };
 
+/**
+ * Move a project's status forward to match its tasks: 'planning' -> 'active' once any task is
+ * done, 'planning'/'active' -> 'completed' once every task is done.
+ *
+ * Forward-only on purpose. 'paused', 'archived' and 'completed' are the owner's choices and are
+ * never overridden, and an 'active' project with nothing done yet stays active (someone
+ * activated it; that is not evidence it is still being planned).
+ *
+ * Counts tasks straight from the Task collection instead of calculateProgress(): that reads a
+ * 5-minute task cache which completing a task does not invalidate, so it would report the
+ * progress from before the completion that triggered this call.
+ *
+ * The write is conditional on the status read, so a concurrent manual change wins.
+ *
+ * @param {mongoose.Types.ObjectId|string} projectId
+ * @returns {Promise<Object|null>} The project (updated when a transition applied), or null if missing
+ */
+projectSchema.statics.syncStatusByProgress = async function(projectId) {
+  const project = await this.findById(projectId);
+  if (!project) return null;
+
+  const total = project.tasks.length;
+  if (total === 0 || !['planning', 'active'].includes(project.status)) return project;
+
+  const done = await mongoose.model('Task').countDocuments({ _id: { $in: project.tasks }, completed: true });
+  let targetStatus = null;
+  if (done >= total) targetStatus = 'completed';
+  else if (done > 0 && project.status === 'planning') targetStatus = 'active';
+  if (!targetStatus) return project;
+
+  const updated = await this.findOneAndUpdate(
+    { _id: projectId, status: project.status },
+    { $set: { status: targetStatus } },
+    { new: true }
+  );
+  if (updated) {
+    cache.del(`tasks_${projectId}`);
+    logger.info(`Project ${projectId} status ${project.status} -> ${targetStatus} (${done}/${total} tasks done)`);
+  }
+  return updated || project;
+};
+
+/**
+ * Sync every project that contains `taskId`. Called after a task is completed; failures are
+ * logged, never thrown, so a status sync can never fail the completion itself.
+ * @param {mongoose.Types.ObjectId|string} taskId
+ */
+projectSchema.statics.syncStatusForTask = async function(taskId) {
+  try {
+    const projects = await this.find({ tasks: taskId }).select('_id').lean();
+    for (const p of projects) {
+      await this.syncStatusByProgress(p._id);
+    }
+  } catch (error) {
+    logger.warn(`Project status sync after task ${taskId} failed: ${error.message}`);
+  }
+};
+
+/**
+ * Instance method that delegates to the static syncStatusByProgress.
+ */
+projectSchema.methods.syncStatusByProgress = function() {
+  return this.constructor.syncStatusByProgress(this._id);
+};
+
 const Project = mongoose.model('Project', projectSchema);
 
 export default Project;

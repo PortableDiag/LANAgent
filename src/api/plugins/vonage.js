@@ -51,6 +51,11 @@ export default class VonagePlugin extends BasePlugin {
         command: 'trackMessageStatus',
         description: 'Track the delivery status of a message',
         usage: 'trackMessageStatus({ messageId: "message_id_here" })'
+      },
+      {
+        command: 'numberinsight',
+        description: 'Look up a phone number: country and formatting (basic, free); carrier and line type with level "standard" (paid)',
+        usage: 'numberinsight({ number: "phone_number", level: "basic" | "standard" })'
       }
     ];
 
@@ -59,6 +64,7 @@ export default class VonagePlugin extends BasePlugin {
     this.apiKey = process.env.VONAGE_API_KEY;
     this.apiSecret = process.env.VONAGE_API_SECRET;
     this.baseUrl = 'https://rest.nexmo.com';
+    this.insightUrl = 'https://api.nexmo.com';
   }
 
   async execute(params) {
@@ -86,6 +92,9 @@ export default class VonagePlugin extends BasePlugin {
 
         case 'trackMessageStatus':
           return await this.trackMessageStatus(params);
+
+        case 'numberinsight':
+          return await this.numberInsight(params);
 
         default:
           return { 
@@ -339,6 +348,65 @@ export default class VonagePlugin extends BasePlugin {
       }
     } catch (error) {
       logger.error('Message status tracking error:', error.message);
+      return { success: false, error: error.message };
+    }
+  }
+
+  /**
+   * Number Insight lookup.
+   * Basic (free) returns country and number formatting only. Carrier and line type are NOT
+   * part of a Basic response; they come from the Standard level (a paid lookup), so they
+   * are only returned when params.level === 'standard'.
+   * Number Insight lives on api.nexmo.com, not on rest.nexmo.com (this.baseUrl).
+   * @param {Object} params - { number, level?: 'basic' | 'standard' }
+   * @returns {Object} { success, data }
+   */
+  async numberInsight(params) {
+    const { number } = params;
+    this.validateParams(params, { number: { required: true, type: 'string' } });
+    const level = params.level === 'standard' ? 'standard' : 'basic';
+
+    if (!this.apiKey || !this.apiSecret) {
+      return { success: false, error: 'API key or secret not configured' };
+    }
+
+    try {
+      logger.info(`Performing Number Insight ${level} lookup`);
+
+      const response = await axios.get(`${this.insightUrl}/ni/${level}/json`, {
+        params: {
+          api_key: this.apiKey,
+          api_secret: this.apiSecret,
+          number
+        },
+        timeout: 15000
+      });
+
+      const data = response.data || {};
+      if (data.status !== 0) {
+        throw new Error(data.status_message || `Number Insight request failed (status ${data.status})`);
+      }
+
+      const result = {
+        level,
+        internationalNumber: data.international_format_number ?? null,
+        nationalNumber: data.national_format_number ?? null,
+        country: data.country_name ?? null,
+        countryCode: data.country_code ?? null,
+        countryPrefix: data.country_prefix ?? null
+      };
+
+      if (level === 'standard') {
+        const carrier = data.current_carrier || {};
+        result.network = carrier.name ?? null;
+        result.type = carrier.network_type ?? null;
+        result.ported = data.ported ?? null;
+        result.requestPrice = data.request_price ?? null;
+      }
+
+      return { success: true, data: result };
+    } catch (error) {
+      logger.error('Number Insight error:', error.message);
       return { success: false, error: error.message };
     }
   }

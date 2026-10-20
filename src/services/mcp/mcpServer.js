@@ -395,6 +395,10 @@ export class MCPServerService {
     const tokenValue = auth.startsWith('Bearer ') ? auth.slice(7).trim() : req.headers['x-mcp-token'];
     const token = tokenValue ? await MCPToken.validateToken(tokenValue) : null;
     if (!token) return rpcError(401, 'Invalid or missing MCP token');
+    if (typeof token.isIpAllowed === 'function' && !token.isIpAllowed(req.ip || req.socket?.remoteAddress)) {
+      logger.warn(`MCP token ${token.name} refused from ${req.ip || req.socket?.remoteAddress} by its IP policy`);
+      return rpcError(403, 'This MCP token may not be used from this address');
+    }
 
     const server = this.createProtocolServer(token);
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });

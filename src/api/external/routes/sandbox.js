@@ -21,6 +21,13 @@ const RUNTIME_BOUNDS = {
 };
 const MAX_CPUS = 2; // matches the pre-configurable fixed limit
 
+// Environment variable injection limits
+const MAX_ENV_VARS = 10;
+const MAX_ENV_KEY_LENGTH = 64;
+const MAX_ENV_VALUE_LENGTH = 256;
+// POSIX-portable names: letter or underscore first, so a shell inside the container can read it.
+const ENV_KEY_REGEX = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
 const LANGUAGE_CONFIG = {
   python: {
     image: 'python:3.12-alpine',
@@ -119,6 +126,46 @@ export function validateRuntimeConfig(runtimeConfig = {}) {
   return validated;
 }
 
+/**
+ * Validate caller-supplied environment variables for the sandbox container.
+ *
+ * Each entry becomes its own `--env KEY=VALUE` argv element (execFile, no shell), and always
+ * with `=VALUE`: docker's bare `--env KEY` form copies the HOST's value, which is how a
+ * request could read this server's environment, so a value is mandatory.
+ *
+ * @param {Object} [env] - { NAME: "value" }
+ * @returns {Array<[string, string]>} Validated [key, value] pairs (an array, so a key like
+ *   `__proto__` cannot vanish into an object prototype)
+ */
+export function validateEnv(env) {
+  if (env === undefined || env === null) return [];
+  if (Array.isArray(env) || typeof env !== 'object') {
+    throw new Error('env must be an object of NAME: "value" pairs');
+  }
+
+  const entries = Object.entries(env);
+  if (entries.length > MAX_ENV_VARS) {
+    throw new Error(`Maximum ${MAX_ENV_VARS} environment variables allowed`);
+  }
+
+  for (const [key, value] of entries) {
+    if (!ENV_KEY_REGEX.test(key) || key.length > MAX_ENV_KEY_LENGTH) {
+      throw new Error(`Invalid env name "${key.slice(0, 80)}": letters, digits and underscore, not starting with a digit, max ${MAX_ENV_KEY_LENGTH} chars`);
+    }
+    if (typeof value !== 'string') {
+      throw new Error(`Env value for "${key}" must be a string`);
+    }
+    if (value.length > MAX_ENV_VALUE_LENGTH) {
+      throw new Error(`Env value for "${key}" exceeds maximum length of ${MAX_ENV_VALUE_LENGTH}`);
+    }
+    // Newlines would corrupt env listings; a NUL makes execFile throw after the call was paid for.
+    if (/[\r\n\0]/.test(value)) {
+      throw new Error(`Env value for "${key}" must not contain newlines or NUL`);
+    }
+  }
+  return entries;
+}
+
 // Map relative cpuShares (100–1024) onto the fixed CPU allowance; unset = full allowance
 export function cpusFromShares(cpuShares) {
   if (cpuShares === undefined) return MAX_CPUS;
@@ -139,7 +186,7 @@ function getDockerCmd(language) {
 router.post('/execute',
   ...hybridAuth('code-sandbox', 20),
   async (req, res) => {
-    const { language, code, timeout: reqTimeout, runtimeConfig } = req.body;
+    const { language, code, timeout: reqTimeout, runtimeConfig, env } = req.body;
 
     // Validate language
     if (!language || !LANGUAGE_CONFIG[language]) {
@@ -166,11 +213,25 @@ router.post('/execute',
       return res.status(400).json({ success: false, error: error.message });
     }
 
+    // Validate environment variables
+    let validatedEnv;
+    try {
+      validatedEnv = validateEnv(env);
+    } catch (error) {
+      return res.status(400).json({ success: false, error: error.message });
+    }
+
     const timeout = validatedRuntimeConfig.timeout || Math.min(Math.max(parseInt(reqTimeout) || DEFAULT_TIMEOUT, 1), MAX_TIMEOUT);
     const config = LANGUAGE_CONFIG[language];
     const cmd = getDockerCmd(language);
 
-    // Build Docker arguments with custom runtime config
+    // Build environment variable flags
+    const envFlags = [];
+    for (const [key, value] of validatedEnv) {
+      envFlags.push('--env', `${key}=${value}`);
+    }
+
+    // Build Docker arguments with custom runtime config and env vars
     const dockerArgs = [
       'run',
       '--rm',
@@ -186,6 +247,7 @@ router.post('/execute',
       '--cap-drop', 'ALL',
       '--user', '1000:1000',
       '--stop-timeout', String(timeout),
+      ...envFlags,
       '-i',                // keep stdin open for piping code
       config.image,
       ...cmd
@@ -263,6 +325,7 @@ router.get('/health', (req, res) => {
       maxCodeSize: MAX_CODE_SIZE,
       maxTimeout: MAX_TIMEOUT,
       maxOutputSize: MAX_OUTPUT_SIZE,
+      maxEnvVars: MAX_ENV_VARS,
       runtimeBounds: RUNTIME_BOUNDS
     }
   });

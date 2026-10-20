@@ -31,13 +31,17 @@ export default class UnsplashPlugin extends BasePlugin {
       },
       {
         command: 'getRandomPhoto',
-        description: 'Get a random photo, optionally filtered by topic',
-        usage: 'getRandomPhoto({ query: "nature" })',
+        description: 'Get a random photo, optionally filtered by query, orientation, count, collections, topics, or username',
+        usage: 'getRandomPhoto({ query: "nature", orientation: "landscape", count: 5, collections: "abc,def", topics: "wallpapers", username: "photographer_handle" })',
         examples: [
           'show me a random photo',
           'get a surprise image',
           'find a random landscape picture',
-          'give me any cool photo'
+          'give me any cool photo',
+          'get 3 random portrait photos',
+          'random photo from a specific photographer',
+          'random photo from collection abc123',
+          'random photo about nature in landscape orientation'
         ]
       },
       {
@@ -152,8 +156,9 @@ export default class UnsplashPlugin extends BasePlugin {
   }
   
   async extractParameters(input, action) {
+    const usage = this.commands.find(c => c.command === action)?.usage;
     const prompt = `Extract parameters from: "${input}"
-    For ${this.name} plugin action: ${action}
+    For ${this.name} plugin action: ${action}${usage ? `\n    Call shape (use these parameter names): ${usage}` : ''}
 
     Return JSON with appropriate parameters based on the action.`;
 
@@ -231,15 +236,48 @@ export default class UnsplashPlugin extends BasePlugin {
   }
 
   async getRandomPhoto(params) {
-    const { query } = params;
+    // A count from a plain-language request arrives as text ("3"); accept it as a number.
+    if (typeof params.count === 'string' && params.count.trim() !== '' && Number.isFinite(Number(params.count))) {
+      params = { ...params, count: Number(params.count) };
+    }
+    const {
+      query,
+      orientation,
+      count,
+      collections,
+      topics,
+      username
+    } = params;
     
     this.validateParams(params, {
-      query: { required: false, type: 'string' }
+      query: { required: false, type: 'string' },
+      orientation: { required: false, type: 'string', enum: ['landscape', 'portrait', 'squarish'] },
+      count: { required: false, type: 'number', min: 1, max: 30 },
+      collections: { required: false, type: 'string' },
+      topics: { required: false, type: 'string' },
+      username: { required: false, type: 'string' }
     });
+
+    if (count !== undefined && !Number.isInteger(count)) {
+      throw new Error('Validation failed: count must be a whole number from 1 to 30');
+    }
+    // Unsplash rejects collections or topics combined with a query; say so plainly.
+    if (query && (collections || topics)) {
+      throw new Error('Validation failed: collections and topics cannot be combined with query');
+    }
 
     if (!this.config.apiKey) {
       throw new Error('Unsplash API key not configured');
     }
+
+    // Build query parameters, only including those that are provided
+    const queryParams = {};
+    if (query) queryParams.query = query;
+    if (orientation) queryParams.orientation = orientation;
+    if (count) queryParams.count = count;
+    if (collections) queryParams.collections = collections;
+    if (topics) queryParams.topics = topics;
+    if (username) queryParams.username = username;
 
     try {
       const response = await retryOperation(() => 
@@ -247,13 +285,14 @@ export default class UnsplashPlugin extends BasePlugin {
           headers: {
             Authorization: `Client-ID ${this.config.apiKey}`
           },
-          params: query ? { query } : {}
+          params: queryParams
         }), 
         { retries: 3, context: 'Unsplash random photo' }
       );
 
-      const photo = response.data;
-      const result = {
+      // The API returns a single object if count is 1 or not specified, an array if count > 1
+      const photos = Array.isArray(response.data) ? response.data : [response.data];
+      const results = photos.map(photo => ({
         id: photo.id,
         url: photo.urls.regular,
         thumb: photo.urls.thumb,
@@ -262,9 +301,11 @@ export default class UnsplashPlugin extends BasePlugin {
           name: photo.user.name,
           profile: photo.user.links.html
         }
-      };
+      }));
 
-      return { success: true, data: result };
+      // If only one photo was requested, return a single object for backward compatibility
+      const data = (count && count > 1) ? results : results[0];
+      return { success: true, data };
     } catch (error) {
       throw new Error(`Failed to get random photo: ${error.response?.data?.errors?.[0] || error.message}`);
     }

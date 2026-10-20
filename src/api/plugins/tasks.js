@@ -1,5 +1,6 @@
 import { BasePlugin } from '../core/basePlugin.js';
 import { Task } from '../../models/Task.js';
+import Project from '../../models/Project.js';
 import { logger } from '../../utils/logger.js';
 
 export default class TasksPlugin extends BasePlugin {
@@ -362,6 +363,9 @@ export default class TasksPlugin extends BasePlugin {
     }
     
     await task.save();
+
+    // A project whose tasks are now all done (or the first one is) moves forward.
+    await Project.syncStatusForTask(task._id);
     
     await this.notify(
       `✅ Task completed: *${task.title}*\n` +

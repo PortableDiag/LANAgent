@@ -135,20 +135,9 @@ class PeerManager {
       this.connectionStartTimes.set(fingerprint, new Date());
     }
 
-    const peer = await P2PPeer.findByFingerprint(fingerprint);
-    if (peer) {
-      // Count this as a session; if peer has any prior session, it's a reconnection.
-      const priorSessions = peer.sessionCount || 0;
-      peer.sessionCount = priorSessions + 1;
-      if (priorSessions > 0) {
-        peer.reconnectionCount = (peer.reconnectionCount || 0) + 1;
-      }
-      peer.isOnline = true;
-      peer.lastSeen = new Date();
-      if (capabilitiesHash) peer.capabilitiesHash = capabilitiesHash;
-      await peer.save();
-      this.updatePeerGroup(peer);
-    }
+    // Atomic: a session is counted once per announcement even when two arrive together.
+    const peer = await P2PPeer.recordOnline(fingerprint, capabilitiesHash);
+    if (peer) this.updatePeerGroup(peer);
   }
 
   /**

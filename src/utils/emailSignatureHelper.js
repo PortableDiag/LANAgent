@@ -54,6 +54,64 @@ export async function generateProfessionalSignature(options) {
 }
 
 /**
+ * Generate a plain-text email signature for clients that do not support HTML.
+ * Uses simple line breaks and separators for improved deliverability and accessibility.
+ * @param {Object} options - Signature configuration options
+ * @param {string} options.name - Full name
+ * @param {string} options.title - Job title
+ * @param {string} options.email - Email address
+ * @param {string} [options.phone] - Phone number
+ * @param {string} [options.website] - Website URL
+ * @param {string} [options.organization] - Organization name
+ * @param {string} [options.disclaimer] - Disclaimer text
+ * @returns {string} Plain-text signature
+ */
+export function generatePlainTextSignature(options) {
+  const {
+    name,
+    title,
+    email,
+    phone,
+    website,
+    organization,
+    disclaimer
+  } = options || {};
+
+  const lines = [];
+
+  // Name and title; a missing field is left out rather than printed as "undefined"
+  if (name) lines.push(name);
+  if (title) lines.push(title);
+
+  // Organization if provided
+  if (organization) {
+    lines.push(organization);
+  }
+
+  // Separator
+  lines.push('---');
+
+  // Contact details
+  if (email) lines.push(`Email: ${email}`);
+  if (phone) {
+    lines.push(`Phone: ${phone}`);
+  }
+  if (website) {
+    // Strip protocol for cleaner display
+    const displayWebsite = website.replace(/^https?:\/\//, '');
+    lines.push(`Web: ${displayWebsite}`);
+  }
+
+  // Disclaimer if provided
+  if (disclaimer) {
+    lines.push('');
+    lines.push(disclaimer);
+  }
+
+  return lines.join('\n');
+}
+
+/**
  * Generate a vCard 3.0 QR code (returned as a data URL) for the given contact.
  * Empty fields are omitted to keep the vCard clean.
  * @param {{name?: string, title?: string, email?: string, phone?: string, organization?: string}} contact

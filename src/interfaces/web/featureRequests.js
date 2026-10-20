@@ -260,27 +260,24 @@ export function setupFeatureRequestRoutes(app, agent) {
     try {
       const { direction } = req.body; // 'up' or 'down'
 
-      const request = await FeatureRequest.findById(req.params.id);
-      
-      if (!request) {
-        return res.status(404).json({
-          success: false,
-          error: 'Feature request not found'
-        });
-      }
-
-      if (direction === 'up') {
-        request.votes += 1;
-      } else if (direction === 'down') {
-        request.votes -= 1;
-      } else {
+      if (direction !== 'up' && direction !== 'down') {
         return res.status(400).json({
           success: false,
           error: 'Invalid vote direction. Use "up" or "down"'
         });
       }
 
-      await request.save();
+      // Atomic $inc: concurrent votes no longer overwrite each other.
+      const request = direction === 'up'
+        ? await FeatureRequest.upvote(req.params.id)
+        : await FeatureRequest.downvote(req.params.id);
+
+      if (!request) {
+        return res.status(404).json({
+          success: false,
+          error: 'Feature request not found'
+        });
+      }
 
       res.json({
         success: true,

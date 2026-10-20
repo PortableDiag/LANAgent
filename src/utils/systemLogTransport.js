@@ -27,6 +27,8 @@ import mongoose from 'mongoose';
 export const CATEGORIES = ['system', 'task', 'network', 'security', 'ai', 'user', 'performance', 'update'];
 const LEVELS = { error: 'error', warn: 'warn', info: 'info', debug: 'debug', verbose: 'debug', silly: 'trace', http: 'info' };
 const SKIP_KEYS = new Set(['level', 'message', 'timestamp', 'service', 'stack', 'category', 'systemLog', 'tags', 'splat']);
+// Moved to context.requestId when they hold a non-empty string; otherwise kept in details.
+const ID_KEYS = new Set(['correlationId', 'requestId']);
 const FLOOD_LIMIT = 3;
 const FLOOD_WINDOW_MS = 60_000;
 const MAX_BUFFER = 1000;
@@ -107,6 +109,7 @@ export class SystemLogTransport extends Transport {
     const details = {};
     for (const [k, v] of Object.entries(info)) {
       if (SKIP_KEYS.has(k) || typeof k === 'symbol') continue;
+      if (ID_KEYS.has(k) && typeof v === 'string' && v) continue;
       details[k] = v;
     }
     let detailsOut;
@@ -123,6 +126,17 @@ export class SystemLogTransport extends Transport {
       tags: [service, ...(Array.isArray(info.tags) ? info.tags.slice(0, 5).map(String) : [])],
       createdAt: new Date(now)
     };
+    // A correlation id links entries from one request. It goes into context.requestId, the
+    // schema's field for it: SystemLog is a strict schema, so a top-level `correlationId`
+    // would be silently dropped at insert (and skipping it from details would lose it).
+    // No retry around insertMany below: this module is imported BY logger.js, retryUtils
+    // imports logger.js (a cycle on the boot path), and an ordered:false insert that half
+    // succeeded would be duplicated by a replay. A failed batch is re-queued for the next
+    // flush instead.
+    const requestId = [info.correlationId, info.requestId].find(v => typeof v === 'string' && v);
+    if (requestId) {
+      doc.context = { requestId: requestId.slice(0, 200) };
+    }
     if (info.stack || level === 'error') {
       const firstLine = message.split('\n')[0];
       doc.error = {

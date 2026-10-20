@@ -29,6 +29,11 @@ export default class GoogleSecOpsPlugin extends BasePlugin {
         command: 'searchDetections',
         description: 'Search detections within a time window, optionally filter by ruleId or query',
         usage: 'searchDetections [startTime ISO8601] [endTime ISO8601] (optional: ruleId, query, state, pageSize, pageToken)'
+      },
+      {
+        command: 'getDetection',
+        description: 'Get a single detection by its ID (cached)',
+        usage: 'getDetection [detectionId]'
       }
     ];
     this.config = null;
@@ -61,13 +66,16 @@ export default class GoogleSecOpsPlugin extends BasePlugin {
       case 'searchDetections':
         return await this.searchDetections(rest);
 
+      case 'getDetection':
+        return await this.getDetection(rest);
+
       case 'getPluginConfig':
         return this.getPluginConfig();
 
       default:
         return {
           success: false,
-          error: 'Unknown action. Available actions: listRules, listAllRules, getRule, searchDetections, getPluginConfig'
+          error: 'Unknown action. Available actions: listRules, listAllRules, getRule, searchDetections, getDetection, getPluginConfig'
         };
     }
   }
@@ -271,6 +279,49 @@ export default class GoogleSecOpsPlugin extends BasePlugin {
       return { success: true, data: response?.data || {} };
     } catch (error) {
       this.logger.error(`Google SecOps: searchDetections failed - ${error.message}`);
+      return this.formatHttpError(error);
+    }
+  }
+
+  /**
+   * Fetch a single detection by its ID.
+   *
+   * @param {Object} options
+   * @param {string} options.detectionId - The unique identifier of the detection.
+   * @returns {Promise<Object>} The detection data or an error.
+   */
+  async getDetection({ detectionId }) {
+    if (!detectionId) {
+      return { success: false, error: 'Missing required parameter: detectionId' };
+    }
+
+    try {
+      this.requireConfig();
+
+      const cacheKey = `googlesecops:detections:get:${detectionId}`;
+      const cached = this.cache.get(cacheKey);
+      if (cached) {
+        this.logger.debug('Google SecOps: getDetection served from cache');
+        return { success: true, data: cached, cached: true };
+      }
+
+      const url = this.buildUrl(`v1alpha/detectionengine/detections/${encodeURIComponent(detectionId)}`);
+
+      const request = async () => {
+        return axios.get(url, { headers: this.authHeaders() });
+      };
+
+      const response = await retryOperation(request, {
+        retries: 3,
+        minTimeout: 500,
+        factor: 2
+      });
+
+      const data = response?.data || {};
+      this.cache.set(cacheKey, data, 300);
+      return { success: true, data };
+    } catch (error) {
+      this.logger.error(`Google SecOps: getDetection failed - ${error.message}`);
       return this.formatHttpError(error);
     }
   }

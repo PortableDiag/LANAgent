@@ -494,7 +494,7 @@ router.get('/api/tokens', authenticateToken, async (req, res) => {
 // Create token
 router.post('/api/tokens', authenticateToken, async (req, res) => {
   try {
-    const { name, permissions = ['*'], allowedTools = [], deniedTools = [], expiresIn, description } = req.body;
+    const { name, permissions = ['*'], allowedTools = [], deniedTools = [], allowedIps = [], blockedIps = [], expiresIn, description } = req.body;
 
     if (!name) {
       return res.status(400).json({ success: false, error: 'name is required' });
@@ -505,6 +505,8 @@ router.post('/api/tokens', authenticateToken, async (req, res) => {
       permissions,
       allowedTools,
       deniedTools,
+      allowedIps,
+      blockedIps,
       expiresIn,
       description,
       createdBy: 'api'
@@ -517,7 +519,7 @@ router.post('/api/tokens', authenticateToken, async (req, res) => {
     });
   } catch (error) {
     logger.error('Create MCP token error:', error);
-    res.status(500).json({ success: false, error: error.message });
+    res.status(error instanceof TypeError ? 400 : 500).json({ success: false, error: error.message });
   }
 });
 

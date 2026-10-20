@@ -51,6 +51,9 @@ const webWatchSchema = new mongoose.Schema({
   // alert when the price moves by at least this many percent, target or not (0 = never)
   changePct: { type: Number, default: 0 },
   alertedTarget: { type: Boolean, default: false },
+  // minimum minutes between percentage-move alerts (0 = no cooldown); target alerts are exempt
+  alertCooldownMin: { type: Number, default: 0, min: 0 },
+  lastAlertedAt: { type: Date, default: null },
   lastCheckedAt: { type: Date, default: null },
   lastChangeAt: { type: Date, default: null },
   lastError: { type: String, default: null },

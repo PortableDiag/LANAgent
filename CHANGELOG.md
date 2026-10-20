@@ -2,6 +2,28 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.550] - 2026-10-20
+
+### Added
+- **MCP tokens can be limited by IP.** `allowedIps` / `blockedIps` (single addresses or CIDR ranges) when a token is created from the dashboard, the plugin or the API; a call from outside the policy gets 403.
+- **Several follow-ups in one call:** `followup.batch({ tasks: [...] })`, up to 10.
+- **Price watches:** `cooldownMin` sets a quiet period between percentage-move alerts (target-price alerts are never held back), and a price check on a page that lists several product variants shows each one.
+- **Log trend view:** `systemLogs.trend({ hours, interval: "hour"|"day", level?, category? })` counts warnings and errors per hour or day, quiet periods included.
+- **Code sandbox** accepts environment variables (`env`), validated by name; NUL bytes are refused.
+- **Vonage:** `numberinsight({ number, level })` looks up a phone number (basic: country and formats; standard, a paid lookup: carrier, line type, ported).
+- **Google SecOps:** `getDetection` fetches one detection by id.
+- **Random photos (Unsplash):** orientation, count, collections, topics and photographer filters.
+- **Gab provider:** an opt-in fallback to another Gab model when the chosen one fails (`enableFallback`; off by default).
+- MongoDB reconnect and circuit-breaker settings can be tuned from the environment (`MONGO_*`, see `.env.example`); unset, nothing changes.
+- Plain-text email signature generator; contract lookup by function or event signature; SSH connection tags; optional retry with backoff for public URL fetches.
+
+### Fixed
+- **Telegram guests were announced as new after every restart.** Guest conversations are now saved and survive a restart.
+- Feature-request votes and peer session counts are counted atomically, so two at once are no longer lost.
+- A project moves to active or completed as its tasks get done (never backwards from paused or archived).
+- "What time is it in Tokyo right now?" finds the place even with trailing words and punctuation.
+- System log entries carry the request's correlation id.
+
 ## [2.25.549] - 2026-10-20
 
 ### Fixed

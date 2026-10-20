@@ -2,6 +2,45 @@ import { safeJsonParse } from '../../utils/jsonUtils.js';
 import { logger } from '../../utils/logger.js';
 
 /**
+ * Last-resort patterns for when the model cannot be reached or answers with something that
+ * is not JSON. Keyed by the real `plugin.action`; each pattern's first capture is the value
+ * of `param`. Only actions whose request reliably names one value belong here: a pattern
+ * that guesses wrong is worse than handing the plugin the whole request.
+ */
+const FALLBACK_PATTERNS = {
+  'maps.timezone': {
+    param: 'place',
+    patterns: [
+      /\bwhat(?:'s| is) the (?:local )?time in (.+)/i,
+      /\bwhat time is it in (.+)/i,
+      /\b(?:current|local) time in (.+)/i,
+      /\bwhat time zone is (.+?) in\b/i
+    ]
+  }
+};
+
+// Trailing filler that is not part of a place name ("Tokyo right now?").
+const TRAILING_FILLER = /(?:\s+(?:right now|now|today|currently|please))+\s*$/i;
+
+/**
+ * The fallback value for an action, or null when no pattern applies.
+ * @param {string} key - `plugin.action`
+ * @param {string} input - the whole request
+ * @returns {Object|null}
+ */
+export function fallbackExtract(key, input) {
+  const spec = FALLBACK_PATTERNS[key];
+  if (!spec) return null;
+  for (const re of spec.patterns) {
+    const m = String(input).match(re);
+    if (!m) continue;
+    const value = m[1].replace(/[?.!,\s]+$/, '').replace(TRAILING_FILLER, '').replace(/[?.!,\s]+$/, '').trim();
+    if (value) return { [spec.param]: value };
+  }
+  return null;
+}
+
+/**
  * Parameters from a plain-language request, for plugins reached by AI intent detection.
  *
  * When intent detection picks a plugin action but not its arguments, the plugin receives
@@ -36,6 +75,11 @@ Return ONLY a JSON object using the parameter names from the call shape, with on
     }
   } catch (err) {
     logger.warn(`${plugin.name}.${action} parameter extraction failed: ${err.message}`);
+  }
+  const fallback = fallbackExtract(`${plugin.name}.${action}`, input);
+  if (fallback) {
+    logger.info(`${plugin.name}.${action} parameters by pattern fallback: ${JSON.stringify(fallback).slice(0, 300)}`);
+    return { ...rest, ...fallback, originalInput: input };
   }
   // Extraction failed: hand the plugin the whole request, as before.
   return params;

@@ -52,7 +52,53 @@ function productName(nodes) {
   return null;
 }
 
-export function extractPrice(html, { selector } = {}) {
+/**
+ * Every distinct offer a page publishes in its JSON-LD (product variants: sizes, colours,
+ * sellers), each with its own name/sku/availability where given. Only structured data is
+ * collected: a page's text holds many amounts (shipping, savings, related items) that are not
+ * offers. When the page has no JSON-LD offers this is the single best reading as a one-item
+ * array, or [] when there is none.
+ */
+function extractOffers(html, { selector } = {}) {
+  const $ = cheerio.load(String(html || ''));
+  const title = ($('meta[property="og:title"]').attr('content') || $('title').first().text() || '').trim().slice(0, 200);
+  const blocks = [];
+  $('script[type="application/ld+json"]').each((_, el) => {
+    try { blocks.push(JSON.parse($(el).contents().text())); } catch { /* malformed block */ }
+  });
+  const productTitle = productName(blocks) || title;
+  const out = [];
+  const seen = new Set();
+  for (const offer of blocks.flatMap(offersOf)) {
+    const price = parseAmount(offer.price ?? offer.lowPrice);
+    if (!price) continue;
+    const name = offer.name || offer.itemOffered?.name || null;
+    const sku = offer.sku || offer.itemOffered?.sku || null;
+    const currency = offer.priceCurrency || null;
+    const key = `${price}|${currency}|${name}|${sku}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({
+      price, currency, source: 'jsonld', confidence: 'high', title: productTitle,
+      availability: offer.availability ? String(offer.availability).split('/').pop() : null,
+      ...(name ? { name: String(name).slice(0, 200) } : {}),
+      ...(sku ? { sku: String(sku) } : {})
+    });
+  }
+  if (out.length) return out;
+  const single = extractPrice(html, { selector });
+  return single ? [single] : [];
+}
+
+/**
+ * @param {string} html
+ * @param {object} [options]
+ * @param {string} [options.selector]  CSS selector for a specific price element
+ * @param {boolean} [options.allOffers=false]  return every JSON-LD offer as an array (see extractOffers)
+ * @returns {object|object[]|null}
+ */
+export function extractPrice(html, { selector, allOffers = false } = {}) {
+  if (allOffers) return extractOffers(html, { selector });
   const $ = cheerio.load(String(html || ''));
   const title = ($('meta[property="og:title"]').attr('content') || $('title').first().text() || '').trim().slice(0, 200);
 

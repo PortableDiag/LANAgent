@@ -1,4 +1,4 @@
-import { test } from 'node:test';
+import { test, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 
 // Test the model method in isolation — instantiate via the mongoose
@@ -75,4 +75,147 @@ test('generateFilteredSessionReport: aggregationLevel weekly groups errors by we
   );
   // Single error in the window — exactly 1 key
   assert.equal(Object.keys(r.errorTrends).length, 1);
+});
+
+test('session analytics uses the requested timezone for hourly trends and peak usage times', () => {
+  const conn = fixtureConn();
+
+  const utcReport = conn.generateFilteredSessionReport(
+    new Date('2026-05-01T00:00:00Z'),
+    new Date('2026-05-03T23:59:59Z'),
+    {
+      timezone: 'UTC',
+      aggregationLevel: 'hourly'
+    }
+  );
+
+  const losAngelesReport = conn.generateFilteredSessionReport(
+    new Date('2026-05-01T00:00:00Z'),
+    new Date('2026-05-03T23:59:59Z'),
+    {
+      timezone: 'America/Los_Angeles',
+      aggregationLevel: 'hourly'
+    }
+  );
+
+  assert.equal(utcReport.errorTrends['5/2/2026 14:00'], 1);
+  assert.equal(losAngelesReport.errorTrends['5/2/2026 07:00'], 1);
+  assert.equal(utcReport.peakUsageTimes[14], 1);
+  assert.equal(losAngelesReport.peakUsageTimes[7], 1);
+  assert.notDeepEqual(utcReport.errorTrends, losAngelesReport.errorTrends);
+  assert.notDeepEqual(utcReport.peakUsageTimes, losAngelesReport.peakUsageTimes);
+});
+
+test('session analytics default locale keeps the en-US daily keys and English weekday names', () => {
+  const conn = fixtureConn();
+  const r = conn.generateFilteredSessionReport(
+    new Date('2026-05-01T00:00:00Z'),
+    new Date('2026-05-03T23:59:59Z'),
+    'daily',
+    { timezone: 'UTC' }
+  );
+  assert.deepEqual(Object.keys(r.errorTrends), ['5/2/2026']);
+  assert.ok(Object.keys(r.usagePatterns).every(d => /day$/.test(d)), 'English weekday names by default');
+});
+
+// ---------------------------------------------------------------------------
+// Tests for atomic tag management (addTag / removeTag)
+// ---------------------------------------------------------------------------
+
+let originalFindOneAndUpdate;
+
+beforeEach(() => {
+  originalFindOneAndUpdate = SSHConnection.findOneAndUpdate;
+});
+
+afterEach(() => {
+  SSHConnection.findOneAndUpdate = originalFindOneAndUpdate;
+});
+
+test('addTag: atomically adds a tag using $addToSet', async () => {
+  const conn = new SSHConnection({
+    connectionId: 'test-1',
+    name: 'Test',
+    host: 'localhost',
+    port: 22,
+    username: 'tester',
+    tags: ['existing']
+  });
+
+  const updatedDoc = { ...conn.toObject(), tags: ['existing', 'newtag'] };
+
+  SSHConnection.findOneAndUpdate = async (query, update, options) => {
+    // _id is an ObjectId; compare string representations
+    assert.equal(query._id.toString(), conn._id.toString());
+    assert.deepEqual(update, { $addToSet: { tags: 'newtag' } });
+    assert.deepEqual(options, { new: true });
+    return updatedDoc;
+  };
+
+  const result = await conn.addTag('newtag');
+  assert.deepEqual(result, updatedDoc);
+});
+
+test('addTag: returns null when document not found', async () => {
+  const conn = new SSHConnection({
+    connectionId: 'test-2',
+    name: 'Test',
+    host: 'localhost',
+    port: 22,
+    username: 'tester'
+  });
+
+  SSHConnection.findOneAndUpdate = async () => null;
+
+  const result = await conn.addTag('tag');
+  assert.equal(result, null);
+});
+
+test('removeTag: atomically removes a tag using $pull', async () => {
+  const conn = new SSHConnection({
+    connectionId: 'test-3',
+    name: 'Test',
+    host: 'localhost',
+    port: 22,
+    username: 'tester',
+    tags: ['tag1', 'tag2']
+  });
+
+  const updatedDoc = { ...conn.toObject(), tags: ['tag1'] };
+
+  SSHConnection.findOneAndUpdate = async (query, update, options) => {
+    assert.equal(query._id.toString(), conn._id.toString());
+    assert.deepEqual(update, { $pull: { tags: 'tag2' } });
+    assert.deepEqual(options, { new: true });
+    return updatedDoc;
+  };
+
+  const result = await conn.removeTag('tag2');
+  assert.deepEqual(result, updatedDoc);
+});
+
+test('removeTag: returns null when document not found', async () => {
+  const conn = new SSHConnection({
+    connectionId: 'test-4',
+    name: 'Test',
+    host: 'localhost',
+    port: 22,
+    username: 'tester'
+  });
+
+  SSHConnection.findOneAndUpdate = async () => null;
+
+  const result = await conn.removeTag('tag');
+  assert.equal(result, null);
+});
+
+test('addTag/removeTag: trim the tag and reject an empty one before touching the DB', async () => {
+  const conn = new SSHConnection({ connectionId: 'test-5', name: 'Test', host: 'localhost', port: 22, username: 'tester' });
+  let calls = 0;
+  SSHConnection.findOneAndUpdate = async (_q, update) => { calls++; return { tags: [update.$addToSet.tags] }; };
+  const r = await conn.addTag('  prod  ');
+  assert.deepEqual(r.tags, ['prod']);
+  await assert.rejects(conn.addTag('   '), /non-empty string/);
+  await assert.rejects(conn.removeTag(undefined), /non-empty string/);
+  assert.equal(calls, 1);
 });

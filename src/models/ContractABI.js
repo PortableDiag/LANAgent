@@ -453,4 +453,49 @@ contractABISchema.statics.updateSecurityAudit = async function(address, network,
   }
 };
 
+/**
+ * Finds all contracts that contain a specific function or event signature.
+ * This enables discovery of deployed contracts implementing a given interface.
+ * @param {Object} signature - The signature to search for.
+ * @param {string} signature.type - The ABI entry type ('function' or 'event').
+ * @param {string} signature.name - The name of the function or event.
+ * @param {string[]} signature.inputTypes - The normalized input parameter types.
+ * @param {string} [network] - Optional network to filter by.
+ * @returns {Promise<Array>} - Array of matching ContractABI documents.
+ */
+contractABISchema.statics.findBySignature = async function(signature, network) {
+  if (!signature || typeof signature !== 'object') {
+    throw new TypeError('signature must be an object with type, name, and inputTypes');
+  }
+  if (!signature.type || !signature.name || !Array.isArray(signature.inputTypes)) {
+    throw new TypeError('signature must contain type (string), name (string), and inputTypes (array of strings)');
+  }
+
+  // Stored ABIs are the raw arrays abiManager.saveABI writes ({ type, name, inputs: [{ type,
+  // components }] }); `inputTypes` exists only on entries normalized in memory, so a query on
+  // it matches nothing. Narrow in Mongo on name and arity, then compare the canonical
+  // signatures (tuples expanded) with the same normalizer compareABIs uses.
+  const wantedTypes = signature.inputTypes.map(t => String(t).trim());
+  const wantedKey = entryKey({ type: signature.type, name: signature.name, inputTypes: wantedTypes });
+  const query = { abi: { $elemMatch: { name: signature.name, inputs: { $size: wantedTypes.length } } } };
+  if (network) {
+    if (typeof network !== 'string' || !supportedNetworks.has(network)) {
+      throw new TypeError(`network must be one of: ${Array.from(supportedNetworks).join(', ')}`);
+    }
+    query.network = network;
+  }
+
+  try {
+    const candidates = await retryOperation(() => this.find(query), { retries: 3, context: 'ContractABI.findBySignature' });
+    return candidates.filter(doc => Array.isArray(doc.abi)
+      && doc.abi.some(entry => {
+        const normalized = normalizeABIEntry(entry);
+        return normalized && entryKey(normalized) === wantedKey;
+      }));
+  } catch (error) {
+    logger.error('Error in findBySignature:', error);
+    throw error;
+  }
+};
+
 export const ContractABI = mongoose.model('ContractABI', contractABISchema);

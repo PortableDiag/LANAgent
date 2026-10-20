@@ -1,5 +1,6 @@
 import axios from 'axios';
 import { assertPublicUrl } from '../../utils/publicUrl.js';
+import { isRetryableError } from '../../utils/retryUtils.js';
 
 /**
  * GET a URL that someone else chose (a feed, a product page, a domain to investigate).
@@ -40,9 +41,18 @@ export async function fetchPublic(
     maxBytes = 8 * 1024 * 1024,
     signal,
     deadlineMs,
-    totalTimeout
+    totalTimeout,
+    // Opt-in retry for transient failures (network errors, and the statuses below).
+    // Off by default: a caller that wants it says how many times.
+    maxRetries = 0,
+    retryDelay = 1000,
+    retryBackoff = 2,
+    retryableStatuses = [500, 502, 503, 504]
   } = {}
 ) {
+  if (!Number.isInteger(maxRetries) || maxRetries < 0) {
+    throw new RangeError('maxRetries must be a non-negative integer');
+  }
   const configuredDeadline = deadlineMs ?? totalTimeout;
   if (configuredDeadline !== undefined && configuredDeadline !== null) {
     if (!Number.isFinite(configuredDeadline) || configuredDeadline < 0) {
@@ -60,28 +70,50 @@ export async function fetchPublic(
   for (let hop = 0; hop <= maxRedirects; hop++) {
     checkRequestLimits(signal, deadlineAt);
 
-    // axios's `timeout` is a socket-inactivity timer, so a server that drips
-    // bytes can outlive it. When a total deadline is set, also abort the hop
-    // on a wall-clock timer for the remaining budget.
-    const remaining = deadlineAt === null ? null : deadlineAt - Date.now();
-    const signals = [signal, remaining === null ? null : AbortSignal.timeout(Math.max(1, remaining))].filter(Boolean);
-    const hopSignal = signals.length > 1 ? AbortSignal.any(signals) : signals[0];
-
     let res;
-    try {
-      res = await axios.get(current, {
-        headers: { 'User-Agent': BROWSER_UA, 'Accept-Language': 'en-US,en;q=0.9', ...headers },
-        timeout: remaining === null ? timeout : Math.max(1, Math.min(timeout, remaining)),
-        signal: hopSignal,
-        responseType,
-        maxRedirects: 0,
-        maxContentLength: maxBytes,
-        validateStatus: () => true
-      });
-    } catch (error) {
-      // Report a cancelled or expired request the same way as the pre-flight checks.
+    for (let attempt = 0; ; attempt++) {
+      // axios's `timeout` is a socket-inactivity timer, so a server that drips
+      // bytes can outlive it. When a total deadline is set, also abort the hop
+      // on a wall-clock timer for the remaining budget.
+      const remaining = deadlineAt === null ? null : deadlineAt - Date.now();
+      const signals = [signal, remaining === null ? null : AbortSignal.timeout(Math.max(1, remaining))].filter(Boolean);
+      const hopSignal = signals.length > 1 ? AbortSignal.any(signals) : signals[0];
+
+      let error = null;
+      try {
+        res = await axios.get(current, {
+          headers: { 'User-Agent': BROWSER_UA, 'Accept-Language': 'en-US,en;q=0.9', ...headers },
+          timeout: remaining === null ? timeout : Math.max(1, Math.min(timeout, remaining)),
+          signal: hopSignal,
+          responseType,
+          maxRedirects: 0,
+          maxContentLength: maxBytes,
+          validateStatus: () => true
+        });
+      } catch (err) {
+        // Report a cancelled or expired request the same way as the pre-flight checks.
+        checkRequestLimits(signal, deadlineAt);
+        error = err;
+      }
+
+      const transient = error
+        ? isRetryableError(error)
+        : retryableStatuses.includes(res.status);
+      if (!transient || attempt >= maxRetries) {
+        if (error) throw error;
+        // Out of retries on a 5xx: hand back the response like any other status,
+        // so a caller sees the same shape with or without retries.
+        break;
+      }
+
+      // Never sleep past the deadline: if the wait would cross it, stop now.
+      const wait = retryDelay * retryBackoff ** attempt;
+      if (deadlineAt !== null && Date.now() + wait >= deadlineAt) {
+        if (error) throw error;
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, wait));
       checkRequestLimits(signal, deadlineAt);
-      throw error;
     }
 
     if (res.status >= 300 && res.status < 400 && res.headers?.location) {

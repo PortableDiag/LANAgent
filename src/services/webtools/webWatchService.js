@@ -30,8 +30,14 @@ export function diffFeedItems(watch, items) {
 
 const money = (n, cur) => `${cur ? `${cur} ` : ''}${Number(n).toLocaleString('en-US', { maximumFractionDigits: 2 })}`;
 
-/** What a new price reading means for a watch: the fields to save and the alert, if any. */
-export function evaluatePrice(watch, reading) {
+/**
+ * What a new price reading means for a watch: the fields to save and the alert, if any.
+ * A percentage-move alert inside the watch's alertCooldownMin of the last alert is suppressed
+ * (an oscillating price would otherwise alert on every check); `suppressed` says so. A
+ * target-price alert is never suppressed: it is already one-shot (alertedTarget) and would
+ * otherwise be marked sent without ever being delivered.
+ */
+export function evaluatePrice(watch, reading, { now = Date.now() } = {}) {
   const price = reading.price;
   const cur = reading.currency || watch.currency;
   const prev = watch.lastPrice;
@@ -53,13 +59,21 @@ export function evaluatePrice(watch, reading) {
       update.alertedTarget = false; // re-arm once it goes back above the target
     }
   }
+  let suppressed = false;
   if (!alert && prev != null && watch.changePct > 0) {
     const pct = ((price - prev) / prev) * 100;
     if (Math.abs(pct) >= watch.changePct) {
-      alert = `${pct < 0 ? '📉' : '📈'} Price ${pct < 0 ? 'drop' : 'rise'} ${Math.abs(pct).toFixed(1)}%: ${label}\n${money(prev, cur)} → ${money(price, cur)}\n${watch.url}`;
+      const cooldownMs = Math.max(0, Number(watch.alertCooldownMin) || 0) * 60000;
+      const last = watch.lastAlertedAt ? new Date(watch.lastAlertedAt).getTime() : NaN;
+      if (cooldownMs > 0 && Number.isFinite(last) && now - last < cooldownMs) {
+        suppressed = true;
+      } else {
+        alert = `${pct < 0 ? '📉' : '📈'} Price ${pct < 0 ? 'drop' : 'rise'} ${Math.abs(pct).toFixed(1)}%: ${label}\n${money(prev, cur)} → ${money(price, cur)}\n${watch.url}`;
+      }
     }
   }
-  return { update, alert };
+  if (alert) update.lastAlertedAt = new Date(now);
+  return { update, alert, suppressed };
 }
 
 /**
@@ -68,12 +82,17 @@ export function evaluatePrice(watch, reading) {
  * (browser, FlareSolverr) get a turn.
  */
 export async function readPrice(url, { selector, scraper } = {}) {
+  // A page listing several variants also reports them all (offers[]), cheapest first.
+  const withOffers = (r, html) => {
+    const offers = extractPrice(html, { selector, allOffers: true });
+    return offers.length > 1 ? { ...r, offers: [...offers].sort((a, b) => a.price - b.price) } : r;
+  };
   let reason = '';
   try {
     const res = await fetchPublic(url);
     if (res.status === 200) {
       const r = extractPrice(res.data, { selector });
-      if (r && r.confidence !== 'low') return { ...r, via: 'http' };
+      if (r && r.confidence !== 'low') return { ...withOffers(r, res.data), via: 'http' };
       reason = r ? 'only a low-confidence price in the page text' : 'no price in the page';
       if (r && !scraper) return { ...r, via: 'http' };
     } else {
@@ -87,7 +106,7 @@ export async function readPrice(url, { selector, scraper } = {}) {
     const s = await scraper.scrapePage(url, { bypassCache: true });
     const html = s?._rawHtml;
     const r = html ? extractPrice(html, { selector }) : null;
-    if (r) return { ...r, via: `scraper:${s.method || 'default'}` };
+    if (r) return { ...withOffers(r, html), via: `scraper:${s.method || 'default'}` };
     reason += '; the scraper found none either';
   }
   throw new Error(`could not read a price (${reason})`);
@@ -130,7 +149,8 @@ export class WebWatchService {
     }
 
     const reading = await readPrice(watch.url, { selector: watch.selector, scraper: this.getScraper() });
-    const { update, alert } = evaluatePrice(watch, reading);
+    const { update, alert, suppressed } = evaluatePrice(watch, reading);
+    if (suppressed) logger.debug(`[webwatch] price alert for ${watch.url} suppressed: inside its ${watch.alertCooldownMin} min cooldown`);
     const set = { ...update, lastCheckedAt: new Date(), lastError: null, failCount: 0 };
     if (!watch.name && reading.title) set.name = reading.title;
     // Keep a bounded history of readings for trend reporting (priceWatch.trend).

@@ -67,15 +67,38 @@ class NoopAck {
 }
 
 export class ReactionAck {
-  constructor(ctx) {
-    this.telegram = ctx.telegram;
-    this.chatId = ctx.chat.id;
-    this.messageId = ctx.message.message_id;
+  /**
+   * Create a reaction acknowledgement for a specific message.
+   *
+   * @param {object} telegram - Grammy Telegram instance (must have setMessageReaction)
+   * @param {number|string} chatId - Telegram chat identifier
+   * @param {number} messageId - Telegram message identifier
+   *
+   * No retry on a refused reaction: reactions are best effort (see the header), and a
+   * backoff on 👀 would hold the chained final reaction back by seconds.
+   */
+  constructor(telegram, chatId, messageId) {
+    this.telegram = telegram;
+    this.chatId = chatId;
+    this.messageId = messageId;
     this.settled = false;
     this.emojis = []; // reactions actually applied, for tests and logs
     this.attemptedEmojis = [];
     this.failedPhases = [];
     this.chain = Promise.resolve();
+  }
+
+  /**
+   * Static factory to create a ReactionAck directly from identifiers, bypassing ctx.
+   * Useful for reacting to bot's own messages or messages from other users.
+   *
+   * @param {object} telegram - Grammy Telegram instance
+   * @param {number|string} chatId - Telegram chat identifier
+   * @param {number} messageId - Telegram message identifier
+   * @returns {ReactionAck} A started reaction acknowledgement instance
+   */
+  static forMessage(telegram, chatId, messageId) {
+    return new ReactionAck(telegram, chatId, messageId).start();
   }
 
   _set(emoji, phase) {
@@ -145,7 +168,7 @@ export function startReactionAck(ctx, { env = process.env } = {}) {
     if (!reactionsEnabled(env) || !shouldReact(ctx) || typeof ctx.telegram?.setMessageReaction !== 'function') {
       return new NoopAck();
     }
-    return new ReactionAck(ctx).start();
+    return new ReactionAck(ctx.telegram, ctx.chat.id, ctx.message.message_id).start();
   } catch (err) {
     logger.debug(`[telegram] reaction ack unavailable: ${err?.message || err}`);
     return new NoopAck();

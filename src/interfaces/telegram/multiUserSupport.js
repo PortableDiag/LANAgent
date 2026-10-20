@@ -1,8 +1,11 @@
+import fs from 'fs';
+import path from 'path';
+import { DATA_PATH } from '../../utils/paths.js';
 import { logger } from '../../utils/logger.js';
 import { retryOperation } from '../../utils/retryUtils.js';
 
 export class MultiUserSupport {
-  constructor(agent) {
+  constructor(agent, options = {}) {
     this.agent = agent;
     this.masterUserId = process.env.TELEGRAM_USER_ID;
     this.masterEmail = process.env.EMAIL_OF_MASTER || '';
@@ -27,6 +30,15 @@ export class MultiUserSupport {
     // Track email conversations separately
     this.emailConversations = new Map();
     
+    // Guest conversations survive a restart, so a known guest is not announced to the
+    // owner as a "new user conversation" again after every reboot. No signal handlers
+    // here: the agent owns shutdown, and a handler that exits from inside an interface
+    // would cut its graceful stop short. At most the last debounce window is lost.
+    this.conversationsFilePath = options.conversationsFilePath
+      || path.join(DATA_PATH, 'telegram_conversations.json');
+    this._saveTimeout = null;
+    this.loadConversations();
+
     // Clean up any existing GitHub notifications on startup
     setTimeout(() => {
       if (this.emailConversations) {
@@ -34,6 +46,79 @@ export class MultiUserSupport {
         logger.info('Cleaned up GitHub notifications from guest logs');
       }
     }, 1000);
+  }
+
+  /**
+   * Load Telegram conversations from the JSON file on disk.
+   * If the file does not exist or is invalid, start with an empty Map.
+   */
+  loadConversations() {
+    try {
+      if (fs.existsSync(this.conversationsFilePath)) {
+        const raw = fs.readFileSync(this.conversationsFilePath, 'utf-8');
+        const entries = JSON.parse(raw);
+        if (Array.isArray(entries)) {
+          // JSON turns Dates into strings; every reader compares them against Date objects
+          // (stats "today", the 30-day cleanup), and a string never compares, so revive them.
+          const cutoff = Date.now() - 30 * 24 * 60 * 60 * 1000;
+          const revived = [];
+          for (const entry of entries) {
+            if (!Array.isArray(entry) || entry.length !== 2 || !entry[1] || typeof entry[1] !== 'object') continue;
+            const [userId, conv] = entry;
+            for (const key of ['startTime', 'lastMessage']) {
+              if (conv[key] != null) {
+                const d = new Date(conv[key]);
+                conv[key] = Number.isNaN(d.getTime()) ? null : d;
+              }
+            }
+            if (conv.lastMessage && conv.lastMessage.getTime() < cutoff) continue;
+            revived.push([userId, conv]); // keep the key type: live keys are ctx.from.id numbers
+          }
+          this.conversations = new Map(revived);
+          logger.info(`Loaded ${this.conversations.size} Telegram conversations from ${this.conversationsFilePath}`);
+        } else {
+          logger.warn(`Conversations file ${this.conversationsFilePath} is not an array, starting fresh`);
+        }
+      }
+    } catch (error) {
+      logger.error(`Failed to load Telegram conversations from ${this.conversationsFilePath}: ${error.message}`);
+      // Continue with empty Map
+    }
+  }
+
+  /**
+   * Schedule a debounced save of Telegram conversations to disk.
+   * Multiple rapid updates will be coalesced into a single write after 5 seconds.
+   */
+  scheduleSave() {
+    if (this._saveTimeout) {
+      clearTimeout(this._saveTimeout);
+    }
+    this._saveTimeout = setTimeout(() => {
+      this._saveTimeout = null;
+      this.saveConversations();
+    }, 5000);
+    this._saveTimeout.unref?.();
+  }
+
+  /**
+   * Persist the current Telegram conversations Map to disk as a JSON array of entries.
+   * Creates the target directory if it does not exist.
+   */
+  saveConversations() {
+    try {
+      // Ensure the directory exists
+      fs.mkdirSync(path.dirname(this.conversationsFilePath), { recursive: true });
+
+      // Write-then-rename so a crash mid-write cannot leave a truncated file behind.
+      const entries = [...this.conversations.entries()];
+      const tmp = `${this.conversationsFilePath}.tmp`;
+      fs.writeFileSync(tmp, JSON.stringify(entries, null, 2), 'utf-8');
+      fs.renameSync(tmp, this.conversationsFilePath);
+      logger.debug(`Saved ${entries.length} Telegram conversations to ${this.conversationsFilePath}`);
+    } catch (error) {
+      logger.error(`Failed to save Telegram conversations to ${this.conversationsFilePath}: ${error.message}`);
+    }
   }
 
   /**
@@ -126,6 +211,9 @@ export class MultiUserSupport {
     const conv = this.conversations.get(userId);
     conv.messageCount++;
     conv.lastMessage = new Date();
+    
+    // Schedule persistence after update
+    this.scheduleSave();
     
     // Prepare context for AI
     const context = {
@@ -326,6 +414,9 @@ export class MultiUserSupport {
         this.emailConversations.delete(email);
       }
     }
+    
+    // Persist the cleaned state immediately
+    this.saveConversations();
   }
 
   /**

@@ -656,6 +656,15 @@ Also in v2.25.464:
 
 Sync covering 2.25.417–2.25.423.
 
+### v2.25.550 — Self-improvement PR sweep (new parameters and actions)
+
+- `POST /mcp/api/tokens` takes `allowedIps` / `blockedIps` (arrays of IPs or CIDR ranges; a bare IP is one host, `::ffff:` IPv4 is normalised). A call to `POST /mcp/server` from outside the policy gets 403; a bad entry at creation gets 400. The address is the direct peer (`req.ip`, no `trust proxy`).
+- `followup.batch({ tasks: [{ task, inMinutes? }, ...] })`: up to 10; `success:false` when none were scheduled.
+- `priceWatch.watch({ ..., cooldownMin })`: minutes between percentage-move alerts; target alerts are exempt. `priceWatch.check` lists every offer when the page's product data has more than one.
+- `systemLogs.trend({ hours?, interval?: "hour"|"day", level?, category? })`: counts per bucket, empty buckets included.
+- `vonage.numberinsight({ number, level?: "basic"|"standard" })`: standard is a paid lookup.
+- `googlesecops.getDetection({ detectionId })`; `unsplash.getRandomPhoto({ query?, orientation?, count?, collections?, topics?, username? })` (collections/topics cannot be combined with `query`).
+
 ### v2.25.454 — Self-improvement PR sweep (new routes and actions)
 
 - `POST /mcp/api/tokens/:id/rotate`: rotates an MCP token. The old token stops working at once, and a revoked token cannot be rotated.

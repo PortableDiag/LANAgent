@@ -35,7 +35,10 @@ export default class SystemLogsPlugin extends BasePlugin {
         examples: ['what keeps failing', 'summarise the errors from today', 'how many errors in the last 24 hours'] },
       { command: 'entry', description: 'Show one stored log entry in full, with its details and stack trace',
         usage: 'entry({ id: "<entry id from recent or search>" })',
-        examples: ['show the full log entry 6ac1...'] }
+        examples: ['show the full log entry 6ac1...'] },
+      { command: 'trend', description: 'Show counts grouped by hour or day to spot patterns',
+        usage: 'trend({ hours: 48, interval: "hour", level: "error", category: "network" })',
+        examples: ['error trend last 48 hours', 'any spikes in warnings today?'] }
     ];
     this.model = SystemLog;
   }
@@ -48,7 +51,8 @@ export default class SystemLogsPlugin extends BasePlugin {
         case 'search': return await this.search(p);
         case 'summary': return await this.summary(p);
         case 'entry': return await this.entry(p);
-        default: return { success: false, error: `Unknown action '${action}'. Use: recent, search, summary, entry` };
+        case 'trend': return await this.trend(p);
+        default: return { success: false, error: `Unknown action '${action}'. Use: recent, search, summary, entry, trend` };
       }
     } catch (error) {
       return { success: false, error: error.message };
@@ -155,5 +159,64 @@ export default class SystemLogsPlugin extends BasePlugin {
     if (e.details) parts.push(`details: ${JSON.stringify(e.details).slice(0, 1500)}`);
     if (e.error?.stack) parts.push(`stack:\n${e.error.stack.slice(0, 2500)}`);
     return { success: true, entry: e, result: parts.join('\n') };
+  }
+
+  /**
+   * Counts per hour or per day, so spikes and quiet stretches show up.
+   *
+   * Buckets are built with $dateToString (UTC) rather than $dateTrunc, which needs MongoDB 5.0.
+   * Counts include what flood collapsing folded into a row (details.suppressed), the same way
+   * summary() counts repeats. Empty buckets are filled with zero when the window is short
+   * enough to list every bucket, because a gap is exactly the "quiet period" this is for.
+   *
+   * @param {Object} p
+   * @param {number} [p.hours=48] - Lookback window in hours (1-720)
+   * @param {string} [p.interval='hour'] - 'hour' or 'day'
+   * @param {string} [p.level] [p.category] [p.service] - same filters as recent()
+   */
+  async trend(p) {
+    const hours = clampInt(p.hours, 1, 720, 48);
+    const interval = /^d(ay|aily)?$/i.test(String(p.interval || '')) ? 'day' : 'hour';
+    const match = this.filter({ hours, level: p.level, category: p.category, service: p.service }, 48);
+    const format = interval === 'day' ? '%Y-%m-%dT00:00:00Z' : '%Y-%m-%dT%H:00:00Z';
+
+    const rows = await this.model.aggregate([
+      { $match: match },
+      { $group: {
+        _id: { $dateToString: { format, date: '$createdAt' } },
+        count: { $sum: { $add: [1, { $ifNull: ['$details.suppressed', 0] }] } }
+      } },
+      { $sort: { _id: 1 } }
+    ]);
+    const counts = new Map(rows.map(r => [String(r._id), r.count]));
+    const what = [p.level, p.category, p.service].filter(Boolean).join(' ') || 'warnings and errors';
+
+    if (counts.size === 0) {
+      return { success: true, hours, interval, series: [], result: `No ${what} stored in the last ${hours} hours to show a trend.` };
+    }
+
+    // Every bucket in the window, oldest first, when that is a readable number of lines.
+    const step = interval === 'day' ? 86400_000 : 3600_000;
+    const start = new Date(match.createdAt.$gte);
+    if (interval === 'day') start.setUTCHours(0, 0, 0, 0); else start.setUTCMinutes(0, 0, 0);
+    const buckets = [];
+    for (let t = start.getTime(); t <= Date.now(); t += step) buckets.push(new Date(t).toISOString().replace('.000Z', 'Z'));
+    const fill = buckets.length <= 72;
+    const keys = fill ? buckets : [...counts.keys()];
+    const series = keys.map(k => ({ timestamp: new Date(k), count: counts.get(k) || 0 }));
+
+    const maxCount = Math.max(...series.map(s => s.count), 1);
+    const barWidth = 10;
+    const lines = series.map(s => {
+      const label = interval === 'day'
+        ? s.timestamp.toISOString().slice(0, 10)
+        : s.timestamp.toISOString().replace('T', ' ').slice(0, 16);
+      const barLen = Math.round((s.count / maxCount) * barWidth);
+      return `${label} ${String(s.count).padStart(4)} ${'█'.repeat(barLen)}${'░'.repeat(barWidth - barLen)}`;
+    });
+    const total = series.reduce((a, s) => a + s.count, 0);
+    const header = `${total} ${what} in the last ${hours} h, per ${interval} (UTC)${fill ? '' : ', empty buckets omitted'}:`;
+
+    return { success: true, hours, interval, series, result: [header, ...lines].join('\n') };
   }
 }

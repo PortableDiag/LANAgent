@@ -1,7 +1,7 @@
 import OpenAI from "openai";
 import { BaseProvider } from "./BaseProvider.js";
 import { logger } from "../utils/logger.js";
-import { retryOperation } from '../utils/retryUtils.js';
+import { retryOperation, isRetryableError } from '../utils/retryUtils.js';
 import NodeCache from 'node-cache';
 import { validateJsonSchema } from '../utils/jsonUtils.js';
 
@@ -14,6 +14,12 @@ export class GabProvider extends BaseProvider {
       chat: config.chatModel || config.model || "arya", // Default to Gab's native model
       alternativeChat: "gpt-4o" // Alternative model if available
     };
+    // Same-provider model fallback is OPT-IN (config.enableFallback === true): the alternative
+    // model is priced several times higher than the default, and cross-provider fallback is
+    // already providerManager's job. It also only engages when Gab's own model list advertises
+    // the alternative model (filled in initialize()).
+    this.availableModels = null;
+    this.metrics.fallbacks = 0;
   }
 
   async initialize() {
@@ -53,7 +59,8 @@ export class GabProvider extends BaseProvider {
       // Optionally fetch available models
       try {
         const models = await this.client.models.list();
-        logger.info("Available Gab models:", models.data.map(m => m.id));
+        this.availableModels = new Set(models.data.map(m => m.id));
+        logger.info("Available Gab models:", [...this.availableModels]);
       } catch (error) {
         logger.warn("Could not fetch Gab model list:", error.message);
       }
@@ -98,19 +105,19 @@ export class GabProvider extends BaseProvider {
   async generateResponse(prompt, options = {}) {
     const startTime = Date.now();
 
+    // Structured output: append schema instructions to the prompt and
+    // validate the reply below. Opt-in via options.structuredOutput.schema.
+    let finalPrompt = prompt;
+    if (options.structuredOutput?.schema) {
+      finalPrompt = `${prompt}\n\nRespond ONLY with valid JSON conforming to this schema (no prose, no code fences):\n${JSON.stringify(options.structuredOutput.schema)}`;
+    }
+
+    const messages = options.messages || [
+      { role: "system", content: options.systemPrompt || "You are a helpful AI assistant." },
+      { role: "user", content: finalPrompt }
+    ];
+
     try {
-      // Structured output: append schema instructions to the prompt and
-      // validate the reply below. Opt-in via options.structuredOutput.schema.
-      let finalPrompt = prompt;
-      if (options.structuredOutput?.schema) {
-        finalPrompt = `${prompt}\n\nRespond ONLY with valid JSON conforming to this schema (no prose, no code fences):\n${JSON.stringify(options.structuredOutput.schema)}`;
-      }
-
-      const messages = options.messages || [
-        { role: "system", content: options.systemPrompt || "You are a helpful AI assistant." },
-        { role: "user", content: finalPrompt }
-      ];
-
       const completion = await retryOperation(() => 
         this.client.chat.completions.create({
           model: options.model || this.models.chat,
@@ -152,8 +159,69 @@ export class GabProvider extends BaseProvider {
       const errorCategory = this.categorizeError(error);
       this.metrics.errors++;
       logger.error(`Gab generateResponse error [${errorCategory}]:`, error);
+
+      // Model fallback: opt-in, never overrides a model the caller asked for, never for a
+      // stream (the non-stream response shape is read below), and only to a model Gab lists.
+      if (this.shouldFallback(error, options)) {
+        logger.warn(`Primary model failed with retryable error, attempting fallback to ${this.models.alternativeChat}`);
+        try {
+          const fallbackCompletion = await this.client.chat.completions.create({
+            model: this.models.alternativeChat,
+            messages,
+            temperature: options.temperature || 0.7,
+            max_tokens: options.maxTokens || 1000,
+            stream: false,
+            ...options.additionalParams
+          });
+
+          const responseTime = Date.now() - startTime;
+          const response = fallbackCompletion.choices[0].message.content;
+
+          let structured = null;
+          if (options.structuredOutput?.schema) {
+            const { parsed, errors } = this.validateStructuredOutput(response, options.structuredOutput.schema);
+            if (!parsed) {
+              logger.warn('Fallback structured output failed schema validation:', errors.map(e => e.message).join('; '));
+              throw new Error(`Structured output does not match the required JSON schema: ${errors.map(e => e.message).join('; ')}`);
+            }
+            structured = parsed;
+          }
+
+          await this.updateMetrics(responseTime, {
+            ...fallbackCompletion.usage,
+            model: fallbackCompletion.model
+          });
+
+          // Track fallback usage
+          this.metrics.fallbacks = (this.metrics.fallbacks || 0) + 1;
+          logger.info(`Fallback to ${this.models.alternativeChat} succeeded`);
+
+          return {
+            content: response,
+            ...(structured !== null && { structured }),
+            model: fallbackCompletion.model,
+            usage: fallbackCompletion.usage,
+            provider: this.name
+          };
+        } catch (fallbackError) {
+          logger.error(`Fallback to ${this.models.alternativeChat} also failed:`, fallbackError);
+          // Fallback failed; rethrow the original error to preserve context
+        }
+      }
       throw error;
     }
+  }
+
+  /**
+   * Whether a failed request may be retried once on this.models.alternativeChat.
+   */
+  shouldFallback(error, options = {}) {
+    const alt = this.models.alternativeChat;
+    if (this.config.enableFallback !== true || !alt) return false;
+    if (options.model || options.stream) return false;
+    if (this.models.chat === alt) return false;
+    if (!this.availableModels || !this.availableModels.has(alt)) return false;
+    return isRetryableError(error);
   }
 
   async generateEmbedding(text) {

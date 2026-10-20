@@ -656,7 +656,7 @@ export default class MCPPlugin extends BasePlugin {
   }
 
   async createToken(data) {
-    const { name, permissions = ['*'], allowedTools = [], deniedTools = [], expiresIn, description } = data;
+    const { name, permissions = ['*'], allowedTools = [], deniedTools = [], allowedIps = [], blockedIps = [], expiresIn, description } = data;
 
     if (!name) {
       return { success: false, error: 'name is required' };
@@ -667,6 +667,8 @@ export default class MCPPlugin extends BasePlugin {
       permissions,
       allowedTools,
       deniedTools,
+      allowedIps,
+      blockedIps,
       expiresIn,
       description,
       createdBy: 'plugin'

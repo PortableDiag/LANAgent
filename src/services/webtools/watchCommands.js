@@ -56,7 +56,7 @@ export function describe(w) {
     lastChecked: w.lastCheckedAt || null, lastError: w.lastError || null };
   if (w.kind === 'feed') return { ...base, keywords: w.keywords, itemsSeen: (w.seen || []).length };
   return { ...base, price: w.lastPrice, lowest: w.lowestPrice, currency: w.currency, target: w.targetPrice,
-    changePct: w.changePct || 0, lastChange: w.lastChangeAt || null };
+    changePct: w.changePct || 0, alertCooldownMin: w.alertCooldownMin || 0, lastChange: w.lastChangeAt || null };
 }
 
 export const interval = v => {

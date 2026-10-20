@@ -7,11 +7,29 @@ import { retryOperation, isRetryableError } from './retryUtils.js';
 let connectionPromise = null;
 let reconnectAttempts = 0;
 let failedConnectAttempts = 0; // every failed attempt, retryable or not — drives the backoff
-const MAX_RECONNECT_ATTEMPTS = 10;
-const RECONNECT_BASE_INTERVAL = 1000; // 1 second base for exponential backoff
-const RECONNECT_MAX_INTERVAL = 30000; // 30 second max backoff
-const CIRCUIT_BREAKER_THRESHOLD = 5; // Number of failures before circuit breaker trips
-const CIRCUIT_BREAKER_COOLDOWN = 30000; // 30 seconds cooldown period
+
+// Reconnect / circuit-breaker tuning, overridable from the environment. Read at use time, not
+// at import: src/index.js runs dotenv.config() after its imports are evaluated, so a value read
+// here at load would miss .env when the app is started without the PM2 ecosystem file.
+// A missing, non-numeric or out-of-range value falls back to the default (never NaN, which
+// would make every `attempts < max` comparison false).
+const DB_TUNING_DEFAULTS = {
+  MAX_RECONNECT_ATTEMPTS: { env: 'MONGO_MAX_RECONNECT_ATTEMPTS', value: 10, min: 0 },
+  RECONNECT_BASE_INTERVAL: { env: 'MONGO_RECONNECT_BASE_INTERVAL_MS', value: 1000, min: 1 }, // 1 second base for exponential backoff
+  RECONNECT_MAX_INTERVAL: { env: 'MONGO_RECONNECT_MAX_INTERVAL_MS', value: 30000, min: 1 }, // 30 second max backoff
+  CIRCUIT_BREAKER_THRESHOLD: { env: 'MONGO_CIRCUIT_BREAKER_THRESHOLD', value: 5, min: 1 }, // Number of failures before circuit breaker trips
+  CIRCUIT_BREAKER_COOLDOWN: { env: 'MONGO_CIRCUIT_BREAKER_COOLDOWN_MS', value: 30000, min: 1 } // 30 seconds cooldown period
+};
+
+export function dbTuning(env = process.env) {
+  const out = {};
+  for (const [key, { env: name, value, min }] of Object.entries(DB_TUNING_DEFAULTS)) {
+    const raw = env[name];
+    const n = raw === undefined || String(raw).trim() === '' ? NaN : Number(raw);
+    out[key] = Number.isInteger(n) && n >= min ? n : value;
+  }
+  return out;
+}
 const DEFAULT_DATABASE_WAIT_TIMEOUT = 30000;
 
 let circuitBreakerOpen = false;
@@ -35,6 +53,7 @@ export function isPermanentConnectError(error) {
  * @returns {number} Delay in ms
  */
 export function connectBackoffDelay(failures) {
+  const { RECONNECT_BASE_INTERVAL, RECONNECT_MAX_INTERVAL } = dbTuning();
   return Math.min(RECONNECT_BASE_INTERVAL * Math.pow(2, Math.max(0, failures)), RECONNECT_MAX_INTERVAL);
 }
 
@@ -154,6 +173,7 @@ async function establishDatabaseConnection() {
     // retrying every second forever; only retryable errors count toward the give-up limit.
     failedConnectAttempts++;
 
+    const { MAX_RECONNECT_ATTEMPTS, CIRCUIT_BREAKER_THRESHOLD } = dbTuning();
     if (isRetryableError(error)) {
       reconnectAttempts++;
       if (reconnectAttempts >= CIRCUIT_BREAKER_THRESHOLD) {
@@ -275,7 +295,7 @@ function openCircuitBreaker() {
     reconnectAttempts = 0;
     circuitBreakerTimer = null;
     logger.info('Circuit breaker closed. Connection attempts can resume.');
-  }, CIRCUIT_BREAKER_COOLDOWN);
+  }, dbTuning().CIRCUIT_BREAKER_COOLDOWN);
 }
 
 /**
@@ -364,7 +384,7 @@ export function databaseHealthCheck() {
     state: states[readyState] || 'unknown',
     timestamp: new Date().toISOString(),
     reconnectAttempts,
-    maxReconnectAttempts: MAX_RECONNECT_ATTEMPTS,
+    maxReconnectAttempts: dbTuning().MAX_RECONNECT_ATTEMPTS,
     circuitBreakerOpen
   };
 }

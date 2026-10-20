@@ -13,7 +13,7 @@ export default class PriceWatchPlugin extends BasePlugin {
   constructor(agent) {
     super(agent);
     this.name = 'priceWatch';
-    this.version = '1.0.0';
+    this.version = '1.1.0';
     this.description = 'Check a product page\'s price, or watch it and alert when it drops to a target price';
     this.commands = [
       { command: 'check', description: 'Read the current price on a product page (any shop that publishes its price; a CSS selector helps on the rest)',
@@ -23,7 +23,7 @@ export default class PriceWatchPlugin extends BasePlugin {
         usage: 'compare({ urls: ["https://shop.example.com/item/123", { url: "https://other.example.com/item/123", name: "Other shop", selector: ".price" }] })',
         examples: ['compare these product prices', 'which retailer has the lowest price'] },
       { command: 'watch', description: 'Watch a product page\'s price and alert when it falls to a target price, or moves by a percentage',
-        usage: 'watch({ url: "https://shop.example.com/item/123", targetPrice: 199.99, changePct: 10, name: "Monitor", interval: 360 })',
+        usage: 'watch({ url: "https://shop.example.com/item/123", targetPrice: 199.99, changePct: 10, name: "Monitor", interval: 360, cooldownMin: 720 })  // cooldownMin: quiet period between % move alerts',
         examples: ['tell me when this drops below 200', 'watch the price of this product', 'alert me if this item goes on sale', 'track the price of this laptop and let me know when it is under $900'] },
       { command: 'unwatch', description: 'Stop watching a product\'s price',
         usage: 'unwatch({ name: "<the watched product\'s name>" })  // or url / id',
@@ -71,7 +71,10 @@ export default class PriceWatchPlugin extends BasePlugin {
     if (!url) throw new Error('a product page url is required');
     const r = await readPrice(await assertPublicUrl(url), { selector, scraper: this.scraper() });
     const note = r.confidence === 'low' ? ' (read from the page text, not the shop\'s price data — confirm it)' : '';
-    return { success: true, ...r, url, result: `${r.title ? `${r.title}: ` : ''}${r.currency ? `${r.currency} ` : ''}${r.price}${r.availability ? ` — ${r.availability}` : ''}${note}` };
+    const variants = r.offers?.length > 1
+      ? `\n${r.offers.length} offers on the page:\n${r.offers.slice(0, 20).map(o => `- ${o.name || o.sku || 'offer'}: ${o.currency ? `${o.currency} ` : ''}${o.price}${o.availability ? ` — ${o.availability}` : ''}`).join('\n')}`
+      : '';
+    return { success: true, ...r, url, result: `${r.title ? `${r.title}: ` : ''}${r.currency ? `${r.currency} ` : ''}${r.price}${r.availability ? ` — ${r.availability}` : ''}${note}${variants}` };
   }
 
   /**
@@ -177,13 +180,15 @@ export default class PriceWatchPlugin extends BasePlugin {
     };
   }
 
-  async watch({ url, targetPrice, target, price, changePct, name, selector, interval: every }) {
+  async watch({ url, targetPrice, target, price, changePct, name, selector, interval: every, cooldownMin }) {
     if (!url) throw new Error('a product page url is required');
     const goal = [targetPrice, target, price].map(v => (v == null || v === '' ? null : Number(String(v).replace(/[^\d.]/g, '')))).find(v => Number.isFinite(v) && v > 0) ?? null;
     const pct = changePct == null || changePct === '' ? undefined : Math.max(0, Number(changePct) || 0);
+    const cooldown = cooldownMin == null || cooldownMin === '' ? undefined : Math.max(0, Number(cooldownMin) || 0);
     const { watch, created } = await upsertWatch('price', url, {
       name: name || undefined, selector: selector || undefined, targetPrice: goal ?? undefined,
-      changePct: pct ?? (goal == null ? 5 : undefined), intervalMin: interval(every), alertedTarget: false
+      changePct: pct ?? (goal == null ? 5 : undefined), intervalMin: interval(every), alertedTarget: false,
+      alertCooldownMin: cooldown
     });
     // Shop prices move slowly and shops rate-limit: a new price watch defaults to every 6 hours.
     if (created && every == null) { watch.intervalMin = 360; await watch.save(); }

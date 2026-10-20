@@ -362,4 +362,58 @@ sshConnectionSchema.methods.getPaginatedSessionLogs = async function(pageNumber,
   return paginatedLogs;
 };
 
+function normalizeTag(tag) {
+  const t = typeof tag === 'string' ? tag.trim() : '';
+  if (!t) throw new Error('Tag must be a non-empty string');
+  return t;
+}
+
+/**
+ * Atomically add a tag to the connection's tags array.
+ * Uses $addToSet to prevent duplicates and avoid race conditions.
+ *
+ * @param {string} tag - The tag to add
+ * @returns {Promise<Object|null>} The updated document, or null if not found
+ */
+sshConnectionSchema.methods.addTag = async function(tag) {
+  tag = normalizeTag(tag);
+  return retryOperation(async () => {
+    const updated = await this.constructor.findOneAndUpdate(
+      { _id: this._id },
+      { $addToSet: { tags: tag } },
+      { new: true }
+    );
+    if (!updated) {
+      logger.warn(`SSHConnection ${this._id} not found during addTag`);
+    } else {
+      logger.info(`Tag "${tag}" added to connection ${this.connectionId}`);
+    }
+    return updated;
+  }, { retries: 3, context: 'SSHConnection.tags' });
+};
+
+/**
+ * Atomically remove a tag from the connection's tags array.
+ * Uses $pull to safely remove the tag without race conditions.
+ *
+ * @param {string} tag - The tag to remove
+ * @returns {Promise<Object|null>} The updated document, or null if not found
+ */
+sshConnectionSchema.methods.removeTag = async function(tag) {
+  tag = normalizeTag(tag);
+  return retryOperation(async () => {
+    const updated = await this.constructor.findOneAndUpdate(
+      { _id: this._id },
+      { $pull: { tags: tag } },
+      { new: true }
+    );
+    if (!updated) {
+      logger.warn(`SSHConnection ${this._id} not found during removeTag`);
+    } else {
+      logger.info(`Tag "${tag}" removed from connection ${this.connectionId}`);
+    }
+    return updated;
+  }, { retries: 3, context: 'SSHConnection.tags' });
+};
+
 export const SSHConnection = mongoose.model('SSHConnection', sshConnectionSchema);

@@ -450,4 +450,34 @@ p2pPeerSchema.methods.calculateConnectionStability = function() {
   };
 };
 
+/**
+ * Record that a peer came online, without the lost update a read-modify-write save allows
+ * (two near-simultaneous announcements each read sessionCount N and both write N+1).
+ *
+ * The session `$inc` returns the PRE-image, so whether this session is a reconnection is
+ * decided from the count this very call incremented: exactly one caller ever sees 0, so
+ * reconnectionCount keeps its documented meaning (sessions 2..N) under concurrency too.
+ * Two plain `$inc`s rather than one pipeline update, so no server-version requirement.
+ *
+ * @param {string} fingerprint
+ * @param {string} [capabilitiesHash]
+ * @returns {Promise<Object|null>} The updated peer, or null when the fingerprint is unknown
+ */
+p2pPeerSchema.statics.recordOnline = async function(fingerprint, capabilitiesHash) {
+  const set = { isOnline: true, lastSeen: new Date() };
+  if (capabilitiesHash) set.capabilitiesHash = capabilitiesHash;
+
+  const prior = await this.findOneAndUpdate(
+    { fingerprint },
+    { $inc: { sessionCount: 1 }, $set: set },
+    { new: false }
+  );
+  if (!prior) return null;
+
+  if ((prior.sessionCount || 0) > 0) {
+    return this.findOneAndUpdate({ _id: prior._id }, { $inc: { reconnectionCount: 1 } }, { new: true });
+  }
+  return this.findById(prior._id);
+};
+
 export const P2PPeer = mongoose.model('P2PPeer', p2pPeerSchema);

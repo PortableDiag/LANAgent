@@ -356,4 +356,31 @@ FeatureRequestSchema.statics.upsertByFingerprint = async function(params = {}) {
   }
 };
 
+/**
+ * Atomically add `delta` to a feature request's vote count.
+ *
+ * A single `$inc` instead of read-modify-write, so two concurrent votes cannot overwrite each
+ * other. Deliberately NOT wrapped in retryOperation: `$inc` is not idempotent, and a retry
+ * after a timeout whose write had already committed would count the vote twice.
+ *
+ * @param {string} id - The feature request ID
+ * @param {number} delta - +1 or -1
+ * @returns {Promise<Object|null>} The updated document, or null when no such request exists
+ */
+async function applyVote(model, id, delta) {
+  const doc = await model.findOneAndUpdate({ _id: id }, { $inc: { votes: delta } }, { new: true });
+  if (!doc) return null;
+  // Cached list/stat reads include vote counts.
+  featureRequestCache.flushAll();
+  return doc;
+}
+
+FeatureRequestSchema.statics.upvote = function(id) {
+  return applyVote(this, id, 1);
+};
+
+FeatureRequestSchema.statics.downvote = function(id) {
+  return applyVote(this, id, -1);
+};
+
 export const FeatureRequest = mongoose.model('FeatureRequest', FeatureRequestSchema);
