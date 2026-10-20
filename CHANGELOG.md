@@ -10,7 +10,7 @@ All notable changes to LANAgent will be documented in this file.
 ## [2.25.555] - 2026-10-20
 
 ### Changed
-- **TextX: texts you ask for are marked as yours (TextX 0.4.10).** With "Text without asking me" on, a text or schedule you ordered from Telegram, the dashboard or the phone counts against its own limit, not the 6-an-hour auto-reply limit, so the phone does not ask you to confirm what you just asked for. Auto-replies and requests from other Telegram users are never marked.
+- **TextX can tell your texts from ALICE's own replies (TextX 0.4.10).** Texts always went from your number, and nothing changes about that. What is new: a text you ask ALICE to send is now flagged to the phone as one you ordered. With "Text without asking me" on, those get their own limit (30 an hour per conversation) instead of sharing the 6-an-hour limit for ALICE's automatic replies, so a busy auto-reply thread can no longer make the phone ask you to confirm a text you just asked for. Automatic replies are never flagged.
 
 ## [2.25.554] - 2026-10-20
 
