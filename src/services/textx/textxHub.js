@@ -386,7 +386,10 @@ export class TextXHub {
     }
     this.contactSweeps ??= new Map();
     const last = this.contactSweeps.get(device.id) || 0;
-    const bookDue = caps.includes('contacts_list') && !device.contactsSyncAt; // the switch just went on
+    // The switch just went on. A phone says hello every few seconds while in use, so this must not
+    // start a second sync while the first runs (six ran at once, 2026-10-19).
+    this.bookSyncing ??= new Set();
+    const bookDue = caps.includes('contacts_list') && !device.contactsSyncAt && !this.bookSyncing.has(device.id);
     if (this.now() - last < 6 * 3600_000 && !bookDue) return;
     this.contactSweeps.set(device.id, this.now());
     const t = setTimeout(async () => {
@@ -403,7 +406,15 @@ export class TextXHub {
 
   /** contacts_list, paged: everything the first time, then only what changed (with deletions). */
   async syncAddressBook(device) {
-    const prev = device.contactsSyncAt ? new Date(device.contactsSyncAt) : null;
+    this.bookSyncing ??= new Set();
+    if (this.bookSyncing.has(device.id)) return null;
+    this.bookSyncing.add(device.id);
+    try { return await this.syncAddressBookOnce(device); } finally { this.bookSyncing.delete(device.id); }
+  }
+
+  async syncAddressBookOnce(device) {
+    const last = (await this.store.getDevice(device.id))?.contactsSyncAt || device.contactsSyncAt;
+    const prev = last ? new Date(last) : null;
     if (prev && this.now() - prev.getTime() < 20 * 3600_000) return null;
     const started = new Date(this.now());
     let after, pages = 0, seen = 0, fresh = 0, dropped = 0;
