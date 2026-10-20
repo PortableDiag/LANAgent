@@ -275,6 +275,8 @@ export class TextXHub {
     if (cursor) await this.store.outboxAckThrough(device.id, cursor);
     const rows = await this.store.outboxSince(device.id, cursor, 100);
     await this.store.updateDevice(device.id, { lastSeenAt: new Date(this.now()) });
+    // A phone that only polls may not say hello for days: the contact sweep keys off its check-ins too.
+    if (device.deviceId) this.sweepContacts(device);
     return { envelopes: rows.map(r => r.env), cursor: String(rows.length ? rows[rows.length - 1].seq : cursor) };
   }
 
