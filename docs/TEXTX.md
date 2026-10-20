@@ -69,6 +69,10 @@ On the agent side:
 - SMS text is wrapped as **untrusted data** and never treated as instructions.
 - Watched-conversation events go to a plain model call, never to the command router.
 
+**Messages for the owner** ("tell Charles…", "ask him…", an alert, or anything else that needs them) go to
+the owner's conversation with the agent in TextX **and** to Telegram, whether or not auto-reply is on for
+that conversation. If one channel fails, the other still delivers.
+
 **Contacts the agent sees are kept** (`textx_contacts`: name, numbers, email only): every lookup
 result, the people in shared conversations (re-read on connect, at most every 6 hours) and whoever texts
 there. A new number also fills the phone field of the one matching card (by name, alias or email) in the
