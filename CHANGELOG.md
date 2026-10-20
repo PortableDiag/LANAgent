@@ -2,6 +2,49 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.545] - 2026-10-20
+
+### Fixed
+- **An offhand remark got a feature pitch.** "ugh my back is killing me" was answered with a menu of things the agent could set up (stretch reminders over Telegram, …). The system prompt told the model, for every message, to always mention its interfaces and to elaborate on its capabilities rather than give short answers; both rules were meant for "who are you" questions. They now apply only there, and the conversation style says small talk gets the reply a friend would give.
+
+## [2.25.544] - 2026-10-19
+
+### Added
+- **Conversation check** (`scripts/testing/conversation-check.sh`). Six scripted multi-turn chats run against the live agent, each in its own thread: a number carried forward, recalling what it just said, answering its own trivia question, "the second one" of its own list, a reply to its clarifying question, and a pronoun across turns. Exact checks where possible, a model judge otherwise. `--deep` adds nine harder ones. `deploy-files.sh` runs it after deploying chat code; it reports and never fails the deploy (`SKIP_CONVO_CHECK=1` skips it). Chat only: nothing that acts.
+- **Intent check** (`scripts/testing/intent-check.mjs`). 47 everyday requests, including media links, routed through the new dry-run `POST /api/test/route` (vector match, then the AI classifier, as the agent routes them; never executed).
+- `POST /api/command/execute` takes an optional `threadId` for a separate conversation.
+
+### Fixed
+- **"Show my trellis cards" matched drawing an arrow.** Every card-editing command's text says "card", so `connectCards` matched at 0.69 while `listBaskets` ranked 21st. A request to see something ("show", "list", "what", …, with no action verb) that matches an action that makes or changes something now needs a near-certain vector match (0.75); otherwise the AI classifier decides. Added examples for listing Trellis cards, for scanning a website (domainIntel), and to make clear that the bug detector scans the agent's own code.
+
+## [2.25.543] - 2026-10-19
+
+### Fixed
+- **Answering the agent's own question works.** When the agent asked something (a trivia question, "which one?", "want me to reply?") and the user answered in a word ("Canberra", "the blue one"), the reply passed none of the follow-up checks, so it went to the router as a new topic. It then landed in the context-query answer, the one meant for "questions that require conversation history", which was given no conversation at all outside Trellis channels. Now a short message right after the agent asked a question is read as the answer, and the context-query answer and the deferred-request draft get the live conversation.
+
+## [2.25.542] - 2026-10-19
+
+### Fixed
+- **Answers knew nothing of the conversation they were in.** `getConversationContext()` read conversation Memory documents that are never written, so it returned nothing on every call. The general answer, the plugin chain, "remember that…" and the follow-up URL lookup all ran with no idea what was just said. Asked "did you really send him my instruction?" right after a text went out, the agent answered blind and denied what it had sent. It now returns the live conversation (the agent's own replies and what its actions reported), with the last 6 hours of the transcript as a fallback. The general answer is told to answer "what did you do/send" from that conversation, quoting it, and to say so when it can't see it rather than guess.
+- **"Ask Wayne if…" texts are written as messages, not pasted instructions.** A request like "ask Wayne via text if he needs help… gotta sell him on yourself ;)" went to Wayne word for word, including the aside. The parameter extractor now gets per-command rules (a new `hint` on plugin commands). For TextX send and schedule: quoted words are sent exactly; a described message is written to the recipient directly ("Do you need any help…?"); anything said to the agent about the message is followed, never sent.
+- "What did you send Wayne" goes to reading the conversation; it was matched to watching it.
+
+## [2.25.541] - 2026-10-19
+
+### Added
+- **Notifications in the LANAgent app.** The app (1.5.0) tells the agent in its hello which notes it wants: messages for you (the default), everything, or none. Messages people ask the agent to pass on now go to the app too, alongside TextX and Telegram; with "everything", so does every notification the agent sends. Notes are queued on the app's own encrypted relay pairing, so they arrive at home and away, and no push service sees them.
+
+## [2.25.540] - 2026-10-19
+
+### Changed
+- **Messages for you from a text reach you in TextX and on Telegram.** When someone in a shared conversation asks the agent to tell you, ask you, remind you or alert you about something, or the text otherwise needs you, the note now goes to your conversation with the agent in TextX and to Telegram. Before, it went to only one of them. If one channel fails, the other still delivers. The note is written to you directly ("Wayne asks you to call him…") and passes the message on in full. The agent no longer guesses where you are ("he's still asleep") in its reply to the sender.
+
+## [2.25.539] - 2026-10-19
+
+### Added
+- **The agent remembers your phone contacts.** Every contact TextX shows it is saved: a contact lookup, the people in your shared conversations (refreshed when the phone connects, at most every 6 hours) and whoever texts in them. The number also goes onto the matching card in the agent's own contact book, so the same person can be texted or emailed by name. A number already on a card is never overwritten. With the phone offline, "text Sam" uses the saved number instead of waiting up to 15 minutes for a lookup; with it connected, the phone's contacts stay the authority. "Show my saved contacts" lists them. Only name, numbers and email are kept.
+- **Whole address-book sync (TextX 0.3.29 `contacts_list`).** When "Share the whole address book" is on for the agent in TextX, the agent copies the address book the first time the phone connects, then once a day only what changed; contacts deleted on the phone are dropped, and the book's numbers replace older ones. Turning the switch off drops the copy at the next connect (contacts seen in shared conversations stay). Email by name now also finds a person whose email is only in the phone's address book.
+
 ## [2.25.538] - 2026-10-19
 
 ### Fixed
