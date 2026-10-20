@@ -17,7 +17,11 @@ export const BOOK = 'the address book';
 
 /** Digits only, the last 10: "+1 (405) 555-0100" and "4055550100" are one number. */
 export const sameNumber = (a, b) => String(a).replace(/\D/g, '').slice(-10) === String(b).replace(/\D/g, '').slice(-10);
-const contactKey = (name) => String(name || '').trim().toLowerCase().replace(/\s+/g, ' ');
+// A name that is only a number (a sender not in the address book) is not a contact.
+const contactKey = (name) => {
+  const k = String(name || '').trim().toLowerCase().replace(/\s+/g, ' ');
+  return /^[\d\s()+.-]*$/.test(k) ? '' : k;
+};
 
 /**
  * Folds { name, number | numbers, email | emails } into an existing record. Returns the merged
