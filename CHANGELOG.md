@@ -2,6 +2,12 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.564] - 2026-10-21
+
+### Fixed
+- **A skill ALICE learns on its own waits a day before other agents get it.** ALICE still uses it right away, but it is shared with peers only after 24 hours (`SKILLS_SHARE_PROBATION_HOURS`). Before, a skill went to other agents within seconds of being learned.
+- **Objecting right after a task un-learns it.** If ALICE just turned a task into a skill and your next message (within 30 minutes) says it went wrong, the skill is archived and you get a note saying so. You can restore it under Skills → Archived. Before, a run you complained about stayed saved as a skill.
+
 ## [2.25.563] - 2026-10-21
 
 ### Fixed

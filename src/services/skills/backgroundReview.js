@@ -20,6 +20,10 @@ const MIN_GAP_MS = Number(process.env.SKILLS_REVIEW_MIN_GAP_MS) || 20000;
 const MAX_PER_DAY = Number(process.env.SKILLS_REVIEW_MAX_PER_DAY) || 200;
 const CORRECTION = /\b(no[,.!]? |not like that|that'?s (wrong|not right|incorrect)|wrong|instead|should have|you should|next time|don'?t|do not|always|never|remember (that|to)|from now on|actually|i prefer|i'?d rather)\b/i;
 
+// "that's what I mean about stupid", "is that a joke?", "it failed", "you forgot…" (2026-10-20).
+const COMPLAINT = /\b(stupid|dumb|useless|terrible|awful|a joke|not what i (asked|said|meant|wanted)|that'?s not it|you (forgot|ignored|missed)|forgetting|failed|didn'?t work|did not work|broke|wtf|ugh)\b/i;
+const RETRACT_WINDOW_MS = 30 * 60 * 1000;
+
 export function reviewEnabled() {
   return String(process.env.SKILLS_BACKGROUND_REVIEW || 'true').toLowerCase() !== 'false';
 }
@@ -99,8 +103,30 @@ export class BackgroundReview {
     return true;
   }
 
+  /**
+   * The owner objecting right after a task that became a skill: the skill learned what the owner
+   * rejected, so it is archived (it has not reached other agents yet, see shareAfter).
+   */
+  async retractIfObjected(input) {
+    const last = this.service?.lastLearned;
+    if (!last || Date.now() - last.at > RETRACT_WINDOW_MS) return false;
+    const text = String(input || '');
+    if (!text || text.substring(0, 200) === last.query) return false;   // the request that taught it
+    if (!CORRECTION.test(text) && !COMPLAINT.test(text)) return false;
+    this.service.lastLearned = null;
+    try {
+      await this.service.archive(last.name, { actor: 'background-review', reason: `the owner objected right after: "${text.slice(0, 120)}"` });
+      if (this.notify) await this.notify([{ kind: 'skill-retract', name: last.name }]).catch(() => {});
+      return true;
+    } catch (err) {
+      logger.debug(`Background review could not retract ${last.name}: ${err.message}`);
+      return false;
+    }
+  }
+
   /** Fire-and-forget entry point. Never throws. */
   consider({ userId, input, reply, recent = [] }) {
+    this.retractIfObjected(input).catch(() => {});
     if (!reviewEnabled() || !this.providerManager || !worthReviewing(input, reply)) return;
     const uid = String(userId || 'default');
     if (!this._allowed(uid)) return;

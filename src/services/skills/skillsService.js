@@ -496,6 +496,12 @@ export default getSkillsService;
  * multi-step chains can become skills too. Failed steps are left out: a skill
  * should describe what worked.
  */
+/** A skill learned on its own is kept here for a day before other agents are taught it. */
+export const SHARE_PROBATION_MS = Number(process.env.SKILLS_SHARE_PROBATION_HOURS ?? 24) * 3600 * 1000;
+export function shareAfter(now = Date.now()) {
+  return new Date(now + SHARE_PROBATION_MS).toISOString();
+}
+
 export function chainToThoughts(steps = [], results = []) {
   return results
     .map((r, i) => ({ r, step: steps[i] || {} }))
@@ -537,8 +543,13 @@ Generalise the steps (no one-off values unless they are always the same). If the
       logger.info(`Skill learning: a ${steps.length}-step task was judged too one-off to keep`);
       return null;
     }
-    const created = await service.create({ ...draft, extra: { source: 'auto', learned_from: String(query).substring(0, 200) } });
-    if (created) logger.info(`Skill learned: ${draft.name} (from a ${steps.length}-step task)`);
+    const created = await service.create({ ...draft, extra: { source: 'auto', learned_from: String(query).substring(0, 200), share_after: shareAfter() } });
+    if (created) {
+      logger.info(`Skill learned: ${draft.name} (from a ${steps.length}-step task)`);
+      // Every step "succeeding" does not make the run right: on 2026-10-20 a run the owner then
+      // called stupid became a skill and reached DELTA in 3 s. The owner's next words can retract it.
+      service.lastLearned = { name: created.name, at: Date.now(), query: String(query).substring(0, 200) };
+    }
     return created;
   } catch (error) {
     logger.debug(`Skill learning skipped: ${error.message}`);

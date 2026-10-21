@@ -6108,8 +6108,9 @@ Important:
       if (!queued.length || !tg?.sendNotification) return;
       const line = (i) => i.kind === 'skill-update' ? `✏️ Updated skill ${i.name}${i.reason ? ` — ${String(i.reason).slice(0, 160)}` : ''}`
         : i.kind === 'skill-create' ? `🆕 New skill ${i.name} — ${String(i.description || '').slice(0, 160)}`
-          : `👤 Noted about you: ${String(i.text).slice(0, 200)}`;
-      const skills = queued.filter(i => i.kind !== 'profile');
+          : i.kind === 'skill-retract' ? `🗑 Dropped skill ${i.name}: it was learned from the run you just objected to (restore it under Skills → Archived)`
+            : `👤 Noted about you: ${String(i.text).slice(0, 200)}`;
+      const skills = queued.filter(i => i.kind !== 'profile' && i.kind !== 'skill-retract');
       const keyboard = skills.length === 1 && `skill_undo:${skills[0].name}`.length <= 64
         ? [[{ text: skills[0].kind === 'skill-update' ? '↩️ Undo' : '🗑 Remove', callback_data: `skill_undo:${skills[0].name}` }]] : [];
       await tg.sendNotification(`🧠 Learned from our conversation:\n\n${queued.slice(0, 10).map(line).join('\n')}\n\nSee or change it in the web UI → Skills.`,

@@ -83,13 +83,18 @@ export default class SkillSharing {
     return this._audit || getShareAudit();
   }
 
-  /** Active, non-bundled skills not marked `share: false`: what COULD be shared. */
+  /**
+   * Active, non-bundled skills not marked `share: false` and past their `share_after` (a learned
+   * skill waits a day, so a run the owner rejects never reaches peers): what COULD be shared.
+   * A skill leaving probation goes out with the next skill_sync.
+   */
   async _candidates() {
     await this.service.scan();
     return [...this.service.skills.values()].filter(s =>
       !s.bundled
       && (s.meta?.status || 'active') === 'active'
-      && String(s.meta?.share ?? 'true').toLowerCase() !== 'false');
+      && String(s.meta?.share ?? 'true').toLowerCase() !== 'false'
+      && !(Date.parse(s.meta?.share_after) > Date.now()));
   }
 
   /**
