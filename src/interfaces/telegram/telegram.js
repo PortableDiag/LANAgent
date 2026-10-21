@@ -1469,6 +1469,17 @@ export class TelegramInterface extends EventEmitter {
       .trim();
   }
 
+  // What to say aloud for a reply. A long one (a thread, a list, a log) is read in the
+  // text; speaking all of it takes minutes to render, so say the opening and point there.
+  speechFor(text, max = 700) {
+    const clean = this.cleanForSpeech(text);
+    if (clean.length <= max) return clean;
+    const cut = clean.slice(0, max);
+    const end = Math.max(cut.lastIndexOf('. '), cut.lastIndexOf('! '), cut.lastIndexOf('? '), cut.lastIndexOf('\n'));
+    const head = (end > 80 ? cut.slice(0, end + 1) : cut.replace(/\s+\S*$/, '')).trim();
+    return `${head} The rest is in the message.`;
+  }
+
   // Smart message splitting for Telegram's 4096 character limit
   async sendLargeMessage(ctx, outStr) {
     const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));

@@ -2,6 +2,11 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.558] - 2026-10-20
+
+### Fixed
+- **Long Telegram answers no longer hold up the next one.** A voice note was made from the whole reply, so a long one (a whole text thread) took minutes to speak and the next message waited for it. A long reply is now read aloud only in its opening lines, with a pointer to the text, and the voice note is made without holding the next message.
+
 ## [2.25.557] - 2026-10-20
 
 ### Fixed

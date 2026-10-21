@@ -1613,14 +1613,16 @@ export class TelegramDashboard extends TelegramInterface {
             logger.info(`TelegramDashboard voice check - TTS Service exists: ${hasTtsService}, Telegram enabled: ${telegramEnabled}`);
             
             if (hasTtsService && telegramEnabled) {
+              // Not awaited: rendering speech can take a minute and must not hold the next message
+              (async () => {
               try {
                 logger.info('TelegramDashboard: Generating Telegram voice response...');
                 // Send typing indicator for voice generation
                 await ctx.sendChatAction('record_voice');
 
                 // Clean markdown from content before TTS (prevents speaking asterisks, brackets, etc.)
-                const cleanedContent = this.cleanForSpeech(replyContent);
-                logger.info(`TelegramDashboard: Generating speech for text: ${cleanedContent.length} characters (cleaned from ${replyContent.length})`);
+                const cleanedContent = this.speechFor(replyContent);
+                logger.info(`TelegramDashboard: Generating speech for text: ${cleanedContent.length} characters (from ${replyContent.length})`);
 
                 const voiceResult = await this.agent.ttsService.generateSpeech(cleanedContent);
                 
@@ -1650,6 +1652,7 @@ export class TelegramDashboard extends TelegramInterface {
                 logger.error('TelegramDashboard: Failed to generate voice response:', error);
                 // Don't send error to user, just log it
               }
+              })();
             } else {
               logger.info(`TelegramDashboard: Voice response skipped - TTS: ${hasTtsService}, Telegram: ${telegramEnabled}`);
             }
@@ -1776,14 +1779,15 @@ export class TelegramDashboard extends TelegramInterface {
         const isTextSuitable = typeof replyContent === 'string' &&
           !replyContent.trim().startsWith('{') &&
           !replyContent.trim().startsWith('[') &&
-          replyContent.length < 5000; // Skip very long responses
+          !replyContent.trim().startsWith('[');
 
         if (hasTtsService && telegramEnabled && isTextSuitable) {
+          (async () => {
           try {
             logger.info('Generating voice response for voice input...');
             await ctx.sendChatAction('record_voice');
 
-            const voiceResult = await this.agent.ttsService.generateSpeech(replyContent);
+            const voiceResult = await this.agent.ttsService.generateSpeech(this.speechFor(replyContent));
 
             await ctx.replyWithVoice(
               { source: voiceResult.buffer },
@@ -1794,6 +1798,7 @@ export class TelegramDashboard extends TelegramInterface {
           } catch (error) {
             logger.error('Failed to generate voice response:', error);
           }
+          })();
         }
         ack.ok();
       } catch (error) {
