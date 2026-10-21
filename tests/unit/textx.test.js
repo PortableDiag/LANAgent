@@ -1254,3 +1254,38 @@ test('plugin: a text ALICE writes follows the owner\'s notes for that person; di
   assert.equal(await plugin.inOwnersStyle('hi', 'Sam', 'say hi to Sam'), 'hi');
   assert.equal(prompts.length, 1);
 });
+
+test('plugin: a send by number gets the contact\'s persona and the phone\'s notes; an offline phone is not asked', async () => {
+  const { default: TextXPlugin } = await import('../../src/api/plugins/textx.js');
+  const prompts = [];
+  const plugin = new TextXPlugin({ config: {}, providerManager: { generateResponse: async (p) => { prompts.push(p); return { content: 'Styled.' }; } } });
+  let connected = true;
+  const calls = [];
+  const hub = {
+    pickDevice: async () => ({ id: 'd1' }),
+    isConnected: () => connected,
+    callTool: async (name) => { calls.push(name); return { ok: true, result: [
+      { thread_id: 7, title: 'Wayne Williams', notes: 'Sign off as The Enrichment Center.', participants: [{ name: 'Wayne Williams', number: '+1 (555) 010-2222' }] },
+      { thread_id: 8, title: 'Sam', notes: 'Be brief.', participants: [{ name: 'Sam', number: '+15550103333' }] }] }; },
+    store: { contactsList: async () => [{ name: 'Wayne Williams', numbers: ['+15550102222'] }] },
+    ownerNotesFor: async (who) => (/Wayne/.test(who) ? '- Talk to Wayne like GLaDOS from Portal.' : '')
+  };
+  Object.defineProperty(plugin, 'svc', { value: { hub } });
+
+  assert.equal(await plugin.inOwnersStyle('Hope the test went well', '5550102222', 'text 5550102222 something nice', { to: ['5550102222'] }), 'Styled.');
+  assert.match(prompts[0], /text Wayne Williams/);
+  assert.match(prompts[0], /Enrichment Center[\s\S]*GLaDOS/);
+  assert.deepEqual(calls, ['list_threads']);
+
+  // Phone not connected: no round trip, the saved contact still names the number.
+  connected = false;
+  assert.equal(await plugin.inOwnersStyle('Hope the test went well', '5550102222', 'text 5550102222 something nice', { to: ['5550102222'] }), 'Styled.');
+  assert.equal(calls.length, 1);
+  assert.doesNotMatch(prompts[1], /Enrichment Center/);
+  assert.match(prompts[1], /GLaDOS/);
+
+  // A thread target finds that conversation's notes alone.
+  connected = true;
+  assert.equal(await plugin.inOwnersStyle('Running late', 'Sam', 'tell Sam I will be late, word it nicely', { thread_id: 8 }), 'Styled.');
+  assert.match(prompts[2], /Be brief/);
+});

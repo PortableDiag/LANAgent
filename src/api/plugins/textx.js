@@ -413,7 +413,7 @@ export default class TextXPlugin extends BasePlugin {
     const file = await this.asGifIfAsked(data._context?.attachedFile, request);
     const files = [...(this.fileAttachment(file) || []), ...mediaAttachments(data)];
     const attachments = files.length ? files : null;
-    text = await this.inOwnersStyle(text, data.to || data.thread, request);
+    text = await this.inOwnersStyle(text, data.to || data.thread, request, target);
     const args = scheduled
       ? { ...target, text, at: new Date(data.at).toISOString(), ...(data.repeat ? { repeat: data.repeat } : {}), ...(data.interval ? { interval: data.interval } : {}), ...(data.endAfter ? { end_after: data.endAfter } : {}), ...(attachments ? { attachments } : {}) }
       : { ...target, text, ...(attachments ? { attachments } : {}) };
@@ -571,18 +571,22 @@ export default class TextXPlugin extends BasePlugin {
 
   /**
    * A text ALICE wrote for the owner follows what the owner told it about that person (tone,
-   * persona). Words the owner dictated go as they are.
+   * persona): memory notes for the name, and the conversation's notes on the phone, which win on
+   * a conflict. Words the owner dictated go as they are.
    */
-  async inOwnersStyle(text, who, request) {
+  async inOwnersStyle(text, who, request, target = {}) {
     const flat = (v) => String(v || '').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
     if (!who || !text || flat(request).includes(flat(text))) return text;
-    const notes = await this.svc?.hub?.ownerNotesFor?.(String(who), { from: { name: String(who) } }).catch(() => '');
+    const rcpt = await this.recipientFor(target, String(who));
+    const saved = rcpt.name ? await this.svc?.hub?.ownerNotesFor?.(rcpt.name, { from: { name: rcpt.name } }).catch(() => '') : '';
+    const notes = [rcpt.notes && `On the phone, for this conversation (wins on a conflict): ${rcpt.notes}`, saved].filter(Boolean).join('\n');
     const pm = this.agent?.providerManager;
     if (!notes || !pm?.generateResponse) return text;
+    const name = rcpt.name || who;
     try {
       const res = await pm.generateResponse(
-        `${process.env.OWNER_NAME || 'The user'} asked you to text ${who}: "${request.slice(0, 600)}"\n` +
-        `Your draft: ${text}\n${process.env.OWNER_NAME || 'The user'}'s own instructions for talking with ${who}:\n${notes}\n\n` +
+        `${process.env.OWNER_NAME || 'The user'} asked you to text ${name}: "${request.slice(0, 600)}"\n` +
+        `Your draft: ${text}\n${process.env.OWNER_NAME || 'The user'}'s own instructions for talking with ${name}:\n${notes}\n\n` +
         'Rewrite the draft so it follows those instructions and does what was asked, keeping its meaning and about its length. ' +
         'Answer with the text only.', { maxTokens: 300, temperature: 0.6 });
       const out = String(res?.content || '').trim().replace(/^"|"$/g, '');
@@ -591,6 +595,41 @@ export default class TextXPlugin extends BasePlugin {
       this.logger.warn(`textx send: style pass failed: ${e.message}`);
       return text;
     }
+  }
+
+  /**
+   * The recipient's name and the phone's notes for their conversation. A send addressed by number
+   * found no persona by name, and owner-ordered sends never read thread.notes (2026-10-20). The
+   * shared conversations are read only while the phone is connected, so a send never waits on it.
+   */
+  async recipientFor(target, who) {
+    const digits = (n) => String(n || '').replace(/\D/g, '').slice(-10);
+    const want = (target.to || []).map(digits).filter(Boolean);
+    let name = numberish(who) ? '' : who;
+    let notes = '';
+    const hub = this.svc?.hub;
+    try {
+      const device = await hub?.pickDevice?.('list_threads', this.origin());
+      if (device && hub.isConnected(device.id)) {
+        const r = await this.call('list_threads', { limit: 50 });
+        const q = name.toLowerCase();
+        const t = (r.ok ? r.result || [] : []).find(x =>
+          (target.thread_id && String(x.thread_id) === String(target.thread_id)) ||
+          (want.length && (x.participants || []).length === want.length && x.participants.every(p => want.includes(digits(p.number)))) ||
+          (!target.thread_id && !want.length && q && (x.title || '').toLowerCase() === q));
+        if (t) {
+          notes = String(t.notes || '').trim().slice(0, 1000);
+          if (!name) name = t.title || t.participants?.[0]?.name || '';
+        }
+      }
+      if (!name && want.length === 1) {
+        const c = (await hub?.store?.contactsList?.(5000) || []).find(x => (x.numbers || []).some(n => digits(n) === want[0]));
+        if (c) name = c.name;
+      }
+    } catch (e) {
+      this.logger.warn(`textx send: recipient lookup failed: ${e.message}`);
+    }
+    return { name, notes };
   }
 
   fileAttachment(file) {

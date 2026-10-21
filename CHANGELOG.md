@@ -2,6 +2,12 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.563] - 2026-10-21
+
+### Fixed
+- **Texts sent to a phone number follow your notes for that person too.** When ALICE writes a text for you and you gave a number instead of a name, it now finds who the number belongs to and uses what you told it about them. Before, only a send by name picked up those notes.
+- **Your notes on the phone shape the texts you ask for, not just auto-replies.** The notes you keep on a conversation in TextX now apply when you ask ALICE to write someone a text, and they win if they disagree with what you told ALICE elsewhere. ALICE only checks them while the phone is connected, so a send never waits on it.
+
 ## [2.25.562] - 2026-10-21
 
 ### Fixed
