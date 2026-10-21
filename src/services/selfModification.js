@@ -5450,7 +5450,9 @@ ${newCapsBlock}${reviewFlagsBlock}
       };
 
       const candidates = await walk('src', this.developmentPath);
-      candidates.push('package.json');
+      // CHANGELOG.md rides with package.json: the startup card reads its headlines
+      // from the deployed copy, so a version bump without it announces old news.
+      candidates.push('package.json', 'CHANGELOG.md');
 
       const drifted = [];
       for (const rel of candidates) {

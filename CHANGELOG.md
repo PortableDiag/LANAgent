@@ -2,6 +2,11 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.562] - 2026-10-21
+
+### Fixed
+- **The startup card shows the current release notes after a self-update.** The hourly self-update now ships CHANGELOG.md along with package.json, so the version number and the "what's new" headlines no longer drift apart.
+
 ## [2.25.561] - 2026-10-20
 
 ### Fixed
