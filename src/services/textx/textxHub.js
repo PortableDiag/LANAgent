@@ -696,11 +696,33 @@ export class TextXHub {
 
   onToolResult(device, body) {
     const p = this.pending.get(body.call_id);
-    if (!p || String(p.device.id) !== String(device.id)) return;
+    if (!p) return this.orphanResult(device, body).catch(e => this.logger.warn?.(`TextX: late result not reported: ${e.message}`));
+    if (String(p.device.id) !== String(device.id)) return;
     const result = { ok: !!body.ok, ...(body.ok ? { result: body.result } : { error: body.error || { code: 'internal' } }) };
     p.finish();
     if (p.settled) p.onLate?.(result);
     else { p.settled = true; p.resolve(body.ok ? result : { ...result, device: p.device }); }
+  }
+
+  /**
+   * A send's result with nobody waiting: the wait died with a restart while the phone was out of
+   * reach (2026-10-21: the phone answered at 12:57 a send queued at 12:46, and the answer was
+   * dropped). The owner still hears how it ended.
+   */
+  async orphanResult(device, body) {
+    const row = await this.store.outboxCall?.(device.id, body.call_id);
+    const call = row?.env?.body;
+    if (!call || !['send_sms', 'schedule_message'].includes(call.name)) return;
+    const to = (call.args?.to || []).join(', ') || 'the conversation';
+    const status = body.ok ? body.result?.status : null;
+    const text = body.ok
+      ? (status === 'sent' ? `✅ Your text to ${to} was sent.`
+        : status === 'declined' ? `Your text to ${to} was declined on the phone, so nothing was sent.`
+          : status === 'timeout' ? `Your text to ${to} wasn't confirmed on the phone in time, so nothing was sent.`
+            : `Your text to ${to}: the phone answered ${status || 'done'}.`)
+      : `⚠️ Your text to ${to} didn't go: ${body.error?.message || body.error?.code || 'the phone refused it'}.`;
+    this.logger.info?.(`TextX: late ${call.name} result from ${device.name}: ${body.ok ? status : body.error?.code}`);
+    await this.agent?.notify?.(text);
   }
 
   // ── watches (§5 watch → event) ─────────────────────────────────────────────────────────

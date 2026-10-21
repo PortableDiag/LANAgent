@@ -25,7 +25,7 @@ export class TextXRelayClient {
    * @param {object} o.transport  createTransport() result: { http, ws }
    * @param {function} o.identity async () => { signPublicKey: Buffer(DER), signPrivateKey: Buffer(DER), fingerprint }
    */
-  constructor({ transport, identity, url = DEFAULT_RELAY_URL, connectAddress = null, logger = console, WebSocketImpl = WebSocket } = {}) {
+  constructor({ transport, identity, url = DEFAULT_RELAY_URL, connectAddress = null, logger = console, WebSocketImpl = WebSocket, pingMs = 30_000 } = {}) {
     this.transport = transport;
     this.identity = identity;
     this.url = url;
@@ -40,6 +40,10 @@ export class TextXRelayClient {
     this.stopped = true;
     this.delay = 1000;
     this.sessions = new Map(); // sid -> handlers from transport.ws()
+    // Our own liveness check. The relay terminates a link that misses its pings, but when the
+    // path is what broke, that close never arrives: on 2026-10-21 the relay dropped the link at
+    // 10:49 and the socket here stayed ESTABLISHED and "up" for hours, so no phone could reach us.
+    this.pingMs = pingMs;
   }
 
   start() {
@@ -51,6 +55,7 @@ export class TextXRelayClient {
   stop() {
     this.stopped = true;
     clearTimeout(this.retryTimer);
+    clearInterval(this.pingTimer);
     try { this.socket?.close(1000, 'stopping'); } catch { /* closed */ }
   }
 
@@ -71,9 +76,27 @@ export class TextXRelayClient {
       return this.retry(e);
     }
     this.socket = ws;
-    ws.on('message', (data) => this.onFrame(String(data)).catch(e => this.logger.error?.(`TextX relay frame failed: ${e.message}`)));
+    let alive = true;
+    clearInterval(this.pingTimer);
+    this.pingTimer = setInterval(() => {
+      if (this.socket !== ws || ws.readyState !== 1) return;
+      if (!alive) {
+        this.logger.warn?.('TextX relay link stopped answering; reconnecting');
+        ws.terminate?.();
+        return;
+      }
+      alive = false;
+      try { ws.ping?.(); } catch { /* closing */ }
+    }, this.pingMs);
+    this.pingTimer.unref?.();
+    ws.on('pong', () => { alive = true; });
+    ws.on('message', (data) => {
+      alive = true;
+      this.onFrame(String(data)).catch(e => this.logger.error?.(`TextX relay frame failed: ${e.message}`));
+    });
     ws.on('close', (code) => {
       if (this.socket !== ws) return;
+      clearInterval(this.pingTimer);
       const wasReady = this.ready;
       this.ready = false;
       for (const s of this.sessions.values()) s.onClose();

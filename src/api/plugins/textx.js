@@ -76,6 +76,9 @@ export function messageTextRule(owner = process.env.OWNER_NAME || 'the user') {
     'follow it, and never put it in the text.';
 }
 
+// Blank lines and trailing space go; the first line's indent stays (ASCII art lost its first
+// line's alignment to a trim(), 2026-10-21).
+const keepIndent = (s) => String(s || '').replace(/^(?:[ \t]*\r?\n)+/, '').trimEnd();
 const numberish = (s) => /^\+?[\d\s().-]{5,}$/.test(String(s).trim());
 // A recipient or a message that points back into the conversation instead of saying it.
 const PRONOUN = /^(him|her|them|they|he|she|this person|that person|the same person)$/i;
@@ -231,6 +234,12 @@ export default class TextXPlugin extends BasePlugin {
         const label = this.outcomeLabel(action, data);
         job.then(r => this.agent.notify?.(r.success ? `✅ ${/^Sent to /.test(r.result) ? r.result : `${label}: ${r.result}`}` : `⚠️ ${label}: ${r.error}`))
           .catch(e => this.logger.error(`textx ${action} (phone offline) failed: ${e.message}`));
+        const silent = this.phoneSilence(device);
+        if (silent) {
+          return { success: true, result: `${label}: waiting for your phone (${device.name}), but it hasn't reached me since ${silent}, ` +
+            `longer than its usual 15-minute check-in${this.relayDown() ? ', and my relay link is down, so right now it can only reach me on the home network' : ''}. ` +
+            'Open TextX on the phone; it goes the moment the phone connects, and I\'ll tell you here.' };
+        }
         return { success: true, result: `${label}: it's going to your phone (${device.name}) and runs as soon as TextX picks it up ` +
           '(opening TextX does that at once). If TextX asks you to confirm, tap it there. I\'ll tell you here when it\'s done.' };
       }
@@ -238,6 +247,23 @@ export default class TextXPlugin extends BasePlugin {
     const res = await this.run(action, data);
     if (!res.success) this.logger.warn(`textx ${action}: ${res.error}`);
     return res;
+  }
+
+  /**
+   * When the phone has been silent past a normal check-in (§3.2: 15 minutes), the time it was
+   * last seen; otherwise null. On 2026-10-21 a send was reported as "going to your phone" two
+   * hours into an outage in which no phone could reach this agent.
+   */
+  phoneSilence(device, now = Date.now()) {
+    const seen = device?.lastSeenAt ? new Date(device.lastSeenAt) : null;
+    if (seen && now - seen.getTime() <= 20 * 60_000) return null;
+    if (!seen) return 'it was paired';
+    return seen.toLocaleString('en-US', { hour: 'numeric', minute: '2-digit', ...(now - seen.getTime() > 20 * 3600_000 ? { month: 'short', day: 'numeric' } : {}) });
+  }
+
+  relayDown() {
+    const relay = this.svc?.relay;
+    return !!relay && !relay.stopped && !relay.status().connected;
   }
 
   async run(action, data) {
@@ -389,10 +415,10 @@ export default class TextXPlugin extends BasePlugin {
   }
 
   async send(data, scheduled = false) {
-    const ref = await this.fromConversation(data, data.to || data.recipient || data.contact, String(data.text || data.message || '').trim());
+    const ref = await this.fromConversation(data, data.to || data.recipient || data.contact, keepIndent(data.text || data.message));
     if (ref.error) return { success: false, error: ref.error };
     data = { ...data, to: ref.to };
-    let text = String(ref.text || '').trim();
+    let text = keepIndent(ref.text);
     if (!text) return { success: false, error: 'What should the text say?' };
     if (scheduled && data.at != null) data.at = resolveRequestTime(data.at, '')?.toISOString() || data.at;
     if (scheduled && !Number.isFinite(Date.parse(data.at))) return { success: false, error: 'When should it be sent? Give a date and time.' };

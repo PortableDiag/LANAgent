@@ -279,6 +279,31 @@ test('relay link: signs the challenge and carries HTTP and a WebSocket session',
   client.stop();
 });
 
+test('relay link: a link that stops answering pings is torn down and redialled (2026-10-21)', async () => {
+  const sockets = [];
+  class FakeWS {
+    constructor() { this.readyState = 1; this.handlers = {}; this.pings = 0; sockets.push(this); }
+    on(ev, fn) { this.handlers[ev] = fn; }
+    send() {}
+    ping() { this.pings++; if (this.answers) setImmediate(() => this.handlers.pong?.()); }
+    terminate() { this.readyState = 3; this.terminated = true; this.handlers.close?.(1006); }
+    close() {}
+  }
+  const client = new TextXRelayClient({ transport: {}, identity: async () => ({}), logger: quiet, WebSocketImpl: FakeWS, pingMs: 20 });
+  client.delay = 5;
+  client.start();
+  sockets[0].answers = true;
+  await new Promise(res => setTimeout(res, 90));
+  assert.ok(sockets[0].pings >= 2, 'pings while the link answers');
+  assert.equal(sockets[0].terminated, undefined, 'an answering link is kept');
+
+  sockets[0].answers = false;   // the path broke: nothing comes back, no close arrives
+  await new Promise(res => setTimeout(res, 120));
+  assert.equal(sockets[0].terminated, true, 'a silent link is terminated');
+  assert.ok(sockets.length >= 2, 'and dialled again');
+  client.stop();
+});
+
 test('relaySignature is a raw Ed25519 signature over the spec string', () => {
   const { publicKey, privateKey } = crypto.generateKeyPairSync('ed25519', {
     publicKeyEncoding: { type: 'spki', format: 'der' }, privateKeyEncoding: { type: 'pkcs8', format: 'der' } });
@@ -716,6 +741,60 @@ test('from Telegram with the phone not connected: a slow check-in gets "on its w
   for (let i = 0; i < 50 && !r.calls.some(c => c.notify); i++) await tick();
   clearInterval(phone);
   assert.deepEqual(r.calls.filter(c => c.notify).map(c => c.notify), ['✅ Sent to Wayne: "Thanks and goodnight"']);
+});
+
+test('from Telegram with the phone silent for hours: the answer says so, and names a dead relay link (2026-10-21)', async () => {
+  const { default: TextXPlugin } = await import('../../src/api/plugins/textx.js');
+  const r = rig({ waits: { read: 30, readExpiry: 60, confirm: 30, confirmExpiry: 60, offline: 2000, late: 10 } });
+  const p = await pairedPhone(r, { tools: ['send_sms', 'contacts_lookup'] });
+  r.hub.sessions.clear();
+  await r.store.updateDevice(p.device.id, { lastSeenAt: new Date(Date.now() - 2 * 3600_000) });
+  const plugin = new TextXPlugin(r.agent);
+  plugin.offlineGraceMs = 50;
+  const relay = { stopped: false, status: () => ({ connected: false }) };
+  Object.defineProperty(plugin, 'svc', { value: { hub: r.hub, relay } });
+  const res = await plugin.execute({ action: 'send', to: 'Wayne', text: 'cake' });
+  assert.equal(res.success, true);
+  assert.match(res.result, /hasn't reached me since .*15-minute check-in, and my relay link is down/);
+  assert.doesNotMatch(res.result, /it's going to your phone/);
+
+  assert.equal(plugin.phoneSilence({ lastSeenAt: new Date() }), null, 'a recent check-in is normal');
+});
+
+test('send keeps the first line\'s indent (ASCII art), dropping only blank lead lines', async () => {
+  const { default: TextXPlugin } = await import('../../src/api/plugins/textx.js');
+  const r = rig({ waits: { read: 30, readExpiry: 60, confirm: 30, confirmExpiry: 60, offline: 2000, late: 10 } });
+  const p = await pairedPhone(r, { tools: ['send_sms', 'contacts_lookup'] });
+  r.hub.sessions.clear();
+  const plugin = new TextXPlugin(r.agent);
+  plugin.offlineGraceMs = 1500;
+  Object.defineProperty(plugin, 'svc', { value: { hub: r.hub } });
+  const sent = [];
+  const phone = setInterval(async () => {
+    for (const { env: e } of await r.store.outboxUnacked(p.device.id)) {
+      await r.store.outboxAckId(p.device.id, e.id);
+      if (e.type !== 'tool_call') continue;
+      if (e.body.name === 'send_sms') sent.push(e.body.args.text);
+      r.hub.onToolResult(p.device, { call_id: e.body.call_id, ok: true, result: e.body.name === 'contacts_lookup' ? [{ name: 'Wayne Williams', numbers: ['+15550199'] }] : { status: 'sent' } });
+    }
+  }, 5);
+  const res = await plugin.execute({ action: 'send', to: 'Wayne', text: '\n   ,:\'\'\'\'.\n  :    :\n   \':,,:\'  \n' });
+  clearInterval(phone);
+  assert.equal(res.success, true);
+  assert.equal(sent[0], '   ,:\'\'\'\'.\n  :    :\n   \':,,:\'');
+});
+
+test('a send result that outlives a restart still reaches the owner (2026-10-21)', async () => {
+  const r = rig();
+  const p = await pairedPhone(r, { tools: ['send_sms'] });
+  // Queued before a restart: the envelope is in the outbox, nobody is waiting on it any more.
+  await r.hub.deliver(p.device, 'tool_call', { call_id: 'c-before-restart', name: 'send_sms', args: { to: ['5550102222'], text: 'cake' } });
+  await r.hub.deliver(p.device, 'tool_call', { call_id: 'c-read', name: 'list_threads', args: {} });
+  r.hub.onToolResult(p.device, { call_id: 'c-before-restart', ok: true, result: { status: 'sent' } });
+  r.hub.onToolResult(p.device, { call_id: 'c-read', ok: true, result: [] });
+  r.hub.onToolResult(p.device, { call_id: 'never-sent', ok: true, result: { status: 'sent' } });
+  for (let i = 0; i < 20 && !r.calls.some(c => c.notify); i++) await tick();
+  assert.deepEqual(r.calls.filter(c => c.notify).map(c => c.notify), ['✅ Your text to 5550102222 was sent.']);
 });
 
 /** A phone with TextX closed: after [delayMs] it drains the outbox and answers each tool call. */

@@ -2,6 +2,18 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.566] - 2026-10-21
+
+### Fixed
+- **You hear how a text ended even if ALICE restarted while waiting.** If the phone answers after ALICE has restarted, ALICE now tells you whether the text was sent, declined or refused. Before, that answer was dropped and you never found out.
+
+## [2.25.565] - 2026-10-21
+
+### Fixed
+- **Phones can reach ALICE again after a network blip.** If the connection to the relay quietly dies, ALICE now notices within a minute and reconnects. Before, the relay dropped ALICE's link at 10:49 and ALICE kept treating the dead link as live for hours, so no phone outside the home network could reach it and texts you asked for never went out.
+- **ALICE tells you when your phone has gone quiet.** If the phone hasn't checked in for longer than its usual 15 minutes, ALICE says when it last heard from it, and whether its own relay link is down, instead of "it's going to your phone".
+- **ASCII art in a text keeps its shape.** The first line's leading spaces are no longer stripped.
+
 ## [2.25.564] - 2026-10-21
 
 ### Fixed

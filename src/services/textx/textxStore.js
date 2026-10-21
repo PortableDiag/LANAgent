@@ -181,6 +181,10 @@ export function mongoStore() {
     async outboxAckThrough(id, seq) {
       await TextXOutbox.updateMany({ device: id, seq: { $lte: seq }, ackedAt: null }, { $set: { ackedAt: new Date() } });
     },
+    /** The tool_call envelope a call_id was sent in (a result can outlive the restart that dropped its wait). */
+    async outboxCall(id, callId) {
+      return callId ? TextXOutbox.findOne({ device: id, 'env.type': 'tool_call', 'env.body.call_id': String(callId) }).lean() : null;
+    },
     async outboxAckId(id, envId) {
       if (envId) await TextXOutbox.updateOne({ device: id, envId: String(envId) }, { $set: { ackedAt: new Date() } });
     },
@@ -259,6 +263,7 @@ export function memoryStore() {
     async outboxSince(id, seq, limit) { return outbox.filter(r => r.device === String(id) && r.seq > seq && !r.acked).slice(0, limit); },
     async outboxUnacked(id) { return outbox.filter(r => r.device === String(id) && !r.acked); },
     async outboxAckThrough(id, seq) { outbox.forEach(r => { if (r.device === String(id) && r.seq <= seq) r.acked = true; }); },
+    async outboxCall(id, callId) { return outbox.find(r => r.device === String(id) && r.env.type === 'tool_call' && r.env.body?.call_id === callId) || null; },
     async outboxAckId(id, envId) { outbox.forEach(r => { if (r.device === String(id) && r.env.id === envId) r.acked = true; }); },
     async outboxAckType(id, type) { outbox.forEach(r => { if (r.device === String(id) && r.env.type === type) r.acked = true; }); },
     async inboxSeen(id, envId, extra = {}) {
