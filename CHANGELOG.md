@@ -2,6 +2,11 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.559] - 2026-10-20
+
+### Changed
+- **TextX "All conversations" stays quiet (TextX 0.4.16).** With the phone's All conversations switch on, ALICE can read every conversation, but it only sends you notes about the ones you picked. Messages elsewhere are kept so ALICE can answer questions about them, and they never get an automatic reply.
+
 ## [2.25.558] - 2026-10-20
 
 ### Fixed

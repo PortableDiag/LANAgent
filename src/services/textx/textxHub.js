@@ -734,6 +734,10 @@ export class TextXHub {
       if (replied) return;
     }
 
+    // Seen only through "All conversations" (0.4.16 picked:false): ALICE knows about it, but
+    // the owner did not pick it, so it does not cost a model call or a note per message.
+    if (!watched && body.thread?.picked === false) return;
+
     // A busy shared group chat must not turn into a stream of notes.
     this.noteRate = this.noteRate || new RateWindow(12, 3600_000);
     const context = recent.length ? `Earlier in this conversation:\n${untrusted('SMS', recent.join('\n'))}\n` : '';

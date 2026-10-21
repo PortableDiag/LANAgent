@@ -602,6 +602,16 @@ test('shared = watching: every new message joins the context; the user is told o
   assert.equal(p.sent.filter(e => e.type === 'message').length, before);
 });
 
+test('a conversation seen only through All conversations (picked:false) is known, never announced or answered', async () => {
+  const { r, ctx, prompts } = sharedRig('Sam is asking if you are free at 7.');
+  const p = await pairedPhone(r, { tools: ['send_sms'] });
+  await p.say(smsEvent({ shared: false, auto_reply: false, thread: { title: 'Sam', picked: false } }));
+  await tick(); await tick();
+  assert.equal(ctx.length, 1, 'joins the context');
+  assert.equal(prompts.length, 0, 'no model call');
+  assert.ok(!p.sent.some(e => e.type === 'message' || e.type === 'tool_call'));
+});
+
 test('the user\'s own outgoing messages are not events to act on', async () => {
   const { r, ctx } = sharedRig('Something');
   const p = await pairedPhone(r);
