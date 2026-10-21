@@ -1202,3 +1202,55 @@ test('plugin: "remind Sam via text message that…" sends a text even when match
   assert.equal(send.body.args.text, 'The cake is coming.');
   assert.equal(res.success, true);
 });
+
+test('plugin: a GIF link passed as media goes as an MMS attachment {name, url}', async () => {
+  const { default: TextXPlugin, mediaAttachments } = await import('../../src/api/plugins/textx.js');
+  assert.deepEqual(mediaAttachments({ media: 'http://x/a.gif' }), [], 'https only');
+  assert.deepEqual(mediaAttachments({ gif: { url: 'https://media.example/w%20ait.gif' } }), [{ name: 'w ait.gif', url: 'https://media.example/w%20ait.gif' }]);
+  const r = rig({ waits: { read: 500, readExpiry: 1000, confirm: 40, confirmExpiry: 2000, late: 10 } });
+  const p = await pairedPhone(r, { tools: ['send_sms', 'contacts_lookup'] });
+  const plugin = new TextXPlugin(r.agent);
+  Object.defineProperty(plugin, 'svc', { value: { hub: r.hub } });
+  plugin._extractArgs = async () => {};
+  const phone = setInterval(async () => {
+    for (const e of p.sent.filter(x => x.type === 'tool_call' && !x.done)) {
+      e.done = true;
+      if (e.body.name === 'contacts_lookup') await p.say(env('tool_result', { call_id: e.body.call_id, ok: true, result: [{ name: 'Sam', numbers: ['+15550100'] }] }));
+      if (e.body.name === 'send_sms') await p.say(env('tool_result', { call_id: e.body.call_id, ok: true, result: { status: 'sent' } }));
+    }
+  }, 5);
+  const res = await textxRequest.run({ deviceId: p.device.id }, () => plugin.execute({ action: 'send', to: 'Sam', text: 'Still waiting…',
+    media: ['https://media.example/waiting.gif'], _context: { originalInput: 'send Sam a waiting gif' } }));
+  clearInterval(phone);
+  const send = p.sent.find(e => e.type === 'tool_call' && e.body.name === 'send_sms');
+  assert.deepEqual(send.body.args.attachments, [{ name: 'waiting.gif', url: 'https://media.example/waiting.gif' }]);
+  assert.match(res.result, /with a picture/);
+});
+
+test('plugin: "send it as a gif" turns the attached video into a GIF; other requests send it as it is', async (t) => {
+  const { execFileSync } = await import('node:child_process');
+  let mp4;
+  try { mp4 = execFileSync('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-f', 'lavfi', '-i', 'testsrc=size=160x120:rate=10:duration=1', '-pix_fmt', 'yuv420p', '-movflags', 'frag_keyframe+empty_moov', '-f', 'mp4', 'pipe:1']); }
+  catch { t.skip('no ffmpeg with an mp4 encoder here'); return; }
+  const { default: TextXPlugin } = await import('../../src/api/plugins/textx.js');
+  const plugin = new TextXPlugin({ config: {} });
+  const file = { filename: 'eyeball.mp4', mimeType: 'video/mp4', base64: mp4.toString('base64') };
+  const gif = await plugin.asGifIfAsked(file, 'send it to Wayne via text as a gif');
+  assert.equal(gif.mimeType, 'image/gif');
+  assert.equal(gif.filename, 'eyeball.gif');
+  assert.equal(Buffer.from(gif.base64, 'base64').subarray(0, 6).toString(), 'GIF89a');
+  assert.equal(await plugin.asGifIfAsked(file, 'send it to Wayne'), file);
+});
+
+test('plugin: a text ALICE writes follows the owner\'s notes for that person; dictated words go as they are', async () => {
+  const { default: TextXPlugin } = await import('../../src/api/plugins/textx.js');
+  const prompts = [];
+  const plugin = new TextXPlugin({ config: {}, providerManager: { generateResponse: async (p) => { prompts.push(p); return { content: 'Test subject Wayne: the cake protocol awaits your reply.' }; } } });
+  Object.defineProperty(plugin, 'svc', { value: { hub: { ownerNotesFor: async (who) => (who === 'Wayne' ? '- Talk to Wayne like GLaDOS from Portal.' : '') } } });
+  const styled = await plugin.inOwnersStyle('Still waiting on your reply!', 'Wayne', 'send it to Wayne with some text that suits it');
+  assert.equal(styled, 'Test subject Wayne: the cake protocol awaits your reply.');
+  assert.match(prompts[0], /GLaDOS/);
+  assert.equal(await plugin.inOwnersStyle('see you at 6', 'Wayne', 'text Wayne saying see you at 6'), 'see you at 6');
+  assert.equal(await plugin.inOwnersStyle('hi', 'Sam', 'say hi to Sam'), 'hi');
+  assert.equal(prompts.length, 1);
+});

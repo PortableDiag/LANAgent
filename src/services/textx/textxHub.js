@@ -72,6 +72,27 @@ export async function encodeM4a(buffer, { kbps = 32 } = {}) {
   }
 }
 
+/** A video as an animated GIF for MMS: 12 s at most, 10 fps, 320 px wide, one palette. */
+export async function encodeGif(buffer) {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'textx-gif-'));
+  try {
+    const src = path.join(dir, 'in'), out = path.join(dir, 'out.gif');
+    await writeFile(src, buffer);
+    await new Promise((resolve, reject) => {
+      const p = spawn('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-y', '-i', src, '-t', '12',
+        '-vf', 'fps=10,scale=320:-1:flags=lanczos,split[a][b];[a]palettegen=max_colors=128[p];[b][p]paletteuse', '-loop', '0', out],
+        { stdio: ['ignore', 'ignore', 'pipe'] });
+      let err = '';
+      p.stderr.on('data', d => { err += d; });
+      p.on('error', reject);
+      p.on('close', code => code === 0 ? resolve() : reject(new Error(`ffmpeg exited ${code}: ${err.trim().slice(0, 200)}`)));
+    });
+    return await readFile(out);
+  } finally {
+    await rm(dir, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
 // Marks the line of an auto-reply that is for the owner, not the conversation.
 const OWNER_NOTE = 'NOTE FOR OWNER:';
 

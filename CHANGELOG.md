@@ -2,6 +2,18 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.561] - 2026-10-20
+
+### Fixed
+- **"Send it to Wayne as a GIF" uses the file you just sent.** ALICE now treats a file you sent in the last few minutes as part of your next request, so "it" means that file. Before, ALICE didn't know a file was there, went looking for a different GIF, and that GIF got lost on the way. Every step of a multi-step request now gets your words and your file.
+- **"As a GIF" turns your video into one.** A video you attach is converted to an animated GIF when you ask for a GIF, and sent as the video if converting fails.
+- **Texts ALICE writes for you follow your notes for that person.** When you ask ALICE to write the text ("with some text that suits it"), it follows what you told it about that contact, like talking to Wayne in the style of Aperture Science. Words you dictate are still sent exactly as you wrote them.
+
+## [2.25.560] - 2026-10-20
+
+### Fixed
+- **"Send Wayne a GIF" sends the GIF.** ALICE found a GIF and passed its link along, but the texting step only sent the words. Picture, GIF and video links now go with the text as an MMS.
+
 ## [2.25.559] - 2026-10-20
 
 ### Changed

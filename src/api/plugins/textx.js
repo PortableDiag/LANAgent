@@ -2,7 +2,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import { BasePlugin } from '../core/basePlugin.js';
 import { nowInZone, resolveRequestTime } from '../../utils/wallClock.js';
 import { getTextX } from '../../services/textx/index.js';
-import { textxRequest, untrusted, formatMessage } from '../../services/textx/textxHub.js';
+import { textxRequest, untrusted, formatMessage, encodeGif } from '../../services/textx/textxHub.js';
 
 /**
  * Texting through the user's phone, via the TextX SMS app (docs/TEXTX.md).
@@ -33,6 +33,20 @@ function errorResult(r) {
 const SEND_WORDS = /\b(?:via|by|in an?|over)\s+(?:text|sms|txt)(?:\s+message)?\b|\b(?:send|shoot|drop)\b[^.?!]*\b(?:text|message|sms|txt)\b|^\s*(?:\w+,?\s+)?(?:please\s+)?(?:do\s+)?(?:text|sms|message|remind|tell|ask)\s+(?!me\b)\w+/i;
 const WATCH_WORDS = /\b(?:let me know|tell me|notify me|alert me|ping me|watch|keep an eye|monitor)\b|\b(?:replies|texts back|writes back|answers)\b/i;
 /** The request asks to send someone a text (not to be told when one arrives). */
+/**
+ * Links to send as MMS (TextX send_sms attachments {name, url}: https only). A chained step
+ * passes them as media, a GIF lookup as gif/url; a plain string or a list both work.
+ */
+export function mediaAttachments(data = {}) {
+  const raw = [data.media, data.mediaUrl, data.gif, data.gifUrl, data.image, data.url]
+    .flatMap(v => (Array.isArray(v) ? v : [v]))
+    .map(v => (v && typeof v === 'object' ? v.url || v.mp4 || v.gif : v))
+    .filter(v => typeof v === 'string');
+  const urls = [...new Set(raw.map(v => v.trim()).filter(v => /^https:\/\/\S+$/i.test(v)))].slice(0, 5);
+  const name = (url) => { try { return decodeURIComponent(new URL(url).pathname.split('/').pop()) || 'media'; } catch { return 'media'; } };
+  return urls.map(url => ({ name: name(url), url }));
+}
+
 export function asksToSendText(input) {
   const s = String(input || '');
   return SEND_WORDS.test(s) && !WATCH_WORDS.test(s);
@@ -77,8 +91,8 @@ export default class TextXPlugin extends BasePlugin {
     this.commands = [
       {
         command: 'send',
-        description: "Send an SMS from the user's phone. The phone shows the text and the user taps Send; nothing goes out without that tap",
-        usage: 'send({ to: "Mom", text: "Running 10 minutes late" })',
+        description: "Send an SMS from the user's phone. The phone shows the text and the user taps Send; nothing goes out without that tap. Optional media: https links to pictures, GIFs or video to send with it (MMS)",
+        usage: 'send({ to: "Mom", text: "Running 10 minutes late", media: ["https://… optional GIF or picture link"] })',
         hint: messageTextRule(),
         examples: ['text mom that I am running late', 'remind Wayne via text message that the meeting moved to 6', 'send a text to 555-0100 saying I am outside', 'reply to Sam by SMS: sounds good', 'text the plumber that tomorrow works']
       },
@@ -378,7 +392,7 @@ export default class TextXPlugin extends BasePlugin {
     const ref = await this.fromConversation(data, data.to || data.recipient || data.contact, String(data.text || data.message || '').trim());
     if (ref.error) return { success: false, error: ref.error };
     data = { ...data, to: ref.to };
-    const text = String(ref.text || '').trim();
+    let text = String(ref.text || '').trim();
     if (!text) return { success: false, error: 'What should the text say?' };
     if (scheduled && data.at != null) data.at = resolveRequestTime(data.at, '')?.toISOString() || data.at;
     if (scheduled && !Number.isFinite(Date.parse(data.at))) return { success: false, error: 'When should it be sent? Give a date and time.' };
@@ -395,7 +409,11 @@ export default class TextXPlugin extends BasePlugin {
     }
 
     const originId = this.origin();
-    const attachments = this.fileAttachment(data._context?.attachedFile);
+    const request = String(data._context?.originalInput || '');
+    const file = await this.asGifIfAsked(data._context?.attachedFile, request);
+    const files = [...(this.fileAttachment(file) || []), ...mediaAttachments(data)];
+    const attachments = files.length ? files : null;
+    text = await this.inOwnersStyle(text, data.to || data.thread, request);
     const args = scheduled
       ? { ...target, text, at: new Date(data.at).toISOString(), ...(data.repeat ? { repeat: data.repeat } : {}), ...(data.interval ? { interval: data.interval } : {}), ...(data.endAfter ? { end_after: data.endAfter } : {}), ...(attachments ? { attachments } : {}) }
       : { ...target, text, ...(attachments ? { attachments } : {}) };
@@ -411,7 +429,8 @@ export default class TextXPlugin extends BasePlugin {
       return { success: true, result: `It's on your phone (${r.device}) for you to confirm. Tap Send there; I'll tell you when it's done.` };
     }
     const done = this.outcomeText(r.result, scheduled);
-    return { success: true, result: done === 'Sent.' && data.to ? `Sent to ${data.to}: "${text}"` : done };
+    const withMedia = attachments ? ` with ${attachments.length === 1 ? 'a picture' : `${attachments.length} pictures`}` : '';
+    return { success: true, result: done === 'Sent.' && data.to ? `Sent to ${data.to}${withMedia}: "${text}"` : done };
   }
 
   outcomeText(res, scheduled) {
@@ -537,6 +556,43 @@ export default class TextXPlugin extends BasePlugin {
   }
 
   /** A file the user gave the agent (Telegram, dashboard) goes out as MMS, within the 5 MB cap. */
+  /** "Send it as a gif": a video the owner attached goes as an animated GIF (as it is if that fails). */
+  async asGifIfAsked(file, request) {
+    if (!file?.base64 || !/^video\//i.test(file.mimeType || '') || !/\bgifs?\b/i.test(request)) return file;
+    try {
+      const gif = await encodeGif(Buffer.from(file.base64, 'base64'));
+      if (gif.length > 5 * 1024 * 1024) throw new Error(`${gif.length} bytes, over the 5 MB limit`);
+      return { ...file, filename: String(file.filename || 'clip').replace(/\.[^.]+$/, '') + '.gif', mimeType: 'image/gif', base64: gif.toString('base64') };
+    } catch (e) {
+      this.logger.warn(`textx send: GIF conversion failed, sending the video: ${e.message}`);
+      return file;
+    }
+  }
+
+  /**
+   * A text ALICE wrote for the owner follows what the owner told it about that person (tone,
+   * persona). Words the owner dictated go as they are.
+   */
+  async inOwnersStyle(text, who, request) {
+    const flat = (v) => String(v || '').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+    if (!who || !text || flat(request).includes(flat(text))) return text;
+    const notes = await this.svc?.hub?.ownerNotesFor?.(String(who), { from: { name: String(who) } }).catch(() => '');
+    const pm = this.agent?.providerManager;
+    if (!notes || !pm?.generateResponse) return text;
+    try {
+      const res = await pm.generateResponse(
+        `${process.env.OWNER_NAME || 'The user'} asked you to text ${who}: "${request.slice(0, 600)}"\n` +
+        `Your draft: ${text}\n${process.env.OWNER_NAME || 'The user'}'s own instructions for talking with ${who}:\n${notes}\n\n` +
+        'Rewrite the draft so it follows those instructions and does what was asked, keeping its meaning and about its length. ' +
+        'Answer with the text only.', { maxTokens: 300, temperature: 0.6 });
+      const out = String(res?.content || '').trim().replace(/^"|"$/g, '');
+      return out && out.length <= 1000 ? out : text;
+    } catch (e) {
+      this.logger.warn(`textx send: style pass failed: ${e.message}`);
+      return text;
+    }
+  }
+
   fileAttachment(file) {
     if (!file?.base64) return null;
     if (Buffer.byteLength(file.base64, 'base64') > 5 * 1024 * 1024) return null;

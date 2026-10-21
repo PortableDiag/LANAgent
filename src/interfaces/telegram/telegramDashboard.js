@@ -1390,9 +1390,14 @@ export class TelegramDashboard extends TelegramInterface {
         const threadId = topicsOn ? ctx.message.message_thread_id : undefined;
         if (threadId) this.topicTitler.maybeTitle(ctx.message, text).catch(() => {});
 
+        // Say so in the request, as a captioned file does, so "send it to Wayne" means that file
+        // and the router does not go looking for another one.
+        const asked = recentFile && !/\[attached file:/.test(text)
+          ? `${text} [attached file: ${recentFile.filename}, type: ${recentFile.mimeType}]` : text;
+
         let response;
         try {
-          response = await this.agent.processNaturalLanguage(text, {
+          response = await this.agent.processNaturalLanguage(asked, {
             platform: 'telegram',
             threadId,
             userId: ctx.from.id.toString(),

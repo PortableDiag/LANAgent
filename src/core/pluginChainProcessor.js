@@ -481,6 +481,15 @@ Analyze the request:`;
 
       // Mark as AI-originated so plugins can resolve device names, aliases, etc.
       params.fromAI = true;
+      // The same request context a single-step command gets: who asked, their words, and the
+      // file they just sent (2026-10-20: "send it to Wayne as a gif" lost the owner's video).
+      params._context = {
+        ...(params._context || {}),
+        ...(context.originalInput || context.input ? { originalInput: context.originalInput || context.input } : {}),
+        ...(context.userId ? { userId: context.userId } : {}),
+        ...(context.threadId ? { threadId: context.threadId } : {}),
+        ...(context.attachedFile ? { attachedFile: context.attachedFile } : {})
+      };
 
       // Validate action exists for the plugin before executing
       // The real registry is apiManager; agent.plugins does not exist, so this

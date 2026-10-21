@@ -1307,7 +1307,7 @@ If answering needs information that is not in the conversation above (messages, 
               await context.showThinking("🔄 Processing multi-step task...");
             }
 
-            const chainResult = await this.pluginChainProcessor.executeChain(complexAnalysis.steps, context);
+            const chainResult = await this.pluginChainProcessor.executeChain(complexAnalysis.steps, { ...context, originalInput: input });
 
             // A successful chain can become a reusable skill, as ReAct runs already do.
             // Best effort and not awaited: learning must never delay or break the reply.
