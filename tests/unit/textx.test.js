@@ -612,6 +612,16 @@ test('a conversation seen only through All conversations (picked:false) is known
   assert.ok(!p.sent.some(e => e.type === 'message' || e.type === 'tool_call'));
 });
 
+test('Auto-reply in all conversations (TextX 0.4.17): auto_reply:true answers an unpicked conversation', async () => {
+  const { r } = sharedRig((p) => (/answering by text message/.test(p) ? 'Hi Sam, they will get back to you soon.' : 'SKIP'));
+  const p = await pairedPhone(r, { tools: ['send_sms'] });
+  await p.say(smsEvent({ shared: false, auto_reply: true, thread: { title: 'Sam', picked: false } }));
+  for (let i = 0; i < 20 && !p.sent.some(e => e.type === 'tool_call'); i++) await tick();
+  const call = p.sent.find(e => e.type === 'tool_call');
+  assert.ok(call, 'the owner\'s switch is honoured');
+  assert.equal(call.body.args.auto, true);
+});
+
 test('the user\'s own outgoing messages are not events to act on', async () => {
   const { r, ctx } = sharedRig('Something');
   const p = await pairedPhone(r);
