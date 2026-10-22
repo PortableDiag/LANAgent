@@ -457,12 +457,36 @@ export default class TextXPlugin extends BasePlugin {
     const tool = scheduled ? 'schedule_message' : 'send_sms';
     const r = await this.call(tool, args, { onLate: (late) => this.reportLate(originId, late, scheduled) });
     if (!r.ok) return errorResult(r);
+    if (args.requested_by_owner && !originId) this.rememberStanding(request, data.to || data.thread).catch(() => {});
     if (r.pending) {
       return { success: true, result: `It's on your phone (${r.device}) for you to confirm. Tap Send there; I'll tell you when it's done.` };
     }
     const done = this.outcomeText(r.result, scheduled);
     const withMedia = attachments ? ` with ${attachments.length === 1 ? 'a picture' : `${attachments.length} pictures`}` : '';
     return { success: true, result: done === 'Sent.' && data.to ? `Sent to ${data.to}${withMedia}: "${text}"` : done };
+  }
+
+  /**
+   * "Tell Wayne the first step is signing up at openrouter.ai … walk him through it one step at a
+   * time" is one text and a standing job. Only the text happened: when Wayne answered, the
+   * auto-reply had no idea it was coaching him (2026-10-21). The standing part is kept as a note
+   * on that person, which the auto-reply reads (hub.ownerNotesFor).
+   */
+  async rememberStanding(request, who) {
+    const pm = this.agent?.providerManager;
+    const mm = this.agent?.memoryManager;
+    const name = String(who || '').trim();
+    if (!request || request.length < 40 || !name || numberish(name) || !pm?.generateResponse || !mm?.store) return;
+    const res = await pm.generateResponse(
+      `${process.env.OWNER_NAME || 'The owner'} asked you to text ${name}: "${request.slice(0, 1500)}"\n\n` +
+      `Besides this one text, does the request tell you how to keep handling ${name} from now on: an ongoing job ` +
+      '(walk them through something, keep helping, follow up), its goal, or how to treat them? If so, write it as ONE ' +
+      `note that starts with "${name}:" and says the job, its goal and where it stands now (what this text covered). ` +
+      'Otherwise answer exactly NONE.', { maxTokens: 200, temperature: 0 });
+    const note = String(res?.content || '').trim().replace(/^["']|["']$/g, '');
+    if (!note || /^NONE\b/i.test(note) || !note.toLowerCase().includes(name.toLowerCase().split(/\s+/)[0])) return;
+    await mm.store('knowledge', note.slice(0, 500), { source: 'textx-owner-request', contact: name, isPermanent: false });
+    this.logger.info(`textx: kept the standing instruction for ${name}: "${note.slice(0, 160)}"`);
   }
 
   outcomeText(res, scheduled) {

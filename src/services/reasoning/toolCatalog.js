@@ -267,6 +267,9 @@ export async function executeTool(agent, tool, command, params = {}, context = n
     if ((tool === 'http' || tool === 'cryptotools') && context?.trellis?.peer) channel._peer = context.trellis.peer;
     // A follow-up is scheduled for the conversation it was promised in.
     if (tool === 'followup' && context) channel._context = { trellis: context.trellis || null, userId: context.userId || null, interface: context.interface || null };
+    // A text sent for the owner follows their request (style, standing instructions for that
+    // person). Without it a reasoning-run send saw an empty request (2026-10-21).
+    if (tool === 'textx' && context) channel._context = { originalInput: context.originalInput || '', userId: context.userId || null, threadId: context.threadId || null };
     const result = await agent.apiManager.executeAPI(tool, 'execute', { ...(params || {}), ...channel, action: command });
     if (result?.success === false) {
       const hint = elsewhereHint(tools, tool, command);

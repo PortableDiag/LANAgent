@@ -50,6 +50,7 @@ conversations you shared with it.
 | "text Mom I'm running late" | `send_sms`. **The phone shows the text and you tap Send**, every time |
 | "schedule a text to Dad for 9am tomorrow" | `schedule_message`, confirmed the same way |
 | "any unread texts?", "catch me up on the family chat" | `list_threads`, `read_thread`. A question about a conversation ("did Wayne get Orbit's text?") gets an answer from it; "read me the Wayne thread" gets the messages |
+| "tell Wayne step one, and walk him through the rest one step at a time" | The text goes out, and the standing job is kept as a note on Wayne that the auto-reply follows when he answers |
 | "ok ask him", "text her back" | Who and what come from the conversation you just had with the agent; it writes the text itself when you only said whom to ask |
 | "find the text with the gate code" | `search_messages` |
 | "what's Sam's number" | `contacts_lookup`. Names in "text Sam …" are also resolved through it. "show my saved contacts" lists what the agent kept |

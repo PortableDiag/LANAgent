@@ -2,6 +2,12 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.568] - 2026-10-21
+
+### Fixed
+- **A job you give ALICE for someone outlasts the first text.** "Tell Wayne the first step is signing up at openrouter.ai, and walk him through it one step at a time" sent the first step, but the rest of the job was not kept anywhere, so when Wayne answered, the auto-reply had no idea it was coaching him. ALICE now keeps the ongoing part as a note on that person, and the auto-reply follows it.
+- **Texts ALICE sends while working through a longer request know what you asked.** Before, a text sent partway through such a request saw an empty request: it could not tell whom "him" meant, and it never saw your wording.
+
 ## [2.25.567] - 2026-10-21
 
 ### Fixed

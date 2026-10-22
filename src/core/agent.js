@@ -943,6 +943,8 @@ export class Agent extends EventEmitter {
    */
   async _runReasoning(input, context) {
     if (!this.reasoningMode || this.reasoningMode === 'disabled') return null;
+    // Tools that act for the owner read the request itself (textx: the text's style, who "him" is).
+    context = { ...context, originalInput: context?.originalInput ?? input };
     let reasoningResult;
     if (this.reasoningMode === 'react' && this.reactAgent) {
       reasoningResult = await this.reactAgent.run(input, context);
