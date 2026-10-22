@@ -55,6 +55,29 @@ export async function resolveConfirmation({ generate, conversation, input }) {
 }
 
 /**
+ * An instruction that leans on the conversation: "ok ask him, please" right after the user asked
+ * whether Wayne got Orbit's text. Routed as it stands, the router saw no recipient but "him" and
+ * no message, and replied "What should the text say?" (2026-10-21). It is rewritten here into the
+ * request it means, every reference spelled out, before it runs.
+ * @returns {Promise<string|null>} a standalone instruction, or null when it cannot be resolved
+ */
+export async function resolveInstruction({ generate, conversation, input }) {
+  const prompt =
+    `The user just told the assistant "${String(input).slice(0, 300)}" in the conversation below. ` +
+    `It only makes sense with that conversation.\n` +
+    `Rewrite it as ONE standalone instruction the assistant can carry out with no other context: ` +
+    `replace every pronoun and reference (him, her, them, it, that, there, the same) with exactly ` +
+    `what it names, say who it goes to and what it should ask, say or do, taken from the conversation. ` +
+    `Add nothing the user did not ask for. Keep the user's voice ("text Wayne and ask him...").\n` +
+    `If the conversation does not say what it refers to, answer with exactly ${NO_ACTION}.\n\n` +
+    `Conversation:\n${conversation}\n\nInstruction:`;
+  const res = await generate(prompt, { maxTokens: 600, temperature: 0 });
+  const text = String(res?.content || res?.text || '').trim().replace(/^["'`]+|["'`]+$/g, '');
+  if (!text || text.startsWith(NO_ACTION)) return null;
+  return text;
+}
+
+/**
  * An instruction to work something out or make something, rather than to fetch or run one thing:
  * "come up with a test", "work together on…", "design / draft / plan …". Used only for messages
  * sent to several agents at once, where the one-shot router misreads them.

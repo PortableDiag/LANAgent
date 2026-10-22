@@ -46,7 +46,7 @@ import { promisify } from 'util';
 import { readFileSync, existsSync, mkdirSync, copyFileSync } from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { isActionConfirmation, resolveConfirmation, isDeferredRequest, isOpenEndedTask, refersToConversation } from './confirmationResolver.js';
+import { isActionConfirmation, resolveConfirmation, isDeferredRequest, isOpenEndedTask, refersToConversation, resolveInstruction } from './confirmationResolver.js';
 // What the follow-up chat answers when the message is an instruction to act, not conversation.
 const ACT_MARKER = 'ACT_ON_IT';
 import { BackgroundReview } from '../services/skills/backgroundReview.js';
@@ -997,6 +997,22 @@ export class Agent extends EventEmitter {
       turns.map(t => `${t.role === 'user' ? 'User' : 'You'}: ${String(t.content).slice(0, 700)}`).join('\n') + '\n';
   }
 
+  /** A short instruction rewritten from the recent chat into the standalone request it means. */
+  async _resolveFollowUp(input, userBuffer) {
+    try {
+      const request = await resolveInstruction({
+        generate: (p, o) => this.providerManager.generateResponse(p, o),
+        conversation: userBuffer.slice(-6).map(m => `${m.role === 'user' ? 'User' : 'You'}: ${String(m.content).slice(0, 2000)}`).join('\n'),
+        input
+      });
+      if (request) logger.info(`Follow-up instruction resolved to: "${request.slice(0, 200)}"`);
+      return request;
+    } catch (err) {
+      logger.warn(`Could not resolve the follow-up instruction: ${err.message}`);
+      return null;
+    }
+  }
+
   async processNaturalLanguage(input, context = {}, systemPrompt = null) {
     // Anyone who is not the operator gets a model reply and nothing else: this router runs
     // plugins, and the guest path's restrictions used to be ignored here.
@@ -1127,7 +1143,7 @@ export class Agent extends EventEmitter {
         }
       }
 
-      if (this.providerManager && userBuffer.length >= 2) {
+      if (this.providerManager && userBuffer.length >= 2 && !context.resolvedConfirmation) {
         try {
           const isShort = input.trim().split(/\s+/).length <= 10;
           const hasFollowUpSignals = /\b(that|it|this|those|these|what|why|how|really|huh|wtf|hmm|ok|yes|no|yeah|nah|sure|exactly|right|is it|was it|did it|can you|could you|about|more|else|also|too|again|same)\b/i.test(input);
@@ -1141,6 +1157,13 @@ export class Agent extends EventEmitter {
           // tool. Answered here from the chat alone, it was invented (2026-10-20).
           const asksForData = /\b(?:latest|newest|most recent|recent|last|new|unread)\b[^?.!]*\b(?:messages?|texts?|sms|emails?|mail|replies|notifications?|files?|logs?|events?)\b|\b(?:messages?|texts?|emails?)\b[^?.!]*\b(?:from|in|with)\b/i.test(input);
           let looksLikeFollowUp = isShort && (hasFollowUpSignals || isQuestion || weAsked) && noStrongIntent && !asksForData;
+
+          // "Text him back", "send her that", "ask him": a person known only from the chat. The
+          // router reads the message alone, so it would text "him". Spell the request out first.
+          if (isShort && /\b(?:him|her|them|he|she|his|their)\b/i.test(input)) {
+            const request = await this._resolveFollowUp(input, userBuffer);
+            if (request) return await this.processNaturalLanguage(request, { ...context, resolvedConfirmation: true }, systemPrompt);
+          }
 
           // Almost every short question passes the checks above, including real
           // commands ("how much free disk space is there?"), which were answered as
@@ -1196,6 +1219,10 @@ If answering needs information that is not in the conversation above (messages, 
                 });
                 if (rendered) return rendered;
               }
+              // The router sees only this message. "Ok ask him, please" reached it as a text to
+              // "him" with nothing to say (2026-10-21), so it gets the request it stands for.
+              const request = await this._resolveFollowUp(input, userBuffer);
+              if (request) return await this.processNaturalLanguage(request, { ...context, resolvedConfirmation: true }, systemPrompt);
             } else if (content && content.length > 5) {
               await this.memoryManager.storeConversation(userId, input, content, context);
               logger.info('Handled as conversational follow-up');

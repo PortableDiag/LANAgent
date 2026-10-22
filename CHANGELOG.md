@@ -2,6 +2,13 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.567] - 2026-10-21
+
+### Fixed
+- **"Ok, ask him" now uses the conversation.** A short follow-up such as "ask him" or "text her back" is rewritten from the last few messages into the full request ("text Wayne and ask whether he got Orbit's long text") before ALICE acts on it. Before, ALICE saw only "ask him", tried to text someone called "him", and asked what the text should say.
+- **ALICE writes the question itself when you only say who to ask.** If you name the person but not the words, ALICE writes the text from what you were just discussing, instead of asking what to say.
+- **Questions about a conversation get an answer.** "Check if Wayne got that text" now gets a sentence or two back ("it shows as sent at 16:20; no reply yet"). Before, ALICE pasted the last 20 messages, about 4,000 characters, and read them out by voice without answering. "Read me the Wayne thread" still shows the messages.
+
 ## [2.25.566] - 2026-10-21
 
 ### Fixed
