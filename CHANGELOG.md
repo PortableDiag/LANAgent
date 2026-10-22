@@ -2,6 +2,15 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.569] - 2026-10-21
+
+### Added
+- **Invitations by text get your answer, not ALICE's.** When someone in a shared conversation invites you somewhere ("BBQ Saturday at 6, you coming?"), ALICE never says yes or no on its own. You choose how it handles them with `TEXTX_INVITES`:
+  - `ask` (default): the sender hears "I'll pass it on". You get the invitation, what your calendar holds then, and "Want to go?".
+  - `pass_on`: the same, without the calendar check or the nudge, for people who usually don't go even when they're free.
+  - `decline`: ALICE politely declines for you.
+- **Buttons on Telegram.** Every invitation notice has buttons. Accept texts your yes in your usual style for that person and adds the event to your calendar with a reminder an hour before. Decline sends a polite no. Add to my calendar adds the event without replying.
+
 ## [2.25.568] - 2026-10-21
 
 ### Fixed

@@ -1866,6 +1866,19 @@ export class TelegramDashboard extends TelegramInterface {
         await ctx.reply(`❌ ${error.message}`);
       }
     });
+    // Accept / Decline / Add to calendar on a TextX invitation notice (services/textx/invitations.js).
+    this.bot.action(/^inv:([a-z0-9]+):(a|d|c)$/, async (ctx) => {
+      ctx.answerCbQuery().catch(() => {});
+      if (!ctx.isMaster) return;
+      await ctx.editMessageReplyMarkup(undefined).catch(() => {});
+      try {
+        const { getTextX } = await import('../../services/textx/index.js');
+        const { answer } = await import('../../services/textx/invitations.js');
+        await ctx.reply(await answer(this.agent, getTextX(this.agent).hub, ctx.match[1], ctx.match[2]));
+      } catch (error) {
+        await ctx.reply(`❌ ${error.message}`);
+      }
+    });
     this.bot.action(/^skill_(ok|no):(.+)$/, async (ctx) => {
       ctx.answerCbQuery().catch(() => {});
       if (!ctx.isMaster) return;

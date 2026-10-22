@@ -142,6 +142,20 @@ goes as text and the report says so ("as text: the voice reply failed: …"). Au
 still over. Needs ffmpeg on the agent's host.
 - The phone enforces the toggle and its own limits (TextX 0.3.13: one reply per incoming message within 15 minutes, 6 per conversation an hour); the agent can't widen them.
 
+**Invitations** ("BBQ at mine Saturday at 6, you coming?"): the agent never accepts or declines one on its
+own. `TEXTX_INVITES` sets what it does:
+
+| Mode | The sender gets (auto-reply on) | You get |
+|---|---|---|
+| `ask` (default) | "I'll pass it on" | The invitation, what your calendar holds then, "Want to go?" |
+| `pass_on` | "I'll pass it on" | The invitation only. Nothing is sent unless you tap a button (for people who usually don't go, free or not) |
+| `decline` | A polite no, no reason given | "I declined politely for you" |
+
+Every notice carries Telegram buttons: **Accept** (texts your yes, in your style for that person, and adds
+the event with a reminder an hour before), **Decline** (a polite no), **Add to my calendar**. Sends go
+to the phone like any other. With auto-reply off the sender gets nothing; you still get the notice.
+Buttons work until a restart or 14 days.
+
 ## Agent extensions (`x.*`)
 
 Beyond the shared protocol, a paired client can ask this agent for `x.status` (the dashboard's
