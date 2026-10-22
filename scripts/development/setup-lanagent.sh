@@ -9,7 +9,7 @@ echo "🚀 Setting up LAN Agent project..."
 
 # Configuration
 PROJECT_DIR="/path/to/lanagent"
-NODE_VERSION="20"  # LTS
+NODE_VERSION="24"  # LTS (Node 20 is end-of-life)
 ENV_TYPE="development"  # Will be 'production' on server
 
 # Colors for output

@@ -3,7 +3,7 @@ import { exec } from 'child_process';
 import { promisify } from 'util';
 import path from 'path';
 import fs from 'fs/promises';
-import simpleGit from 'simple-git';
+import { simpleGit } from 'simple-git';
 import { determineProjectForIssue, parseIssueDetails } from '../../utils/projectContext.js';
 import os from 'os';
 

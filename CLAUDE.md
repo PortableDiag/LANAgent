@@ -157,8 +157,8 @@ Key variables:
 
 ## Node.js Environment
 
-Requires Node.js 20+:
+Requires Node.js 24 (22.23.4+ also works; Node 20 is end-of-life):
 ```bash
 source ~/.nvm/nvm.sh
-nvm use 20
+nvm use 24
 ```

@@ -11,6 +11,7 @@ installResilientDns();
 import dotenv from 'dotenv';
 import { Agent } from './core/agent.js';
 import { logger } from './utils/logger.js';
+import { unpatchedNodeWarning } from './utils/nodeSecurity.js';
 
 // Load environment variables
 import path from 'path';
@@ -52,6 +53,8 @@ setupGlobalErrorHandlers();
 async function start() {
   try {
     logger.info('Starting LAN Agent...');
+    const nodeWarning = unpatchedNodeWarning();
+    if (nodeWarning) logger.warn(nodeWarning);
     
     const agent = new Agent();
     await agent.initialize();

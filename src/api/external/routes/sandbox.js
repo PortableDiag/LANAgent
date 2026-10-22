@@ -34,7 +34,7 @@ const LANGUAGE_CONFIG = {
     cmd: ['python3', '-']
   },
   node: {
-    image: 'node:20-alpine',
+    image: 'node:24.22.1-alpine',  // patched for the 2026-10-21 Node security release; pre-pulled on hosts
     cmd: ['node', '--input-type=module', '-e', '']  // placeholder, code via stdin
   },
   bash: {
@@ -74,7 +74,7 @@ const LANGUAGE_CONFIG = {
     needsExecTmpfs: true
   },
   typescript: {
-    image: 'node:20-alpine',
+    image: 'node:24.22.1-alpine',  // patched for the 2026-10-21 Node security release; pre-pulled on hosts
     cmd: ['sh', '-c', 'npx --yes tsx --eval "$(cat)"']
   },
   perl: {

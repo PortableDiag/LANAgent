@@ -21,7 +21,7 @@ if ($hasDocker) {
     Write-Host "    3. Run: docker compose up -d" -ForegroundColor Cyan
     Write-Host ""
     Write-Host "  Or run the interactive setup in Docker:" -ForegroundColor White
-    Write-Host "    docker run -it --rm -v ${PWD}:/app -w /app node:20-slim bash scripts/setup/install.sh --docker" -ForegroundColor Cyan
+    Write-Host "    docker run -it --rm -v ${PWD}:/app -w /app node:24-slim bash scripts/setup/install.sh --docker" -ForegroundColor Cyan
     Write-Host ""
 }
 elseif ($hasWSL) {

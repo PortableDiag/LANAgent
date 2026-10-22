@@ -1,6 +1,6 @@
 {
   "name": "lan-agent",
-  "version": "2.25.569",
+  "version": "2.25.570",
   "description": "AI-powered personal assistant agent for home server management",
   "type": "module",
   "main": "src/index.js",
@@ -30,8 +30,6 @@
     "@cobusgreyling/loop-audit": "^1.7.0",
     "@huggingface/inference": "^4.13.5",
     "@lancedb/lancedb": "^0.10.0",
-    "@langchain/community": "^0.0.38",
-    "@langchain/openai": "^0.0.28",
     "@modelcontextprotocol/sdk": "^1.0.0",
     "@sentry/node": "^7.99.0",
     "@whoisjson/whoisjson": "^1.0.4",
@@ -58,20 +56,20 @@
     "express": "^4.19.2",
     "express-rate-limit": "^7.2.0",
     "fluent-ffmpeg": "^2.1.2",
+    "form-data": "^4.0.6",
     "fuse.js": "^7.0.0",
     "grammy": "^1.21.1",
     "helmet": "^7.1.0",
     "ical.js": "^1.5.0",
     "imap": "^0.8.19",
-    "jsonld": "^8.3.2",
+    "jsonld": "^9.0.0",
     "jsonwebtoken": "^9.0.2",
     "jszip": "^3.10.1",
-    "langchain": "^0.1.30",
     "libphonenumber-js": "^1.11.0",
-    "llamaindex": "^0.1.8",
     "mailparser": "^3.9.1",
     "mammoth": "^1.11.0",
     "moment-timezone": "^0.5.45",
+    "mongodb": "^4.17.2",
     "mongoose": "^8.1.1",
     "mqtt": "^5.3.4",
     "multer": "^1.4.5-lts.1",
@@ -81,13 +79,12 @@
     "node-fetch": "^3.3.2",
     "node-shazam": "^1.2.7",
     "node-ssh": "^13.2.0",
-    "node-virustotal": "^3.0.0",
-    "nodemailer": "^7.0.11",
+    "nodemailer": "^10.2.0",
     "openai": "^4.28.4",
+    "p-queue": "^6.6.2",
     "pdf-lib": "^1.17.1",
     "pdf-parse": "^1.1.1",
     "playwright": "^1.59.1",
-    "pm2": "^5.3.1",
     "pptxgenjs": "^4.0.1",
     "puppeteer": "^22.15.0",
     "puppeteer-extra": "^3.3.6",
@@ -98,8 +95,8 @@
     "replicate": "^1.0.1",
     "rrule": "^2.8.1",
     "serialport": "^12.0.0",
-    "sharp": "^0.33.2",
-    "simple-git": "^3.30.0",
+    "sharp": "^0.35.5",
+    "simple-git": "^4.0.2",
     "socket.io": "^4.7.4",
     "ssh2": "^1.15.0",
     "systeminformation": "^5.22.0",
@@ -108,6 +105,7 @@
     "tough-cookie": "^4.1.3",
     "uuid": "^9.0.1",
     "winston": "^3.12.0",
+    "winston-transport": "^4.9.0",
     "ws": "^8.16.0",
     "xml2js": "^0.6.2"
   },
@@ -118,12 +116,20 @@
     "nodemon": "^3.1.0"
   },
   "engines": {
-    "node": ">=20.0.0"
+    "node": ">=22.23.4"
   },
   "optionalDependencies": {
     "bip39": "^3.1.0",
     "bitcoinjs-lib": "^6.1.0",
     "hdkey": "^2.1.0",
     "siwe": "^2.3.0"
+  },
+  "overrides": {
+    "tar": "^7.5.22",
+    "xmldom": "npm:@xmldom/xmldom@^0.9.12",
+    "utf7": {
+      "semver": "^5.7.2"
+    },
+    "basic-ftp": "^6.2.3"
   }
 }

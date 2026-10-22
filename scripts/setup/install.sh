@@ -296,18 +296,25 @@ if [ "$DOCKER_MODE" = "true" ]; then
             MISSING_DEPS+=("docker")
         fi
     fi
-    ok "Node.js 20, MongoDB 7 — handled by Docker"
+    ok "Node.js 24, MongoDB 7 — handled by Docker"
 else
 
 # Node.js
 if command -v node &>/dev/null; then
     NODE_VERSION=$(node -v 2>/dev/null)
     NODE_MAJOR=$(echo "$NODE_VERSION" | sed 's/v//' | cut -d. -f1)
-    if [ "$NODE_MAJOR" -ge 20 ]; then
-        ok "Node.js $NODE_VERSION"
-    else
-        fail "Node.js $NODE_VERSION (need v20+)"
+    # Node 20 is end-of-life. On a supported line, older than its 2026-10-21 security release
+    # (22.23.4 / 24.22.1 / 26.12.1) still runs, with a warning to upgrade.
+    NODE_MINOR=$(echo "$NODE_VERSION" | sed 's/v//' | cut -d. -f2)
+    NODE_PATCH=$(echo "$NODE_VERSION" | sed 's/v//' | cut -d. -f3)
+    case "$NODE_MAJOR" in 22) NODE_FLOOR="22 23 4" ;; 24) NODE_FLOOR="24 22 1" ;; 26) NODE_FLOOR="26 12 1" ;; *) NODE_FLOOR="" ;; esac
+    if [ "$NODE_MAJOR" -lt 22 ] || [ "$NODE_MAJOR" = 23 ] || [ "$NODE_MAJOR" = 25 ]; then
+        fail "Node.js $NODE_VERSION is end-of-life and unpatched (need v22.23.4+ or v24.22.1+)"
         MISSING_DEPS+=("nodejs")
+    elif [ -n "$NODE_FLOOR" ] && [ "$(printf '%03d%03d%03d' $NODE_MAJOR $NODE_MINOR $NODE_PATCH)" \< "$(printf '%03d%03d%03d' $NODE_FLOOR)" ]; then
+        warn "Node.js $NODE_VERSION predates the 2026-10-21 security release; upgrade to v$(echo $NODE_FLOOR | tr ' ' .) or newer"
+    else
+        ok "Node.js $NODE_VERSION"
     fi
 else
     fail "Node.js not found"
@@ -384,15 +391,15 @@ if [ ${#MISSING_DEPS[@]} -gt 0 ]; then
     if [ "$AUTO_INSTALL_DEPS" = "true" ]; then
         # Install Node.js via nvm
         if [[ "${MISSING_DEPS[*]}" =~ "nodejs" ]] || [[ "${MISSING_DEPS[*]}" =~ "npm" ]]; then
-            info "Installing Node.js 20 via nvm..."
+            info "Installing Node.js 24 via nvm..."
             export NVM_DIR="${HOME}/.nvm"
             if [ ! -s "$NVM_DIR/nvm.sh" ]; then
                 curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh 2>/dev/null | bash &>/dev/null
             fi
             [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
-            nvm install 20 &>/dev/null
-            nvm use 20 &>/dev/null
-            nvm alias default 20 &>/dev/null
+            nvm install 24 &>/dev/null
+            nvm use 24 &>/dev/null
+            nvm alias default 24 &>/dev/null
 
             if command -v node &>/dev/null; then
                 ok "Node.js $(node -v) installed"
@@ -552,7 +559,7 @@ EOF
         echo -e "  Install manually:"
         if [[ "${MISSING_DEPS[*]}" =~ "nodejs" ]]; then
             echo -e "    ${DIM}curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh | bash${NC}"
-            echo -e "    ${DIM}source ~/.nvm/nvm.sh && nvm install 20${NC}"
+            echo -e "    ${DIM}source ~/.nvm/nvm.sh && nvm install 24${NC}"
         fi
         if [[ "${MISSING_DEPS[*]}" =~ "git" ]]; then
             echo -e "    ${DIM}sudo apt install git${NC}"
@@ -1391,7 +1398,7 @@ else
         if [ -s "${HOME}/.nvm/nvm.sh" ]; then
             export NVM_DIR="${HOME}/.nvm"
             . "$NVM_DIR/nvm.sh"
-            nvm use 20 &>/dev/null 2>&1
+            nvm use 24 &>/dev/null 2>&1
         fi
 
         # Install PM2 globally for process management (uses nvm node if available)
@@ -1402,7 +1409,7 @@ else
             ok "PM2 already installed"
         fi
     else
-        warn "npm not available — install Node.js 20+ first, then run: npm install --legacy-peer-deps"
+        warn "npm not available — install Node.js 24 first, then run: npm install --legacy-peer-deps"
     fi
 
     # AI detector Python deps (torch + transformers ~250MB CPU-only). Installed
@@ -1563,12 +1570,12 @@ if [ "$DOCKER_MODE" != "true" ] && command -v pm2 &>/dev/null; then
     fi
     if [ "$START_PM2" = "true" ]; then
         echo ""
-        # Ensure nvm node 20 is active and set as default for PM2
+        # Ensure nvm node 24 is active and set as default for PM2
         export NVM_DIR="${HOME}/.nvm"
         if [ -s "$NVM_DIR/nvm.sh" ]; then
             . "$NVM_DIR/nvm.sh"
-            nvm use 20 &>/dev/null 2>&1
-            nvm alias default 20 &>/dev/null 2>&1
+            nvm use 24 &>/dev/null 2>&1
+            nvm alias default 24 &>/dev/null 2>&1
         fi
         cd "$PROJECT_ROOT"
         if pm2 start ecosystem.config.cjs 2>&1 | tail -5; then

@@ -178,7 +178,7 @@ cp .env.example .env          # then edit (AGENT_NAME, an AI key, MONGODB_URI)
 npm start                     # or: pm2 start ecosystem.config.cjs
 ```
 
-Requires **Node.js 20+** (`nvm use 20`).
+Requires **Node.js 24** (`nvm use 24`; 22.23.4+ also works). Node 20 is end-of-life and missed the 2026-10-21 security release.
 
 ## Usage
 

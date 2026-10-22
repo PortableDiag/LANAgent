@@ -1,6 +1,6 @@
 import { logger } from '../utils/logger.js';
 import { EventEmitter } from 'events';
-import simpleGit from 'simple-git';
+import { simpleGit } from 'simple-git';
 import path from 'path';
 import fs from 'fs/promises';
 import { execSync } from 'child_process';

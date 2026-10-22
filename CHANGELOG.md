@@ -2,6 +2,18 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.570] - 2026-10-21
+
+### Security
+- **Node.js 24.22.1, the October 21 security release.** It fixes TLS hostname checks, the Brotli decoder, keep-alive sockets and `dns`, and updates the bundled undici, OpenSSL and c-ares. `engines` now requires Node 22.23.4 or newer. Node 20 is end-of-life and got none of these fixes.
+- **New installs and containers get a patched Node.** The installer and dev setup install Node 24. The installer refuses Node 20, 23 or 25 and warns on an unpatched 22, 24 or 26. The Dockerfile builds on `node:24-slim`, and the code sandbox runs JavaScript and TypeScript in `node:24.22.1-alpine`.
+- **LANAgent warns at startup when it runs on an unpatched or end-of-life Node.js.** The message says which version to upgrade to.
+- **Dependency security updates: production `npm audit` findings drop from 102 to 26, and critical from 11 to 0.**
+  - Removed six packages that were never used (langchain, @langchain/community, @langchain/openai, llamaindex, node-virustotal, and pm2 as a library). The installer still installs pm2 globally.
+  - Upgraded nodemailer 7 → 10, jsonld 8 → 9 (which carries the undici fixes), sharp 0.33 → 0.35 and simple-git 3 → 4. simple-git 4 has no default export, so it is now imported by name.
+  - Overrides force fixed `tar` and `basic-ftp`, a fixed `semver` under `utf7`, and the maintained `@xmldom/xmldom` 0.9 in place of the abandoned `xmldom` that the CalDAV client uses.
+  - Declared four packages the code imports but never listed (`p-queue`, `form-data`, `mongodb`, `winston-transport`). `p-queue` had only been installed because langchain pulled it in, so image generation would have broken with langchain gone.
+
 ## [2.25.569] - 2026-10-21
 
 ### Added

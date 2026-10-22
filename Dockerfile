@@ -1,4 +1,4 @@
-FROM node:20-slim
+FROM node:24-slim
 
 # System dependencies for LANAgent
 # - ffmpeg: media transcoding plugin
