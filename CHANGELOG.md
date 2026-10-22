@@ -2,6 +2,12 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.571] - 2026-10-22
+
+### Fixed
+- **PDF links scrape again.** A PDF fetched on the plain-HTTP tier was decoded as text and parsed as HTML, and its binary nested so deep that reading the text failed with "Maximum call stack size exceeded". The scraper now spots a PDF by its content type or its `%PDF-` header and extracts its text, title and page count. The paid API returns that text with `contentType: "application/pdf"` and no `html` field, where it used to re-fetch the file and return binary as `html`. A PDF with no title is named after its file, so it is no longer sent to the browser tier, which only shows Chrome's PDF viewer.
+- **`deploy-check.sh` no longer reports the live app as a stray process** when PM2's `pm2.pid` file is missing. It finds the PM2 daemon in the process table instead.
+
 ## [2.25.570] - 2026-10-21
 
 ### Security

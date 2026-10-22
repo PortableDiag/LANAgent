@@ -1244,6 +1244,9 @@ async function executeScrape(req, { url, selectors, extractType = 'text', userAg
   // non-FlareSolverr result, which is how `html` and `text` could disagree.
   if (typeof result._rawHtml === 'string' && result._rawHtml.length > 0) {
     response._rawHtml = result._rawHtml;
+  } else if (result.contentType === 'application/pdf') {
+    // A PDF has no HTML; a re-fetch would put its binary in the html field.
+    response.contentType = result.contentType;
   } else {
     logger.info(`[ExternalScrape] No HTML from the ${result.method || 'unknown'} path for ${url} — falling back to a direct re-fetch (no cookies/VPN/bypass)`);
     try {

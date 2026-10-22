@@ -742,6 +742,7 @@ export default class ScraperPlugin extends BasePlugin {
     
     try {
       const html = await this._fetchHtml(url, headers, cacheKey, bodyCacheKey, options.publicOnly === true);
+      if (Buffer.isBuffer(html)) return await this._pdfResult(url, html);
 
       const $ = cheerio.load(html);
       
@@ -821,6 +822,36 @@ export default class ScraperPlugin extends BasePlugin {
     }
   }
 
+  // A PDF fetched on the plain-HTTP path, as the same result shape the HTML tiers
+  // return. The title is never empty: the paid route sends a result with no title
+  // to Puppeteer, which only shows Chrome's PDF viewer. contentType tells the
+  // route there is no HTML to re-fetch.
+  async _pdfResult(url, buffer) {
+    const pdfParse = (await import('pdf-parse')).default;
+    // A fresh copy: a small Buffer sits at an offset inside Node's shared pool,
+    // and the pdf.js in pdf-parse reads the whole underlying ArrayBuffer ("bad
+    // XRef entry" on any PDF under 4KB).
+    const data = await pdfParse(new Uint8Array(buffer));
+    const name = decodeURIComponent(new URL(url).pathname.split('/').pop() || '') || url;
+    return {
+      success: true,
+      url,
+      content: {
+        title: String(data.info?.Title || '').trim() || name,
+        description: String(data.info?.Subject || '').trim(),
+        ogImage: '',
+        text: String(data.text || '').replace(/\s+/g, ' ').trim(),
+        links: [],
+        images: [],
+        jsonld: [],
+        microdata: [],
+        pages: data.numpages
+      },
+      method: 'cheerio',
+      contentType: 'application/pdf'
+    };
+  }
+
   // Fetch a page body, honouring conditional requests: returns HTML from the
   // response, or on 304 the cached body those validators refer to.
   //
@@ -831,8 +862,17 @@ export default class ScraperPlugin extends BasePlugin {
   // all, so any re-scrape of an ETag-serving site threw outright.
   async _fetchHtml(url, headers, headerCacheKey, bodyCacheKey, publicOnly = false) {
     try {
-      const response = await (publicOnly ? this.publicAxiosInstance : this.axiosInstance).get(url, { headers });
-      const html = response.data;
+      // Bytes, not text: a PDF decoded as a string is lost, and parsed as HTML its
+      // binary nests deep enough that cheerio's .text() overflows the stack
+      // ("Maximum call stack size exceeded" on every PDF a paid caller sent).
+      // A PDF comes back as its Buffer; everything else is decoded exactly as
+      // axios's default text path did (UTF-8).
+      const response = await (publicOnly ? this.publicAxiosInstance : this.axiosInstance).get(url, { headers, responseType: 'arraybuffer' });
+      const body = Buffer.from(response.data);
+      if (/application\/pdf/i.test(response.headers['content-type'] || '') || body.subarray(0, 5).toString('latin1') === '%PDF-') {
+        return body;
+      }
+      const html = body.toString('utf8');
 
       const newHeaders = {};
       if (response.headers.etag) {
