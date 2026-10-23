@@ -774,7 +774,7 @@ export class TextXHub {
    * about it only when it needs them.
    */
   async onEvent(device, body) {
-    if (String(body.kind || '').startsWith('call.')) return isDialX(device) ? this.dialx.onEvent(device, body) : undefined;
+    if (/^(call|voicemail)\./.test(String(body.kind || ''))) return isDialX(device) ? this.dialx.onEvent(device, body) : undefined;
     if (body.message?.from?.name && body.message.from.number) await this.learnContacts([body.message.from], 'a text');
     if (body.kind === 'mention' && body.message) return this.onMention(device, body);
     if (body.kind !== 'incoming' || !body.message) return;

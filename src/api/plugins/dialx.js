@@ -2,7 +2,7 @@ import { BasePlugin } from '../core/basePlugin.js';
 import { nowInZone, resolveRequestTime, localZone } from '../../utils/wallClock.js';
 import { getTextX } from '../../services/textx/index.js';
 import { textxRequest } from '../../services/textx/textxHub.js';
-import { isoWithOffset, getDialXSettings, agentAudio } from '../../services/textx/dialx.js';
+import { isoWithOffset, getDialXSettings, agentAudio, clock } from '../../services/textx/dialx.js';
 
 /**
  * Phone calls through the DialX dialer app ("call Wayne and tell him happy birthday at 5pm").
@@ -19,7 +19,13 @@ const ERROR_TEXT = {
   rate_limited: 'DialX is rate-limiting calls from this agent (3 an hour, 10 a day). Try later.',
   busy_in_call: 'DialX is on a call right now. Try again when it ends.',
   timeout: "DialX didn't answer. The phone may be offline.",
-  expired: 'The request expired before DialX saw it. Ask again.'
+  expired: 'The request expired before DialX saw it. Ask again.',
+  not_owner: 'DialX only takes calls you ask for yourself.',
+  not_approved: "That contact isn't approved for me in DialX. Add them in DialX first.",
+  forbidden_number: "DialX won't let me call that number (emergency, short-code, premium or international numbers are never allowed).",
+  in_the_past: 'That time has already passed. When should I call?',
+  too_far_ahead: 'DialX schedules calls at most 30 days ahead.',
+  duplicate: 'That exact call is already waiting for you to approve on the phone.'
 };
 
 function errorResult(r) {
@@ -77,6 +83,30 @@ export default class DialXPlugin extends BasePlugin {
         examples: ['who can you call', 'which contacts are approved for calls']
       },
       {
+        command: 'voicemails',
+        description: 'List voicemails from DialX, with what each caller said (unreadOnly for new ones)',
+        usage: 'voicemails({ unreadOnly: true })',
+        examples: ['any new voicemails', 'do I have voicemail', 'list my voicemails']
+      },
+      {
+        command: 'voicemail',
+        description: 'Read one voicemail (the latest, or the one from a caller), optionally with its audio recording',
+        usage: 'voicemail({ from: "Wayne", audio: false })',
+        examples: ['read my latest voicemail', 'what did wayne say in his voicemail', 'send me the voicemail from mom', 'play the last voicemail']
+      },
+      {
+        command: 'markVoicemail',
+        description: 'Mark a voicemail read or unread, by caller or id',
+        usage: 'markVoicemail({ from: "Wayne", read: true })',
+        examples: ['mark wayne\'s voicemail as read', 'mark all voicemails read']
+      },
+      {
+        command: 'deleteVoicemail',
+        description: 'Delete a voicemail, by caller or id (the user confirms on the phone)',
+        usage: 'deleteVoicemail({ from: "spam caller" })',
+        examples: ['delete the voicemail from that spam number', 'delete wayne\'s voicemail']
+      },
+      {
         command: 'recents',
         description: 'Recent calls on the phone, from DialX',
         usage: 'recents()',
@@ -106,6 +136,10 @@ export default class DialXPlugin extends BasePlugin {
         case 'contacts': return await this.listing('dialx.list_approved_contacts', 'approved contacts', ['contacts']);
         case 'recents': return await this.listing('dialx.list_recents', 'recent calls', ['calls', 'recents']);
         case 'screened': return await this.listing('dialx.list_screened', 'screened calls', ['calls', 'screened']);
+        case 'voicemails': return await this.voicemails(data);
+        case 'voicemail': return await this.voicemail(data);
+        case 'markVoicemail': return await this.markVoicemail(data);
+        case 'deleteVoicemail': return await this.deleteVoicemail(data);
         default: return { success: false, error: `Unknown action: ${action}` };
       }
     } catch (error) {
@@ -148,7 +182,9 @@ export default class DialXPlugin extends BasePlugin {
     const pick = this.match(approved, who);
     if (pick.error) return { success: false, error: pick.error };
 
-    let at = new Date();
+    // No time = now: `at` is left out (DialX's "omitted: now"), so a few seconds in transit
+    // can never turn "call him now" into an in_the_past refusal.
+    let at = null;
     if (data.at) {
       const d = resolveRequestTime(data.at, request);
       if (!d) return { success: false, error: `I couldn't read the time "${data.at}". When should I call?` };
@@ -160,7 +196,7 @@ export default class DialXPlugin extends BasePlugin {
     const audio = await agentAudio(this.agent, device, line, settings, this.logger);
     const args = {
       ...(pick.contact.id != null ? { contact_id: pick.contact.id } : { number: pick.contact.number }),
-      at: isoWithOffset(at, localZone()),
+      ...(at ? { at: isoWithOffset(at, localZone()) } : {}),
       purpose: purpose || line,
       opening: line,
       ...(audio ? { opening_audio_b64: audio.audio_b64 } : {}),
@@ -223,6 +259,90 @@ export default class DialXPlugin extends BasePlugin {
       this.logger.warn(`dialx call: argument extraction failed: ${err.message}`);
     }
     delete data.needsParameterExtraction;
+  }
+
+  // ── voicemail (DialX 0.3.0) ─────────────────────────────────────────────────────────────
+  // A transcript is the caller's words: it is shown to the owner, never followed.
+
+  async listVoicemails(unreadOnly = false) {
+    const r = await this.tool('dialx.list_voicemails', { limit: 50, ...(unreadOnly ? { unread_only: true } : {}) });
+    if (!r.ok) return { error: r.error?.code === 'not_allowed' || r.error?.code === 'none'
+      ? 'Voicemail is off for me in DialX. Turn on "Read voicemail" for this agent in DialX.' : errorResult(r).error };
+    return { list: listOf(r.result, 'voicemails') };
+  }
+
+  vmLine(v) {
+    const who = v.name || v.number || 'unknown number';
+    const words = String(v.transcript || '').trim();
+    return `${v.read ? '' : '🆕 '}${who} (${when(v.at)}, ${clock(v.duration_s)}): ${words ? `"${words.slice(0, 400)}"` : '(no transcript)'}`;
+  }
+
+  /** The voicemail meant: by id, by caller, or the latest. */
+  async findVoicemail(data) {
+    const got = await this.listVoicemails();
+    if (got.error) return got;
+    const id = data.voicemail_id || data.id;
+    const from = String(data.from || data.caller || data.name || data.contact || '').toLowerCase().trim();
+    const list = [...got.list].sort((a, b) => new Date(b.at) - new Date(a.at));
+    const hits = id ? list.filter(v => String(v.voicemail_id) === String(id))
+      : from && !/^(the )?(latest|last|newest|most recent)$/.test(from)
+        ? list.filter(v => `${v.name || ''} ${v.number || ''}`.toLowerCase().includes(from) || String(v.number || '').replace(/\D/g, '').endsWith(from.replace(/\D/g, '') || '#'))
+        : list.slice(0, 1);
+    if (!hits.length) return { error: from ? `No voicemail from ${from}.` : 'No voicemails.' };
+    return { vm: hits[0], more: hits.length - 1 };
+  }
+
+  async voicemails(data) {
+    const got = await this.listVoicemails(!!(data.unreadOnly || data.unread_only));
+    if (got.error) return { success: false, error: got.error };
+    if (!got.list.length) return { success: true, result: data.unreadOnly || data.unread_only ? 'No new voicemails.' : 'No voicemails.' };
+    return { success: true, result: `Voicemails:\n${got.list.slice(0, 20).map(v => `- ${this.vmLine(v)}`).join('\n')}`, data: got.list };
+  }
+
+  async voicemail(data) {
+    const f = await this.findVoicemail(data);
+    if (f.error) return { success: false, error: f.error };
+    const text = this.vmLine(f.vm) + (f.more ? `\n(${f.more} more from them; ask for the list to see all.)` : '');
+    const request = String(data._context?.originalInput || '');
+    const wantsAudio = data.audio === true || /\b(play|send|audio|recording|listen|hear)\b/i.test(request);
+    if (!wantsAudio) return { success: true, result: text };
+    const a = await this.tool('dialx.get_voicemail_audio', { voicemail_id: f.vm.voicemail_id });
+    if (!a.ok || !a.result?.audio_b64) {
+      const off = a.error?.code === 'not_allowed';
+      return { success: true, result: `${text}\n\n${off ? 'The recording is off for me: turn on "Listen to voicemail audio" in DialX.' : `I couldn't get the recording: ${errorResult(a).error}`}` };
+    }
+    const audio = Buffer.from(a.result.audio_b64, 'base64');
+    const ext = audio.subarray(0, 4).toString('latin1') === 'RIFF' ? 'wav' : audio.subarray(0, 3).toString('latin1') === 'ID3' || audio[0] === 0xff ? 'mp3' : 'amr';
+    return { success: true, result: text, audio, format: 'buffer', mimetype: ext === 'wav' ? 'audio/wav' : ext === 'mp3' ? 'audio/mpeg' : 'audio/amr',
+      filename: `voicemail-${String(f.vm.name || f.vm.number || 'caller').replace(/[^\w-]+/g, '_')}.${ext}`, caption: text.slice(0, 1000), title: `Voicemail from ${f.vm.name || f.vm.number || 'caller'}` };
+  }
+
+  async markVoicemail(data) {
+    if (!this.fromOwner(data)) return { success: false, error: 'Only my owner can change voicemail.' };
+    const read = data.read !== false;
+    if (/\ball\b/i.test(String(data.from || data._context?.originalInput || ''))) {
+      const got = await this.listVoicemails(read);
+      if (got.error) return { success: false, error: got.error };
+      for (const v of got.list) await this.tool('dialx.mark_voicemail_read', { voicemail_id: v.voicemail_id, read });
+      return { success: true, result: `Marked ${got.list.length} voicemail(s) ${read ? 'read' : 'unread'}.` };
+    }
+    const f = await this.findVoicemail(data);
+    if (f.error) return { success: false, error: f.error };
+    const r = await this.tool('dialx.mark_voicemail_read', { voicemail_id: f.vm.voicemail_id, read });
+    if (!r.ok) return errorResult(r);
+    return { success: true, result: `Marked the voicemail from ${f.vm.name || f.vm.number} ${read ? 'read' : 'unread'}.` };
+  }
+
+  async deleteVoicemail(data) {
+    if (!this.fromOwner(data)) return { success: false, error: 'Only my owner can delete voicemail.' };
+    const f = await this.findVoicemail(data);
+    if (f.error) return { success: false, error: f.error };
+    const who = f.vm.name || f.vm.number || 'that caller';
+    const r = await this.tool('dialx.delete_voicemail', { voicemail_id: f.vm.voicemail_id },
+      { onLate: (late) => this.agent.notify?.(late.ok && late.result?.status === 'deleted' ? `🗑️ Voicemail from ${who} deleted.` : `Voicemail from ${who} was not deleted.`) });
+    if (!r.ok) return errorResult(r);
+    if (r.pending) return { success: true, result: `Confirm on the phone to delete the voicemail from ${who}. I'll tell you when it's gone.` };
+    return { success: true, result: r.result?.status === 'deleted' ? `Deleted the voicemail from ${who}.` : `DialX answered "${r.result?.status}"; it was not deleted.` };
   }
 
   async cancel(data) {

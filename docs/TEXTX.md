@@ -174,6 +174,13 @@ the code in DialX (DialX › Settings › Agents › Scan QR). That code uses th
 - **Limits are DialX's:** 08:00–21:00 in the owner's time, 3 calls an hour and 10 a day, 5 minutes a call, the
   owner's mic muted with a Take over button. A deploy waits while a call is live (`dialx_calls` with no `endedAt`).
 - "Call X" is read as a phone call only while a DialX phone is paired. Until then it means what it did before.
+- **Voicemail** (DialX 0.3.0, v2.25.575), behind DialX's own switches for this agent:
+  - With **Read voicemail** on, every new voicemail (`event {kind: "voicemail.new"}`) reaches the owner with the
+    caller, the length and the transcript. The transcript is never given to a model or acted on.
+  - The owner can ask "any new voicemails", "what did Wayne say in his voicemail", "mark Wayne's voicemail read" or
+    "delete the voicemail from that spam number". Each delete is confirmed on the phone.
+  - **Listen to voicemail audio** is a separate switch. With it on, "send me the voicemail from Mom" returns the
+    recording as an audio file.
 
 **Invitations** ("BBQ at mine Saturday at 6, you coming?"): the agent never accepts or declines one on its
 own. `TEXTX_INVITES` sets what it does:

@@ -19,9 +19,25 @@ import { PluginSettings } from '../../models/PluginSettings.js';
 
 export const DIALX_TOOLS = ['dialx.say', 'dialx.hangup', 'dialx.list_approved_contacts', 'dialx.schedule_call',
   'dialx.list_scheduled_calls', 'dialx.cancel_scheduled_call', 'dialx.list_recents', 'dialx.list_screened',
-  'dialx.contacts_lookup'];
-/** Scheduling waits on the owner's tap on the phone's confirm card, like a send. */
-export const DIALX_CONFIRMED = new Set(['dialx.schedule_call']);
+  'dialx.contacts_lookup',
+  // DialX 0.3.0: voicemail ("Read voicemail" and, separately, "Listen to voicemail audio" in DialX)
+  'dialx.list_voicemails', 'dialx.mark_voicemail_read', 'dialx.delete_voicemail', 'dialx.get_voicemail_audio'];
+/** These wait on the owner's tap on the phone's confirm card, like a send. */
+export const DIALX_CONFIRMED = new Set(['dialx.schedule_call', 'dialx.delete_voicemail']);
+
+/** call.ended reasons (DialX protocol doc), in words for the owner. */
+const END_REASONS = {
+  callee_hung_up: 'they hung up', agent_hung_up: 'I hung up', agent_silent: 'I went quiet too long',
+  time_limit: 'it hit the 5-minute limit', owner_took_over: 'you took over', owner_ended: 'you ended it',
+  no_answer: 'no answer', not_placed: "it wasn't placed", voice_path_failed: "the phone couldn't connect my voice to the call",
+  skipped: 'it was skipped'
+};
+
+/** "0:23" */
+export function clock(secs) {
+  const s = Math.max(0, Math.round(Number(secs) || 0));
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+}
 /** Advertised in welcome.capabilities: without it DialX never starts a session with this agent. */
 export const CALL_SESSION = 'call_session';
 const MAX_TURNS = 40;
@@ -200,11 +216,26 @@ export class DialXCalls {
   }
 
   async onEvent(device, body) {
+    if (body.kind === 'voicemail.new') return this.onVoicemail(device, body);
     const id = String(body.call_id || '');
     if (!id) return;
     if (body.kind === 'call.started') return this.started(device, id, body);
     if (body.kind === 'call.heard') return this.heard(device, id, body);
     if (body.kind === 'call.ended') return this.ended(device, id, body);
+  }
+
+  /**
+   * A new voicemail (DialX 0.3.0, sent only with "Read voicemail" on). The transcript is the
+   * caller's words: it goes to the owner as they said it, and nothing else is done with it.
+   */
+  async onVoicemail(device, body) {
+    const who = body.name || body.number || 'an unknown number';
+    const len = body.duration_s ? ` (${clock(body.duration_s)})` : '';
+    const words = String(body.transcript || '').trim();
+    this.logger.info?.(`DialX: new voicemail from ${who}${len}`);
+    await this.hub.tellOwner(device, `📞 New voicemail from ${who}${body.name && body.number ? ` (${body.number})` : ''}${len}:\n` +
+      (words ? `"${words.slice(0, 1500)}"` : '(no transcript; ask me to fetch the audio if Listen to voicemail audio is on in DialX)'), null)
+      .catch(e => this.logger.warn?.(`DialX: voicemail notice not sent: ${e.message}`));
   }
 
   session(device, id, body = {}) {
@@ -322,8 +353,9 @@ export class DialXCalls {
     const { name } = this.names();
     const who = (role) => role === 'callee' ? s.contact : role === 'agent' ? name : role;
     const shown = transcript.filter(l => l.role !== 'filler').map(l => `${who(l.role)}: ${l.text}`).join('\n').slice(0, 3000);
-    const length = secs ? ` (${Math.floor(secs / 60)}:${String(Math.round(secs % 60)).padStart(2, '0')})` : '';
-    await this.hub.tellOwner(device, `📞 Call with ${s.contact} ended${length}${body.reason ? `: ${body.reason}` : ''}.\n${shown || '(nothing was said)'}`, null)
+    const length = secs ? ` (${clock(secs)})` : '';
+    const reason = body.reason ? `: ${END_REASONS[body.reason] || body.reason}${body.detail ? ` (${body.detail})` : ''}` : '';
+    await this.hub.tellOwner(device, `📞 Call with ${s.contact} ended${length}${reason}.\n${shown || '(nothing was said)'}`, null)
       .catch(e => this.logger.warn?.(`DialX: call report not sent: ${e.message}`));
   }
 

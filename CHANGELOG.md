@@ -2,6 +2,18 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.575] - 2026-10-23
+
+### Added
+- **Voicemail through DialX.** With "Read voicemail" on for ALICE in DialX:
+  - Each new voicemail reaches you with who called, how long it was and what they said. ALICE never acts on what the caller said.
+  - Ask "any new voicemails", "what did Wayne say in his voicemail", "mark all voicemails read" or "delete the voicemail from that spam number". You confirm each delete on the phone.
+  - With "Listen to voicemail audio" also on, "send me the voicemail from Mom" sends you the recording.
+
+### Fixed
+- **"Call Mom now" can't be refused as already past.** With no time given, ALICE now lets DialX call right away, instead of sending the current time, which could arrive a few seconds late.
+- **DialX's refusals and call endings read as plain sentences:** for example "DialX won't let me call that number" or "the call ended: you took over".
+
 ## [2.25.574] - 2026-10-23
 
 ### Fixed
