@@ -2,7 +2,7 @@ import path from 'path';
 import QRCode from 'qrcode';
 import { WebSocketServer } from 'ws';
 import { TextXHub } from './textxHub.js';
-import { mongoCallStore } from './dialx.js';
+import { mongoCallStore, isDialX } from './dialx.js';
 import { mongoStore } from './textxStore.js';
 import { createTransport } from './textxTransport.js';
 import { TextXRelayClient, DEFAULT_RELAY_URL } from './textxRelayClient.js';
@@ -69,7 +69,7 @@ export function getTextX(agent) {
   async function pair(name, { requestOrigin, app } = {}) {
     const { kid, key } = newPairing();
     const base = await pairingBase(requestOrigin);
-    const device = await store.createDevice({ name: String(name || 'Phone').slice(0, 60), kid, key, base });
+    const device = await store.createDevice({ name: String(name || (app === 'dialx' ? 'DialX' : 'Phone')).slice(0, 60), kid, key, base, ...(app === 'dialx' ? { app } : {}) });
     await ensureRelay();
     const uri = app === 'dialx' ? pairingUri(base, kid, key).replace(/^textx-agent:/, 'dialx-agent:') : pairingUri(base, kid, key);
     logger.info(`TextX: new pairing "${device.name}" (${kid.slice(0, 6)}…) via ${base}`);
@@ -79,6 +79,8 @@ export function getTextX(agent) {
   const publicDevice = (d) => ({
     id: d.id, name: d.name, kid: `${d.kid.slice(0, 6)}…`, base: d.base, bound: !!d.deviceId, boundAt: d.boundAt,
     lastSeenAt: d.lastSeenAt, appVersion: d.appVersion, client: d.client || null, tools: d.capabilities || [], notify: !!d.notify,
+    // Which dashboard section lists it: DialX pairings under Phone calls, everything else under TextX.
+    app: isDialX(d) ? 'dialx' : 'textx',
     connected: hub.isConnected(d.id), revoked: !!d.revokedAt,
     watches: (d.watches || []).filter(w => new Date(w.until) > new Date()).map(w => ({ thread: w.title || w.threadId, purpose: w.purpose, until: w.until }))
   });

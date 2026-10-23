@@ -1322,22 +1322,21 @@
                         </div>
 
                         <div class="settings-section" id="textx-section">
-                            <h3><i class="fas fa-comment-sms"></i> TextX (texting app)</h3>
-                            <p class="setting-description">Use this agent as a conversation in the TextX SMS app on your phone. It works from anywhere: the phone reaches this agent through the api.lanagent.net relay, which only ever sees encrypted data. In TextX you choose what the agent may do (send texts, read the conversations you share); every text it sends needs your tap on the phone.</p>
+                            <h3><i class="fas fa-comment-sms"></i> TextX — texting app</h3>
+                            <p class="setting-description">Use this agent as a conversation in the TextX SMS app on your phone (the LANAgent Android app pairs here too). It works from anywhere: the phone reaches this agent through the api.lanagent.net relay, which only ever sees encrypted data. In TextX you choose what the agent may do (send texts, read the conversations you share); every text it sends needs your tap on the phone. <strong>For phone calls, use the DialX section below, not this one.</strong></p>
                             <div class="setting-item">
-                                <label>Paired phones:</label>
+                                <label>Paired TextX phones:</label>
                                 <ul id="textx-devices" class="tg-peer-list"></ul>
                                 <p class="setting-description" id="textx-relay-status"></p>
                             </div>
                             <div class="setting-item">
                                 <div style="display:flex;gap:8px;flex-wrap:wrap;">
                                     <input type="text" id="textx-pair-name" placeholder="Phone name, e.g. Pixel" style="flex:1;min-width:160px;">
-                                    <button class="btn btn-primary" onclick="dashboard.pairTextX()"><i class="fas fa-qrcode"></i> Pair a phone</button>
-                                    <button class="btn btn-secondary" onclick="dashboard.pairTextX('dialx')"><i class="fas fa-phone"></i> Pair DialX (calls)</button>
+                                    <button class="btn btn-primary" onclick="dashboard.pairTextX()"><i class="fas fa-comment-sms"></i> Pair TextX</button>
                                 </div>
                                 <div id="textx-pair-result" style="display:none;margin-top:12px;">
-                                    <p class="setting-description">On another phone, in TextX: Settings › Assistants › Add › Agent › Scan QR. On this phone, use Open in TextX (or Menu › Use in TextX in the LANAgent app). This code is shown once; anyone who scans it can talk to this agent as you, so don't share it.</p>
-                                    <img id="textx-pair-qr" alt="Pairing QR code" style="background:#fff;padding:8px;border-radius:8px;max-width:260px;width:100%;">
+                                    <p class="setting-description"><strong>TextX pairing code.</strong> On another phone, in TextX: Settings › Assistants › Add › Agent › Scan QR. On this phone, use Open in TextX (or Menu › Use in TextX in the LANAgent app). This code is shown once; anyone who scans it can talk to this agent as you, so don't share it.</p>
+                                    <img id="textx-pair-qr" alt="TextX pairing QR code" style="background:#fff;padding:8px;border-radius:8px;max-width:260px;width:100%;">
                                     <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap;">
                                         <a id="textx-pair-open" class="btn btn-primary btn-sm" href="#"><i class="fas fa-mobile-screen"></i> Open in TextX on this phone</a>
                                         <button class="btn btn-secondary btn-sm" onclick="dashboard.copyTextXPairing()"><i class="fas fa-copy"></i> Copy pairing text</button>
@@ -1345,8 +1344,30 @@
                                     </div>
                                 </div>
                             </div>
+                        </div>
+
+                        <div class="settings-section" id="dialx-section">
+                            <h3><i class="fas fa-phone"></i> DialX — phone calls</h3>
+                            <p class="setting-description">Let this agent place phone calls from your phone through the DialX dialer app ("call Wayne and tell him happy birthday at 5pm"), and read your voicemail. DialX decides who may be called (only contacts you approve there for this agent) and you approve every call on the phone. <strong>This is a separate pairing from TextX: pair DialX here, not with the TextX button above.</strong></p>
                             <div class="setting-item">
-                                <label for="dialx-voice">Phone calls (DialX) — voice on calls:</label>
+                                <label>Paired DialX phones:</label>
+                                <ul id="dialx-devices" class="tg-peer-list"></ul>
+                            </div>
+                            <div class="setting-item">
+                                <div style="display:flex;gap:8px;flex-wrap:wrap;">
+                                    <input type="text" id="dialx-pair-name" placeholder="Name, e.g. DialX on OnePlus" style="flex:1;min-width:160px;">
+                                    <button class="btn btn-primary" onclick="dashboard.pairDialX()"><i class="fas fa-phone"></i> Pair DialX</button>
+                                </div>
+                                <div id="dialx-pair-result" style="display:none;margin-top:12px;">
+                                    <p class="setting-description"><strong>DialX pairing code.</strong> Scan it from inside DialX: Settings › Agents › Scan QR. Don't open it with the phone's camera app or copy it into TextX; scanning inside DialX is what keeps it a DialX pairing. This code is shown once; don't share it.</p>
+                                    <img id="dialx-pair-qr" alt="DialX pairing QR code" style="background:#fff;padding:8px;border-radius:8px;max-width:260px;width:100%;">
+                                    <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap;">
+                                        <button class="btn btn-secondary btn-sm" onclick="dashboard.hideDialXPairing()">Done</button>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="setting-item">
+                                <label for="dialx-voice">Voice on calls:</label>
                                 <select id="dialx-voice">
                                     <option value="agent">This agent's own voice (falls back to the phone's voice)</option>
                                     <option value="phone">The phone's voice (fastest)</option>
@@ -1355,7 +1376,7 @@
                                 <select id="dialx-profile"></select>
                                 <label for="dialx-timeout" style="margin-top:8px;">Wait for the agent's voice at most (seconds):</label>
                                 <input type="number" id="dialx-timeout" min="1" max="15" step="0.5" style="width:90px;">
-                                <p class="setting-description">Pair DialX the same way as TextX (Pair a phone, then scan the code in DialX). With this agent's own voice, each line is sent as audio; if that voice fails, is slower than the wait above, or the phone can't play it, the line goes as text and the phone speaks it, so the call never stalls. A fast voice matters on a call: Ara takes about 1 s per sentence, Tara about 8 s.</p>
+                                <p class="setting-description">With this agent's own voice, each line is sent as audio; if that voice fails, is slower than the wait above, or the phone can't play it, the line goes as text and the phone speaks it, so the call never stalls. A fast voice matters on a call: Ara takes about 1 s per sentence, Tara about 8 s.</p>
                                 <button class="btn btn-primary" onclick="dashboard.saveDialX()"><i class="fas fa-save"></i> Save call settings</button>
                             </div>
                         </div>

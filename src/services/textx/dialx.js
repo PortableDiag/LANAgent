@@ -44,7 +44,7 @@ const MAX_TURNS = 40;
 
 /** A DialX pairing: its hello listed DialX tools, or it says it is DialX. */
 export function isDialX(device) {
-  return /dialx/i.test(String(device?.client || '')) || (device?.capabilities || []).some(t => DIALX_TOOLS.includes(t));
+  return device?.app === 'dialx' || /dialx/i.test(String(device?.client || '')) || (device?.capabilities || []).some(t => DIALX_TOOLS.includes(t));
 }
 
 // ── settings ────────────────────────────────────────────────────────────────────────────────

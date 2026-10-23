@@ -359,3 +359,13 @@ test('plugin call: no time means no `at` (DialX reads that as now)', async () =>
   await plugin.execute({ action: 'call', contact: 'Mom', purpose: 'check in', opening: 'Hi Mom!', _context: { originalInput: 'call mom now' } });
   assert.equal('at' in calls.find(c => c.name === 'dialx.schedule_call').args, false);
 });
+
+test('a pairing minted for DialX counts as DialX before its first hello (dashboard lists it under DialX)', async () => {
+  const r = rig();
+  const d = await r.store.createDevice({ name: 'DialX', kid: 'k1', key: 'x', base: 'https://relay.test/r/abc', app: 'dialx' });
+  const { isDialX } = await import('../../src/services/textx/dialx.js');
+  assert.equal(isDialX(d), true);
+  assert.ok(r.hub.welcomeBody(d).capabilities.includes(CALL_SESSION));
+  const t = await r.store.createDevice({ name: 'Phone', kid: 'k2', key: 'y', base: 'https://relay.test/r/abc' });
+  assert.equal(isDialX(t), false);
+});

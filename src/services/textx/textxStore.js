@@ -75,6 +75,7 @@ const deviceSchema = new mongoose.Schema({
   lastSeenAt: Date,
   appVersion: String,
   client: String,
+  app: String, // 'dialx' when the dashboard minted it for DialX; otherwise a TextX (or LANAgent app) pairing
   replyMode: String, // text | voice | both, the phone's per-agent choice (TextX 0.3.21)
   maxAttachmentBytes: Number, // the carrier MMS cap the phone reports in hello
   audioFormats: { type: [String], default: undefined }, // DialX: audio it plays into a call
@@ -126,8 +127,8 @@ export const TextXDevice = mongoose.models.TextXDevice || mongoose.model('TextXD
 export const TextXOutbox = mongoose.models.TextXOutbox || mongoose.model('TextXOutbox', outboxSchema);
 export const TextXInbox = mongoose.models.TextXInbox || mongoose.model('TextXInbox', inboxSchema);
 
-const PUBLIC_FIELDS = ['name', 'kid', 'base', 'deviceId', 'boundAt', 'lastSeenAt', 'appVersion', 'client', 'replyMode', 'maxAttachmentBytes',
-  'capabilities', 'notify', 'notifyLevel', 'watches', 'contactsSyncAt', 'revokedAt', 'createdAt'];
+const PUBLIC_FIELDS = ['name', 'kid', 'base', 'app', 'deviceId', 'boundAt', 'lastSeenAt', 'appVersion', 'client', 'replyMode', 'maxAttachmentBytes',
+  'audioFormats', 'maxAudioBytes', 'capabilities', 'notify', 'notifyLevel', 'watches', 'contactsSyncAt', 'revokedAt', 'createdAt'];
 
 function toDevice(doc) {
   if (!doc) return null;
@@ -145,8 +146,8 @@ export function mongoStore() {
     return cache;
   };
   return {
-    async createDevice({ name, kid, key, base }) {
-      const doc = await TextXDevice.create({ name, kid, keyEnc: encrypt(key), base });
+    async createDevice({ name, kid, key, base, app }) {
+      const doc = await TextXDevice.create({ name, kid, keyEnc: encrypt(key), base, ...(app ? { app } : {}) });
       const d = toDevice(doc.toObject());
       (await load()).set(d.id, d);
       return d;
@@ -251,8 +252,8 @@ export function memoryStore() {
   const contacts = new Map();
   let n = 0;
   return {
-    async createDevice({ name, kid, key, base }) {
-      const d = { id: String(++n), name, kid, key, base, capabilities: [], notify: false, watches: [], createdAt: new Date(), nextSeq: 0 };
+    async createDevice({ name, kid, key, base, app }) {
+      const d = { id: String(++n), name, kid, key, base, ...(app ? { app } : {}), capabilities: [], notify: false, watches: [], createdAt: new Date(), nextSeq: 0 };
       devices.set(d.id, d);
       return { ...d };
     },

@@ -2,6 +2,17 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.576] - 2026-10-23
+
+### Changed
+- **TextX and DialX each have their own section in Settings.** Before, both pair buttons sat side by side under TextX.
+  - **TextX — texting app:** lists your TextX phones and has a **Pair TextX** button.
+  - **DialX — phone calls:** lists your DialX pairings, has a **Pair DialX** button with its own scanning instructions, and holds the voice-on-calls settings.
+  - Each pairing remembers which app it was made for, so a DialX code shows under DialX even before the phone scans it.
+
+### Fixed
+- **DialX audio settings survive a restart.** The audio formats and size limit DialX reports were saved but not read back after a restart until the phone checked in again.
+
 ## [2.25.575] - 2026-10-23
 
 ### Added

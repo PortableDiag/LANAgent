@@ -6194,30 +6194,11 @@ class LANAgentDashboard {
             const r = await this.apiGet('/api/textx/status');
             if (!r.success) return;
             const { relay, devices } = r.data;
-            const list = document.getElementById('textx-devices');
-            list.innerHTML = '';
-            if (!devices.length) list.innerHTML = '<li class="setting-description">None yet.</li>';
-            for (const d of devices) {
-                const li = document.createElement('li');
-                const state = d.connected ? 'connected' : d.bound ? `last seen ${d.lastSeenAt ? new Date(d.lastSeenAt).toLocaleString() : 'never'}` : 'not scanned yet';
-                const tools = d.tools.length ? d.tools.join(', ') : 'chat only';
-                li.appendChild(document.createTextNode(`${d.name} — ${state}; allows ${tools} `));
-                const notify = document.createElement('label');
-                notify.style.marginRight = '8px';
-                const box = document.createElement('input');
-                box.type = 'checkbox';
-                box.checked = d.notify;
-                box.onchange = () => this.setTextXNotify(d.id, box.checked);
-                notify.appendChild(box);
-                notify.appendChild(document.createTextNode(' send my notifications here'));
-                li.appendChild(notify);
-                const b = document.createElement('button');
-                b.className = 'btn btn-sm btn-danger';
-                b.textContent = 'Revoke';
-                b.onclick = () => this.revokeTextX(d.id, d.name);
-                li.appendChild(b);
-                list.appendChild(li);
-            }
+            // Each pairing is listed in its own section: DialX (phone calls) or TextX (texting).
+            const textx = devices.filter(d => d.app !== 'dialx');
+            const dialx = devices.filter(d => d.app === 'dialx');
+            this.renderTextXDevices('textx-devices', textx, { notify: true });
+            this.renderTextXDevices('dialx-devices', dialx, { notify: false });
             document.getElementById('textx-relay-status').textContent = relay.enabled === false
                 ? 'Relay off (TEXTX_RELAY=off): phones reach this agent only on its own network or VPN.'
                 : relay.connected ? `Relay connected: ${relay.base}` : (devices.length ? 'Relay connecting…' : 'The relay link starts when you pair a phone.');
@@ -6226,47 +6207,40 @@ class LANAgentDashboard {
         }
     }
 
-    async loadDialX() {
-        try {
-            const r = await this.apiGet('/api/textx/dialx');
-            if (!r.success) return;
-            const { settings, profiles } = r.data;
-            document.getElementById('dialx-voice').value = settings.voice;
-            const sel = document.getElementById('dialx-profile');
-            sel.innerHTML = '';
-            const names = profiles.includes(settings.voiceProfile) ? profiles : [settings.voiceProfile, ...profiles];
-            for (const n of names) {
-                const o = document.createElement('option');
-                o.value = n;
-                o.textContent = profiles.includes(n) ? n : `${n} (not a saved voice: calls use the current voice)`;
-                sel.appendChild(o);
+    renderTextXDevices(listId, devices, { notify }) {
+        const list = document.getElementById(listId);
+        if (!list) return;
+        list.innerHTML = '';
+        if (!devices.length) list.innerHTML = '<li class="setting-description">None yet.</li>';
+        for (const d of devices) {
+            const li = document.createElement('li');
+            const state = d.connected ? 'connected' : d.bound ? `last seen ${d.lastSeenAt ? new Date(d.lastSeenAt).toLocaleString() : 'never'}` : 'not scanned yet';
+            const tools = d.tools.length ? d.tools.map(t => t.replace(/^dialx\./, '')).join(', ') : (notify ? 'chat only' : 'nothing yet (turn tools on in DialX)');
+            li.appendChild(document.createTextNode(`${d.name} — ${state}; allows ${tools} `));
+            if (notify) {
+                const label = document.createElement('label');
+                label.style.marginRight = '8px';
+                const box = document.createElement('input');
+                box.type = 'checkbox';
+                box.checked = d.notify;
+                box.onchange = () => this.setTextXNotify(d.id, box.checked);
+                label.appendChild(box);
+                label.appendChild(document.createTextNode(' send my notifications here'));
+                li.appendChild(label);
             }
-            sel.value = settings.voiceProfile;
-            document.getElementById('dialx-timeout').value = settings.ttsTimeoutMs / 1000;
-        } catch (error) {
-            console.error('Failed to load DialX settings:', error);
+            const b = document.createElement('button');
+            b.className = 'btn btn-sm btn-danger';
+            b.textContent = 'Revoke';
+            b.onclick = () => this.revokeTextX(d.id, d.name);
+            li.appendChild(b);
+            list.appendChild(li);
         }
     }
 
-    async saveDialX() {
+    async pairTextX() {
+        const name = document.getElementById('textx-pair-name').value.trim() || 'Phone';
         try {
-            const r = await this.apiPut('/api/textx/dialx', {
-                voice: document.getElementById('dialx-voice').value,
-                voiceProfile: document.getElementById('dialx-profile').value,
-                ttsTimeoutMs: Math.round(parseFloat(document.getElementById('dialx-timeout').value) * 1000)
-            });
-            this.showNotification(r.success ? 'Call settings saved' : `Not saved: ${r.error}`, r.success ? 'success' : 'error');
-            this.loadDialX();
-        } catch (error) {
-            this.showNotification(`Not saved: ${error.message}`, 'error');
-        }
-    }
-
-    async pairTextX(app) {
-        // DialX gets a dialx-agent: code: TextX claims textx-agent: links and would keep the pairing.
-        const name = document.getElementById('textx-pair-name').value.trim() || (app === 'dialx' ? 'DialX' : 'Phone');
-        try {
-            const r = await this.apiPost('/api/textx/pair', app === 'dialx' ? { name, app } : { name });
+            const r = await this.apiPost('/api/textx/pair', { name });
             if (!r.success) { this.showNotification(`Not paired: ${r.error}`, 'error'); return; }
             this._textxPairing = r.data.uri;
             document.getElementById('textx-pair-qr').src = r.data.qr;
@@ -6300,6 +6274,26 @@ class LANAgentDashboard {
         this.showNotification(ok ? 'Pairing text copied' : 'Copy failed; scan the QR or use Open in TextX', ok ? 'success' : 'error');
     }
 
+    // DialX gets a dialx-agent: code: TextX claims textx-agent: links and would keep the pairing.
+    async pairDialX() {
+        const name = document.getElementById('dialx-pair-name').value.trim() || 'DialX';
+        try {
+            const r = await this.apiPost('/api/textx/pair', { name, app: 'dialx' });
+            if (!r.success) { this.showNotification(`Not paired: ${r.error}`, 'error'); return; }
+            document.getElementById('dialx-pair-qr').src = r.data.qr;
+            document.getElementById('dialx-pair-result').style.display = '';
+            document.getElementById('dialx-pair-name').value = '';
+            this.loadTextX();
+        } catch (error) {
+            this.showNotification(`Not paired: ${error.message}`, 'error');
+        }
+    }
+
+    hideDialXPairing() {
+        document.getElementById('dialx-pair-qr').removeAttribute('src');
+        document.getElementById('dialx-pair-result').style.display = 'none';
+    }
+
     hideTextXPairing() {
         this._textxPairing = null;
         document.getElementById('textx-pair-qr').removeAttribute('src');
@@ -6317,7 +6311,7 @@ class LANAgentDashboard {
     }
 
     async revokeTextX(id, name) {
-        if (!confirm(`Revoke ${name}? TextX on that phone will no longer reach this agent.`)) return;
+        if (!confirm(`Revoke ${name}? That app on the phone will no longer reach this agent.`)) return;
         try {
             const r = await this.apiDelete(`/api/textx/devices/${encodeURIComponent(id)}`);
             this.showNotification(r.success ? `${name} revoked` : r.error, r.success ? 'success' : 'error');
