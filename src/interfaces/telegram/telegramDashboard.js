@@ -17,6 +17,7 @@ import { installAgentCommands } from './agentCommands.js';
 import { getAgentFeatures } from './agentFeatures.js';
 import { TelegramMediaGenerator } from '../../services/telegramMediaGenerator.js';
 import fs from 'fs/promises';
+import { describeImages, VISION_CAVEAT } from '../../utils/describeImages.js';
 
 export class TelegramDashboard extends TelegramInterface {
   constructor(agent) {
@@ -1253,8 +1254,12 @@ export class TelegramDashboard extends TelegramInterface {
           logger.info(`Telegram NL request from owner (with photo): "${caption}"`);
           const thinkingMsg = await ctx.reply('🤔 Processing photo...');
 
+          // The router and the chat model are text-only: without this the photo was never seen.
+          const [seen] = await describeImages(this.agent.providerManager, [{ name: 'photo', mime: 'image/jpeg', buffer }], caption);
+          const view = seen?.text ? `\n\n[What the photo shows, from the vision model:]\n${seen.text}\n\n${VISION_CAVEAT}`
+            : `\n\n[The photo could not be looked at: ${seen?.error || 'unknown error'}.]`;
           const result = await this.agent.processNaturalLanguage(
-            `${caption} [attached photo: ${photo.width}x${photo.height}]`,
+            `${caption} [attached photo: ${photo.width}x${photo.height}]${view}`,
             { userId: ctx.from.id.toString(), interface: 'telegram',
               attachedFile: this._lastReceivedFile }
           );

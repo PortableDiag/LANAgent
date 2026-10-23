@@ -142,6 +142,12 @@ goes as text and the report says so ("as text: the voice reply failed: …"). Au
 still over. Needs ffmpeg on the agent's host.
 - The phone enforces the toggle and its own limits (TextX 0.3.13: one reply per incoming message within 15 minutes, 6 per conversation an hour); the agent can't widen them.
 
+**Pictures the owner sends** (v2.25.572): every picture attached to a message in the agent's conversation
+goes to the vision model (up to 8). Its description reaches the router as untrusted data with a note that
+text read from a picture can be wrong. This covers TextX 0.4.27's long-press "Ask <agent> about this", which
+sends a picture as one still and a video or GIF as four. The first file also stays attached for the
+plugins, so "send this to Wayne" still forwards it. Telegram photos with a caption are looked at the same way.
+
 **Invitations** ("BBQ at mine Saturday at 6, you coming?"): the agent never accepts or declines one on its
 own. `TEXTX_INVITES` sets what it does:
 

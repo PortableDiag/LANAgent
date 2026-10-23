@@ -2,6 +2,12 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.572] - 2026-10-22
+
+### Fixed
+- **ALICE now looks at the pictures you send her.** A picture attached to a message used to reach the model only as "[The user attached photo.jpg]", so a question about a photo was answered without seeing it. Every attached picture (up to 8) now goes to the vision model first, and its description comes with your question. It is marked as data, not instructions, with a note that text read from a picture can be wrong. This applies to TextX and to Telegram photos with a caption.
+- **TextX: "Ask ALICE about this" works.** Long-pressing a picture or video in TextX 0.4.27 and later sends its stills to ALICE (one for a picture, four for a video or GIF). All of them are looked at. Before, only the first was kept, and the others were reported as unreadable.
+
 ## [2.25.571] - 2026-10-22
 
 ### Fixed

@@ -8,6 +8,7 @@ import { linkToContactBook, contactBookNumbers } from './textxContacts.js';
 import { BOOK } from './textxStore.js';
 import { resultText } from '../../interfaces/web/openaiCompat.js';
 import * as invites from './invitations.js';
+import { describeImages, isPicture, VISION_CAVEAT } from '../../utils/describeImages.js';
 
 /**
  * TextX Agent Protocol v1 — the agent side (spec: TextX repo docs/agent-protocol.md).
@@ -508,18 +509,30 @@ export class TextXHub {
     let input = String(b.text || '').slice(0, MAX_TEXT).trim();
     let attachedFile = null;
     const notes = [];
+    const pictures = [];
     for (const a of (Array.isArray(b.attachments) ? b.attachments : []).slice(0, 10)) {
       const data = a.data_b64 ? Buffer.from(a.data_b64, 'base64') : (a.url && this.readFile ? await this.readFile(device, a.url).catch(() => null) : null);
       const mime = String(a.mime || '');
-      if (data && (mime.startsWith('text/') || mime.includes('json')) && data.length <= INLINE_TEXT_ATTACHMENT) {
+      const name = a.name || 'attachment';
+      if (!data) {
+        notes.push(`[An attachment (${a.name || mime || 'file'}) could not be read.]`);
+      } else if ((mime.startsWith('text/') || mime.includes('json')) && data.length <= INLINE_TEXT_ATTACHMENT) {
         // "Send to <assistant>" copies an SMS here: someone else's words (§5 sharing).
         notes.push(untrusted(`SHARED ${a.name || 'message'}`, data.toString('utf8')));
-      } else if (data && !attachedFile) {
-        attachedFile = { filename: a.name || 'attachment', mimeType: mime || 'application/octet-stream', size: data.length, base64: data.toString('base64'), receivedAt: this.now() };
-        notes.push(`[The user attached ${a.name || 'a file'} (${mime || 'file'}).]`);
       } else {
-        notes.push(`[An attachment (${a.name || mime || 'file'}) could not be read.]`);
+        // The first file stays attached for the plugins (forward it, turn it into a GIF); every
+        // picture is also looked at. "Ask <agent> about this" (TextX 0.4.27) sends up to 8 stills.
+        if (!attachedFile) attachedFile = { filename: name, mimeType: mime || 'application/octet-stream', size: data.length, base64: data.toString('base64'), receivedAt: this.now() };
+        if (isPicture(mime, name)) pictures.push({ name, mime: mime || 'image/jpeg', buffer: data });
+        else notes.push(`[The user attached ${a.name || 'a file'} (${mime || 'file'}).]`);
       }
+    }
+    if (pictures.length) {
+      for (const d of await describeImages(this.agent.providerManager, pictures, input)) {
+        // A picture can carry text written by someone else: data, not instructions.
+        notes.push(d.text ? untrusted(`PICTURE ${d.name}`, d.text) : `[The user attached ${d.name}, which could not be looked at: ${d.error}.]`);
+      }
+      notes.push(VISION_CAVEAT);
     }
     if (notes.length) input = [input, ...notes].filter(Boolean).join('\n\n');
     if (!input) return;
