@@ -2,7 +2,7 @@
 
 All notable changes to LANAgent will be documented in this file.
 
-## [2.25.576] - 2026-10-23
+## [2.25.576] - 2026-10-22
 
 ### Changed
 - **TextX and DialX each have their own section in Settings.** Before, both pair buttons sat side by side under TextX.
@@ -13,7 +13,7 @@ All notable changes to LANAgent will be documented in this file.
 ### Fixed
 - **DialX audio settings survive a restart.** The audio formats and size limit DialX reports were saved but not read back after a restart until the phone checked in again.
 
-## [2.25.575] - 2026-10-23
+## [2.25.575] - 2026-10-22
 
 ### Added
 - **Voicemail through DialX.** With "Read voicemail" on for ALICE in DialX:
@@ -25,13 +25,13 @@ All notable changes to LANAgent will be documented in this file.
 - **"Call Mom now" can't be refused as already past.** With no time given, ALICE now lets DialX call right away, instead of sending the current time, which could arrive a few seconds late.
 - **DialX's refusals and call endings read as plain sentences:** for example "DialX won't let me call that number" or "the call ended: you took over".
 
-## [2.25.574] - 2026-10-23
+## [2.25.574] - 2026-10-22
 
 ### Fixed
 - **DialX pairs from its own QR code.** Settings → TextX has a new **Pair DialX (calls)** button. Its code starts with `dialx-agent:`, so opening it with the phone's camera or copying it can no longer hand it to TextX. TextX would have kept the pairing for itself, and DialX could never have used it.
 - **Clearer answers when a call isn't approved.** If you decline a call on the phone, or don't approve it in time, ALICE now says so plainly instead of quoting DialX's status word.
 
-## [2.25.573] - 2026-10-23
+## [2.25.573] - 2026-10-22
 
 ### Added
 - **ALICE can make phone calls through DialX.** Say "call Wayne and tell him happy birthday at 5pm" and ALICE asks DialX, the dialer app, to place the call. You approve it once on the phone. At 5 PM the phone plays a short AI disclosure and ALICE's opening, then ALICE talks with Wayne, one or two sentences at a time, until the call is done. Afterwards you get the transcript.
