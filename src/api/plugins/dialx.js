@@ -168,13 +168,20 @@ export default class DialXPlugin extends BasePlugin {
     };
     const name = pick.contact.name || who;
     const r = await this.tool('dialx.schedule_call', args, {
-      onLate: (late) => this.agent.notify?.(late.ok ? `📞 Call to ${name} at ${when(args.at)}: ${late.result?.status || 'scheduled'}.` : `⚠️ Call to ${name}: ${errorResult(late).error}`)
+      onLate: (late) => this.agent.notify?.(late.ok ? `📞 ${this.outcome(late.result, name, args.at, line)}` : `⚠️ Call to ${name}: ${errorResult(late).error}`)
     });
     if (!r.ok) return errorResult(r);
     if (r.pending) return { success: true, result: `It's on your phone for you to approve: calling ${name} at ${when(args.at)} (${purpose || line}). Tap Approve in DialX; I'll tell you when it's set.` };
-    const status = r.result?.status || 'scheduled';
-    if (/declin/i.test(status)) return { success: true, result: `You declined the call to ${name} on the phone, so it won't happen.` };
-    return { success: true, result: `Call to ${name} ${status} for ${when(args.at)}: I'll open with "${line}" and tell you how it went.` };
+    return { success: true, result: this.outcome(r.result, name, args.at, line) };
+  }
+
+  /** schedule_call's result: {status: "scheduled", call_id, at} | {status: "declined"} | {status: "timeout"} (DialX 0.2.0). */
+  outcome(result, name, at, line) {
+    const status = String(result?.status || 'scheduled');
+    if (status === 'declined') return `You declined the call to ${name} on the phone, so it won't happen.`;
+    if (status === 'timeout') return `The call to ${name} wasn't approved on the phone in time, so it isn't scheduled. Ask again to retry.`;
+    if (status === 'scheduled') return `Call to ${name} scheduled for ${when(result?.at || at)}: I'll open with "${line}" and tell you how it went.`;
+    return `Call to ${name}: DialX answered "${status}".`;
   }
 
   /** One approved contact for the name, or an error that lists the choices. */

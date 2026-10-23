@@ -259,3 +259,16 @@ test('plugin: refuses a contact that is not approved, and anyone but the owner',
   assert.match(s.error, /Only my owner/);
   delete process.env.TELEGRAM_USER_ID;
 });
+
+test('plugin: DialX 0.2.0 results read as plain answers (scheduled, declined, timeout)', async () => {
+  const approved = [{ contact_id: '5594032825', name: 'Wayne', number: '(559) 403-2825' }];
+  const base = { action: 'call', contact: 'wayne', purpose: 'say hi', opening: 'Hi Wayne!', _context: {} };
+  const scheduled = await pluginRig({ approved, schedule: { ok: true, result: { status: 'scheduled', call_id: 'c9', at: '2099-10-23T17:00:00-07:00' } } });
+  const r1 = await scheduled.plugin.execute(base);
+  assert.match(r1.result, /^Call to Wayne scheduled for /);
+  assert.equal(scheduled.calls.find(c => c.name === 'dialx.schedule_call').args.contact_id, '5594032825');
+  const r2 = await pluginRig({ approved, schedule: { ok: true, result: { status: 'declined' } } }).plugin.execute(base);
+  assert.match(r2.result, /You declined the call to Wayne/);
+  const r3 = await pluginRig({ approved, schedule: { ok: true, result: { status: 'timeout' } } }).plugin.execute(base);
+  assert.match(r3.result, /wasn't approved on the phone in time/);
+});

@@ -151,8 +151,9 @@ plugins, so "send this to Wayne" still forwards it. Telegram photos with a capti
 ## Phone calls: DialX (v2.25.573)
 
 DialX is a dialer app that lets the agent place a call and hold a short conversation ("call Wayne and tell him
-happy birthday at 5pm"). It speaks this same protocol and pairs the same way (Settings → TextX → Pair a phone,
-then scan the code in DialX). Its tools and events are "DialX call frames v1" (Trellis card 4293):
+happy birthday at 5pm"). It speaks this same protocol. Pair it with **Settings → TextX → Pair DialX (calls)** and scan
+the code in DialX (DialX › Settings › Agents › Scan QR). That code uses the `dialx-agent:` scheme: TextX claims
+`textx-agent:` links from the camera or clipboard and would keep the pairing for itself. Its tools and events are "DialX call frames v1" (Trellis card 4293):
 
 - **The agent asks:** `dialx.schedule_call {contact_id, at, purpose, opening, opening_audio_b64?, requested_by_owner}`.
   Only the owner can order a call (a TextX phone of theirs, Telegram as them, or the dashboard). Only contacts

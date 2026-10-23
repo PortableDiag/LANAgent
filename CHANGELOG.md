@@ -2,6 +2,12 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.574] - 2026-10-23
+
+### Fixed
+- **DialX pairs from its own QR code.** Settings → TextX has a new **Pair DialX (calls)** button. Its code starts with `dialx-agent:`, so opening it with the phone's camera or copying it can no longer hand it to TextX. TextX would have kept the pairing for itself, and DialX could never have used it.
+- **Clearer answers when a call isn't approved.** If you decline a call on the phone, or don't approve it in time, ALICE now says so plainly instead of quoting DialX's status word.
+
 ## [2.25.573] - 2026-10-23
 
 ### Added

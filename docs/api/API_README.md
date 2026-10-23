@@ -838,7 +838,7 @@ Pairing management (JWT or API key). The phone's own endpoint is `/textx/v1/*` (
 | Method | Endpoint | Body | Description |
 |---|---|---|---|
 | GET | `/api/textx/status` | | `{relay: {url, connected, base}, devices: [{id, name, bound, connected, lastSeenAt, appVersion, tools, notify, watches}]}` |
-| POST | `/api/textx/pair` | `{name}` | `{id, name, base, uri, qr}`. `uri` is `textx-agent:<base>#<kid>.<key>` and `qr` is a PNG data URL. This is the only time the key is returned. |
+| POST | `/api/textx/pair` | `{name, app?: "dialx"}` | `{id, name, base, uri, qr}`. `uri` is `textx-agent:<base>#<kid>.<key>` and `qr` is a PNG data URL. This is the only time the key is returned. With `app: "dialx"` the code is `dialx-agent:…`, for the DialX dialer. |
 | PATCH | `/api/textx/devices/:id` | `{notify?: bool, name?}` | `notify` sends the agent's notifications to that phone too. |
 | DELETE | `/api/textx/devices/:id` | | Revoke: deletes the pairing and its key, and closes the phone's connection. |
 | GET | `/api/textx/dialx` | | DialX call settings: `{settings: {voice: "agent"\|"phone", voiceProfile, ttsTimeoutMs}, profiles: [saved voice names]}`. |

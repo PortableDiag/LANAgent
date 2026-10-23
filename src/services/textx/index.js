@@ -61,12 +61,17 @@ export function getTextX(agent) {
     return requestOrigin;
   }
 
-  async function pair(name, { requestOrigin } = {}) {
+  /**
+   * `app: 'dialx'` mints the same pairing under the `dialx-agent:` scheme. TextX claims
+   * `textx-agent:` links (camera, clipboard) and would bind a DialX pairing to itself, so DialX
+   * could never use it (Trellis 4293 #11); TextX ignores `dialx-agent:`.
+   */
+  async function pair(name, { requestOrigin, app } = {}) {
     const { kid, key } = newPairing();
     const base = await pairingBase(requestOrigin);
     const device = await store.createDevice({ name: String(name || 'Phone').slice(0, 60), kid, key, base });
     await ensureRelay();
-    const uri = pairingUri(base, kid, key);
+    const uri = app === 'dialx' ? pairingUri(base, kid, key).replace(/^textx-agent:/, 'dialx-agent:') : pairingUri(base, kid, key);
     logger.info(`TextX: new pairing "${device.name}" (${kid.slice(0, 6)}…) via ${base}`);
     return { id: device.id, name: device.name, base, uri, qr: await QRCode.toDataURL(uri, { margin: 1, width: 320 }) };
   }

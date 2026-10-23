@@ -6262,10 +6262,11 @@ class LANAgentDashboard {
         }
     }
 
-    async pairTextX() {
-        const name = document.getElementById('textx-pair-name').value.trim() || 'Phone';
+    async pairTextX(app) {
+        // DialX gets a dialx-agent: code: TextX claims textx-agent: links and would keep the pairing.
+        const name = document.getElementById('textx-pair-name').value.trim() || (app === 'dialx' ? 'DialX' : 'Phone');
         try {
-            const r = await this.apiPost('/api/textx/pair', { name });
+            const r = await this.apiPost('/api/textx/pair', app === 'dialx' ? { name, app } : { name });
             if (!r.success) { this.showNotification(`Not paired: ${r.error}`, 'error'); return; }
             this._textxPairing = r.data.uri;
             document.getElementById('textx-pair-qr').src = r.data.qr;
