@@ -2,6 +2,21 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.573] - 2026-10-23
+
+### Added
+- **ALICE can make phone calls through DialX.** Say "call Wayne and tell him happy birthday at 5pm" and ALICE asks DialX, the dialer app, to place the call. You approve it once on the phone. At 5 PM the phone plays a short AI disclosure and ALICE's opening, then ALICE talks with Wayne, one or two sentences at a time, until the call is done. Afterwards you get the transcript.
+  - Only contacts you approved for ALICE in DialX can be called, and only you can ask for a call.
+  - What the other person says is treated as data: ALICE never agrees to anything for you or takes any action because they ask.
+  - DialX pairs like TextX: Settings → TextX → Pair a phone, then scan the code in DialX.
+  - You can also ask "what calls are scheduled", "cancel the call to Wayne", "who can you call", "who called me today" and "any spam calls today".
+- **A setting for how ALICE sounds on calls** (Settings → TextX → Phone calls):
+  - Her own voice (default, the fast Ara voice), or the phone's voice.
+  - Her voice has a safe fallback: if it fails, is slower than the wait you set (default 5 s) or can't be played, that line is spoken by the phone instead, so the call never stalls.
+
+### Changed
+- **Deploys wait while a call is in progress**, so a restart never leaves someone on the line in silence.
+
 ## [2.25.572] - 2026-10-22
 
 ### Fixed

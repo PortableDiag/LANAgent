@@ -2,6 +2,7 @@ import path from 'path';
 import QRCode from 'qrcode';
 import { WebSocketServer } from 'ws';
 import { TextXHub } from './textxHub.js';
+import { mongoCallStore } from './dialx.js';
 import { mongoStore } from './textxStore.js';
 import { createTransport } from './textxTransport.js';
 import { TextXRelayClient, DEFAULT_RELAY_URL } from './textxRelayClient.js';
@@ -36,7 +37,7 @@ async function identity() {
 export function getTextX(agent) {
   if (service) return service;
   const store = mongoStore();
-  const hub = new TextXHub({ store, agent, logger });
+  const hub = new TextXHub({ store, agent, logger, callStore: mongoCallStore() });
   const transport = createTransport(hub, {
     filesDir: path.join(DATA_PATH, 'textx', 'files'),
     avatarFile: () => (agent?.agentModel?.avatarPath ? path.join(DEPLOY_PATH, agent.agentModel.avatarPath) : null),
@@ -93,6 +94,7 @@ export function getTextX(agent) {
     if (!d) return false;
     hub.sessions.get(String(id))?.close(4401, 'pairing revoked');
     await store.deleteDevice(id);
+    await hub.refreshDialXPaired();
     await ensureRelay();
     logger.info(`TextX: pairing "${d.name}" revoked`);
     return true;

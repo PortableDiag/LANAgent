@@ -9,6 +9,7 @@ import { BOOK } from './textxStore.js';
 import { resultText } from '../../interfaces/web/openaiCompat.js';
 import * as invites from './invitations.js';
 import { describeImages, isPicture, VISION_CAVEAT } from '../../utils/describeImages.js';
+import { DIALX_TOOLS, DIALX_CONFIRMED, CALL_SESSION, isDialX, DialXCalls, memoryCallStore, getDialXSettings } from './dialx.js';
 
 /**
  * TextX Agent Protocol v1 — the agent side (spec: TextX repo docs/agent-protocol.md).
@@ -179,7 +180,8 @@ export class TextXHub {
    * @param {object} o.agent   the agent: processNaturalLanguage, providerManager, notify, config
    */
   constructor({ store, agent, logger = console, now = () => Date.now(), waits = {}, encodeVoice = encodeM4a,
-    linkContacts = linkToContactBook, bookNumbers = contactBookNumbers } = {}) {
+    linkContacts = linkToContactBook, bookNumbers = contactBookNumbers, callStore = memoryCallStore(),
+    dialxSettings = getDialXSettings } = {}) {
     this.store = store;
     this.linkContacts = linkContacts;
     this.bookNumbers = bookNumbers;
@@ -198,6 +200,16 @@ export class TextXHub {
     this.sessions = new Map();   // deviceId(store id) -> { send(env), close(code, reason) }
     this.pending = new Map();    // call_id -> { resolve, settled, onLate, timers[] }
     this.messageRate = new RateWindow(30, 60_000);
+    // DialX (dialer app) pairings: calls arrive as events and are answered with dialx.* tools.
+    this.dialx = new DialXCalls({ hub: this, agent, store: callStore, logger, settings: dialxSettings, now });
+    // Whether any DialX phone is paired: the router only reads "call Wayne" as a phone call then.
+    this.dialxPaired = false;
+    this.refreshDialXPaired();
+  }
+
+  async refreshDialXPaired() {
+    try { this.dialxPaired = (await this.store.listDevices()).some(d => !d.revokedAt && isDialX(d)); } catch { /* keep the last answer */ }
+    return this.dialxPaired;
   }
 
   // ── contacts ─────────────────────────────────────────────────────────────────────────────
@@ -387,15 +399,19 @@ export class TextXHub {
     // Every HTTP batch leads with a hello (§3.1): a repeat replaces the pending welcome rather
     // than queueing another.
     if (device.deviceId) await this.store.outboxAckType(device.id, 'welcome');
-    const capabilities = (Array.isArray(b.capabilities) ? b.capabilities : []).filter(t => TOOLS.includes(t));
+    const capabilities = (Array.isArray(b.capabilities) ? b.capabilities : []).filter(t => TOOLS.includes(t) || DIALX_TOOLS.includes(t));
     const patch = { capabilities, appVersion: String(b.app_version || '').slice(0, 40), client: String(b.app || '').slice(0, 40),
       replyMode: REPLY_MODES.includes(b.reply_mode) ? b.reply_mode : 'text',
       // The LANAgent app says which of the agent's notes it shows as phone notifications.
       ...(NOTIFY_LEVELS.includes(b.notify) ? { notifyLevel: b.notify } : {}),
-      maxAttachmentBytes: Number.isFinite(b.max_attachment_bytes) && b.max_attachment_bytes > 0 ? b.max_attachment_bytes : null, lastSeenAt: new Date(this.now()) };
+      maxAttachmentBytes: Number.isFinite(b.max_attachment_bytes) && b.max_attachment_bytes > 0 ? b.max_attachment_bytes : null, lastSeenAt: new Date(this.now()),
+      // DialX (call frames v1): what audio the phone plays into a call, and its inline size cap.
+      ...(Array.isArray(b.audio_formats) ? { audioFormats: b.audio_formats.map(String).slice(0, 10) } : {}),
+      ...(Number.isFinite(b.max_audio_bytes) && b.max_audio_bytes > 0 ? { maxAudioBytes: b.max_audio_bytes } : {}) };
     if (!device.deviceId) Object.assign(patch, { deviceId: phoneId, boundAt: new Date(this.now()) });
     Object.assign(device, await this.store.updateDevice(device.id, patch));
     this.logger.info?.(`TextX: ${device.name} hello (app ${patch.appVersion}, replies: ${patch.replyMode}, tools: ${capabilities.join(', ') || 'none'})`);
+    if (isDialX(device)) this.dialxPaired = true;
     await this.deliver(device, 'welcome', this.welcomeBody(device));
     this.sweepContacts(device);
     return true;
@@ -486,6 +502,8 @@ export class TextXHub {
       await this.deliver(device, 'message', { text: `I restarted before I finished answering ${what}. Send it again if you still need it.`, reply_to: p.envId });
       this.logger.info?.(`TextX: told ${device.name} an answer was cut off by a restart`);
     }
+    const cut = await this.dialx.recoverInterrupted();
+    if (cut) this.logger.info?.(`DialX: ${cut} call(s) were cut off by a restart`);
   }
 
   welcomeBody(device) {
@@ -495,7 +513,8 @@ export class TextXHub {
       version: this.agent?.version || process.env.npm_package_version || '',
       description: `${name}, your LANAgent. Ask it anything you would ask it on Telegram or the dashboard.`,
       ...(this.avatarUrl ? { avatar_url: this.avatarUrl(device) } : {}),
-      capabilities: TOOLS,
+      // A DialX pairing gets the dialer's tools and call_session, without which DialX never starts a call.
+      capabilities: isDialX(device) ? [...DIALX_TOOLS, CALL_SESSION] : TOOLS,
       extensions: EXTENSIONS
     };
   }
@@ -671,14 +690,14 @@ export class TextXHub {
   }
 
   async callToolOnce(name, args = {}, { onLate, deviceId = null, onlyDevice = null, offline = false, exclude = [] } = {}) {
-    if (!TOOLS.includes(name)) return { ok: false, error: { code: 'unknown_tool', message: name } };
+    if (!TOOLS.includes(name) && !DIALX_TOOLS.includes(name)) return { ok: false, error: { code: 'unknown_tool', message: name } };
     const device = await this.pickDevice(name, deviceId, onlyDevice, exclude);
     if (!device) {
       return { ok: false, error: { code: 'not_allowed', message: onlyDevice
         ? `This phone hasn't allowed ${name} for this agent (TextX: Settings › Assistants › this agent › tools).`
         : `No paired TextX phone allows ${name}. In TextX: Settings › Assistants › this agent › tools.` } };
     }
-    const confirmed = CONFIRMED_TOOLS.has(name);
+    const confirmed = CONFIRMED_TOOLS.has(name) || DIALX_CONFIRMED.has(name);
     // `offline`: the caller is not holding a turn open, so a read waits out the phone's next
     // check-in (§3.2: within 15 minutes when TextX is closed) instead of 45 s.
     const waitMs = offline ? this.waits.offline : confirmed ? this.waits.confirm : this.waits.read;
@@ -755,6 +774,7 @@ export class TextXHub {
    * about it only when it needs them.
    */
   async onEvent(device, body) {
+    if (String(body.kind || '').startsWith('call.')) return isDialX(device) ? this.dialx.onEvent(device, body) : undefined;
     if (body.message?.from?.name && body.message.from.number) await this.learnContacts([body.message.from], 'a text');
     if (body.kind === 'mention' && body.message) return this.onMention(device, body);
     if (body.kind !== 'incoming' || !body.message) return;

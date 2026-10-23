@@ -1779,6 +1779,17 @@ export class AIIntentDetector {
       return 169;
     }
 
+    // "Call Wayne and tell him happy birthday at 5pm": a phone call through DialX, although it
+    // says "tell him" (which otherwise means a text). Only with a DialX phone paired.
+    const dialx = this.agent?.apiManager?.apis?.get?.('dialx');
+    if (dialx?.enabled && dialx.instance?.paired &&
+        (/^(?:(?:hey|ok|okay)\s+\w+[,\s]+)?(?:(?:please|can you|could you|would you)\s+)*(?:call|phone|ring|dial)\s+(?!me\b|it\b|this\b|that\b|back\b)\S/i.test(t.trim()) ||
+         /\bgive\s+(?!me\b)(?:\w+\s+){1,3}a\s+(?:call|ring)\b/i.test(t))) {
+      for (const [id, intent] of Object.entries(this.getDynamicIntents())) {
+        if (intent.plugin === 'dialx' && intent.action === 'call') return parseInt(id);
+      }
+    }
+
     // Twitter/X URL: find the dynamic intent ID for twitter download
     if (/https?:\/\/(?:www\.)?(?:twitter\.com|x\.com)\/\w+\/status\/\d+/i.test(text)) {
       const dynamicIntents = this.getDynamicIntents();
@@ -3464,6 +3475,11 @@ Respond in JSON format:
       } else if (this.agent.apiManager?.apis?.get?.('textx')?.enabled) {
         conversationContext += 'The user\'s phone is paired (TextX). "Send X a message", "message X", "text X" or ' +
           '"tell X", now or at a time, means a text message (the textx send or schedule intent), unless they say email.\n\n';
+      }
+      const dialxPlugin = this.agent.apiManager?.apis?.get?.('dialx');
+      if (dialxPlugin?.enabled && dialxPlugin.instance?.paired) {
+        conversationContext += 'The user\'s dialer (DialX) is paired. "Call X", "phone X", "ring X" or "give X a call" means a ' +
+          'phone call (the dialx call intent), even when it also says to tell them something.\n\n';
       }
       
       // Pre-check: regex hints for intents that get lost in the 400+ intent prompt

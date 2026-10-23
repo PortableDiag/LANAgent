@@ -77,6 +77,8 @@ const deviceSchema = new mongoose.Schema({
   client: String,
   replyMode: String, // text | voice | both, the phone's per-agent choice (TextX 0.3.21)
   maxAttachmentBytes: Number, // the carrier MMS cap the phone reports in hello
+  audioFormats: { type: [String], default: undefined }, // DialX: audio it plays into a call
+  maxAudioBytes: Number, // DialX: inline audio cap
   capabilities: { type: [String], default: [] },
   notify: { type: Boolean, default: false },
   watches: { type: [mongoose.Schema.Types.Mixed], default: [] },

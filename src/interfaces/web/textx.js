@@ -1,6 +1,7 @@
 import express from 'express';
 import { authenticateToken } from './auth.js';
 import { getTextX } from '../../services/textx/index.js';
+import { getDialXSettings, setDialXSettings } from '../../services/textx/dialx.js';
 import { logger } from '../../utils/logger.js';
 
 /**
@@ -60,6 +61,24 @@ export function createTextXAdminRouter(agent) {
     const d = await getTextX(agent).update(req.params.id, req.body || {}).catch(() => null);
     if (!d) return res.status(404).json({ success: false, error: 'No such pairing' });
     res.json({ success: true, data: d });
+  });
+
+  // DialX calls: how the agent sounds on a call (its own voice or the phone's, with a fallback).
+  router.get('/dialx', async (req, res) => {
+    try {
+      const profiles = (agent.ttsService?.getVoiceProfiles?.() || []).map(p => p.name);
+      res.json({ success: true, data: { settings: await getDialXSettings(), profiles } });
+    } catch (error) {
+      res.status(500).json({ success: false, error: error.message });
+    }
+  });
+
+  router.put('/dialx', async (req, res) => {
+    try {
+      res.json({ success: true, data: { settings: await setDialXSettings(req.body || {}) } });
+    } catch (error) {
+      res.status(400).json({ success: false, error: error.message });
+    }
   });
 
   router.delete('/devices/:id', async (req, res) => {

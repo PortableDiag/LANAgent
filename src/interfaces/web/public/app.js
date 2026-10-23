@@ -754,6 +754,7 @@ class LANAgentDashboard {
                 this.loadReportSettings();
                 this.loadTelegramAgentFeatures();
                 this.loadTextX();
+                this.loadDialX();
                 this.loadAutonomousDeploymentSetting();
                 this.loadTokenThresholds();
                 this.loadAvatarSettings();
@@ -6222,6 +6223,42 @@ class LANAgentDashboard {
                 : relay.connected ? `Relay connected: ${relay.base}` : (devices.length ? 'Relay connecting…' : 'The relay link starts when you pair a phone.');
         } catch (error) {
             console.error('Failed to load TextX settings:', error);
+        }
+    }
+
+    async loadDialX() {
+        try {
+            const r = await this.apiGet('/api/textx/dialx');
+            if (!r.success) return;
+            const { settings, profiles } = r.data;
+            document.getElementById('dialx-voice').value = settings.voice;
+            const sel = document.getElementById('dialx-profile');
+            sel.innerHTML = '';
+            const names = profiles.includes(settings.voiceProfile) ? profiles : [settings.voiceProfile, ...profiles];
+            for (const n of names) {
+                const o = document.createElement('option');
+                o.value = n;
+                o.textContent = profiles.includes(n) ? n : `${n} (not a saved voice: calls use the current voice)`;
+                sel.appendChild(o);
+            }
+            sel.value = settings.voiceProfile;
+            document.getElementById('dialx-timeout').value = settings.ttsTimeoutMs / 1000;
+        } catch (error) {
+            console.error('Failed to load DialX settings:', error);
+        }
+    }
+
+    async saveDialX() {
+        try {
+            const r = await this.apiPut('/api/textx/dialx', {
+                voice: document.getElementById('dialx-voice').value,
+                voiceProfile: document.getElementById('dialx-profile').value,
+                ttsTimeoutMs: Math.round(parseFloat(document.getElementById('dialx-timeout').value) * 1000)
+            });
+            this.showNotification(r.success ? 'Call settings saved' : `Not saved: ${r.error}`, r.success ? 'success' : 'error');
+            this.loadDialX();
+        } catch (error) {
+            this.showNotification(`Not saved: ${error.message}`, 'error');
         }
     }
 

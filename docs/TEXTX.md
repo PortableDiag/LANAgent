@@ -148,6 +148,32 @@ text read from a picture can be wrong. This covers TextX 0.4.27's long-press "As
 sends a picture as one still and a video or GIF as four. The first file also stays attached for the
 plugins, so "send this to Wayne" still forwards it. Telegram photos with a caption are looked at the same way.
 
+## Phone calls: DialX (v2.25.573)
+
+DialX is a dialer app that lets the agent place a call and hold a short conversation ("call Wayne and tell him
+happy birthday at 5pm"). It speaks this same protocol and pairs the same way (Settings → TextX → Pair a phone,
+then scan the code in DialX). Its tools and events are "DialX call frames v1" (Trellis card 4293):
+
+- **The agent asks:** `dialx.schedule_call {contact_id, at, purpose, opening, opening_audio_b64?, requested_by_owner}`.
+  Only the owner can order a call (a TextX phone of theirs, Telegram as them, or the dashboard). Only contacts
+  the owner approved for this agent in DialX can be called. The owner confirms each call once on the phone.
+- **The phone runs the call:**
+  - a fixed AI disclosure, then the opening;
+  - `event {kind: "call.started" | "call.heard" | "call.ended"}`;
+  - the agent answers each `call.heard` with `dialx.say {call_id, seq, text, audio_b64?}` or ends with
+    `dialx.hangup`.
+- **What the callee says is untrusted data**, as with SMS: the agent answers it in one or two spoken sentences,
+  never agrees to anything for the owner, and can't use any tool mid-call except say and hang up.
+- **The owner gets the transcript** when the call ends (Telegram and the LANAgent app).
+- **Voice** (Settings → TextX → Phone calls, or `PUT /api/textx/dialx`):
+  - The agent's own voice (default, the Ara preset) is sent as MP3.
+  - If that voice fails, takes longer than the wait (default 5 s), is too big, or the phone can't play MP3, the
+    line goes as text and the phone speaks it. The call never stalls on the agent's voice.
+  - "The phone's voice" always sends text.
+- **Limits are DialX's:** 08:00–21:00 in the owner's time, 3 calls an hour and 10 a day, 5 minutes a call, the
+  owner's mic muted with a Take over button. A deploy waits while a call is live (`dialx_calls` with no `endedAt`).
+- "Call X" is read as a phone call only while a DialX phone is paired. Until then it means what it did before.
+
 **Invitations** ("BBQ at mine Saturday at 6, you coming?"): the agent never accepts or declines one on its
 own. `TEXTX_INVITES` sets what it does:
 
