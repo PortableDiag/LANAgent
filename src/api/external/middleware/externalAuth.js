@@ -9,6 +9,20 @@ const OWNER_OF_ABI = ['function ownerOf(uint256 tokenId) view returns (address)'
 // Cache verified agents for 10 minutes
 const verifiedAgents = new NodeCache({ stdTTL: 600, checkperiod: 120 });
 
+// Agent ID allowlist / blocklist from environment variables.
+// EXTERNAL_AUTH_ALLOWLIST: comma-separated agent IDs that are instantly approved
+// without hitting the on-chain registry.  Takes priority over the blocklist.
+// EXTERNAL_AUTH_BLOCKLIST: comma-separated agent IDs that are permanently rejected.
+// Both lists are parsed once at startup; changes require a restart.
+const allowlistRaw = process.env.EXTERNAL_AUTH_ALLOWLIST || '';
+const blocklistRaw = process.env.EXTERNAL_AUTH_BLOCKLIST || '';
+const allowlistSet = new Set(
+  allowlistRaw.split(',').map(s => s.trim()).filter(Boolean)
+);
+const blocklistSet = new Set(
+  blocklistRaw.split(',').map(s => s.trim()).filter(Boolean)
+);
+
 // Adaptive circuit breaker for identity verification
 const circuitBreaker = {
   state: 'CLOSED',       // CLOSED (normal), OPEN (failing), HALF_OPEN (testing)
@@ -117,6 +131,28 @@ async function _verifyIdentity(req, res, next) {
   }
 
   const cacheKey = `${chain}:${agentId}`;
+
+  // --- Allowlist / Blocklist checks (before cache, allowlist wins) ---
+  if (allowlistSet.has(agentId)) {
+    // Instantly approve known‑trusted callers without hitting the registry.
+    req.externalAgentId = agentId;
+    req.externalAgentOwner = 'allowlisted';
+    req.externalAgentChain = chain;
+    // Cache the decision so subsequent lookups are instant.
+    verifiedAgents.set(cacheKey, { owner: 'allowlisted' });
+    return next();
+  }
+
+  if (blocklistSet.has(agentId)) {
+    // Permanently reject. The Set lookup is already O(1), so nothing is cached;
+    // an agent verified before it was blocklisted is still refused here because
+    // this check runs ahead of the cache.
+    return res.status(403).json({
+      success: false,
+      error: 'Agent ID is blocklisted'
+    });
+  }
+
   const cached = verifiedAgents.get(cacheKey);
   if (cached) {
     req.externalAgentId = agentId;

@@ -4005,7 +4005,7 @@ Plugin includes inline documentation and usage examples.
             rich: notice.rich,
             reply_markup: notice.replyMarkup
           });
-          logger.info('Telegram notification sent successfully');
+          logger.info('Plugin development notice handed to Telegram'); // telegram.js logs the send itself, with (silent) when it is
         } catch (telegramError) {
           logger.warn('Telegram notification attempt failed (may still be delivered):', telegramError.message);
           // Don't throw - notification might still go through despite timeout

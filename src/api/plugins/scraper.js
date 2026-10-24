@@ -188,6 +188,12 @@ export function pickMainText(mainText, bodyText) {
   return main;
 }
 
+// Chrome's built-in PDF viewer: an empty page holding one <embed type="application/pdf">.
+export function isChromePdfViewer(html) {
+  if (!html || typeof html !== 'string' || html.length > 2000) return false;
+  return /<embed\b[^>]*\btype=["']application\/pdf["']/i.test(html);
+}
+
 function detectChromeErrorPage(html) {
   if (!html || typeof html !== 'string' || html.length > 200000) return null;
   const structural = /id=["']main-frame-error["']/i.test(html)
@@ -695,6 +701,15 @@ export default class ScraperPlugin extends BasePlugin {
       throw new Error(`net::${fsNetErr} for ${url} (FlareSolverr could not reach site)`);
     }
 
+    // A PDF opens in Chrome's viewer, and FlareSolverr returns only the viewer's
+    // ~344-byte <embed> shell. Read as a page it is a stub, so the render tier ran
+    // Wayback and archive.ph and failed every PDF (98 of 125 paid failures,
+    // 2026-10-24). Fetch the file itself on the plain-HTTP path, which parses PDFs.
+    if (isChromePdfViewer(html)) {
+      logger.info(`[Scraper] FlareSolverr opened ${url} in the PDF viewer; fetching the file directly`);
+      return this.scrapeWithCheerio(solution.url || url, { ...options, bypassCache: true });
+    }
+
     const { content, $ } = this.parseHtmlContent(html, url, selector);
     content.jsonld = await this.extractJsonLd($);
     content.microdata = this.extractMicrodata($);
@@ -1068,10 +1083,42 @@ export default class ScraperPlugin extends BasePlugin {
       // cookie persists and lets us through on subsequent visits.
       await primePageWithSavedCookies(page, url);
 
-      await page.goto(url, {
-        waitUntil: 'networkidle2',
-        timeout: 45000
+      // A PDF opens in Chrome's viewer, whose DOM holds no text, and Chrome hands
+      // even the navigation response over as the viewer's wrapper HTML. So when the
+      // main frame lands on a PDF, fetch the file again from inside the page: same
+      // origin, cookies and TLS fingerprint, which is the only way past hosts that
+      // refuse a plain fetch (Akamai on media.defense.gov).
+      let pdfUrl = null;
+      page.on('response', (res) => {
+        if (pdfUrl || res.frame() !== page.mainFrame() || !res.request().isNavigationRequest()) return;
+        if (/application\/pdf/i.test(res.headers()['content-type'] || '')) pdfUrl = res.url();
       });
+
+      try {
+        await page.goto(url, {
+          waitUntil: 'networkidle2',
+          timeout: 45000
+        });
+      } catch (err) {
+        if (!pdfUrl) throw err;
+      }
+      if (pdfUrl) {
+        const b64 = await page.evaluate(async (u, max) => {
+          const res = await fetch(u, { credentials: 'include' });
+          if (!res.ok) return null;
+          const buf = new Uint8Array(await res.arrayBuffer());
+          if (buf.length > max) return null;
+          let s = '';
+          for (let i = 0; i < buf.length; i += 0x8000) s += String.fromCharCode.apply(null, buf.subarray(i, i + 0x8000));
+          return btoa(s);
+        }, pdfUrl, 50 * 1024 * 1024).catch(() => null);
+        const pdf = b64 ? Buffer.from(b64, 'base64') : null;
+        if (pdf && pdf.subarray(0, 5).toString('latin1') === '%PDF-') {
+          logger.info(`[Scraper] Puppeteer read ${url} as a PDF (${pdf.length} bytes)`);
+          return await this._pdfResult(url, pdf);
+        }
+        logger.warn(`[Scraper] ${url} opened as a PDF but the file could not be read from the page`);
+      }
 
       // The site was unreachable and Chromium committed its own error page
       // (chrome-error://). goto doesn't always throw on this — during a VPN exit

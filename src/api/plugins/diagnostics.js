@@ -51,6 +51,11 @@ export default class DiagnosticsPlugin extends BasePlugin {
         command: 'cancel-schedule',
         description: 'Cancel all scheduled diagnostics',
         usage: 'diagnostics cancel-schedule'
+      },
+      {
+        command: 'compare',
+        description: 'Compare two diagnostic reports',
+        usage: 'diagnostics compare [reportId1] [reportId2]'
       }
     ];
   }
@@ -76,10 +81,12 @@ export default class DiagnosticsPlugin extends BasePlugin {
           return await this.viewScheduledDiagnostics();
         case 'cancel-schedule':
           return await this.cancelScheduledDiagnostics();
+        case 'compare':
+          return await this.compareReports(data);
         default:
           return {
             success: false,
-            error: 'Invalid action. Available actions: run, status, history, report, test, schedule, view-schedule, cancel-schedule'
+            error: 'Invalid action. Available actions: run, status, history, report, test, schedule, view-schedule, cancel-schedule, compare'
           };
       }
     } catch (error) {
@@ -395,6 +402,144 @@ export default class DiagnosticsPlugin extends BasePlugin {
     }
   }
 
+  /**
+   * Compare two diagnostic reports and return a structured diff
+   * @param {Object} data - Contains optional reportId1 and reportId2
+   * @returns {Object} Diff result with test changes, health comparison, and summary
+   */
+  async compareReports(data) {
+    try {
+      const diagnosticsService = this.agent.selfDiagnosticsService;
+      if (!diagnosticsService) {
+        return { success: false, error: 'Diagnostics service not available' };
+      }
+
+      let report1, report2;
+
+      // Determine which reports to compare
+      if (data.reportId1 && data.reportId2) {
+        // Both IDs provided
+        report1 = await diagnosticsService.getReport(data.reportId1);
+        report2 = await diagnosticsService.getReport(data.reportId2);
+      } else if (!data.reportId1 && !data.reportId2) {
+        // No IDs provided: fetch two most recent reports
+        const recent = await diagnosticsService.getHistory(2);
+        if (!recent || recent.length < 2) {
+          return {
+            success: false,
+            error: 'Need at least two diagnostic reports to compare. Run diagnostics first.'
+          };
+        }
+        // getHistory returns newest first, so index 0 is most recent, index 1 is previous
+        report1 = recent[1]; // older
+        report2 = recent[0]; // newer
+      } else {
+        // Only one ID provided
+        return {
+          success: false,
+          error: 'Please provide both report IDs or none to compare the two most recent reports.'
+        };
+      }
+
+      if (!report1 || !report2) {
+        return { success: false, error: 'One or both reports not found.' };
+      }
+
+      // Build test maps by name for comparison
+      const tests1 = report1.tests || [];
+      const tests2 = report2.tests || [];
+      const map1 = new Map(tests1.map(t => [t.name, t]));
+      const map2 = new Map(tests2.map(t => [t.name, t]));
+
+      const added = [];
+      const removed = [];
+      const changed = [];
+      const unchanged = [];
+
+      // Check for added and changed tests in report2
+      for (const [name, test2] of map2) {
+        const test1 = map1.get(name);
+        if (!test1) {
+          added.push({ name, status: test2.status });
+        } else if (test1.status !== test2.status) {
+          changed.push({
+            name,
+            from: test1.status,
+            to: test2.status
+          });
+        } else {
+          unchanged.push({ name, status: test2.status });
+        }
+      }
+
+      // Check for removed tests (present in report1 but not report2)
+      for (const [name, test1] of map1) {
+        if (!map2.has(name)) {
+          removed.push({ name, status: test1.status });
+        }
+      }
+
+      // Compare overall health, duration, summary
+      const healthChanged = report1.overallHealth !== report2.overallHealth;
+      const durationDiff = (report2.duration || 0) - (report1.duration || 0);
+      const summaryChanged = report1.summary !== report2.summary;
+
+      // Build human-readable summary
+      const summaryParts = [];
+      if (added.length) summaryParts.push(`${added.length} test(s) added`);
+      if (removed.length) summaryParts.push(`${removed.length} test(s) removed`);
+      if (changed.length) summaryParts.push(`${changed.length} test(s) changed status`);
+      if (healthChanged) summaryParts.push(`overall health changed from "${report1.overallHealth}" to "${report2.overallHealth}"`);
+      if (summaryChanged) summaryParts.push('summary text changed');
+      if (durationDiff !== 0) {
+        const sign = durationDiff > 0 ? '+' : '';
+        summaryParts.push(`duration ${sign}${durationDiff}ms`);
+      }
+      const humanSummary = summaryParts.length
+        ? summaryParts.join(', ')
+        : 'No significant changes detected';
+
+      return {
+        success: true,
+        report1: {
+          id: report1._id,
+          timestamp: report1.timestamp
+        },
+        report2: {
+          id: report2._id,
+          timestamp: report2.timestamp
+        },
+        diff: {
+          tests: {
+            added,
+            removed,
+            changed,
+            unchanged: unchanged.length
+          },
+          overallHealth: {
+            from: report1.overallHealth,
+            to: report2.overallHealth,
+            changed: healthChanged
+          },
+          duration: {
+            from: report1.duration,
+            to: report2.duration,
+            diff: durationDiff
+          },
+          summary: {
+            from: report1.summary,
+            to: report2.summary,
+            changed: summaryChanged
+          }
+        },
+        summary: humanSummary
+      };
+    } catch (error) {
+      logger.error('Failed to compare reports:', error);
+      return { success: false, error: error.message };
+    }
+  }
+
   // Intent handler
   async handleIntent(intent, params, context) {
     const commandMap = {
@@ -405,7 +550,8 @@ export default class DiagnosticsPlugin extends BasePlugin {
       'test_component': 'test',
       'schedule_diagnostics': 'schedule',
       'view_scheduled_diagnostics': 'view-schedule',
-      'cancel_scheduled_diagnostics': 'cancel-schedule'
+      'cancel_scheduled_diagnostics': 'cancel-schedule',
+      'compare_diagnostics': 'compare'
     };
 
     const action = commandMap[intent] || 'status';
@@ -429,6 +575,12 @@ export default class DiagnosticsPlugin extends BasePlugin {
         pattern: /diagnos.*history|health.*history/i,
         intent: 'diagnostic_history',
         description: 'View diagnostic history'
+      },
+      {
+        // Before the report pattern: "compare the last two diagnostic reports" matches both.
+        pattern: /compar\w*.*(diagnos|health)|(diagnos|health).*compar/i,
+        intent: 'compare_diagnostics',
+        description: 'Compare two diagnostic reports'
       },
       {
         pattern: /diagnos.*report|health.*report/i,

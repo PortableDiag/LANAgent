@@ -15,6 +15,7 @@ import { DiscoveredFeature } from '../models/DiscoveredFeature.js';
 import { SystemSettings } from '../models/SystemSettings.js';
 import Improvement from '../models/Improvement.js';
 import { selfModLock } from './selfModLock.js';
+import { waitForQuiet } from './productionQuiet.js';
 import { GitHubFeatureDiscovery } from './githubFeatureDiscovery.js';
 import { formatPrNotice, formatDeployNotice, formatSelfModError } from '../interfaces/telegram/prNotice.js';
 import { getProvider, PROVIDER_TYPES } from './gitHosting/index.js';
@@ -5147,7 +5148,7 @@ ${newCapsBlock}${reviewFlagsBlock}
             rich: notice.rich,
             reply_markup: notice.replyMarkup
           });
-          logger.info('Telegram notification sent successfully');
+          logger.info('Self-modification notice handed to Telegram'); // telegram.js logs the send itself, with (silent) when it is
         } catch (telegramError) {
           logger.warn('Telegram notification attempt failed (may still be delivered):', telegramError.message);
           // Don't throw - notification might still go through despite timeout
@@ -5470,6 +5471,18 @@ ${newCapsBlock}${reviewFlagsBlock}
 
       logger.info(`Deploy: ${drifted.length} file(s) differ from the repository`);
 
+      // A deploy ends in a restart, which kills whatever the agent is doing. Until 2026-10-23 this
+      // job restarted with no check, so a push went live mid-task at the next run. Wait up to
+      // 5 min for a quiet moment (same checks as scripts/deployment/quiet-gate.sh); still busy =
+      // copy nothing and try again next run.
+      if (!dryRun && !options.ignoreBusy) {
+        const busy = await waitForQuiet();
+        if (busy.length) {
+          logger.info(`Deploy: ${drifted.length} file(s) waiting for a quiet moment, not restarting now: ${busy.join('; ')}`);
+          return { success: true, deployed: [], skipped: drifted, reason: `busy: ${busy.join('; ')}` };
+        }
+      }
+
       // 3. Back up what we are about to replace, THEN copy, THEN verify in place.
       //
       // Verification has to happen in the environment the code will actually run
@@ -5688,7 +5701,7 @@ ${newCapsBlock}${reviewFlagsBlock}
             rich: notice.rich,
             reply_markup: notice.replyMarkup
           });
-          logger.info('Telegram notification sent successfully');
+          logger.info('Self-modification notice handed to Telegram'); // telegram.js logs the send itself, with (silent) when it is
         } catch (telegramError) {
           logger.warn('Telegram notification attempt failed (may still be delivered):', telegramError.message);
           // Don't throw - notification might still go through despite timeout

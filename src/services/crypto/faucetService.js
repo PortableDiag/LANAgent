@@ -579,7 +579,11 @@ class FaucetService {
         const history = [];
         
         for (const [key, timestamp] of this.claimHistory.entries()) {
-            const [faucetUrl, address] = key.split(':');
+            // Keys are `${faucetUrl}:${address}` and the URL itself contains ':'
+            // (https://…), so split on the LAST colon — the address has none.
+            const sep = key.lastIndexOf(':');
+            const faucetUrl = sep >= 0 ? key.slice(0, sep) : key;
+            const address = sep >= 0 ? key.slice(sep + 1) : '';
             history.push({
                 faucet: faucetUrl,
                 address,

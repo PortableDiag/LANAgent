@@ -141,15 +141,93 @@ router.get('/balances/:network', async (req, res) => {
 });
 
 /**
- * Get claim history
+ * Get claim history with optional filtering, sorting, and pagination.
+ *
+ * Query parameters:
+ *   faucet    - filter by faucet (case-insensitive substring of the faucet URL/API host)
+ *   address   - filter by claiming wallet address (case-insensitive exact match)
+ *   startDate - ISO date string, include claims on or after this date
+ *   endDate   - ISO date string, include claims on or before this date
+ *   limit     - maximum number of records to return (default: all if not provided)
+ *   offset    - number of records to skip (default: 0)
+ *   sort      - sort order, e.g. '+timestamp' (ascending) or '-timestamp' (descending)
+ *
+ * Response:
+ *   { success: true, history: [...], total: <number>, limit: <number|null>, offset: <number> }
  */
 router.get('/history', async (req, res) => {
     try {
         const history = await retryOperation(() => faucetService.getClaimHistory(), { retries: 3 });
 
+        // Apply filters
+        let filtered = history;
+        // getClaimHistory() entries are { faucet, address, timestamp (ms), nextClaim } —
+        // there is no network field, so filter on what the service actually returns.
+        const { faucet, address, startDate, endDate } = req.query;
+
+        if (faucet) {
+            const faucetLower = String(faucet).toLowerCase();
+            filtered = filtered.filter(entry => entry.faucet && entry.faucet.toLowerCase().includes(faucetLower));
+        }
+
+        if (address) {
+            const addressLower = String(address).toLowerCase();
+            filtered = filtered.filter(entry => entry.address && entry.address.toLowerCase() === addressLower);
+        }
+
+        if (startDate) {
+            const start = new Date(startDate);
+            if (isNaN(start.getTime())) {
+                return res.status(400).json({ error: 'Invalid startDate format' });
+            }
+            filtered = filtered.filter(entry => entry.timestamp && new Date(entry.timestamp) >= start);
+        }
+
+        if (endDate) {
+            const end = new Date(endDate);
+            if (isNaN(end.getTime())) {
+                return res.status(400).json({ error: 'Invalid endDate format' });
+            }
+            filtered = filtered.filter(entry => entry.timestamp && new Date(entry.timestamp) <= end);
+        }
+
+        // Apply sorting
+        const sortParam = req.query.sort;
+        if (sortParam) {
+            const sortOrder = sortParam.startsWith('-') ? -1 : 1;
+            const sortField = sortParam.replace(/^[+-]/, '');
+            if (sortField !== 'timestamp') {
+                return res.status(400).json({ error: 'Sort field not supported. Only "timestamp" is allowed.' });
+            }
+            filtered.sort((a, b) => {
+                const aVal = a.timestamp ? new Date(a.timestamp).getTime() : 0;
+                const bVal = b.timestamp ? new Date(b.timestamp).getTime() : 0;
+                return sortOrder * (aVal - bVal);
+            });
+        }
+
+        const total = filtered.length;
+
+        // Apply pagination
+        let limit = req.query.limit ? parseInt(req.query.limit, 10) : null;
+        let offset = req.query.offset ? parseInt(req.query.offset, 10) : 0;
+
+        if (limit !== null && (isNaN(limit) || limit < 0)) {
+            return res.status(400).json({ error: 'Invalid limit' });
+        }
+        if (isNaN(offset) || offset < 0) {
+            return res.status(400).json({ error: 'Invalid offset' });
+        }
+
+        // offset applies on its own too; limit is optional
+        const paginated = filtered.slice(offset, limit !== null ? offset + limit : undefined);
+
         res.json({
             success: true,
-            history
+            history: paginated,
+            total,
+            limit,
+            offset
         });
     } catch (error) {
         logger.error('Get claim history error:', error);

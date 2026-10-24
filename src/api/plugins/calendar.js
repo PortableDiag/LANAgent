@@ -418,8 +418,10 @@ export default class CalendarPlugin extends BasePlugin {
         (event.description ? `📝 ${event.description}` : '');
 
       // Send notification based on reminder type
+      // A reminder is what the owner asked for, so it makes a sound. This called agent.sendNotification,
+      // which the agent never had: every Telegram reminder threw (2026-10-23).
       if (reminder.type === 'telegram' && this.agent) {
-        await this.agent.sendNotification(message);
+        await this.agent.notify(message, { urgent: true });
       } else if (reminder.type === 'email' && this.agent) {
         const emailPlugin = this.agent.pluginManager?.getPlugin('email');
         if (emailPlugin) {
@@ -462,8 +464,8 @@ export default class CalendarPlugin extends BasePlugin {
           }
         }
       } else if (reminder.type === 'notification' && this.agent) {
-        // In-app notification — falls back to telegram if available
-        await this.agent.sendNotification?.(message);
+        // In-app notification — falls back to telegram if available (sendNotification?.() was a silent no-op)
+        await this.agent.notify(message, { urgent: true });
       }
 
       if (options.recurring) {

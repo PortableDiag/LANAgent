@@ -142,6 +142,12 @@ export default class SkillsPlugin extends BasePlugin {
         examples: ['test whether the humanizer skill triggers correctly', 'does that skill get used when it should', 'evaluate the skill description']
       },
       {
+        command: 'review',
+        description: 'Ask the model to review a skill against the skill-writing rules and suggest specific improvements (complements the automatic lint warnings)',
+        usage: 'review({ name: "humanizer" })',
+        examples: ['suggest improvements for the humanizer skill', 'how could that skill be written better', 'review the restart-media-stack skill']
+      },
+      {
         command: 'curate',
         description: 'Run skill housekeeping now: mark unused learned skills stale, archive long-unused ones, merge duplicates, tidy the profile',
         usage: 'curate',
@@ -466,6 +472,17 @@ export default class SkillsPlugin extends BasePlugin {
           const pct = (x) => (x === null ? 'n/a' : `${Math.round(x * 100)}%`);
           const misses = r.cases.filter(c => !c.pass).slice(0, 6).map(c => `• ${c.expected ? 'missed' : 'wrongly used for'}: "${c.query.slice(0, 120)}"`).join('\n');
           return { success: true, ...r, result: `${r.name}: used for ${pct(r.recall)} of the requests it should handle, and wrongly for ${r.falseTriggers} near-miss request(s); ${pct(r.passRate)} correct overall.${misses ? `\n${misses}` : ''}` };
+        }
+        case 'review': {
+          this.validateParams(data, { name: { required: true, type: 'string' } });
+          const skill = await service.get(data.name);
+          if (!skill) return { success: false, error: `No skill named "${data.name}"` };
+          const { suggestSkillImprovements, lintSkill } = await import('../../services/skills/skillQuality.js');
+          const suggestions = await suggestSkillImprovements({ skill, providerManager: this.agent?.providerManager });
+          const warnings = lintSkill(skill);
+          const lines = suggestions.map(x => `• [${x.severity}] ${x.section}: ${x.issue} — ${x.suggestion}`);
+          if (warnings.length) lines.push(...warnings.map(w => `• [lint] ${w}`));
+          return { success: true, name: skill.name, suggestions, warnings, result: lines.length ? `Suggestions for ${skill.name}:\n${lines.join('\n')}` : `${skill.name} follows the skill-writing rules; nothing to change.` };
         }
         case 'curate': {
           if (!this.agent?.curator) return { success: false, error: 'The curator is not running on this agent' };

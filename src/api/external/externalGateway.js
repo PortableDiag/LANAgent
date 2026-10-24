@@ -39,6 +39,7 @@ import creditRoutes from './routes/credits.js';
 import pluginRoutes from './routes/plugins.js';
 import imageTranscodeRoutes from './routes/imageTranscode.js';
 import adminRoutes from './routes/admin.js';
+import { trackExternalRequest } from '../../services/productionQuiet.js';
 
 const router = Router();
 
@@ -67,6 +68,8 @@ const externalLimiter = rateLimit({
   message: { success: false, error: 'Too many requests — slow down or contact support to raise your per-key limit' }
 });
 router.use(externalLimiter);
+// Counts requests in flight, so the self-update never restarts under a paid call (productionQuiet.js).
+router.use(trackExternalRequest);
 
 router.use(responseSanitizer);
 router.use(killSwitchMiddleware);

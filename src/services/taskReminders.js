@@ -233,7 +233,8 @@ export class TaskReminderService {
    */
   async retryNotifyUser(message) {
     try {
-      await retryOperation(() => this.agent.notify(message), { retries: 3 });
+      // A reminder the owner set makes a sound (notifications are silent unless urgent).
+      await retryOperation(() => this.agent.notify(message, { urgent: true }), { retries: 3 });
     } catch (error) {
       logger.error('Failed to send task reminder after retries:', error);
     }

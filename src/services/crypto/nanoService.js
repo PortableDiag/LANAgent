@@ -284,6 +284,56 @@ class NanoService {
         }
     }
 
+    /**
+     * Retrieve transaction history for a Nano account with pagination.
+     * rpcCall already fails over across endpoints and backs off on 429, so this is
+     * not wrapped in another retry layer.
+     * @param {string} address - Nano account address
+     * @param {number} [count=10] - Number of transactions to fetch
+     * @param {number} [offset=0] - Offset for pagination
+     * @param {boolean} [raw=false] - If true, amounts are returned in raw units; otherwise converted to NANO.
+     *   (Not passed to the RPC: its own `raw` flag switches to full state blocks, whose
+     *   `type` is always "state" instead of send/receive.)
+     * @returns {Promise<Array<{hash: string, type: string, amount: string, timestamp: string, account: string}>>}
+     */
+    async getAccountHistory(address, count = 10, offset = 0, raw = false) {
+        let data;
+        try {
+            data = await this.rpcCall('account_history', { account: address, count: String(count), offset: String(offset) });
+        } catch (err) {
+            // An unopened account has no history, not an error
+            if (err.message.includes('Account not found')) return [];
+            throw err;
+        }
+        const lib = await this.loadLibrary();
+        const history = Array.isArray(data.history) ? data.history : [];
+        return history.map(tx => ({
+            hash: tx.hash,
+            type: tx.type,
+            amount: raw ? tx.amount : lib.tools.convert(tx.amount, 'RAW', 'NANO'),
+            timestamp: tx.local_timestamp,
+            account: tx.account
+        }));
+    }
+
+    /**
+     * Health check for the Nano service – verifies connectivity to the current RPC endpoint.
+     * @returns {Promise<{healthy: boolean, endpoint?: string, blockCount?: string, error?: string}>}
+     */
+    async healthCheck() {
+        try {
+            const data = await this.rpcCall('block_count');
+            return {
+                healthy: true,
+                endpoint: RPC_ENDPOINTS[this.rpcIndex],
+                blockCount: data.count
+            };
+        } catch (err) {
+            logger.error(`Nano health check failed: ${err.message}`);
+            return { healthy: false, error: err.message };
+        }
+    }
+
     startReceivableMonitor(address) {
         if (this.receivableMonitor) return;
         this.monitorAddress = address;

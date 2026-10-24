@@ -51,6 +51,11 @@ export default class PRReviewerPlugin extends BasePlugin {
         usage: 'getStats()'
       },
       {
+        command: 'getHistory',
+        description: 'Paginated PR review history (filter by action and date range)',
+        usage: 'getHistory({ action: "merge", startDate: "2026-10-01", page: 1, limit: 20 })'
+      },
+      {
         command: 'testReview',
         description: 'Test review a specific PR without merging',
         usage: 'testReview({ prNumber: 123 })'
@@ -142,6 +147,8 @@ export default class PRReviewerPlugin extends BasePlugin {
           return await this.updateSettings(data);
         case 'getStats':
           return await this.getStats();
+        case 'getHistory':
+          return await this.getHistory(data);
         case 'testReview':
           return await this.testReviewPR(data);
         case 'deploy':
@@ -1147,6 +1154,16 @@ ${reason}
       logger.error('[PRReviewer] Error updating settings:', error);
       return { success: false, error: error.message };
     }
+  }
+
+  /** Full review history from the PRReviewHistory collection (getStats only carries the last 100). */
+  async getHistory(data = {}) {
+    const { action, startDate, endDate, page, limit, sort } = data;
+    const result = await PRReviewHistory.getHistory({
+      agentId: this.agent.id || 'default',
+      action, startDate, endDate, page, limit, sort
+    });
+    return { success: true, ...result };
   }
 
   async getStats() {

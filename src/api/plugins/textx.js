@@ -57,8 +57,14 @@ export function asksToSendText(input) {
 const FIRST_TOOL = {
   send: 'send_sms', schedule: 'schedule_message', threads: 'list_threads', read: 'list_threads',
   search: 'search_messages', contact: 'contacts_lookup', watch: 'list_threads', scheduled: 'list_scheduled',
-  manageScheduled: 'list_scheduled', react: 'list_threads', markRead: 'list_threads', block: 'block_number'
+  manageScheduled: 'list_scheduled', react: 'list_threads', markRead: 'list_threads', block: 'block_number',
+  // TextX 0.4.32
+  thread: 'list_threads', customize: 'list_threads', pinMessage: 'list_threads', draft: 'list_threads',
+  tabs: 'manage_tabs', templates: 'templates', gif: 'gif_search', edit: 'list_threads', forward: 'list_threads',
+  deleteThread: 'list_threads', blockRules: 'block_rules', settings: 'app_settings', pendingMms: 'pending_mms', backup: 'backup'
 };
+// Actions a "text/tell/ask <someone> …" request can really mean; any other match becomes a send.
+const SEND_LIKE = new Set(['send', 'schedule', 'manageScheduled', 'edit', 'forward', 'draft']);
 // Set while a request runs in the background for a phone with no socket (see execute()).
 const offlineRun = new AsyncLocalStorage();
 
@@ -95,7 +101,7 @@ export default class TextXPlugin extends BasePlugin {
       {
         command: 'send',
         description: "Send an SMS from the user's phone. The phone shows the text and the user taps Send; nothing goes out without that tap. Optional media: https links to pictures, GIFs or video to send with it (MMS)",
-        usage: 'send({ to: "Mom", text: "Running 10 minutes late", media: ["https://… optional GIF or picture link"] })',
+        usage: 'send({ to: "Mom", text: "Running 10 minutes late", media: ["https://… optional GIF or picture link"], gifSearch: "optional words to find a GIF to attach", replyTo: "optional words from the message this answers", individually: false })',
         hint: messageTextRule(),
         examples: ['text mom that I am running late', 'remind Wayne via text message that the meeting moved to 6', 'send a text to 555-0100 saying I am outside', 'reply to Sam by SMS: sounds good', 'text the plumber that tomorrow works']
       },
@@ -173,6 +179,91 @@ export default class TextXPlugin extends BasePlugin {
         usage: 'unwatch({ thread: "Sam" })',
         examples: ['stop watching my texts with Sam']
       },
+      // TextX 0.4.32: the rest of the app. Each tool is off until the owner turns its group on.
+      {
+        command: 'thread',
+        description: 'Change a shared conversation on the phone: pin or unpin, archive, mute (until a time, or "off"), snooze until a time, set a reminder, mark unread, or rename a group',
+        usage: 'thread({ thread: "Family", pinned: true, archived: false, muted: true, mutedUntil: "2026-10-24T08:00", snoozedUntil: "…", remindAt: "…", unread: true, name: "New group name" })',
+        examples: ['pin my conversation with Sam', 'mute the family chat until tomorrow morning', 'archive the texts with the plumber', 'remind me about Wayne\'s text at 6pm', 'rename the group chat to Poker night', 'snooze the landlord thread until Monday', 'mark the Sam conversation unread']
+      },
+      {
+        command: 'customize',
+        description: "Change how a conversation looks on the phone: theme, my bubble color, their bubble color, wallpaper, wallpaper dim, bubble shape, font, chat bubble; reset puts it back to the app's default",
+        usage: 'customize({ thread: "Sam", theme: "dark", color: "#3366ff", theirColor: "…", wallpaper: "…", wallpaperDim: 0.3, bubbleShape: "round", font: "…", chatBubble: true, reset: false })',
+        examples: ['make my chat with Sam blue', 'give the family chat a dark theme', 'reset the look of the Wayne conversation']
+      },
+      {
+        command: 'pinMessage',
+        description: 'Pin (or unpin) a message in a shared conversation, the latest one or one matching some words',
+        usage: 'pinMessage({ thread: "Sam", match: "gate code", unpin: false })',
+        examples: ['pin the message with the address in my chat with Sam', 'unpin the gate code text']
+      },
+      {
+        command: 'draft',
+        description: 'Leave a draft in a conversation on the phone for the user to finish and send themselves (never sends); empty text clears it',
+        usage: 'draft({ thread: "Mom", text: "Happy birthday! …" })',
+        examples: ['put a draft in my chat with mom saying happy birthday', 'draft a reply to Sam that I will finish later', 'clear the draft in the Wayne thread']
+      },
+      {
+        command: 'tabs',
+        description: "The phone's conversation tabs: list them, create, rename or delete a tab, or add/remove a conversation",
+        usage: 'tabs({ op: "add", tab: "Work", thread: "Sam" })  (op: list|create|rename|delete|add|remove; name, kind for create)',
+        examples: ['what tabs do I have in TextX', 'make a Work tab', 'put the plumber conversation in the Home tab', 'remove Sam from the Work tab']
+      },
+      {
+        command: 'templates',
+        description: 'Quick-reply templates on the phone: list, add, update, delete, or expand one for a conversation',
+        usage: 'templates({ op: "add", title: "Running late", body: "Running 10 minutes late, sorry!" })  (op: list|add|update|delete|expand; match or id picks one)',
+        examples: ['list my text templates', 'add a template saying I am in a meeting, will call back', 'delete the running late template']
+      },
+      {
+        command: 'gif',
+        description: 'Search GIFs through the phone (to send one, use send with gifSearch)',
+        usage: 'gif({ query: "happy dance", limit: 5 })',
+        examples: ['find a gif of a dancing cat']
+      },
+      {
+        command: 'edit',
+        description: 'Edit a text the user sent to another TextX phone in the last 15 minutes (the user confirms)',
+        usage: 'edit({ thread: "Sam", match: "see you at 5", text: "see you at 6" })',
+        examples: ['edit my last text to Sam to say 6 instead of 5', 'fix the typo in the message I just sent mom']
+      },
+      {
+        command: 'forward',
+        description: 'Forward a message (with its pictures) from a shared conversation to someone else or another conversation, with an optional comment (the user confirms)',
+        usage: 'forward({ thread: "Sam", match: "address", to: "Mom", toThread: "Family", comment: "this is where we are going" })',
+        examples: ["forward Sam's address text to mom", 'forward the last picture from Wayne to the family chat']
+      },
+      {
+        command: 'deleteThread',
+        description: 'Delete a whole conversation on the phone (the user confirms)',
+        usage: 'deleteThread({ thread: "Spam number" })',
+        examples: ['delete the whole conversation with that spam number']
+      },
+      {
+        command: 'blockRules',
+        description: 'Spam blocking rules on the phone: list rules, add one (number, prefix, keyword or regex), remove one, see texts the rules caught, restore a caught text, or clear all rules (clearing asks the user)',
+        usage: 'blockRules({ op: "add", kind: "keyword", pattern: "crypto giveaway" })  (op: list|add|remove|caught|restore|clear; id for remove/restore)',
+        examples: ['block texts that mention car warranty', 'block every number starting with +1 900', 'what spam did the block rules catch', 'list my block rules', 'restore that caught text']
+      },
+      {
+        command: 'settings',
+        description: 'Read or change TextX app settings, or add a shared theme code (TXP1.…). Sensitive settings (app lock, relay, updates, notifications, auto-reply…) ask the user on the phone',
+        usage: 'settings({ op: "get" })  or  settings({ op: "set", values: { "theme": "dark" } })  or  settings({ op: "set", addTheme: "TXP1.…" })',
+        examples: ['what are my textx settings', 'switch textx to the dark theme', 'add this textx theme code']
+      },
+      {
+        command: 'pendingMms',
+        description: 'Picture messages waiting to download on the phone: list them, or download one',
+        usage: 'pendingMms({ op: "list" })  or  pendingMms({ op: "download", id: "…" })',
+        examples: ['are any picture messages waiting to download', 'download the waiting mms']
+      },
+      {
+        command: 'backup',
+        description: "TextX backups: status, save a backup now, or restore one (restoring asks the user)",
+        usage: 'backup({ op: "status" })  or  backup({ op: "save", pictures: true })',
+        examples: ['back up my texts', 'when was textx last backed up']
+      },
       {
         command: 'status',
         description: 'Which phones are paired with the agent through TextX, and what they allow',
@@ -205,10 +296,11 @@ export default class TextXPlugin extends BasePlugin {
     let { action, ...data } = params;
     // "Remind Wayne via text message that…" matched watch (it reads like "let me know") and the
     // owner got a permissions error for a text they asked to send (2026-10-20). A request to send
-    // someone a text is a send, whatever the matcher picked.
-    if (action === 'watch' && asksToSendText(data._context?.originalInput)) {
+    // someone a text is a send, whatever the matcher picked. Since 2.25.580 that covers every
+    // action: "Tell Wayne what TextX/DialX does…" matched the new `settings` (2026-10-23).
+    if (!SEND_LIKE.has(action) && asksToSendText(data._context?.originalInput)) {
       this.logger.info(`textx: "${String(data._context.originalInput).slice(0, 80)}" asks to send a text, not to watch; sending`);
-      data = { _context: data._context, to: data.thread || data.contact || data.to, needsParameterExtraction: true };
+      data = { _context: data._context, to: data.thread || data.contact || data.to, ...(data.text ? { text: data.text } : {}), needsParameterExtraction: true };
       action = 'send';
     }
     if (data.needsParameterExtraction) await this._extractArgs(action, data);
@@ -283,6 +375,20 @@ export default class TextXPlugin extends BasePlugin {
         case 'react': return await this.react(data);
         case 'markRead': return await this.markRead(data);
         case 'block': return await this.block(data);
+        case 'thread': return await this.updateThread(data);
+        case 'customize': return await this.customize(data);
+        case 'pinMessage': return await this.pinMessage(data);
+        case 'draft': return await this.draft(data);
+        case 'tabs': return await this.tabs(data);
+        case 'templates': return await this.templates(data);
+        case 'gif': return await this.gif(data);
+        case 'edit': return await this.edit(data);
+        case 'forward': return await this.forward(data);
+        case 'deleteThread': return await this.deleteThread(data);
+        case 'blockRules': return await this.blockRules(data);
+        case 'settings': return await this.settings(data);
+        case 'pendingMms': return await this.pendingMms(data);
+        case 'backup': return await this.backup(data);
         default: return { success: false, error: `Unknown action: ${action}` };
       }
     } catch (error) {
@@ -421,7 +527,10 @@ export default class TextXPlugin extends BasePlugin {
   }
 
   async send(data, scheduled = false) {
-    const ref = await this.fromConversation(data, data.to || data.recipient || data.contact, keepIndent(data.text || data.message));
+    const asGiven = keepIndent(data.text || data.message);
+    const ref = await this.fromConversation(data, data.to || data.recipient || data.contact, asGiven);
+    // Words taken from the conversation ("send him the same thing") are the owner's own: not checked.
+    const fromChat = keepIndent(ref.text) !== asGiven;
     if (ref.error) return { success: false, error: ref.error };
     data = { ...data, to: ref.to };
     let text = keepIndent(ref.text);
@@ -430,7 +539,17 @@ export default class TextXPlugin extends BasePlugin {
     if (scheduled && !Number.isFinite(Date.parse(data.at))) return { success: false, error: 'When should it be sent? Give a date and time.' };
     // A named conversation (a group) is addressed by its thread; people by their numbers.
     let target;
-    if (data.thread && !data.to) {
+    // TextX 0.4.32: answering a particular message quotes it. A reply goes into that conversation
+    // (reply_to needs its thread_id), so the recipient's number is never needed.
+    let replyTo = null;
+    if (!scheduled && data.replyTo) {
+      const f = await this.findThread(data.thread || (Array.isArray(data.to) ? data.to[0] : data.to));
+      if (f.error) return { success: false, error: f.error };
+      const m = await this.findMessage(f.thread.thread_id, data.replyTo === true ? '' : String(data.replyTo), { theirs: true });
+      if (m.error) return { success: false, error: m.error };
+      target = { thread_id: f.thread.thread_id };
+      replyTo = m.message.message_id;
+    } else if (data.thread && !data.to) {
       const f = await this.findThread(data.thread);
       if (f.error) return { success: false, error: f.error };
       target = { thread_id: f.thread.thread_id };
@@ -443,12 +562,18 @@ export default class TextXPlugin extends BasePlugin {
     const originId = this.origin();
     const request = String(data._context?.originalInput || '');
     const file = await this.asGifIfAsked(data._context?.attachedFile, request);
-    const files = [...(this.fileAttachment(file) || []), ...mediaAttachments(data)];
+    const found = data.gifSearch ? await this.findGif(data.gifSearch) : null;
+    if (found?.error) return { success: false, error: found.error };
+    const files = [...(this.fileAttachment(file) || []), ...mediaAttachments(data), ...(found ? [found.attachment] : [])];
     const attachments = files.length ? files : null;
     text = await this.inOwnersStyle(text, data.to || data.thread, request, target);
+    const checked = fromChat ? { text } : await this.grounded(text, request, data.to || data.thread);
+    if (checked.error) return { success: false, error: checked.error };
+    text = checked.text;
     const args = scheduled
       ? { ...target, text, at: new Date(data.at).toISOString(), ...(data.repeat ? { repeat: data.repeat } : {}), ...(data.interval ? { interval: data.interval } : {}), ...(data.endAfter ? { end_after: data.endAfter } : {}), ...(attachments ? { attachments } : {}) }
-      : { ...target, text, ...(attachments ? { attachments } : {}) };
+      : { ...target, text, ...(attachments ? { attachments } : {}), ...(replyTo ? { reply_to: replyTo } : {}),
+        ...(data.individually && target.to?.length > 1 ? { individually: true } : {}) };
     // TextX 0.4.10: a send the owner ordered has its own cap, not the 6/h auto-reply one (2119 #150).
     // Never for a reply the agent decided on (those go through the hub, not here), nor for a
     // Telegram user other than the owner.
@@ -460,6 +585,14 @@ export default class TextXPlugin extends BasePlugin {
     if (args.requested_by_owner && !originId) this.rememberStanding(request, data.to || data.thread).catch(() => {});
     if (r.pending) {
       return { success: true, result: `It's on your phone (${r.device}) for you to confirm. Tap Send there; I'll tell you when it's done.` };
+    }
+    // Sent: it joins each recipient's history (services/people) as the owner's words, so a later
+    // SMS, call or email with them knows what was said. Only immediate sends; a tap later is not known here.
+    if (!scheduled && r.result?.status === 'sent' && target.to?.length) {
+      for (const number of target.to) {
+        const person = await this.svc.hub.smsPerson?.({ name: target.to.length === 1 ? String(data.to || '') : '', number }).catch(() => null);
+        if (person) await this.svc.hub.rememberSms(person, 'owner', text).catch(() => {});
+      }
     }
     const done = this.outcomeText(r.result, scheduled);
     const withMedia = attachments ? ` with ${attachments.length === 1 ? 'a picture' : `${attachments.length} pictures`}` : '';
@@ -533,7 +666,11 @@ export default class TextXPlugin extends BasePlugin {
     const list = r.result || [];
     await this.svc.hub.learnContacts(list.flatMap(t => t.participants || []), 'a shared conversation');
     if (!list.length) return { success: true, result: 'No conversations are shared with me in TextX.' };
-    const lines = list.map(t => `- ${t.title || (t.participants || []).map(p => p.name || p.number).join(', ')}${t.unread ? ` (${t.unread} unread)` : ''} — last ${t.last_date || '?'}`);
+    const lines = list.map(t => {
+      // TextX 0.4.32 rows carry the conversation's state; older phones don't, and nothing shows.
+      const st = [t.pinned && 'pinned', t.archived && 'archived', t.muted_until && 'muted', t.snoozed_until && 'snoozed', t.draft && 'draft waiting'].filter(Boolean);
+      return `- ${t.title || (t.participants || []).map(p => p.name || p.number).join(', ')}${t.unread ? ` (${t.unread} unread)` : ''}${st.length ? ` [${st.join(', ')}]` : ''} — last ${t.last_date || '?'}`;
+    });
     return { success: true, result: `Shared conversations:\n${lines.join('\n')}` };
   }
 
@@ -682,6 +819,46 @@ export default class TextXPlugin extends BasePlugin {
   }
 
   /**
+   * A text ALICE wrote (not one the owner dictated) may only state what the request or ALICE's own
+   * knowledge supports. "Tell Wayne what TextX/DialX does that other apps don't" would otherwise go
+   * out with features the model made up: it knew nothing about either app (2026-10-23). Unsupported
+   * claims are dropped or replaced by known facts; with nothing to support the point, the owner is
+   * told so instead of the text going out. Returns {text} or {error}.
+   */
+  async grounded(text, request, who) {
+    const flat = (v) => String(v || '').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+    const pm = this.agent?.providerManager;
+    if (!text || !request || flat(request).includes(flat(text)) || !pm?.generateResponse) return { text };
+    let facts = [];
+    try {
+      const hits = await this.agent.memoryManager?.recall?.(request, { type: 'knowledge', limit: 6, minSimilarity: 0.5 }) || [];
+      facts = hits.map(m => String(m.content || '').trim()).filter(Boolean).slice(0, 6);
+    } catch (e) {
+      this.logger.warn(`textx send: knowledge lookup failed: ${e.message}`);
+    }
+    this.logger.info(`textx send: checking a composed text against ${facts.length} known fact(s)`);
+    try {
+      const res = await pm.generateResponse(
+        `${process.env.OWNER_NAME || 'The user'} asked: "${String(request).slice(0, 600)}"\nDraft text to ${who || 'the recipient'}: ${text}\n\n` +
+        `What you know:\n${facts.length ? facts.map(f => `- ${f.slice(0, 1200)}`).join('\n') : '(nothing stored on this)'}\n\n` +
+        'Check every factual claim in the draft about products, features, prices, dates, places or people. Keep a claim only if the ' +
+        'request or "What you know" supports it; remove it or replace it with a supported fact otherwise. Questions, greetings, ' +
+        'thanks and plans the request itself states need no support. Keep the tone and about the length. If the main point of ' +
+        'the message cannot be made from supported facts, answer exactly NO_FACTS. Otherwise answer with the text only.',
+        { maxTokens: 500, temperature: 0.2 });
+      const out = String(res?.content || '').trim().replace(/^"|"$/g, '');
+      if (/^NO_FACTS\b/.test(out)) {
+        this.logger.info('textx send: not sent, nothing known supports the point');
+        return { error: "I don't know enough about that to write it without making things up, so I didn't send anything. Tell me what to say, or tell me the facts first (\"remember that …\")." };
+      }
+      return { text: out && out.length <= 1500 ? out : text };
+    } catch (e) {
+      this.logger.warn(`textx send: fact check failed: ${e.message}`);
+      return { text };
+    }
+  }
+
+  /**
    * The recipient's name and the phone's notes for their conversation. A send addressed by number
    * found no persona by name, and owner-ordered sends never read thread.notes (2026-10-20). The
    * shared conversations are read only while the phone is connected, so a send never waits on it.
@@ -805,6 +982,266 @@ export default class TextXPlugin extends BasePlugin {
     const number = String(data.number || data.to || '').replace(/[^\d+]/g, '');
     if (number.length < 5) return { success: false, error: 'Which number?' };
     return this.confirmed('block_number', { number, ...(data.unblock ? { unblock: true } : {}) });
+  }
+
+  /** A message in a conversation: the latest (from them, with theirs) or the latest matching some words. */
+  async findMessage(threadId, match = '', { theirs = false } = {}) {
+    const r = await this.call('read_thread', { thread_id: threadId, limit: 50 });
+    if (!r.ok) return { error: errorResult(r).error };
+    let msgs = r.result || [];
+    if (theirs) msgs = msgs.filter(m => m.direction !== 'out' && m.from !== 'me');
+    const q = String(match || '').toLowerCase().trim();
+    const hit = q ? msgs.filter(m => (m.text || '').toLowerCase().includes(q)).pop() : msgs[msgs.length - 1];
+    if (!hit) return { error: q ? `No message there matches "${match}".` : 'There is no message there to use.' };
+    return { message: hit };
+  }
+
+  /** One GIF for a send: the smallest size of the first match, as a send_sms attachment. */
+  async findGif(query) {
+    const r = await this.call('gif_search', { query: String(query), limit: 5 });
+    if (!r.ok) return { error: errorResult(r).error };
+    const first = (r.result || []).find(g => (g.sizes || []).some(z => z.url));
+    if (!first) return { error: `No GIF found for "${query}".` };
+    const size = [...first.sizes].filter(z => z.url).sort((a, b) => (a.bytes || 0) - (b.bytes || 0))[0];
+    return { attachment: { name: `${(first.title || 'gif').replace(/[^\w.-]+/g, '-').slice(0, 40) || 'gif'}.gif`, url: size.url } };
+  }
+
+  /** A time for a 0.4.32 thread field: ISO-8601, or "off". */
+  timeArg(v, request = '') {
+    if (v == null || v === '') return undefined;
+    if (v === false || /^(off|none|never|clear)$/i.test(String(v))) return 'off';
+    const at = resolveRequestTime(v, request);
+    return at ? at.toISOString() : undefined;
+  }
+
+  describeThreadState(st = {}) {
+    const bits = [];
+    if (st.pinned) bits.push('pinned');
+    if (st.archived) bits.push('archived');
+    if (st.muted_until) bits.push(st.muted_until === 'forever' ? 'muted' : `muted until ${st.muted_until}`);
+    if (st.snoozed_until) bits.push(`snoozed until ${st.snoozed_until}`);
+    if (st.remind_at) bits.push(`reminder at ${st.remind_at}`);
+    if (st.name) bits.push(`named "${st.name}"`);
+    return bits.length ? bits.join(', ') : 'no pin, mute, snooze or reminder';
+  }
+
+  async updateThread(data) {
+    const f = await this.findThread(data.thread || data.contact);
+    if (f.error) return { success: false, error: f.error };
+    const request = String(data._context?.originalInput || '');
+    const args = { thread_id: f.thread.thread_id };
+    for (const [k, key] of [['pinned', 'pinned'], ['archived', 'archived'], ['unread', 'unread']]) {
+      if (typeof data[k] === 'boolean') args[key] = data[k];
+    }
+    if (data.mutedUntil != null) args.muted_until = this.timeArg(data.mutedUntil, request);
+    else if (typeof data.muted === 'boolean') args.muted = data.muted;
+    if (data.snoozedUntil != null) args.snoozed_until = this.timeArg(data.snoozedUntil, request);
+    if (data.remindAt != null) args.remind_at = this.timeArg(data.remindAt, request);
+    if (data.name) args.name = String(data.name);
+    for (const k of Object.keys(args)) if (args[k] === undefined) delete args[k];
+    if (Object.keys(args).length === 1) return { success: false, error: 'What should change: pin, archive, mute, snooze, reminder, unread or name?' };
+    const r = await this.call('update_thread', args);
+    if (!r.ok) return errorResult(r);
+    return { success: true, result: `"${f.thread.title}": ${this.describeThreadState(r.result)}.` };
+  }
+
+  async customize(data) {
+    const f = await this.findThread(data.thread || data.contact);
+    if (f.error) return { success: false, error: f.error };
+    const map = { theme: 'theme', color: 'color', theirColor: 'their_color', wallpaper: 'wallpaper', wallpaperDim: 'wallpaper_dim', bubbleShape: 'bubble_shape', font: 'font', chatBubble: 'chat_bubble' };
+    const args = { thread_id: f.thread.thread_id };
+    for (const [k, key] of Object.entries(map)) if (data[k] != null && data[k] !== '') args[key] = data[k];
+    if (data.reset) args.reset = true;
+    if (Object.keys(args).length === 1) return { success: false, error: 'What should change: theme, colors, wallpaper, bubble shape or font?' };
+    const r = await this.call('customize_thread', args);
+    return r.ok ? { success: true, result: data.reset ? `"${f.thread.title}" is back to the app's look.` : `Changed how "${f.thread.title}" looks on your phone.` } : errorResult(r);
+  }
+
+  async pinMessage(data) {
+    const f = await this.findThread(data.thread || data.contact);
+    if (f.error) return { success: false, error: f.error };
+    const m = await this.findMessage(f.thread.thread_id, data.match);
+    if (m.error) return { success: false, error: m.error };
+    const r = await this.call('pin_message', { thread_id: f.thread.thread_id, message_id: m.message.message_id, ...(data.unpin ? { unpin: true } : {}) });
+    return r.ok ? { success: true, result: `${r.result?.status === 'unpinned' ? 'Unpinned' : 'Pinned'} it in "${f.thread.title}".` } : errorResult(r);
+  }
+
+  async draft(data) {
+    const f = await this.findThread(data.thread || data.contact || data.to);
+    if (f.error) return { success: false, error: f.error };
+    const text = keepIndent(data.text || '');
+    const r = await this.call('set_draft', { thread_id: f.thread.thread_id, text });
+    if (!r.ok) return errorResult(r);
+    return { success: true, result: text ? `Left a draft in "${f.thread.title}"; it's in the compose box for you to send.` : `Cleared the draft in "${f.thread.title}".` };
+  }
+
+  async tabs(data) {
+    const op = String(data.op || 'list').toLowerCase();
+    const args = { action: op };
+    if (data.tab || data.tabId) args.tab_id = String(data.tabId || data.tab);
+    if (data.name) args.name = String(data.name);
+    if (data.kind) args.kind = String(data.kind);
+    if (op === 'add' || op === 'remove') {
+      const f = await this.findThread(data.thread || data.contact);
+      if (f.error) return { success: false, error: f.error };
+      args.thread_id = f.thread.thread_id;
+    }
+    if (args.tab_id && !/^\d+$/.test(args.tab_id) && op !== 'create') {
+      const l = await this.call('manage_tabs', { action: 'list' });
+      if (!l.ok) return errorResult(l);
+      const hit = (Array.isArray(l.result) ? l.result : l.result?.tabs || []).find(t => String(t.name || '').toLowerCase() === args.tab_id.toLowerCase());
+      if (!hit) return { success: false, error: `There's no tab called "${args.tab_id}".` };
+      args.tab_id = hit.tab_id ?? hit.id;
+    }
+    const r = await this.call('manage_tabs', args);
+    if (!r.ok) return errorResult(r);
+    if (op === 'list') {
+      const list = Array.isArray(r.result) ? r.result : r.result?.tabs || [];
+      return { success: true, result: list.length ? `Tabs: ${list.map(t => t.name).join(', ')}` : 'No tabs yet.' };
+    }
+    return { success: true, result: `Done (${r.result?.status || op}).` };
+  }
+
+  async templates(data) {
+    const op = String(data.op || 'list').toLowerCase();
+    const args = { action: op };
+    if (data.title) args.title = String(data.title);
+    if (data.body) args.body = String(data.body);
+    if (['update', 'delete', 'expand'].includes(op)) {
+      let id = data.id;
+      if (!id) {
+        const l = await this.call('templates', { action: 'list' });
+        if (!l.ok) return errorResult(l);
+        const q = String(data.match || data.title || '').toLowerCase();
+        const list = Array.isArray(l.result) ? l.result : l.result?.templates || [];
+        const hits = list.filter(t => q && `${t.title || ''} ${t.body || ''}`.toLowerCase().includes(q));
+        if (hits.length !== 1) return { success: false, error: hits.length ? `More than one template matches "${q}"; which one?` : 'Which template? Say part of its title or text.' };
+        id = hits[0].id;
+      }
+      args.id = id;
+    }
+    if (op === 'expand') {
+      const f = await this.findThread(data.thread || data.contact);
+      if (f.error) return { success: false, error: f.error };
+      args.thread_id = f.thread.thread_id;
+    }
+    const r = await this.call('templates', args);
+    if (!r.ok) return errorResult(r);
+    if (op === 'list') {
+      const list = Array.isArray(r.result) ? r.result : r.result?.templates || [];
+      return { success: true, result: list.length ? `Templates:\n${list.map(t => `- ${t.title}: ${t.body}`).join('\n')}` : 'No templates yet.' };
+    }
+    if (op === 'expand') return { success: true, result: r.result?.text || '' };
+    return { success: true, result: `Done (${r.result?.status || op}).` };
+  }
+
+  async gif(data) {
+    const r = await this.call('gif_search', { query: String(data.query || ''), limit: Math.min(Number(data.limit) || 5, 24) });
+    if (!r.ok) return errorResult(r);
+    const list = (r.result || []).map(g => `- ${g.title || g.id}: ${(g.sizes || []).find(z => z.url)?.url || ''}`);
+    return { success: true, result: list.length ? `GIFs:\n${list.join('\n')}` : 'No GIFs found.' };
+  }
+
+  async edit(data) {
+    const f = await this.findThread(data.thread || data.contact || data.to);
+    if (f.error) return { success: false, error: f.error };
+    const r0 = await this.call('read_thread', { thread_id: f.thread.thread_id, limit: 30 });
+    if (!r0.ok) return errorResult(r0);
+    const mine = (r0.result || []).filter(m => m.direction === 'out' || m.from === 'me');
+    const q = String(data.match || '').toLowerCase();
+    const target = q ? mine.filter(m => (m.text || '').toLowerCase().includes(q)).pop() : mine[mine.length - 1];
+    if (!target) return { success: false, error: q ? `None of your texts there matches "${data.match}".` : 'You have no text there to edit.' };
+    const text = keepIndent(data.text || '');
+    if (!text) return { success: false, error: 'What should it say instead?' };
+    return this.confirmed('edit_message', { thread_id: f.thread.thread_id, message_id: target.message_id, text });
+  }
+
+  async forward(data) {
+    const f = await this.findThread(data.thread || data.contact);
+    if (f.error) return { success: false, error: f.error };
+    const m = await this.findMessage(f.thread.thread_id, data.match);
+    if (m.error) return { success: false, error: m.error };
+    const args = { thread_id: f.thread.thread_id, message_id: m.message.message_id };
+    if (data.toThread) {
+      const t = await this.findThread(data.toThread);
+      if (t.error) return { success: false, error: t.error };
+      args.to_thread_id = t.thread.thread_id;
+    } else {
+      const rcpt = await this.resolveRecipients(data.to || data.recipient);
+      if (rcpt.error) return { success: false, error: rcpt.error };
+      args.to = rcpt.numbers;
+    }
+    if (data.comment) args.comment = String(data.comment);
+    return this.confirmed('forward_message', args);
+  }
+
+  async deleteThread(data) {
+    const said = String(data._context?.originalInput ?? data.originalInput ?? '');
+    if (said && !/\b(delete|remove|erase|get rid of)\b/i.test(said)) {
+      return { success: false, error: "That didn't sound like a request to delete a conversation, so I didn't." };
+    }
+    const f = await this.findThread(data.thread || data.contact);
+    if (f.error) return { success: false, error: f.error };
+    return this.confirmed('delete_thread', { thread_id: f.thread.thread_id });
+  }
+
+  async blockRules(data) {
+    const op = String(data.op || 'list').toLowerCase();
+    const args = { action: op };
+    if (data.kind) args.kind = String(data.kind);
+    if (data.pattern) args.pattern = String(data.pattern);
+    if (data.id != null) args.id = data.id;
+    if (op === 'add' && !args.pattern) return { success: false, error: 'What should the rule block: a number, a prefix, a keyword or a pattern?' };
+    const r = await this.call('block_rules', args);
+    if (!r.ok) return errorResult(r);
+    if (r.pending) return { success: true, result: `It's on your phone (${r.device}) for you to confirm; I'll tell you when it's done.` };
+    if (op === 'caught') return { success: true, result: untrusted('CAUGHT SMS', JSON.stringify(r.result, null, 1)) };
+    if (op === 'list') return { success: true, result: `Block rules:\n${JSON.stringify(r.result, null, 1)}` };
+    return { success: true, result: `Done (${r.result?.status || op}).` };
+  }
+
+  async settings(data) {
+    const op = String(data.op || 'get').toLowerCase();
+    const args = { action: op === 'set' ? 'set' : 'get' };
+    if (op === 'set') {
+      if (data.values && typeof data.values === 'object') args.values = data.values;
+      if (data.addTheme) args.add_theme = String(data.addTheme);
+      if (!args.values && !args.add_theme) return { success: false, error: 'Which setting, and to what?' };
+    }
+    const r = await this.call('app_settings', args);
+    if (!r.ok) return errorResult(r);
+    if (r.pending) return { success: true, result: `That setting needs your OK on the phone (${r.device}); I'll tell you when it's done.` };
+    if (args.action === 'get') return { success: true, result: `TextX settings:\n${JSON.stringify(r.result?.values || r.result, null, 1)}` };
+    const changed = r.result?.changed;
+    return { success: true, result: `Changed${Array.isArray(changed) && changed.length ? `: ${changed.join(', ')}` : ''}${r.result?.theme_added ? ' (theme added)' : ''}.` };
+  }
+
+  async pendingMms(data) {
+    const op = String(data.op || 'list').toLowerCase();
+    const r = await this.call('pending_mms', { action: op === 'download' ? 'download' : 'list', ...(data.id ? { id: data.id } : {}) });
+    if (!r.ok) return errorResult(r);
+    if (op === 'download') return { success: true, result: 'Downloading it on the phone.' };
+    const list = Array.isArray(r.result) ? r.result : r.result?.pending || [];
+    return { success: true, result: list.length ? `${list.length} picture message(s) waiting to download.` : 'No picture messages are waiting.' };
+  }
+
+  async backup(data) {
+    const op = String(data.op || 'status').toLowerCase();
+    if (!['status', 'save', 'restore'].includes(op)) return { success: false, error: 'Use op status, save or restore.' };
+    const args = { action: op };
+    // The passphrase/key go to the phone only; never logged or repeated back.
+    if (data.passphrase) args.passphrase = String(data.passphrase);
+    if (data.key) args.key = String(data.key);
+    if (typeof data.pictures === 'boolean') args.pictures = data.pictures;
+    const r = await this.call('backup', args);
+    if (!r.ok) return errorResult(r);
+    if (r.pending) return { success: true, result: `It's on your phone (${r.device}) for you to confirm; I'll tell you when it's done.` };
+    if (op === 'status') {
+      const b = r.result || {};
+      const list = b.backups || [];
+      return { success: true, result: `Cloud backup ${b.cloud_configured ? 'is set up' : 'is not set up'}; ${list.length} backup(s)${list.length ? `, latest ${list[0].date || list[0].at || list[0].name || ''}` : ''}.` };
+    }
+    return { success: true, result: `Backup ${r.result?.status || op}.` };
   }
 
   async status() {

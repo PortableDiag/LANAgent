@@ -6,6 +6,7 @@ import { fileURLToPath } from 'url';
 import fs from 'fs/promises';
 import fsSync from 'fs';
 import { logger } from '../../utils/logger.js';
+import { trackCommandRequest, externalRequestsInFlight, commandRequestsInFlight } from '../../services/productionQuiet.js';
 import { authenticateToken, generateToken, verifyToken } from './auth.js';
 import { setupTestingRoutes } from './testingRoutes.js';
 import { setupFeatureRequestRoutes } from './featureRequests.js';
@@ -359,10 +360,14 @@ export class WebInterface {
         const health = isStale ? 'stale' : (latest?.overallHealth || 'unknown');
         const isHealthy = isStale || !latest || latest.overallHealth !== 'critical';
 
+        // Requests being answered right now, for the deploy quiet gate (scripts/deployment/
+        // quiet-gate.sh), which asks from the host itself. Not shown to anyone else.
+        const local = ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(req.socket?.remoteAddress);
         res.json({
           status: isHealthy ? 'ok' : 'unhealthy',
           health,
           reportAgeSeconds: reportAgeMs !== null ? Math.floor(reportAgeMs / 1000) : null,
+          ...(local ? { inFlight: { external: externalRequestsInFlight(), command: commandRequestsInFlight() } } : {}),
           timestamp: new Date().toISOString(),
           uptime: process.uptime(),
           // Reported so the gateway can publish a live version instead of a
@@ -921,7 +926,7 @@ export class WebInterface {
     });
 
     // Command execution
-    this.app.post('/api/command/execute', authenticateToken, async (req, res) => {
+    this.app.post('/api/command/execute', authenticateToken, trackCommandRequest, async (req, res) => {
       try {
         const { command, reasoningModel, threadId } = req.body;
         // reasoningModel: run this request's reasoning on another model of the current provider

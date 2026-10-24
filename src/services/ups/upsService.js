@@ -484,7 +484,8 @@ class UpsService extends EventEmitter {
     // Send via agent notification system (Telegram, etc.)
     if (this.agent) {
       try {
-        await this.agent.notify(message);
+        // Power trouble buzzes (on battery, low, critical, overload, lost contact); restored and tests stay silent.
+        await this.agent.notify(message, { urgent: severity === 'critical' || severity === 'warning' });
         logger.debug(`Sent notification for UPS event: ${eventType}`);
       } catch (error) {
         logger.error('Failed to send UPS notification:', error.message);
@@ -572,7 +573,7 @@ class UpsService extends EventEmitter {
       if (autoShutdown.notifyBeforeShutdown) {
         const message = `🚨 **CRITICAL: System shutdown in ${autoShutdown.delaySeconds} seconds**\nUPS battery critically low. Initiating safe shutdown.`;
         if (this.agent) {
-          await this.agent.notify(message);
+          await this.agent.notify(message, { urgent: true });
         }
       }
 

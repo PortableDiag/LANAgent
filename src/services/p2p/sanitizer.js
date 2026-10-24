@@ -7,7 +7,8 @@ import { logger } from '../../utils/logger.js';
 
 const REDACTED = '[REDACTED]';
 
-// Patterns to strip/redact from outgoing content
+// Patterns to strip/redact from outgoing content.
+// This array is extensible via registerPattern() / unregisterPattern().
 const SANITIZE_PATTERNS = [
   // Environment variable access
   { pattern: /process\.env\.([\w]+)/g, replace: 'process.env.REDACTED' },
@@ -186,4 +187,61 @@ export function validateSanitization(content) {
     safe: warnings.length === 0,
     warnings
   };
+}
+
+/**
+ * Register a custom sanitization pattern.
+ * Plugins and other modules can use this to add domain-specific redaction rules
+ * without modifying the core sanitizer.
+ *
+ * @param {RegExp} pattern - Regular expression to match (must be a RegExp instance)
+ * @param {string|function} replace - Replacement string or function (passed to String.prototype.replace)
+ * @throws {TypeError} If pattern is not a RegExp
+ *
+ * @example
+ * // Redact internal project codes
+ * registerPattern(/PROJ-\d{4,}/g, '[PROJECT-CODE]');
+ *
+ * @example
+ * // Use a replacement function
+ * registerPattern(/secret:\s*\S+/gi, (match) => 'secret: [REDACTED]');
+ */
+export function registerPattern(pattern, replace) {
+  if (!(pattern instanceof RegExp)) {
+    const err = new TypeError('registerPattern: pattern must be a RegExp');
+    logger.error('registerPattern validation failed', { error: err.message });
+    throw err;
+  }
+
+  SANITIZE_PATTERNS.push({ pattern, replace });
+  logger.debug('Registered custom sanitization pattern', { pattern: pattern.toString() });
+}
+
+/**
+ * Unregister a previously registered sanitization pattern.
+ * Removes the first occurrence of the exact { pattern, replace } pair.
+ *
+ * @param {RegExp} pattern - The RegExp that was registered
+ * @param {string|function} replace - The replacement that was registered
+ * @returns {boolean} true if a pattern was removed, false otherwise
+ *
+ * @example
+ * const myPattern = /PROJ-\d{4,}/g;
+ * registerPattern(myPattern, '[PROJECT-CODE]');
+ * // later...
+ * unregisterPattern(myPattern, '[PROJECT-CODE]');
+ */
+export function unregisterPattern(pattern, replace) {
+  const idx = SANITIZE_PATTERNS.findIndex(
+    entry => entry.pattern === pattern && entry.replace === replace
+  );
+
+  if (idx !== -1) {
+    SANITIZE_PATTERNS.splice(idx, 1);
+    logger.debug('Unregistered custom sanitization pattern', { pattern: pattern.toString() });
+    return true;
+  }
+
+  logger.debug('unregisterPattern: pattern not found', { pattern: pattern.toString() });
+  return false;
 }

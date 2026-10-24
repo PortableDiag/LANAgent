@@ -6158,7 +6158,12 @@ Important:
     await tg.sendNotification(`🧹 Skill housekeeping:\n\n${lines.join('\n')}\n\nNothing is deleted: restore any of them in the web UI → Skills.`, { parse_mode: undefined }).catch(() => {});
   }
 
-  async notify(message, userId = null) {
+  /**
+   * Tell the owner. Silent on Telegram unless { urgent: true } (safety, money at risk, a person
+   * asking for the owner): notify(message, { urgent: true }) or notify(message, userId, { urgent: true }).
+   */
+  async notify(message, userId = null, options = {}) {
+    if (userId && typeof userId === 'object') { options = userId; userId = null; }
     try {
       if (message && typeof message === 'object' && !Array.isArray(message)) {
         const { title, message: body, text } = message;
@@ -6171,7 +6176,7 @@ Important:
       // Send via Telegram if available
       const telegramInterface = this.interfaces.get('telegram');
       if (telegramInterface) {
-        await telegramInterface.sendNotification(message, {});
+        await telegramInterface.sendNotification(message, options?.urgent ? { urgent: true } : {});
       }
       
       // TextX phones that opted in to notifications (Settings › TextX)

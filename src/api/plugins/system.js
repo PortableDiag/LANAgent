@@ -774,7 +774,7 @@ export default class SystemPlugin extends BasePlugin {
     
     try {
       if (method === 'telegram' || method === 'both') {
-        await this.notify(message);
+        await this.notify(message, { urgent: true }); // a reminder: it makes a sound
         notifications.push('Telegram');
       }
       

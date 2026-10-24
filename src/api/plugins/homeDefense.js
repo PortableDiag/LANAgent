@@ -695,7 +695,8 @@ export default class HomeDefensePlugin extends BasePlugin {
     };
     const msg = `🛡️ *Home Defense* — ${fresh.length} new alert(s)\n` + fresh.slice(0, 15).map(fmt).join('\n') +
       (fresh.length > 15 ? `\n…and ${fresh.length - 15} more` : '');
-    await this.notify(msg, { parse_mode: 'Markdown', disable_web_page_preview: true });
+    // A spoofed or suspicious device buzzes; only-new devices arrive silently.
+    await this.notify(msg, { parse_mode: 'Markdown', disable_web_page_preview: true, urgent: fresh.some(c => c.kind === 'spoof' || c.kind === 'suspicious') });
     logger.info(`[home-defense] sent ${fresh.length} device alert(s) to Telegram`);
   }
 

@@ -3,6 +3,20 @@ import { logger } from '../../utils/logger.js';
 import { exec } from 'child_process';
 import { promisify } from 'util';
 import { PluginSettings } from '../../models/PluginSettings.js';
+import { existsSync } from 'fs';
+
+/**
+ * A host with the system VPN watchdog (netcheck, scripts/ops/expressvpn-watchdog) leaves recovery
+ * to it: it restarts a wedged daemon, re-asserts Network Lock and bootstraps DNS, which this
+ * plugin cannot. Both reconnecting at once made outages longer: on 2026-10-23 netcheck reconnected
+ * at 16:14:47 and this monitor started a second connect to another exit at 16:15:09.
+ * VPN_RECOVERY=app|system overrides the detection.
+ */
+export function systemOwnsVpnRecovery(env = process.env, exists = existsSync) {
+  if (env.VPN_RECOVERY === 'app') return false;
+  if (env.VPN_RECOVERY === 'system') return true;
+  return exists('/etc/systemd/system/netcheck.service');
+}
 
 const execAsync = promisify(exec);
 
@@ -1287,12 +1301,20 @@ export class VPNPlugin extends BasePlugin {
       clearInterval(this.healthCheckInterval);
     }
     
+    const systemOwned = systemOwnsVpnRecovery();
+    if (systemOwned) logger.info('VPN recovery is the system watchdog\'s (netcheck); this plugin only watches');
     this.healthCheckInterval = setInterval(async () => {
       await this.updateConnectionState();
       if (!this.connectionState.connected && this.config.autoConnect) {
+        if (systemOwned) {
+          if (!this._lostLogged) logger.warn('VPN connection lost; leaving recovery to the system watchdog (netcheck)');
+          this._lostLogged = true;
+          return;
+        }
         logger.warn('VPN connection lost, attempting to reconnect...');
         await this.smartConnect({ purpose: 'general' });
       }
+      if (this.connectionState.connected) this._lostLogged = false;
     }, this.config.healthCheckInterval);
   }
 

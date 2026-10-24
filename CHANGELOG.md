@@ -2,6 +2,84 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.585] - 2026-10-24
+
+### Fixed
+- **PDFs come back as their text on every path.** A parsed PDF lost its type on the way to the response, so it was re-fetched as a web page, sent to the browser for a "quality" retry, and given a screenshot of an empty viewer. It now returns its text, title and page count.
+- **PDFs on sites that refuse a plain download.** When only a real browser gets through, the scraper now reads the file from inside the browser page instead of returning the empty PDF viewer.
+
+## [2.25.584] - 2026-10-24
+
+### Fixed
+- **PDF links scrape on the render tier.** The browser opened a PDF in its built-in viewer and returned only the empty viewer page, so every PDF on that tier was treated as a blocked page, sent through the web archives and failed. The scraper now fetches the file itself and returns its text and title, and a short PDF is no longer mistaken for a stub.
+
+## [2.25.583] - 2026-10-23
+
+### Added
+- **Calls that reach voicemail leave a proper message** (DialX 0.6.0 to 0.6.2). The agent stays quiet through the greeting, and after the beep DialX plays the disclosure and a short message: who is calling for you, why, and to call you back. The message is written when the call is scheduled, in your own words when you give them, and in the agent's own voice, so nothing waits once the beep comes. You get "I left a voicemail" in the call report and a recording of the voicemail as their phone heard it, on Telegram.
+
+### Changed
+- **Live calls listen better.** The agent transcribes the caller's audio itself and uses that over the phone's rougher transcription. A reply that the caller has already talked past is dropped and rewritten, it never asks the same question twice, and it wraps up once "anything else?" gets nothing new. How you asked the agent to talk with someone (a persona, a tone) now reaches calls, not only texts.
+- **The agent learns facts about a person only from what they said**, never from your jokes or its own lines, and a voicemail greeting is never stored as the person's words.
+
+## [2.25.582] - 2026-10-23
+
+### Changed
+- **Telegram notifications are silent unless they need you.** Status updates, reports, deploy and self-improvement notices, swaps and confirmations arrive without a sound. Reminders you set, safety alerts (UPS on battery or shutting down, a spoofed or suspicious device), someone asking for you through TextX, invitations and sign-off requests still make a sound. Replies to your own messages are unchanged. You can unmute the agent.
+
+### Fixed
+- Calendar reminders sent by Telegram never arrived: they called a notification function the agent did not have.
+
+## [2.25.581] - 2026-10-23
+
+### Added
+- **The agent knows people across every channel.** Someone who texts, gets a call from the agent, or emails back is one person to it, found by their number or email address (never by name alone, so two Sams stay two people). When it talks to them on any channel it sees what was said with them before on every channel, and what it has learned about them, so it never treats someone it knows as a stranger. Only conversations the agent is part of are kept; your personal messages are not.
+- **It learns lasting facts about each person** (who they are to you, work, family, plans, preferences) from those conversations, never codes, passwords or account details.
+- **What you tell the agent in TextX counts.** Facts you mention in your TextX chat now reach what it remembers about you, as they already did on Telegram and the dashboard.
+- **It won't invent facts in a text it writes for you.** "Tell Sam what TextX does…" is checked against what it actually knows; if it knows nothing, it says so instead of sending something made up. Your own wording is never changed.
+
+### Fixed
+- "Tell <someone> …" always sends a text, even when the request looked like another TextX action (it had started reading your TextX settings).
+
+## [2.25.580] - 2026-10-23
+
+### Added
+- **The agent can use everything TextX 0.4.32 opened up**, once you switch each group on in TextX: pin, archive, mute, snooze, set a reminder on or rename a conversation; change how one looks; pin a message; leave a draft for you to send; tabs; quick-reply templates; GIFs; edit a text you just sent; forward a message; delete a conversation; spam-block rules; app settings; waiting picture messages; backups. Anything that changes or sends something asks you on the phone first.
+- **Replying to a particular message.** "Reply to Sam's address text: perfect" sends it as a reply that quotes Sam's message; "text Sam a happy-dance GIF" finds and attaches one; "text Al and Bo separately" sends each their own.
+
+### Changed
+- **A swipe-reply in TextX is understood as a reply.** The agent acts on what you wrote and uses the quoted message only as context, instead of reacting to the quote.
+- **The automatic update no longer restarts the agent in the middle of something.** It waits for a quiet moment (no paid request, no reply being written, no phone call), the same as a manual deploy, and tries again an hour later if the agent stays busy.
+
+## [2.25.579] - 2026-10-23
+
+### Added
+- **Free TTS price quotes.** `POST /tts/estimate` returns the credits a text-to-speech request would cost, after the same checks the paid call runs, so a quote always matches the charge.
+- **Revenue records can be filtered, sorted and paged** (type, category, network, date range; paging only when you ask for it, so the dashboard still sees every row).
+- **PR review history** (`getHistory` on the PR reviewer), **an AI review of a skill** (`review` on skills), and **comparing two diagnostic reports**.
+- **Faucet claim history** filters by faucet and address, with sorting and paging.
+- **External API allow/block lists** (`EXTERNAL_AUTH_ALLOWLIST`, `EXTERNAL_AUTH_BLOCKLIST`, empty by default).
+- Nano account history and RPC health check; a cache-clear action for the loop audit; extra redaction rules for the P2P sanitizer; a partial mode for validating PATCH bodies.
+
+### Changed
+- **DialX call logs no longer contain what was said.** Each line records how many words were heard or spoken and whether the speech was unclear. The call's own record still holds the transcript.
+- Image descriptions are cached per picture and question, so a second question about the same photo gets its own answer.
+
+### Fixed
+- Faucet claim history read every faucet as "https" (the key was split on the first colon of the URL).
+
+## [2.25.578] - 2026-10-22
+
+### Fixed
+- **The agent no longer hangs up on someone it couldn't hear.** On the first real call, the phone couldn't make out the person's answer and passed it on as "(unclear)". The agent took that for voicemail, left a message and hung up. Now unclear or empty speech gets "Sorry, I didn't catch that, could you say it again?" (then "a little louder"). It is told it is talking to a live person, never a voicemail, and it ends the call only when they say goodbye or it has your answer and has thanked them.
+- **A deploy can't restart the agent during a call any more.** A call is recorded the moment it's scheduled, not when DialX reports it started. The deploy check now waits from 5 minutes before a call is due until it has ended. On the first test, a restart landed 30 seconds into the call.
+- **An approved contact is never told it needs approval,** even when the phone is slow to answer.
+
+## [2.25.577] - 2026-10-22
+
+### Changed
+- **The agent can call someone who isn't on its approved list; you approve that call on the phone.** This follows DialX 0.3.4. Contacts you approved for it are called straight away with no card. For anyone else, the agent finds their number in your phone's contacts, and DialX asks you to approve that one call. If the name matches more than one number, it asks which one.
+
 ## [2.25.576] - 2026-10-22
 
 ### Changed

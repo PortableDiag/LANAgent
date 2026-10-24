@@ -7,11 +7,15 @@ import NodeCache from 'node-cache';
 const validationCache = new NodeCache({ stdTTL: 300, checkperiod: 60 });
 
 /**
- * Generate a unique cache key for input-schema combination
+ * Generate a unique cache key for input-schema-options combination
+ * @param {Object} input - Input data
+ * @param {Object} schema - Validation schema
+ * @param {Object} [options] - Validation options
+ * @returns {string|null} Cache key or null if serialization fails
  */
-function generateCacheKey(input, schema) {
+function generateCacheKey(input, schema, options = {}) {
   try {
-    return JSON.stringify({ input, schema });
+    return JSON.stringify({ input, schema, options });
   } catch {
     return null;
   }
@@ -40,7 +44,7 @@ function appendPath(path, segment) {
  * @param {string} path - Field path
  * @returns {Array<string>} Validation errors
  */
-function validateComposition(value, rules, path) {
+function validateComposition(value, rules, path, options = {}) {
   const errors = [];
 
   if (Array.isArray(rules.oneOf)) {
@@ -65,7 +69,10 @@ function validateComposition(value, rules, path) {
 
   if (Array.isArray(rules.allOf)) {
     for (const candidate of rules.allOf) {
-      errors.push(...validateValue(value, candidate, path));
+      // allOf is a plain conjunction, so partial mode applies to each branch.
+      // oneOf/anyOf/not stay strict: relaxing `required` inside them changes
+      // which branch matches rather than just loosening a constraint.
+      errors.push(...validateValue(value, candidate, path, options));
     }
   }
 
@@ -82,9 +89,10 @@ function validateComposition(value, rules, path) {
  * @param {*} value - Value to validate
  * @param {Object} rules - Validation rules
  * @param {string} path - Field path
+ * @param {Object} [options] - Validation options (e.g., { partial: true })
  * @returns {Array<string>} Validation errors
  */
-function validateValue(value, rules = {}, path = 'value') {
+function validateValue(value, rules = {}, path = 'value', options = {}) {
   const errors = [];
   const fieldName = path || 'value';
 
@@ -93,7 +101,7 @@ function validateValue(value, rules = {}, path = 'value') {
     return errors;
   }
 
-  errors.push(...validateComposition(value, rules, fieldName));
+  errors.push(...validateComposition(value, rules, fieldName, options));
 
   if (rules.enum && !rules.enum.includes(value)) {
     errors.push(`Field '${fieldName}' must be one of: ${rules.enum.join(', ')}`);
@@ -136,7 +144,7 @@ function validateValue(value, rules = {}, path = 'value') {
 
     if (rules.items) {
       value.forEach((item, index) => {
-        errors.push(...validateValue(item, rules.items, appendPath(path, index)));
+        errors.push(...validateValue(item, rules.items, appendPath(path, index), options));
       });
     }
   }
@@ -144,6 +152,10 @@ function validateValue(value, rules = {}, path = 'value') {
   if (value !== null && typeof value === 'object' && !Array.isArray(value) && rules.properties) {
     if (Array.isArray(rules.required)) {
       for (const field of rules.required) {
+        // In partial mode, skip required check for fields not present in the object
+        if (options.partial && !(field in value)) {
+          continue;
+        }
         if (value[field] === undefined || value[field] === null) {
           errors.push(`Required field '${appendPath(path, field)}' is missing`);
         }
@@ -157,7 +169,7 @@ function validateValue(value, rules = {}, path = 'value') {
         continue;
       }
 
-      errors.push(...validateValue(childValue, childRules, appendPath(path, field)));
+      errors.push(...validateValue(childValue, childRules, appendPath(path, field), options));
     }
   }
 
@@ -183,10 +195,12 @@ function validateValue(value, rules = {}, path = 'value') {
  * Validate input against a schema
  * @param {Object} input - Input to validate
  * @param {Object} schema - Validation schema
+ * @param {Object} [options] - Validation options
+ * @param {boolean} [options.partial] - If true, skip required checks for fields not present in input (for PATCH requests)
  * @returns {Object} Validation result { valid: boolean, errors: Array }
  */
-export function validateInput(input, schema = {}) {
-  const cacheKey = generateCacheKey(input, schema);
+export function validateInput(input, schema = {}, options = {}) {
+  const cacheKey = generateCacheKey(input, schema, options);
 
   if (cacheKey) {
     const cachedResult = validationCache.get(cacheKey);
@@ -203,6 +217,10 @@ export function validateInput(input, schema = {}) {
   if (Array.isArray(schema.required)) {
     const target = value === undefined || value === null ? {} : value;
     for (const field of schema.required) {
+      // In partial mode, skip required check for fields not present in input
+      if (options.partial && !(field in target)) {
+        continue;
+      }
       if (target[field] === undefined || target[field] === null) {
         errors.push(`Required field '${field}' is missing`);
       }
@@ -216,10 +234,10 @@ export function validateInput(input, schema = {}) {
     if (schema.properties) {
       // Absent input was already reported via `required`; nothing to walk.
       if (value !== undefined && value !== null) {
-        errors.push(...validateValue(value, rootRules, ''));
+        errors.push(...validateValue(value, rootRules, '', options));
       }
     } else {
-      errors.push(...validateValue(value, rootRules, 'value'));
+      errors.push(...validateValue(value, rootRules, 'value', options));
     }
   }
 
@@ -437,11 +455,12 @@ export const commonSchemas = {
 /**
  * Create a validation middleware for express routes
  * @param {Object} schema - Validation schema
+ * @param {Object} [options] - Validation options (e.g., { partial: true } for PATCH)
  * @returns {Function} Express middleware
  */
-export function validationMiddleware(schema) {
+export function validationMiddleware(schema, options = {}) {
   return (req, res, next) => {
-    const { valid, errors } = validateInput(req.body, schema);
+    const { valid, errors } = validateInput(req.body, schema, options);
 
     if (!valid) {
       return res.status(400).json({

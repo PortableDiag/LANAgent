@@ -915,7 +915,7 @@ Return ONLY the tweet text, nothing else.`;
             text: tweetText, url: tweetUrl, count: postsToday + 1, max: maxAutoPostsPerDay
           });
           await telegram.sendNotification(notice.text, {
-            parse_mode: undefined, rich: notice.rich, reply_markup: notice.replyMarkup, disable_notification: false
+            parse_mode: undefined, rich: notice.rich, reply_markup: notice.replyMarkup // a report of a post already made: silent
           });
         }
       } catch { /* non-critical */ }

@@ -16,10 +16,15 @@ const transcriptSchema = new mongoose.Schema({
   role: { type: String, enum: ['user', 'assistant'], required: true },
   content: { type: String, required: true },
   threadId: { type: Number },   // Telegram private-chat topic, when the message was in one
+  // One person across channels (models/Person.js, 2026-10-23): whose conversation this is, and
+  // who spoke (`role` stays user/assistant for the readers that predate people).
+  personId: { type: String },
+  speaker: { type: String, enum: ['person', 'owner', 'assistant'] },
   createdAt: { type: Date, default: Date.now }
 }, { versionKey: false });
 
 transcriptSchema.index({ userId: 1, createdAt: -1 });
+transcriptSchema.index({ personId: 1, createdAt: -1 }, { partialFilterExpression: { personId: { $exists: true } } });
 transcriptSchema.index({ createdAt: 1 }, { expireAfterSeconds: RETENTION_DAYS * 86400 });
 transcriptSchema.index({ content: 'text' });
 

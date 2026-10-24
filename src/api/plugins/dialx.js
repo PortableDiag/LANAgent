@@ -2,7 +2,7 @@ import { BasePlugin } from '../core/basePlugin.js';
 import { nowInZone, resolveRequestTime, localZone } from '../../utils/wallClock.js';
 import { getTextX } from '../../services/textx/index.js';
 import { textxRequest } from '../../services/textx/textxHub.js';
-import { isoWithOffset, getDialXSettings, agentAudio, clock } from '../../services/textx/dialx.js';
+import { isoWithOffset, getDialXSettings, agentAudio, clock, voicemailText } from '../../services/textx/dialx.js';
 
 /**
  * Phone calls through the DialX dialer app ("call Wayne and tell him happy birthday at 5pm").
@@ -61,7 +61,7 @@ export default class DialXPlugin extends BasePlugin {
       {
         command: 'call',
         description: 'Phone someone from the user\'s phone and talk with them. `purpose` is why the user wants the call; `opening` is the first thing to say to them; `at` is when (ISO-8601, omit for now). Only contacts approved in DialX; the user confirms on the phone',
-        usage: 'call({ contact: "Wayne", at: "2026-10-23T17:00", purpose: "wish him a happy birthday", opening: "Hi Wayne! I\'m calling to wish you a happy birthday." })',
+        usage: 'call({ contact: "Wayne", at: "2026-10-23T17:00", purpose: "wish him a happy birthday", opening: "Hi Wayne! I\'m calling to wish you a happy birthday.", voicemail: "optional: what to leave if voicemail answers, in the user\'s words" })',
         examples: ['call wayne and tell him happy birthday at 5pm', 'phone mom and ask if she needs anything from the store', 'give the plumber a call tomorrow at 9 and confirm the appointment', 'ring Sam now and let him know I\'m running late']
       },
       {
@@ -169,7 +169,7 @@ export default class DialXPlugin extends BasePlugin {
   async call(data) {
     if (!this.fromOwner(data)) return { success: false, error: 'Only my owner can ask me to place calls.' };
     const request = String(data._context?.originalInput || data.originalInput || '');
-    if (data.needsParameterExtraction || !data.contact || !data.opening) await this.extract(data, request);
+    if (data.needsParameterExtraction || !data.contact || !data.opening || !data.voicemail) await this.extract(data, request);
     const who = String(data.contact || data.to || data.name || '').trim();
     if (!who) return { success: false, error: 'Who should I call?' };
     const purpose = String(data.purpose || data.message || '').trim();
@@ -179,7 +179,15 @@ export default class DialXPlugin extends BasePlugin {
     const list = await this.tool('dialx.list_approved_contacts');
     if (!list.ok) return errorResult(list);
     const approved = listOf(list.result, 'contacts').map(contactOf).filter(c => c.name || c.number);
-    const pick = this.match(approved, who);
+    // DialX 0.3.4 (Trellis 4293 #23): an approved contact is called with no card; anyone else
+    // goes to the owner's confirm card for that one call. So a name not on the list is looked up
+    // in the phone's contacts and sent by number, and the phone asks the owner.
+    let pick = this.match(approved, who);
+    if (pick.error && !pick.ambiguous) {
+      const found = await this.lookup(who);
+      if (found.error) return { success: false, error: found.error };
+      pick = found;
+    }
     if (pick.error) return { success: false, error: pick.error };
 
     // No time = now: `at` is left out (DialX's "omitted: now"), so a few seconds in transit
@@ -193,13 +201,25 @@ export default class DialXPlugin extends BasePlugin {
     const device = await this.device('dialx.schedule_call');
     const settings = await this.settings();
     const line = opening || `Hi ${pick.contact.name || 'there'}! I'm calling about ${purpose}.`;
-    const audio = await agentAudio(this.agent, device, line, settings, this.logger);
+    // DialX 0.6.0/0.6.1: what to leave after the beep, as text and (0.6.1) in ALICE's own voice,
+    // rendered now with the opening so voicemail never waits on a round trip.
+    // The name the owner used ("Wayne") over the phone book's ("CommanderFog Wayne") when it is part of it.
+    const said = String(data.contact || '').trim();
+    const spoken = said && String(pick.contact.name || '').toLowerCase().split(/\s+/).includes(said.toLowerCase()) ? said : pick.contact.name;
+    const vmText = voicemailText({ name: spoken, owner: process.env.OWNER_NAME, self: this.agent?.config?.name || process.env.AGENT_NAME,
+      purpose: purpose || '', given: data.voicemail });
+    const [audio, vmAudio] = await Promise.all([
+      agentAudio(this.agent, device, line, settings, this.logger),
+      agentAudio(this.agent, device, vmText, settings, this.logger)
+    ]);
     const args = {
       ...(pick.contact.id != null ? { contact_id: pick.contact.id } : { number: pick.contact.number }),
       ...(at ? { at: isoWithOffset(at, localZone()) } : {}),
       purpose: purpose || line,
       opening: line,
+      voicemail: vmText, // the transcript of voicemail_audio_b64, or what the phone speaks without it
       ...(audio ? { opening_audio_b64: audio.audio_b64 } : {}),
+      ...(vmAudio ? { voicemail_audio_b64: vmAudio.audio_b64 } : {}),
       requested_by_owner: true
     };
     const name = pick.contact.name || who;
@@ -207,7 +227,20 @@ export default class DialXPlugin extends BasePlugin {
       onLate: (late) => this.agent.notify?.(late.ok ? `📞 ${this.outcome(late.result, name, args.at, line)}` : `⚠️ Call to ${name}: ${errorResult(late).error}`)
     });
     if (!r.ok) return errorResult(r);
-    if (r.pending) return { success: true, result: `It's on your phone for you to approve: calling ${name} at ${when(args.at)} (${purpose || line}). Tap Approve in DialX; I'll tell you when it's set.` };
+    // Recorded at once: the deploy quiet gate holds a restart from now until the call has ended,
+    // not just from call.started (the first live call's restart landed in that gap, 2026-10-23).
+    if (r.result?.call_id) {
+      await this.hub?.dialx?.store?.plan?.({ callId: String(r.result.call_id), contact: name, number: pick.contact.number || '', voicemail: args.voicemail, purpose: purpose || line,
+        plannedAt: new Date(r.result.at || args.at || Date.now()) })?.catch?.(e => this.logger.warn(`dialx: call not recorded: ${e.message}`));
+    }
+    const time = args.at ? `at ${when(args.at)}` : 'now';
+    // Only someone off the approved list gets a confirm card. An approved contact never does: a
+    // pending answer there just means the phone hasn't replied yet (offline or asleep).
+    if (r.pending) {
+      return { success: true, result: pick.unapproved
+        ? `${name} isn't on my approved list, so DialX is asking you on the phone: calling ${name} ${time} (${purpose || line}). Tap Approve there; I'll tell you when it's set.`
+        : `I've asked DialX to call ${name} ${time}; the phone hasn't answered yet (it may be offline). No approval is needed for ${name}. I'll tell you when it's scheduled.` };
+    }
     return { success: true, result: this.outcome(r.result, name, args.at, line) };
   }
 
@@ -216,21 +249,38 @@ export default class DialXPlugin extends BasePlugin {
     const status = String(result?.status || 'scheduled');
     if (status === 'declined') return `You declined the call to ${name} on the phone, so it won't happen.`;
     if (status === 'timeout') return `The call to ${name} wasn't approved on the phone in time, so it isn't scheduled. Ask again to retry.`;
-    if (status === 'scheduled') return `Call to ${name} scheduled for ${when(result?.at || at)}: I'll open with "${line}" and tell you how it went.`;
+    if (status === 'scheduled') return `Call to ${name} scheduled ${result?.at || at ? `for ${when(result?.at || at)}` : 'for now'}: I'll open with "${line}" and tell you how it went.`;
     return `Call to ${name}: DialX answered "${status}".`;
   }
 
   /** One approved contact for the name, or an error that lists the choices. */
   match(approved, who) {
-    if (!approved.length) return { error: 'No contacts are approved for me in DialX yet. Add them in DialX: this agent › approved contacts.' };
+    if (!approved.length) return { error: 'No contacts are approved for me in DialX yet.' };
     const q = who.toLowerCase();
     const digits = who.replace(/\D/g, '');
     const exact = approved.filter(c => c.name.toLowerCase() === q || (digits.length >= 7 && c.number.replace(/\D/g, '').endsWith(digits)));
     const hits = exact.length ? exact : approved.filter(c => c.name.toLowerCase().split(/\s+/).includes(q) || c.name.toLowerCase().includes(q));
     if (hits.length === 1) return { contact: hits[0] };
     const names = approved.map(c => c.name || c.number).slice(0, 12).join(', ');
-    if (!hits.length) return { error: `${who} isn't on my approved list in DialX (approved: ${names}). Add them in DialX first.` };
-    return { error: `"${who}" matches more than one approved contact: ${hits.map(c => c.name).join(', ')}. Which one?` };
+    if (!hits.length) return { error: `${who} isn't on my approved list in DialX (approved: ${names}).` };
+    return { ambiguous: true, error: `"${who}" matches more than one approved contact: ${hits.map(c => c.name).join(', ')}. Which one?` };
+  }
+
+  /** Someone not on the approved list: one number from the phone's contacts (or the number itself). */
+  async lookup(who) {
+    const digits = who.replace(/\D/g, '');
+    if (digits.length >= 7 && /^[+\d\s().-]+$/.test(who.trim())) return { contact: { id: null, name: who, number: who.trim() }, unapproved: true };
+    const r = await this.tool('dialx.contacts_lookup', { query: who, limit: 5 });
+    if (!r.ok) return { error: r.error?.code === 'not_allowed' || r.error?.code === 'none'
+      ? `${who} isn't on my approved list in DialX, and contact lookup is off for me there, so I can't find their number. Approve them in DialX or give me the number.`
+      : errorResult(r).error };
+    const people = listOf(r.result, 'contacts').filter(c => (c.numbers || (c.number ? [c.number] : [])).length);
+    const exact = people.filter(c => String(c.name || '').toLowerCase() === who.toLowerCase());
+    const pool = exact.length ? exact : people;
+    const options = pool.flatMap(c => (c.numbers || [c.number]).map(n => ({ name: c.name, number: n })));
+    if (!options.length) return { error: `No contact on the phone matches "${who}".` };
+    if (options.length > 1) return { ambiguous: true, error: `"${who}" matches more than one number: ${options.slice(0, 6).map(o => `${o.name} ${o.number}`).join('; ')}. Which one?` };
+    return { contact: { id: null, name: options[0].name || who, number: options[0].number }, unapproved: true };
   }
 
   async extract(data, request) {
@@ -241,18 +291,22 @@ export default class DialXPlugin extends BasePlugin {
     try {
       const res = await pm.generateResponse(
         `${owner} asked you, ${name}, to make a phone call. Request: ${request}\n` +
-        'Extract one JSON object {"contact": who to call, "at": when, "purpose": why, "opening": first line}.\n' +
+        'Extract one JSON object {"contact": who to call, "at": when, "purpose": why, "opening": first line, "voicemail": message to leave}.\n' +
         '- "at": the wall-clock time they said, YYYY-MM-DDTHH:mm with no offset or Z (a time with no date that has ' +
         `already passed today means tomorrow); null for now. Local now is ${nowInZone()}.\n` +
         `- "purpose": what ${owner} wants from the call, in a few words ("wish Wayne a happy birthday").\n` +
         `- "opening": the first thing you will say to them, after the phone has already said you are ${owner}'s AI ` +
         `assistant: one or two warm, spoken sentences addressed to them, carrying ${owner}'s message ("Hi Wayne! ` +
         `${owner} asked me to call and wish you a very happy birthday."). No emoji or symbols.\n` +
+        `- "voicemail": what to leave if voicemail answers, after the phone says you are ${owner}'s AI assistant: two or ` +
+        `three short spoken sentences to them by first name: that you are ${name} calling for ${owner}, the message or ` +
+        `reason in plain words, and to call ${owner} back. ${owner}'s own words when the request gives a message for ` +
+        'voicemail. The same tone as the opening. Under 400 characters, no emoji or symbols.\n' +
         'Leave out what the request does not say. Answer the JSON only.',
         { maxTokens: 300, temperature: 0.3 });
       const raw = String(res?.content || '').replace(/^```(?:json)?\s*|\s*```$/g, '');
       const got = JSON.parse(raw.slice(raw.indexOf('{'), raw.lastIndexOf('}') + 1)) || {};
-      for (const k of ['contact', 'at', 'purpose', 'opening']) {
+      for (const k of ['contact', 'at', 'purpose', 'opening', 'voicemail']) {
         if ((data[k] == null || data[k] === '') && got[k] != null && got[k] !== '') data[k] = got[k];
       }
     } catch (err) {

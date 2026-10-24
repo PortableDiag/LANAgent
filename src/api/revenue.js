@@ -5,6 +5,7 @@ import DailyPnL from '../models/DailyPnL.js';
 import { logger } from '../utils/logger.js';
 import NodeCache from 'node-cache';
 import { retryOperation } from '../utils/retryUtils.js';
+import { queryRevenueRecords } from '../utils/revenueRecordQuery.js';
 import rateLimit from 'express-rate-limit';
 
 const router = express.Router();
@@ -269,11 +270,19 @@ router.get('/report/risk-metrics', authenticateToken, async (req, res) => {
     }
 });
 
-// Get all records
+// Get all records; optional filtering (type/category/network/startDate/endDate), sorting
+// (sortBy/sortOrder) and pagination (page/limit — only when asked for; see revenueRecordQuery.js)
 router.get('/records', authenticateToken, async (req, res) => {
     try {
-        const records = await retryOperation(() => revenueService.getAllRecords());
-        res.json({ success: true, data: records });
+        const allRecords = await retryOperation(() => revenueService.getAllRecords());
+        let result;
+        try {
+            result = queryRevenueRecords(allRecords, req.query);
+        } catch (e) {
+            if (e.status === 400) return res.status(400).json({ success: false, error: e.message });
+            throw e;
+        }
+        res.json({ success: true, data: result.data, ...(result.pagination ? { pagination: result.pagination } : {}) });
     } catch (error) {
         logger.error('Failed to get records:', error);
         res.status(500).json({ success: false, error: error.message });

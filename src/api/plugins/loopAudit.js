@@ -18,6 +18,11 @@ export default class LoopAuditPlugin extends BasePlugin {
         command: 'getAuditLevels',
         description: 'Get the finding levels the auditor emits, most severe first',
         usage: 'getAuditLevels'
+      },
+      {
+        command: 'clearAuditCache',
+        description: 'Clear cached audit results to force a fresh audit',
+        usage: 'clearAuditCache [targetDirectory]'
       }
     ];
     this.cache = new NodeCache({ stdTTL: 1800 });
@@ -34,10 +39,13 @@ export default class LoopAuditPlugin extends BasePlugin {
         case 'getAuditLevels':
           return this.getAuditLevels();
 
+        case 'clearAuditCache':
+          return await this.clearAuditCache(target);
+
         default:
           return {
             success: false,
-            error: 'Unknown action. Supported actions: auditScore, getAuditLevels'
+            error: 'Unknown action. Supported actions: auditScore, getAuditLevels, clearAuditCache'
           };
       }
     } catch (error) {
@@ -131,6 +139,46 @@ export default class LoopAuditPlugin extends BasePlugin {
       return response;
     } catch (err) {
       throw new Error(`Error running loop-audit: ${err.message}`);
+    }
+  }
+
+  /**
+   * Clear cached audit results, optionally scoped to a specific target directory.
+   * Without a targetDir, all cached audit entries are flushed.
+   * @param {string} [targetDir] - Optional directory to clear cache for
+   * @returns {object} Success status and count of cleared entries
+   */
+  async clearAuditCache(targetDir = null) {
+    try {
+      if (targetDir) {
+        // Delete the exact keys getAuditScore writes for this directory. A prefix
+        // match on `audit_${targetDir}_` would also hit a sibling directory whose
+        // name merely starts with this one plus an underscore (foo vs foo_bar).
+        const suffixes = ['all', ...Object.keys(LoopAuditPlugin.LEVEL_RANK)];
+        const cleared = this.cache.del(suffixes.map(s => `audit_${targetDir}_${s}`));
+        this.logger.info(`Cleared ${cleared} cached audit entries for directory: ${targetDir}`);
+        return {
+          success: true,
+          cleared,
+          message: `Cleared ${cleared} cached audit entries for directory: ${targetDir}`
+        };
+      } else {
+        // Flush entire cache
+        const count = this.cache.getStats().keys;
+        this.cache.flushAll();
+        this.logger.info(`Cleared all ${count} cached audit entries`);
+        return {
+          success: true,
+          cleared: count,
+          message: `Cleared all ${count} cached audit entries`
+        };
+      }
+    } catch (error) {
+      this.logger.error('Error clearing audit cache:', error);
+      return {
+        success: false,
+        error: error.message
+      };
     }
   }
 }

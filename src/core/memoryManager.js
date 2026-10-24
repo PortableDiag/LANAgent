@@ -461,7 +461,10 @@ export class MemoryManager {
     // Raw conversation storage was creating 13K+ junk entries (every message and response
     // stored verbatim with no value for recall). The AI filter in analyzeAndLearn
     // extracts only genuinely useful personal facts, preferences, and instructions.
-    if (userId === process.env.TELEGRAM_USER_ID || metadata.isAuthenticated || userId === 'admin' || userId === 'web-user') {
+    // The owner on any channel: TextX/DialX chats and the LANAgent app run as master under their own
+    // ids (textx:<device>), so what the owner said there never reached their learned facts (2026-10-23).
+    if (userId === process.env.TELEGRAM_USER_ID || metadata.isAuthenticated || userId === 'admin' || userId === 'web-user' ||
+        (metadata.isMaster === true && !metadata.isGuest)) {
       await this.analyzeAndLearn(userMessage, metadata);
     }
   }

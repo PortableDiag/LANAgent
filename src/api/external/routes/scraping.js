@@ -140,6 +140,8 @@ function looksLikeJsShell(result) {
 // Used by the Puppeteer-escalation, Twitterbot, Wayback, and archive.ph gates.
 export function isUnusableResult(result) {
   if (!result?.success) return true;
+  // A parsed PDF is the file itself, with no HTML to measure; a short one is not a stub.
+  if (result.contentType === 'application/pdf') return false;
   const htmlLen = typeof result._rawHtml === 'string' ? result._rawHtml.length : 0;
   const textLen = typeof result.content?.text === 'string' ? result.content.text.length : 0;
   // textLen is primary. htmlLen is a belt-and-suspenders gate; every tier now
@@ -1111,8 +1113,9 @@ async function executeScrape(req, { url, selectors, extractType = 'text', userAg
     // repeated-text <title>) is the genuine page, not a scrape artifact. Without
     // this, a good 86KB FS result was thrown away to re-scrape with Puppeteer for
     // 5+ minutes, blowing the budget entirely. Also gated on the overall budget.
+    // A parsed PDF's title is its metadata, and Puppeteer would only show Chrome's viewer.
     if (rawResult.success && !options.usePuppeteer && rawResult.method !== 'flaresolverr'
-        && !outOfBudget() && rawResult.content) {
+        && rawResult.contentType !== 'application/pdf' && !outOfBudget() && rawResult.content) {
       const title = rawResult.content.title || '';
       const ogImage = rawResult.content.ogImage || '';
       const images = rawResult.content.images || [];
@@ -1156,9 +1159,12 @@ async function executeScrape(req, { url, selectors, extractType = 'text', userAg
         links: (rawResult.content.links || []).map(l => ({ href: String(l.href || ''), text: String(l.text || '') })),
         images: (rawResult.content.images || []).map(i => ({ src: String(i.src || ''), alt: String(i.alt || '') })),
         jsonld: rawResult.content.jsonld || [],
-        microdata: rawResult.content.microdata || []
+        microdata: rawResult.content.microdata || [],
+        pages: Number.isInteger(rawResult.content.pages) ? rawResult.content.pages : undefined
       } : null,
       method: String(rawResult.method || 'unknown'),
+      // Dropping this sent every parsed PDF down the HTML re-fetch below.
+      contentType: rawResult.contentType === 'application/pdf' ? rawResult.contentType : undefined,
       error: rawResult.error ? String(rawResult.error) : undefined,
       // Preserve raw HTML and cookies from FlareSolverr so we can attach
       // HTML to render-tier responses without a redundant fetch and so the
@@ -1210,7 +1216,8 @@ async function executeScrape(req, { url, selectors, extractType = 'text', userAg
       links: result.content?.links || [],
       images: filteredImages,
       structuredData: result.content?.jsonld || [],
-      microdata: result.content?.microdata || []
+      microdata: result.content?.microdata || [],
+      ...(result.content?.pages ? { pages: result.content.pages } : {})
     },
     method: result.method
   };
@@ -1266,7 +1273,8 @@ async function executeScrape(req, { url, selectors, extractType = 'text', userAg
   // Capture screenshot for render tier via separate screenshot action.
   // For FlareSolverr-solved pages, pass the CF-clearance cookies so puppeteer
   // can navigate past the challenge.
-  const wantScreenshot = usePuppeteer || renderTier;
+  // A PDF renders as Chrome's empty viewer: nothing worth a screenshot.
+  const wantScreenshot = (usePuppeteer || renderTier) && result.contentType !== 'application/pdf';
   if (wantScreenshot && scraper.execute) {
     try {
       // v2.25.88: Honor the caller's fullPage flag. Was hardcoded to false,

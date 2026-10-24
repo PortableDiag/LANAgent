@@ -334,7 +334,7 @@ export class TrellisChannelListener {
       { text: '✅ Approve', callback_data: `trellis_so:${id}:a` },
       { text: '🛑 Reject', callback_data: `trellis_so:${id}:r` }
     ]];
-    tg.sendNotification(text, { parse_mode: undefined, reply_markup: { inline_keyboard: keyboard } })
+    tg.sendNotification(text, { parse_mode: undefined, reply_markup: { inline_keyboard: keyboard }, urgent: true }) // someone waits on the owner's sign-off
       .catch(err => logger.debug(`[trellis-listen] sign-off notice failed: ${err.message}`));
   }
 

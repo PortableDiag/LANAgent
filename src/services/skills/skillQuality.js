@@ -1,3 +1,6 @@
+import NodeCache from 'node-cache';
+import { logger } from '../../utils/logger.js';
+
 /**
  * Skill quality, after agentskills.io "Best practices for skill creators" and "Optimizing skill
  * descriptions" (read 2026-09-30):
@@ -92,4 +95,55 @@ Answer JSON only: {"should": ["..."], "shouldNot": ["..."]}`, { maxTokens: 1200,
     passRate: cases.length ? cases.filter(c => c.pass).length / cases.length : null,
     cases
   };
+}
+
+// Cache for AI-generated improvement suggestions (1 hour TTL), keyed by the skill's content
+// so an edited skill is reviewed afresh.
+const suggestionCache = new NodeCache({ stdTTL: 3600, checkperiod: 600 });
+const SEVERITIES = ['high', 'medium', 'low'];
+
+/**
+ * AI review of a skill against SKILL_WRITING_RULES: specific, actionable changes, complementing
+ * lintSkill()'s mechanical checks.
+ *
+ * An empty array means the model found nothing to change. Every failure (no model, model error,
+ * unparseable reply) THROWS instead, so a broken review is never reported as a clean skill.
+ * Only successful reviews are cached.
+ *
+ * @param {Object} options
+ * @param {Object} options.skill - { name, description, body }
+ * @param {Object} options.providerManager - needs generateAux (or generateResponse)
+ * @returns {Promise<Array<{section: string, issue: string, suggestion: string, severity: string}>>}
+ */
+export async function suggestSkillImprovements({ skill, providerManager }) {
+  if (!skill?.name) throw new Error('No skill to review');
+  const gen = providerManager?.generateAux || providerManager?.generateResponse;
+  if (typeof gen !== 'function') throw new Error('No model available to review the skill');
+
+  const cacheKey = `suggestions:${JSON.stringify({ name: skill.name, description: skill.description, body: skill.body })}`;
+  const cached = suggestionCache.get(cacheKey);
+  if (cached) return cached;
+
+  const prompt = `Review this AI-agent skill against the rules below and list specific, actionable changes. For each: the section ("description", "steps", "gotchas", "name"), the issue, a concrete replacement or addition, and a severity ("high", "medium", "low").
+
+Skill name: ${skill.name}
+Description: ${skill.description || ''}
+Body:
+${String(skill.body || '').slice(0, 8000)}
+
+${SKILL_WRITING_RULES}
+
+Answer JSON only: [{"section": "...", "issue": "...", "suggestion": "...", "severity": "high|medium|low"}]. If nothing needs changing, answer [].`;
+
+  const res = await gen.call(providerManager, prompt, { maxTokens: 1500, temperature: 0.3, auxTask: 'skill-improvement-suggestions' });
+  let parsed;
+  try { parsed = JSON.parse(String(res?.content || '').match(/\[[\s\S]*\]/)[0]); } catch { parsed = null; }
+  if (!Array.isArray(parsed)) throw new Error('The model did not return a usable review');
+
+  const suggestions = parsed
+    .filter(x => x && typeof x.section === 'string' && typeof x.issue === 'string' && typeof x.suggestion === 'string')
+    .map(x => ({ section: x.section, issue: x.issue, suggestion: x.suggestion, severity: SEVERITIES.includes(String(x.severity).toLowerCase()) ? String(x.severity).toLowerCase() : 'medium' }));
+  suggestionCache.set(cacheKey, suggestions);
+  logger.debug(`Skill review for "${skill.name}": ${suggestions.length} suggestion(s)`);
+  return suggestions;
 }

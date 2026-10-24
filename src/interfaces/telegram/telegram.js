@@ -1335,7 +1335,14 @@ export class TelegramInterface extends EventEmitter {
       }
 
       // Ensure options is an object (defensive programming)
-      const { rich, ...safeOptions } = options && typeof options === 'object' ? options : {};
+      const { rich, urgent, ...safeOptions } = options && typeof options === 'object' ? options : {};
+      // Silent unless it needs the owner (operator, 2026-10-23: ALICE was muted because every
+      // notice buzzed all day, so the ones that mattered were muted too). Sound only for `urgent`
+      // (safety, reminders, a person asking for the owner, a decision someone waits on) or a caller
+      // that explicitly asked for sound. Buttons alone are not a decision: the startup card has menu
+      // buttons and buzzed on the first version. Replies to the owner's own messages don't come here.
+      const loud = urgent === true || safeOptions.disable_notification === false;
+      safeOptions.disable_notification = !loud;
 
       // `rich`: the same notice as Rich Markdown (headings, tables). When Telegram takes it, that
       // is the notice; otherwise `message` goes out as before, so it must stand on its own.
@@ -1346,14 +1353,13 @@ export class TelegramInterface extends EventEmitter {
           disableNotification: safeOptions.disable_notification
         });
         if (sent) {
-          logger.info('Telegram notification sent successfully');
+          logger.info(`Telegram notification sent successfully${loud ? '' : ' (silent)'}`);
           return true;
         }
       }
 
       const defaultOptions = {
-        parse_mode: 'Markdown',
-        disable_notification: false
+        parse_mode: 'Markdown'
       };
 
       const finalOptions = { ...defaultOptions, ...safeOptions };
@@ -1401,7 +1407,7 @@ export class TelegramInterface extends EventEmitter {
         throw error;
       }
 
-      logger.info('Telegram notification sent successfully');
+      logger.info(`Telegram notification sent successfully${finalOptions.disable_notification ? ' (silent)' : ''}`);
       return true;
     } catch (error) {
       logger.error('Failed to send Telegram notification:', error);

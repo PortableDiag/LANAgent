@@ -3,6 +3,7 @@
  *
  *   POST /api/external/tts          JSON { text, model?, voice?, speed? } → MP3 as base64
  *   GET  /api/external/tts/voices   free: models, tiers, prices and the voices each accepts
+ *   POST /api/external/tts/estimate free: the credits a POST /tts would charge, after the same checks
  *
  * Speech is generated through the agent's OpenRouter provider (services/tts.js), which bills
  * per input character at the model's catalog price. The price is fixed per tier and known
@@ -70,6 +71,49 @@ async function liveCatalog() {
   return new Map(models.map(m => [m.id, m]));
 }
 
+/**
+ * Validate a speech request against the limits and the live catalog. Shared by POST /tts and
+ * POST /tts/estimate so a quote can never accept what the paid call would refuse (or the reverse).
+ * Returns { error: { status, body } } or { text, model, info, voice, speed }. Charges nothing.
+ */
+export async function checkTtsRequest(body, catalog = liveCatalog) {
+  const fail = (status, b) => ({ error: { status, body: { success: false, ...b, creditsCharged: 0 } } });
+  const text = typeof body?.text === 'string' ? body.text.trim() : '';
+  if (!text) return fail(400, { error: 'Send JSON { "text": "…" } (and optionally model, voice, speed)' });
+  if (text.length > TTS_MAX_CHARS) {
+    return fail(413, { error: `Text is ${text.length} characters; the limit is ${TTS_MAX_CHARS} per request`, maxChars: TTS_MAX_CHARS });
+  }
+  const model = body.model ? String(body.model) : TTS_DEFAULT_MODEL;
+  const info = modelInfo(model);
+  if (!info) {
+    return fail(400, { error: `Unknown model "${model}". See GET /tts/voices`, models: Object.values(TTS_TIERS).flatMap(t => Object.keys(t.models)) });
+  }
+  let speed;
+  if (body.speed !== undefined) {
+    speed = Number(body.speed);
+    if (!Number.isFinite(speed) || speed < 0.5 || speed > 2) {
+      return fail(400, { error: 'speed must be a number from 0.5 to 2' });
+    }
+  }
+
+  // Live catalog: the voices this model accepts and its current per-character cost.
+  let entry;
+  try {
+    entry = (await catalog()).get(model);
+  } catch (e) {
+    logger.warn(`[tts] catalog unavailable: ${e.message}`);
+  }
+  if (!entry || !withinMargin(Number(entry.pricing?.prompt), info.creditsPer1k)) {
+    return fail(503, { error: `Model ${model} is not available right now; try another (GET /tts/voices)` });
+  }
+  const voice = body.voice ? String(body.voice) : info.defaultVoice;
+  const voices = entry.voices || [];
+  if (voices.length && !voices.includes(voice)) {
+    return fail(400, { error: `Voice "${voice}" is not offered by ${model}`, voices });
+  }
+  return { text, model, info, voice, speed };
+}
+
 const router = Router();
 
 router.get('/voices', async (req, res) => {
@@ -105,39 +149,9 @@ router.post('/',
   creditAuth(false),
   requireCredits,
   async (req, res) => {
-    const text = typeof req.body?.text === 'string' ? req.body.text.trim() : '';
-    if (!text) return res.status(400).json({ success: false, error: 'Send JSON { "text": "…" } (and optionally model, voice, speed)', creditsCharged: 0 });
-    if (text.length > TTS_MAX_CHARS) {
-      return res.status(413).json({ success: false, error: `Text is ${text.length} characters; the limit is ${TTS_MAX_CHARS} per request`, maxChars: TTS_MAX_CHARS, creditsCharged: 0 });
-    }
-    const model = req.body.model ? String(req.body.model) : TTS_DEFAULT_MODEL;
-    const info = modelInfo(model);
-    if (!info) {
-      return res.status(400).json({ success: false, error: `Unknown model "${model}". See GET /tts/voices`, models: Object.values(TTS_TIERS).flatMap(t => Object.keys(t.models)), creditsCharged: 0 });
-    }
-    let speed;
-    if (req.body.speed !== undefined) {
-      speed = Number(req.body.speed);
-      if (!Number.isFinite(speed) || speed < 0.5 || speed > 2) {
-        return res.status(400).json({ success: false, error: 'speed must be a number from 0.5 to 2', creditsCharged: 0 });
-      }
-    }
-
-    // Live catalog: the voices this model accepts and its current per-character cost.
-    let entry;
-    try {
-      entry = (await liveCatalog()).get(model);
-    } catch (e) {
-      logger.warn(`[tts] catalog unavailable: ${e.message}`);
-    }
-    if (!entry || !withinMargin(Number(entry.pricing?.prompt), info.creditsPer1k)) {
-      return res.status(503).json({ success: false, error: `Model ${model} is not available right now; try another (GET /tts/voices)`, creditsCharged: 0 });
-    }
-    const voice = req.body.voice ? String(req.body.voice) : info.defaultVoice;
-    const voices = entry.voices || [];
-    if (voices.length && !voices.includes(voice)) {
-      return res.status(400).json({ success: false, error: `Voice "${voice}" is not offered by ${model}`, voices, creditsCharged: 0 });
-    }
+    const checked = await checkTtsRequest(req.body);
+    if (checked.error) return res.status(checked.error.status).json(checked.error.body);
+    const { text, model, info, voice, speed } = checked;
 
     const credits = ttsCredits(text.length, info.creditsPer1k);
     // A reseller (the api.lanagent.net gateway) holds only what its customer can afford and
@@ -191,5 +205,24 @@ router.post('/',
       }
     }
   });
+
+/**
+ * POST /tts/estimate — free quote: the credits POST /tts would charge for this text, model and
+ * voice, after the same checks (length, model, voice, live availability). Generates nothing,
+ * debits nothing, needs no key.
+ */
+router.post('/estimate', async (req, res) => {
+  const checked = await checkTtsRequest(req.body);
+  if (checked.error) return res.status(checked.error.status).json(checked.error.body);
+  const { text, model, info, voice } = checked;
+  return res.json({
+    success: true,
+    creditsRequired: ttsCredits(text.length, info.creditsPer1k),
+    model,
+    voice,
+    tier: info.tier,
+    characters: text.length
+  });
+});
 
 export default router;
