@@ -59,6 +59,19 @@ conversations you shared with it.
 | "thumbs up Sam's last text", "mark the family chat read" | `react` (confirmed), `mark_read` |
 | "block 555-0100" | `block_number` (confirmed) |
 | "text the family group…" | `send_sms` to a shared conversation by name (`thread_id`). A file you gave the agent goes out as MMS |
+| "reply to Sam's address text: perfect", "text Sam a happy-dance GIF", "text Al and Bo separately" | `send_sms` with `reply_to` (quoted on the phone), a GIF found with `gif_search`, or `individually` (TextX 0.4.32) |
+| "mute the family chat until tomorrow", "pin / archive / snooze the Sam thread", "remind me about Wayne's text at 6", "rename the group" | `update_thread` (0.4.32) |
+| "make my chat with Sam blue", "reset its look" | `customize_thread` (0.4.32) |
+| "pin the address message", "leave a draft for mom saying…" | `pin_message`, `set_draft` (never sends) (0.4.32) |
+| "make a Work tab", "add Sam to it", "list my templates", "add a template…" | `manage_tabs`, `templates` (0.4.32) |
+| "edit my last text to Sam", "forward Sam's address to mom", "delete the spam conversation" | `edit_message`, `forward_message`, `delete_thread`, each confirmed on the phone (0.4.32) |
+| "block texts about car warranties", "what spam got caught" | `block_rules` (clearing all rules is confirmed; caught texts come back as untrusted) (0.4.32) |
+| "switch TextX to dark", "add this theme code", "any picture messages waiting?", "back up my texts" | `app_settings` (sensitive ones confirmed), `pending_mms`, `backup` (restore confirmed) (0.4.32) |
+
+The 0.4.32 tools are listed in the agent's `welcome`, which is what lets you switch them on: each is off
+until you turn its group on in TextX › the agent's setup screen. Messages show what a reply answers
+(`reply_to_quote`), and whether one is pinned or delivered; the conversation list shows pinned, archived,
+muted, snoozed and a waiting draft.
 
 The phone itself enforces the guards:
 
@@ -98,6 +111,24 @@ is on). The agent waits up to 25 seconds for it. A phone that checks in by then 
 answer ("Sent to Wayne: …"). Otherwise you get "it's going to your phone… I'll tell you here when it's
 done", and the outcome arrives as a notification once the phone picks it up (the agent keeps the
 request open for 20 minutes). Opening TextX makes the phone check in at once.
+
+## People across channels (v2.25.581)
+
+Everyone ALICE talks with is one **person** (`people` collection, `src/models/Person.js`), whatever the
+channel: an SMS sender, someone she calls on DialX, an email correspondent. A person is found only by
+an exact identifier (phone number by its last 10 digits, email, Telegram id, bot id, P2P fingerprint),
+never by name; identifiers that point at two people are recorded as a conflict and never merged.
+
+- **History:** every message ALICE is part of with them goes into `transcripts` under `person:<id>`
+  with the channel and who spoke (them, the owner, or ALICE). Incoming texts in shared conversations,
+  ALICE's auto-replies, texts the owner had her send, DialX calls (the number recorded at scheduling),
+  and email correspondents. Not the owner's personal messages.
+- **Every reply knows them:** the TextX auto-reply, a DialX call and an email reply get a block with
+  who they are, the channels used, learned facts, and the latest exchanges from every channel. It is
+  wrapped as untrusted data; in a group conversation it is never repeated to the others.
+- **Facts:** after 3+ new messages (at most every 30 minutes per person) or at a call's end, durable
+  facts are extracted and stored as knowledge with `metadata.personId` (`category: person_fact`).
+  Codes, passwords, PINs and account details are never stored.
 
 ## Shared conversations are watched
 
@@ -156,8 +187,9 @@ the code in DialX (DialX › Settings › Agents › Scan QR). That code uses th
 `textx-agent:` links from the camera or clipboard and would keep the pairing for itself. Its tools and events are "DialX call frames v1" (Trellis card 4293):
 
 - **The agent asks:** `dialx.schedule_call {contact_id, at, purpose, opening, opening_audio_b64?, requested_by_owner}`.
-  Only the owner can order a call (a TextX phone of theirs, Telegram as them, or the dashboard). Only contacts
-  the owner approved for this agent in DialX can be called. The owner confirms each call once on the phone.
+  Only the owner can order a call (a TextX phone of theirs, Telegram as them, or the dashboard). Since DialX
+  0.3.4, a contact the owner approved for this agent is called with no card. Anyone else is looked up in the
+  phone's contacts (`dialx.contacts_lookup`), sent by number, and the owner approves that one call on the phone.
 - **The phone runs the call:**
   - a fixed AI disclosure, then the opening;
   - `event {kind: "call.started" | "call.heard" | "call.ended"}`;
@@ -195,6 +227,50 @@ Every notice carries Telegram buttons: **Accept** (texts your yes, in your style
 the event with a reminder an hour before), **Decline** (a polite no), **Add to my calendar**. Sends go
 to the phone like any other. With auto-reply off the sender gets nothing; you still get the notice.
 Buttons work until a restart or 14 days.
+
+### Voicemail (DialX 0.6.0–0.6.2, v2.25.583)
+
+DialX tells a person from voicemail before anything is said (`call.answered {by}`). Every
+`schedule_call` carries:
+- `voicemail`: written by the model at scheduling (plugin `extract`, same tone as the opening, the
+  name the owner used), the owner's own words when given; `voicemailText()` is only the fallback
+  ("Hi <name>, this is ALICE, <owner>'s assistant. <owner> asked me to call you to/about …").
+- `voicemail_audio_b64` (0.6.1): the same text in the agent voice, rendered in parallel with the
+  opening. Without it (phone voice, TTS failed, clip too big) DialX speaks the text.
+
+A call booked without a message gets it by `dialx.say` on `call.voicemail_ready`, voice capped at
+2.5 s (DialX waits 8 s), then a hangup. Nothing heard on voicemail is a turn or is stored as the
+person's words (it is their greeting). `call.ended {reason:"voicemail_left", voicemail_audio}`
+reports "I left a voicemail", then ALICE fetches `dialx.get_call_audio` (0.6.2), converts the WAV to
+MP3 with ffmpeg (WAV as a file if that fails) and sends it to the owner on Telegram.
+
+### Live call quality (v2.25.583)
+
+From the first real conversation call (call 3, 2026-10-23): ALICE transcribes `audio_b64` itself and
+prefers that over the phone's text (3 s cap; phone text on failure or unclear). A reply made stale by
+newer speech is dropped and rewritten (at most twice in a row). The prompt forbids repeating a line
+or question and ends the call once "anything else?" brings nothing new. The owner's notes on how to
+talk with the person (`hub.ownerNotesFor`) reach the call. Each turn logs `model N ms` and
+`voice N ms`. The aux model (gpt-4.1-nano, 1.8 s) is NOT used: it hung up after the first answer;
+the main model answered the same turn in 2.2 s.
+
+## Notifications: NotifX (v2.25.586)
+
+NotifX (the owner's notification history app, frames doc `docs/agent-protocol-notifx.md` in the NotifX repo,
+locked 2026-10-24 on Trellis NotifX › Agent Card) speaks this protocol unchanged. Code: `src/services/textx/notifx.js`
+(events, alerts) and `src/api/plugins/notifx.js` (watch, unwatch, watches, search, active, apps, channels, reply, tap, dismiss).
+
+- **Pairing:** Settings → NotifX → Pair NotifX mints a `notifx-agent:` code (`POST /api/textx/pair {app:"notifx"}`).
+  NotifX has no scanner: the owner pastes the text in NotifX › Agents › Add. Each phone is its own pairing; `hello.phone.name`
+  is kept as `phoneName` and used to say which phone when more than one is paired.
+- **Watches run on the phone.** A notification that matches no watch never leaves it. The agent keeps its own record of each
+  watch (`notifxWatches` on the pairing: name, packages, silent).
+- **`notification.posted` goes straight to Telegram**, loud, with the snapshot (`include_picture`) when there is one. No model
+  call: notification text is someone else's words. The same notification from two phones within 2 minutes is told once.
+- **Choosing a filter:** "tell me when someone rings the doorbell" names the app and a label; with no explicit words, the
+  plugin reads the app's channels (`list_channels`, ids + one recent title each) and the model picks the channel. Titles only.
+- **Owner-only:** every action. Reply and tap wait on the owner's tap on the phone (`NOTIFX_CONFIRMED`).
+- The phone owns the guards: per-agent app list (empty by default), one-time codes withheld, 60 calls and 30 events a minute.
 
 ## Agent extensions (`x.*`)
 
