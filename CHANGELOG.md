@@ -2,6 +2,11 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.588] - 2026-10-24
+
+### Changed
+- **NotifX: Always connected is pointed out where you need it.** The NotifX settings section and a timed-out request both say to turn on Always connected in NotifX, without which the phone answers the agent's questions only every few minutes. Alerts are not affected.
+
 ## [2.25.587] - 2026-10-24
 
 ### Fixed

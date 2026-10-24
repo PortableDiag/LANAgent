@@ -24,7 +24,8 @@ const ERROR_TEXT = {
   gone: 'That notification is no longer on the phone.',
   duplicate: 'That watch already exists.',
   bad_args: null,
-  timeout: "NotifX didn't answer. The phone may be offline.",
+  // Without Always connected, NotifX collects tool calls at worst every 15 minutes (frames doc § Timing).
+  timeout: "NotifX didn't answer in time. Turn on Always connected in NotifX › Agents › this agent so it answers in seconds; otherwise the phone checks in only every few minutes, or may be offline.",
   expired: 'The request expired before NotifX saw it. Ask again.'
 };
 
