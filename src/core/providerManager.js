@@ -51,7 +51,13 @@ export class ProviderManager extends EventEmitter {
     const message = String(error?.message || '');
     return error?.status === 402 ||
       error?.response?.status === 402 ||
-      /\b402\b|payment required|depleted|insufficient (credits|funds|quota|balance)|exceeded your (current )?quota|billing/i.test(message);
+      // OpenRouter answers a key's spending cap with 403 "Key limit exceeded (monthly limit)" (2026-10-24).
+      /\b402\b|payment required|depleted|insufficient (credits|funds|quota|balance)|exceeded your (current )?quota|billing|key limit exceeded|(monthly|spend(ing)?|credit) limit/i.test(message);
+  }
+
+  /** The last quota failure, for telling the user why there is no answer: {name, message, resetsAt, at}. */
+  quotaState(maxAgeMs = 60 * 60 * 1000) {
+    return this.lastQuota && Date.now() - this.lastQuota.at <= maxAgeMs ? this.lastQuota : null;
   }
 
   isCoolingDown(name) {
@@ -66,6 +72,9 @@ export class ProviderManager extends EventEmitter {
   }
 
   markQuotaExhausted(name, error) {
+    const resets = String(error?.message || '').match(/resets\s+(\d{4}-\d{2}-\d{2}T[\d:.]+Z)/i);
+    this.lastQuota = { name, message: String(error?.message || '').slice(0, 300), resetsAt: resets ? resets[1] : null, at: Date.now() };
+    try { this.onQuotaExhausted?.(this.lastQuota); } catch { /* an alert must never break a request */ }
     if (this.quotaCooldowns.has(name)) return;
     this.quotaCooldowns.set(name, Date.now() + PROVIDER_QUOTA_COOLDOWN_MS);
     logger.warn(

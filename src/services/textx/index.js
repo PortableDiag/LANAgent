@@ -3,6 +3,7 @@ import QRCode from 'qrcode';
 import { WebSocketServer } from 'ws';
 import { TextXHub } from './textxHub.js';
 import { mongoCallStore, isDialX } from './dialx.js';
+import { isNotifX } from './notifx.js';
 import { mongoStore } from './textxStore.js';
 import { createTransport } from './textxTransport.js';
 import { TextXRelayClient, DEFAULT_RELAY_URL } from './textxRelayClient.js';
@@ -69,9 +70,11 @@ export function getTextX(agent) {
   async function pair(name, { requestOrigin, app } = {}) {
     const { kid, key } = newPairing();
     const base = await pairingBase(requestOrigin);
-    const device = await store.createDevice({ name: String(name || (app === 'dialx' ? 'DialX' : 'Phone')).slice(0, 60), kid, key, base, ...(app === 'dialx' ? { app } : {}) });
+    // NotifX (2026-10-24) takes `notifx-agent:` for the same reason.
+    const own = app === 'dialx' || app === 'notifx' ? app : null;
+    const device = await store.createDevice({ name: String(name || (own === 'dialx' ? 'DialX' : own === 'notifx' ? 'NotifX' : 'Phone')).slice(0, 60), kid, key, base, ...(own ? { app: own } : {}) });
     await ensureRelay();
-    const uri = app === 'dialx' ? pairingUri(base, kid, key).replace(/^textx-agent:/, 'dialx-agent:') : pairingUri(base, kid, key);
+    const uri = own ? pairingUri(base, kid, key).replace(/^textx-agent:/, `${own}-agent:`) : pairingUri(base, kid, key);
     logger.info(`TextX: new pairing "${device.name}" (${kid.slice(0, 6)}…) via ${base}`);
     return { id: device.id, name: device.name, base, uri, qr: await QRCode.toDataURL(uri, { margin: 1, width: 320 }) };
   }
@@ -80,7 +83,8 @@ export function getTextX(agent) {
     id: d.id, name: d.name, kid: `${d.kid.slice(0, 6)}…`, base: d.base, bound: !!d.deviceId, boundAt: d.boundAt,
     lastSeenAt: d.lastSeenAt, appVersion: d.appVersion, client: d.client || null, tools: d.capabilities || [], notify: !!d.notify,
     // Which dashboard section lists it: DialX pairings under Phone calls, everything else under TextX.
-    app: isDialX(d) ? 'dialx' : 'textx',
+    app: isDialX(d) ? 'dialx' : isNotifX(d) ? 'notifx' : 'textx',
+    ...(d.phoneName ? { phone: d.phoneName } : {}),
     connected: hub.isConnected(d.id), revoked: !!d.revokedAt,
     watches: (d.watches || []).filter(w => new Date(w.until) > new Date()).map(w => ({ thread: w.title || w.threadId, purpose: w.purpose, until: w.until }))
   });

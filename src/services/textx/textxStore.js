@@ -86,6 +86,9 @@ const deviceSchema = new mongoose.Schema({
   nextSeq: { type: Number, default: 0 },
   contactsSyncAt: Date, // last full address-book sync (contacts_list); null = none kept
   notifyLevel: String,  // from the LANAgent app's hello: 'all' | 'owner' | 'off' (TextX sends none)
+  phoneName: String, // NotifX: what the owner calls this phone (hello.phone.name)
+  sharedApps: { type: [String], default: undefined }, // NotifX: packages the owner shared, ['*'] = all
+  notifxWatches: { type: [mongoose.Schema.Types.Mixed], default: undefined }, // NotifX: the agent's record of its watches
   revokedAt: Date
 }, { timestamps: true, collection: 'textx_devices' });
 
@@ -128,7 +131,7 @@ export const TextXOutbox = mongoose.models.TextXOutbox || mongoose.model('TextXO
 export const TextXInbox = mongoose.models.TextXInbox || mongoose.model('TextXInbox', inboxSchema);
 
 const PUBLIC_FIELDS = ['name', 'kid', 'base', 'app', 'deviceId', 'boundAt', 'lastSeenAt', 'appVersion', 'client', 'replyMode', 'maxAttachmentBytes',
-  'audioFormats', 'maxAudioBytes', 'capabilities', 'notify', 'notifyLevel', 'watches', 'contactsSyncAt', 'revokedAt', 'createdAt'];
+  'audioFormats', 'maxAudioBytes', 'capabilities', 'notify', 'notifyLevel', 'watches', 'phoneName', 'sharedApps', 'notifxWatches', 'contactsSyncAt', 'revokedAt', 'createdAt'];
 
 function toDevice(doc) {
   if (!doc) return null;

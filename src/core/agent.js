@@ -83,6 +83,7 @@ export class Agent extends EventEmitter {
     
     // Core components
     this.providerManager = new ProviderManager();
+    this.providerManager.onQuotaExhausted = (q) => this.alertQuotaExhausted(q);
     this.commandParser = new CommandParser();
     this.memoryManager = new MemoryManager(this);
     this.systemExecutor = new SystemExecutor(this);
@@ -4019,10 +4020,7 @@ Return ONLY a valid JSON object with the extracted parameters, nothing else.`;
         }
       } catch (providerError) {
         logger.error("Failed to generate AI response:", providerError);
-        return {
-          type: "text",
-          content: "I'm having trouble connecting to the AI service. Please check that you have a valid AI provider configured (OpenAI, Anthropic, etc.) with proper API keys in the .env file."
-        };
+        return { type: "text", content: this.aiUnavailableText() };
       }
       
       logger.info("AI response received:", { 
@@ -6162,6 +6160,32 @@ Important:
    * Tell the owner. Silent on Telegram unless { urgent: true } (safety, money at risk, a person
    * asking for the owner): notify(message, { urgent: true }) or notify(message, userId, { urgent: true }).
    */
+  /**
+   * Why there is no answer. A spent budget used to read "check your API keys in .env", which sent the
+   * owner looking for a config fault while the key was fine and only its monthly cap was reached.
+   */
+  aiUnavailableText() {
+    const q = this.providerManager?.quotaState?.();
+    if (q) {
+      const reset = q.resetsAt ? new Date(q.resetsAt) : null;
+      const when = reset && Number.isFinite(reset.getTime()) ? ` It resets on ${reset.toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' })}.` : '';
+      return `I can't answer right now: my AI budget for this period is used up (the ${q.name} key's spending limit).${when} My owner can raise the limit to bring me back sooner.`;
+    }
+    return "I'm having trouble connecting to the AI service. Please check that you have a valid AI provider configured (OpenAI, Anthropic, etc.) with proper API keys in the .env file.";
+  }
+
+  /** One loud notice when the AI budget runs out, at most every 12 hours per provider. */
+  alertQuotaExhausted(q) {
+    const last = this._quotaAlertAt?.get(q.name) || 0;
+    if (Date.now() - last < 12 * 60 * 60 * 1000) return;
+    (this._quotaAlertAt ||= new Map()).set(q.name, Date.now());
+    const reset = q.resetsAt ? new Date(q.resetsAt) : null;
+    const when = reset && Number.isFinite(reset.getTime()) ? ` It resets ${reset.toISOString().slice(0, 10)}.` : '';
+    this.notify(`⚠️ My AI budget is used up: ${q.name} refused with "${q.message.replace(/https?:\/\/\S+/g, '').slice(0, 160).trim()}".${when} ` +
+      'Until then I cannot chat, answer on Telegram, take calls or auto-reply. The provider lock stops me spending on another provider; ' +
+      'raise the key limit or change the lock to bring me back.', { urgent: true }).catch(() => {});
+  }
+
   async notify(message, userId = null, options = {}) {
     if (userId && typeof userId === 'object') { options = userId; userId = null; }
     try {

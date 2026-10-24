@@ -2,6 +2,16 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.587] - 2026-10-24
+
+### Fixed
+- **A spent AI budget is said as one.** When the AI provider's key reaches its spending limit, the agent now answers that its budget is used up and when it resets, instead of "check the API keys in your .env". You get one urgent notice on Telegram, and the provider is recognised as out of quota, so it is not retried hundreds of times.
+
+## [2.25.586] - 2026-10-24
+
+### Added
+- **The agent reads your phone's notifications through NotifX**, the notification history app. Pair each phone in Settings → NotifX. "Tell me when someone rings the doorbell" sets a watch on the phone, so only the ring is sent, never the motion alerts. It arrives on Telegram with the doorbell snapshot, and says which phone when you have two. You can also search past notifications, see what's on the status bar, and reply to one or press its button, each confirmed on the phone. Only the apps you share in NotifX are visible, and a notification's text never goes to an AI model unless you ask about it.
+
 ## [2.25.585] - 2026-10-24
 
 ### Fixed

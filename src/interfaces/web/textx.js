@@ -49,7 +49,7 @@ export function createTextXAdminRouter(agent) {
   router.post('/pair', async (req, res) => {
     try {
       const requestOrigin = `${req.protocol}://${req.get('host')}`;
-      const data = await getTextX(agent).pair(req.body?.name, { requestOrigin, app: req.body?.app === 'dialx' ? 'dialx' : undefined });
+      const data = await getTextX(agent).pair(req.body?.name, { requestOrigin, app: ['dialx', 'notifx'].includes(req.body?.app) ? req.body.app : undefined });
       res.json({ success: true, data });
     } catch (error) {
       logger.error('TextX pairing failed:', error);

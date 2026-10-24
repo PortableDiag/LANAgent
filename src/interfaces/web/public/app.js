@@ -6195,10 +6195,12 @@ class LANAgentDashboard {
             if (!r.success) return;
             const { relay, devices } = r.data;
             // Each pairing is listed in its own section: DialX (phone calls) or TextX (texting).
-            const textx = devices.filter(d => d.app !== 'dialx');
+            const textx = devices.filter(d => d.app !== 'dialx' && d.app !== 'notifx');
             const dialx = devices.filter(d => d.app === 'dialx');
+            const notifx = devices.filter(d => d.app === 'notifx');
             this.renderTextXDevices('textx-devices', textx, { notify: true });
             this.renderTextXDevices('dialx-devices', dialx, { notify: false });
+            this.renderTextXDevices('notifx-devices', notifx, { notify: false, app: 'NotifX' });
             document.getElementById('textx-relay-status').textContent = relay.enabled === false
                 ? 'Relay off (TEXTX_RELAY=off): phones reach this agent only on its own network or VPN.'
                 : relay.connected ? `Relay connected: ${relay.base}` : (devices.length ? 'Relay connecting…' : 'The relay link starts when you pair a phone.');
@@ -6207,7 +6209,7 @@ class LANAgentDashboard {
         }
     }
 
-    renderTextXDevices(listId, devices, { notify }) {
+    renderTextXDevices(listId, devices, { notify, app = 'DialX' }) {
         const list = document.getElementById(listId);
         if (!list) return;
         list.innerHTML = '';
@@ -6215,8 +6217,8 @@ class LANAgentDashboard {
         for (const d of devices) {
             const li = document.createElement('li');
             const state = d.connected ? 'connected' : d.bound ? `last seen ${d.lastSeenAt ? new Date(d.lastSeenAt).toLocaleString() : 'never'}` : 'not scanned yet';
-            const tools = d.tools.length ? d.tools.map(t => t.replace(/^dialx\./, '')).join(', ') : (notify ? 'chat only' : 'nothing yet (turn tools on in DialX)');
-            li.appendChild(document.createTextNode(`${d.name} — ${state}; allows ${tools} `));
+            const tools = d.tools.length ? d.tools.map(t => t.replace(/^(dialx|notifx)\./, '')).join(', ') : (notify ? 'chat only' : `nothing yet (turn tools on in ${app})`);
+            li.appendChild(document.createTextNode(`${d.name}${d.phone && d.phone !== d.name ? ` (${d.phone})` : ''} — ${state}; allows ${tools} `));
             if (notify) {
                 const label = document.createElement('label');
                 label.style.marginRight = '8px';
@@ -6287,6 +6289,34 @@ class LANAgentDashboard {
         } catch (error) {
             this.showNotification(`Not paired: ${error.message}`, 'error');
         }
+    }
+
+    // NotifX gets a notifx-agent: code and has no QR scanner, so the text is what the owner pastes.
+    async pairNotifX() {
+        const name = document.getElementById('notifx-pair-name').value.trim() || 'NotifX';
+        try {
+            const r = await this.apiPost('/api/textx/pair', { name, app: 'notifx' });
+            if (!r.success) { this.showNotification(`Not paired: ${r.error}`, 'error'); return; }
+            this._notifxPairing = r.data.uri;
+            document.getElementById('notifx-pair-qr').src = r.data.qr;
+            document.getElementById('notifx-pair-result').style.display = '';
+            document.getElementById('notifx-pair-name').value = '';
+            this.loadTextX();
+        } catch (error) {
+            this.showNotification(`Not paired: ${error.message}`, 'error');
+        }
+    }
+
+    async copyNotifXPairing() {
+        const saved = this._textxPairing;
+        this._textxPairing = this._notifxPairing;
+        try { await this.copyTextXPairing(); } finally { this._textxPairing = saved; }
+    }
+
+    hideNotifXPairing() {
+        this._notifxPairing = null;
+        document.getElementById('notifx-pair-qr').removeAttribute('src');
+        document.getElementById('notifx-pair-result').style.display = 'none';
     }
 
     hideDialXPairing() {

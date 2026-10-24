@@ -1381,6 +1381,29 @@
                             </div>
                         </div>
 
+                        <div class="settings-section" id="notifx-section">
+                            <h3><i class="fas fa-bell"></i> NotifX — notifications</h3>
+                            <p class="setting-description">Let this agent read your phone's notifications through the NotifX notification history app, and tell you on Telegram when one you care about arrives ("tell me when someone rings the doorbell"). NotifX shares only the apps you pick there for this agent, watches run on the phone so nothing else leaves it, and replying or pressing a notification's button needs your tap. <strong>A separate pairing from TextX and DialX: pair each phone that runs NotifX here.</strong></p>
+                            <div class="setting-item">
+                                <label>Paired NotifX phones:</label>
+                                <ul id="notifx-devices" class="tg-peer-list"></ul>
+                            </div>
+                            <div class="setting-item">
+                                <div style="display:flex;gap:8px;flex-wrap:wrap;">
+                                    <input type="text" id="notifx-pair-name" placeholder="Name, e.g. NotifX on OnePlus" style="flex:1;min-width:160px;">
+                                    <button class="btn btn-primary" onclick="dashboard.pairNotifX()"><i class="fas fa-bell"></i> Pair NotifX</button>
+                                </div>
+                                <div id="notifx-pair-result" style="display:none;margin-top:12px;">
+                                    <p class="setting-description"><strong>NotifX pairing code.</strong> NotifX has no scanner: copy the text below and paste it in NotifX › Agents › Add, or scan the QR with any QR reader and share the result to NotifX. This code is shown once; don't share it.</p>
+                                    <img id="notifx-pair-qr" alt="NotifX pairing QR code" style="background:#fff;padding:8px;border-radius:8px;max-width:260px;width:100%;">
+                                    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px;">
+                                        <button class="btn btn-primary btn-sm" onclick="dashboard.copyNotifXPairing()"><i class="fas fa-copy"></i> Copy pairing text</button>
+                                        <button class="btn btn-secondary btn-sm" onclick="dashboard.hideNotifXPairing()">Done</button>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
                         <div class="settings-section">
                             <h3>System Reports</h3>
                             <div class="setting-item">
