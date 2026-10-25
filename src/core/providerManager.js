@@ -692,6 +692,9 @@ export class ProviderManager extends EventEmitter {
       ? [preferred, ...audioProviders.filter(p => p !== preferred)]
       : await this.allowedProviders(audioProviders, 'transcription');
 
+    // A provider that answered with no words heard no speech (music, a theremin riff, silence): that is
+    // an answer, not a failure. It used to fall through to "No provider available" (2026-10-24).
+    let heardNothing = false;
     for (const providerName of order) {
       const provider = this.providers.get(providerName);
       if (provider) {
@@ -702,12 +705,14 @@ export class ProviderManager extends EventEmitter {
             { retries: 3 }
           );
           if (transcription) return transcription;
+          heardNothing = true;
         } catch (error) {
           logger.warn(`Audio transcription failed with ${providerName}:`, error);
         }
       }
     }
-    
+    if (heardNothing) return '';
+
     throw new Error("No provider available for audio transcription");
   }
 

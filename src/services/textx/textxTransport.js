@@ -3,6 +3,9 @@ import path from 'path';
 import crypto from 'node:crypto';
 import { P2A, A2P, kidFromAuth, openJson, sealJson, openBytes, sealBytes } from './textxCrypto.js';
 
+/** Longest a GET may be held for `wait` (the relay forwards a request for at most 30 s). */
+export const LONG_POLL_MAX_S = 25;
+
 /**
  * The TextX endpoint, independent of how a request arrives. The local Express/WebSocket
  * endpoint (interfaces/web/textx.js) and the relay link (textxRelayClient.js) both call
@@ -92,6 +95,12 @@ export function createTransport(hub, { filesDir, avatarFile = () => null, logger
       if (p === '/textx/v1/messages' && method === 'GET') {
         if (!device.deviceId) return seal({ envelopes: [], cursor: '0' });
         if (askedDev !== device.deviceId) return refuse();
+        const first = await hub.drain(device, params.get('since'));
+        // Long-poll: `wait` (seconds) holds an empty answer until something is queued. Capped at
+        // LONG_POLL_MAX_S, under the api.lanagent.net relay's 30 s request ceiling.
+        const wait = Math.min(LONG_POLL_MAX_S, Number.parseFloat(params.get('wait')) || 0);
+        if (first.envelopes.length || !(wait > 0)) return seal(first);
+        await hub.waitForOutbox(device.id, wait * 1000);
         return seal(await hub.drain(device, params.get('since')));
       }
       if ((p.startsWith('/textx/v1/files') || p === '/textx/v1/avatar') && (!device.deviceId || askedDev !== device.deviceId)) return refuse();

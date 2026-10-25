@@ -115,8 +115,10 @@ export class NotifXWatches {
       return;
     }
     const several = (await this.notifxPhones()).length > 1;
-    const text = alertText(n, { name: meta?.name, dropped: body.dropped, updated: body.updated, phone: several ? this.phoneName(device, body) : null });
     const photo = pictureOf(body.picture);
+    // NotifX 0.3.2: a picture too big for the relay is dropped and the event says so.
+    const droppedPicture = !photo && body.picture_dropped ? '\n(The phone could not send the picture: too big.)' : '';
+    const text = alertText(n, { name: meta?.name, dropped: body.dropped, updated: body.updated, phone: several ? this.phoneName(device, body) : null }) + droppedPicture;
     // Content never goes in the log, only which watch fired.
     this.logger.info?.(`NotifX: watch ${meta?.name ? `"${meta.name}"` : body.watch_id || '?'} matched (${n.package || 'unknown app'})` +
       `${photo ? `, picture ${Math.round(photo.length / 1024)} KB` : ''}${body.dropped ? `, ${body.dropped} dropped` : ''}`);

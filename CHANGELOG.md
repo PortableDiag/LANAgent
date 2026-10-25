@@ -2,6 +2,290 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.637] - 2026-10-25
+
+### Fixed
+- **A text the agent writes as itself says it's the agent.** "Text a contact that you want to show him your new voice" went out as "I want to show you my new voice…" from the owner's number, so it read as the owner. When a text speaks as the agent, it now always says who is writing.
+
+## [2.25.636] - 2026-10-25
+
+### Changed
+- **Replying to reactions is the owner's choice.** Whether the agent answers a heart in an auto-reply conversation now follows TextX's "Reply to reactions" switch (on by default), not a fixed block. The agent still never sends the owner a separate notice about a reaction.
+
+## [2.25.635] - 2026-10-25
+
+### Fixed
+- **A heart on a text is not a message.** Reactions like "Reacted ♥️ to a movie", "Removed ♥️ from…" or "Loved “…”" are no longer answered in the conversation or passed on to the owner. Two hearts from a contact had turned into eight messages for the owner, including a reply to her.
+
+## [2.25.634] - 2026-10-25
+
+### Added
+- **The agent can join the owner's own calls.** With DialX 0.7.36, the owner can tap Add agents… during a call. The agent then knows it joined a call already in progress with that person, speaks only when addressed, and never talks over the owner. Before, the agent alone on such a call would have acted as if it had placed the call itself. This holds on a call the owner answered too: the agent joins it as a guest and doesn't take a message.
+
+## [2.25.632] - 2026-10-25
+
+### Added
+- **Group calls.** With DialX 0.7.35 the owner can put the agent on a call with other agents. The agent DialX picks opens, the rest wait, and a line DialX holds back because someone else has the floor is left out of the call's transcript.
+
+## [2.25.631] - 2026-10-25
+
+### Added
+- **Agent-to-agent calls.** With DialX 0.7.34 the owner can start a call between the agent and another agent on a topic (Agents › Call another agent…) and listen in. The agent DialX picks opens; the other waits and answers.
+
+### Changed
+- **Calls the agent answers for the owner are realtime** from DialX 0.7.34.
+
+## [2.25.630] - 2026-10-25
+
+### Added
+- **Answering for the owner can use realtime.** When the agent answers a call for the owner, it offers DialX a realtime session to take the message in its natural voice. Once DialX accepts it on answered calls, those calls go realtime; until then they stay turn-by-turn as before.
+
+## [2.25.629] - 2026-10-25
+
+### Added
+- **Ready for multi-agent calls.** When DialX starts a call between the agent and another agent, or a group call with the owner and several agents, the agent gets fitting instructions: with another agent it discusses the owner's topic as a colleague; in a group it speaks only when addressed, never talks over the owner, and takes instructions from the owner alone.
+
+## [2.25.628] - 2026-10-25
+
+### Changed
+- **Realtime calls are on for every call.** The silent call turned out to be the phone failing to capture the other side, which DialX 0.7.32 now catches, so every call the agent places uses realtime again (`realtimeCalls` defaults to `all`).
+
+## [2.25.627] - 2026-10-25
+
+### Fixed
+- **A call DialX moves back to turns is not hung up.** DialX 0.7.32 switches a realtime call to turn-by-turn by itself when it hears nothing; the agent's own silence guard now stands down then, so the call carries on.
+- **A call where the phone cannot hear the other side says so.** DialX now reports a dead capture of the other person's audio (what silenced the call to a contact), and the agent's call report tells the owner.
+
+## [2.25.626] - 2026-10-25
+
+### Fixed
+- **No more silent realtime calls.** On the first realtime call to a real person, the other side's voice never reached the agent, and a contact sat through 4½ minutes of silence. Realtime now runs only on DialX test calls until real calls are proven (setting `realtimeCalls`: `test`, `all` or `off`). If a realtime call ever hears nothing from the other side for 40 s, the agent hangs up and tells the owner why.
+- **A refused call says why.** DialX's own reason reaches the owner (its limits are the owner's settings now), and the refusal is logged.
+
+## [2.25.625] - 2026-10-25
+
+### Changed
+- **Test calls greet the owner as someone the agent knows**, never "nice to meet you".
+- **Realtime call speed is logged.** Each realtime call's end now records the reply delays DialX measured on the phone (median and worst), how often the person talked over the agent, and any audio dropouts.
+
+## [2.25.624] - 2026-10-25
+
+### Fixed
+- **A realtime call no longer opens with "you sound good".** The first test call began by remarking on the owner's audio before anything had been said. The agent now greets first and says nothing about how someone sounds until it has heard them.
+
+## [2.25.623] - 2026-10-25
+
+### Added
+- **Test calls.** DialX's new Test call button lets the owner talk to the agent through the phone's own speaker and mic, with nothing dialed. The agent treats it as a call with the owner, not one made on the owner's behalf, so a realtime call can be tried without phoning anyone.
+
+## [2.25.622] - 2026-10-25
+
+### Changed
+- **Realtime calls speak in a voice close to Ara.** Realtime calls can only use OpenAI's own voices, so the default is now marin, the closest to the agent's usual Ara voice. A new DialX setting, `realtimeVoice`, picks another (coral, shimmer and more).
+
+## [2.25.621] - 2026-10-25
+
+### Changed
+- **Call recordings are a tenth of the size.** With DialX 0.7.27 or later, the agent asks for recordings and voicemail copies as m4a (a 70 s call: about 430 KB, not 4.5 MB), so they reach Telegram much faster. Older DialX still sends WAV.
+
+## [2.25.620] - 2026-10-25
+
+### Added
+- **Realtime phone calls.** Calls the agent places can run on the OpenAI Realtime API, which answers in under a second, handles people talking over it, and speaks in one natural voice. Turn-by-turn calls took 6-12 s a reply. It turns on by itself once DialX on the phone supports it; until then calls work as before, and any realtime failure drops back to turns. The phone only ever gets a one-minute key.
+
+### Fixed
+- **Call recordings are fetched without piling up.** When the phone is still uploading a recording, the agent now waits instead of asking again every few seconds, which only queued more copies on the phone.
+
+## [2.25.619] - 2026-10-25
+
+### Fixed
+- **"Text a contact and introduce yourself" introduces the agent.** It wrote "Hi, this is <the owner>!", as the owner. When a request says "yourself" or "you", the text now speaks as the agent ("Hi, this is the agent, the owner's AI assistant…"); otherwise it's still the owner's own words.
+
+## [2.25.618] - 2026-10-25
+
+### Fixed
+- **Notification answers say which phones were checked.** With two phones paired, an answer about notifications now names both, says when one has nothing, and says when one couldn't be read. Before, a phone that failed was silently left out, so "which device did you check?" had no answer.
+
+## [2.25.617] - 2026-10-25
+
+### Fixed
+- **The routing dry run matches real routing for text requests.** It skipped the rule that sends "text a contact…" to texting, so it reported the wrong command.
+
+## [2.25.616] - 2026-10-25
+
+### Fixed
+- **"the agent, send me the mp3 of …" sends the song.** The agent read its own name as an email recipient, planned "email the MP3 to the agent", and that step was refused, so the downloaded file was dropped and only text came back. The agent's name at the start of a request now only says who is being spoken to; a chain that downloaded a file sends it even if a later step fails; and email's AI-written send is accepted as a chain step.
+- **"Text a contact and tell him the Theremin app is in Telegram" sends a text.** It matched the voice-sample command on the words "theremin" and "Telegram" and sent the owner a voice sample instead. A request that starts by asking for a text now always goes to texting.
+
+## [2.25.615] - 2026-10-24
+
+### Fixed
+- **"Text a contact and ask him to call" sends a text.** The word "call" in it made the agent phone a contact instead. A request that starts by asking for a text is now always sent as a text.
+
+## [2.25.614] - 2026-10-24
+
+### Changed
+- **When someone talks over the agent on a call, it knows they missed the end of its line,** and doesn't carry on as if they had heard it.
+
+## [2.25.613] - 2026-10-24
+
+### Changed
+- **Shorter pauses on calls.** A reply of more than one sentence starts playing its first sentence while the rest is still being voiced, and DialX 0.7.20 joins the parts with no turn chime between them.
+
+## [2.25.612] - 2026-10-24
+
+### Fixed
+- **The agent answers what the person said, not their "hello".** The words someone says as they pick up were answered after the agent's opening, over their real reply. They now stay as context and the next thing they say gets the answer.
+
+## [2.25.611] - 2026-10-24
+
+### Fixed
+- **"Call a contact in the theremin voice and see how she's doing" is one call, reported as such.** The planner split it into "call a contact" and "apply the theremin to the call"; the call went out right, but you were told a step failed.
+
+### Changed
+- On a call, the agent knows how long the call has run and says a warm goodbye before the time limit cuts it off, and it waits longer for its own transcription of what the person said when the phone sends no words (DialX 0.7.19).
+
+## [2.25.610] - 2026-10-24
+
+### Fixed
+- **On a call, the agent keeps the conversation going.** It answers every follow-up and question and ends the call only when the person says goodbye or clearly wants to go (or the call reaches its time limit). It used to wind up once it had what you asked it to find out.
+
+### Changed
+- A voice note is fetched and transcribed once, then remembered, instead of on every turn.
+
+## [2.25.609] - 2026-10-24
+
+### Changed
+- **The agent's theremin voice sounds like the clips you liked.** It is now made from the agent's own voice with a strong pitch and volume wobble (and, for "theremin mix", a quiet sweeping tone underneath), the same recipe as another agent's samples, instead of DialX's effect. "Let me hear your theremin voice" sends a sample to Telegram.
+
+### Fixed
+- A voice note with no speech in it (music, a riff) is read as "nothing said", not as a transcription failure.
+
+## [2.25.608] - 2026-10-24
+
+### Fixed
+- **Voice notes are transcribed whatever their format.** The transcription model refused a TextX voice note in M4A (HTTP 400), so the agent heard nothing. Audio other than WAV or MP3 is now converted to MP3 first, and a refused clip is retried with the fallback model.
+
+## [2.25.607] - 2026-10-24
+
+### Changed
+- **You set the limits, in TextX and DialX.** The agent no longer caps its own auto-replies and tagged replies (it had 6 an hour per conversation and 60 a day); the apps' settings are the only limits.
+
+### Added
+- **Hear the agent's voice through an effect before any call** (DialX 0.7.17): "let me hear your theremin voice" sends a sample to Telegram.
+
+### Fixed
+- A chat request misread as "suggest improvements" is answered normally instead of failing.
+
+## [2.25.606] - 2026-10-24
+
+### Added
+- **The agent listens to voice notes.** A voice note someone sends in a shared conversation is transcribed before the agent answers, and "what did a contact say in that voice note" gets the words. TextX 0.4.46 hands over the phone's voice-note formats as M4A, which transcription accepts.
+
+## [2.25.605] - 2026-10-24
+
+### Changed
+- **Several agents can answer in the same conversation again,** as you set it up: the "one agent per conversation" rule from 2.25.604 is removed, and auto-replies use the conversation's reply mode (text, voice or both) again. The phone itself now caps the sends and keeps one approval card per person (TextX 0.4.45), and a send it refuses for that reason is no longer reported to you.
+- **"Theremin" on a call is the agent's own voice bent by the theremin** (DialX ThereminVoice), wobbling around its normal pitch so the words stay clear, instead of its voice with a theremin tone behind it.
+
+## [2.25.604] - 2026-10-24
+
+### Fixed
+- **No more floods of approval requests from auto-replies.** In a conversation with auto-reply on, the agent answered every text from the contact with a voice message, and each one waited on your approval, so the cards piled up. Auto-replies are now plain text (no card), and where another agent already writes in that conversation, this one stays out unless you tag it.
+
+## [2.25.603] - 2026-10-24
+
+### Fixed
+- **Asking the agent to do something by tagging it in a text conversation does it.** "@agent call a contact and tell him about your theremin voice" was answered "Calling a contact now" and no call was placed: a tag only ever got a written reply. An instruction now runs exactly as if you had asked in your own chat. Only your own texts can do this: another agent's text or a contact's "@agent" runs nothing.
+
+## [2.25.602] - 2026-10-24
+
+### Fixed
+- **"Leave a contact a theremin voicemail" and "call a contact and play him a theremin riff" place the call.** They were read as listing your voicemails and as playing the theremin on your own call. A request to call someone or leave them a voicemail is now always a call, with the effect it names; your own voice is never changed by it.
+
+## [2.25.601] - 2026-10-24
+
+### Added
+- **The agent plays the theremin on its calls** (DialX 0.7.16): "call a contact and play him a theremin riff", "leave a contact a theremin voicemail". The agent's voice comes with the tone under it, so its words, the AI notice included, are always heard. On your own call, a riff now plays in one go.
+
+### Fixed
+- **Installing or uninstalling software only happens when you ask for it in so many words.** A chat request ("pick a random number") was routed to uninstall; the approval gate stopped it, and now the router can't pick it either.
+
+## [2.25.600] - 2026-10-24
+
+### Added
+- **The agent answers calls for you** (DialX 0.7.15). When you set Answers for a contact in DialX and don't pick up, DialX answers and greets them, and the agent takes a message: who, what about, how and when to reach them. It never agrees to, books or promises anything, and never says where you are. You get an urgent notice with their message, the transcript and the recording.
+- **A voice effect for the agent's own voice on a call, when you ask** (DialX 0.7.14): "leave a contact a voicemail in a robot voice". Without the request, calls sound exactly as before.
+
+## [2.25.599] - 2026-10-24
+
+### Changed
+- **A NotifX alert says when the phone couldn't send the picture** (NotifX 0.3.2 drops a picture too big for the relay), instead of arriving without it and no word why.
+
+## [2.25.598] - 2026-10-24
+
+### Fixed
+- **Every call and voicemail says it is an AI assistant.** The opening was written expecting DialX to say so first, but the owner can switch DialX's notice off per agent; then the person never heard that it was an AI. The opening and the voicemail now always say it, checked in code.
+
+## [2.25.597] - 2026-10-24
+
+### Added
+- **TextX: delete a message, resend a failed text, and look at what someone sent.** "Delete my last text to a contact", "my text to a contact didn't go through, try again" (both confirmed on the phone), and "what's in the picture a contact sent" (pictures, or stills from a video when the file is too big to send whole).
+
+### Fixed
+- A reply too big for the relay (TextX `too_big`, DialX `too_large`) is reported plainly in TextX, DialX and NotifX.
+
+## [2.25.596] - 2026-10-24
+
+### Fixed
+- **Call recordings get through.** A minute of recording was just too big for the relay, so the phone's upload was refused. The agent now asks for 30-second pieces and joins them.
+
+## [2.25.595] - 2026-10-24
+
+### Fixed
+- **The agent never introduces itself twice on a call.** DialX plays the opening line itself, and the agent did not know it had been said, so the first reply greeted the person again.
+- **Call recordings arrive.** A recording part can take longer than a normal request to upload from the phone; the agent now waits for it and retries instead of giving up after 45 seconds.
+
+## [2.25.594] - 2026-10-24
+
+### Added
+- **Every DialX and NotifX tool is usable.** Each works once you switch its group on for the agent in the app, and every change waits for your tap on the phone.
+  - **Voice effects** on your own live call: "make me sound like a robot", a theremin riff.
+  - **Call recordings:** list them, "send me the recording of my call with a contact", delete one.
+  - **Spam and screening:** "report that last caller as spam", "what's on my spam list", which numbers always ring, the blocked list, clearing the screened calls, importing the old app's spam list.
+  - **Block or unblock** a number.
+  - **"I'm expecting a call"**: let everyone ring for up to 24 hours.
+  - **Call history and voicemail:** delete calls from the history; transcribe a voicemail word for word.
+  - **NotifX:** "send me the doorbell picture" sends the snapshot of a notification still on the phone.
+
+## [2.25.593] - 2026-10-24
+
+### Added
+- **Recordings of the agent's calls reach you.** With DialX's Record every call on (DialX 0.7.0), the agent fetches the whole call, both sides, joins it into one MP3 and sends it to Telegram after the call report. A recorded voicemail call sends the recording instead of the separate voicemail copy.
+
+## [2.25.592] - 2026-10-24
+
+### Changed
+- **Calls start sooner.** A phone that checks in only every 15 seconds can now wait on the agent's answer (long-poll, `wait` up to 25 s on `GET /textx/v1/messages`), so a request reaches DialX in about a second once DialX supports it. A repeat call also reuses DialX's approved-contacts list for 10 minutes instead of asking the phone again.
+
+### Fixed
+- **A call DialX cut off before anything played is reported as exactly that**, with an offer to call again, instead of "I went quiet too long".
+
+## [2.25.591] - 2026-10-24
+
+### Fixed
+- **A notification watch is checked against your history.** Words that no past notification from the app contains are replaced by the app's own channel for that alert, wherever the words came from. "Stop telling me about the doorbell" removes the watch instead of being read as another alert switch, and the watch list no longer shows empty conditions.
+
+## [2.25.590] - 2026-10-24
+
+### Fixed
+- **A notification watch matches what the app really sends.** "Tell me when someone rings the doorbell" became a watch for the word "doorbell", which Ring's doorbell alert ("Someone is at your Front Door") never contains, so it could never fire. Unless you give the words yourself, the watch now uses the app's own notification channel for that kind of alert, picked from your notification history.
+
+## [2.25.589] - 2026-10-24
+
+### Fixed
+- **NotifX and DialX answer you from the dashboard.** Requests typed in the dashboard (or sent with the API key) were refused with "only my owner can…", because the check knew only Telegram and the phone apps.
+
 ## [2.25.588] - 2026-10-24
 
 ### Changed

@@ -673,6 +673,22 @@ export class OpenRouterProvider extends BaseProvider {
   }
 
   /** input_audio.format for a buffer, from its magic bytes. */
+  /** Audio as MP3 through ffmpeg; null when ffmpeg is missing or fails. */
+  static async toMp3(buf, { timeoutMs = 20000 } = {}) {
+    const { spawn } = await import('child_process');
+    return new Promise((resolve) => {
+      let p;
+      try { p = spawn('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-i', 'pipe:0', '-ac', '1', '-f', 'mp3', '-b:a', '64k', 'pipe:1']); } catch { return resolve(null); }
+      const out = [];
+      const timer = setTimeout(() => { p.kill('SIGKILL'); resolve(null); }, timeoutMs);
+      p.stdout.on('data', (d) => out.push(d));
+      p.on('error', () => { clearTimeout(timer); resolve(null); });
+      p.on('close', (code) => { clearTimeout(timer); resolve(code === 0 && out.length ? Buffer.concat(out) : null); });
+      p.stdin.on('error', () => {});
+      p.stdin.end(buf);
+    });
+  }
+
   static detectAudioFormat(buf) {
     if (!buf || buf.length < 12) return "wav";
     const ascii = (a, b) => buf.toString("latin1", a, b);
@@ -698,7 +714,13 @@ export class OpenRouterProvider extends BaseProvider {
     // upstream; microsoft/mai-transcribe-2 does, and transcribed a test clip exactly (2026-10-06).
     let model = options.model || process.env.OPENROUTER_TRANSCRIPTION_MODEL || (this.zdr ? "microsoft/mai-transcribe-2" : "openai/gpt-transcribe");
     try {
-      const format = options.format || OpenRouterProvider.detectAudioFormat(audioBuffer);
+      let format = options.format || OpenRouterProvider.detectAudioFormat(audioBuffer);
+      // mai-transcribe-2 answered 400 to a TextX voice note in M4A (2026-10-24). Anything but WAV/MP3
+      // goes out as MP3, which every transcription model takes.
+      if (!['wav', 'mp3'].includes(format)) {
+        const mp3 = await OpenRouterProvider.toMp3(audioBuffer);
+        if (mp3) { audioBuffer = mp3; format = 'mp3'; }
+      }
       const send = (m) => axios.post(`${BASE_URL}/audio/transcriptions`, {
         model: m,
         input_audio: { data: Buffer.from(audioBuffer).toString("base64"), format },
@@ -711,8 +733,9 @@ export class OpenRouterProvider extends BaseProvider {
         ({ data } = await send(model));
       } catch (error) {
         const e = { status: error.response?.status, message: error.response?.data?.error?.message || error.message };
-        if (!this._noPolicyEndpoint(e) || model === fallback) throw error;
-        logger.warn(`OpenRouter: no zero-retention upstream for ${model}; transcribing with ${fallback}`);
+        // A 400 (a model that refuses this audio) also gets the fallback, not only a missing ZDR host.
+        if (!(this._noPolicyEndpoint(e) || e.status === 400) || model === fallback) throw error;
+        logger.warn(`OpenRouter: ${e.status === 400 ? `${model} refused the audio (${e.message})` : `no zero-retention upstream for ${model}`}; transcribing with ${fallback}`);
         model = fallback;
         ({ data } = await send(model));
       }

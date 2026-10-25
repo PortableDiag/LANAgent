@@ -254,6 +254,33 @@ talk with the person (`hub.ownerNotesFor`) reach the call. Each turn logs `model
 `voice N ms`. The aux model (gpt-4.1-nano, 1.8 s) is NOT used: it hung up after the first answer;
 the main model answered the same turn in 2.2 s.
 
+### Realtime calls (v2.25.620)
+
+Turn-by-turn calls (heard clip → STT → model → TTS → say) take 6-12 s a reply. On a phone whose
+DialX hello lists `dialx.realtime`, and with `OPENAI_API_KEY` set, a call ALICE places goes to the
+OpenAI Realtime API instead (`src/services/textx/dialxRealtime.js`; protocol on Trellis 4293 #191-#196,
+the same frames Orbit speaks):
+
+- `dialx.schedule_call` carries `realtime: true` (not with a voice effect, which stays on turns).
+- On `call.answered {by:"person"}` ALICE mints a 60 s client secret (`POST /v1/realtime/client_secrets`)
+  with the whole session fixed: instructions (the turn-mode call rules, the purpose, the opening for the
+  model to say, the owner's notes about the person), `gpt-realtime-2.1`, the `realtimeVoice` setting
+  (default `marin`, the closest to Ara; realtime cannot use ALICE's TTS voices), semantic VAD,
+  far-field noise reduction, pcm 24 kHz, and one tool, `hang_up`. The phone gets only the secret, in
+  `dialx.realtime`, and opens OpenAI's WebSocket itself. The API key never leaves ALICE.
+- `call.realtime_event` forwards both sides' transcripts and function calls (OpenAI's id as `fn_call_id`).
+  `hang_up` is answered with `dialx.realtime_tool_output`, then `dialx.hangup`; DialX lets the goodbye finish.
+- While realtime is live, `call.heard` is ignored. `call.realtime_failed`, or a secret that cannot be
+  minted, leaves the call on turns. Voicemail is unchanged.
+- **Which calls (setting `realtimeCalls`, default `all`):** every placed call; `test` = DialX Test calls only (0.7.30, the
+  owner on the phone's mic and speaker); `off` = none. Call 32 (2026-10-25) heard nothing of the callee for 4.5 min: the
+  phone's capture returned zeros (not realtime); DialX 0.7.32 reopens a dead capture and falls back to turns after 25 s.
+- **Multi-agent calls (4293 #216, DialX building):** `call.started {test:true, contact:{agent:true}}` = agent ↔ agent on the
+  owner's topic (`purpose`); `participants:[{name, role, self}]` with more than one other = a group call (speak when addressed,
+  instructions only from the owner). DialX holds the floor.
+- **Silence guard:** no callee transcript 40 s into a realtime call → ALICE hangs up and tells the owner why.
+- Overrides: `DIALX_REALTIME=off`, `DIALX_REALTIME_MODEL`, `DIALX_REALTIME_VOICE`.
+
 ## Notifications: NotifX (v2.25.586)
 
 NotifX (the owner's notification history app, frames doc `docs/agent-protocol-notifx.md` in the NotifX repo,

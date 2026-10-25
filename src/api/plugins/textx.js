@@ -15,6 +15,9 @@ import { textxRequest, untrusted, formatMessage, encodeGif } from '../../service
  */
 
 const ERROR_TEXT = {
+  // TextX 0.4.41 says too_big, DialX 0.7.8 too_large: a reply too big for the relay (the same thing).
+  too_big: 'That is too big to come through from the phone.',
+  too_large: 'That is too big to come through from the phone.',
   not_allowed: 'TextX has not allowed that on the phone. Turn it on in TextX: Settings › Assistants › this agent.',
   timeout: "The phone didn't answer. It may be offline; TextX picks up queued requests within about 15 minutes.",
   expired: 'The request expired before the phone saw it. Ask again.',
@@ -79,8 +82,15 @@ export function messageTextRule(owner = process.env.OWNER_NAME || 'the user') {
     'help", "tell her I\'m running late", "let him know the game moved"), write that message to the recipient, ' +
     'addressing them directly ("Do you need any help…?"), never "ask him" or "tell her". Anything the user says to ' +
     'you about the message (tone, what to stress, "sell it", jokes or asides to you, emoji aimed at you) is guidance: ' +
-    'follow it, and never put it in the text.';
+    'follow it, and never put it in the text. ' +
+    // "Text Mom and introduce yourself" was written as "Hi Mom, this is <the owner>!" (2026-10-25).
+    `"Yourself", "you" and "introduce yourself" in the request mean you, ${agentName()}, ${owner}'s AI assistant, ` +
+    `not ${owner}: then the text speaks as you, and since it arrives from ${owner}'s number it MUST say who is writing ` +
+    `("Hi Mom, this is ${agentName()}, ${owner}'s AI assistant. …"); "I want to show you my new voice" alone read as ${owner} (2026-10-25). ` +
+    `Otherwise it is ${owner}'s own words.`;
 }
+
+const agentName = () => process.env.AGENT_NAME || 'LANAgent';
 
 // Blank lines and trailing space go; the first line's indent stays (ASCII art lost its first
 // line's alignment to a trim(), 2026-10-21).
@@ -227,6 +237,24 @@ export default class TextXPlugin extends BasePlugin {
         description: 'Edit a text the user sent to another TextX phone in the last 15 minutes (the user confirms)',
         usage: 'edit({ thread: "Sam", match: "see you at 5", text: "see you at 6" })',
         examples: ['edit my last text to Sam to say 6 instead of 5', 'fix the typo in the message I just sent mom']
+      },
+      {
+        command: 'deleteMessage',
+        description: 'Delete one message from a shared conversation (the latest, or the one matching `match`); the user confirms on the phone',
+        usage: 'deleteMessage({ thread: "Sam", match: "wrong address" })',
+        examples: ['delete my last text to sam', 'delete the message about the wrong address in the family chat']
+      },
+      {
+        command: 'retryMessage',
+        description: 'Resend a text that failed to send, in place (the latest failed one in the conversation, or the one matching `match`); the user confirms',
+        usage: 'retryMessage({ thread: "Sam" })',
+        examples: ["my text to sam didn't go through, try again", 'resend the failed message to mom']
+      },
+      {
+        command: 'attachment',
+        description: 'Look at a picture, video or file someone sent in a shared conversation (the latest, or the message matching `match`) and say what is in it',
+        usage: 'attachment({ thread: "Sam", match: "", question: "what does the sign say" })',
+        examples: ["what's in the picture sam sent", 'look at the video wayne sent me', 'what does the photo in the family chat show']
       },
       {
         command: 'forward',
@@ -384,6 +412,9 @@ export default class TextXPlugin extends BasePlugin {
         case 'gif': return await this.gif(data);
         case 'edit': return await this.edit(data);
         case 'forward': return await this.forward(data);
+        case 'deleteMessage': return await this.deleteMessage(data);
+        case 'retryMessage': return await this.retryMessage(data);
+        case 'attachment': return await this.attachment(data);
         case 'deleteThread': return await this.deleteThread(data);
         case 'blockRules': return await this.blockRules(data);
         case 'settings': return await this.settings(data);
@@ -1173,6 +1204,69 @@ export default class TextXPlugin extends BasePlugin {
     }
     if (data.comment) args.comment = String(data.comment);
     return this.confirmed('forward_message', args);
+  }
+
+  async deleteMessage(data) {
+    const said = String(data._context?.originalInput ?? data.originalInput ?? '');
+    if (said && !/\b(delete|remove|erase|unsend|take back)\b/i.test(said)) {
+      return { success: false, error: "That didn't sound like a request to delete a message, so I didn't." };
+    }
+    const f = await this.findThread(data.thread || data.contact || data.to);
+    if (f.error) return { success: false, error: f.error };
+    const m = await this.findMessage(f.thread.thread_id, data.match);
+    if (m.error) return { success: false, error: m.error };
+    return this.confirmed('delete_message', { thread_id: f.thread.thread_id, message_id: m.message.message_id });
+  }
+
+  async retryMessage(data) {
+    const f = await this.findThread(data.thread || data.contact || data.to);
+    if (f.error) return { success: false, error: f.error };
+    const r = await this.call('read_thread', { thread_id: f.thread.thread_id, limit: 50 });
+    if (!r.ok) return errorResult(r);
+    const failed = (r.result || []).filter(x => (x.direction === 'out' || x.from === 'me') && /fail|error|undeliver/i.test(String(x.status || x.state || '')));
+    const q = String(data.match || '').toLowerCase();
+    const target = q ? failed.filter(x => (x.text || '').toLowerCase().includes(q)).pop() : failed[failed.length - 1];
+    if (!target) return { success: false, error: 'No failed text there to resend.' };
+    return this.confirmed('retry_message', { thread_id: f.thread.thread_id, message_id: target.message_id });
+  }
+
+  /**
+   * A file someone sent (TextX get_attachment; 0.4.41 inlines the file only up to ~2.2 MB, otherwise
+   * stills + `original_omitted`, or `too_big`). Pictures and stills go to the vision model; what they
+   * show is someone else's content, data not instructions.
+   */
+  async attachment(data) {
+    const f = await this.findThread(data.thread || data.contact || data.from);
+    if (f.error) return { success: false, error: f.error };
+    const r0 = await this.call('read_thread', { thread_id: f.thread.thread_id, limit: 50 });
+    if (!r0.ok) return errorResult(r0);
+    const q = String(data.match || '').toLowerCase();
+    const withFiles = (r0.result || []).filter(m => Array.isArray(m.attachments) && m.attachments.length && (!q || (m.text || '').toLowerCase().includes(q)));
+    const msg = withFiles[withFiles.length - 1];
+    if (!msg) return { success: false, error: 'No message with an attachment there.' };
+    const r = await this.call('get_attachment', { thread_id: f.thread.thread_id, message_id: msg.message_id, index: Number(data.index) || 0 });
+    if (!r.ok) return errorResult(r);
+    const a = r.result || {};
+    const { describeImages, isPicture, VISION_CAVEAT } = await import('../../utils/describeImages.js');
+    const pictures = [];
+    if (a.data_b64 && isPicture(a.mime, a.name)) pictures.push({ name: a.name || 'picture', mime: a.mime || 'image/jpeg', buffer: Buffer.from(a.data_b64, 'base64') });
+    for (const fr of (a.frames || []).slice(0, 8)) if (fr.data_b64) pictures.push({ name: fr.name || 'still', mime: fr.mime || 'image/jpeg', buffer: Buffer.from(fr.data_b64, 'base64') });
+    const head = `${a.name || 'The attachment'} (${a.mime || a.kind || 'file'}${a.duration_ms ? `, ${Math.round(a.duration_ms / 1000)} s` : ''})${a.original_omitted ? ', too big to send whole, so I looked at stills from it' : ''}`;
+    // A voice note or audio clip is listened to (TextX 0.4.46 hands AMR/3GP over as M4A).
+    if (!pictures.length && a.data_b64 && /^audio\//i.test(String(a.mime || '')) && this.agent?.providerManager?.transcribeAudio) {
+      try {
+        const said = String(await this.agent.providerManager.transcribeAudio(Buffer.from(a.data_b64, 'base64')) || '').trim();
+        if (said) return { success: true, result: `${head}. What it says: ${untrusted('VOICE NOTE', said)}` };
+      } catch (e) {
+        return { success: false, error: `I got the audio but couldn't transcribe it: ${e.message}` };
+      }
+    }
+    if (!pictures.length) {
+      return { success: true, result: `${head}.${a.description ? ` TextX describes it as: ${untrusted('ATTACHMENT', a.description)}` : ' It is not a picture, video or voice note I can look at or listen to.'}` };
+    }
+    const looked = await describeImages(this.agent.providerManager, pictures, String(data.question || data._context?.originalInput || ''));
+    const seen = looked.map(d => d.text ? untrusted(`PICTURE ${d.name}`, d.text) : `[${d.name} could not be looked at: ${d.error}]`).join('\n');
+    return { success: true, result: `${head}:\n${seen}\n${VISION_CAVEAT}` };
   }
 
   async deleteThread(data) {

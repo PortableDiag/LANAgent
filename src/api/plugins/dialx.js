@@ -2,7 +2,9 @@ import { BasePlugin } from '../core/basePlugin.js';
 import { nowInZone, resolveRequestTime, localZone } from '../../utils/wallClock.js';
 import { getTextX } from '../../services/textx/index.js';
 import { textxRequest } from '../../services/textx/textxHub.js';
-import { isoWithOffset, getDialXSettings, agentAudio, clock, voicemailText } from '../../services/textx/dialx.js';
+import { isoWithOffset, getDialXSettings, agentAudio, clock, voicemailText, joinToMp3, RECORDING_PART_S, withAiDisclosure, riffPad, thereminize, thereminMode } from '../../services/textx/dialx.js';
+import { isTextRequest } from '../../core/pluginChainProcessor.js';
+import { supportsRealtime } from '../../services/textx/dialxRealtime.js';
 
 /**
  * Phone calls through the DialX dialer app ("call Wayne and tell him happy birthday at 5pm").
@@ -13,10 +15,13 @@ import { isoWithOffset, getDialXSettings, agentAudio, clock, voicemailText } fro
  */
 
 const ERROR_TEXT = {
+  // TextX 0.4.41 says too_big, DialX 0.7.8 too_large: a reply too big for the relay (the same thing).
+  too_big: 'That is too big to come through from the phone.',
+  too_large: 'That is too big to come through from the phone.',
   not_allowed: 'DialX has not allowed that for this agent. Turn it on in DialX: this agent › tools.',
   not_supported: 'DialX says this agent does not support calls yet.',
   outside_hours: null, // DialX's own message names the hours and zone
-  rate_limited: 'DialX is rate-limiting calls from this agent (3 an hour, 10 a day). Try later.',
+  rate_limited: null, // the limits are the owner's DialX settings (0.7.22): DialX's message names them
   busy_in_call: 'DialX is on a call right now. Try again when it ends.',
   timeout: "DialX didn't answer. The phone may be offline.",
   expired: 'The request expired before DialX saw it. Ask again.',
@@ -27,6 +32,11 @@ const ERROR_TEXT = {
   too_far_ahead: 'DialX schedules calls at most 30 days ahead.',
   duplicate: 'That exact call is already waiting for you to approve on the phone.'
 };
+
+export { isTextRequest };
+
+/** How long a read of DialX's approved contacts is reused for the next call. */
+const APPROVED_TTL_MS = 10 * 60 * 1000;
 
 function errorResult(r) {
   const code = r?.error?.code || 'internal';
@@ -62,7 +72,8 @@ export default class DialXPlugin extends BasePlugin {
         command: 'call',
         description: 'Phone someone from the user\'s phone and talk with them. `purpose` is why the user wants the call; `opening` is the first thing to say to them; `at` is when (ISO-8601, omit for now). Only contacts approved in DialX; the user confirms on the phone',
         usage: 'call({ contact: "Wayne", at: "2026-10-23T17:00", purpose: "wish him a happy birthday", opening: "Hi Wayne! I\'m calling to wish you a happy birthday.", voicemail: "optional: what to leave if voicemail answers, in the user\'s words" })',
-        examples: ['call wayne and tell him happy birthday at 5pm', 'phone mom and ask if she needs anything from the store', 'give the plumber a call tomorrow at 9 and confirm the appointment', 'ring Sam now and let him know I\'m running late']
+        examples: ['call wayne and tell him happy birthday at 5pm', 'phone mom and ask if she needs anything from the store', 'give the plumber a call tomorrow at 9 and confirm the appointment', 'ring Sam now and let him know I\'m running late',
+          'leave Adam a voicemail saying I\'ll be late', 'leave Adam a theremin voicemail', 'call Wayne and play him a theremin riff', 'call Sam in a robot voice and say hi']
       },
       {
         command: 'calls',
@@ -113,6 +124,102 @@ export default class DialXPlugin extends BasePlugin {
         examples: ['who called me today', 'show my recent calls']
       },
       {
+        command: 'recordings',
+        description: 'List recorded phone calls from DialX (every recorded call, the user\'s own too)',
+        usage: 'recordings({ limit: 20 })',
+        examples: ['list my call recordings', 'what calls were recorded today']
+      },
+      {
+        command: 'recording',
+        description: 'Send the recording of a call (the latest, or the one with a person) to the user on Telegram',
+        usage: 'recording({ from: "Mom" })',
+        examples: ['send me the recording of my call with mom', 'play back my last call', 'send me the last call recording']
+      },
+      {
+        command: 'deleteRecording',
+        description: 'Delete a call recording, by person or id (the user confirms on the phone)',
+        usage: 'deleteRecording({ from: "Mom" })',
+        examples: ['delete the recording of my call with mom']
+      },
+      {
+        command: 'reportSpam',
+        description: 'Add a number (or the latest caller) to DialX\'s spam list (the user confirms on the phone)',
+        usage: 'reportSpam({ number: "+15550100" })',
+        examples: ['report that last caller as spam', 'block that spam number in dialx', 'mark +15550100 as spam']
+      },
+      {
+        command: 'notSpam',
+        description: 'Take a number off DialX\'s spam list (the user confirms on the phone)',
+        usage: 'notSpam({ number: "+15550100" })',
+        examples: ['that number is not spam', 'unmark that caller as spam']
+      },
+      {
+        command: 'expecting',
+        description: 'Let every caller ring through DialX\'s screening until a time (at most 24 hours), e.g. when the user expects an unknown caller. `hours` or `until` (ISO)',
+        usage: 'expecting({ hours: 2 })',
+        examples: ["i'm expecting a call from the doctor, let everyone ring for 2 hours", 'let all calls through until 5pm', 'turn off call screening for an hour']
+      },
+      {
+        command: 'callLists',
+        description: 'Show one of DialX\'s call lists: `list` is spam (the spam list), allowed (numbers that always ring), blocked (the phone\'s block list), screened (calls DialX screened), or contacts (favorites with favoritesOnly)',
+        usage: 'callLists({ list: "spam" })',
+        examples: ["what's on my spam list", 'which numbers always ring through', 'show my blocked numbers', 'list my favorite contacts']
+      },
+      {
+        command: 'removeFromList',
+        description: 'Take a number off DialX\'s spam or always-ring list, or remove an entry from the screened list. `list`: spam | allowed | screened; `number` (or `from` for a screened caller). Spam/allowed changes are confirmed on the phone',
+        usage: 'removeFromList({ list: "allowed", number: "+15550100" })',
+        examples: ['take +15550100 off the always-ring list', 'remove that number from my spam list', 'remove the screened call from that number']
+      },
+      {
+        command: 'clearList',
+        description: 'Empty DialX\'s spam list or its screened-calls list (confirmed on the phone). `list`: spam | screened',
+        usage: 'clearList({ list: "screened" })',
+        examples: ['clear my screened calls', 'empty the spam list']
+      },
+      {
+        command: 'importSpam',
+        description: 'Import into DialX the numbers the previous phone app had blocked as spam (confirmed on the phone)',
+        usage: 'importSpam()',
+        examples: ['import my old spam list into dialx']
+      },
+      {
+        command: 'block',
+        description: 'Block a number on the phone (no calls or texts), or the latest caller; `unblock: true` to unblock. Confirmed on the phone',
+        usage: 'block({ number: "+15550100" })',
+        examples: ['block that last caller', 'block +15550100', 'unblock +15550100']
+      },
+      {
+        command: 'deleteRecent',
+        description: 'Delete calls from the phone\'s call history: those with a person/number, or the latest one. Confirmed on the phone',
+        usage: 'deleteRecent({ from: "+15550100" })',
+        examples: ['delete that call from my call history', 'remove the calls from that number from my recents']
+      },
+      {
+        command: 'transcribeVoicemail',
+        description: 'Transcribe a voicemail on the phone (the latest, or from a caller) and read what it says',
+        usage: 'transcribeVoicemail({ from: "Mom" })',
+        examples: ['transcribe my latest voicemail', 'what does the voicemail from mom say word for word']
+      },
+      {
+        command: 'voicePreview',
+        description: "Let the user hear a sample of the agent's own voice through a DialX effect (theremin, robot…) before any call, sent to them on Telegram. `voice` is the effect; `text` an optional line to say",
+        usage: 'voicePreview({ voice: "theremin", text: "Hello from my new voice" })',
+        examples: ['let me hear your theremin voice', 'preview the robot voice', 'what would you sound like in a deep voice', 'play me a sample of your theremin voice']
+      },
+      {
+        command: 'voiceEffect',
+        description: "Change the user's own voice on their live phone call with DialX's voice changer (Robot, Deep voice, Woman, Theremin…), or turn it off. `voice` is the effect's name",
+        usage: 'voiceEffect({ voice: "Robot" })',
+        examples: ['make me sound like a robot on this call', 'give me a deep voice', 'turn off the voice effect', 'make my voice normal again', 'what voice effects are there']
+      },
+      {
+        command: 'theremin',
+        description: "Play a short theremin riff on the user's live call (DialX's in-call pad), over their voice. `notes`: semitones above C3, 0-24, optional; `seconds`: how long",
+        usage: 'theremin({ seconds: 4 })',
+        examples: ['play a theremin riff while I talk', 'do a spooky theremin on this call', 'play some theremin']
+      },
+      {
         command: 'screened',
         description: 'Calls DialX screened (spam or unknown callers)',
         usage: 'screened()',
@@ -136,7 +243,23 @@ export default class DialXPlugin extends BasePlugin {
         case 'contacts': return await this.listing('dialx.list_approved_contacts', 'approved contacts', ['contacts']);
         case 'recents': return await this.listing('dialx.list_recents', 'recent calls', ['calls', 'recents']);
         case 'screened': return await this.listing('dialx.list_screened', 'screened calls', ['calls', 'screened']);
-        case 'voicemails': return await this.voicemails(data);
+        case 'voicePreview': return this.wantsACall(data) ? await this.call({ ...data, voice: data.voice || this.effectIn(data) }) : await this.voicePreview(data);
+        case 'voiceEffect': return this.wantsACall(data) ? await this.call({ ...data, voice: data.voice || this.effectIn(data) }) : await this.voiceEffect(data);
+        case 'recordings': return await this.listing('dialx.list_recordings', 'call recordings', ['recordings'], { limit: Math.min(200, Number(data.limit) || 20) });
+        case 'recording': return await this.recording(data);
+        case 'deleteRecording': return await this.deleteRecording(data);
+        case 'reportSpam': return await this.spam('dialx.report_spam', data);
+        case 'notSpam': return await this.spam('dialx.mark_not_spam', data);
+        case 'expecting': return await this.expecting(data);
+        case 'callLists': return await this.callLists(data);
+        case 'removeFromList': return await this.removeFromList(data);
+        case 'clearList': return await this.clearList(data);
+        case 'importSpam': return await this.ownerTool('dialx.import_spam_from_history', {}, data, 'import the old spam list', (r) => `Imported ${r?.added ?? 'the'} numbers into DialX's spam list.`);
+        case 'block': return await this.block(data);
+        case 'deleteRecent': return await this.deleteRecent(data);
+        case 'transcribeVoicemail': return await this.transcribeVoicemail(data);
+        case 'theremin': return this.wantsACall(data) ? await this.call({ ...data, voice: data.voice || 'theremin' }) : await this.theremin(data);
+        case 'voicemails': return this.wantsACall(data) ? await this.call({ ...data, voice: data.voice || this.effectIn(data) }) : await this.voicemails(data);
         case 'voicemail': return await this.voicemail(data);
         case 'markVoicemail': return await this.markVoicemail(data);
         case 'deleteVoicemail': return await this.deleteVoicemail(data);
@@ -146,6 +269,321 @@ export default class DialXPlugin extends BasePlugin {
       this.logger.error(`dialx ${action} failed: ${error.message}`);
       return { success: false, error: error.message };
     }
+  }
+
+  // ── recordings (DialX 0.7.0 "Call recordings" switch) ─────────────────────────────────
+
+  async findRecording(data) {
+    const r = await this.tool('dialx.list_recordings', { limit: 200 });
+    if (!r.ok) return { error: r.error?.code === 'not_allowed' || r.error?.code === 'none'
+      ? 'Call recordings are off for me in DialX. Turn on "Call recordings" for this agent in DialX.' : errorResult(r).error };
+    const list = listOf(r.result, 'recordings').sort((a, b) => String(b.at).localeCompare(String(a.at)));
+    if (!list.length) return { error: 'DialX has no call recordings.' };
+    if (data.id || data.recording_id) {
+      const hit = list.find(x => String(x.recording_id) === String(data.id || data.recording_id));
+      return hit ? { rec: hit } : { error: 'No recording with that id.' };
+    }
+    const q = String(data.from || data.contact || data.name || '').toLowerCase().trim();
+    if (!q) return { rec: list[0] };
+    const digits = q.replace(/\D/g, '');
+    const hit = list.find(x => String(x.name || '').toLowerCase().includes(q) || (digits.length >= 4 && String(x.number || '').replace(/\D/g, '').endsWith(digits)));
+    return hit ? { rec: hit } : { error: `No recorded call with ${data.from || data.contact || data.name}.` };
+  }
+
+  async recording(data) {
+    if (!this.fromOwner(data)) return { success: false, error: 'Only my owner can hear call recordings.' };
+    const f = await this.findRecording(data);
+    if (f.error) return { success: false, error: f.error };
+    const id = f.rec.recording_id;
+    const first = await this.tool('dialx.get_recording_audio', { recording_id: id, part: 0, seconds: RECORDING_PART_S });
+    if (!first.ok || !first.result?.audio_b64) return { success: false, error: errorResult(first).error };
+    const parts = Math.max(1, Math.min(20, Number(first.result.parts) || 1));
+    const wavs = [Buffer.from(first.result.audio_b64, 'base64')];
+    for (let i = 1; i < parts; i++) {
+      const r = await this.tool('dialx.get_recording_audio', { recording_id: id, part: i, seconds: RECORDING_PART_S });
+      if (!r.ok || !r.result?.audio_b64) break;
+      wavs.push(Buffer.from(r.result.audio_b64, 'base64'));
+    }
+    const mp3 = await joinToMp3(wavs);
+    const tg = this.agent?.interfaces?.get?.('telegram');
+    const who = f.rec.name || f.rec.number || 'a call';
+    if (!tg?.sendNotification || !(mp3 || wavs.length === 1)) return { success: false, error: "I couldn't prepare the recording to send." };
+    await tg.sendNotification(`🎙️ Call with ${who}, ${when(f.rec.at)}${wavs.length < parts ? ` (${wavs.length} of ${parts} minutes)` : ''}. Left: your side, right: theirs.`,
+      { [mp3 ? 'audio' : 'document']: { source: mp3 || wavs[0], filename: `call-${String(who).replace(/[^\w-]+/g, '_')}.${mp3 ? 'mp3' : 'wav'}` }, parse_mode: undefined });
+    return { success: true, result: `Sent you the recording of the call with ${who} (${when(f.rec.at)}) on Telegram.` };
+  }
+
+  async deleteRecording(data) {
+    if (!this.fromOwner(data)) return { success: false, error: 'Only my owner can delete call recordings.' };
+    const f = await this.findRecording(data);
+    if (f.error) return { success: false, error: f.error };
+    const r = await this.tool('dialx.delete_recording', { recording_id: f.rec.recording_id });
+    if (!r.ok) return errorResult(r);
+    return { success: true, result: r.pending ? `Confirm on the phone to delete the recording of the call with ${f.rec.name || f.rec.number}.` : 'Deleted.' };
+  }
+
+  // ── spam list and "expecting a call" (owner confirms each on the phone) ───────────────
+
+  async spam(tool, data) {
+    if (!this.fromOwner(data)) return { success: false, error: 'Only my owner can change the spam list.' };
+    let number = String(data.number || '').trim();
+    if (!number) {
+      // "that last caller": the newest call in the phone's recents
+      const r = await this.tool('dialx.list_recents', { limit: 5 });
+      const last = r.ok ? listOf(r.result, 'calls', 'recents')[0] : null;
+      if (!last?.number) return { success: false, error: 'Which number?' };
+      number = last.number;
+    }
+    const r = await this.tool(tool, { number });
+    if (!r.ok) return errorResult(r);
+    const what = tool === 'dialx.report_spam' ? 'add' : 'take';
+    return { success: true, result: r.pending ? `Confirm on the phone to ${what} ${number} ${what === 'add' ? 'to' : 'off'} DialX's spam list.`
+      : `${number} is ${what === 'add' ? 'on' : 'off'} DialX's spam list.` };
+  }
+
+  async expecting(data) {
+    if (!this.fromOwner(data)) return { success: false, error: 'Only my owner can change call screening.' };
+    let until = null;
+    if (data.until) {
+      const d = resolveRequestTime(data.until, String(data._context?.originalInput || ''));
+      if (d) until = d;
+    } else {
+      const h = Number(data.hours) || (Number(data.minutes) ? Number(data.minutes) / 60 : 1);
+      until = new Date(Date.now() + Math.min(24, Math.max(0.1, h)) * 3600000);
+    }
+    if (!until) return { success: false, error: `I couldn't read the time "${data.until}".` };
+    if (until.getTime() - Date.now() > 24 * 3600000) until = new Date(Date.now() + 24 * 3600000);
+    const r = await this.tool('dialx.set_expecting', { until: isoWithOffset(until, localZone()) });
+    if (!r.ok) return errorResult(r);
+    return { success: true, result: r.pending ? `Confirm on the phone: every caller rings until ${when(until)}.` : `Every caller rings through until ${when(until)}.` };
+  }
+
+  // ── call lists and history (DialX owner tools) ────────────────────────────────────────
+
+  /** An owner-only, phone-confirmed tool: says "confirm on the phone" while the card waits. */
+  async ownerTool(tool, args, data, what, done) {
+    if (!this.fromOwner(data)) return { success: false, error: 'Only my owner can change that.' };
+    const r = await this.tool(tool, args);
+    if (!r.ok) return r.error?.code === 'not_default_dialer'
+      ? { success: false, error: "DialX can't block numbers unless it's set as the phone app." } : errorResult(r);
+    return { success: true, result: r.pending ? `Confirm on the phone to ${what}.` : done(r.result) };
+  }
+
+  async callLists(data) {
+    const which = String(data.list || data.which || '').toLowerCase();
+    const map = { spam: ['dialx.list_spam', 'spam list', ['spam', 'numbers']], allowed: ['dialx.list_allowed', 'always-ring list', ['allowed', 'numbers']],
+      blocked: ['dialx.list_blocked', 'blocked numbers', ['blocked', 'numbers']], screened: ['dialx.list_screened', 'screened calls', ['calls', 'screened']],
+      contacts: ['dialx.list_contacts', data.favoritesOnly || data.favorites ? 'favorite contacts' : 'contacts', ['contacts']] };
+    const key = Object.keys(map).find(k => which.startsWith(k.slice(0, 4))) || (/always|white/.test(which) ? 'allowed' : /block/.test(which) ? 'blocked' : null);
+    if (!key) return { success: false, error: 'Which list: spam, allowed (always ring), blocked, screened or contacts?' };
+    const [tool, label, keys] = map[key];
+    const args = key === 'contacts' ? { limit: 500, ...(data.favoritesOnly || data.favorites ? { favorites_only: true } : {}) } : key === 'screened' ? { limit: 50 } : {};
+    return this.listing(tool, label, keys, args);
+  }
+
+  async removeFromList(data) {
+    const list = String(data.list || '').toLowerCase();
+    if (list.startsWith('screen')) {
+      if (!this.fromOwner(data)) return { success: false, error: 'Only my owner can change that.' };
+      const r = await this.tool('dialx.list_screened', { limit: 50 });
+      const q = String(data.number || data.from || '').replace(/\D/g, '');
+      const hit = r.ok ? listOf(r.result, 'calls', 'screened').find(x => q && String(x.number || '').replace(/\D/g, '').endsWith(q.slice(-7))) : null;
+      if (!hit?.screened_id) return { success: false, error: 'No screened call matches that number.' };
+      return this.ownerTool('dialx.remove_screened', { screened_id: hit.screened_id }, data, 'remove it', () => 'Removed from the screened list.');
+    }
+    const number = String(data.number || '').trim();
+    if (!number) return { success: false, error: 'Which number?' };
+    if (list.startsWith('spam')) return this.ownerTool('dialx.remove_spam', { number }, data, `take ${number} off the spam list`, () => `${number} is off the spam list.`);
+    if (/allow|always/.test(list)) return this.ownerTool('dialx.remove_allowed', { number }, data, `take ${number} off the always-ring list`, () => `${number} is screened again.`);
+    return { success: false, error: 'Which list: spam, allowed or screened?' };
+  }
+
+  async clearList(data) {
+    const list = String(data.list || '').toLowerCase();
+    if (list.startsWith('spam')) return this.ownerTool('dialx.clear_spam', {}, data, 'empty the spam list', () => 'The spam list is empty.');
+    if (list.startsWith('screen')) return this.ownerTool('dialx.clear_screened', {}, data, 'clear the screened calls', () => 'Screened calls cleared.');
+    return { success: false, error: 'Which list: spam or screened?' };
+  }
+
+  async latestCaller() {
+    const r = await this.tool('dialx.list_recents', { limit: 5 });
+    return r.ok ? listOf(r.result, 'calls', 'recents')[0] || null : null;
+  }
+
+  async block(data) {
+    const number = String(data.number || '').trim() || (await this.latestCaller())?.number;
+    if (!number) return { success: false, error: 'Which number?' };
+    return data.unblock
+      ? this.ownerTool('dialx.unblock_number', { number }, data, `unblock ${number}`, () => `${number} is unblocked.`)
+      : this.ownerTool('dialx.block_number', { number }, data, `block ${number} (calls and texts)`, () => `${number} is blocked.`);
+  }
+
+  async deleteRecent(data) {
+    const r = await this.tool('dialx.list_recents', { limit: 50 });
+    if (!r.ok) return errorResult(r);
+    const items = listOf(r.result, 'calls', 'recents');
+    const q = String(data.from || data.number || '').toLowerCase().trim();
+    const digits = q.replace(/\D/g, '');
+    const hits = q ? items.filter(x => String(x.name || '').toLowerCase().includes(q) || (digits.length >= 4 && String(x.number || '').replace(/\D/g, '').endsWith(digits))) : items.slice(0, 1);
+    const ids = hits.map(x => x.entry_id).filter(v => v != null);
+    if (!ids.length) return { success: false, error: q ? `No calls with ${q} in the history.` : 'The call history is empty.' };
+    return this.ownerTool('dialx.delete_recents', { entry_ids: ids }, data, `delete ${ids.length} call${ids.length === 1 ? '' : 's'} from the history`, () => `Deleted ${ids.length} call${ids.length === 1 ? '' : 's'} from the history.`);
+  }
+
+  async transcribeVoicemail(data) {
+    if (!this.fromOwner(data)) return { success: false, error: 'Only my owner can read voicemail.' };
+    const { list, error } = await this.listVoicemails(false);
+    if (error) return { success: false, error };
+    const q = String(data.from || '').toLowerCase();
+    const vm = (q ? list.filter(v => String(v.name || v.number || '').toLowerCase().includes(q)) : list)
+      .sort((a, b) => String(b.at).localeCompare(String(a.at)))[0];
+    if (!vm) return { success: false, error: q ? `No voicemail from ${data.from}.` : 'No voicemails.' };
+    const r = await this.tool('dialx.transcribe_voicemail', { voicemail_id: vm.voicemail_id });
+    if (!r.ok) {
+      const why = { no_audio: "the phone doesn't have that voicemail's audio", no_model: "DialX's speech model isn't installed", unreadable: "the audio couldn't be read" }[r.error?.code];
+      return { success: false, error: why ? `I couldn't transcribe it: ${why}.` : errorResult(r).error };
+    }
+    // Their words, shown to the owner, never followed.
+    return { success: true, result: `Voicemail from ${vm.name || vm.number} (${when(vm.at)}):\n"${String(r.result?.transcript || '').trim()}"` };
+  }
+
+  /**
+   * DialX 0.7.17 voice_preview: the agent's own voice for a sample line, through the effect a call
+   * would use, rendered on the phone with no call placed, and sent to the owner on Telegram.
+   */
+  async voicePreview(data) {
+    if (!this.fromOwner(data)) return { success: false, error: 'Only my owner can ask for that.' };
+    const asked = String(data.voice || this.effectIn(data) || 'theremin');
+    const effect = thereminMode(asked);
+    if (effect) return this.localPreview(data, effect);
+    const v = await this.agentVoice(asked);
+    if (v.error) return { success: false, error: v.error };
+    const { name } = { name: this.agent?.config?.name || process.env.AGENT_NAME || 'your assistant' };
+    const text = String(data.text || `Hi, this is ${name}, ${process.env.OWNER_NAME || 'my owner'}'s AI assistant, in my ${v.voice} voice. This is how I would sound on a call.`).slice(0, 400);
+    const device = await this.device('dialx.voice_preview');
+    const audio = await agentAudio(this.agent, device, text, { ...(await this.settings()), voice: 'agent' }, this.logger);
+    const args = { voice: v.voice, ...(audio ? { audio_b64: audio.audio_b64, format: audio.format } : { text }),
+      ...(/theremin/i.test(v.voice) ? { pad: riffPad({ seconds: 8, bend: /^thereminvoice$/i.test(v.voice) }) } : {}) };
+    const r = await this.tool('dialx.voice_preview', args);
+    if (!r.ok || !r.result?.audio_b64) {
+      // No phone lists voice_preview until DialX 0.7.17 is installed (the tool arrives in its hello).
+      const old = ['none', 'unknown_tool'].includes(r.error?.code);
+      return { success: false, error: old ? 'DialX has no voice preview yet (DialX 0.7.17 adds it), or Voice effects is off for me.' : (r.ok ? 'DialX sent no audio.' : errorResult(r).error) };
+    }
+    const wav = Buffer.from(r.result.audio_b64, 'base64');
+    const mp3 = await joinToMp3([wav]);
+    const tg = this.agent?.interfaces?.get?.('telegram');
+    if (!tg?.sendNotification) return { success: false, error: "Telegram isn't available to send the sample." };
+    await tg.sendNotification(`🎛️ Sample of my ${v.voice} voice (${Math.round((r.result.duration_ms || 0) / 1000)} s), as a call would sound.`,
+      { [mp3 ? 'audio' : 'document']: { source: mp3 || wav, filename: `voice-${v.voice}.${mp3 ? 'mp3' : 'wav'}` }, parse_mode: undefined });
+    return { success: true, result: `Sent you a sample of my ${v.voice} voice on Telegram.` };
+  }
+
+  /** A theremin sample made here (the sound calls now use), sent to the owner's Telegram. */
+  async localPreview(data, effect) {
+    const name = this.agent?.config?.name || process.env.AGENT_NAME || 'your assistant';
+    const text = String(data.text || `Hi, this is ${name}, ${process.env.OWNER_NAME || 'my owner'}'s AI assistant, in my theremin voice. This is how I would sound on a call.`).slice(0, 400);
+    const device = await this.device('dialx.schedule_call');
+    const audio = await agentAudio(this.agent, device, text, { ...(await this.settings()), voice: 'agent', effect, ttsTimeoutMs: 15000 }, this.logger);
+    if (!audio) return { success: false, error: "I couldn't make the sample (no voice or ffmpeg)." };
+    const tg = this.agent?.interfaces?.get?.('telegram');
+    if (!tg?.sendNotification) return { success: false, error: "Telegram isn't available to send the sample." };
+    const label = effect === 'mix' ? 'theremin mix (voice with a theremin under it)' : 'theremin voice';
+    await tg.sendNotification(`🎛️ Sample of my ${label}, as a call would sound.`,
+      { audio: { source: Buffer.from(audio.audio_b64, 'base64'), filename: `theremin-${effect}.mp3` }, parse_mode: undefined });
+    return { success: true, result: `Sent you a sample of my ${label} on Telegram.` };
+  }
+
+  /** "robot" → DialX's name for it, from voice_status.agent_choices (theremins are the owner's only). */
+  async agentVoice(asked) {
+    const r = await this.tool('dialx.voice_status');
+    if (!r.ok) return { error: r.error?.code === 'not_allowed' || r.error?.code === 'none'
+      ? 'Voice effects are off for me in DialX. Turn on "Voice effects" for this agent in DialX.' : errorResult(r).error };
+    const choices = (r.result?.agent_choices || []).map(String).filter(c => !/^off$/i.test(c));
+    if (!choices.length) return { error: 'This DialX version cannot put an effect on my voice yet (DialX 0.7.14 adds it).' };
+    const q = asked.toLowerCase().replace(/[\s-]+/g, '').replace(/voice$/, '');
+    const norm = (c) => c.toLowerCase().replace(/[\s-]+/g, '').replace(/voice$/, '');
+    // A plain "theremin" is the agent's own voice bent by the theremin (ThereminVoice), as the owner
+    // wants it (2026-10-24); never the tone-only "Theremin", which would carry none of the words or the
+    // AI disclosure. "theremin mix" / "with a theremin behind" asks for ThereminMix by name.
+    const bent = choices.find(c => /^thereminvoice$/i.test(c));
+    const pick = (/theremin/.test(q) && !/mix|behind|background|under/.test(q) && bent) ? bent
+      : (/theremin/.test(q) && /mix|behind|background|under/.test(q)) ? choices.find(c => /^thereminmix$/i.test(c))
+        : choices.find(c => norm(c) === q) || choices.find(c => norm(c).includes(q) || q.includes(norm(c)));
+    return pick ? { voice: pick } : { error: `DialX has no "${asked}" effect for my voice. It has: ${choices.join(', ')}.` };
+  }
+
+  // ── voice effects (DialX 0.7.6): the owner's voice on the owner's own live call ─────────
+
+  async voiceStatus() {
+    const r = await this.tool('dialx.voice_status');
+    if (!r.ok) return { error: r.error?.code === 'not_allowed' || r.error?.code === 'none'
+      ? 'Voice effects are off for me in DialX. Turn on "Voice effects" for this agent in DialX (it needs root).' : errorResult(r).error };
+    return { status: r.result || {} };
+  }
+
+  async voiceEffect(data) {
+    if (!this.fromOwner(data)) return { success: false, error: 'Only my owner can change their call voice.' };
+    const st = await this.voiceStatus();
+    if (st.error) return { success: false, error: st.error };
+    const choices = (st.status.choices || []).map(String);
+    const asked = String(data.voice || data.effect || '').trim();
+    if (!asked) return { success: true, result: `Voice effects: ${choices.join(', ') || 'none listed'}. Now: ${st.status.label || st.status.voice || 'normal'}.` };
+    const q = asked.toLowerCase().replace(/\s+/g, '');
+    const off = /^(off|none|normal|regular|myvoice|default|stop)$/.test(q);
+    const pick = off
+      ? choices.find(c => /^(normal|off|none|natural)/i.test(c))
+      : choices.find(c => c.toLowerCase().replace(/\s+/g, '') === q) || choices.find(c => c.toLowerCase().replace(/\s+/g, '').includes(q)) || choices.find(c => q.includes(c.toLowerCase().replace(/\s+/g, '')));
+    if (!pick) return { success: false, error: `DialX has no "${asked}" voice. It has: ${choices.join(', ')}.` };
+    const r = await this.tool('dialx.set_voice', { voice: pick });
+    if (!r.ok) return { success: false, error: r.error?.code === 'agent_call' ? "I can't change your voice while I'm on a call myself." : errorResult(r).error };
+    return { success: true, result: off ? 'Your voice is back to normal.' : `Done: you sound like ${pick}${st.status.call_up ? ' on this call' : ' on your next call'}.` };
+  }
+
+  /** A short riff on the pad: x is pitch (two octaves from C3), y the level. */
+  async theremin(data) {
+    if (!this.fromOwner(data)) return { success: false, error: 'Only my owner can use their call voice.' };
+    const st = await this.voiceStatus();
+    if (st.error) return { success: false, error: st.error };
+    if (!/theremin/i.test(String(st.status.voice || ''))) {
+      const choices = (st.status.choices || []).map(String);
+      const mix = choices.find(c => /^thereminmix$/i.test(c)) || choices.find(c => /theremin/i.test(c));
+      if (!mix) return { success: false, error: 'DialX lists no theremin voice.' };
+      const r = await this.tool('dialx.set_voice', { voice: mix });
+      if (!r.ok) return { success: false, error: errorResult(r).error };
+    }
+    const notes = Array.isArray(data.notes) && data.notes.length
+      ? data.notes.map(Number).filter(n => Number.isFinite(n)).map(n => Math.max(0, Math.min(24, n)))
+      : [0, 7, 12, 15, 19, 15, 12, 7, 12, 24, 19, 12]; // a spooky minor arpeggio
+    const seconds = Math.max(1, Math.min(15, Number(data.seconds) || 4));
+    // DialX 0.7.16 plays a whole riff from one call; older versions answer bad_args and get the point-by-point path.
+    const whole = await this.tool('dialx.theremin', { points: riffPad({ notes, seconds, level: 0.25 }) });
+    if (whole.ok) return { success: true, result: `Playing a ${seconds}-second theremin riff${st.status.call_up ? '' : ' (you are not on a call, so only the pad moved)'}.` };
+    const step = (seconds * 1000) / notes.length;
+    for (const n of notes) {
+      const r = await this.tool('dialx.theremin', { x: Number((n / 24).toFixed(3)), y: 0.25, touching: true });
+      if (!r.ok) return { success: false, error: errorResult(r).error };
+      await new Promise(res => setTimeout(res, step));
+    }
+    await this.tool('dialx.theremin', { x: 0.5, y: 0.25, touching: false });
+    return { success: true, result: `Played a ${seconds}-second theremin riff${st.status.call_up ? '' : ' (you are not on a call, so only the pad moved)'}.` };
+  }
+
+  /**
+   * "Leave Adam a theremin voicemail" routed to the voicemail list, and "call Wayne and play him a
+   * theremin riff" to the owner's own pad (2026-10-24; Orbit's model made the same mistake). A request
+   * to call someone or leave them a voicemail is a call, whichever action matched.
+   */
+  wantsACall(data) {
+    const said = String(data._context?.originalInput || data.originalInput || '');
+    return /\b(call|ring|phone|dial)\s+(?!me\b|my\b|back\b)\w+/i.test(said) || /\bleave\s+(?!me\b)\w+\s+(a|an)\b[^.]*\bvoice ?mail\b/i.test(said);
+  }
+
+  /** The effect a call request names ("in a robot voice", "a theremin voicemail"). */
+  effectIn(data) {
+    const said = String(data._context?.originalInput || data.originalInput || '').toLowerCase();
+    const m = said.match(/\b(theremin|robot|deep|woman|auto ?tune|chipmunk|alien|echo)\b/);
+    return m ? m[1] : undefined;
   }
 
   /** The DialX phone a tool goes to. */
@@ -163,12 +601,23 @@ export default class DialXPlugin extends BasePlugin {
   /** Only the owner orders calls: a TextX phone of theirs, Telegram as them, or the dashboard. */
   fromOwner(data) {
     const uid = data._context?.userId;
-    return !!textxRequest.getStore()?.deviceId || !uid || String(uid) === String(process.env.TELEGRAM_USER_ID || '');
+    // 'web-user' is the logged-in dashboard and the API key (POST /api/command/execute); refusing it
+    // turned the owner away from their own dashboard (2026-10-24).
+    return !!textxRequest.getStore()?.deviceId || !uid || uid === 'web-user' || String(uid) === String(process.env.TELEGRAM_USER_ID || '');
   }
 
   async call(data) {
     if (!this.fromOwner(data)) return { success: false, error: 'Only my owner can ask me to place calls.' };
     const request = String(data._context?.originalInput || data.originalInput || '');
+    // "Alice text Wayne and ask him to call…" matched this action on the word "call" and phoned Wayne
+    // (2026-10-24). A request that starts by asking for a text is a text: it goes to TextX, never a call.
+    if (isTextRequest(request)) {
+      const tx = this.agent?.apiManager?.apis?.get?.('textx');
+      const plugin = tx?.instance || tx;
+      this.logger.warn(`dialx call: "${request.slice(0, 80)}" asks for a text; sending it through TextX instead of calling`);
+      if (plugin?.execute) return plugin.execute({ action: 'send', needsParameterExtraction: true, _context: data._context, originalInput: request });
+      return { success: false, error: "That asks for a text, and I can't send texts right now, so I didn't call." };
+    }
     if (data.needsParameterExtraction || !data.contact || !data.opening || !data.voicemail) await this.extract(data, request);
     const who = String(data.contact || data.to || data.name || '').trim();
     if (!who) return { success: false, error: 'Who should I call?' };
@@ -176,9 +625,17 @@ export default class DialXPlugin extends BasePlugin {
     const opening = String(data.opening || '').trim();
     if (!purpose && !opening) return { success: false, error: `What should I say to ${who}?` };
 
-    const list = await this.tool('dialx.list_approved_contacts');
-    if (!list.ok) return errorResult(list);
-    const approved = listOf(list.result, 'contacts').map(contactOf).filter(c => c.name || c.number);
+    // A repeat call reuses the approved list for a few minutes: each round trip to a phone that
+    // only polls costs up to 15 s before the call even starts (call 7, 2026-10-24). DialX checks
+    // approval itself at dialing; a stale list costs one refusal, then a fresh read.
+    const cached = !data._freshContacts && this._approved && Date.now() - this._approved.at < APPROVED_TTL_MS ? this._approved.list : null;
+    let approved = cached;
+    if (!approved) {
+      const list = await this.tool('dialx.list_approved_contacts');
+      if (!list.ok) return errorResult(list);
+      approved = listOf(list.result, 'contacts').map(contactOf).filter(c => c.name || c.number);
+      this._approved = { at: Date.now(), list: approved };
+    }
     // DialX 0.3.4 (Trellis 4293 #23): an approved contact is called with no card; anyone else
     // goes to the owner's confirm card for that one call. So a name not on the list is looked up
     // in the phone's contacts and sent by number, and the phone asks the owner.
@@ -199,18 +656,29 @@ export default class DialXPlugin extends BasePlugin {
       at = d;
     }
     const device = await this.device('dialx.schedule_call');
+    let voice = null;
+    // A theremin voice is made here, from the agent's own TTS, with the sound the owner approved
+    // (Orbit's recipe, 4293 #159); DialX's own theremin chain sounded bad (2026-10-24). Other effects
+    // (Robot, Deep…) still go through DialX's `voice`.
+    const effect = thereminMode(data.voice);
+    if (data.voice && !effect && !/^(none|null|off|normal|plain)$/i.test(String(data.voice).trim())) {
+      const v = await this.agentVoice(String(data.voice));
+      if (v.error) return { success: false, error: v.error };
+      voice = v.voice;
+    }
     const settings = await this.settings();
-    const line = opening || `Hi ${pick.contact.name || 'there'}! I'm calling about ${purpose}.`;
-    // DialX 0.6.0/0.6.1: what to leave after the beep, as text and (0.6.1) in ALICE's own voice,
-    // rendered now with the opening so voicemail never waits on a round trip.
     // The name the owner used ("Wayne") over the phone book's ("CommanderFog Wayne") when it is part of it.
     const said = String(data.contact || '').trim();
     const spoken = said && String(pick.contact.name || '').toLowerCase().split(/\s+/).includes(said.toLowerCase()) ? said : pick.contact.name;
-    const vmText = voicemailText({ name: spoken, owner: process.env.OWNER_NAME, self: this.agent?.config?.name || process.env.AGENT_NAME,
-      purpose: purpose || '', given: data.voicemail });
+    const line = withAiDisclosure(opening || `Hi ${pick.contact.name || 'there'}! I'm calling about ${purpose}.`,
+      { name: spoken, self: this.agent?.config?.name || process.env.AGENT_NAME, owner: process.env.OWNER_NAME });
+    // DialX 0.6.0/0.6.1: what to leave after the beep, as text and (0.6.1) in ALICE's own voice,
+    // rendered now with the opening so voicemail never waits on a round trip.
+    const vmText = withAiDisclosure(voicemailText({ name: spoken, owner: process.env.OWNER_NAME, self: this.agent?.config?.name || process.env.AGENT_NAME,
+      purpose: purpose || '', given: data.voicemail }), { name: spoken, self: this.agent?.config?.name || process.env.AGENT_NAME, owner: process.env.OWNER_NAME });
     const [audio, vmAudio] = await Promise.all([
-      agentAudio(this.agent, device, line, settings, this.logger),
-      agentAudio(this.agent, device, vmText, settings, this.logger)
+      agentAudio(this.agent, device, line, effect ? { ...settings, effect } : settings, this.logger),
+      agentAudio(this.agent, device, vmText, effect ? { ...settings, effect } : settings, this.logger)
     ]);
     const args = {
       ...(pick.contact.id != null ? { contact_id: pick.contact.id } : { number: pick.contact.number }),
@@ -220,17 +688,32 @@ export default class DialXPlugin extends BasePlugin {
       voicemail: vmText, // the transcript of voicemail_audio_b64, or what the phone speaks without it
       ...(audio ? { opening_audio_b64: audio.audio_b64 } : {}),
       ...(vmAudio ? { voicemail_audio_b64: vmAudio.audio_b64 } : {}),
-      requested_by_owner: true
+      requested_by_owner: true,
+      // Realtime (Trellis 4293 #191/#196): the phone streams to OpenAI Realtime once someone answers.
+      // A voice effect stays on the turn path, which renders each line through it.
+      ...(supportsRealtime(device) && !voice && settings.realtimeCalls === 'all' ? { realtime: true } : {}),
+      // DialX 0.7.14: the agent's own lines through a voice effect, only when the owner asked for one.
+      ...(voice ? { voice } : {}),
+      // DialX 0.7.16: a theremin voice plays from a pad script, one riff that serves every line of the call.
+      ...(voice && /theremin/i.test(voice) ? { pad: riffPad({ notes: Array.isArray(data.notes) ? data.notes : undefined, seconds: data.seconds || 6, bend: /^thereminvoice$/i.test(voice) }) } : {})
     };
     const name = pick.contact.name || who;
     const r = await this.tool('dialx.schedule_call', args, {
       onLate: (late) => this.agent.notify?.(late.ok ? `📞 ${this.outcome(late.result, name, args.at, line)}` : `⚠️ Call to ${name}: ${errorResult(late).error}`)
     });
-    if (!r.ok) return errorResult(r);
+    if (!r.ok && cached && r.error?.code === 'not_approved') {
+      this._approved = null;
+      return this.call({ ...data, _freshContacts: true });
+    }
+    if (!r.ok) {
+      // A refused call left no trace but the owner's reply (call to Wayne, 2026-10-25 14:43).
+      this.logger.warn(`dialx call to ${name} refused: ${r.error?.code || 'no code'} ${r.error?.message || ''}`);
+      return errorResult(r);
+    }
     // Recorded at once: the deploy quiet gate holds a restart from now until the call has ended,
     // not just from call.started (the first live call's restart landed in that gap, 2026-10-23).
     if (r.result?.call_id) {
-      await this.hub?.dialx?.store?.plan?.({ callId: String(r.result.call_id), contact: name, number: pick.contact.number || '', voicemail: args.voicemail, purpose: purpose || line,
+      await this.hub?.dialx?.store?.plan?.({ callId: String(r.result.call_id), contact: name, number: pick.contact.number || '', voicemail: args.voicemail, opening: line, ...(effect ? { effect } : {}), purpose: purpose || line,
         plannedAt: new Date(r.result.at || args.at || Date.now()) })?.catch?.(e => this.logger.warn(`dialx: call not recorded: ${e.message}`));
     }
     const time = args.at ? `at ${when(args.at)}` : 'now';
@@ -291,12 +774,14 @@ export default class DialXPlugin extends BasePlugin {
     try {
       const res = await pm.generateResponse(
         `${owner} asked you, ${name}, to make a phone call. Request: ${request}\n` +
-        'Extract one JSON object {"contact": who to call, "at": when, "purpose": why, "opening": first line, "voicemail": message to leave}.\n' +
+        'Extract one JSON object {"contact": who to call, "at": when, "purpose": why, "opening": first line, "voicemail": message to leave, "voice": a voice effect for your voice on this call}.\n' +
+        '- "voice": only when the request asks for one ("in a robot voice", "a deep voice", "autotune"): its name, e.g. "Robot"; otherwise null.\n' +
         '- "at": the wall-clock time they said, YYYY-MM-DDTHH:mm with no offset or Z (a time with no date that has ' +
         `already passed today means tomorrow); null for now. Local now is ${nowInZone()}.\n` +
         `- "purpose": what ${owner} wants from the call, in a few words ("wish Wayne a happy birthday").\n` +
-        `- "opening": the first thing you will say to them, after the phone has already said you are ${owner}'s AI ` +
-        `assistant: one or two warm, spoken sentences addressed to them, carrying ${owner}'s message ("Hi Wayne! ` +
+        `- "opening": the first thing you will say to them. It may be the first thing they hear, so it must say who you ` +
+        `are and that you are an AI: one or two warm, spoken sentences addressed to them, starting "Hi <name>, this is ${name}, ` +
+        `${owner}'s AI assistant" and carrying ${owner}'s message ("Hi Wayne, this is ${name}, ${owner}'s AI assistant. ` +
         `${owner} asked me to call and wish you a very happy birthday."). No emoji or symbols.\n` +
         `- "voicemail": what to leave if voicemail answers, after the phone says you are ${owner}'s AI assistant: two or ` +
         `three short spoken sentences to them by first name: that you are ${name} calling for ${owner}, the message or ` +
@@ -306,7 +791,7 @@ export default class DialXPlugin extends BasePlugin {
         { maxTokens: 300, temperature: 0.3 });
       const raw = String(res?.content || '').replace(/^```(?:json)?\s*|\s*```$/g, '');
       const got = JSON.parse(raw.slice(raw.indexOf('{'), raw.lastIndexOf('}') + 1)) || {};
-      for (const k of ['contact', 'at', 'purpose', 'opening', 'voicemail']) {
+      for (const k of ['contact', 'at', 'purpose', 'opening', 'voicemail', 'voice']) {
         if ((data[k] == null || data[k] === '') && got[k] != null && got[k] !== '') data[k] = got[k];
       }
     } catch (err) {
@@ -417,8 +902,8 @@ export default class DialXPlugin extends BasePlugin {
     return { success: true, result: 'Cancelled.' };
   }
 
-  async listing(tool, label, keys) {
-    const r = await this.tool(tool, { limit: 20 });
+  async listing(tool, label, keys, args = { limit: 20 }) {
+    const r = await this.tool(tool, args);
     if (!r.ok) return errorResult(r);
     const items = listOf(r.result, ...keys);
     if (!items.length) return { success: true, result: `No ${label}.` };

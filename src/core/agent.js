@@ -16,7 +16,7 @@ import { APIManager } from "../api/core/apiManager.js";
 import { IntentDetector } from "./intentDetector.js";
 import { AIIntentDetector } from "./aiIntentDetector.js";
 import { vectorIntentDetector } from "./vectorIntentDetector.js";
-import { PluginChainProcessor } from "./pluginChainProcessor.js";
+import { PluginChainProcessor, isTextRequest } from "./pluginChainProcessor.js";
 // EmailAutoReply functionality moved to background tasks
 import { SelfModificationService } from '../services/selfModification.js';
 import { TaskReminderService } from '../services/taskReminders.js';
@@ -1257,6 +1257,14 @@ If answering needs information that is not in the conversation above (messages, 
               intentResult = null;
             }
 
+            // "Alice text Wayne and tell him the Theremin app is in telegram" matched dialx.voicePreview
+            // on the words theremin + telegram, twice, and sent the owner a voice sample (2026-10-24).
+            // A request that opens by asking for a text is a text; the AI classifier routes it to TextX.
+            if (intentResult && intentResult.plugin !== 'textx' && isTextRequest(input)) {
+              logger.info(`Text request matched ${intentResult.plugin}.${intentResult.action}: using the AI classifier`);
+              intentResult = null;
+            }
+
             // Override: If vector matched a non-schedule Govee intent but input contains
             // schedule-related temporal phrases, fall through to the AI two-step classifier
             // which has better contextual understanding of schedule vs. immediate commands.
@@ -1357,6 +1365,27 @@ If answering needs information that is not in the conversation above (messages, 
               chainResult.summary,
               { ...context, multiStep: true, stepsCompleted: chainResult.completedSteps }
             );
+
+            // A file a step downloaded is sent even when a later step fails: on 2026-10-25 the MP3 was
+            // on disk, an email step failed, and the owner got a paragraph of text instead of the song.
+            const fileStep = [...chainResult.results].reverse().find(r => r.success && r.file?.path);
+            if (fileStep) {
+              const filePath = fileStep.file.path;
+              const filename = fileStep.file.filename || path.basename(filePath);
+              const ext = path.extname(filename).toLowerCase().slice(1);
+              const type = ['mp3', 'wav', 'ogg', 'flac', 'm4a', 'aac', 'opus'].includes(ext) ? 'audio'
+                : ['mp4', 'mkv', 'avi', 'webm', 'mov', 'wmv'].includes(ext) ? 'video'
+                : ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp'].includes(ext) ? 'photo' : 'document';
+              logger.info(`Chain produced ${filePath}; returning it as ${type}${chainResult.success ? '' : ' (a later step failed)'}`);
+              return {
+                type,
+                path: filePath,
+                filename,
+                caption: chainResult.success ? `📁 ${filename}` : chainResult.summary.slice(0, 1000),
+                multiStep: true,
+                success: chainResult.success
+              };
+            }
 
             return {
               type: 'text',
@@ -1656,6 +1685,12 @@ If answering needs information that is not in the conversation above (messages, 
               return examineResponse;
               
             case 'suggestImprovements':
+              // The router sent "Pick a random number between 1 and 50" here (2026-10-24). Self-improvement
+              // suggestions only when the request asks for them; anything else is an ordinary answer.
+              if (!/\b(improv\w*|suggest\w*|better|optimi[sz]\w*|upgrade\w*|enhanc\w*)\b/i.test(input || '')) {
+                logger.info(`[intent-guard] suggestImprovements needs to be asked for; answering "${String(input).slice(0, 80)}" normally`);
+                return await this.handleNaturalQuery(input, context);
+              }
               const suggestResult = await this.suggestImprovements(intentResult.params);
               const suggestResponse = { type: 'text', content: suggestResult };
               await this.memoryManager.storeConversation(context.userId, input, suggestResult, context);
@@ -3192,6 +3227,11 @@ Return ONLY a valid JSON object with the extracted parameters, nothing else.`;
             'subagents.createTaskAgent': /\b(task[- ]?agent|sub-?agent|delegate|background agent)\b/i,
             'subagents.approve': /\b(approv\w*)\b[\s\S]*\b(sub-?agent|agent \w+|approval \w+|[0-9a-f]{24})\b/i,
             'subagents.reject': /\b(reject\w*)\b[\s\S]*\b(sub-?agent|agent \w+|approval \w+|[0-9a-f]{24})\b/i,
+            // "Pick a random whole number between 1 and 50" was routed to software.uninstall by the AI
+            // intent detector (2026-10-24); only the plugin's approval gate stopped it. Changing what is
+            // installed must be asked for in so many words.
+            'software.uninstall': /\b(uninstall\w*|remove|purge|get rid of|delete)\b/i,
+            'software.install': /\b(install\w*|set ?up|add)\b/i,
             // "say hello in five words" is a reply, not text-to-speech (DELTA, 2026-10-02).
             'voice.speak': /\b(out loud|aloud|voice (message|note)|audio|speak|spoken|tts|text[- ]to[- ]speech|read (it|this|that|them) (out|to me))\b/i
           };
@@ -5383,7 +5423,7 @@ Return ONLY a valid JSON object with the extracted parameters, nothing else.`;
 
   async suggestImprovements(params) {
     try {
-      const { feature } = params;
+      const feature = params?.feature || params?.query || 'the system';
       logger.info(`Suggesting improvements for: ${feature}`);
       
       // Analyze current implementation

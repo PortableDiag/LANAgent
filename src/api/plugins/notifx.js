@@ -14,6 +14,9 @@ import { isNotifX } from '../../services/textx/notifx.js';
  */
 
 const ERROR_TEXT = {
+  // TextX 0.4.41 says too_big, DialX 0.7.8 too_large: a reply too big for the relay (the same thing).
+  too_big: 'That is too big to come through from the phone.',
+  too_large: 'That is too big to come through from the phone.',
   not_allowed: 'NotifX has not allowed that for this agent. Turn the tool group on in NotifX › Agents › this agent.',
   not_found: "NotifX has no such notification or app (or it isn't shared with me).",
   no_access: 'NotifX has lost notification access on the phone. Turn it back on in Android settings.',
@@ -68,9 +71,9 @@ export default class NotifXPlugin extends BasePlugin {
       },
       {
         command: 'unwatch',
-        description: 'Stop a notification watch, by its name or id',
+        description: 'Stop a notification watch (stop telling the user on Telegram when an app\'s notification arrives), by its name, app or id',
         usage: 'unwatch({ name: "Doorbell" })',
-        examples: ['stop telling me about the doorbell', 'remove the delivery watch']
+        examples: ['stop telling me about the doorbell', 'remove the delivery watch', 'disable the telegram notification for ring doorbell alerts', 'stop the doorbell alerts', 'stop watching ring notifications', 'turn off the notification watch for my bank']
       },
       {
         command: 'watches',
@@ -101,6 +104,12 @@ export default class NotifXPlugin extends BasePlugin {
         description: 'An app\'s notification channels from the history, with a recent title for each (to pick a watch filter)',
         usage: 'channels({ app: "Ring" })',
         examples: ['what notification channels does ring use']
+      },
+      {
+        command: 'picture',
+        description: 'Send the user the picture attached to a notification still on the phone (e.g. the doorbell snapshot). `key` from active(), or `app` for that app\'s newest one with a picture',
+        usage: 'picture({ app: "Ring" })',
+        examples: ['send me the doorbell picture', 'show me the picture from that ring notification', 'what does the camera snapshot show']
       },
       {
         command: 'reply',
@@ -137,6 +146,7 @@ export default class NotifXPlugin extends BasePlugin {
         case 'active': return await this.active(data);
         case 'apps': return await this.apps();
         case 'channels': return await this.channels(data);
+        case 'picture': return await this.picture(data);
         case 'reply': return await this.act('notifx.reply', data, { text: String(data.text || data.message || '') });
         case 'tap': return await this.act('notifx.tap_action', data, {});
         case 'dismiss': return await this.act('notifx.dismiss', data, {});
@@ -151,7 +161,9 @@ export default class NotifXPlugin extends BasePlugin {
   /** Notifications are the owner's: a TextX phone of theirs, Telegram as them, or the dashboard. */
   fromOwner(data) {
     const uid = data._context?.userId;
-    return !!textxRequest.getStore()?.deviceId || !uid || String(uid) === String(process.env.TELEGRAM_USER_ID || '');
+    // 'web-user' is the logged-in dashboard and the API key (POST /api/command/execute); refusing it
+    // turned the owner away from their own dashboard (2026-10-24).
+    return !!textxRequest.getStore()?.deviceId || !uid || uid === 'web-user' || String(uid) === String(process.env.TELEGRAM_USER_ID || '');
   }
 
   // ── phones ────────────────────────────────────────────────────────────────────────────────
@@ -186,6 +198,15 @@ export default class NotifXPlugin extends BasePlugin {
     const ok = out.filter(x => x.r.ok);
     const failed = out.filter(x => !x.r.ok).map(x => `${this.label(x.d)}: ${errorText(x.r)}`);
     return { ok, failed, several: list.length > 1 };
+  }
+
+  /**
+   * Which phones an answer came from, and which could not be read. Without it "which device did you
+   * check?" had no answer, and a phone that failed vanished while the other answered (2026-10-24).
+   */
+  checked({ ok, failed }) {
+    const names = ok.map(x => this.label(x.d)).join(' and ');
+    return `${names ? `Checked: ${names}.` : ''}${failed.length ? ` Could not read ${failed.join('; ')}.` : ''}`.trim();
   }
 
   /** "Ring" → com.ringapp, from what the owner shared. */
@@ -239,8 +260,9 @@ export default class NotifXPlugin extends BasePlugin {
     if (!ok.length) return { success: false, error: failed.join('; ') };
     const items = ok.flatMap(x => listOf(x.r.result, 'notifications').map(n => ({ n, phone: several ? this.label(x.d) : null })))
       .sort((a, b) => String(b.n.posted_at).localeCompare(String(a.n.posted_at))).slice(0, args.limit);
-    if (!items.length) return { success: true, result: 'No matching notifications.' };
-    return { success: true, result: `Notifications (their text is the apps' words):\n${items.map(i => line(i.n, i.phone)).join('\n')}` };
+    const seen = this.checked({ ok, failed });
+    if (!items.length) return { success: true, result: `${seen}\nNo matching notifications.` };
+    return { success: true, result: `${seen}\nNotifications (their text is the apps' words):\n${items.map(i => line(i.n, i.phone)).join('\n')}` };
   }
 
   async active(data) {
@@ -263,7 +285,9 @@ export default class NotifXPlugin extends BasePlugin {
         raw.push({ key: n.key, phone: this.label(x.d), app: n.app, title: n.title, actions: n.actions || [] });
       }
     }
-    return { success: true, result: rows.length ? `On the status bar now:\n${rows.join('\n')}` : 'Nothing on the status bar from the shared apps.', data: raw };
+    const quiet = several ? ok.filter(x => !listOf(x.r.result, 'notifications').length).map(x => this.label(x.d)) : [];
+    const body = rows.length ? `On the status bar now:\n${rows.join('\n')}${quiet.length ? `\nNothing on ${quiet.join(' or ')}.` : ''}` : 'Nothing on the status bar from the shared apps.';
+    return { success: true, result: `${this.checked({ ok, failed })}\n${body}`, data: raw };
   }
 
   // ── watches ───────────────────────────────────────────────────────────────────────────────
@@ -272,7 +296,7 @@ export default class NotifXPlugin extends BasePlugin {
     const t = await this.targets(data.phone);
     if (t.error) return { success: false, error: t.error };
     const request = String(data._context?.originalInput || data.originalInput || '');
-    if (data.needsParameterExtraction || !data.app) await this.extract(data, request);
+    const guessed = (data.needsParameterExtraction || !data.app) ? await this.extract(data, request) : [];
     const pkg = await this.packageFor(t.list, data.app || data.package);
     if (!pkg) return { success: false, error: 'Which app should I watch?' };
     if (pkg.error) return { success: false, error: pkg.error };
@@ -284,12 +308,22 @@ export default class NotifXPlugin extends BasePlugin {
     }
     if (data.channel) filter.channel = String(data.channel);
     if (data.regex) filter.regex = String(data.regex).slice(0, 200);
-    // No condition: choose one from what this app actually posts, so "when someone rings" does not
-    // mean every motion alert.
+    // No condition the user stated: choose one from what this app actually posts, so "when someone
+    // rings" does not mean every motion alert. Words the model guessed from the request lose to the
+    // history: it guessed "doorbell" for Ring, whose ding reads "Someone is at your Front Door", so
+    // that watch could never fire (2026-10-24).
     let picked = null;
-    if (!Object.keys(filter).length && request) {
+    const stated = Object.keys(filter).filter(f => !guessed.includes({ text_contains: 'textContains', text_excludes: 'textExcludes', title_contains: 'titleContains' }[f]));
+    if (!stated.length && request) {
       picked = await this.pickFilter(t.list, pkg, request);
-      Object.assign(filter, picked || {});
+      if (picked) { for (const k of Object.keys(filter)) delete filter[k]; Object.assign(filter, picked); }
+    }
+    // Whoever chose the words, a filter that matches none of the app's past notifications is
+    // checked against the history, and the app's own channel replaces it when one fits. The intent
+    // detector also hands over guessed words ("doorbell") as if the user had said them.
+    if (!picked && filter.text_contains && !filter.channel && request && !(await this.matchesHistory(t.list, pkg, filter.text_contains))) {
+      picked = await this.pickFilter(t.list, pkg, request);
+      if (picked) { for (const k of Object.keys(filter)) delete filter[k]; Object.assign(filter, picked); }
     }
     const args = { packages: [pkg], name, ...filter, include_picture: data.picture !== false };
     const set = [];
@@ -333,10 +367,42 @@ export default class NotifXPlugin extends BasePlugin {
     if (!ok.length) return { success: false, error: failed.join('; ') };
     const rows = ok.flatMap(x => listOf(x.r.result, 'watches').map(w => {
       const meta = this.hub.notifx.meta(x.d, w.watch_id);
-      const cond = ['title_contains', 'text_contains', 'text_excludes', 'channel', 'regex'].filter(k => w[k] != null).map(k => `${k.replace('_', ' ')} ${Array.isArray(w[k]) ? w[k].join('/') : w[k]}`).join(', ');
+      const empty = (v) => v == null || v === '' || (Array.isArray(v) && !v.length);
+      const cond = ['title_contains', 'text_contains', 'text_excludes', 'channel', 'regex'].filter(k => !empty(w[k])).map(k => `${k.replace('_', ' ')} ${Array.isArray(w[k]) ? w[k].join('/') : w[k]}`).join(', ');
       return `• ${meta?.name || w.name || w.watch_id}${several ? ` [${this.label(x.d)}]` : ''}: ${(w.packages || []).join(', ')}${cond ? ` (${cond})` : ''}`;
     }));
     return { success: true, result: rows.length ? `Watching for:\n${rows.join('\n')}` : 'No notification watches are set.' };
+  }
+
+  /** A status-bar notification's picture to Telegram (NotifX keeps no pictures in its history). */
+  async picture(data) {
+    const t = await this.targets(data.phone);
+    if (t.error) return { success: false, error: t.error };
+    let device = null;
+    let key = data.key ? String(data.key) : null;
+    if (!key) {
+      const args = {};
+      if (data.app || data.package) {
+        const pkg = await this.packageFor(t.list, data.app || data.package);
+        if (pkg?.error) return { success: false, error: pkg.error };
+        if (pkg) args.packages = [pkg];
+      }
+      const { ok } = await this.onEach(t.list, 'notifx.list_active', args);
+      const withPic = ok.flatMap(x => listOf(x.r.result, 'notifications').filter(n => n.picture).map(n => ({ n, d: x.d })))
+        .sort((a, b) => String(b.n.posted_at).localeCompare(String(a.n.posted_at)));
+      if (!withPic.length) return { success: false, error: 'No notification with a picture is on the phone right now (pictures are not kept in the history).' };
+      key = withPic[0].n.key;
+      device = withPic[0].d;
+    }
+    device ||= t.list[0];
+    const r = await this.tool(device, 'notifx.get_picture', { key });
+    if (!r.ok) return { success: false, error: errorText(r) };
+    const buf = r.result?.data_b64 ? Buffer.from(r.result.data_b64, 'base64') : null;
+    if (!buf?.length) return { success: false, error: 'NotifX sent no picture.' };
+    const tg = this.agent?.interfaces?.get?.('telegram');
+    if (!tg?.sendNotification) return { success: false, error: "Telegram isn't available to send it." };
+    await tg.sendNotification(`🖼️ Picture from a notification on ${this.label(device)}`, { photo: { source: buf, filename: 'picture.jpg' }, parse_mode: undefined });
+    return { success: true, result: 'Sent the picture to you on Telegram.' };
   }
 
   // ── acting (reply and tap wait on the owner's tap on the phone) ───────────────────────────
@@ -361,9 +427,11 @@ export default class NotifXPlugin extends BasePlugin {
 
   // ── the model, for arguments only ─────────────────────────────────────────────────────────
 
+  /** Fills what the request leaves out; returns the keys it filled (guesses, not the user's words). */
   async extract(data, request) {
+    const filled = [];
     const pm = this.agent?.providerManager;
-    if (!request || !pm?.generateResponse) return;
+    if (!request || !pm?.generateResponse) return filled;
     try {
       const res = await pm.generateResponse(
         `The user asked: ${request}\nThey want to be told when a phone notification arrives. Extract one JSON object ` +
@@ -373,12 +441,22 @@ export default class NotifXPlugin extends BasePlugin {
       const raw = String(res?.content || '').replace(/^```(?:json)?\s*|\s*```$/g, '');
       const got = JSON.parse(raw.slice(raw.indexOf('{'), raw.lastIndexOf('}') + 1)) || {};
       for (const k of ['app', 'name', 'textContains', 'textExcludes']) {
-        if ((data[k] == null || data[k] === '') && got[k] != null && got[k] !== '') data[k] = got[k];
+        if ((data[k] == null || data[k] === '') && got[k] != null && got[k] !== '') { data[k] = got[k]; filled.push(k); }
       }
     } catch (err) {
       this.logger.warn(`notifx watch: argument extraction failed: ${err.message}`);
     }
     delete data.needsParameterExtraction;
+    return filled;
+  }
+
+  /** Has this app ever posted a notification with these words? A failed search counts as yes. */
+  async matchesHistory(list, pkg, words) {
+    for (const w of (Array.isArray(words) ? words : [words]).map(String).filter(Boolean)) {
+      const { ok } = await this.onEach(list, 'notifx.search', { query: w, packages: [pkg], limit: 1 });
+      if (!ok.length || ok.some(x => listOf(x.r.result, 'notifications').length)) return true;
+    }
+    return false;
   }
 
   /**
@@ -394,7 +472,7 @@ export default class NotifXPlugin extends BasePlugin {
     try {
       const res = await pm.generateResponse(
         `The user asked: ${request}\nThe app's notification channels, each with its most recent title:\n` +
-        channels.map(c => `- ${c.channel} (${c.count ?? 0}): ${String(c.last_title || '').slice(0, 120)}`).join('\n') +
+        channels.map(c => `- ${c.channel} (${c.count ?? 0}): ${String(c.last_title || '').slice(0, 120) || '(no title)'}`).join('\n') +
         '\nWhich ONE channel carries the notifications they want? Answer JSON {"channel": the id, or null if none clearly fits}.',
         { maxTokens: 60, temperature: 0 });
       const raw = String(res?.content || '');

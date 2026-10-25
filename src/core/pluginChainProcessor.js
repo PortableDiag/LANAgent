@@ -6,6 +6,35 @@ import { schemas } from '../services/outputSchemas.js';
  * Plugin Chain Processor
  * Handles multi-step tasks by breaking them down into sequential plugin operations
  */
+
+/**
+ * Drop the agent's own name from the front ("Alice, send me…", "Hey Alice text Wayne…"): it says who
+ * is being spoken to, never who to send to. Read as a recipient it planned "email the MP3 to Alice"
+ * and the song was never sent (2026-10-25).
+ */
+export function stripAgentAddress(input) {
+  const names = [...new Set([process.env.AGENT_NAME, 'alice'].filter(Boolean).map(n => n.toLowerCase()))]
+    .map(n => n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|');
+  return String(input || '').trim().replace(new RegExp(`^((hey|hi|ok|okay|no|yo)[,\\s]+)?(${names})\\b[,:.!\\s]*`, 'i'), '');
+}
+
+/** A request that opens by asking for a text message ("text Wayne…", "send Sam a text…"), not a call or a voice. */
+export function isTextRequest(request) {
+  const t = stripAgentAddress(request).replace(/^(please|pls|can you|could you)\s+/i, '');
+  return /^(text|txt|sms|message|msg)\s+\w+/i.test(t) || /^send\s+\w+\s+(a\s+)?(text|message|sms)\b/i.test(t) || /^send\s+(a\s+)?(text|message|sms)\s+to\b/i.test(t);
+}
+
+/** A request that is a single phone call (with its manner and message), not a chain. */
+export function isOnePhoneCall(input) {
+  const t = stripAgentAddress(input);
+  const call = /^(please\s+)?(call|ring|phone|dial)\s+(?!me\b|back\b)\w+/i.test(t) || /^(please\s+)?leave\s+\w+\s+an?\b[^.]*\bvoice ?mail\b/i.test(t);
+  const chained = /\b(then|after that|afterwards|and also)\b|\band\s+(text|email|e-mail|message|send|remind|search|schedule|book|post|tweet)\b/i.test(t);
+  return call && !chained;
+}
+
+/** Actions a plugin's execute() dispatches that are not in its command list. */
+const UNLISTED_ACTIONS = { email: ['sendWithAI'] };
+
 export class PluginChainProcessor {
   constructor(agent) {
     this.agent = agent;
@@ -71,6 +100,11 @@ export class PluginChainProcessor {
 
   async analyzeComplexTask(input, context = {}) {
     try {
+      // "Call Lizzy in the ThereminVoice and give her a wellness check" is one phone call: the call
+      // action takes the voice, the purpose and the opening together. Split, it became "call Lizzy"
+      // then "apply the theremin to the active call", which failed and reported an error for a call
+      // that went fine (2026-10-24). A request that chains another action ("…, then text Sam") still splits.
+      if (isOnePhoneCall(input)) return { isMultiStep: false, singleIntent: 'phone_call' };
       logger.info(`Analyzing complex task: "${input}"`);
 
       // Get recent conversation context if available
@@ -103,6 +137,7 @@ Details for plugins that need specific parameters:
 - websearch: Search web (action: "search"), crypto prices (action: "crypto"), stock prices (action: "stock"), weather (action: "weather")
 - scraper: Web scraping (action: "scrape"), screenshots (action: "screenshot"), PDF generation (action: "pdf")
 - email: Send emails (use sendWithAI for AI-composed emails), manage contacts
+- textx: text messages (SMS) — "text Wayne…", "send Sam a text" is textx action "send", never email
 - calendar: Google Calendar via CalDAV - get today's events (action: "getToday"), get upcoming events (action: "getUpcoming", params: {days, limit}), search events (action: "searchEvents", params: {query, startDate}), get events in range (action: "getEvents", params: {startDate, endDate, limit}), create event (action: "createEvent", params: {title, start, end, description}), update event (action: "updateEvent", params: {eventId, updates}), delete event (action: "deleteEvent", params: {eventId}), check availability (action: "checkAvailability", params: {date, duration, startHour, endHour}), list calendars (action: "listCalendars"), status (action: "status"). For checking trips/plans use "searchEvents" or "getEvents" with a date range.
 - govee: Smart home device control - list ALL devices (action: "list"), device status (action: "status", params: {device}), power on/off/toggle (action: "power", params: {device, state}), brightness (action: "brightness", params: {device, level}), color (action: "color", params: {device, color}), temperature (action: "temperature", params: {device, kelvin}), scenes (action: "scene", params: {device, scene}), schedules (action: "schedules", params: {operation: "create"|"update"|"delete"|"list", device, time: "HH:MM", action: "on"|"off"|"color"|"brightness", value, repeat: "daily"|"weekdays"|"weekends"|"once"}). For schedule changes use action "schedules" with appropriate operation. IMPORTANT: For "list all devices" use action "list", NOT "status".
 
@@ -167,11 +202,12 @@ IMPORTANT FILE DELIVERY RULES:
 - For "download X and send me" requests via Telegram: ONLY the download step is needed
 - Only add an email step if the user EXPLICITLY says "email" or mentions an email recipient
 - "send me here", "send in telegram", "send to telegram" = single download step only
+- The request may start with MY name ("${process.env.AGENT_NAME || 'Alice'}, send me…", "Hey ${process.env.AGENT_NAME || 'Alice'} …"); that addresses ME and is NEVER a recipient. Voice transcripts garble it ("Alice and me the mp3…" = "Alice, send me the mp3…")
 
 Important: For email steps:
 - Use action "sendWithAI" with a "prompt" parameter describing what to send
 - OR use action "send" with "text" or "html" parameter containing the content
-- ALWAYS include "to" parameter with the recipient (extract from phrases like "email to John", "send to Alice", etc.)
+- ALWAYS include "to" parameter with the recipient (extract from phrases like "email to John", "send to Sarah", etc.; never my own name)
 - If a name is mentioned (e.g., "Whalley"), use that as the "to" parameter
 - Set "useSharedData": true on the email step to use data from previous steps
 - Set "passDataToNext": true on previous steps that gather data for the email
@@ -351,6 +387,7 @@ Analyze the request:`;
           action: step.action,
           success: stepResult.success,
           result: stepResult.result || stepResult,
+          file: stepResult.file,
           error: stepResult.error,
           executionTime: stepResult.executionTime
         });
@@ -497,6 +534,9 @@ Analyze the request:`;
       const plugin = this.agent.apiManager?.getPlugin?.(step.plugin) || this.agent.plugins?.get?.(step.plugin);
       if (plugin && plugin.commands && Array.isArray(plugin.commands)) {
         const validActions = plugin.commands.map(c => c.command || c.name).filter(Boolean);
+        // Actions the plugin runs without listing them as commands. This prompt tells the planner to
+        // use email.sendWithAI, and the check refused it: the chain stopped at that step (2026-10-25).
+        validActions.push(...(UNLISTED_ACTIONS[step.plugin] || []));
         if (validActions.length > 0 && !validActions.includes(step.action)) {
           logger.warn(`Invalid action "${step.action}" for plugin "${step.plugin}". Valid actions: ${validActions.join(', ')}`);
           return {
@@ -526,6 +566,9 @@ Analyze the request:`;
       return {
         success: result.success || false,
         result: result.result || result,
+        // ytdlp's result.result is its caption, so the line above drops the file; keep it so the
+        // chain can still send what it downloaded.
+        file: result.file,
         error: result.error,
         executionTime,
         outputData

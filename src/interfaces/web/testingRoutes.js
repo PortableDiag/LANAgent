@@ -5,6 +5,7 @@
 
 import { authenticateToken } from './auth.js';
 import { logger } from '../../utils/logger.js';
+import { isTextRequest } from '../../core/pluginChainProcessor.js';
 
 /**
  * Setup comprehensive testing routes for LANAgent API endpoints
@@ -53,6 +54,28 @@ export function setupTestingRoutes(app, agent) {
       });
     } catch (error) {
       logger.error('AI Intent test error:', error);
+      res.status(500).json({ success: false, error: error.message });
+    }
+  });
+
+  // Dry-run routing: what a request would run, without running it. The same order as
+  // processNaturalLanguage (vector match, then the AI classifier); nothing is executed. Used by
+  // scripts/testing/intent-check.mjs to score intent detection against everyday requests.
+  app.post('/api/test/route', authenticateToken, async (req, res) => {
+    try {
+      const text = String(req.body?.text || '').trim();
+      if (!text) return res.status(400).json({ success: false, error: 'text is required' });
+      const context = { userId: 'intent-check', interface: 'web', dryRun: true };
+      let via = 'vector';
+      let intent = agent.vectorIntentDetector?.enabled ? await agent.vectorIntentDetector.detectIntent(text, context).catch(() => null) : null;
+      // The router's own override: a request that opens by asking for a text never keeps a non-TextX
+      // vector match. Without it this dry run reported dialx.voicePreview for "Alice text Wayne…".
+      if (intent && intent.plugin !== 'textx' && isTextRequest(text)) intent = null;
+      if (!intent) { via = 'ai'; intent = await agent.aiIntentDetector?.detect(text, context).catch(() => null); }
+      res.json({ success: true, data: { text, via, plugin: intent?.plugin || null, action: intent?.action || null,
+        intent: intent?.intent || null, confidence: intent?.confidence ?? null } });
+    } catch (error) {
+      logger.error('Route dry-run error:', error);
       res.status(500).json({ success: false, error: error.message });
     }
   });
