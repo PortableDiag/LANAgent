@@ -719,11 +719,17 @@ export default class DialXPlugin extends BasePlugin {
         plannedAt: new Date(r.result.at || args.at || Date.now()) })?.catch?.(e => this.logger.warn(`dialx: call not recorded: ${e.message}`));
     }
     const time = args.at ? `at ${when(args.at)}` : 'now';
+    // The card was silent and the owner could not find it (2026-10-26): say exactly where it is, and alert loudly.
+    const dev = await this.hub.pickDevice('dialx.schedule_call').catch(() => null);
+    const phoneLabel = dev?.phoneName || dev?.name || 'your phone';
+    if (r.pending && pick.unapproved) {
+      this.agent?.interfaces?.get?.('telegram')?.sendNotification?.(`📞 Approve the call to ${name} in the DialX notification on ${phoneLabel} (it's silent; check the shade). It expires in 5 minutes.`, { urgent: true })?.catch?.(() => {});
+    }
     // Only someone off the approved list gets a confirm card. An approved contact never does: a
     // pending answer there just means the phone hasn't replied yet (offline or asleep).
     if (r.pending) {
       return { success: true, result: pick.unapproved
-        ? `${name} isn't on my approved list, so DialX is asking you on the phone: calling ${name} ${time} (${purpose || line}). Tap Approve there; I'll tell you when it's set.`
+        ? `${name} isn't on my approved list, so DialX needs your OK: open the DialX notification "Agent requests" on ${phoneLabel} (pull down the notification shade; it makes no sound) and tap Approve within 5 minutes to call ${name} ${time} (${purpose || line}). I'll tell you when it's set.`
         : `I've asked DialX to call ${name} ${time}; the phone hasn't answered yet (it may be offline). No approval is needed for ${name}. I'll tell you when it's scheduled.` };
     }
     return { success: true, result: this.outcome(r.result, name, args.at, line) };

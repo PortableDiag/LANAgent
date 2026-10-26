@@ -2,6 +2,40 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.664] - 2026-10-26
+
+### Fixed
+- **A restart no longer looks like a call that just ended.** The first phone report after a restart set the "call ended" clock, so the gate held every deploy for 2 minutes after a restart. The health check also asked DialX for the phone's state on every request; it now uses DialX's own state reports and asks only when none has come yet.
+
+## [2.25.663] - 2026-10-26
+
+### Changed
+- **The deploy gate sees every state of a call.** It now reads DialX 0.7.75's `call_state` (and its `phone.call_state` events) instead of `call_up`, which counted only a connected call, so ringing, dialing and hold slipped past. It holds for 2 minutes after a call ends.
+- **A call that needs the owner's OK says where to tap.** The reply names the phone and the silent DialX "Agent requests" notification, and an urgent Telegram alert goes out too; the owner could not find the card.
+
+## [2.25.662] - 2026-10-26
+
+### Changed
+- **No restart while the owner is on the phone.** The deploy gate counted only ALICE's own calls, so it passed during the owner's own call. ALICE's health endpoint now reports, to the host itself, whether the owner's phone is on any call (DialX `voice_status`), and the gate holds the deploy on a call and whenever it cannot tell. With the phone on the dev box's USB it also reads the phone's call state directly, and holds for 2 minutes after a call ends.
+
+## [2.25.661] - 2026-10-26
+
+### Fixed (conversation)
+- **ALICE follows the conversation.** The multi-step reasoning agent read only Trellis channels, so a chat request ran with no idea what was just said; it now gets the last 8 turns. A vague follow-up ("what happened?") with a live conversation goes to it instead of a fixed menu about disk space and web search.
+- **No phantom "Processing..." replies.** A message that fell through to command parsing was stored twice, once answered "Processing...", and the model read that back as its own reply.
+- **Answers, not dumps.** Multi-step and single-step results that came back as raw JSON (diagnostics, a 49-task list) are now answered in plain words from the result.
+- **Small talk is quick.** "You there?", "hello", "say hi", "thanks" skip routing and memory search (one took 26 s) and are answered from the conversation. "ok", "sure" and "got it" still route, since they can answer a question ALICE asked.
+
+### Added
+- **On a call with the owner, the call voice can use the agent.** Asked on a group call to take notes in Trellis, the realtime voice said it had no access: its session had only hang-up and stay-silent tools. When the owner is on the line (DialX lists them as a participant, or a Test call), the session now also has `ask_agent`, which runs the owner's request through the agent like a typed message and speaks the answer. It acts only on the owner's own requests. A call to anyone else, or an agent-to-agent call the owner only listens to, does not get it.
+- **On a group call ALICE can tell the owner from the other agents.** With DialX 0.7.69 only people come through as audio, and other agents arrive as text lines starting "<name> (an AI agent on this call):". ALICE's group-call instructions say so, include DialX's own `hearing` sentence, and take requests only from the owner's voice.
+
+### Fixed
+- **The call voice no longer says its thinking out loud.** On a call with Mom it said "Alright, let me think about how to say that back to you warmly" and "Let me wrap up with a quick goodbye". Every call mode and talk mode now tell it to say only what it would say to the person.
+- **The voice never makes up a task, and confirms before acting.** In talk mode, after reading the owner's Wayne thread aloud, the voice sent "Later today, call Wayne and survey him" to the agent on its own, which scheduled a follow-up the owner never asked for. Talk mode and the owner's call voice now ask the agent only for what the owner said, never turn something they read into a request, and say back any call, text, send, schedule or change and wait for the owner's yes. Tested against the live model: reading a text that mentions a call schedules nothing (3/3), and "call Mom" is confirmed first (3/3).
+- **A long voicemail stays in the agent's voice.** A voicemail message in the agent's voice came to 334 KB, over DialX's 256 KB limit, and the call fell back to the phone's robot voice. An oversized clip is now re-encoded as mono speech at 32 kbps (24 if needed) first; a 60-second clip fits at 240 KB.
+- **A call the phone never reports ending is closed and the owner is told.** DialX crashed as a call reached voicemail (call 51), no end report came, and the owner never heard how it went. A call with no end report by the call limit plus 90 s is now closed as lost, with "the phone stopped reporting on it". DialX 0.7.71's `dialx_stopped` end (a call the dialer stopped during) is told the same way, with an offer to call again.
+
 ## [2.25.660] - 2026-10-26
 
 ### Changed

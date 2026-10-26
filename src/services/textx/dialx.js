@@ -51,7 +51,10 @@ const END_REASONS = {
   callee_hung_up: 'they hung up', agent_hung_up: 'I hung up', agent_silent: 'I went quiet too long',
   time_limit: 'it hit the 5-minute limit', owner_took_over: 'you took over', owner_ended: 'you ended it',
   no_answer: 'no answer', not_placed: "it wasn't placed", voice_path_failed: "the phone couldn't connect my voice to the call",
-  skipped: 'it was skipped', voicemail_left: 'I left a voicemail'
+  skipped: 'it was skipped', voicemail_left: 'I left a voicemail',
+  lost: "the phone stopped reporting on it (DialX may have restarted), so I don't know how it ended. Say if you want me to call again",
+  // DialX 0.7.71: sent at the next start for a call DialX stopped during (4293 #319).
+  dialx_stopped: "the dialer stopped during the call, so it didn't finish and nothing was left. Say if you want me to call again"
 };
 
 /**
@@ -71,12 +74,12 @@ export function voicemailText({ name, owner, self, purpose, given } = {}) {
 }
 
 /** A WAV (DialX's voicemail copy) as MP3 for Telegram's player; null when ffmpeg is missing or fails. */
-export async function toMp3(buf, { timeoutMs = 20000 } = {}) {
+export async function toMp3(buf, { timeoutMs = 20000, kbps = 64, mono = false } = {}) {
   const { spawn } = await import('child_process');
   return new Promise((resolve) => {
     let p;
     try {
-      p = spawn('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-i', 'pipe:0', '-f', 'mp3', '-b:a', '64k', 'pipe:1']);
+      p = spawn('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-i', 'pipe:0', ...(mono ? ['-ac', '1'] : []), '-f', 'mp3', '-b:a', `${kbps}k`, 'pipe:1']);
     } catch { return resolve(null); }
     const out = [];
     const timer = setTimeout(() => { p.kill('SIGKILL'); resolve(null); }, timeoutMs);
@@ -493,6 +496,13 @@ export async function agentAudio(agent, device, text, settings, logger = console
       if (small) buf = small; else logger.warn?.('DialX: theremin effect failed; speaking plain');
     }
     const max = device?.maxAudioBytes || 262144;
+    // A long voicemail in the agent's voice came to 334 KB (call 51, 2026-10-26) and was dropped for the phone's
+    // robot voice. Speech holds up as mono at 32 kbps (24 if still too big): re-encode before giving up on it.
+    for (const kbps of [32, 24]) {
+      if (buf.length <= max) break;
+      const small = await toMp3(buf, { kbps, mono: true });
+      if (small?.length) { logger.info?.(`DialX: agent voice clip ${buf.length} → ${small.length} bytes at ${kbps} kbps`); buf = small; }
+    }
     if (buf.length > max) return why(`the clip is ${buf.length} bytes, over the phone's ${max}`);
     return { audio_b64: buf.toString('base64'), format: 'mp3' };
   } catch (err) {
@@ -519,6 +529,7 @@ export class DialXCalls {
     this.now = now;
     this.calls = new Map(); // call_id -> session
     this.limitS = CALL_LIMIT_S;
+    this.lostGraceS = 90; // past limitS + this with no call.ended, a call is closed as lost
     this.rt = new DialXRealtime({ calls: this, logger });
   }
 
@@ -526,8 +537,20 @@ export class DialXCalls {
     return { name: this.agent?.config?.name || process.env.AGENT_NAME || 'the assistant', owner: process.env.OWNER_NAME || 'the owner' };
   }
 
+  notePhoneState(state) {
+    const prev = this.phoneState?.state;
+    const st = ['idle', 'ringing', 'in_call'].includes(state) ? state : 'unknown';
+    // idleSince is when a call ENDED. A first report after a restart is not an end: it counts as idle all along (0).
+    const idleSince = st !== 'idle' ? null : prev === 'idle' ? this.phoneState.idleSince : (prev && prev !== 'unknown') ? this.now() : 0;
+    this.phoneState = { state: st, at: this.now(), idleSince };
+    if (st !== prev) this.logger.info?.(`DialX: phone is ${st}`);
+  }
+
   async onEvent(device, body) {
     if (body.kind === 'voicemail.new') return this.onVoicemail(device, body);
+    // DialX 0.7.75: the phone's call state, any call (the owner's own, any agent's, test or group). The deploy
+    // gate holds while it is not idle and for 2 minutes after (owner's rule, 2026-10-26).
+    if (body.kind === 'phone.call_state') return this.notePhoneState(body.state);
     const id = String(body.call_id || '');
     if (!id) return;
     if (body.kind === 'call.dialing') return this.dialing(device, id, body);
@@ -581,11 +604,23 @@ export class DialXCalls {
     // DialX 0.7.15: the agent answers for the owner. DialX has already spoken its greeting
     // (body.opening), so it opens the transcript; `rules` are DialX's message-taking rules.
     s.startedAtMs = s.startedAtMs || this.now();
+    // Call 51 (2026-10-26): DialX crashed as voicemail answered, no call.ended ever came, and the owner never heard
+    // how it went. Past the call limit plus a margin, close it as lost and say so.
+    if (!s.lostTimer) {
+      s.lostTimer = setTimeout(() => {
+        if (s.done) return;
+        this.logger.warn?.(`DialX: call ${id} with ${s.contact}: no end report ${this.limitS + this.lostGraceS} s after it started; closing it as lost`);
+        this.ended(device, id, { reason: 'lost' }).catch(e => this.logger.warn?.(`DialX: lost call ${id} not closed: ${e.message}`));
+      }, (this.limitS + this.lostGraceS) * 1000);
+      s.lostTimer.unref?.();
+    }
     // DialX 0.7.30 Test call: nothing is dialed; the owner talks through the phone's mic and speaker.
     if (body.test) s.test = true;
     // Multi-agent calls (4293 #216): the other end is an agent, or several people and agents share the line.
     if (body.contact?.agent) s.peerAgent = true;
-    if (Array.isArray(body.participants)) s.participants = body.participants.slice(0, 12).map(p => ({ name: String(p?.name || '').slice(0, 80), role: String(p?.role || ''), self: !!p?.self }));
+    // DialX 0.7.69: on group calls only people are audio; other agents arrive as text. It says so in a sentence.
+    if (body.hearing) s.hearing = String(body.hearing).slice(0, 400);
+    if (Array.isArray(body.participants)) s.participants = body.participants.slice(0, 12).map(p => ({ name: String(p?.name || '').slice(0, 80), role: String(p?.role || ''), self: !!p?.self, ...(p?.listening ? { listening: true } : {}) }));
     if (body.listening) s.listening = true;
     if (body.group) s.group = true; // DialX 0.7.35 group call, 0.7.36 agents added to the owner's own call
     if (typeof body.speaks_first === 'boolean') s.speaksFirst = body.speaks_first; // DialX 0.7.34 agent-to-agent
@@ -914,6 +949,8 @@ export class DialXCalls {
 
   async ended(device, id, body) {
     const s = this.session(device, id, body);
+    if (s.done && body.reason === 'lost') return;
+    clearTimeout(s.lostTimer);
     s.done = true;
     this.rt.end(s);
     this.calls.delete(id);

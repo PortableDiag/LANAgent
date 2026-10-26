@@ -363,11 +363,27 @@ export class WebInterface {
         // Requests being answered right now, for the deploy quiet gate (scripts/deployment/
         // quiet-gate.sh), which asks from the host itself. Not shown to anyone else.
         const local = ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(req.socket?.remoteAddress);
+        // The owner's phone: on a call (theirs, Orbit's or ALICE's), the gate holds the deploy (owner's rule, 2026-10-26).
+        // dialx.voice_status answers in about a second over DialX's socket; no answer in 5 s = unknown, never idle.
+        let phone;
+        if (local) {
+          // DialX 0.7.75 reports every change as an event: ask the phone only when no report has come since start.
+          const known = getTextX(this.agent).hub.dialx?.phoneState;
+          const r = known && known.state !== 'unknown' ? null : await Promise.race([
+            getTextX(this.agent).hub.callTool('dialx.voice_status', {}).catch(() => null),
+            new Promise(resolve => setTimeout(resolve, 5000, null))
+          ]);
+          // call_state (DialX 0.7.75) counts ringing, dialing and hold; call_up is only a connected call.
+          const ev = getTextX(this.agent).hub.dialx?.phoneState;
+          const state = r?.ok ? (r.result?.call_state || (r.result?.call_up || r.result?.agent_call ? 'in_call' : 'idle')) : ev?.state;
+          const idleFor = state === 'idle' && ev?.idleSince ? Math.round((Date.now() - ev.idleSince) / 1000) : null; // null: no call ended since start
+          phone = state && state !== 'unknown' ? { callState: state, idleForS: idleFor, busy: state !== 'idle' || (idleFor !== null && idleFor < 120) } : { unknown: true };
+        }
         res.json({
           status: isHealthy ? 'ok' : 'unhealthy',
           health,
           reportAgeSeconds: reportAgeMs !== null ? Math.floor(reportAgeMs / 1000) : null,
-          ...(local ? { inFlight: { external: externalRequestsInFlight(), command: commandRequestsInFlight() } } : {}),
+          ...(local ? { inFlight: { external: externalRequestsInFlight(), command: commandRequestsInFlight() }, phone } : {}),
           timestamp: new Date().toISOString(),
           uptime: process.uptime(),
           // Reported so the gateway can publish a live version instead of a

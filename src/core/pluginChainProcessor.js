@@ -430,9 +430,14 @@ Analyze the request:`;
       }
       }
 
-      const summary = this.generateChainSummary(results, overallSuccess);
+      const details = this.generateChainSummary(results, overallSuccess);
+      // "why is it so slow" ran three steps and the owner got their raw output (a diagnostics JSON, df,
+      // ip addr) under ✅ headings (2026-10-26). The reply now answers the question from the steps.
+      const answer = await this.answerFromSteps(context.originalInput, results, overallSuccess).catch(() => null);
+      const summary = answer || details;
 
       return {
+        details,
         success: overallSuccess,
         totalSteps: steps.length,
         completedSteps: results.length,
@@ -636,6 +641,26 @@ Analyze the request:`;
    * @param {boolean} overallSuccess - Whether the entire chain succeeded
    * @returns {string} Summary text
    */
+  /** The user's question answered from what the steps found, in a few plain sentences; null when that fails. */
+  async answerFromSteps(question, results, overallSuccess) {
+    const pm = this.agent?.providerManager;
+    if (!question || !pm?.generateResponse || !results.length) return null;
+    const found = results.map(r => {
+      let out = r.success ? r.result : { error: r.error || 'failed' };
+      try { out = typeof out === 'string' ? out : JSON.stringify(out); } catch { out = String(out); }
+      return `Step ${r.stepNumber} (${r.description || `${r.plugin}.${r.action}`}): ${r.success ? 'ok' : 'FAILED'}\n${String(out).slice(0, 2500)}`;
+    }).join('\n\n');
+    const res = await pm.generateResponse(
+      `The owner asked: "${String(question).slice(0, 500)}"\nYou ran these steps; their raw results:\n${found}\n\n` +
+      'Answer the owner\'s question from these results in a few short plain sentences: what the results mean for what ' +
+      'they asked, with the specific numbers or names that matter. No JSON, no step list, no headings. ' +
+      (overallSuccess ? '' : 'Say plainly which step failed and what that means. ') +
+      'Never claim anything the results do not show.',
+      { maxTokens: 400, temperature: 0.2 });
+    const text = String(res?.content ?? res ?? '').trim();
+    return text.length > 10 ? text : null;
+  }
+
   generateChainSummary(results, overallSuccess) {
     // Lead with what each step FOUND. The old summary listed only step names and
     // statuses, so a successful chain answered "SUCCESS, 2/2" and never showed

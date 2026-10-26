@@ -484,6 +484,7 @@ export class TextXHub {
     // 2026-10-26: 26 in two minutes, each a device write, a log line and a fresh welcome). The same hello
     // from the bound phone, answered by the same welcome, is acknowledged and nothing else; lastSeenAt
     // is refreshed at most once a minute.
+    if (isDialX(device) && b.call_state) this.dialx?.notePhoneState?.(String(b.call_state));
     const { lastSeenAt, ...said } = patch;
     const sig = JSON.stringify([said, this.welcomeBody({ ...device, ...said })]);
     if (!device.deviceId) Object.assign(patch, { deviceId: phoneId, boundAt: new Date(this.now()) });
@@ -499,6 +500,7 @@ export class TextXHub {
     Object.assign(device, await this.store.updateDevice(device.id, patch));
     this.logger.info?.(`TextX: ${device.name} hello (app ${patch.appVersion}, replies: ${patch.replyMode}, tools: ${capabilities.join(', ') || 'none'})`);
     if (isDialX(device)) this.dialxPaired = true;
+    if (isDialX(device) && b.call_state) this.dialx?.notePhoneState?.(String(b.call_state));
     await this.deliver(device, 'welcome', this.welcomeBody(device));
     this.sweepContacts(device);
     return true;

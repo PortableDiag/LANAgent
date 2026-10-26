@@ -70,6 +70,12 @@ try {
 
 
 
+/**
+ * A greeting or a check-in that needs no tool: answered straight from the conversation. Never "ok", "sure" or
+ * "got it": those can be the answer to a question ALICE just asked ("want me to call again?").
+ */
+export const SMALL_TALK = /^(?:hi|hey|hello|yo|hiya|sup|howdy|good (?:morning|afternoon|evening|night)|(?:are )?you there|you (?:up|around|awake|alive)|still there|say hi|say hello|thanks|thank you|thx|ty|lol|haha|bye|goodnight|night|cheers)(?:,? (?:alice|there|buddy|again))?[\s!.?]*$/i;
+
 export class Agent extends EventEmitter {
   constructor() {
     super();
@@ -1050,6 +1056,25 @@ export class Agent extends EventEmitter {
       });
       if (resumed) return resumed;
 
+      // Small talk ("you there?", "hello", "say hi", "thanks") went through intent routing and a memory search:
+      // "You there?" took 26 s on 2026-10-26. Answered here from the live conversation, in a second or two.
+      if (SMALL_TALK.test(input.trim()) && this.providerManager?.generateResponse) {
+        try {
+          const said = this._conversationBlock(context, 6);
+          const res = await this.providerManager.generateResponse(
+            `${said}\nThe owner just said: "${input.trim()}". Reply in one short, natural sentence, as yourself ` +
+            '(warm, no lists, no offer menu). If the conversation above shows something you were doing, you may mention it.',
+            { maxTokens: 80, temperature: 0.7, systemPrompt: this.getSystemPrompt() });
+          const content = String(res?.content ?? res ?? '').trim();
+          if (content) {
+            await this.memoryManager?.storeConversation(context.userId, input, content, context);
+            return { type: 'text', content };
+          }
+        } catch (err) {
+          logger.warn(`Small-talk reply failed, routing normally: ${err.message}`);
+        }
+      }
+
       // Check if this is a personal question that memory can answer BEFORE intent detection.
       // Without this, "what is my name?" routes to song-ID, "favorite color" to smart home, etc.
       const personalQuestionPattern = /\b(what(?:'s| is| are) my |do (?:i|you) (?:know|remember)|what do i (?:like|love|hate|prefer|enjoy)|who am i|tell me about (?:me|myself)|my (?:name|favorite|fav|preference))\b/i;
@@ -1500,8 +1525,12 @@ If answering needs information that is not in the conversation above (messages, 
               // From a Trellis channel the conversation usually says what was meant
               // ("was unable to complete the task" right after the task): answer from it
               // as a question below rather than asking the operator to repeat themselves.
-              if (context.trellis?.recent) {
-                logger.info('Clarify skipped: the Trellis channel conversation gives the context');
+              // The same holds for any live conversation: "Wtf happened" six minutes after "call Adam V" was
+              // met with a menu about disk space and web search (2026-10-26). With recent turns, the reasoning
+              // agent (which reads them and can check the call) takes it; the menu is only for a cold start.
+              const recentTurns = this.memoryManager?.getRecentTurns?.(context.userId || 'default', context.threadId, 4) || [];
+              if (context.trellis?.recent || recentTurns.length) {
+                logger.info(`Clarify skipped: ${context.trellis?.recent ? 'the Trellis channel conversation' : `${recentTurns.length} recent turn(s)`} give the context`);
                 // An instruction in a channel is usually a task, not a question: let the reasoning
                 // agent (which can call tools) take it before answering in words, which can only
                 // describe work, never do it.
@@ -3700,6 +3729,11 @@ Return ONLY a valid JSON object with the extracted parameters, nothing else.`;
                 }
               }
               
+              // A raw object went out as the reply (the 49-task JSON for "is a reminder set?", 2026-10-26):
+              // answer the question from it instead, and keep the JSON only if that fails.
+              if (/^\s*[\[{]/.test(content) && content.length > 200) {
+                content = await this._answerFromResult(input, content).catch(() => null) || content;
+              }
               response = { 
                 type: 'text', 
                 content: content
@@ -3856,14 +3890,10 @@ Return ONLY a valid JSON object with the extracted parameters, nothing else.`;
       // Fall back to command parsing if no intent detected and reasoning didn't handle it
       // Parse the command
       const parsed = this.commandParser.parse(input, context);
-      
-      // Store in conversation memory
-      await this.memoryManager.storeConversation(
-        context.userId,
-        input,
-        "Processing...",
-        context
-      );
+
+      // The reply is stored once, below, when there is one. A "Processing..." placeholder stored here put
+      // every such message in the conversation twice, once answered "Processing...", and the model then
+      // read itself replying "Processing..." to "You there?", "hello" and "say hi" (2026-10-26).
       
       // Check if it requires approval
       if (parsed.requiresApproval) {
@@ -3963,6 +3993,18 @@ Return ONLY a valid JSON object with the extracted parameters, nothing else.`;
    * Turn a ReAct / Plan-Execute result into a reply. A clarifying question is parked in
    * this.clarifications (10 minutes) so the user's next message resumes the same task.
    */
+  /** The user's question answered in plain words from a tool's raw (JSON) result; null when that fails. */
+  async _answerFromResult(question, raw) {
+    if (!question || !this.providerManager?.generateResponse) return null;
+    const res = await this.providerManager.generateResponse(
+      `The owner asked: "${String(question).slice(0, 500)}"\nA tool returned this raw result:\n${String(raw).slice(0, 6000)}\n\n` +
+      'Answer the question from it in a few short plain sentences, with the specific items, times or numbers that answer it. ' +
+      'No JSON. If the result does not answer the question, say what it does show. Never claim more than it shows.',
+      { maxTokens: 400, temperature: 0.2 });
+    const text = String(res?.content ?? res ?? '').trim();
+    return text.length > 10 && !/^\s*[\[{]/.test(text) ? text : null;
+  }
+
   async renderReasoningResult(input, reasoningResult, context, originalQuery) {
     return renderReasoningResult({
       store: this.clarifications,

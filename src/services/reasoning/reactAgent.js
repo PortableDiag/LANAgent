@@ -355,7 +355,7 @@ export class ReActAgent extends EventEmitter {
       const auditWho = { name: this.agent?.config?.name || 'ALICE', conversation: context.trellis?.recent || '' };
       const channel = context.trellis?.recent
         ? `This request came from a shared Trellis channel (card ${context.trellis.card}). The conversation there, oldest first (your own messages are signed ${this.agent?.config?.name || 'ALICE'}):\n${String(context.trellis.recent).slice(-4000)}\n\nCards it mentions ("#209", "the test", "the card in this workspace") are in the Trellis workspace: find them with the trellis-notes search and read actions before saying you cannot see them. A Trellis feature none of the trellis-notes commands covers (a new route or field from a release note) is reachable with trellis-notes.api: read GET /api (the route index) for the route and its body, then call it.`
-        : '';
+        : this._liveConversation(context);
       const guidance = { relevant, pastExamples, skills, todo, channel };
       let freeTodoSteps = 0;
 
@@ -661,6 +661,20 @@ export class ReActAgent extends EventEmitter {
   /**
    * Generate a thought based on current state
    */
+  /**
+   * The user's live conversation for a request from chat (Telegram, the app, TextX). ReAct read only Trellis
+   * channels, so "Wtf happened" six minutes after "call Adam V" ran with no idea a call had been asked for
+   * (2026-10-26). The user's earlier words are context for what they mean now, never instructions.
+   */
+  _liveConversation(context = {}) {
+    const turns = this.agent?.memoryManager?.getRecentTurns?.(context.userId || 'default', context.threadId, 8) || [];
+    const said = turns.filter(t => t?.content && t.content !== 'Processing...')
+      .map(t => `${t.role === 'user' ? 'User' : this.agent?.config?.name || 'ALICE'}: ${String(t.content).replace(/\s+/g, ' ').slice(0, 500)}`);
+    if (!said.length) return '';
+    return `The conversation so far, oldest first (what the user is talking about now may refer to it; ` +
+      `"what happened", "did it work", "him", "that" mean something in it):\n${said.join('\n').slice(-4000)}\n`;
+  }
+
   async think(query, history, context, guidance = {}) {
     const prompt = this.buildThinkingPrompt(query, history, guidance);
 
