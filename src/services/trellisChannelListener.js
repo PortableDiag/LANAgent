@@ -895,7 +895,7 @@ export class TrellisChannelListener {
     const files = teach?.files || null;
     const said = await this.plugin._call('post', `/api/cards/${card}/say`, {
       // A shaped ask is answered as a reply to it, so the server can check the shape.
-      body: { text: quietBroadcasts(reply).slice(0, MAX_REPLY_CHARS), ...(files ? { files } : {}), ...(expect && Number(target.seq) > 0 ? { reply_to: Number(target.seq) } : {}) },
+      body: { text: channelSafe(quietBroadcasts(reply)).slice(0, MAX_REPLY_CHARS), ...(files ? { files } : {}), ...(expect && Number(target.seq) > 0 ? { reply_to: Number(target.seq) } : {}) },
       ...(files ? { timeoutMs: 120000 } : {})
     });
     if (said?.expect_missed) logger.warn(`[trellis-listen] ${key} reply to #${target.seq} misses the shape asked for: ${said.expect_missed}`);
@@ -1347,6 +1347,14 @@ function textOf(result) {
  * the reply to every agent in the channel and the builtin answered it (card 21 #959,
  * 2026-10-01). The fullwidth sign reads the same and is not a mention.
  */
+/**
+ * A line of only `---` ends a message in a channel card, so Trellis refuses the post. A markdown rule written that
+ * way lost ALICE's drone comparison on card 21 (2026-10-25). `***` is the same rule and renders identically.
+ */
+export function channelSafe(text) {
+  return String(text).replace(/^[ \t]*-{3,}[ \t]*$/gm, '***');
+}
+
 export function quietBroadcasts(text) {
   return String(text || '').replace(/(^|[^\w@.])@(agents|all|everyone)\b/gi, '$1＠$2');
 }

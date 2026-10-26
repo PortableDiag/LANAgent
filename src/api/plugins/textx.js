@@ -92,6 +92,16 @@ export function messageTextRule(owner = process.env.OWNER_NAME || 'the user') {
 
 const agentName = () => process.env.AGENT_NAME || 'LANAgent';
 
+/** "voice note" / "video" / "photo" / "file" in a reaction request → the attachment mime it means (TextX 0.4.54). */
+export function mediaKind(words) {
+  const w = String(words || '');
+  if (/\b(voice ?(note|message|memo)|audio|recording)\b/.test(w)) return /^audio\//;
+  if (/\b(video|clip|movie)\b/.test(w)) return /^video\//;
+  if (/\b(photo|picture|pic|image|selfie)\b/.test(w)) return /^image\//;
+  if (/\b(file|attachment|document|pdf)\b/.test(w)) return /^(application|text)\//;
+  return null;
+}
+
 // Blank lines and trailing space go; the first line's indent stays (ASCII art lost its first
 // line's alignment to a trim(), 2026-10-21).
 const keepIndent = (s) => String(s || '').replace(/^(?:[ \t]*\r?\n)+/, '').trimEnd();
@@ -138,7 +148,7 @@ export default class TextXPlugin extends BasePlugin {
         command: 'react',
         description: 'React to the latest message (or one matching some words) in a shared conversation with an emoji tapback; the user confirms on the phone',
         usage: 'react({ thread: "Sam", emoji: "👍", match: "see you at 5" })',
-        examples: ['thumbs up the last text from Sam', 'heart mom\'s photo']
+        examples: ['thumbs up the last text from Sam', 'heart mom\'s photo', 'heart Wayne\'s voice note', 'react 🔥 to the video Sam sent']
       },
       {
         command: 'markRead',
@@ -991,7 +1001,11 @@ export default class TextXPlugin extends BasePlugin {
     if (!r.ok) return errorResult(r);
     const msgs = (r.result || []).filter(m => m.direction !== 'out' && m.from !== 'me');
     const q = String(data.match || '').toLowerCase();
-    const target = q ? msgs.filter(m => (m.text || '').toLowerCase().includes(q)).pop() : msgs[msgs.length - 1];
+    // TextX 0.4.54: any message takes a reaction. "Heart mom's voice note" names a kind of media, which has no text to match.
+    const kind = mediaKind(q || String(data._context?.originalInput || '').toLowerCase());
+    const isKind = (m) => (m.attachments || []).some(a => kind.test(String(a.mime || a.mime_type || a.type || '')));
+    const target = kind && msgs.some(isKind) && (!q || mediaKind(q)) ? msgs.filter(isKind).pop()
+      : q ? msgs.filter(m => (m.text || '').toLowerCase().includes(q)).pop() : msgs[msgs.length - 1];
     if (!target) return { success: false, error: q ? `No message there matches "${data.match}".` : 'There is no message from them to react to.' };
     return this.confirmed('react', { thread_id: f.thread.thread_id, message_id: target.message_id, emoji, ...(data.remove ? { remove: true } : {}) });
   }

@@ -1,5 +1,5 @@
 import mongoose from 'mongoose';
-import { DialXRealtime, supportsRealtime } from './dialxRealtime.js';
+import { DialXRealtime, supportsRealtime, realtimeVoiceAudio } from './dialxRealtime.js';
 import { PluginSettings } from '../../models/PluginSettings.js';
 
 /**
@@ -38,7 +38,9 @@ export const DIALX_TOOLS = ['dialx.say', 'dialx.hangup', 'dialx.list_approved_co
   'dialx.list_spam', 'dialx.remove_spam', 'dialx.clear_spam', 'dialx.import_spam_from_history', 'dialx.list_allowed',
   'dialx.remove_allowed', 'dialx.list_blocked', 'dialx.block_number', 'dialx.unblock_number',
   // Realtime calls (Trellis 4293 #191/#195): the phone streams the call to OpenAI Realtime with a secret ALICE mints
-  'dialx.realtime', 'dialx.realtime_tool_output'];
+  'dialx.realtime', 'dialx.realtime_tool_output',
+  // DialX 0.7.48: the disclosure in the agent's own voice
+  'dialx.disclosure_audio'];
 /** These wait on the owner's tap on the phone's confirm card, like a send. */
 export const DIALX_CONFIRMED = new Set(['dialx.schedule_call', 'dialx.delete_voicemail', 'dialx.report_spam', 'dialx.mark_not_spam',
   'dialx.set_expecting', 'dialx.delete_recording', 'dialx.delete_recents', 'dialx.clear_screened', 'dialx.remove_spam', 'dialx.clear_spam',
@@ -86,6 +88,28 @@ export async function toMp3(buf, { timeoutMs = 20000 } = {}) {
   });
 }
 
+/** Length of an audio buffer in seconds (ffprobe; from a file, since a pipe gives no duration for MP3), 0 if unknown. */
+export async function audioSeconds(buf, { timeoutMs = 10000 } = {}) {
+  const [{ spawn }, fs, os, path] = await Promise.all([import('child_process'), import('fs/promises'), import('os'), import('path')]);
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'dialx-len-')).catch(() => null);
+  if (!dir) return 0;
+  const f = path.join(dir, 'a.mp3');
+  try {
+    await fs.writeFile(f, buf);
+    return await new Promise((resolve) => {
+      let p;
+      try { p = spawn('ffprobe', ['-v', 'error', '-show_entries', 'format=duration', '-of', 'default=nw=1:nk=1', f]); } catch { return resolve(0); }
+      let out = '';
+      const timer = setTimeout(() => { p.kill('SIGKILL'); resolve(0); }, timeoutMs);
+      p.stdout.on('data', (d) => { out += d; });
+      p.on('error', () => { clearTimeout(timer); resolve(0); });
+      p.on('close', () => { clearTimeout(timer); resolve(Number.parseFloat(out) || 0); });
+    });
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
 /**
  * Recording parts (one call's) joined into one stereo MP3; null when ffmpeg is missing or fails.
  * `ext` names the parts' format: an m4a is read from a file, never a pipe (its index often sits at
@@ -121,6 +145,9 @@ export async function joinToMp3(wavs, { timeoutMs = 60000, ext = 'wav' } = {}) {
  * a 413 (call 9, 2026-10-24). 30 s is ~2.5 MB sealed. The same value must be used for every part.
  */
 export const RECORDING_PART_S = 30;
+
+/** get_call_audio answers that a retry won't change: stop asking for that part. */
+const TERMINAL_AUDIO_ERRORS = new Set(['not_found', 'not_allowed', 'too_big', 'too_large', 'bad_args', 'not_supported', 'gone']);
 
 /**
  * DialX 0.7.27 `format:"m4a"`: AAC 48 kbit/s stereo, 1/10 the size of WAV (70 s: 428 KB, not 4.48 MB),
@@ -264,7 +291,9 @@ export const REALTIME_VOICES = ['marin', 'coral', 'shimmer', 'sage', 'ballad', '
 // realtimeCalls: which calls use OpenAI Realtime. 'all' (owner, 2026-10-25) once call 32's silence turned out to be
 // the phone's capture, not realtime (DialX 0.7.32 reopens it and falls back to turns). 'test' = DialX Test calls only.
 export const REALTIME_CALLS = ['test', 'all', 'off'];
-export const SETTINGS_DEFAULTS = Object.freeze({ voice: 'agent', voiceProfile: 'Ara', ttsTimeoutMs: 5000, realtimeVoice: 'marin', realtimeCalls: 'all' });
+// realtimeAnswering: realtime on calls the agent answers for the owner. Paused after Orbit's call 42 (2026-10-25, 4293 #247:
+// 14 s of dead air, then a session that started after the greeting); DialX 0.7.47-0.7.48 fixed it (#250).
+export const SETTINGS_DEFAULTS = Object.freeze({ voice: 'agent', voiceProfile: 'Ara', ttsTimeoutMs: 5000, realtimeVoice: 'marin', realtimeCalls: 'all', realtimeAnswering: true });
 
 export async function getDialXSettings() {
   const saved = await PluginSettings.getCached('dialx', 'settings').catch(() => null);
@@ -273,6 +302,7 @@ export async function getDialXSettings() {
   if (!Number.isFinite(s.ttsTimeoutMs)) s.ttsTimeoutMs = SETTINGS_DEFAULTS.ttsTimeoutMs;
   if (!REALTIME_VOICES.includes(s.realtimeVoice)) s.realtimeVoice = SETTINGS_DEFAULTS.realtimeVoice;
   if (!REALTIME_CALLS.includes(s.realtimeCalls)) s.realtimeCalls = SETTINGS_DEFAULTS.realtimeCalls;
+  if (typeof s.realtimeAnswering !== 'boolean') s.realtimeAnswering = SETTINGS_DEFAULTS.realtimeAnswering;
   return s;
 }
 
@@ -294,11 +324,14 @@ export async function setDialXSettings(patch = {}) {
       const name = String(v || '').trim().toLowerCase();
       if (!REALTIME_VOICES.includes(name)) throw new Error(`realtimeVoice must be one of ${REALTIME_VOICES.join(', ')}.`);
       s.realtimeVoice = name;
+    } else if (k === 'realtimeAnswering') {
+      if (typeof v !== 'boolean') throw new Error('realtimeAnswering must be true or false.');
+      s.realtimeAnswering = v;
     } else if (k === 'realtimeCalls') {
       if (!REALTIME_CALLS.includes(v)) throw new Error(`realtimeCalls must be one of ${REALTIME_CALLS.join(', ')}.`);
       s.realtimeCalls = v;
     } else {
-      throw new Error(`Unknown setting "${k}". Settings: voice, voiceProfile, ttsTimeoutMs, realtimeVoice, realtimeCalls.`);
+      throw new Error(`Unknown setting "${k}". Settings: voice, voiceProfile, ttsTimeoutMs, realtimeVoice, realtimeCalls, realtimeAnswering.`);
     }
   }
   await PluginSettings.setCached('dialx', 'settings', s);
@@ -497,6 +530,9 @@ export class DialXCalls {
     if (body.kind === 'voicemail.new') return this.onVoicemail(device, body);
     const id = String(body.call_id || '');
     if (!id) return;
+    if (body.kind === 'call.dialing') return this.dialing(device, id, body);
+    // DialX 0.7.47: the owner picked up an incoming call the agent was getting ready for.
+    if (body.kind === 'call.ended' && body.reason === 'owner_answered') this.logger.info?.(`DialX: call ${id}: the owner answered it`);
     if (body.kind === 'call.started') return this.started(device, id, body);
     if (body.kind === 'call.answered') return this.answered(device, id, body);
     if (body.kind === 'call.voicemail_ready') return this.voicemailReady(device, id, body);
@@ -556,15 +592,77 @@ export class DialXCalls {
     // An agent added to a call the owner answered (DialX 0.7.36) is a guest on that call, not answering it.
     if (body.direction === 'incoming' && !body.group) {
       s.incoming = true;
-      s.rules = String(body.rules || '').slice(0, 1500);
-      if (body.opening) s.transcript.unshift({ role: 'agent', text: String(body.opening) });
+      if (body.rules) s.rules = String(body.rules).slice(0, 1500);
+      // The phone's greeting was said only when the model did not greet (a session from call.dialing does).
+      if (body.opening && !s.modelGreets) s.transcript.unshift({ role: 'agent', text: String(body.opening) });
     }
     this.logger.info?.(`DialX: call ${id} with ${s.contact} started (${s.incoming ? 'incoming, answering for the owner' : s.purpose ? 'purpose given' : 'no purpose given'})`);
-    // Who is on the line, across channels: the number recorded when the call was scheduled finds
-    // them (call.started carries only a name). Their texts, earlier calls and what ALICE knows about
-    // them reach the call, so she never talks to someone she knows as a stranger (2026-10-23).
-    // Events run concurrently, and the first words can arrive while this lookup runs: reply() waits on it.
-    s.ready = (async () => {
+    s.ready = s.ready || this.whoIsOn(s, id);
+    await s.ready;
+    await this.store.start({ callId: id, device: String(device.id), contact: s.contact, purpose: s.purpose, startedAt: new Date(this.now()) })
+      .catch(e => this.logger.warn?.(`DialX: call record not saved: ${e.message}`));
+    // Answering for the owner (4293 #219): DialX has greeted them; realtime takes the message. A DialX that does not
+    // take realtime on incoming calls refuses the tool, and the call stays on turns as before.
+    // A call ALICE placed: offered at call.dialing (0.7.40) when DialX sends it; otherwise now, at pickup.
+    if (!s.incoming && !s.realtimeEarly) this.offerEarly(device, s);
+    // Not awaited: a DialX that never answers the tool must not hold up the caller's first words on turns.
+    const st = s.incoming ? await this.settings() : null;
+    if (s.incoming && !s.realtimeEarly && supportsRealtime(device) && st.realtimeCalls === 'all' && st.realtimeAnswering) {
+      s.answeredAtMs = s.answeredAtMs || this.now(); // DialX answers incoming calls itself: no call.answered, so the guard counts from here
+      this.rt.begin(s, { ...this.names(), limitS: this.limitS }).catch(() => {});
+    }
+  }
+
+  /**
+   * DialX 0.7.40 `call.dialing`: sent the moment the phone places the call, while it rings (call.started comes only
+   * at pickup). The realtime session is handed over now, so the socket is up when they answer; call 36 lost 4 s.
+   */
+  async dialing(device, id, body) {
+    const s = this.session(device, id, body);
+    if (body.contact?.name) s.contact = body.contact.name;
+    if (body.purpose) s.purpose = String(body.purpose);
+    // DialX 0.7.47: an incoming call ringing for the owner. The session starts now and the model greets at pickup.
+    if (body.direction === 'incoming') {
+      s.incoming = true;
+      s.modelGreets = true;
+      if (body.rules) s.rules = String(body.rules).slice(0, 1500);
+    }
+    s.ready = s.ready || this.whoIsOn(s, id);
+    this.logger.info?.(`DialX: call ${id} ${s.incoming ? 'from' : 'to'} ${s.contact} ${s.incoming ? 'ringing' : 'dialing'}`);
+    this.offerEarly(device, s);
+    // DialX 0.7.48: the disclosure in the call's own voice, sent before the pickup (the phone's TTS otherwise).
+    if (body.disclosure) this.sendDisclosure(device, s, String(body.disclosure)).catch(() => {});
+  }
+
+  /** The disclosure rendered in the realtime voice; DialX checks it names the agent and says AI before it uses it. */
+  async sendDisclosure(device, s, text) {
+    if (!supportsRealtime(device)) return;
+    const { realtimeVoice } = await this.settings();
+    const audio = await realtimeVoiceAudio(text, { voice: realtimeVoice });
+    if (!audio) return this.logger.info?.(`DialX: call ${s.id}: disclosure stays in the phone's voice (could not render it)`);
+    const r = await this.hub.callTool('dialx.disclosure_audio', { call_id: s.id, ...audio }, { deviceId: device.id, onlyDevice: device.id });
+    this.logger.info?.(`DialX: call ${s.id}: disclosure in ${realtimeVoice} ${r.ok ? (r.result?.status || 'sent') : `refused (${r.error?.code || 'no code'})`}`);
+  }
+
+  /** Hand DialX the realtime session before pickup. Not awaited: call.answered must not wait on it. */
+  offerEarly(device, s) {
+    if (s.realtimeEarly || !supportsRealtime(device)) return;
+    // Set before any await, so a pickup that lands meanwhile waits on this offer instead of making a second one.
+    s.realtimeEarly = (async () => {
+      const { realtimeCalls, realtimeAnswering } = await this.settings();
+      const on = s.incoming ? realtimeCalls === 'all' && realtimeAnswering : realtimeCalls === 'all' || (realtimeCalls === 'test' && s.test);
+      if (on) await this.rt.begin(s, { ...this.names(), limitS: this.limitS });
+    })().catch(() => {});
+  }
+
+  /**
+   * Who is on the line, across channels: the number recorded when the call was scheduled finds
+   * them (call.started carries only a name). Their texts, earlier calls and what ALICE knows about
+   * them reach the call, so she never talks to someone she knows as a stranger (2026-10-23).
+   * Events run concurrently, and the first words can arrive while this lookup runs: reply() waits on it.
+   */
+  whoIsOn(s, id) {
+    return (async () => {
       const planned = await this.store.get?.(id).catch(() => null);
       if (planned?.number) {
         s.person = await this.hub.callPerson?.({ name: s.contact, number: planned.number });
@@ -578,15 +676,6 @@ export class DialXCalls {
       if (planned?.opening && !s.transcript.some(l => l.role === 'agent')) s.transcript.unshift({ role: 'agent', text: String(planned.opening) });
       if (planned?.effect) s.effect = String(planned.effect); // every line of this call in the same theremin voice
     })().catch(e => this.logger.warn?.(`DialX: who is on call ${id}: ${e.message}`));
-    await s.ready;
-    await this.store.start({ callId: id, device: String(device.id), contact: s.contact, purpose: s.purpose, startedAt: new Date(this.now()) })
-      .catch(e => this.logger.warn?.(`DialX: call record not saved: ${e.message}`));
-    // Answering for the owner (4293 #219): DialX has greeted them; realtime takes the message. A DialX that does not
-    // take realtime on incoming calls refuses the tool, and the call stays on turns as before.
-    // Not awaited: a DialX that never answers the tool must not hold up the caller's first words on turns.
-    if (s.incoming && supportsRealtime(device) && (await this.settings()).realtimeCalls === 'all') {
-      this.rt.begin(s, { ...this.names(), limitS: this.limitS }).catch(() => {});
-    }
   }
 
   /**
@@ -603,7 +692,9 @@ export class DialXCalls {
     s.answeredAtMs = this.now();
     this.logger.info?.(`DialX: call ${id} answered by ${s.voicemail ? 'voicemail' : 'a person'}`);
     // A person on a call ALICE placed: hand the phone a realtime session (it was asked for at scheduling).
-    if (!s.voicemail && !s.incoming && supportsRealtime(device)) {
+    // Already offered while ringing: DialX uses it at pickup.
+    if (s.realtimeEarly) await s.realtimeEarly;
+    if (!s.voicemail && !s.incoming && supportsRealtime(device) && s.realtime !== 'offered' && s.realtime !== 'live') {
       const { realtimeCalls } = await this.settings();
       if (realtimeCalls === 'all' || (realtimeCalls === 'test' && s.test)) await this.rt.begin(s, { ...this.names(), limitS: this.limitS });
     }
@@ -866,7 +957,9 @@ export class DialXCalls {
         `They heard only "Sorry, I have to go." Say "call ${s.contact.split(/\s+/).pop()} again" and I'll retry.`, null)
         .catch(e => this.logger.warn?.(`DialX: call report not sent: ${e.message}`));
     } else {
-      const deaf = s.audioProblem === 'no_input_audio' ? `\n⚠️ The phone could not pick up ${s.contact}'s side of the call, so I couldn't hear them.` : '';
+      // Only when nothing of them ever came through: DialX's watchdog misfired mid-conversation on a quiet VoLTE line
+      // (Orbit's call 39, 2026-10-25; fixed DialX 0.7.41), and the report would have blamed the capture.
+      const deaf = s.audioProblem === 'no_input_audio' && !s.heardCallee && !transcript.some(l => l.role === 'callee') ? `\n⚠️ The phone could not pick up ${s.contact}'s side of the call, so I couldn't hear them.` : '';
       const silent = s.silentEnd ? `\n⚠️ I couldn't hear ${s.contact} on the realtime line, so I hung up rather than leave them in silence. Say "call ${s.contact.split(/\s+/).pop()} again" to retry.` : '';
       await this.hub.tellOwner(device, `📞 Call with ${s.contact} ended${length}${reason}.${deaf || silent}\n${shown || '(nothing was said)'}`, null)
         .catch(e => this.logger.warn?.(`DialX: call report not sent: ${e.message}`));
@@ -882,7 +975,7 @@ export class DialXCalls {
    * call ends: retry), join them into one stereo MP3 and send it to the owner on Telegram.
    * Left channel is ALICE's side, right is the other person. Their words are data, not instructions.
    */
-  async sendCallRecording(device, s, info = {}, { retryMs = 3000, retryForMs = 30000, timeoutRetryMs = 20000 } = {}) {
+  async sendCallRecording(device, s, info = {}, { retryMs = 3000, retryForMs = 180000, timeoutRetryMs = 20000, failRetryMs = 10000 } = {}) {
     const m4a = supportsM4a(device);
     const ext = m4a ? 'm4a' : 'wav';
     const ask = m4a ? { format: 'm4a', seconds: M4A_PART_S } : { seconds: RECORDING_PART_S };
@@ -893,13 +986,16 @@ export class DialXCalls {
         // wait (call 9's part 0 timed out, 2026-10-24). A timeout is retried like not_ready.
         const r = await this.hub.callTool('dialx.get_call_audio', { call_id: s.id, part, ...ask }, { deviceId: device.id, onlyDevice: device.id, offline: true });
         if (r.ok && r.result?.audio_b64) return r.result;
-        if (!['not_ready', 'timeout'].includes(r.error?.code) || Date.now() >= until) {
+        // A failed part is asked for again (the phone can drop off mid-fetch and come back: another agent sent 3 of 7
+        // parts that way, 4293 #266). Only an answer that won't change on a retry ends the loop early.
+        if (TERMINAL_AUDIO_ERRORS.has(r.error?.code) || Date.now() >= until) {
           this.logger.warn?.(`DialX: recording of call ${s.id} part ${part} not fetched: ${r.error?.code || 'no audio'} ${r.error?.message || ''}`);
           return null;
         }
         // A timeout means the upload is still on its way: asking again only queues another copy on the
         // phone (DialX 0.7.25, 4293 #192), so wait it out instead of re-asking every few seconds.
-        await new Promise(res => setTimeout(res, r.error?.code === 'timeout' ? timeoutRetryMs : retryMs));
+        const code = r.error?.code;
+        await new Promise(res => setTimeout(res, code === 'timeout' ? timeoutRetryMs : code === 'not_ready' ? retryMs : failRetryMs));
       }
     };
     const first = await fetchPart(0);
@@ -917,7 +1013,14 @@ export class DialXCalls {
     const audio = mp3 || (wavs.length === 1 ? wavs[0] : null);
     if (!audio) { this.logger.warn?.(`DialX: recording of call ${s.id} could not be joined`); return false; }
     const file = `call-with-${String(s.contact || 'contact').replace(/[^\w-]+/g, '_')}.${mp3 ? 'mp3' : ext}`;
-    const missing = wavs.length < parts ? ` (${wavs.length} of ${parts} minutes arrived)` : '';
+    // The joined file must be as long as the call (DialX #255: another agent sent 1:30 of a 3:22 call). If it is not,
+    // the owner is told how much arrived instead of getting a clipped file as if it were whole.
+    const expectS = Number(info?.duration_ms) > 0 ? Number(info.duration_ms) / 1000 : 0;
+    const gotS = mp3 ? await audioSeconds(mp3) : 0;
+    const short = expectS && gotS && gotS < expectS - 3;
+    if (short) this.logger.warn?.(`DialX: recording of call ${s.id} is ${Math.round(gotS)} s of ${Math.round(expectS)} s (${wavs.length}/${parts} parts)`);
+    const missing = short ? ` (only ${clock(gotS)} of ${clock(expectS)} came through)`
+      : wavs.length < parts ? ` (${wavs.length} of ${parts} parts arrived)` : '';
     try {
       await tg.sendNotification(`🎙️ Recording of my call with ${s.contact}${missing}. Left: me, right: them.`,
         { [mp3 ? 'audio' : 'document']: { source: audio, filename: file }, parse_mode: undefined });

@@ -58,7 +58,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import axios from 'axios';
 import { PluginSettings } from '../../models/PluginSettings.js';
 import { encrypt } from '../../utils/encryption.js';
-import { TrellisChannelListener, fitToExpect } from '../../services/trellisChannelListener.js';
+import { TrellisChannelListener, fitToExpect, channelSafe } from '../../services/trellisChannelListener.js';
 import { EXTRA_COMMANDS, EXTRA_ACTIONS, installTrellisExtras } from '../../services/trellis/trellisExtras.js';
 import { syncAllBasketSkills, SKILLS_SYNC_MS } from '../../services/trellis/trellisSkills.js';
 
@@ -1604,6 +1604,9 @@ export default class TrellisNotesPlugin extends BasePlugin {
     }
     const paths = Array.isArray(files) ? files : (files ? [files] : []);
     if ((!text || !String(text).trim()) && !paths.length) throw new Error('replyChannel needs text or files.');
+    // A line of only `---` ends a message in a channel card, so Trellis refuses the post; a markdown rule
+    // written that way lost a whole drone comparison on card 21 (2026-10-25). `***` is the same rule.
+    if (text) text = channelSafe(text);
     // Files travel in the message itself: {name, data_base64}, up to 40 MB each.
     const attached = [];
     for (const p of paths) attached.push(await this._readLocalFile(p));

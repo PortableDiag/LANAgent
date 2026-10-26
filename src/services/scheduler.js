@@ -2626,14 +2626,19 @@ Respond with ONLY the rephrased message, no explanation:`;
     this.agenda.define('system-diagnostics', async (job) => {
       try {
         logger.info('🏥 Running scheduled system diagnostics...', { service: 'diagnostics' });
-        this.lastSystemDiagnostics = new Date();
-        this.saveActivityTimestamps(); // Persist to database
-
-        const diagnosticsService = this.agent.selfDiagnosticsService;
+        // Right after a restart this job can fire a second before the service is up (21:18:33 vs 21:18:34 on
+        // 2026-10-25), and the high-severity error fed the error scanner. Wait for it during boot.
+        let diagnosticsService = this.agent.selfDiagnosticsService;
+        for (let i = 0; !diagnosticsService && i < 12; i++) {
+          await new Promise(r => setTimeout(r, 5000));
+          diagnosticsService = this.agent.selfDiagnosticsService;
+        }
         if (!diagnosticsService) {
           logger.error('Diagnostics service not available', { service: 'diagnostics' });
           return;
         }
+        this.lastSystemDiagnostics = new Date();
+        this.saveActivityTimestamps(); // Persist to database
 
         const result = await diagnosticsService.runDiagnostics('scheduled', 'system');
 

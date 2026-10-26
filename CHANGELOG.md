@@ -2,6 +2,72 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.652] - 2026-10-25
+
+### Fixed
+- **A call recording survives the phone dropping off mid-fetch.** A part that fails is now asked for again for about three minutes, one request at a time, instead of the agent sending only the parts it already had.
+
+## [2.25.651] - 2026-10-25
+
+### Changed
+- **Realtime replies start a little sooner.** The call model now uses low reasoning effort, which cut time to first audio from about 1.2 s to 1.0 s in another agent's measurements.
+
+## [2.25.650] - 2026-10-25
+
+### Fixed
+- **A clipped call recording says so.** the agent now checks the joined recording against the call's length. If part of it didn't come through, the message says "only 1:30 of 3:22 came through" instead of sending the file as if it were complete.
+
+## [2.25.649] - 2026-10-25
+
+### Added
+- **React to a voice note, video or file.** With TextX 0.4.54 any message can take a reaction; "heart a contact's voice note" or "🔥 the video a contact sent" now picks that message, where before the agent looked for those words in the message text.
+
+## [2.25.648] - 2026-10-25
+
+### Fixed
+- **No false diagnostics error after a restart.** The scheduled health check could run a second before its service had started and log a high-severity "not available" error. It now waits for the service during startup.
+
+## [2.25.647] - 2026-10-25
+
+### Changed
+- **Calls the agent answers for the owner are realtime again, and the agent greets the caller itself.** With DialX 0.7.47–0.7.48 the session starts while the phone rings, and the agent says who it is and that the owner can't come to the phone, in its call voice, the moment the caller picks up. This replaces the phone's voice and the long silence before it.
+- **One voice per call.** The AI disclosure, the opening and the voicemail are now made in the realtime call voice (marin), so a call no longer switches to the phone's robot voice for the disclosure. A voice effect still uses the agent's usual voice.
+
+## [2.25.646] - 2026-10-25
+
+### Fixed
+- **Calls the agent answers for the owner stay turn-by-turn for now.** The first realtime answered call (on another agent) never heard the caller, who hung up in silence. Realtime on answered calls is paused until DialX fixes it; turn it back on with the DialX setting `realtimeAnswering`. Calls the agent places stay realtime.
+
+## [2.25.645] - 2026-10-25
+
+### Fixed
+- **A Trellis channel reply with a horizontal rule is posted.** A line of only `---` ends a message in a channel card, so Trellis refused a whole reply that used it as a markdown rule. The agent now writes those lines as `***`, which looks the same.
+
+## [2.25.644] - 2026-10-25
+
+### Fixed
+- **A call report only says the phone couldn't hear the other person when nothing of them came through.** DialX's dead-capture check could misfire mid-conversation on a quiet line (fixed in DialX 0.7.41); the agent no longer repeats that verdict about a call where the person was heard.
+
+## [2.25.643] - 2026-10-25
+
+### Changed
+- **The realtime session is handed over the moment the call is placed** (DialX 0.7.40 `call.dialing`), so it's connected while the phone rings and the agent can speak right after pickup. Before, the phone only told the agent at pickup, which cost about 2 s of silence.
+
+## [2.25.642] - 2026-10-25
+
+### Changed
+- **Realtime calls are ready the moment someone answers.** With DialX 0.7.39, the agent hands the phone its realtime session as soon as the call is dialed. The phone connects while it rings and the agent speaks right after pickup; the session lasts two minutes, and if a very long ring outlasts it, the agent sends a fresh one.
+
+## [2.25.640] - 2026-10-25
+
+### Changed
+- **Realtime calls start sooner.** the agent prepares the call's realtime session while the phone is still ringing, so it's ready the moment someone answers. Before, two seconds went to preparing it after the answer, part of the silence the person heard before the agent spoke. The opening also asks only one thing now, not two at once.
+
+## [2.25.638] - 2026-10-25
+
+### Fixed
+- **Realtime calls chat instead of interviewing.** On the first real realtime call, every reply ran two paragraphs with several questions and ended by offering to pass something on, and the person hung up. Replies are now one or two short sentences with at most one question, the offer comes once near the end, and people are called by their first name, not their full contact name.
+
 ## [2.25.637] - 2026-10-25
 
 ### Fixed

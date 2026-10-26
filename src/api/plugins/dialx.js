@@ -4,7 +4,7 @@ import { getTextX } from '../../services/textx/index.js';
 import { textxRequest } from '../../services/textx/textxHub.js';
 import { isoWithOffset, getDialXSettings, agentAudio, clock, voicemailText, joinToMp3, RECORDING_PART_S, withAiDisclosure, riffPad, thereminize, thereminMode } from '../../services/textx/dialx.js';
 import { isTextRequest } from '../../core/pluginChainProcessor.js';
-import { supportsRealtime } from '../../services/textx/dialxRealtime.js';
+import { supportsRealtime, realtimeVoiceAudio } from '../../services/textx/dialxRealtime.js';
 
 /**
  * Phone calls through the DialX dialer app ("call Wayne and tell him happy birthday at 5pm").
@@ -676,10 +676,12 @@ export default class DialXPlugin extends BasePlugin {
     // rendered now with the opening so voicemail never waits on a round trip.
     const vmText = withAiDisclosure(voicemailText({ name: spoken, owner: process.env.OWNER_NAME, self: this.agent?.config?.name || process.env.AGENT_NAME,
       purpose: purpose || '', given: data.voicemail }), { name: spoken, self: this.agent?.config?.name || process.env.AGENT_NAME, owner: process.env.OWNER_NAME });
-    const [audio, vmAudio] = await Promise.all([
-      agentAudio(this.agent, device, line, effect ? { ...settings, effect } : settings, this.logger),
-      agentAudio(this.agent, device, vmText, effect ? { ...settings, effect } : settings, this.logger)
-    ]);
+    // A realtime call speaks in the realtime voice, so its opening (the fallback if realtime fails) and its voicemail are
+    // made in that voice too: one call, one voice (DialX 0.7.48 #250). A voice effect keeps the agent's own TTS.
+    const rtVoice = supportsRealtime(device) && !voice && !effect && settings.realtimeCalls === 'all' ? settings.realtimeVoice : null;
+    const render = async (text) => (rtVoice && await realtimeVoiceAudio(text, { voice: rtVoice, maxBytes: device?.maxAudioBytes || 262144 })) ||
+      agentAudio(this.agent, device, text, effect ? { ...settings, effect } : settings, this.logger);
+    const [audio, vmAudio] = await Promise.all([render(line), render(vmText)]);
     const args = {
       ...(pick.contact.id != null ? { contact_id: pick.contact.id } : { number: pick.contact.number }),
       ...(at ? { at: isoWithOffset(at, localZone()) } : {}),
