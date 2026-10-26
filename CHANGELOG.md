@@ -2,6 +2,27 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.656] - 2026-10-26
+
+### Fixed
+- **"List my 3 most recent text conversations" lists them.** The request reached the read-a-conversation action with no conversation named and was answered "Which conversation?". A read with nothing named now returns the recent conversations.
+
+## [2.25.655] - 2026-10-26
+
+### Changed
+- **The log shows when a TextX phone is on its socket.** With TextX 0.4.59 agents stay connected over `/textx/v1/ws`; ALICE now logs each socket opening and closing, whether a tool call went out over the socket or waits for the next check-in, and each result that comes back over the socket.
+
+## [2.25.654] - 2026-10-26
+
+### Fixed
+- **Talk mode never guesses at the system's state.** Asked "how is the system doing?", the voice once answered "steady and responsive from what I can tell" without asking the agent. It now knows it is only the voice: questions about the system, devices, messages, schedule, news or weather always go to the agent (15 of 15 in testing; general knowledge is still answered directly). A slow database no longer delays starting a talk.
+- **No more MaxListenersExceededWarning at startup.** The logger has 11 transports by design; the warning read like a memory leak but was only the count.
+
+## [2.25.653] - 2026-10-26
+
+### Added
+- **Talk mode for the LANAgent Android app.** Talk with the agent live by voice, as on a DialX realtime call, on the loudspeaker or held to the ear. The agent mints a short-lived OpenAI Realtime session (`POST /api/voice/realtime` at home, `x.realtime` over the relay away from home), so the phone never holds the API key. Anything that needs the agent's tools goes through the same path as a typed chat message. Needs LANAgent app 1.7.0. `TALK_REALTIME=off` turns it off.
+
 ## [2.25.652] - 2026-10-25
 
 ### Fixed

@@ -10,6 +10,7 @@ import { resultText } from '../../interfaces/web/openaiCompat.js';
 import * as invites from './invitations.js';
 import { describeImages, isPicture, VISION_CAVEAT } from '../../utils/describeImages.js';
 import { DIALX_TOOLS, DIALX_CONFIRMED, CALL_SESSION, isDialX, DialXCalls, memoryCallStore, getDialXSettings } from './dialx.js';
+import { mintTalkSession } from '../voiceTalk.js';
 import { NOTIFX_TOOLS, NOTIFX_CONFIRMED, isNotifX, NotifXWatches } from './notifx.js';
 
 /**
@@ -55,7 +56,7 @@ const INBOUND_TYPES = new Set(['hello', 'message', 'tool_result', 'event', 'ping
 // protocol, answered with `x.result {of, ok, data|error}`. TextX never sends them; the LANAgent
 // Android app uses them for its Status tab and voice when it reaches the agent through the relay.
 const EXTENSION_TYPE = /^x\.[a-z][a-z0-9_.]{0,40}$/;
-export const EXTENSIONS = ['x.status', 'x.transcribe', 'x.speak'];
+export const EXTENSIONS = ['x.status', 'x.transcribe', 'x.speak', 'x.realtime'];
 const MAX_AUDIO_IN = 3 * 1024 * 1024;
 const MAX_SPEAK_CHARS = 4000;
 
@@ -341,6 +342,8 @@ export class TextXHub {
     if (old) { try { old.close(4000, 'replaced by a newer connection'); } catch { /* gone */ } }
     const session = { send, close, device };
     this.sessions.set(key, session);
+    // TextX 0.4.59 keeps agents on /textx/v1/ws: without these lines nothing showed which path a frame took.
+    this.logger.info?.(`TextX: ${device.name} connected by socket${old ? ' (replaced the older one)' : ''}`);
     // Resend anything not acknowledged (§4).
     for (const { env } of await this.store.outboxUnacked(device.id)) send(env);
     return session;
@@ -348,7 +351,7 @@ export class TextXHub {
 
   detach(device, session) {
     const key = String(device.id);
-    if (this.sessions.get(key) === session) this.sessions.delete(key);
+    if (this.sessions.get(key) === session) { this.sessions.delete(key); this.logger.info?.(`TextX: ${device.name} socket closed`); }
   }
 
   /** A frame on a socket. Acks and pongs go back on the same socket. */
@@ -678,11 +681,17 @@ export class TextXHub {
           const r = await this.agent.ttsService.generateSpeech(text);
           return await answer(true, { mime: 'audio/mpeg', audio_b64: r.buffer.toString('base64') });
         }
+        case 'x.realtime': {
+          // Talk mode in the LANAgent app (services/voiceTalk.js). ask_agent comes back as an ordinary message.
+          const session = await mintTalkSession(this.agent, { userId: `textx:${device.id}` });
+          this.logger.info?.(`TextX: talk mode session minted for ${device.name} (${session.model}, ${session.voice})`);
+          return await answer(true, session);
+        }
         default:
           return await answer(false, { code: 'unsupported', message: `${env.type} is not supported; this agent knows ${EXTENSIONS.join(', ')}` });
       }
     } catch (error) {
-      return answer(false, { code: 'internal', message: error.message });
+      return answer(false, { code: error.code === 'unavailable' ? 'unavailable' : 'internal', message: error.message });
     }
   }
 
@@ -814,6 +823,7 @@ export class TextXHub {
         if (p.settled) p.onLate?.({ ok: false, error: { code: 'timeout', message: "The phone didn't answer." } });
       }, expiresMs + this.waits.late));
       this.pending.set(call_id, p);
+      this.logger.info?.(`TextX: ${name} ${call_id} → ${device.name} ${this.isConnected(device.id) ? 'over its socket' : 'queued for its next check-in'}`);
       this.deliver(device, 'tool_call', { call_id, name, args, expires_at }).catch((e) => {
         finish();
         resolve({ ok: false, error: { code: 'internal', message: e.message } });

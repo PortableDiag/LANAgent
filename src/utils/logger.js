@@ -399,6 +399,11 @@ const logger = winston.createLogger({
   ]
 });
 
+// Winston pipes the logger into every transport, one 'end' and one 'data' listener each. With the file
+// transports above plus SystemLog (or Console in development) that is 11, past Node's default of 10, and
+// every boot printed a MaxListenersExceededWarning that read like a leak. It is not: the count is fixed.
+logger.setMaxListeners(30);
+
 // 5. QUERYABLE HISTORY - warnings and errors in the SystemLog collection (systemLogTransport.js),
 // read by the systemLogs plugin and the scheduler's error/operations reports. Same splat merge
 // and redaction as the files. Off in module load checks and tests (a test must never write a

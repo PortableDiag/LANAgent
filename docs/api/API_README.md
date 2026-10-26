@@ -8953,6 +8953,7 @@ When auto-approve is enabled:
 - **POST** `/api/voice/settings` - Update voice settings
 - **POST** `/api/voice/test` - Test voice synthesis
 - **GET** `/api/voice/audio/:filename` - Serve generated audio files
+- **POST** `/api/voice/realtime` - Talk mode (v2.25.653, LANAgent app 1.7.0): mints a short-lived OpenAI Realtime session → `{ success, client_secret, expires_at, model, voice }`. The phone opens `wss://api.openai.com/v1/realtime` with the secret; the session's tools are `ask_agent {request}` (the phone runs it as a chat message and returns the reply as the tool output) and `end_talk`. 503 with no OpenAI key or `TALK_REALTIME=off`. Over the relay, the extension `x.realtime` returns the same.
 
 #### Wake Word Training
 - **GET** `/api/voice/wakeword/status` - Get wake word training status and model info

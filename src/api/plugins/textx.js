@@ -716,6 +716,9 @@ export default class TextXPlugin extends BasePlugin {
   }
 
   async read(data) {
+    // No conversation named: "list my 3 most recent text conversations" was routed here and answered
+    // "Which conversation?" (2026-10-26). That is a request for the list.
+    if (!(data.thread || data.contact || data.query)) return this.threads(data);
     const f = await this.findThread(data.thread || data.contact || data.query);
     if (f.error) return { success: false, error: f.error };
     const r = await this.call('read_thread', { thread_id: f.thread.thread_id, limit: Math.min(Number(data.limit) || 20, 100) });

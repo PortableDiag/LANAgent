@@ -169,6 +169,7 @@ export function createTransport(hub, { filesDir, avatarFile = () => null, logger
         session = await hub.attach(current, { send: raw, close: shut });
         return;
       }
+      if (env.type === 'tool_result') logger.info?.(`TextX: tool_result ${env.body?.call_id} from ${current.name} over its socket`);
       await hub.onSocketEnvelope(current, env, sender).catch(e => logger.error?.(`TextX frame failed: ${e.message}`));
     };
     return {

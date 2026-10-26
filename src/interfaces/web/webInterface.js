@@ -976,6 +976,19 @@ export class WebInterface {
       }
     });
 
+    // Talk mode (LANAgent app): a short-lived OpenAI Realtime secret; the phone holds the socket (services/voiceTalk.js)
+    this.app.post('/api/voice/realtime', authenticateToken, async (req, res) => {
+      try {
+        const { mintTalkSession } = await import('../../services/voiceTalk.js');
+        const session = await mintTalkSession(this.agent, { userId: 'web-user' });
+        logger.info(`Talk mode: realtime session minted (${session.model}, ${session.voice})`);
+        res.json({ success: true, ...session });
+      } catch (error) {
+        logger.warn(`Talk mode: no session: ${error.message}`);
+        res.status(error.code === 'unavailable' ? 503 : 502).json({ success: false, error: error.message });
+      }
+    });
+
     // Text-to-speech endpoint (text -> audio URL)
     this.app.post('/api/voice/speak', authenticateToken, async (req, res) => {
       try {
