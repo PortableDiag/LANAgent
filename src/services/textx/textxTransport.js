@@ -28,7 +28,7 @@ const json = (status, value) => ({ status, headers: { 'content-type': 'applicati
 const MIME = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp',
   '.mp3': 'audio/mpeg', '.ogg': 'audio/ogg', '.wav': 'audio/wav', '.mp4': 'video/mp4', '.pdf': 'application/pdf', '.txt': 'text/plain' };
 
-export function createTransport(hub, { filesDir, avatarFile = () => null, logger = console } = {}) {
+export function createTransport(hub, { filesDir, avatarFile = () => null, logger = console, socketSilentMs = 75000 } = {}) {
   const fileId = () => crypto.randomBytes(16).toString('base64url');
   const filePath = (device, id) => path.join(filesDir, String(device.id), id.replace(/[^A-Za-z0-9_-]/g, ''));
 
@@ -149,10 +149,30 @@ export function createTransport(hub, { filesDir, avatarFile = () => null, logger
     const raw = (env) => { if (!closed) send(JSON.stringify(sealJson(device.key, device.kid, A2P, env))); };
     const shut = (code, reason) => { if (!closed) { closed = true; close(code, reason); } };
 
+    // A phone pings after 25 s of quiet and drops its side after 75 s; a phone that vanished (LTE gone, no
+    // close) left ALICE "connected" and tool calls went into a dead socket until their read timeout. The
+    // same rule here (as Orbit's bridge, 2026-10-26). A relayed socket's close does not reach onClose, so
+    // the session is detached here too.
+    // Only DATA frames count: a WebSocket ping control frame is answered below this layer (ws library,
+    // relay). That closed live sockets on 2.25.658, so 2.25.659 turned this off; TextX 0.4.62 and
+    // DialX 0.7.58 now send a `ping` envelope whenever they have sent nothing for 25 s (protocol §3.1),
+    // so it is back on. socketSilentMs 0 turns it off.
+    let heard = Date.now();
+    const idle = socketSilentMs > 0 && setInterval(() => {
+      if (closed) { clearInterval(idle); return; }
+      if (Date.now() - heard <= socketSilentMs) return;
+      clearInterval(idle);
+      logger.info?.(`TextX: ${device.name} socket silent ${Math.round(socketSilentMs / 1000)} s; closing it`);
+      shut(1001, 'silent');
+      if (session) hub.detach(device, session);
+    }, Math.min(15000, Math.max(10, Math.floor(socketSilentMs / 5))));
+    if (idle) idle.unref?.();
+
     // Frames are handled in arrival order: a message sent right behind its hello must see the
     // pairing already bound.
     let queue = Promise.resolve();
     const handle = async (text) => {
+      heard = Date.now();
       let env;
       try { env = openJson(device.key, device.kid, P2A, String(text)); } catch {
         if (++bad >= BAD_FRAMES_BEFORE_CLOSE) shut(4400, 'frames do not decrypt');
@@ -177,7 +197,7 @@ export function createTransport(hub, { filesDir, avatarFile = () => null, logger
         queue = queue.then(() => handle(text));
         return queue;
       },
-      onClose() { closed = true; if (session) hub.detach(device, session); }
+      onClose() { closed = true; if (idle) clearInterval(idle); if (session) hub.detach(device, session); }
     };
   }
 

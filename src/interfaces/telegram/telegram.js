@@ -1624,23 +1624,31 @@ export class TelegramInterface extends EventEmitter {
       // promise may not resolve for minutes, but the bot IS functional at this point
       this.isRunning = true;
 
+      // launch() resolves only when polling STOPS, so waiting on it always ran into the timeout:
+      // every boot logged "startup timeout" and agent.start() returned 2 minutes late, with the
+      // graceful-shutdown handler unregistered until then (2026-10-26). onLaunch fires once the bot
+      // is connected, just before polling starts.
+      let launched;
+      const onLaunch = new Promise(resolve => { launched = resolve; });
       const launchPromise = this.bot.launch({
         dropPendingUpdates: true, // Don't process old messages on startup
         allowedUpdates: [], // Get all update types
-      }).catch(err => {
+      }, () => launched('launched')).catch(err => {
         logger.error('Bot launch error details:', err);
         this.isRunning = false;
       });
 
+      let launchTimer;
       const timeoutPromise = new Promise((resolve) =>
-        setTimeout(() => {
+        launchTimer = setTimeout(() => {
           logger.info('Telegram bot launch timed out but bot is functional (long-polling delay)');
           resolve('timeout');
         }, launchTimeout)
       );
 
-      await Promise.race([launchPromise, timeoutPromise]);
-      logger.info('Telegram bot started successfully');
+      const how = await Promise.race([onLaunch, launchPromise, timeoutPromise]);
+      clearTimeout(launchTimer);
+      logger.info(`Telegram bot started successfully${how === 'launched' ? '' : ` (${how || 'launch ended'})`}`);
 
       // Sync bot profile description (non-blocking)
       this.syncBotProfile().catch(err => logger.warn('Could not sync bot profile:', err.message));

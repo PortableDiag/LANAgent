@@ -926,7 +926,7 @@ export class DialXCalls {
     // DialX 0.7.31: how quick the realtime replies were, measured on the phone (speech_stopped → first audio).
     const rt = body.realtime;
     if (rt && typeof rt === 'object') {
-      this.logger.info?.(`DialX: call ${id} realtime: ${rt.replies ?? '?'} replies, median gap ${rt.median_gap_ms ?? '?'} ms, max ${rt.max_gap_ms ?? '?'} ms, ${rt.barge_ins ?? 0} barge-ins, ${rt.underruns ?? 0} underruns`);
+      this.logger.info?.(`DialX: call ${id} realtime: ${rt.replies ?? '?'} replies, median gap ${rt.median_gap_ms ?? '?'} ms, max ${rt.max_gap_ms ?? '?'} ms, ${rt.barge_ins ?? 0} barge-ins, ${rt.underruns ?? 0} underruns${s.silences ? `, stayed silent ${s.silences}×` : ''}`);
     }
     // The call joins the person's history, in order: what they said and what ALICE said. On voicemail
     // the "callee" is their greeting (a recording, often with their number), never their words.

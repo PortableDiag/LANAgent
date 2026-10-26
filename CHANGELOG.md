@@ -2,6 +2,28 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.660] - 2026-10-26
+
+### Changed
+- **A phone socket that goes silent for 75 s is closed again.** TextX 0.4.62 and DialX 0.7.58 now send a ping envelope whenever they have sent nothing for 25 s, so a live socket is never silent that long, and a phone that vanished without closing stops looking connected.
+
+### Fixed
+- **One realtime offer per call.** When a call's start and pickup reached ALICE in the same second, both offered DialX a realtime session; DialX refused the second, and ALICE then marked the call as not realtime although the first session was live (call 46). A call now makes one offer, and a failed offer never overwrites a live session.
+
+### Added
+- **ALICE can stay quiet on a group call.** On a call with another agent, both realtime models answered every turn they heard, and ALICE and Orbit traded "I'll be here if you need me" until the owner cut in. Group-call sessions now have a `stay_silent` tool, used when the turn is not ALICE's or there is nothing new to say, and answered with `respond:false` so DialX (0.7.61+) does not ask the model to speak. The end-of-call line counts the silences.
+
+## [2.25.659] - 2026-10-26
+
+### Fixed
+- **Healthy phone sockets are no longer closed as silent.** 2.25.658's 75-second silence rule counted only data frames, but the phones keep a socket alive with WebSocket ping control frames that are answered before they reach that check, so a live TextX socket was closed 135 s after it opened. The rule is off.
+
+## [2.25.658] - 2026-10-26
+
+### Fixed
+- **Telegram counts as started as soon as the bot connects.** Startup waited for the bot's launch call, which only returns when polling stops, so every boot logged "telegram interface startup timeout" and finished starting two minutes late. Until then the graceful-shutdown handler was not registered, so a restart in those two minutes skipped the clean stop.
+- **A phone that vanished no longer looks connected.** A TextX-protocol socket that stays silent for 75 s (phones ping every 25 s) is now closed and detached, local or relayed. Before, a phone that lost signal without closing kept its "connected" state, and tool calls went into the dead socket until their read timeout.
+
 ## [2.25.657] - 2026-10-26
 
 ### Changed
