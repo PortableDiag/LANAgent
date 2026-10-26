@@ -2,6 +2,11 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.657] - 2026-10-26
+
+### Changed
+- **A repeated hello costs nothing.** Over HTTP every batch from a TextX-protocol phone starts with a hello, so DialX on a call sent one every ~300 ms (26 in two minutes on call 44), and each was a database write, a log line and a fresh welcome. The same hello from the bound phone, answered by the same welcome, is now only acknowledged, and its last-seen time is written at most once a minute. A changed hello, or the first one on a new socket, is handled as before.
+
 ## [2.25.656] - 2026-10-26
 
 ### Fixed

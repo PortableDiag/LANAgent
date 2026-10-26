@@ -262,6 +262,8 @@ export class TextXHub {
       late: waits.late ?? 60_000         // grace after expiry for a result still in flight
     };
     this.sessions = new Map();   // deviceId(store id) -> { send(env), close(code, reason) }
+    /** The last hello per pairing and when lastSeenAt was written: a repeat of it is a no-op. */
+    this.helloSeen = new Map();
     this.pending = new Map();    // call_id -> { resolve, settled, onLate, timers[] }
     this.messageRate = new RateWindow(30, 60_000);
     // DialX (dialer app) pairings: calls arrive as events and are answered with dialx.* tools.
@@ -351,7 +353,8 @@ export class TextXHub {
 
   detach(device, session) {
     const key = String(device.id);
-    if (this.sessions.get(key) === session) { this.sessions.delete(key); this.logger.info?.(`TextX: ${device.name} socket closed`); }
+    // The next socket's hello must get its own welcome.
+    if (this.sessions.get(key) === session) { this.sessions.delete(key); this.helloSeen.delete(key); this.logger.info?.(`TextX: ${device.name} socket closed`); }
   }
 
   /** A frame on a socket. Acks and pongs go back on the same socket. */
@@ -465,9 +468,6 @@ export class TextXHub {
     }
     reply(this.envelope('ack', { of: env.id }));
     if (seen && device.deviceId) return true;
-    // Every HTTP batch leads with a hello (§3.1): a repeat replaces the pending welcome rather
-    // than queueing another.
-    if (device.deviceId) await this.store.outboxAckType(device.id, 'welcome');
     const capabilities = (Array.isArray(b.capabilities) ? b.capabilities : []).filter(t => TOOLS.includes(t) || DIALX_TOOLS.includes(t) || NOTIFX_TOOLS.includes(t));
     const patch = { capabilities, appVersion: String(b.app_version || '').slice(0, 40), client: String(b.app || '').slice(0, 40),
       replyMode: REPLY_MODES.includes(b.reply_mode) ? b.reply_mode : 'text',
@@ -480,7 +480,22 @@ export class TextXHub {
       // NotifX: what the owner calls this phone (two phones may run it), and the apps they shared.
       ...(b.phone?.name ? { phoneName: String(b.phone.name).slice(0, 60) } : {}),
       ...(Array.isArray(b.apps) ? { sharedApps: b.apps.map(String).slice(0, 200) } : {}) };
+    // Over HTTP every batch leads with a hello, so DialX on a call sends one every ~300 ms (call 44,
+    // 2026-10-26: 26 in two minutes, each a device write, a log line and a fresh welcome). The same hello
+    // from the bound phone, answered by the same welcome, is acknowledged and nothing else; lastSeenAt
+    // is refreshed at most once a minute.
+    const { lastSeenAt, ...said } = patch;
+    const sig = JSON.stringify([said, this.welcomeBody({ ...device, ...said })]);
     if (!device.deviceId) Object.assign(patch, { deviceId: phoneId, boundAt: new Date(this.now()) });
+    const last = this.helloSeen.get(String(device.id));
+    if (device.deviceId && last?.sig === sig) {
+      if (this.now() - last.at > 60000) { last.at = this.now(); await this.store.updateDevice(device.id, { lastSeenAt }).catch(() => {}); }
+      return true;
+    }
+    this.helloSeen.set(String(device.id), { sig, at: this.now() });
+    // Every HTTP batch leads with a hello (§3.1): a repeat replaces the pending welcome rather
+    // than queueing another.
+    if (device.deviceId) await this.store.outboxAckType(device.id, 'welcome');
     Object.assign(device, await this.store.updateDevice(device.id, patch));
     this.logger.info?.(`TextX: ${device.name} hello (app ${patch.appVersion}, replies: ${patch.replyMode}, tools: ${capabilities.join(', ') || 'none'})`);
     if (isDialX(device)) this.dialxPaired = true;
