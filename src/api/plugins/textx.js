@@ -92,6 +92,24 @@ export function messageTextRule(owner = process.env.OWNER_NAME || 'the user') {
 
 const agentName = () => process.env.AGENT_NAME || 'LANAgent';
 
+/**
+ * A text the request has the agent say about itself ("tell her you just tried to call her") arrives
+ * from the owner's number, so it must say who is writing. The model wrote "I just tried to call
+ * you." and Lizzy read it as the owner (2026-10-26) although messageTextRule asks for the name.
+ * Quoted message text and "I"/"me" requests are the owner's own words: untouched.
+ */
+export function identifyAgent(request, text, { name = agentName(), owner = process.env.OWNER_NAME || '' } = {}) {
+  const req = String(request || '').replace(/"[^"]*"|“[^”]*”/g, ' ');
+  const t = String(text || '');
+  if (!t || !name || new RegExp(`\\b${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i').test(t)) return t;
+  const aboutAgent = /\byourself\b/i.test(req) ||
+    // "tell her you just tried…": the recipient (one or two words, never "I"), then "you" and a verb.
+    // "tell Wayne thank you" and "tell Sam I love you" are the owner's words.
+    /\b(tell|remind|let|inform|warn)\s+(?:(?!I\b)\S+\s+){1,2}?(?:know\s+)?(?:that\s+)?you(?:'re|'ve|'ll|'d|\s+(?:are|have|had|will|just|were|did|tried|called|can|could|want|wanted|need|got|sent|found|missed|saw|heard|left|booked|scheduled))\b/i.test(req);
+  if (!aboutAgent) return t;
+  return `This is ${name}${owner ? `, ${owner}'s AI assistant` : ', an AI assistant'}. ${t}`;
+}
+
 /** "voice note" / "video" / "photo" / "file" in a reaction request → the attachment mime it means (TextX 0.4.54). */
 export function mediaKind(words) {
   const w = String(words || '');
@@ -576,6 +594,7 @@ export default class TextXPlugin extends BasePlugin {
     data = { ...data, to: ref.to };
     let text = keepIndent(ref.text);
     if (!text) return { success: false, error: 'What should the text say?' };
+    if (!fromChat && !data.replyTo) text = identifyAgent(data.originalInput || data._context?.originalInput, text);
     if (scheduled && data.at != null) data.at = resolveRequestTime(data.at, '')?.toISOString() || data.at;
     if (scheduled && !Number.isFinite(Date.parse(data.at))) return { success: false, error: 'When should it be sent? Give a date and time.' };
     // A named conversation (a group) is addressed by its thread; people by their numbers.

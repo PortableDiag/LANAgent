@@ -370,6 +370,7 @@ export function mongoCallStore() {
     async start(c) { await DialXCall.updateOne({ callId: c.callId }, { $set: c }, { upsert: true }); },
     async end(callId, patch) { await DialXCall.updateOne({ callId }, { $set: { ...patch, endedAt: new Date() } }); },
     async open() { return DialXCall.find({ endedAt: null, startedAt: { $ne: null } }).lean(); },
+    async planned(since) { return DialXCall.find({ endedAt: null, startedAt: null, plannedAt: { $gte: since } }).sort({ plannedAt: 1 }).limit(20).lean(); },
     async get(callId) { return DialXCall.findOne({ callId }).lean(); }
   };
 }
@@ -382,7 +383,8 @@ export function memoryCallStore() {
     async start(c) { rows.set(c.callId, { ...(rows.get(c.callId) || { endedAt: null }), ...c }); },
     async end(callId, patch) { const r = rows.get(callId); if (r) Object.assign(r, patch, { endedAt: new Date() }); },
     async get(callId) { return rows.get(callId) || null; },
-    async open() { return [...rows.values()].filter(r => !r.endedAt && r.startedAt); }
+    async open() { return [...rows.values()].filter(r => !r.endedAt && r.startedAt); },
+    async planned(since) { return [...rows.values()].filter(r => !r.endedAt && !r.startedAt && r.plannedAt && new Date(r.plannedAt) >= since).sort((x, y) => new Date(x.plannedAt) - new Date(y.plannedAt)); }
   };
 }
 

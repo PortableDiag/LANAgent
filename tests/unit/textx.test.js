@@ -2209,6 +2209,32 @@ test('a reaction can name the kind of media: "heart mom\'s voice note" picks her
   assert.equal(mediaKind('see you at 5'), null);
 });
 
+test('a text the agent says about itself names the agent; what the owner says stays as written (Lizzy, 2026-10-26)', async () => {
+  const { identifyAgent } = await import('../../src/api/plugins/textx.js');
+  const o = { name: 'ALICE', owner: 'Pat' };
+  assert.equal(identifyAgent('Text Lizzy and tell her you just tried to call her', 'I just tried to call you.', o), "This is ALICE, Pat's AI assistant. I just tried to call you.");
+  assert.match(identifyAgent('Text Mom and introduce yourself', 'Hi Mom!', o), /^This is ALICE/);
+  assert.equal(identifyAgent('Text Mom and introduce yourself', 'Hi Mom, this is ALICE.', o), 'Hi Mom, this is ALICE.', 'already named');
+  for (const [req, text] of [['tell Wayne thank you', 'Thank you!'], ['tell Sam I love you', 'I love you'], ['tell her I will see you there', 'I will see you there'], ['text Sam "you just missed me"', 'you just missed me']]) {
+    assert.equal(identifyAgent(req, text, o), text, req);
+  }
+});
+
+test('an auto-reply knows the calls already planned with that person (Lizzy, 2026-10-26)', async () => {
+  const { r, prompts } = sharedRig((p) => (/answering by text message/.test(p) ? 'Sure, ALICE is calling you at 4:30.' : 'SKIP'));
+  const p = await pairedPhone(r, { tools: ['send_sms'] });
+  const soon = new Date(Date.now() + 3600000);
+  await r.hub.dialx.store.plan({ callId: 'c1', contact: 'Lizzy', number: '+1 (555) 000-1234', purpose: 'ask about Saturday', plannedAt: soon });
+  await r.hub.dialx.store.plan({ callId: 'c2', contact: 'Sam', number: '+15559990000', purpose: 'someone else', plannedAt: soon });
+  await r.hub.dialx.store.plan({ callId: 'c3', contact: 'Lizzy', number: '+15550001234', purpose: 'long past', plannedAt: new Date(Date.now() - 86400000) });
+  await p.say(smsEvent({ auto_reply: true, message: { thread_id: 't9', message_id: 'z1', from: { name: 'Lizzy', number: '+15550001234' }, text: 'call me in 10', untrusted: true } }));
+  for (let i = 0; i < 40 && !prompts.some(x => /answering by text message/.test(x)); i++) await tick();
+  const prompt = prompts.find(x => /answering by text message/.test(x));
+  assert.ok(prompt, 'an auto-reply was composed');
+  assert.match(prompt, /already planned with this person[\s\S]*phone call to them is scheduled[\s\S]*ask about Saturday/);
+  assert.doesNotMatch(prompt, /someone else|long past/);
+});
+
 test('two texts in a burst get one auto-reply; a reply written to the owner is never texted to them (Wayne, 2026-10-26)', async () => {
   const prev = process.env.OWNER_NAME; process.env.OWNER_NAME = 'Charles';
   try {

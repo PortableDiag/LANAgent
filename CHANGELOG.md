@@ -2,6 +2,18 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.670] - 2026-10-27
+
+### Fixed
+- **The call voice stops announcing what it is about to do.** It said "I'm going to step back so you can deal with that" and "Alright, I'll keep it brief and let you get back to your day" (call 64). It now just does it.
+- **The call voice uses a person's name, not their phone-book handle.** A contact saved with a nickname in front was greeted by the whole entry; the voice now uses the first name, as a friend would.
+
+## [2.25.669] - 2026-10-27
+
+### Fixed
+- **Auto-replies know the calls already planned with that person.** Lizzy texted "call me in 10" and the auto-reply answered without knowing ALICE was already calling her at 4:30. A reply now sees the owner's scheduled calls to the sender's number (time and purpose), so it can say so.
+- **A text the agent says about itself says who is writing.** "Text Lizzy and tell her you just tried to call her" sent "I just tried to call you." from the owner's number, and it read as the owner. When the request has the agent speak about itself ("tell her you…", "introduce yourself") and the text does not name the agent, it now opens "This is ALICE, <owner>'s AI assistant." Requests in the owner's own voice ("tell Sam I love you", "tell Wayne thank you") and quoted text are sent as written.
+
 ## [2.25.668] - 2026-10-27
 
 ### Added
