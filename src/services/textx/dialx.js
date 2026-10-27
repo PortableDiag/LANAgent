@@ -666,7 +666,12 @@ export class DialXCalls {
     this.logger.info?.(`DialX: call ${id} ${s.incoming ? 'from' : 'to'} ${s.contact} ${s.incoming ? 'ringing' : 'dialing'}`);
     this.offerEarly(device, s);
     // DialX 0.7.48: the disclosure in the call's own voice, sent before the pickup (the phone's TTS otherwise).
-    if (body.disclosure) this.sendDisclosure(device, s, String(body.disclosure)).catch(() => {});
+    if (body.disclosure) {
+      // What the callee was told: the model must answer "is this recorded?" truthfully (call 58, 2026-10-26).
+      s.disclosure = String(body.disclosure).slice(0, 400);
+      s.recorded = /\brecorded\b/i.test(s.disclosure);
+      this.sendDisclosure(device, s, String(body.disclosure)).catch(() => {});
+    }
   }
 
   /** The disclosure rendered in the realtime voice; DialX checks it names the agent and says AI before it uses it. */

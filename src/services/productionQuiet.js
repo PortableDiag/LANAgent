@@ -53,8 +53,23 @@ const logTime = (line) => new Date(line.slice(0, 19).replace(' ', 'T')).getTime(
  * Reasons this instance is busy; an empty array means quiet. Anything that cannot be read counts
  * as busy: a restart is never worth a guess.
  */
-export async function busyReasons({ db = mongoose.connection?.db, now = Date.now(), tail = logTail } = {}) {
+// The owner's phone as DialX last reported it ({state, idleSince}), or null when nothing has said.
+async function phoneState() {
+  const { textxIfStarted } = await import('./textx/index.js');
+  return textxIfStarted()?.hub?.dialx?.phoneState || null;
+}
+
+export async function busyReasons({ db = mongoose.connection?.db, now = Date.now(), tail = logTail, phone = phoneState } = {}) {
   const busy = [];
+  // The owner's own calls too, not only ALICE's: this job could restart ALICE in the middle of one, which the
+  // deploy scripts' gate stopped doing in 2.25.662. Unknown is not busy here (no DialX paired = no phone to protect).
+  try {
+    const p = await phone();
+    if (p?.state && !['idle', 'unknown'].includes(p.state)) busy.push(`the owner's phone is on a call (${p.state})`);
+    else if (p?.state === 'idle' && p.idleSince && now - p.idleSince < 120000) busy.push('the owner\'s phone call ended under 2 minutes ago');
+  } catch (e) {
+    busy.push(`cannot read the phone's call state (${e.message})`);
+  }
   if (inFlight.external > 0) busy.push(`${inFlight.external} paid request(s) in flight`);
   if (inFlight.command > 0) busy.push(`${inFlight.command} command request(s) being answered`);
 

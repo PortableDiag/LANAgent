@@ -28,7 +28,7 @@ const json = (status, value) => ({ status, headers: { 'content-type': 'applicati
 const MIME = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp',
   '.mp3': 'audio/mpeg', '.ogg': 'audio/ogg', '.wav': 'audio/wav', '.mp4': 'video/mp4', '.pdf': 'application/pdf', '.txt': 'text/plain' };
 
-export function createTransport(hub, { filesDir, avatarFile = () => null, logger = console, socketSilentMs = 75000 } = {}) {
+export function createTransport(hub, { filesDir, avatarFile = () => null, logger = console, socketSilentMs = 75000, socketKeepAliveMs = 30000 } = {}) {
   const fileId = () => crypto.randomBytes(16).toString('base64url');
   const filePath = (device, id) => path.join(filesDir, String(device.id), id.replace(/[^A-Za-z0-9_-]/g, ''));
 
@@ -146,7 +146,8 @@ export function createTransport(hub, { filesDir, avatarFile = () => null, logger
     let closed = false;
     let sender = null;   // the device this socket proved, once its hello was accepted
     let session = null;
-    const raw = (env) => { if (!closed) send(JSON.stringify(sealJson(device.key, device.kid, A2P, env))); };
+    let sentAt = Date.now();
+    const raw = (env) => { if (!closed) { sentAt = Date.now(); send(JSON.stringify(sealJson(device.key, device.kid, A2P, env))); } };
     const shut = (code, reason) => { if (!closed) { closed = true; close(code, reason); } };
 
     // A phone pings after 25 s of quiet and drops its side after 75 s; a phone that vanished (LTE gone, no
@@ -167,6 +168,14 @@ export function createTransport(hub, { filesDir, avatarFile = () => null, logger
       if (session) hub.detach(device, session);
     }, Math.min(15000, Math.max(10, Math.floor(socketSilentMs / 5))));
     if (idle) idle.unref?.();
+    // A data ping after 30 s of ALICE sending nothing. A sleeping phone wakes on the packet and answers with a data
+    // frame, which keeps it inside the 75 s silence rule. A WS-level ping is answered by the phone's socket library
+    // (OkHttp in NotifX) without the app ever seeing it, so it kept nothing open (2026-10-26, 3051 #83).
+    const keepAlive = setInterval(() => {
+      if (closed) { clearInterval(keepAlive); return; }
+      if (session && Date.now() - sentAt >= socketKeepAliveMs) raw(hub.envelope('ping'));
+    }, Math.min(10000, Math.max(10, Math.floor(socketKeepAliveMs / 3))));
+    keepAlive.unref?.();
 
     // Frames are handled in arrival order: a message sent right behind its hello must see the
     // pairing already bound.
@@ -197,7 +206,7 @@ export function createTransport(hub, { filesDir, avatarFile = () => null, logger
         queue = queue.then(() => handle(text));
         return queue;
       },
-      onClose() { closed = true; if (idle) clearInterval(idle); if (session) hub.detach(device, session); }
+      onClose() { closed = true; if (idle) clearInterval(idle); clearInterval(keepAlive); if (session) hub.detach(device, session); }
     };
   }
 

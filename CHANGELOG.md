@@ -2,6 +2,30 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.668] - 2026-10-27
+
+### Added
+- **"Why is my TextX list empty?" gets an answer.** The TextX `backup` action takes `op: "messageStore"` (TextX 0.4.70): how many texts and picture messages Android's message store holds, whether TextX is the default SMS app and can read them, and, for an empty store, the usual cause (RCS chats kept in Google Messages) with the fix (TextX › Backup & restore › Import messages, from an SMS Backup & Restore .xml).
+
+## [2.25.667] - 2026-10-26
+
+### Fixed
+- **A reply the call never heard is not in the transcript.** At pickup the model writes the opening while DialX waits for its person-or-voicemail verdict; on voicemail DialX drops it, but its transcript still came through and read as if ALICE had talked over the greeting (call 54). DialX 0.7.81 marks such a reply `played:false`, and ALICE leaves it out.
+
+## [2.25.666] - 2026-10-26
+
+### Fixed
+- **A sleeping phone stays connected.** After 30 s of sending nothing on a phone's socket (local or relayed), ALICE sends a data `ping` envelope. The packet wakes the phone and the app answers with a data frame, so the 75 s silence rule no longer drops a phone that only slept. A WS-level ping would not do: NotifX's socket library answers it without the app seeing it.
+- **One auto-reply per burst, and never a text that talks to the owner.** Two texts from Wayne 7 seconds apart got two replies composed at once, and the second, written to the owner ("<owner>, that sounds like the call went far better…"), was texted to Wayne. Auto-replies in a conversation now run one at a time, a message the last reply already covered gets no second reply, and a reply that opens by addressing the owner is sent to the owner as a note instead.
+- **The hourly self-update holds during the owner's own phone calls.** Its quiet check (`productionQuiet.js`) counted only ALICE's own DialX calls, so a push could restart ALICE in the middle of a call the owner placed or answered: the gap 2.25.662 closed for the deploy scripts. It now holds while DialX reports any call state but idle, and for 2 minutes after a call ends.
+
+## [2.25.665] - 2026-10-26
+
+### Fixed
+- **The phone's call state reaches the deploy gate.** DialX's `phone.call_state` events were dropped before reaching the call handling (only `call.*` and `voicemail.*` were passed on), so after the first hello the gate kept reading "idle" through a call.
+- **The call voice is honest about recording.** Asked "are these calls recorded?", it said it had no access to that, though the call opened with "This call is recorded". It now knows from the disclosure and says so (the owner gets the recording and transcript), and it never says anything about the owner it was not told (it had offered to say what he ate for lunch).
+- **Fewer interruptions on calls.** Turn detection eagerness is low: call 58 had 8 barge-ins in 10 replies.
+
 ## [2.25.664] - 2026-10-26
 
 ### Fixed

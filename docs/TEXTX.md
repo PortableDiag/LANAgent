@@ -66,7 +66,7 @@ conversations you shared with it.
 | "make a Work tab", "add Sam to it", "list my templates", "add a template…" | `manage_tabs`, `templates` (0.4.32) |
 | "edit my last text to Sam", "forward Sam's address to mom", "delete the spam conversation" | `edit_message`, `forward_message`, `delete_thread`, each confirmed on the phone (0.4.32) |
 | "block texts about car warranties", "what spam got caught" | `block_rules` (clearing all rules is confirmed; caught texts come back as untrusted) (0.4.32) |
-| "switch TextX to dark", "add this theme code", "any picture messages waiting?", "back up my texts" | `app_settings` (sensitive ones confirmed), `pending_mms`, `backup` (restore confirmed) (0.4.32) |
+| "switch TextX to dark", "add this theme code", "any picture messages waiting?", "back up my texts" | `app_settings` (sensitive ones confirmed), `pending_mms`, `backup` (restore confirmed) (0.4.32); "why is my message list empty?" → `backup` `message_store` (0.4.70) |
 
 The 0.4.32 tools are listed in the agent's `welcome`, which is what lets you switch them on: each is off
 until you turn its group on in TextX › the agent's setup screen. Messages show what a reply answers

@@ -894,7 +894,8 @@ export class TextXHub {
    * about it only when it needs them.
    */
   async onEvent(device, body) {
-    if (/^(call|voicemail)\./.test(String(body.kind || ''))) return isDialX(device) ? this.dialx.onEvent(device, body) : undefined;
+    // phone.call_state (DialX 0.7.75) was dropped here, so the deploy gate saw only the state from the last hello.
+    if (/^(call|voicemail|phone)\./.test(String(body.kind || ''))) return isDialX(device) ? this.dialx.onEvent(device, body) : undefined;
     if (/^notification\./.test(String(body.kind || ''))) return isNotifX(device) ? this.notifx.onEvent(device, body) : undefined;
     if (body.message?.from?.name && body.message.from.number) await this.learnContacts([body.message.from], 'a text');
     if (body.kind === 'mention' && body.message) return this.onMention(device, body);
@@ -1184,7 +1185,33 @@ export class TextXHub {
     }
   }
 
-  async autoReply(device, { threadId, title, recent, m, mode = 'text', notes = '', invite = null, person = null, about = '', group = false }) {
+  /**
+   * One auto-reply at a time per conversation. Wayne's "Big improvement" and "Yeah big time" 7 s apart got two replies
+   * composed at once (2026-10-26); the second was written to the owner ("<owner>, that sounds like…") and texted to
+   * Wayne. A message that arrived before the last reply was written is covered by it (that reply read the thread).
+   */
+  async autoReply(device, args) {
+    const key = `${device.id}:${args.threadId}`;
+    this.autoReplying = this.autoReplying || new Map();
+    this.autoRepliedAt = this.autoRepliedAt || new Map();
+    const arrived = this.now();
+    const prev = this.autoReplying.get(key);
+    const run = (async () => {
+      if (prev) await prev.catch(() => {});
+      const last = this.autoRepliedAt.get(key) || 0;
+      if (last > arrived) {
+        this.logger.info?.(`TextX: auto-reply in "${args.title}": this message is covered by the reply just sent`);
+        return true;
+      }
+      const r = await this.autoReplyOnce(device, args);
+      if (r) this.autoRepliedAt.set(key, this.now());
+      return r;
+    })();
+    this.autoReplying.set(key, run);
+    try { return await run; } finally { if (this.autoReplying.get(key) === run) this.autoReplying.delete(key); }
+  }
+
+  async autoReplyOnce(device, { threadId, title, recent, m, mode = 'text', notes = '', invite = null, person = null, about = '', group = false }) {
     // No caps of the agent's own: where the owner turned auto-reply on, the owner decides limits, and
     // TextX enforces any (operator, TextX 0.4.47, Trellis 4293 #153).
     if (!threadId) return false;
@@ -1261,6 +1288,14 @@ export class TextXHub {
     const forOwner = at >= 0 ? text.slice(at + OWNER_NOTE.length).trim() : '';
     if (at >= 0) text = text.slice(0, at).trim();
     if (!text || /^SKIP\b/i.test(text)) return false;
+    // A reply that talks to the owner is a note, never a text to someone else.
+    // Only with a real name: the fallback "the person whose phone this is" made every "The …" reply look addressed.
+    const ownerFirst = process.env.OWNER_NAME ? String(process.env.OWNER_NAME).trim().split(/\s+/)[0] : '';
+    if (ownerFirst && ownerFirst.length > 1 && new RegExp(`^(@?${ownerFirst.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})\\b[,:!\\s-]`, 'i').test(text) && !title.toLowerCase().includes(ownerFirst.toLowerCase())) {
+      this.logger.warn?.(`TextX: auto-reply in "${title}" was written to ${ownerFirst}; sent to them as a note, not as a text`);
+      await this.tellOwner(device, text, title, {});
+      return true;
+    }
     // An invitation gets its own notice (with buttons) from onInvite.
     if (forOwner && !invite) await this.tellOwner(device, forOwner, title, { urgent: true }); // someone asks for the owner
     // The conversation's reply mode, as the owner set it. Both agents may answer in one conversation

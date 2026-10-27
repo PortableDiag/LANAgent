@@ -298,9 +298,9 @@ export default class TextXPlugin extends BasePlugin {
       },
       {
         command: 'backup',
-        description: "TextX backups: status, save a backup now, or restore one (restoring asks the user)",
-        usage: 'backup({ op: "status" })  or  backup({ op: "save", pictures: true })',
-        examples: ['back up my texts', 'when was textx last backed up']
+        description: "TextX backups: status, save a backup now, restore one (restoring asks the user), or messageStore: what Android's message store holds and whether TextX can read it (why the conversation list is empty)",
+        usage: 'backup({ op: "status" })  or  backup({ op: "save", pictures: true })  or  backup({ op: "messageStore" })',
+        examples: ['back up my texts', 'when was textx last backed up', 'why is my textx message list empty', 'can textx see my messages']
       },
       {
         command: 'status',
@@ -1337,8 +1337,9 @@ export default class TextXPlugin extends BasePlugin {
   }
 
   async backup(data) {
-    const op = String(data.op || 'status').toLowerCase();
-    if (!['status', 'save', 'restore'].includes(op)) return { success: false, error: 'Use op status, save or restore.' };
+    let op = String(data.op || 'status').toLowerCase().replace(/[^a-z]/g, '');
+    if (op === 'messagestore') op = 'message_store';
+    if (!['status', 'save', 'restore', 'message_store'].includes(op)) return { success: false, error: 'Use op status, save, restore or messageStore.' };
     const args = { action: op };
     // The passphrase/key go to the phone only; never logged or repeated back.
     if (data.passphrase) args.passphrase = String(data.passphrase);
@@ -1351,6 +1352,17 @@ export default class TextXPlugin extends BasePlugin {
       const b = r.result || {};
       const list = b.backups || [];
       return { success: true, result: `Cloud backup ${b.cloud_configured ? 'is set up' : 'is not set up'}; ${list.length} backup(s)${list.length ? `, latest ${list[0].date || list[0].at || list[0].name || ''}` : ''}.` };
+    }
+    if (op === 'message_store') {
+      // TextX 0.4.70. An empty store usually means RCS chats left in Google Messages' own database.
+      const m = r.result || {};
+      const parts = [`Android's message store holds ${m.texts ?? 0} text(s) and ${m.picture_messages ?? 0} picture message(s) in ${m.conversations ?? 0} conversation(s)`];
+      parts.push(m.is_default ? 'TextX is the default SMS app' : 'TextX is not the default SMS app');
+      parts.push(m.can_read ? 'it can read them' : "it can't read them (SMS access is off)");
+      let text = `${parts.join('; ')}.`;
+      if (m.advice) text += ` ${m.advice}`;
+      else if (!m.texts && !m.picture_messages) text += ' An empty store usually means the chats are RCS ones kept in Google Messages; import an SMS Backup & Restore .xml from TextX › Backup & restore › Import messages.';
+      return { success: true, result: text };
     }
     return { success: true, result: `Backup ${r.result?.status || op}.` };
   }

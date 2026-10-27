@@ -35,6 +35,9 @@ async function identity() {
   return cryptoManager.identity || cryptoManager.loadOrCreateIdentity();
 }
 
+/** The running TextX service, or null when it was never started (never starts one). */
+export const textxIfStarted = () => service || null;
+
 export function getTextX(agent) {
   if (service) return service;
   const store = mongoStore();
