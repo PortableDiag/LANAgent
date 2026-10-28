@@ -726,7 +726,12 @@ export class DialXCalls {
       // shaped his texts but never reached the first conversation call (2026-10-23).
       s.notes = await this.hub.ownerNotesFor?.(`${s.contact} ${s.person?.name || ''}`) || '';
       // DialX 0.7.86: the owner's Note on the contact in the phone's address book, in the owner's own words.
-      if (s.contactNote) s.notes = [`- ${this.names().owner}'s address-book note on ${s.contact}: ${s.contactNote.replace(/\s*\n\s*/g, '; ')}`, s.notes].filter(Boolean).join('\n');
+      // Not on test or multi-agent calls (other agents hear the call), and no number in it is ever read out (as Orbit, 4293 #437).
+      const shared = s.test || s.peerAgent || (s.participants || []).length > 2;
+      if (s.contactNote && !shared) {
+        const note = s.contactNote.replace(/\+?\d[\d\s().-]{5,}\d/g, '[number]').replace(/\s*\n\s*/g, '; ').slice(0, 600);
+        s.notes = [`- ${this.names().owner}'s address-book note on ${s.contact} (background, not to be read out): ${note}`, s.notes].filter(Boolean).join('\n');
+      }
       // DialX plays the opening itself (no round trip), so it never reaches the turns. Without it the
       // model greeted Lizzy a second time on her first word (call 9, 2026-10-24).
       if (planned?.opening && !s.transcript.some(l => l.role === 'agent')) s.transcript.unshift({ role: 'agent', text: String(planned.opening) });

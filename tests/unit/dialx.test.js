@@ -677,7 +677,23 @@ test('the owner\'s address-book note on the contact reaches the call (DialX 0.7.
   await d.say(env('event', { kind: 'call.started', call_id: 'c1', contact: { name: 'Wayne', note: 'Old friend from the Navy.\nLoves Portal.' }, purpose: 'say hi' }));
   await d.say(heard('Hello?'));
   await tick(60);
-  assert.match(r.prompts[0], /address-book note on Wayne: Old friend from the Navy\.; Loves Portal\./);
+  assert.match(r.prompts[0], /address-book note on Wayne \(background, not to be read out\): Old friend from the Navy\.; Loves Portal\./);
+});
+
+test('a contact note hides numbers and stays out of test calls (as Orbit, 4293 #437)', async () => {
+  const r = rig();
+  const d = await phone(r);
+  await d.say(env('event', { kind: 'call.started', call_id: 'c1', contact: { name: 'Wayne', note: 'Gate code line 555-012-3456. Likes Portal.' }, purpose: 'say hi' }));
+  await d.say(heard('Hello?'));
+  await tick(60);
+  assert.match(r.prompts[0], /Gate code line \[number\]\. Likes Portal\./);
+  assert.doesNotMatch(r.prompts[0], /555-012-3456/);
+  const r2 = rig();
+  const d2 = await phone(r2);
+  await d2.say(env('event', { kind: 'call.started', call_id: 'c1', test: true, contact: { name: 'Wayne', note: 'Likes Portal.' }, purpose: 'say hi' }));
+  await d2.say(heard('Hello?'));
+  await tick(60);
+  assert.doesNotMatch(r2.prompts[0] || '', /address-book note/);
 });
 
 test('agent_silent before anything played (DialX silence clock ran through the ringing) is told as DialX cutting the call, with a retry offer', async () => {

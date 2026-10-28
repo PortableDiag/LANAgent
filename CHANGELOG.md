@@ -5,7 +5,7 @@ All notable changes to LANAgent will be documented in this file.
 ## [2.25.678] - 2026-10-28
 
 ### Added
-- **Calls read the owner's address-book note on the contact.** DialX 0.7.86 sends the Note on a contact as `contact.note`; it now joins the owner's notes for that person in every call prompt (placed, answered and realtime), as the owner's own words.
+- **Calls read the owner's address-book note on the contact.** DialX 0.7.86 sends the Note on a contact as `contact.note`; it now joins the owner's notes for that person in every call prompt (placed, answered and realtime), as the owner's own words. Numbers in it are hidden, and it is left out of test calls and calls with other agents on the line.
 
 ## [2.25.677] - 2026-10-28
 
