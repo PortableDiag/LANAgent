@@ -489,6 +489,32 @@ test('plugin: "Send Lizzy a gif of a sad robot" sends the GIF with no text (2026
   assert.deepEqual(sent.attachments.map(a => a.url), ['https://media.example/robot.gif']);
 });
 
+test('plugin: a GIF action redirected to a send still finds the recipient (2026-10-28 live test)', async () => {
+  const { default: TextXPlugin } = await import('../../src/api/plugins/textx.js');
+  const r = rig({ waits: { read: 500, readExpiry: 1000, confirm: 40, confirmExpiry: 2000, late: 10 } });
+  const p = await pairedPhone(r, { tools: ['send_sms', 'contacts_lookup', 'gif_search'] });
+  r.agent.providerManager.generateResponse = async (q) => ({ content: /^Extract the arguments/.test(q) ? '{"to":"5599402727","gifSearch":"happy robot"}' : 'NONE' });
+  const plugin = new TextXPlugin(r.agent);
+  Object.defineProperty(plugin, 'svc', { value: { hub: r.hub } });
+  let sent = null;
+  const answered = new Set();
+  const phone = setInterval(async () => {
+    for (const e of p.sent.filter(x => x.type === 'tool_call' && !answered.has(x.body.call_id))) {
+      answered.add(e.body.call_id);
+      if (e.body.name === 'contacts_lookup') await p.say(env('tool_result', { call_id: e.body.call_id, ok: true, result: [] }));
+      if (e.body.name === 'gif_search') await p.say(env('tool_result', { call_id: e.body.call_id, ok: true, result: [{ id: 'g1', title: 'happy robot', sizes: [{ url: 'https://media.example/happy.gif', bytes: 1000 }] }] }));
+      if (e.body.name === 'send_sms') { sent = e.body.args; await p.say(env('tool_result', { call_id: e.body.call_id, ok: true, result: { status: 'sent' } })); }
+    }
+  }, 5);
+  const res = await textxRequest.run({ deviceId: p.device.id }, () => plugin.execute({ action: 'gif', query: 'happy robot', _context: { originalInput: 'Text 5599402727 a gif of a happy robot' } }));
+  for (let i = 0; i < 30 && !sent; i++) await tick();
+  clearInterval(phone);
+  assert.equal(res.success, true, JSON.stringify(res));
+  assert.ok(sent, 'send_sms reached the phone');
+  assert.deepEqual(sent.attachments.map(a => a.url), ['https://media.example/happy.gif']);
+  assert.equal(sent.text, undefined);
+});
+
 test('plugin: a voice note request is spoken and sent as audio, with no text (2026-10-27)', async () => {
   const { default: TextXPlugin, wantsVoiceNote } = await import('../../src/api/plugins/textx.js');
   assert.equal(wantsVoiceNote('Send Adam V a voice note audio text message reminding him not to blab about Mars'), true);
@@ -541,6 +567,7 @@ test('chain: a voice note text is one textx step; a chained request still splits
   assert.equal(isOneVoiceText('Alice, text Wayne a voice message saying the game moved'), true);
   assert.equal(isOneVoiceText('Send Adam V a voice note reminding him, then call Wayne'), false);
   assert.equal(isOneVoiceText('text mom that I am late'), false);
+  assert.equal(isOneVoiceText('Send 5599402727 a voice note saying this is a test'), true);
 });
 
 test('plugin: a conversation not shared with the agent is refused with how to share it', async () => {

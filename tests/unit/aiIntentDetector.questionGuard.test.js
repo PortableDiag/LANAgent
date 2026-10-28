@@ -20,4 +20,7 @@ test('a voice note to someone is hinted to textx send (2026-10-28: it asked a cl
   d.getDynamicIntents = () => ({ 2033: { plugin: 'textx', action: 'send' }, 2034: { plugin: 'textx', action: 'status' } });
   assert.equal(d._regexIntentHint('Send Adam V a voice note audio text message reminding him not to blab about Mars'), 2033);
   assert.equal(d._regexIntentHint('tell Sam I got his voice message'), null);
+  // 2026-10-28 live test: no "text"/"message" in it, a number for the recipient; it ran voice.test.
+  assert.equal(d._regexIntentHint('Send 5599402727 a voice note saying this is a test of ALICE voice notes'), 2033);
+  assert.equal(d._regexIntentHint('send me a voice note of that'), null, 'a voice note for the user is not a text');
 });

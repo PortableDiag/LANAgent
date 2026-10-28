@@ -61,6 +61,12 @@ export function wantsVoiceNote(request) {
   return VOICE_NOTE.test(String(request || '').replace(/"[^"]*"|“[^”]*”/g, ' '));
 }
 
+/** A voice note for someone else ("send Wayne a voice note…"), not one for the user ("send me a voice note"). */
+export function asksToSendVoiceNote(input) {
+  const s = String(input || '');
+  return wantsVoiceNote(s) && !/\b(?:send|make|record|give|leave)\s+me\b/i.test(s) && !WATCH_WORDS.test(s);
+}
+
 export function asksToSendText(input) {
   const s = String(input || '');
   return SEND_WORDS.test(s) && !WATCH_WORDS.test(s);
@@ -473,7 +479,9 @@ export default class TextXPlugin extends BasePlugin {
   }
 
   async _extractArgs(action, data) {
-    const request = String(data.originalInput || data.query || '').trim();
+    // A redirected action ("gif" → send) carries the request only in _context: without it nothing was
+    // extracted and "Text 5599402727 a gif of a happy robot" asked who to send it to (2026-10-28).
+    const request = String(data.originalInput || data._context?.originalInput || data.query || '').trim();
     for (const k of ['needsParameterExtraction', 'originalInput']) delete data[k];
     if (action !== 'search') delete data.query;
     const cmd = this.commands.find(c => c.command === action);

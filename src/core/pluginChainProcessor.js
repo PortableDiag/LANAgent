@@ -1,7 +1,7 @@
 import { logger } from '../utils/logger.js';
 import { StructuredOutputParser } from '../services/outputParser.js';
 import { schemas } from '../services/outputSchemas.js';
-import { asksToSendText, wantsVoiceNote } from '../api/plugins/textx.js';
+import { asksToSendVoiceNote } from '../api/plugins/textx.js';
 
 /**
  * Plugin Chain Processor
@@ -41,7 +41,7 @@ export function isOnePhoneCall(input) {
 export function isOneVoiceText(input) {
   const t = stripAgentAddress(input);
   const chained = /\b(then|after that|afterwards|and also)\b|\band\s+(call|email|e-mail|search|schedule|book|post|tweet)\b/i.test(t);
-  return wantsVoiceNote(t) && asksToSendText(t) && !chained;
+  return asksToSendVoiceNote(t) && !chained;
 }
 
 /** Actions a plugin's execute() dispatches that are not in its command list. */

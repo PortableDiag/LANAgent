@@ -2,7 +2,7 @@ import { logger } from '../utils/logger.js';
 import { StructuredOutputParser, JSONOutputParser } from '../services/outputParser.js';
 import { nowInZone, resolveRequestTime } from '../utils/wallClock.js';
 import { schemas } from '../services/outputSchemas.js';
-import { asksToSendText, wantsVoiceNote } from '../api/plugins/textx.js';
+import { asksToSendVoiceNote } from '../api/plugins/textx.js';
 
 /**
  * A question picked as an action that changes something, with no word asking for a change:
@@ -1809,7 +1809,7 @@ export class AIIntentDetector {
 
     // "Send Adam V a voice note … reminding him…" was answered with a clarifying question (2026-10-28).
     // A voice note to someone is a textx send, which speaks it.
-    if (this.agent?.apiManager?.apis?.get?.('textx')?.enabled && wantsVoiceNote(text) && asksToSendText(text)) {
+    if (this.agent?.apiManager?.apis?.get?.('textx')?.enabled && asksToSendVoiceNote(text)) {
       for (const [id, intent] of Object.entries(this.getDynamicIntents())) {
         if (intent.plugin === 'textx' && intent.action === 'send') return parseInt(id);
       }

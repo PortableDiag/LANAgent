@@ -3,6 +3,7 @@ import { embeddingService } from '../services/embeddingService.js';
 import { vectorStore } from '../services/vectorStore.js';
 import NodeCache from 'node-cache';
 import { retryOperation } from '../utils/retryUtils.js';
+import { asksToSendVoiceNote } from '../api/plugins/textx.js';
 
 /**
  * Vector-based intent detection using embeddings and similarity search
@@ -166,6 +167,12 @@ export class VectorIntentDetector {
         return null;
       }
       
+      // "Send 5599402727 a voice note saying…" matched voice.test at 0.61 and only made speech; nothing was
+      // sent (2026-10-28). A voice note to someone is a text send: the AI classifier routes it to textx.
+      if (metadata.plugin !== 'textx' && asksToSendVoiceNote(input)) {
+        logger.info(`A voice note to someone matched ${metadata.plugin}.${metadata.action}; falling back to AI (a text send)`);
+        return null;
+      }
       logger.info(`Vector match found: ${metadata.name} (similarity: ${similarity})`);
 
       // Override: song requests without "lyrics" should route to ytdlp, not lyrics plugin

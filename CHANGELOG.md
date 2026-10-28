@@ -2,6 +2,17 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.680] - 2026-10-28
+
+### Added
+- **Realtime calls come back from a dropped connection.** DialX 0.7.87 gives a group, joined or agent-to-agent call 20 seconds to reconnect after the realtime socket drops. ALICE now sends a fresh session within that window, carrying the conversation so far and told not to greet again, up to 3 times a call.
+
+## [2.25.679] - 2026-10-28
+
+### Fixed
+- **"Send <number> a voice note saying …" sends it.** A live test matched it to the voice test command, which made the speech and sent nothing. A voice note for someone else now skips that matcher and goes to the text send, even when the request never says "text" or "message".
+- **"Text <number> a gif of …" sends the GIF.** When a GIF search or another texting action is turned into a send, the request now goes with it; without it no recipient was found and ALICE asked who to send it to.
+
 ## [2.25.678] - 2026-10-28
 
 ### Added
