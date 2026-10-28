@@ -607,6 +607,7 @@ export class DialXCalls {
     const s = this.session(device, id, body);
     if (body.contact?.name) s.contact = body.contact.name;
     if (body.contact?.number) s.number = String(body.contact.number); // DialX on Trellis 4293 #401: answered calls too
+    if (body.contact?.note) s.contactNote = String(body.contact.note).slice(0, 1000); // DialX 0.7.86 (4293 #434)
     if (body.purpose) s.purpose = String(body.purpose);
     // DialX 0.7.15: the agent answers for the owner. DialX has already spoken its greeting
     // (body.opening), so it opens the transcript; `rules` are DialX's message-taking rules.
@@ -663,6 +664,7 @@ export class DialXCalls {
     const s = this.session(device, id, body);
     if (body.contact?.name) s.contact = body.contact.name;
     if (body.contact?.number) s.number = String(body.contact.number);
+    if (body.contact?.note) s.contactNote = String(body.contact.note).slice(0, 1000);
     if (body.purpose) s.purpose = String(body.purpose);
     // DialX 0.7.47: an incoming call ringing for the owner. The session starts now and the model greets at pickup.
     if (body.direction === 'incoming') {
@@ -723,6 +725,8 @@ export class DialXCalls {
       // How the owner wants this person talked to ("an Aperture Science demeanor with Wayne"): it
       // shaped his texts but never reached the first conversation call (2026-10-23).
       s.notes = await this.hub.ownerNotesFor?.(`${s.contact} ${s.person?.name || ''}`) || '';
+      // DialX 0.7.86: the owner's Note on the contact in the phone's address book, in the owner's own words.
+      if (s.contactNote) s.notes = [`- ${this.names().owner}'s address-book note on ${s.contact}: ${s.contactNote.replace(/\s*\n\s*/g, '; ')}`, s.notes].filter(Boolean).join('\n');
       // DialX plays the opening itself (no round trip), so it never reaches the turns. Without it the
       // model greeted Lizzy a second time on her first word (call 9, 2026-10-24).
       if (planned?.opening && !s.transcript.some(l => l.role === 'agent')) s.transcript.unshift({ role: 'agent', text: String(planned.opening) });

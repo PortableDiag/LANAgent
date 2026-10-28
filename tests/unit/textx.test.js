@@ -489,6 +489,60 @@ test('plugin: "Send Lizzy a gif of a sad robot" sends the GIF with no text (2026
   assert.deepEqual(sent.attachments.map(a => a.url), ['https://media.example/robot.gif']);
 });
 
+test('plugin: a voice note request is spoken and sent as audio, with no text (2026-10-27)', async () => {
+  const { default: TextXPlugin, wantsVoiceNote } = await import('../../src/api/plugins/textx.js');
+  assert.equal(wantsVoiceNote('Send Adam V a voice note audio text message reminding him not to blab about Mars'), true);
+  assert.equal(wantsVoiceNote('text Lizzy by voice that dinner is ready'), true);
+  assert.equal(wantsVoiceNote('tell Sam I got his voice message'), false, 'his voice message is not one to send');
+  assert.equal(wantsVoiceNote('Text mom "send me a voice note"'), false, 'quoted words');
+  assert.equal(wantsVoiceNote('text mom that I am late'), false);
+  const r = rig({ waits: { read: 500, readExpiry: 1000, confirm: 40, confirmExpiry: 2000, late: 10 } });
+  const p = await pairedPhone(r, { tools: ['send_sms', 'contacts_lookup'] });
+  r.agent.providerManager.generateResponse = async () => ({ content: "Don't blab about Mars." }); // the fact check keeps the draft
+  const spoke = [];
+  r.agent.ttsService = { generateSpeech: async (text) => { spoke.push(text); return { buffer: Buffer.from('mp3') }; } };
+  r.hub.encodeVoice = async () => Buffer.from('m4a-audio');
+  const plugin = new TextXPlugin(r.agent);
+  Object.defineProperty(plugin, 'svc', { value: { hub: r.hub } });
+  let sent = null;
+  const answered = new Set();
+  const phone = setInterval(async () => {
+    for (const e of p.sent.filter(x => x.type === 'tool_call' && !answered.has(x.body.call_id))) {
+      answered.add(e.body.call_id);
+      if (e.body.name === 'contacts_lookup') await p.say(env('tool_result', { call_id: e.body.call_id, ok: true, result: [{ name: 'Adam V', numbers: ['+15550122'] }] }));
+      if (e.body.name === 'send_sms') { sent = e.body.args; await p.say(env('tool_result', { call_id: e.body.call_id, ok: true, result: { status: 'sent' } })); }
+    }
+  }, 5);
+  const res = await textxRequest.run({ deviceId: p.device.id }, () => plugin.execute({ action: 'send', to: 'Adam V', text: "Don't blab about Mars.",
+    _context: { originalInput: 'Send Adam V a voice note audio text message reminding him not to blab about Mars' } }));
+  for (let i = 0; i < 30 && !sent; i++) await tick();
+  clearInterval(phone);
+  assert.equal(res.success, true, JSON.stringify(res));
+  assert.deepEqual(spoke, ["Don't blab about Mars."]);
+  assert.equal(sent.text, undefined, 'a voice note goes without text');
+  assert.equal(sent.attachments.length, 1);
+  assert.equal(sent.attachments[0].mime, 'audio/mp4');
+  assert.equal(Buffer.from(sent.attachments[0].data_b64, 'base64').toString(), 'm4a-audio');
+  assert.match(res.result, /voice note/);
+});
+
+test('plugin: the style pass never adds what the draft does not say (Adam V, 2026-10-27)', async () => {
+  const { default: TextXPlugin } = await import('../../src/api/plugins/textx.js');
+  const prompts = [];
+  const plugin = new TextXPlugin({ config: {}, providerManager: { generateResponse: async (q) => { prompts.push(q); return { content: "Don't blab about Mars on your rides or in your writing. It's a secret announcement, so keep it under wraps for now, okay?" }; } } });
+  Object.defineProperty(plugin, 'svc', { value: { hub: { ownerNotesFor: async () => '- Adam V has talked about biking with Alice.' } } });
+  assert.equal(await plugin.inOwnersStyle("Don't blab about Mars.", 'Adam V', 'remind Adam V not to blab about Mars'), "Don't blab about Mars.");
+  assert.match(prompts[0], /background, never content/);
+});
+
+test('chain: a voice note text is one textx step; a chained request still splits', async () => {
+  const { isOneVoiceText } = await import('../../src/core/pluginChainProcessor.js');
+  assert.equal(isOneVoiceText('Send Adam V a voice note audio text message reminding him not to blab about Mars'), true);
+  assert.equal(isOneVoiceText('Alice, text Wayne a voice message saying the game moved'), true);
+  assert.equal(isOneVoiceText('Send Adam V a voice note reminding him, then call Wayne'), false);
+  assert.equal(isOneVoiceText('text mom that I am late'), false);
+});
+
 test('plugin: a conversation not shared with the agent is refused with how to share it', async () => {
   const { default: TextXPlugin } = await import('../../src/api/plugins/textx.js');
   const r = rig({ waits: { read: 300, readExpiry: 600, late: 10 } });

@@ -2,6 +2,19 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.678] - 2026-10-28
+
+### Added
+- **Calls read the owner's address-book note on the contact.** DialX 0.7.86 sends the Note on a contact as `contact.note`; it now joins the owner's notes for that person in every call prompt (placed, answered and realtime), as the owner's own words.
+
+## [2.25.677] - 2026-10-28
+
+### Fixed
+- **"Send X a voice note …" sends a voice note.** The request was split into "speak it" and "send it", the audio never reached the send, and a resend went out as plain text. A text send that asks for a voice note, voice message or audio message now speaks the message in the agent's voice and sends it as audio, with no text beside it. A resend from the conversation keeps the voice-note ask, and the planner keeps it as one step. The AI classifier had answered it with a clarifying question; it now goes straight to the text send.
+- **A text ALICE words no longer gains extra content.** The pass that applies the owner's notes for a person also read stored facts about them ("has talked about biking") as instructions, and "Don't blab about Mars" went out with "on your rides or in your writing" added. It now applies only how-to-write instructions, adds nothing the draft does not say, and keeps the draft if the rewrite grows.
+- **A question never runs an action that changes something.** "Hey can you see my phone?" was classified as a git commit. A question the AI classifier maps to a change, with no word asking for one, is now answered instead.
+- **Phone status names each app and phone.** It listed every tool and no app, so a connected NotifX link on the second phone was read back as missing. Each line now says the app, the phone, the version, connected or last seen, and a tool count.
+
 ## [2.25.676] - 2026-10-28
 
 ### Fixed

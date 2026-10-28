@@ -2,7 +2,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import { BasePlugin } from '../core/basePlugin.js';
 import { nowInZone, resolveRequestTime } from '../../utils/wallClock.js';
 import { getTextX } from '../../services/textx/index.js';
-import { textxRequest, untrusted, formatMessage, encodeGif } from '../../services/textx/textxHub.js';
+import { textxRequest, untrusted, formatMessage, encodeGif, encodeM4a } from '../../services/textx/textxHub.js';
 
 /**
  * Texting through the user's phone, via the TextX SMS app (docs/TEXTX.md).
@@ -48,6 +48,17 @@ export function mediaAttachments(data = {}) {
   const urls = [...new Set(raw.map(v => v.trim()).filter(v => /^https:\/\/\S+$/i.test(v)))].slice(0, 5);
   const name = (url) => { try { return decodeURIComponent(new URL(url).pathname.split('/').pop()) || 'media'; } catch { return 'media'; } };
   return urls.map(url => ({ name: name(url), url }));
+}
+
+/**
+ * "Send Adam V a voice note audio text message reminding him…" went out as plain text: a chain spoke
+ * it, then failed to attach it, and the retry sent text only (2026-10-27). A voice note is the message
+ * spoken in the agent's voice and sent as audio. Quoted words and someone's own voice note ("tell Sam
+ * I got his voice message") don't count.
+ */
+const VOICE_NOTE = /\b(?:send|text|shoot|leave|drop|record|make|message)\b\s+(?:(?!(?:his|her|their|my|our|its|the|that|this)\b)\S+\s+){0,4}?(?:a\s+|an\s+)?(?:(?:short|quick|little)\s+)?(?:voice|audio)[\s-]?(?:note|message|memo|text|clip|recording|msg)s?\b|\b(?:by|as an?|as)\s+(?:voice|audio)(?:[\s-]?(?:note|message|memo|clip))?\b|\bin your (?:own )?voice\b/i;
+export function wantsVoiceNote(request) {
+  return VOICE_NOTE.test(String(request || '').replace(/"[^"]*"|“[^”]*”/g, ' '));
 }
 
 export function asksToSendText(input) {
@@ -143,7 +154,7 @@ export default class TextXPlugin extends BasePlugin {
       {
         command: 'send',
         description: "Send an SMS from the user's phone. The phone shows the text and the user taps Send; nothing goes out without that tap. Optional media: https links to pictures, GIFs or video to send with it (MMS)",
-        usage: 'send({ to: "Mom", text: "Running 10 minutes late", media: ["https://… optional GIF or picture link"], gifSearch: "optional words to find a GIF to attach", replyTo: "optional words from the message this answers", individually: false })',
+        usage: 'send({ to: "Mom", text: "Running 10 minutes late", media: ["https://… optional GIF or picture link"], gifSearch: "optional words to find a GIF to attach", voice: "true to send it as a voice note in your voice", replyTo: "optional words from the message this answers", individually: false })',
         hint: messageTextRule(),
         examples: ['text mom that I am running late', 'remind Wayne via text message that the meeting moved to 6', 'send a text to 555-0100 saying I am outside', 'reply to Sam by SMS: sounds good', 'text the plumber that tomorrow works']
       },
@@ -574,9 +585,10 @@ export default class TextXPlugin extends BasePlugin {
         'They want a text message sent. Work out from the conversation who it goes to (a name or number exactly as it ' +
         'appears) and the exact message text. If they mean an earlier message ("the same thing"), copy that message body ' +
         'word for word: the body only, no subject line, no email headers, no JSON. If they ask you to ask or tell that ' +
-        'person something the conversation spells out ("ask him if he got it"), write that short message yourself. ' +
-        'Answer one JSON object ' +
-        '{"to": string|null, "text": string|null}, null for anything the conversation does not settle.',
+        'person something the conversation spells out ("ask him if he got it"), write that short message yourself, saying ' +
+        'only what the conversation asks for: no detail, reason or aside of your own. "voice" is true when the message ' +
+        'they want is a voice note or audio message. Answer one JSON object ' +
+        '{"to": string|null, "text": string|null, "voice": boolean}, null for anything the conversation does not settle.',
         { maxTokens: 800, temperature: 0 });
       const raw = String(res?.content || '');
       got = JSON.parse(raw.slice(raw.indexOf('{'), raw.lastIndexOf('}') + 1)) || {};
@@ -587,7 +599,7 @@ export default class TextXPlugin extends BasePlugin {
     const newText = BACK_REFERENCE.test(String(text || '').trim()) || unsaid ? got.text : text;
     if (!newTo || PRONOUN.test(String(newTo))) return { error: 'Who should I text? Give me their name or number.' };
     if (!newText || BACK_REFERENCE.test(String(newText))) return { error: 'What should the text say?' };
-    return { to: newTo, text: String(newText).trim() };
+    return { to: newTo, text: String(newText).trim(), ...(got.voice === true ? { voice: true } : {}) };
   }
 
   async send(data, scheduled = false) {
@@ -596,7 +608,7 @@ export default class TextXPlugin extends BasePlugin {
     // Words taken from the conversation ("send him the same thing") are the owner's own: not checked.
     const fromChat = keepIndent(ref.text) !== asGiven;
     if (ref.error) return { success: false, error: ref.error };
-    data = { ...data, to: ref.to };
+    data = { ...data, to: ref.to, ...(ref.voice ? { voice: true } : {}) };
     let text = keepIndent(ref.text);
     const hasMedia = !!(data.gifSearch || (Array.isArray(data.media) ? data.media.length : data.media) || data._context?.attachedFile);
     if (!text && !hasMedia) return { success: false, error: 'What should the text say?' };
@@ -635,11 +647,21 @@ export default class TextXPlugin extends BasePlugin {
     const found = data.gifSearch ? await this.findGif(data.gifSearch) : null;
     if (found?.error) return { success: false, error: found.error };
     const files = [...(this.fileAttachment(file) || []), ...mediaAttachments(data), ...(found ? [found.attachment] : [])];
-    const attachments = files.length ? files : null;
     text = await this.inOwnersStyle(text, data.to || data.thread, request, target);
     const checked = fromChat || reworded ? { text } : await this.grounded(text, request, data.to || data.thread);
     if (checked.error) return { success: false, error: checked.error };
     text = checked.text;
+    // A voice note is that text spoken, sent as audio with no text beside it.
+    const spoken = !file?.base64 && (data.voice === true || data.voice === 'true' || wantsVoiceNote(request));
+    if (spoken) {
+      if (!text) return { success: false, error: 'What should the voice note say?' };
+      const note = await this.voiceNote(text);
+      if (note.error) return { success: false, error: `I couldn't make the voice note (${note.error}), so nothing was sent.` };
+      files.push(note.attachment);
+    }
+    const attachments = files.length ? files : null;
+    const said = text;
+    if (spoken) text = '';
     const args = scheduled
       ? { ...target, text, at: new Date(data.at).toISOString(), ...(data.repeat ? { repeat: data.repeat } : {}), ...(data.interval ? { interval: data.interval } : {}), ...(data.endAfter ? { end_after: data.endAfter } : {}), ...(attachments ? { attachments } : {}) }
       : { ...target, text, ...(attachments ? { attachments } : {}), ...(replyTo ? { reply_to: replyTo } : {}),
@@ -662,11 +684,12 @@ export default class TextXPlugin extends BasePlugin {
     if (!scheduled && r.result?.status === 'sent' && target.to?.length) {
       for (const number of target.to) {
         const person = await this.svc.hub.smsPerson?.({ name: target.to.length === 1 ? String(data.to || '') : '', number }).catch(() => null);
-        if (person) await this.svc.hub.rememberSms(person, 'owner', text).catch(() => {});
+        if (person) await this.svc.hub.rememberSms(person, 'owner', spoken ? `(voice note) ${said}` : text).catch(() => {});
       }
     }
     const done = this.outcomeText(r.result, scheduled);
-    const media = attachments ? (attachments.length === 1 ? (found ? 'a GIF' : 'a picture') : `${attachments.length} pictures`) : '';
+    const media = spoken ? 'a voice note' : attachments ? (attachments.length === 1 ? (found ? 'a GIF' : 'a picture') : `${attachments.length} pictures`) : '';
+    if (spoken) return { success: true, result: done === 'Sent.' && data.to ? `Sent ${data.to} a voice note saying: "${said}"` : `${done} The voice note says: "${said}"` };
     if (!(done === 'Sent.' && data.to)) return { success: true, result: done };
     return { success: true, result: text ? `Sent to ${data.to}${media ? ` with ${media}` : ''}: "${text}"` : `Sent ${data.to} ${media}.` };
   }
@@ -882,7 +905,7 @@ export default class TextXPlugin extends BasePlugin {
         `${process.env.OWNER_NAME || 'The user'} asked you: "${req.slice(0, 600)}"
 ` +
         `Write the text message ${who ? `${who} ` : 'the recipient '}will read, in your own words, addressing them directly. ` +
-        'Short and natural, never a copy of the request. Keep every number, code, time, date, name, address and link exactly as given. ' +
+        'Short and natural, never a copy of the request. Say only what the request asks; add no detail, reason or aside of your own. Keep every number, code, time, date, name, address and link exactly as given. ' +
         'If the request only asks to send a GIF, picture or video, answer exactly NONE. ' +
         'Answer with the message only.', { maxTokens: 200, temperature: 0.6 });
       const out = String(res?.content || '').trim().replace(/^"|"$/g, '');
@@ -912,9 +935,18 @@ export default class TextXPlugin extends BasePlugin {
       const res = await pm.generateResponse(
         `${process.env.OWNER_NAME || 'The user'} asked you to text ${name}: "${request.slice(0, 600)}"\n` +
         `Your draft: ${text}\n${process.env.OWNER_NAME || 'The user'}'s own instructions for talking with ${name}:\n${notes}\n\n` +
-        'Rewrite the draft so it follows those instructions and does what was asked, keeping its meaning and about its length. ' +
-        'Answer with the text only.', { maxTokens: 300, temperature: 0.6 });
+        // Adam V's draft "Don't blab about Mars" went out as "…on your rides or in your writing", from
+        // stored facts ("Adam has talked about biking") read as instructions (2026-10-27).
+        'Apply only the lines that tell you HOW to write to them (a tone, a persona, a way of speaking). Other lines are ' +
+        'things known about them: background, never content. Never add a fact, topic, detail, reason, aside or sentence ' +
+        'the draft does not already say. If no line says how to write to them, answer the draft unchanged. ' +
+        'Answer with the text only.', { maxTokens: 300, temperature: 0.4 });
       const out = String(res?.content || '').trim().replace(/^"|"$/g, '');
+      // A tone pass keeps about the draft's length; a much longer answer added something.
+      if (out.length > text.length * 1.6 + 40) {
+        this.logger.info(`textx send: style pass grew the text (${text.length} → ${out.length} chars); keeping the draft`);
+        return text;
+      }
       return out && out.length <= 1000 ? out : text;
     } catch (e) {
       this.logger.warn(`textx send: style pass failed: ${e.message}`);
@@ -995,6 +1027,24 @@ export default class TextXPlugin extends BasePlugin {
       this.logger.warn(`textx send: recipient lookup failed: ${e.message}`);
     }
     return { name, notes };
+  }
+
+  /** The text in the agent's voice as a TextX audio attachment (m4a, as voice replies use), or { error }. */
+  async voiceNote(text) {
+    const tts = this.agent?.ttsService;
+    if (!tts?.generateSpeech) return { error: 'no voice is set up on this agent' };
+    try {
+      // source 'voice' keeps it off the server's own speaker.
+      const speech = await tts.generateSpeech(text, { source: 'voice', format: 'mp3' });
+      if (!speech?.buffer?.length) return { error: 'the voice service returned no audio' };
+      const encode = this.svc?.hub?.encodeVoice || encodeM4a;
+      const audio = await encode(speech.buffer);
+      if (audio.length > 5 * 1024 * 1024) return { error: 'the audio is over the 5 MB MMS limit' };
+      return { attachment: { name: 'voice-note.m4a', mime: 'audio/mp4', data_b64: audio.toString('base64') } };
+    } catch (e) {
+      this.logger.warn(`textx send: voice note failed: ${e.message}`);
+      return { error: e.message };
+    }
   }
 
   fileAttachment(file) {
@@ -1432,8 +1482,15 @@ export default class TextXPlugin extends BasePlugin {
     if (!s.devices.length) {
       return { success: true, result: 'No phone is paired. Pair one from the dashboard: Settings › TextX › Pair a phone, then scan the QR in TextX.' };
     }
-    const lines = s.devices.map(d => `- ${d.name}: ${d.connected ? 'connected' : d.bound ? `last seen ${d.lastSeenAt ? new Date(d.lastSeenAt).toISOString() : 'never'}` : 'not scanned yet'}; allows ${d.tools.length ? d.tools.join(', ') : 'chat only'}`);
-    const relay = s.relay.enabled === false ? 'relay off' : s.relay.connected ? `relay up (${s.relay.base})` : 'relay connecting';
-    return { success: true, result: `TextX (${relay}):\n${lines.join('\n')}` };
+    // One line per app link, named by app and phone. The old dump listed every tool and no app, and
+    // "OnePlus12: connected; allows notifx.list_apps…" was read back as "nothing from the OnePlus 12" (2026-10-27).
+    const label = (d) => d.app === 'dialx' ? 'DialX' : d.app === 'notifx' ? 'NotifX' : /lanagent/i.test(d.client || d.name || '') ? 'LANAgent app' : 'TextX';
+    const when = (t) => new Date(t).toLocaleString('en-US', { timeZone: process.env.TZ || undefined, month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+    const lines = s.devices.map(d => `- ${label(d)} on ${d.phone || d.name}${d.appVersion ? ` (${d.appVersion})` : ''}: ` +
+      `${d.connected ? 'connected' : d.bound ? `not connected, last seen ${d.lastSeenAt ? when(d.lastSeenAt) : 'never'}` : 'paired, never connected'}` +
+      `; ${d.tools.length ? `${d.tools.length} tools` : 'chat only'}`);
+    const relay = s.relay.enabled === false ? 'relay off' : s.relay.connected ? 'relay up' : 'relay connecting';
+    return { success: true, result: `Phone links (${relay}):\n${lines.join('\n')}\n` +
+      'A link handed to PhoneAPI shows as the app it carries (same name and tools).' };
   }
 }

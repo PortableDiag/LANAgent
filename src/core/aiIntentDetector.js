@@ -2,6 +2,23 @@ import { logger } from '../utils/logger.js';
 import { StructuredOutputParser, JSONOutputParser } from '../services/outputParser.js';
 import { nowInZone, resolveRequestTime } from '../utils/wallClock.js';
 import { schemas } from '../services/outputSchemas.js';
+import { asksToSendText, wantsVoiceNote } from '../api/plugins/textx.js';
+
+/**
+ * A question picked as an action that changes something, with no word asking for a change:
+ * "Hey can you see my phone?" ran git.commit (2026-10-27). The vector path needs 0.7 for such
+ * actions; the classifier's pick has no score, so a question it maps to a change goes to the
+ * general path, which can still use tools.
+ */
+const CHANGE_ACTION = /^(commit|push|pull|merge|create|add|connect|set|update|move|append|post|send|write|make|draw|generate|upload|schedule|reply|react|edit|delete|remove|restart|redeploy|shutdown|stop|block|unblock|share|unshare|install|uninstall|deploy|transfer|swap|buy|sell|stake|unstake)/i;
+const QUESTION = /^(?:(?:hey|hi|hello|ok|okay|so|um|yo)\b[,!. ]*)?(?:\w+,\s*)?(?:can|could|would|will|do|does|did|is|are|was|were|have|has|what|which|who|where|when|how|why|any)\b/i;
+const ASKS_CHANGE = /\b(commit|push|merge|create|add|make|set|change|update|move|post|send|text|message|write|draw|generate|upload|schedule|reply|react|edit|delete|remove|restart|redeploy|shut ?down|stop|block|unblock|share|install|deploy|transfer|swap|buy|sell|stake|call|email|turn|switch|start|run|book|pay)\b/i;
+export function questionPickedAsChange(text, intent) {
+  const action = String(intent?.action || intent?.name || '');
+  if (!CHANGE_ACTION.test(action)) return false;
+  const t = String(text || '').trim();
+  return QUESTION.test(t) && !ASKS_CHANGE.test(t);
+}
 
 export class AIIntentDetector {
   constructor(agent) {
@@ -1790,6 +1807,14 @@ export class AIIntentDetector {
       }
     }
 
+    // "Send Adam V a voice note … reminding him…" was answered with a clarifying question (2026-10-28).
+    // A voice note to someone is a textx send, which speaks it.
+    if (this.agent?.apiManager?.apis?.get?.('textx')?.enabled && wantsVoiceNote(text) && asksToSendText(text)) {
+      for (const [id, intent] of Object.entries(this.getDynamicIntents())) {
+        if (intent.plugin === 'textx' && intent.action === 'send') return parseInt(id);
+      }
+    }
+
     // Twitter/X URL: find the dynamic intent ID for twitter download
     if (/https?:\/\/(?:www\.)?(?:twitter\.com|x\.com)\/\w+\/status\/\d+/i.test(text)) {
       const dynamicIntents = this.getDynamicIntents();
@@ -3514,6 +3539,10 @@ Respond in JSON format:
       
       // Get the selected intent
       const intent = this.getAllIntents()[intentId];
+      if (intent && questionPickedAsChange(text, intent)) {
+        logger.info(`AI picked ${intent.plugin || 'core'}.${intent.action || intent.name} for a question that asks for no change; answering it instead`);
+        return { detected: false, intent: 'general', original: text };
+      }
       
       // If this is a Govee plugin intent, use two-step detection for better accuracy
       if (intent && intent.plugin === 'govee') {

@@ -671,6 +671,15 @@ test('the owner\'s notes on how to talk with them reach the call, and the prompt
   assert.match(r.prompts[0], /Never repeat a line or a question/);
 });
 
+test('the owner\'s address-book note on the contact reaches the call (DialX 0.7.86)', async () => {
+  const r = rig();
+  const d = await phone(r);
+  await d.say(env('event', { kind: 'call.started', call_id: 'c1', contact: { name: 'Wayne', note: 'Old friend from the Navy.\nLoves Portal.' }, purpose: 'say hi' }));
+  await d.say(heard('Hello?'));
+  await tick(60);
+  assert.match(r.prompts[0], /address-book note on Wayne: Old friend from the Navy\.; Loves Portal\./);
+});
+
 test('agent_silent before anything played (DialX silence clock ran through the ringing) is told as DialX cutting the call, with a retry offer', async () => {
   const r = rig();
   const d = await phone(r);

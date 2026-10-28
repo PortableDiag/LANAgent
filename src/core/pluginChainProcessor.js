@@ -1,6 +1,7 @@
 import { logger } from '../utils/logger.js';
 import { StructuredOutputParser } from '../services/outputParser.js';
 import { schemas } from '../services/outputSchemas.js';
+import { asksToSendText, wantsVoiceNote } from '../api/plugins/textx.js';
 
 /**
  * Plugin Chain Processor
@@ -30,6 +31,17 @@ export function isOnePhoneCall(input) {
   const call = /^(please\s+)?(call|ring|phone|dial)\s+(?!me\b|back\b)\w+/i.test(t) || /^(please\s+)?leave\s+\w+\s+an?\b[^.]*\bvoice ?mail\b/i.test(t);
   const chained = /\b(then|after that|afterwards|and also)\b|\band\s+(text|email|e-mail|message|send|remind|search|schedule|book|post|tweet)\b/i.test(t);
   return call && !chained;
+}
+
+/**
+ * "Send Adam V a voice note … reminding him…" is one textx send: textx speaks the text in the agent's
+ * voice and attaches it. Split into voice.speak + a send, the audio never reached the send and the
+ * owner got only the clip back (2026-10-27). A request that chains another action still splits.
+ */
+export function isOneVoiceText(input) {
+  const t = stripAgentAddress(input);
+  const chained = /\b(then|after that|afterwards|and also)\b|\band\s+(call|email|e-mail|search|schedule|book|post|tweet)\b/i.test(t);
+  return wantsVoiceNote(t) && asksToSendText(t) && !chained;
 }
 
 /** Actions a plugin's execute() dispatches that are not in its command list. */
@@ -105,6 +117,7 @@ export class PluginChainProcessor {
       // then "apply the theremin to the active call", which failed and reported an error for a call
       // that went fine (2026-10-24). A request that chains another action ("…, then text Sam") still splits.
       if (isOnePhoneCall(input)) return { isMultiStep: false, singleIntent: 'phone_call' };
+      if (isOneVoiceText(input)) return { isMultiStep: false, singleIntent: 'voice_note_text' };
       logger.info(`Analyzing complex task: "${input}"`);
 
       // Get recent conversation context if available
@@ -137,7 +150,7 @@ Details for plugins that need specific parameters:
 - websearch: Search web (action: "search"), crypto prices (action: "crypto"), stock prices (action: "stock"), weather (action: "weather")
 - scraper: Web scraping (action: "scrape"), screenshots (action: "screenshot"), PDF generation (action: "pdf")
 - email: Send emails (use sendWithAI for AI-composed emails), manage contacts
-- textx: text messages (SMS) — "text Wayne…", "send Sam a text" is textx action "send", never email
+- textx: text messages (SMS) — "text Wayne…", "send Sam a text" is textx action "send", never email; a voice note / audio message to someone is ONE textx "send" step with voice: true (textx speaks it), never a voice step first
 - calendar: Google Calendar via CalDAV - get today's events (action: "getToday"), get upcoming events (action: "getUpcoming", params: {days, limit}), search events (action: "searchEvents", params: {query, startDate}), get events in range (action: "getEvents", params: {startDate, endDate, limit}), create event (action: "createEvent", params: {title, start, end, description}), update event (action: "updateEvent", params: {eventId, updates}), delete event (action: "deleteEvent", params: {eventId}), check availability (action: "checkAvailability", params: {date, duration, startHour, endHour}), list calendars (action: "listCalendars"), status (action: "status"). For checking trips/plans use "searchEvents" or "getEvents" with a date range.
 - govee: Smart home device control - list ALL devices (action: "list"), device status (action: "status", params: {device}), power on/off/toggle (action: "power", params: {device, state}), brightness (action: "brightness", params: {device, level}), color (action: "color", params: {device, color}), temperature (action: "temperature", params: {device, kelvin}), scenes (action: "scene", params: {device, scene}), schedules (action: "schedules", params: {operation: "create"|"update"|"delete"|"list", device, time: "HH:MM", action: "on"|"off"|"color"|"brightness", value, repeat: "daily"|"weekdays"|"weekends"|"once"}). For schedule changes use action "schedules" with appropriate operation. IMPORTANT: For "list all devices" use action "list", NOT "status".
 
