@@ -72,8 +72,15 @@ export function setupTestingRoutes(app, agent) {
       // vector match. Without it this dry run reported dialx.voicePreview for "Alice text Wayne…".
       if (intent && intent.plugin !== 'textx' && isTextRequest(text)) intent = null;
       if (!intent) { via = 'ai'; intent = await agent.aiIntentDetector?.detect(text, context).catch(() => null); }
+      // reasoning:true adds the reasoning agent's first step on the same request, executed never: a
+      // comparison of the router with the agent loop (2026-10-28).
+      let reasoning;
+      if (req.body?.reasoning === true && agent.reactAgent?.firstStep) {
+        reasoning = await agent.reactAgent.firstStep(text, { ...context, originalInput: text }).catch(e => ({ error: e.message }));
+      }
       res.json({ success: true, data: { text, via, plugin: intent?.plugin || null, action: intent?.action || null,
-        intent: intent?.intent || null, confidence: intent?.confidence ?? null } });
+        intent: intent?.intent || null, confidence: intent?.confidence ?? null,
+        ...(req.body?.reasoning === true ? { params: intent?.parameters || intent?.params || null, reasoning: reasoning || null } : {}) } });
     } catch (error) {
       logger.error('Route dry-run error:', error);
       res.status(500).json({ success: false, error: error.message });

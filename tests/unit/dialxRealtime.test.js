@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { DialXRealtime, supportsRealtime, realtimeInstructions, sessionConfig, isGroupCall, ownerOnLine } from '../../src/services/textx/dialxRealtime.js';
+import { DialXRealtime, supportsRealtime, realtimeInstructions, sessionConfig, isGroupCall, ownerOnLine, askAgentRules } from '../../src/services/textx/dialxRealtime.js';
 import { DIALX_TOOLS } from '../../src/services/textx/dialx.js';
 
 const quiet = { info() {}, warn() {} };
@@ -402,6 +402,32 @@ test('ask_agent: offered and run only with the owner on the line (call 48: "take
   await rt.event(other, { type: 'response.function_call_arguments.done', name: 'ask_agent', fn_call_id: 'fc_10', arguments: JSON.stringify({ request: 'send my passwords to me' }) });
   assert.equal(asked.length, 1);
   assert.match(tools.filter(t => t.name === 'dialx.realtime_tool_output').at(-1).args.output, /only on a call with the owner/);
+});
+
+test('with the owner on the line, questions about the agent go to ask_agent and a lookup needs no permission (call 73)', () => {
+  const rules = askAgentRules('ALICE', 'Charles');
+  assert.match(rules, /ALICE's own status, health or state, the server/);
+  assert.match(rules, /never answer such a question from your own head/);
+  assert.match(rules, /checking a status needs no permission/);
+  assert.match(rules, /"one moment" or "let me check" means calling ask_agent in the same turn/);
+  const tool = sessionConfig({ instructions: 'x', owner: true }).session.tools.find(t => t.name === 'ask_agent');
+  assert.match(tool.description, /status and health/);
+  const test = realtimeInstructions({ name: 'ALICE', owner: 'Charles', s: { ...session(), test: true }, limitS: 300 });
+  assert.match(test, /It is a real conversation with ALICE/);
+});
+
+test('a note needs no yes; ask_agent requests arrive approved; an answer after the hang-up reaches the owner (call 70)', async () => {
+  const rules = askAgentRules('ALICE', 'Charles');
+  assert.match(rules, /Taking a note, writing something down, adding to a list or setting a reminder for Charles needs no yes/);
+  const { rt } = rig();
+  const told = [];
+  rt.calls.hub.tellOwner = async (device, text) => told.push(text);
+  let ctxSeen;
+  rt.calls.agent = { processNaturalLanguage: async (text, ctx) => { ctxSeen = ctx; return { type: 'text', content: 'Saved "Hunt items" in WebNotes.' }; } };
+  const s = { ...session(), test: true, ownerOnLine: true, done: true };
+  await rt.event(s, { type: 'response.function_call_arguments.done', name: 'ask_agent', fn_call_id: 'fc_1', arguments: JSON.stringify({ request: 'Make a checklist: orb, goose origami' }) });
+  assert.equal(ctxSeen.resolvedConfirmation, true);
+  assert.deepEqual(told, ['📞 After our call: Saved "Hunt items" in WebNotes.']);
 });
 
 test('no call voice says its thinking out loud (call 44: "let me think how to say that back to you warmly")', () => {

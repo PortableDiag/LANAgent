@@ -24,3 +24,11 @@ test('a voice note to someone is hinted to textx send (2026-10-28: it asked a cl
   assert.equal(d._regexIntentHint('Send 5599402727 a voice note saying this is a test of ALICE voice notes'), 2033);
   assert.equal(d._regexIntentHint('send me a voice note of that'), null, 'a voice note for the user is not a text');
 });
+
+test('system status carries the host: uptime, load, memory and disk (call 73: "operating system stats")', async () => {
+  const { hostStats } = await import('../../src/api/plugins/system.js');
+  const h = await hostStats(process.cwd());
+  assert.ok(h.uptimeHours >= 0 && h.cpus > 0 && h.load.length === 3);
+  assert.ok(h.memoryGB.total > 0);
+  assert.ok(h.diskGB.total > 0 && h.diskGB.free >= 0);
+});

@@ -4,6 +4,7 @@ import { promisify } from 'util';
 import { logger } from '../../utils/logger.js';
 import fs from 'fs/promises';
 import path from 'path';
+import os from 'os';
 import { resolveGitRemote } from '../../utils/gitRemote.js';
 
 const execAsync = promisify(exec);
@@ -446,7 +447,9 @@ export default class SystemPlugin extends BasePlugin {
           pid: process.pid
         },
         git: {},
-        pm2: null
+        pm2: null,
+        // Call 73 (2026-10-28): asked for the server's operating-system stats, the status had only the process's.
+        host: await hostStats(this.deployPath)
       };
       
       // Git status. The deploy directory is an rsync target, not a checkout, so fall back to the
@@ -478,7 +481,9 @@ export default class SystemPlugin extends BasePlugin {
           status.pm2 = {
             name: me.name,
             status: me.pm2_env?.status,
-            restarts: me.pm2_env?.restart_time,
+            // Every deploy and self-update restarts the app, so this counts those too: it is not a crash count.
+            restartsSinceInstall: me.pm2_env?.restart_time,
+            restartsNote: 'counts every deploy and update since PM2 started managing the app, not crashes',
             cpu: me.monit?.cpu,
             memory: Math.round((me.monit?.memory || 0) / 1024 / 1024) + ' MB'
           };
@@ -1177,4 +1182,21 @@ export default class SystemPlugin extends BasePlugin {
       throw new Error(`Sync failed: ${error.message}`);
     }
   }
+}
+
+/** The machine the agent runs on: uptime, load, memory and the disk holding the app. */
+export async function hostStats(dir = process.cwd()) {
+  const gb = (n) => Math.round(n / 1024 ** 3 * 10) / 10;
+  const host = { hostname: os.hostname(), uptimeHours: Math.round(os.uptime() / 360) / 10, cpus: os.cpus().length,
+    load: os.loadavg().map(n => Math.round(n * 100) / 100), memoryGB: { total: gb(os.totalmem()), free: gb(os.freemem()) } };
+  try {
+    // MemAvailable counts reclaimable cache; os.freemem() alone makes a healthy Linux box look full.
+    const avail = /MemAvailable:\s+(\d+) kB/.exec(await fs.readFile('/proc/meminfo', 'utf8'));
+    if (avail) host.memoryGB.available = gb(Number(avail[1]) * 1024);
+  } catch { /* not Linux */ }
+  try {
+    const st = await fs.statfs(dir);
+    host.diskGB = { path: dir, total: gb(st.blocks * st.bsize), free: gb(st.bavail * st.bsize) };
+  } catch { /* statfs unavailable */ }
+  return host;
 }

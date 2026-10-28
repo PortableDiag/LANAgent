@@ -2,6 +2,19 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.682] - 2026-10-28
+
+### Fixed
+- **On a call with the owner, questions about the agent get real answers.** Asked how the system was running, the call voice said "seems good so far" and "I'm up and running" from nothing, said "one moment" without checking, then asked permission to look. With the owner on the line it now sends any question about the agent, its status, the server, its tasks or anything beyond small talk to the agent at once; a lookup needs no permission, and "one moment" means it is checking. Against the live realtime model, the status questions from that call went to the agent 6 times out of 6, against once before.
+- **"Take a note" on a call gets taken.** On call 70 the owner asked for a list on a group call: the call voice asked for a yes first, its request then reached the agent as "do it once I confirm" (only a draft was made), the retry put the note in a basket named after the owner that does not exist, and the failure arrived a second after the hang-up and was never heard. Now a note, list or reminder needs no yes on the call; a request from the call voice arrives approved; a note naming a basket that does not exist goes to the default basket and says so; a numbered list on one line becomes checklist items; and an answer that arrives after the hang-up is sent to the owner. Texts, calls and anything sent to someone else still need the owner's yes.
+- **A test call is a real conversation.** It was described to the call voice as a way to hear how it sounds, so real questions were played along with.
+- **System status includes the server.** It now gives the machine's uptime, load, memory (including available) and the free disk where the app runs. The PM2 restart count is labelled as every deploy and update, not crashes.
+
+## [2.25.681] - 2026-10-28
+
+### Added
+- **The routing dry run can show the reasoning agent's first step.** `POST /api/test/route` with `reasoning: true` also returns the extracted parameters and what the reasoning agent would do first (tool, command, parameters, or its answer), with nothing executed. Used to compare the router with the agent loop on real requests.
+
 ## [2.25.680] - 2026-10-28
 
 ### Added

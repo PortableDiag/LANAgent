@@ -1274,11 +1274,24 @@ export default class TrellisNotesPlugin extends BasePlugin {
     if (!VALID_KINDS.includes(kind)) throw new Error(`kind must be one of: ${VALID_KINDS.join(', ')}.`);
 
     const place = placement(pos, size);
-    const node = await this._resolveNode(basket, { allowDefault: true });
+    // Call 70 (2026-10-27): "a note for Charles" became basket "Charles", and the owner's note was never made. A note
+    // is never lost to a basket guess: one that does not exist falls back to the default, and the result says so.
+    let node, missed = null;
+    try {
+      node = await this._resolveNode(basket, { allowDefault: true });
+    } catch (e) {
+      if (basket == null || basket === '' || !/^No basket (matching|with id)/.test(e.message)) throw e;
+      missed = String(basket);
+      node = await this._resolveNode(undefined, { allowDefault: true });
+    }
     const payload = { kind, title: String(title).trim(), ...place };
 
     if (kind === 'checklist') {
-      const list = Array.isArray(items) ? items : String(body || '').split('\n').filter(Boolean);
+      // "a running checklist with: 1) a small orb, 2) a goose-like origami" is one line with numbered items.
+      const lines = String(body || '').split('\n').map(l => l.trim()).filter(Boolean);
+      const numbered = lines.length === 1 && /\b1[.)]\s/.test(lines[0])
+        ? lines[0].replace(/^[^\d]*?(?=\b1[.)]\s)/, '').split(/(?:^|[,;]?\s+)\d+[.)]\s+/).map(x => x.replace(/[,;.]\s*$/, '').trim()).filter(Boolean) : null;
+      const list = Array.isArray(items) ? items : (numbered || lines);
       if (!list.length) throw new Error('A checklist note needs items (array of strings, or newline-separated body text).');
       payload.items = list.map(i => (typeof i === 'string' ? { done: false, text: i } : { done: !!i.done, text: String(i.text) }));
     } else {
@@ -1294,7 +1307,8 @@ export default class TrellisNotesPlugin extends BasePlugin {
     const created = await this._call('post', `/api/nodes/${node.id}/cards`, { body: payload });
     return {
       success: true,
-      created: { card: created.id, basket: node.id, basketTitle: node.title, kind, title: payload.title, ...(place.pos && { pos: place.pos }), ...(place.size && { size: place.size }) }
+      created: { card: created.id, basket: node.id, basketTitle: node.title, kind, title: payload.title, ...(place.pos && { pos: place.pos }), ...(place.size && { size: place.size }) },
+      ...(missed ? { note: `No basket is called "${missed}", so it went into "${node.title}".` } : {})
     };
   }
 

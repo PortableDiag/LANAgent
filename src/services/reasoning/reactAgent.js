@@ -284,6 +284,50 @@ export class ReActAgent extends EventEmitter {
   /**
    * Run the ReAct loop for a given query
    */
+  /**
+   * What one task's thoughts are given: the relevant tools in full, similar past runs, a matching
+   * skill and where the request came from. Chosen once per task.
+   */
+  async _guidance(query, context = {}, todo = null) {
+    // Tools and worked examples are chosen once per task: the plugins relevant to it get
+    // full command lists, and similar tasks that succeeded before are shown as examples.
+    await this.refreshTools(context);
+    const relevant = await selectRelevantTools(this.agent, stripListenerNotes(query), { available: this.tools });
+    // A web or API task gets the http tool's full usage, not a one-line catalog entry: listed
+    // only by name, it went unused and the run asked the operator to "enable the HTTP tool"
+    // (2026-10-02).
+    if (/\b(api|https?|url|endpoint|sign ?up|register|webhook|upload|post|\w+\.(?:com|net|org|io|ai|dev|app))\b/i.test(query)
+      && this.tools.some(t => t.name === 'http') && !relevant.includes('http')) relevant.unshift('http');
+    const pastExamples = await findPastExamples(this.thoughtStore, stripListenerNotes(query));
+    if (pastExamples) logger.info('ReAct: reusing similar past reasoning as examples');
+    // Matched on the request alone: the listener's "(Note for ALICE: this message also goes to
+    // Nexus, trellis, Orbit…)" is all Trellis-and-agents words, and with it every channel request
+    // matched run-standard-agent-test (0.77-0.84). On card 21 #1574 ("test reapption and send
+    // me your link") that skill took the run to card 209 and reapption was never called.
+    const request = stripListenerNotes(query);
+    const skills = await getSkillsService().promptFor(request).catch(() => '');
+    if (skills) logger.info('ReAct: following a matching skill');
+    // A request from a shared Trellis channel only makes sense with that conversation: "do you
+    // all agree on the steps?" is about cards and messages ReAct otherwise never sees. On card
+    // 21 #1255 (2026-10-01) it answered that it could not see the steps of a test it had run
+    // and signed the day before.
+    const channel = context.trellis?.recent
+      ? `This request came from a shared Trellis channel (card ${context.trellis.card}). The conversation there, oldest first (your own messages are signed ${this.agent?.config?.name || 'ALICE'}):\n${String(context.trellis.recent).slice(-4000)}\n\nCards it mentions ("#209", "the test", "the card in this workspace") are in the Trellis workspace: find them with the trellis-notes search and read actions before saying you cannot see them. A Trellis feature none of the trellis-notes commands covers (a new route or field from a release note) is reachable with trellis-notes.api: read GET /api (the route index) for the route and its body, then call it.`
+      : this._liveConversation(context);
+    return { relevant, pastExamples, skills, todo, channel };
+  }
+
+  /**
+   * The first step this agent would take on a request, with nothing executed: for the routing dry
+   * run (POST /api/test/route {reasoning:true}), which compares it with what the router picks.
+   */
+  async firstStep(query, context = {}) {
+    const guidance = await this._guidance(query, context, new TodoList());
+    const t = await this.think(query, [], context, guidance);
+    return { reasoning: t.reasoning || null, action: t.action?.tool ? { tool: t.action.tool, command: t.action.command, params: t.action.params || {} } : null,
+      finalAnswer: t.finalAnswer || null, todo: Array.isArray(t.todo) ? t.todo : null };
+  }
+
   async run(query, context = {}) {
     // Resuming after a clarification: keep the earlier steps and add the user's answer
     const resume = context.resume;
@@ -330,33 +374,8 @@ export class ReActAgent extends EventEmitter {
     try {
       this._checkBudget(run);
 
-      // Tools and worked examples are chosen once per task: the plugins relevant to it get
-      // full command lists, and similar tasks that succeeded before are shown as examples.
-      await this.refreshTools(context);
-      const relevant = await selectRelevantTools(this.agent, stripListenerNotes(query), { available: this.tools });
-      // A web or API task gets the http tool's full usage, not a one-line catalog entry: listed
-      // only by name, it went unused and the run asked the operator to "enable the HTTP tool"
-      // (2026-10-02).
-      if (/\b(api|https?|url|endpoint|sign ?up|register|webhook|upload|post|\w+\.(?:com|net|org|io|ai|dev|app))\b/i.test(query)
-        && this.tools.some(t => t.name === 'http') && !relevant.includes('http')) relevant.unshift('http');
-      const pastExamples = await findPastExamples(this.thoughtStore, stripListenerNotes(query));
-      if (pastExamples) logger.info('ReAct: reusing similar past reasoning as examples');
-      // Matched on the request alone: the listener's "(Note for ALICE: this message also goes to
-      // Nexus, trellis, Orbit…)" is all Trellis-and-agents words, and with it every channel request
-      // matched run-standard-agent-test (0.77-0.84). On card 21 #1574 ("test reapption and send
-      // me your link") that skill took the run to card 209 and reapption was never called.
-      const request = stripListenerNotes(query);
-      const skills = await getSkillsService().promptFor(request).catch(() => '');
-      if (skills) logger.info('ReAct: following a matching skill');
-      // A request from a shared Trellis channel only makes sense with that conversation: "do you
-      // all agree on the steps?" is about cards and messages ReAct otherwise never sees. On card
-      // 21 #1255 (2026-10-01) it answered that it could not see the steps of a test it had run
-      // and signed the day before.
+      const guidance = await this._guidance(query, context, todo);
       const auditWho = { name: this.agent?.config?.name || 'ALICE', conversation: context.trellis?.recent || '' };
-      const channel = context.trellis?.recent
-        ? `This request came from a shared Trellis channel (card ${context.trellis.card}). The conversation there, oldest first (your own messages are signed ${this.agent?.config?.name || 'ALICE'}):\n${String(context.trellis.recent).slice(-4000)}\n\nCards it mentions ("#209", "the test", "the card in this workspace") are in the Trellis workspace: find them with the trellis-notes search and read actions before saying you cannot see them. A Trellis feature none of the trellis-notes commands covers (a new route or field from a release note) is reachable with trellis-notes.api: read GET /api (the route index) for the route and its body, then call it.`
-        : this._liveConversation(context);
-      const guidance = { relevant, pastExamples, skills, todo, channel };
       let freeTodoSteps = 0;
 
       while (iteration < this.maxIterations + freeTodoSteps) {
