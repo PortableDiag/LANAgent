@@ -602,6 +602,7 @@ export class DialXCalls {
   async started(device, id, body) {
     const s = this.session(device, id, body);
     if (body.contact?.name) s.contact = body.contact.name;
+    if (body.contact?.number) s.number = String(body.contact.number); // DialX on Trellis 4293 #401: answered calls too
     if (body.purpose) s.purpose = String(body.purpose);
     // DialX 0.7.15: the agent answers for the owner. DialX has already spoken its greeting
     // (body.opening), so it opens the transcript; `rules` are DialX's message-taking rules.
@@ -657,6 +658,7 @@ export class DialXCalls {
   async dialing(device, id, body) {
     const s = this.session(device, id, body);
     if (body.contact?.name) s.contact = body.contact.name;
+    if (body.contact?.number) s.number = String(body.contact.number);
     if (body.purpose) s.purpose = String(body.purpose);
     // DialX 0.7.47: an incoming call ringing for the owner. The session starts now and the model greets at pickup.
     if (body.direction === 'incoming') {
@@ -705,9 +707,13 @@ export class DialXCalls {
    */
   whoIsOn(s, id) {
     return (async () => {
+      // The number recorded when ALICE scheduled the call, or the one DialX names on the call (a call
+      // ALICE answers for the owner had none, so nothing from it reached that person's notes, 2026-10-28).
+      // Never by name alone: two contacts can share one.
       const planned = await this.store.get?.(id).catch(() => null);
-      if (planned?.number) {
-        s.person = await this.hub.callPerson?.({ name: s.contact, number: planned.number });
+      const number = planned?.number || s.number;
+      if (number) {
+        s.person = await this.hub.callPerson?.({ name: s.contact, number });
         s.about = s.person ? await this.hub.aboutPerson(s.person) : '';
       }
       // How the owner wants this person talked to ("an Aperture Science demeanor with Wayne"): it
@@ -976,7 +982,9 @@ export class DialXCalls {
     // the "callee" is their greeting (a recording, often with their number), never their words.
     const voicemail = s.voicemail || body.reason === 'voicemail_left';
     await s.ready; // a short call can end before the person lookup has finished
-    if (s.person) {
+    // One-to-one calls with a person only: a group call's lines are not marked by speaker, and a test
+    // or agent-to-agent call is not that person talking (Trellis 4293 #402).
+    if (s.person && !s.group && !s.test && !s.peerAgent) {
       for (const l of transcript.filter(x => (x.role === 'callee' && !voicemail) || x.role === 'agent')) {
         await this.hub.rememberCall?.(s.person, l.role === 'callee' ? 'person' : 'assistant', l.text);
       }

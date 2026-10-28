@@ -463,6 +463,28 @@ test('a call to someone who texted before: the call knows the texts, and the cal
   assert.deepEqual(mine, [['sms', 'person', 'My Hermes setup finally runs.'], ['call', 'assistant', 'Hi Wayne!'], ['call', 'person', 'Hey, it is going great.']]);
 });
 
+test('a call DialX names by number (one ALICE answered) joins that person; a group call joins nobody (4293 #401/#402)', async () => {
+  const r = rig({ answers: ['{"say":"Hi Lizzy!","hangup":false}', '{"say":"Hello all","hangup":false}'] });
+  const rows = [];
+  const transcripts = { async insert(docs) { docs.forEach(d => rows.push({ ...d, createdAt: new Date(Date.UTC(2026, 9, 28, 9, rows.length)) })); },
+    async recent(personId, { limit }) { return rows.filter(x => x.personId === personId).sort((a, b) => b.createdAt - a.createdAt).slice(0, limit); } };
+  const directory = new PersonDirectory({ store: memoryPeopleStore(), logger: quiet });
+  const memory = new PersonMemory({ directory, transcripts, logger: quiet });
+  r.hub._people = { directory, memory };
+  const lizzy = await directory.resolve({ number: '+1 405 555 0111' }, { name: 'Lizzy', channel: 'sms' });
+  const d = await phone(r);
+  await d.say(env('event', { kind: 'call.started', call_id: 'in1', direction: 'incoming', contact: { name: 'Lizzy', number: '+14055550111' } }));
+  await d.say(env('event', { kind: 'call.ended', call_id: 'in1', reason: 'remote_hangup', duration_s: 20,
+    transcript: [{ role: 'agent', text: 'Hi Lizzy!' }, { role: 'callee', text: 'Biscuit says hi.' }] }));
+  await tick(60);
+  assert.deepEqual(rows.filter(x => x.personId === String(lizzy._id)).map(x => x.content), ['Hi Lizzy!', 'Biscuit says hi.']);
+  await d.say(env('event', { kind: 'call.started', call_id: 'g1', group: true, contact: { name: 'Lizzy', number: '+14055550111' } }));
+  await d.say(env('event', { kind: 'call.ended', call_id: 'g1', reason: 'remote_hangup', duration_s: 20,
+    transcript: [{ role: 'agent', text: 'Hello all' }, { role: 'callee', text: 'Someone else talking.' }] }));
+  await tick(60);
+  assert.ok(!rows.some(x => x.content === 'Someone else talking.'), 'a group call is not filed under one person');
+});
+
 test('a call with no recorded number still works, with no person block', async () => {
   const r = rig();
   r.hub._people = null;

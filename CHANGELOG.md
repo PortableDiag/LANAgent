@@ -2,6 +2,15 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.672] - 2026-10-28
+
+### Added
+- **ALICE keeps one reviewed note per person.** After each call or burst of texts, a reviewer with no tools rewrites that person's note from the old note and the new conversation. It keeps what lasts (family, pets and their names, work, plans with real dates), updates what changed (someone who was sick and is better: said, then dropped) and removes instructions to the assistant, claims about the owner, numbers, codes, money and jokes. The note is read on that person's next call or text, as background. A sentence with a code word or a phone-length number is always dropped, and a failed review keeps the old note. This replaces the add-only fact list, which had stored one-off remarks and requests as facts.
+- **Calls ALICE answers are remembered for that person** once DialX names the caller's number on the call. Before, only calls ALICE scheduled reached the person's history.
+
+### Fixed
+- **Group, test and agent-to-agent calls are never filed under one person.** Their lines are not marked by speaker.
+
 ## [2.25.671] - 2026-10-27
 
 ### Fixed

@@ -23,7 +23,10 @@ const personSchema = new mongoose.Schema({
   cardId: { type: mongoose.Schema.Types.ObjectId, default: null }, // the email contact-book card
   channels: { type: Map, of: Date, default: {} },    // channel -> last time seen there
   // Identifiers that pointed at two different people: kept for the owner to settle, never merged.
-  conflicts: { type: [mongoose.Schema.Types.Mixed], default: [] }
+  conflicts: { type: [mongoose.Schema.Types.Mixed], default: [] },
+  // ALICE's own reviewed note on this person, rewritten after each conversation (personMemory.learn).
+  note: { type: String, default: '' },
+  noteAt: { type: Date, default: null }
 }, { timestamps: true, versionKey: false });
 
 personSchema.index({ numberKeys: 1 });
