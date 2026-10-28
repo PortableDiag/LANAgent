@@ -2,6 +2,12 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.671] - 2026-10-27
+
+### Fixed
+- **Only quoted words are sent as written; anything else ALICE puts in its own words.** "Text Adam V a gif of a funny cat" was sent as the text "a gif of a funny cat", with no GIF. When the words of a text are copied from a request without quotes, ALICE now writes the message to the recipient instead, keeping every number, code, time, name and link exactly. Words in quotes still go exactly as given.
+- **"Send Lizzy a gif of a sad robot" sends the GIF.** It answered "What should the text say?": a GIF with no message was refused. A GIF, picture or video now goes on its own when no message is described, and a GIF request that matched the GIF search action keeps its search words when it turns into a send.
+
 ## [2.25.670] - 2026-10-27
 
 ### Fixed

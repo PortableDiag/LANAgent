@@ -77,8 +77,12 @@ const offlineRun = new AsyncLocalStorage();
  * sell him on yourself you know ;)" went to Wayne word for word, aside and all (2026-10-19).
  */
 export function messageTextRule(owner = process.env.OWNER_NAME || 'the user') {
-  return `"text" is the message the recipient will read, sent from ${owner}'s phone. If the request quotes the message or ` +
-    'says "saying …" / "that says …", copy those words exactly. If it describes the message ("ask Wayne if he needs ' +
+  // The owner, 2026-10-27: "if i want it to send a phrase verbatim or literally, then ill include it in quotes
+  // otherwise alice should rephrase it" ("Text Adam V a gif of a funny cat" was sent as "a gif of a funny cat").
+  return `"text" is the message the recipient will read, sent from ${owner}'s phone. Only words in quotes are copied ` +
+    'exactly. Anything else describes the message: write it in your own words. A GIF, picture or video the request asks ' +
+    'for ("a gif of a funny cat") goes in gifSearch, never in the text; with no message described, leave text out. ' +
+    'If it describes the message ("ask Wayne if he needs ' +
     'help", "tell her I\'m running late", "let him know the game moved"), write that message to the recipient, ' +
     'addressing them directly ("Do you need any help…?"), never "ask him" or "tell her". Anything the user says to ' +
     'you about the message (tone, what to stress, "sell it", jokes or asides to you, emoji aimed at you) is guidance: ' +
@@ -356,7 +360,8 @@ export default class TextXPlugin extends BasePlugin {
     // action: "Tell Wayne what TextX/DialX does…" matched the new `settings` (2026-10-23).
     if (!SEND_LIKE.has(action) && asksToSendText(data._context?.originalInput)) {
       this.logger.info(`textx: "${String(data._context.originalInput).slice(0, 80)}" asks to send a text, not to watch; sending`);
-      data = { _context: data._context, to: data.thread || data.contact || data.to, ...(data.text ? { text: data.text } : {}), needsParameterExtraction: true };
+      const gif = action === 'gif' ? (data.gifSearch || data.query) : data.gifSearch;
+      data = { _context: data._context, to: data.thread || data.contact || data.to, ...(data.text ? { text: data.text } : {}), ...(gif ? { gifSearch: String(gif) } : {}), needsParameterExtraction: true };
       action = 'send';
     }
     if (data.needsParameterExtraction) await this._extractArgs(action, data);
@@ -593,7 +598,12 @@ export default class TextXPlugin extends BasePlugin {
     if (ref.error) return { success: false, error: ref.error };
     data = { ...data, to: ref.to };
     let text = keepIndent(ref.text);
-    if (!text) return { success: false, error: 'What should the text say?' };
+    const hasMedia = !!(data.gifSearch || (Array.isArray(data.media) ? data.media.length : data.media) || data._context?.attachedFile);
+    if (!text && !hasMedia) return { success: false, error: 'What should the text say?' };
+    // Reworded from the owner's own request: still the owner's content, so not fact-checked below.
+    const copied = text;
+    if (text && !fromChat) text = await this.ownWords(text, data.originalInput || data._context?.originalInput, data.to || data.thread);
+    const reworded = text !== copied;
     if (!fromChat && !data.replyTo) text = identifyAgent(data.originalInput || data._context?.originalInput, text);
     if (scheduled && data.at != null) data.at = resolveRequestTime(data.at, '')?.toISOString() || data.at;
     if (scheduled && !Number.isFinite(Date.parse(data.at))) return { success: false, error: 'When should it be sent? Give a date and time.' };
@@ -627,13 +637,14 @@ export default class TextXPlugin extends BasePlugin {
     const files = [...(this.fileAttachment(file) || []), ...mediaAttachments(data), ...(found ? [found.attachment] : [])];
     const attachments = files.length ? files : null;
     text = await this.inOwnersStyle(text, data.to || data.thread, request, target);
-    const checked = fromChat ? { text } : await this.grounded(text, request, data.to || data.thread);
+    const checked = fromChat || reworded ? { text } : await this.grounded(text, request, data.to || data.thread);
     if (checked.error) return { success: false, error: checked.error };
     text = checked.text;
     const args = scheduled
       ? { ...target, text, at: new Date(data.at).toISOString(), ...(data.repeat ? { repeat: data.repeat } : {}), ...(data.interval ? { interval: data.interval } : {}), ...(data.endAfter ? { end_after: data.endAfter } : {}), ...(attachments ? { attachments } : {}) }
       : { ...target, text, ...(attachments ? { attachments } : {}), ...(replyTo ? { reply_to: replyTo } : {}),
         ...(data.individually && target.to?.length > 1 ? { individually: true } : {}) };
+    if (!args.text) delete args.text; // a GIF or picture on its own (TextX: text is optional with attachments)
     // TextX 0.4.10: a send the owner ordered has its own cap, not the 6/h auto-reply one (2119 #150).
     // Never for a reply the agent decided on (those go through the hub, not here), nor for a
     // Telegram user other than the owner.
@@ -655,8 +666,9 @@ export default class TextXPlugin extends BasePlugin {
       }
     }
     const done = this.outcomeText(r.result, scheduled);
-    const withMedia = attachments ? ` with ${attachments.length === 1 ? 'a picture' : `${attachments.length} pictures`}` : '';
-    return { success: true, result: done === 'Sent.' && data.to ? `Sent to ${data.to}${withMedia}: "${text}"` : done };
+    const media = attachments ? (attachments.length === 1 ? (found ? 'a GIF' : 'a picture') : `${attachments.length} pictures`) : '';
+    if (!(done === 'Sent.' && data.to)) return { success: true, result: done };
+    return { success: true, result: text ? `Sent to ${data.to}${media ? ` with ${media}` : ''}: "${text}"` : `Sent ${data.to} ${media}.` };
   }
 
   /**
@@ -850,6 +862,35 @@ export default class TextXPlugin extends BasePlugin {
     } catch (e) {
       this.logger.warn(`textx send: GIF conversion failed, sending the video: ${e.message}`);
       return file;
+    }
+  }
+
+  /**
+   * Words copied from an unquoted request are a description, not the message: "Text Adam V a gif of a
+   * funny cat" went out as "a gif of a funny cat" (2026-10-27). Only quoted words go as they are.
+   */
+  async ownWords(text, request, who) {
+    const flat = (v) => String(v || '').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+    const req = String(request || '');
+    if (!req || !flat(req).includes(flat(text))) return text;
+    const quoted = [...req.matchAll(/"([^"]+)"|“([^”]+)”/g)].map(m => flat(m[1] || m[2]));
+    if (quoted.some(q => q && (q.includes(flat(text)) || flat(text).includes(q)))) return text;
+    const pm = this.agent?.providerManager;
+    if (!pm?.generateResponse) return text;
+    try {
+      const res = await pm.generateResponse(
+        `${process.env.OWNER_NAME || 'The user'} asked you: "${req.slice(0, 600)}"
+` +
+        `Write the text message ${who ? `${who} ` : 'the recipient '}will read, in your own words, addressing them directly. ` +
+        'Short and natural, never a copy of the request. Keep every number, code, time, date, name, address and link exactly as given. ' +
+        'If the request only asks to send a GIF, picture or video, answer exactly NONE. ' +
+        'Answer with the message only.', { maxTokens: 200, temperature: 0.6 });
+      const out = String(res?.content || '').trim().replace(/^"|"$/g, '');
+      if (/^NONE\b/.test(out)) return '';
+      return out && out.length <= 1000 ? out : text;
+    } catch (e) {
+      this.logger.warn(`textx send: rewording failed: ${e.message}`);
+      return text;
     }
   }
 

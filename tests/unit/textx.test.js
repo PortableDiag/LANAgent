@@ -450,6 +450,45 @@ test('plugin: backup messageStore asks the phone what Android holds and explains
   assert.match(res.result, /Import messages/);
 });
 
+test('plugin: only quoted words are sent as written; a described message is reworded (owner, 2026-10-27)', async () => {
+  const { default: TextXPlugin } = await import('../../src/api/plugins/textx.js');
+  const asked = [];
+  const r = rig({ waits: { read: 200, readExpiry: 400, late: 10 } });
+  r.agent.providerManager.generateResponse = async (p) => { asked.push(p); return { content: /gif of a sad robot"/.test(p) ? 'NONE' : 'Hey! Thought this would make you smile.' }; };
+  const plugin = new TextXPlugin(r.agent);
+  assert.equal(await plugin.ownWords('see you soon', 'text Sam "see you soon"', 'Sam'), 'see you soon', 'quoted: verbatim');
+  assert.equal(await plugin.ownWords('Running late, sorry!', 'tell Sam I am running late', 'Sam'), 'Running late, sorry!', 'already written by the model');
+  assert.equal(await plugin.ownWords('a gif of a funny cat', 'Text Adam V a gif of a funny cat', 'Adam V'), 'Hey! Thought this would make you smile.');
+  assert.equal(await plugin.ownWords('a gif of a sad robot', 'Send Lizzy a gif of a sad robot', 'Lizzy'), '', 'a GIF on its own needs no text');
+  assert.equal(asked.length, 2);
+});
+
+test('plugin: "Send Lizzy a gif of a sad robot" sends the GIF with no text (2026-10-27)', async () => {
+  const { default: TextXPlugin } = await import('../../src/api/plugins/textx.js');
+  const r = rig({ waits: { read: 500, readExpiry: 1000, confirm: 40, confirmExpiry: 2000, late: 10 } });
+  const p = await pairedPhone(r, { tools: ['send_sms', 'contacts_lookup', 'gif_search'] });
+  r.agent.providerManager.generateResponse = async () => ({ content: 'NONE' });
+  const plugin = new TextXPlugin(r.agent);
+  Object.defineProperty(plugin, 'svc', { value: { hub: r.hub } });
+  let sent = null;
+  const answered = new Set();
+  const phone = setInterval(async () => {
+    for (const e of p.sent.filter(x => x.type === 'tool_call' && !answered.has(x.body.call_id))) {
+      answered.add(e.body.call_id);
+      if (e.body.name === 'contacts_lookup') await p.say(env('tool_result', { call_id: e.body.call_id, ok: true, result: [{ name: 'Lizzy', numbers: ['+15550111'] }] }));
+      if (e.body.name === 'gif_search') await p.say(env('tool_result', { call_id: e.body.call_id, ok: true, result: [{ id: 'g1', title: 'sad robot', sizes: [{ url: 'https://media.example/robot.gif', bytes: 1000 }] }] }));
+      if (e.body.name === 'send_sms') { sent = e.body.args; await p.say(env('tool_result', { call_id: e.body.call_id, ok: true, result: { status: 'sent' } })); }
+    }
+  }, 5);
+  const res = await textxRequest.run({ deviceId: p.device.id }, () => plugin.execute({ action: 'send', to: 'Lizzy', gifSearch: 'sad robot', _context: { originalInput: 'Send Lizzy a gif of a sad robot' } }));
+  for (let i = 0; i < 30 && !sent; i++) await tick();
+  clearInterval(phone);
+  assert.equal(res.success, true, JSON.stringify(res));
+  assert.ok(sent, 'send_sms reached the phone');
+  assert.equal(sent.text, undefined, 'no text with a GIF on its own');
+  assert.deepEqual(sent.attachments.map(a => a.url), ['https://media.example/robot.gif']);
+});
+
 test('plugin: a conversation not shared with the agent is refused with how to share it', async () => {
   const { default: TextXPlugin } = await import('../../src/api/plugins/textx.js');
   const r = rig({ waits: { read: 300, readExpiry: 600, late: 10 } });
@@ -1548,6 +1587,8 @@ test('plugin: "remind Sam via text message that…" sends a text even when match
   Object.defineProperty(plugin, 'svc', { value: { hub: r.hub } });
   const asked = [];
   plugin._extractArgs = async (action, d) => { asked.push(action); d.text = 'The cake is coming.'; };
+  // Unquoted, so ALICE writes it (owner, 2026-10-27).
+  r.agent.providerManager.generateResponse = async () => ({ content: 'Hey Sam, the cake is on its way!' });
   const phone = setInterval(async () => {
     for (const e of p.sent.filter(x => x.type === 'tool_call' && !x.done)) {
       e.done = true;
@@ -1560,7 +1601,7 @@ test('plugin: "remind Sam via text message that…" sends a text even when match
   clearInterval(phone);
   assert.deepEqual(asked, ['send']);
   const send = p.sent.find(e => e.type === 'tool_call' && e.body.name === 'send_sms');
-  assert.equal(send.body.args.text, 'The cake is coming.');
+  assert.equal(send.body.args.text, 'Hey Sam, the cake is on its way!');
   assert.equal(res.success, true);
 });
 
@@ -1980,17 +2021,31 @@ test('known facts reach the check, and its corrected text is what goes out', asy
   assert.match(prompts.join('\n'), /assistants send only after the owner taps Send/);
 });
 
-test('words the owner dictated are not rewritten or checked', async () => {
+test('quoted words the owner dictated are not rewritten or checked', async () => {
   const { plugin, p, r } = await plugin432(['contacts_lookup', 'send_sms']);
   let calls = 0;
   r.agent.providerManager = { generateResponse: async () => { calls++; return { content: 'NO_FACTS' }; } };
   const ph = fakePhone(p, { contacts_lookup: () => [{ name: 'Sam', numbers: ['+15550100'] }], send_sms: () => ({ status: 'sent' }) });
   const res = await plugin.execute({ action: 'send', to: 'Sam', text: 'the gate code changed to 4471',
-    _context: { originalInput: 'text Sam the gate code changed to 4471' } });
+    _context: { originalInput: 'text Sam "the gate code changed to 4471"' } });
   ph.stop();
   assert.equal(res.success, true, res.error);
   assert.equal(ph.seen.find(c => c.name === 'send_sms').args.text, 'the gate code changed to 4471');
   assert.equal(calls, 0);
+});
+
+test('unquoted words are reworded, never fact-checked into a refusal, and keep their numbers', async () => {
+  const { plugin, p, r } = await plugin432(['contacts_lookup', 'send_sms']);
+  const prompts = [];
+  r.agent.providerManager = { generateResponse: async (q) => { prompts.push(q); return { content: /Write the text message/.test(q) ? 'Heads up, the gate code is now 4471.' : 'NO_FACTS' }; } };
+  const ph = fakePhone(p, { contacts_lookup: () => [{ name: 'Sam', numbers: ['+15550100'] }], send_sms: () => ({ status: 'sent' }) });
+  const res = await plugin.execute({ action: 'send', to: 'Sam', text: 'the gate code changed to 4471',
+    _context: { originalInput: 'text Sam the gate code changed to 4471' } });
+  ph.stop();
+  assert.equal(res.success, true, res.error);
+  assert.equal(ph.seen.find(c => c.name === 'send_sms').args.text, 'Heads up, the gate code is now 4471.');
+  assert.match(prompts[0], /Keep every number, code/);
+  assert.ok(!prompts.some(q => /NO_FACTS/.test(q)), 'the owner\'s own content is not fact-checked');
 });
 
 // ---- one person across channels (services/people, 2026-10-23) ----
