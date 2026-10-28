@@ -77,7 +77,13 @@ export function createTransport(hub, { filesDir, avatarFile = () => null, logger
     const params = new URLSearchParams(query);
     const headerDev = headers['x-textx-device'] ? String(headers['x-textx-device']).slice(0, 128) : null;
     const askedDev = params.get('device') || headerDev;
-    const refuse = () => json(401, { error: 'this pairing belongs to another device, or the request did not say which device it is' });
+    // Logged with only the first 4 characters of each id: enough to tell a missing device from a wrong
+    // one (the PhoneAPI handover's 401s could not be told apart, Trellis 2119 #274).
+    const short = (v) => (v ? `${String(v).slice(0, 4)}…` : 'missing');
+    const refuse = (why = '', got = askedDev) => {
+      logger.warn?.(`TextX: ${device.name} ${method} ${p} refused (${why || 'device'}): sent ${short(got)}, bound ${short(device.deviceId)}`);
+      return json(401, { error: 'this pairing belongs to another device, or the request did not say which device it is' });
+    };
     const raw = body ? Buffer.from(body) : Buffer.alloc(0);
     try {
       if (p === '/textx/v1/messages' && method === 'POST') {
@@ -85,16 +91,16 @@ export function createTransport(hub, { filesDir, avatarFile = () => null, logger
         try { envelopes = openJson(device.key, device.kid, P2A, raw.toString('utf8')); } catch { return json(400, { error: 'bad_frame' }); }
         if (!Array.isArray(envelopes)) return json(400, { error: 'body must be an array of envelopes' });
         const lead = envelopes[0]?.type === 'hello' ? String(envelopes[0].body?.device || '').slice(0, 128) : null;
-        if (lead && headerDev && lead !== headerDev) return refuse();
+        if (lead && headerDev && lead !== headerDev) return refuse('hello and header disagree', lead);
         const sender = lead || headerDev;
         // Nothing in a batch that does not name the bound device is acted on.
-        if (!sender || (device.deviceId && sender !== device.deviceId)) return refuse();
-        if (!device.deviceId && !lead) return refuse();
+        if (!sender || (device.deviceId && sender !== device.deviceId)) return refuse(lead ? 'hello device' : 'header device', sender);
+        if (!device.deviceId && !lead) return refuse('unbound, no hello', sender);
         return seal(await hub.handlePost(device, envelopes, sender));
       }
       if (p === '/textx/v1/messages' && method === 'GET') {
         if (!device.deviceId) return seal({ envelopes: [], cursor: '0' });
-        if (askedDev !== device.deviceId) return refuse();
+        if (askedDev !== device.deviceId) return refuse('?device');
         const first = await hub.drain(device, params.get('since'));
         // Long-poll: `wait` (seconds) holds an empty answer until something is queued. Capped at
         // LONG_POLL_MAX_S, under the api.lanagent.net relay's 30 s request ceiling.

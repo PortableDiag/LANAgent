@@ -2,6 +2,11 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.675] - 2026-10-28
+
+### Changed
+- **A refused phone request says why.** When TextX, DialX or NotifX traffic is refused because it names no device or the wrong one, the log line now gives the route, the reason and the first four characters of the device it sent and the one the pairing is bound to. During the first PhoneAPI handover attempt every refusal looked the same.
+
 ## [2.25.674] - 2026-10-28
 
 ### Fixed
