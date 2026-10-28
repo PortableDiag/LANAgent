@@ -1154,3 +1154,15 @@ test('phone.call_state events reach the DialX calls and mark a call ending (Dial
   await tick();
   assert.ok(r.hub.dialx.phoneState.idleSince > 0, 'the end of a call starts the 2-minute hold');
 });
+
+test('a hello that names its app is that app, whatever tools it lists (PhoneAPI 0.1.5 merged them, 2026-10-27)', async () => {
+  const { isNotifX } = await import('../../src/services/textx/notifx.js');
+  const { isDialX } = await import('../../src/services/textx/dialx.js');
+  const notifx = ['notifx.list_apps', 'notifx.watch'];
+  assert.equal(isNotifX({ client: 'TextX', capabilities: ['send_sms', ...notifx] }), false);
+  assert.equal(isNotifX({ client: 'DialX', capabilities: ['dialx.say', ...notifx] }), false);
+  assert.equal(isNotifX({ client: 'NotifX', capabilities: notifx }), true);
+  assert.equal(isNotifX({ capabilities: notifx }), true, 'no app name: the tools decide, as before');
+  assert.equal(isDialX({ client: 'DialX', capabilities: ['dialx.say', ...notifx] }), true);
+  assert.equal(isDialX({ client: 'TextX', capabilities: ['dialx.say'] }), false);
+});

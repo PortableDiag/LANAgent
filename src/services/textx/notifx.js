@@ -25,7 +25,11 @@ export const NOTIFX_CONFIRMED = new Set(['notifx.reply', 'notifx.tap_action']);
 
 /** A NotifX pairing: minted for NotifX, says it is NotifX, or its hello listed NotifX tools. */
 export function isNotifX(device) {
-  return device?.app === 'notifx' || /notifx/i.test(String(device?.client || '')) || (device?.capabilities || []).some(t => NOTIFX_TOOLS.includes(t));
+  if (device?.app === 'notifx' || /notifx/i.test(String(device?.client || ''))) return true;
+  // A hello that names another app is that app, whatever tools it lists: PhoneAPI 0.1.5 listed NotifX's
+  // tools in TextX's and DialX's hellos, and every NotifX request went to all three (2026-10-27).
+  if (/\b(textx|dialx|notifx)\b/i.test(String(device?.client || ''))) return false;
+  return (device?.capabilities || []).some(t => NOTIFX_TOOLS.includes(t));
 }
 
 /** The same notification reported by two phones (each with its own watch) is told once. */

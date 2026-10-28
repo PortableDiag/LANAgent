@@ -271,7 +271,11 @@ const CALL_LIMIT_S = Number(process.env.DIALX_CALL_LIMIT_S) || 300;
 
 /** A DialX pairing: its hello listed DialX tools, or it says it is DialX. */
 export function isDialX(device) {
-  return device?.app === 'dialx' || /dialx/i.test(String(device?.client || '')) || (device?.capabilities || []).some(t => DIALX_TOOLS.includes(t));
+  if (device?.app === 'dialx' || /dialx/i.test(String(device?.client || ''))) return true;
+  // A hello that names another app is that app, whatever tools it lists: PhoneAPI 0.1.5 listed NotifX's
+  // tools in TextX's and DialX's hellos, and every NotifX request went to all three (2026-10-27).
+  if (/\b(textx|dialx|notifx)\b/i.test(String(device?.client || ''))) return false;
+  return (device?.capabilities || []).some(t => DIALX_TOOLS.includes(t));
 }
 
 // ── settings ────────────────────────────────────────────────────────────────────────────────

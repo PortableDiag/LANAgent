@@ -2,6 +2,11 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.676] - 2026-10-28
+
+### Fixed
+- **A phone app is the app its hello names.** ALICE told NotifX phones apart partly by the tools a hello lists. Through PhoneAPI, TextX's and DialX's hellos also listed NotifX's tools, so a NotifX request went to three links and every app came back listed two or three times. A hello that names TextX, DialX or NotifX is now that app, whatever it lists.
+
 ## [2.25.675] - 2026-10-28
 
 ### Changed
