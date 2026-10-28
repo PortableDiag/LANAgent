@@ -1199,7 +1199,12 @@ export class TextXHub {
     const run = (async () => {
       if (prev) await prev.catch(() => {});
       const last = this.autoRepliedAt.get(key) || 0;
-      if (last > arrived) {
+      // Covered = the last reply read this message. Timing alone was wrong: Adam's "I can't see the gif"
+      // came while the reply to his tapback was being written, after it had read the thread, and got no
+      // answer (2026-10-27). The finish time is the fallback when the read did not list message ids.
+      const read = this.autoReplyRead?.get(key);
+      const id = args.m?.message_id;
+      if (read && id ? read.has(String(id)) : last > arrived) {
         this.logger.info?.(`TextX: auto-reply in "${args.title}": this message is covered by the reply just sent`);
         return true;
       }
@@ -1221,6 +1226,10 @@ export class TextXHub {
     // incoming texts and is empty after a restart, so "reword your last message" had nothing to
     // go on (2026-10-19).
     const read = await this.callTool('read_thread', { thread_id: threadId, limit: 20 }, { deviceId: device.id, onlyDevice: device.id });
+    if (read.ok && Array.isArray(read.result) && read.result.some(x => x?.message_id)) {
+      this.autoReplyRead = this.autoReplyRead || new Map();
+      this.autoReplyRead.set(`${device.id}:${threadId}`, new Set(read.result.map(x => String(x?.message_id || '')).filter(Boolean)));
+    }
     const history = read.ok && (read.result || []).length ? (read.result || []).map(x => formatMessage(x, { self: name, owner })) : recent;
     // A voice note is heard, not just seen as "[audio/mp4]" (TextX 0.4.46 hands AMR/3GP over as M4A).
     const heard = read.ok ? await this.hearVoiceNotes(device, threadId, read.result || []) : '';

@@ -157,6 +157,10 @@ export class VectorIntentDetector {
         !/\b(create|add|make|draw|connect|send|post|write|set|move|schedule|generate|upload|reply|edit|link)\b/i.test(input);
       const readVsWrite = writesSomething && asksToSee;
       if (readVsWrite) threshold = Math.max(threshold, 0.75);
+      // Any action that makes or changes something needs a confident match: "Alice pick an avatar you
+      // like from botsnborgs.com" ran mindswarm.uploadAvatar at 0.605, twice (2026-10-27). Below 0.7 the
+      // AI classifier, which reads the whole request, decides; reads keep the 0.6 base.
+      if (writesSomething) threshold = Math.max(threshold, 0.7);
       if (similarity < threshold) {
         logger.info(`Best match similarity ${similarity.toFixed(3)} below threshold ${threshold}${isDangerousAction ? ' (dangerous action)' : readVsWrite ? ' (a request to see matched an action that changes)' : ` (${metadata.plugin || 'system'})`}, falling back to AI`);
         return null;

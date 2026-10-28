@@ -2,6 +2,18 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.674] - 2026-10-28
+
+### Fixed
+- **"Pick an avatar you like from <site>" looks at the site.** The AI classifier read it as "set your avatar" and the MindSwarm avatar upload matched it too. Both now run only when the request asks to set, change, use or upload an avatar; anything else goes to the reasoning agent, which can browse.
+- **A text that came after the reply read the thread gets its own answer.** Adam's "I can't see the gif" arrived while the reply to his tapback was being written, and was treated as already answered. A message now counts as covered only if the last reply actually read it.
+
+## [2.25.673] - 2026-10-28
+
+### Fixed
+- **A request is not handed to an action that changes something on a weak match.** "Alice pick an avatar you like from botsnborgs.com" ran the MindSwarm avatar upload, twice, on a 0.60 match. A match to an action that creates, sends, sets or uploads now needs 0.7; below that the AI classifier, which reads the whole request, decides.
+- **A wrong action never answers with its validation error.** When a matched action cannot run because a required input is missing, the request goes to the reasoning agent instead of answering "Validation failed: Required field 'filePath' is missing".
+
 ## [2.25.672] - 2026-10-28
 
 ### Added

@@ -2290,6 +2290,36 @@ test('an auto-reply knows the calls already planned with that person (Lizzy, 202
   assert.doesNotMatch(prompt, /someone else|long past/);
 });
 
+test('a text that came after the reply read the thread still gets its own reply (Adam, 2026-10-27)', async () => {
+  const replies = [];
+  let release;
+  const gate = new Promise(r => { release = r; });
+  const { r } = sharedRig(() => 'SKIP');
+  r.agent.providerManager.generateResponse = async (p) => {
+    if (!/answering by text message/.test(p)) return { content: 'SKIP' };
+    if (!replies.length) { replies.push('1'); await gate; return { content: 'Glad you liked it!' }; }
+    replies.push('2'); return { content: 'Sorry, here it is again.' };
+  };
+  const p = await pairedPhone(r, { tools: ['send_sms', 'read_thread'] });
+  const inThread = [{ message_id: 'a1', thread_id: 't9', from: { name: 'Adam' }, text: 'Laughed at an audio message' }];
+  const answered = new Set();
+  const phone = setInterval(async () => {
+    for (const e of p.sent.filter(x => x.type === 'tool_call' && !answered.has(x.body.call_id))) {
+      answered.add(e.body.call_id);
+      if (e.body.name === 'read_thread') await p.say(env('tool_result', { call_id: e.body.call_id, ok: true, result: [...inThread] }));
+      if (e.body.name === 'send_sms') await p.say(env('tool_result', { call_id: e.body.call_id, ok: true, result: { status: 'sent' } }));
+    }
+  }, 5);
+  await p.say(smsEvent({ auto_reply: true, message: { thread_id: 't9', message_id: 'a1', from: { name: 'Adam' }, text: 'Laughed at an audio message', untrusted: true } }));
+  for (let i = 0; i < 40 && !replies.length; i++) await tick();
+  // The first reply has read the thread (a1 only); a2 arrives while it is being written.
+  await p.say(smsEvent({ auto_reply: true, message: { thread_id: 't9', message_id: 'a2', from: { name: 'Adam' }, text: "I can't see the gif", untrusted: true } }));
+  release();
+  for (let i = 0; i < 80 && replies.length < 2; i++) await new Promise(res => setTimeout(res, 50));
+  clearInterval(phone);
+  assert.equal(replies.length, 2, 'the message the first reply never read gets an answer');
+});
+
 test('two texts in a burst get one auto-reply; a reply written to the owner is never texted to them (Wayne, 2026-10-26)', async () => {
   const prev = process.env.OWNER_NAME; process.env.OWNER_NAME = 'Charles';
   try {

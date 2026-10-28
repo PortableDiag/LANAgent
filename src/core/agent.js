@@ -1943,6 +1943,17 @@ If answering needs information that is not in the conversation above (messages, 
 
             // ======= AGENT AVATAR =======
             case 'setAvatar': {
+              // "Alice pick an avatar you like from botsnborgs.com" is a request to browse and give an
+              // opinion, not to change anything (2026-10-27): only "set / change / use … avatar" sets one.
+              if (!/\b(set|change|update|use|make|swap|replace)\b[\s\S]{0,40}\b(avatar|profile (pic|picture|photo|image))\b|\bnew (avatar|profile (pic|picture))\b|\bas (your|its) (avatar|profile)/i.test(input)) {
+                logger.info(`[intent-guard] setAvatar needs to be asked for by name; handing "${input.slice(0, 80)}" to the reasoning agent`);
+                try {
+                  const rendered = await this._runReasoning(input, context);
+                  if (rendered) return rendered;
+                } catch (reasoningError) {
+                  logger.warn(`Reasoning after a guarded setAvatar failed: ${reasoningError.message}`);
+                }
+              }
               // When triggered via NLP, the user is telling the agent to set an avatar
               // If they sent an image attachment, context will have it; otherwise guide them
               const avatarMsg = 'To set my avatar, please go to **Settings > Agent Avatar** in the web UI and upload an image there. You can also send me an image file and I\'ll save it as my avatar.';
@@ -3253,6 +3264,7 @@ Return ONLY a valid JSON object with the extracted parameters, nothing else.`;
           // subagents.approve and answered "Please provide agent ID and approval ID". Without
           // the explicit wording, the task goes to the reasoning agent, which has the tools.
           const EXPLICIT_ONLY = {
+            'mindswarm.uploadAvatar': /\b(upload|set|change|update|use)\b[\s\S]{0,40}\b(avatar|profile (pic|picture|photo|image))\b[\s\S]*\bmindswarm\b|\bmindswarm\b[\s\S]*\b(upload|set|change|update)\b[\s\S]{0,40}\bavatar\b/i,
             'subagents.createTaskAgent': /\b(task[- ]?agent|sub-?agent|delegate|background agent)\b/i,
             'subagents.approve': /\b(approv\w*)\b[\s\S]*\b(sub-?agent|agent \w+|approval \w+|[0-9a-f]{24})\b/i,
             'subagents.reject': /\b(reject\w*)\b[\s\S]*\b(sub-?agent|agent \w+|approval \w+|[0-9a-f]{24})\b/i,
@@ -3331,6 +3343,19 @@ Return ONLY a valid JSON object with the extracted parameters, nothing else.`;
             context
           );
           
+          // A matched action that cannot run for a missing required input was the wrong action, not a
+          // question for the owner: "pick an avatar you like from botsnborgs.com" ran mindswarm.uploadAvatar
+          // twice and answered "Validation failed: Required field 'filePath' is missing" (2026-10-27).
+          if (result && result.success === false && /^Validation failed: Required field/i.test(String(result.error || ''))) {
+            logger.info(`[intent-guard] ${intentResult.plugin}.${finalAction} could not run (${result.error}); handing "${input.slice(0, 80)}" to the reasoning agent`);
+            try {
+              const rendered = await this._runReasoning(input, context);
+              if (rendered) return rendered;
+            } catch (reasoningError) {
+              logger.warn(`Reasoning after a failed intent failed: ${reasoningError.message}`);
+            }
+          }
+
           let response;
           // Debug: log what we got from the plugin
           logger.info(`Plugin result keys: ${Object.keys(result || {}).join(', ')}, hasFile: ${!!result?.file}, filePath: ${result?.file?.path || 'none'}`);
