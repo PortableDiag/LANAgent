@@ -2,6 +2,31 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.707] - 2026-10-29
+
+### Fixed
+- **A repeating reminder starts when asked.** The parameter extractor turned "monthly" into a 30-day delay, so "monthly starting tomorrow at 3am" first fired a month later at the current time. A delay now counts only when the request names one ("in 20 minutes").
+
+## [2.25.706] - 2026-10-29
+
+### Added
+- **Repeating reminders.** "Remind me monthly starting today to clean the vacuum bags" now sets a monthly reminder instead of a one-off (the word "monthly" used to be dropped). Daily, weekly, monthly and yearly are understood from the request or a `repeat` parameter, with an optional start ("tomorrow", "at 7pm"; 9:00 by default). Each reminder schedules the next, so a monthly one keeps its day of the month and uses the last day of shorter months. "Starting today" after the reminder's time sends the first one at once.
+
+### Fixed
+- **Reminders make a sound.** Reminder notifications were sent silently, like every other notice since 2.25.582; they are now urgent.
+
+## [2.25.705] - 2026-10-29
+
+### Added
+- **Bug reports for the developer, by voice or chat.** Say "log a bug: …" on a call, in Telegram or in a voice note. The report is saved in the database and added to the Trellis basket "Dev Inbox" as a card with the conversation so far, the errors logged in the 5 minutes before, the version and the model, so the developer can pick it up later with all the context. On realtime calls the voice has a new `report_bug` tool; in chat it is the `devreports` plugin (`report`, `list`). Only the owner can file reports, and a report Trellis does not accept is retried every 15 minutes. See docs/TEXTX.md.
+
+## [2.25.704] - 2026-10-29
+
+### Fixed
+- **No more "High Resource Usage" alerts for one-shot commands.** `ps` reports a lifetime-average CPU, so a short command sampled a moment after it started (a database query, a VPN status call) read ~100% and sent an alert. A process now has to be over the threshold on two consecutive checks (10 minutes apart) before it is reported.
+- **The AI-budget notice keeps its formatting.** The provider's error text (e.g. `max_tokens`) is stripped of Markdown characters before it is quoted, so Telegram no longer refuses the message's formatting.
+- The self-improvement deploy log line names the deployed files instead of `undefined`.
+
 ## [2.25.703] - 2026-10-28
 
 ### Fixed

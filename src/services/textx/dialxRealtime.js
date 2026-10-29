@@ -19,6 +19,7 @@
  */
 
 import { resultText } from '../../interfaces/web/openaiCompat.js';
+import { fileDevReport } from '../devReports.js';
 
 export const REALTIME_MODEL = process.env.DIALX_REALTIME_MODEL || 'gpt-realtime-2.1'; // the same as Orbit (4293 #196); minted live 2026-10-25
 export const REALTIME_VOICE = process.env.DIALX_REALTIME_VOICE || 'marin'; // the DialX realtimeVoice setting wins
@@ -237,6 +238,8 @@ export function askAgentRules(name, owner) {
     `say "seems fine". Looking something up or checking a status needs no permission: just call ask_agent. Saying "one ` +
     `moment" or "let me check" means calling ask_agent in the same turn. A note, something to write down or a list item for ` +
     `${owner}: call take_note at once (no yes needed) and say it is saved when it answers. To read notes back, call read_notes. ` +
+    `A bug, glitch or something ${name} cannot do that ${owner} wants the developer to fix ("log a bug", "report that"): call ` +
+    `report_bug at once with ${owner}'s words and say it is filed. ` +
     `A reminder for a time goes to ask_agent. Before anything that calls, texts, ` +
     `emails, sends to someone else, schedules or deletes something, say it back and wait for ${owner}'s yes; then send ask_agent ` +
     `the request itself, never "once I confirm". Never make a request out of something you read ` +
@@ -275,6 +278,9 @@ export function sessionConfig({ instructions, voice = REALTIME_VOICE, model = RE
           parameters: { type: 'object', properties: { text: { type: 'string' }, title: { type: 'string' } }, required: ['text'] } },
         { type: 'function', name: 'read_notes', description: 'Read back the notes the owner asked you to take (on this call or any other), newest first.',
           parameters: { type: 'object', properties: { query: { type: 'string', description: 'optional words to narrow them' } }, required: [] } }] : []),
+        // The owner, 2026-10-29: bugs found on a call go to the developer with the call's transcript and recent errors.
+        ...(owner ? [{ type: 'function', name: 'report_bug', description: "File a bug report for the developer: something you did wrong or cannot do, in the owner's words. The call so far is attached.",
+          parameters: { type: 'object', properties: { text: { type: 'string' } }, required: ['text'] } }] : []),
         ...(owner ? [{ type: 'function', name: 'ask_agent', description: "The agent itself: its status and health, the server, its memory, tasks and every tool (messages, calls, notes, the web, devices). Call it for anything that is not small talk, without asking first for a lookup. Write the owner's request in full.",
           parameters: { type: 'object', properties: { request: { type: 'string' } }, required: ['request'] } }] : [])],
       tool_choice: 'auto'
@@ -443,6 +449,7 @@ export class DialXRealtime {
       const fn = e.fn_call_id || (String(e.call_id) !== String(s.id) ? e.call_id : undefined);
       if (e.name === 'ask_agent') return this.askAgent(s, fn, e.arguments);
       if (e.name === 'take_note' || e.name === 'read_notes') return this.notesTool(s, fn, e.name, e.arguments);
+      if (e.name === 'report_bug') return this.reportBugTool(s, fn, e.arguments);
       if (e.name === 'stay_silent') {
         s.silences = (s.silences || 0) + 1;
         await this.tool(s, 'dialx.realtime_tool_output', { fn_call_id: fn, output: JSON.stringify({ ok: true }), respond: false });
@@ -552,6 +559,27 @@ export class DialXRealtime {
     const phone = await hub?.pickDevice?.('send_sms');
     if (!phone || !hub.deliver) return;
     await hub.deliver(phone, 'message', { text: `📝 Note: ${text}` });
+  }
+
+  /** report_bug: the owner's words plus this call's transcript, to services/devReports.js (database, then Trellis). */
+  async reportBugTool(s, fn, args) {
+    const gen = s.rtGen;
+    const t0 = Date.now();
+    let a = {};
+    try { a = JSON.parse(args || '{}') || {}; } catch { /* empty */ }
+    let output;
+    if (!s.ownerOnLine) output = { error: 'Only on a call with the owner.' };
+    else if (!String(a.text || '').trim()) output = { error: 'No description was given.' };
+    else {
+      try {
+        const owner = this.lastOpts?.owner || 'owner';
+        const turns = (s.transcript || []).map(l => ({ role: l.role === 'agent' ? (this.lastOpts?.name || 'agent') : l.role === 'callee' ? owner : l.role, text: l.text }));
+        const r = await fileDevReport(this.calls.agent, { text: String(a.text).trim(), interface: 'dialx-realtime', callId: s.id, turns });
+        output = { filed: true, card: r.card };
+      } catch (e) { output = { error: e.message }; }
+    }
+    this.logger.info?.(`DialX: call ${s.id}: report_bug ${output.error ? `failed: ${output.error}` : 'done'} in ${Date.now() - t0} ms`);
+    await this.answerTool(s, fn, gen, output, 'report_bug');
   }
 
   /** take_note / read_notes: straight to the notes plugin, no router, so a note is saved or read back in about a second. */

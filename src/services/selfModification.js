@@ -5671,8 +5671,8 @@ ${newCapsBlock}${reviewFlagsBlock}
       if (improvement.error) {
         logger.error(`NOTIFICATION: Self-modification error - ${improvement.error}`);
       } else {
-        logger.info(`NOTIFICATION: Self-Improvement Completed - ${improvement.type} - ${improvement.file}`);
-        logger.info(`Branch: ${branchName}, Description: ${improvement.description}`);
+        logger.info(`NOTIFICATION: Self-Improvement Completed - ${improvement.type} - ${improvement.file || (improvement.files || []).join(', ')}`);
+        logger.info(`Branch: ${branchName || '(none)'}, Description: ${improvement.description}`);
       }
       
       const agentName = process.env.AGENT_NAME || 'LANAgent';

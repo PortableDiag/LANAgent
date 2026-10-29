@@ -48,6 +48,7 @@ export class ProcessManager extends EventEmitter {
     this.processCache = new Map();
     this.zombieHistory = [];
     this.alerts = new Map();
+    this.prevHighCpuPids = new Set();
     this.monitoringIntervals = new Map();
   }
 
@@ -182,7 +183,7 @@ export class ProcessManager extends EventEmitter {
       const isIgnored = (cmd) =>
         this.config.ignoredProcesses.some(name => cmd.includes(name));
 
-      const highCpuProcesses = processes.filter(p =>
+      const cpuNow = processes.filter(p =>
         p.cpu >= this.config.alertThresholds.cpuPercent &&
         !p.command.includes('ps aux') &&
         !p.command.includes('ps -') &&
@@ -190,6 +191,13 @@ export class ProcessManager extends EventEmitter {
         !p.command.includes('htop') &&
         !isIgnored(p.command)
       );
+
+      // A process sampled a moment after it starts reads ~100% (lifetime
+      // average over a fraction of a second), so one-shot commands like a
+      // mongosh query tripped this alert. Only alert on a PID that was also
+      // high on the previous check — sustained load, not a startup burst.
+      const highCpuProcesses = cpuNow.filter(p => this.prevHighCpuPids.has(p.pid));
+      this.prevHighCpuPids = new Set(cpuNow.map(p => p.pid));
 
       const highMemoryProcesses = processes.filter(p =>
         p.memory >= this.config.alertThresholds.memoryPercent &&

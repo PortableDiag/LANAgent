@@ -376,6 +376,14 @@ What each layer guarantees, and what it doesn't.
 - Text the user sends the agent goes to the agent's AI provider, as any chat does. With OpenRouter, the agent requires zero-data-retention routing.
 - The relay is a single point of availability, not of confidentiality. If it's down, phones use the home network (or the agent's own `TEXTX_PUBLIC_URL`).
 
+## Bug reports for the developer
+
+The owner can report a bug or limitation in any conversation: "log a bug: you hung up while I was still talking". On a realtime call the voice calls the `report_bug` tool (owner calls only). In chat, Telegram and voice notes the `devreports` plugin (`report`, `list`) does it.
+
+- Each report is saved first to the `devreports` collection (`src/models/DevReport.js`), so nothing is lost if Trellis is unreachable.
+- The report goes into the Trellis basket **Dev Inbox** (`DEV_REPORTS_BASKET`) as a card with the owner's words, the conversation so far (the call's own transcript on a call), the `[ERROR]` lines from the 5 minutes before, the version and the model. Cards Trellis did not accept are retried every 15 minutes.
+- Only the owner can file reports. Filing a report never runs anything.
+
 ## API
 
 | Route | Auth | |

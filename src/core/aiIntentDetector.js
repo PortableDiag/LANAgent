@@ -93,10 +93,10 @@ export class AIIntentDetector {
       // Reminders
       3: {
         name: 'setReminder',
-        description: 'Set reminders with time delays',
+        description: 'Set reminders, once (after a delay) or repeating daily, weekly, monthly or yearly',
         plugin: 'system',
         action: 'remind',
-        examples: ['remind me to X in 30 minutes', 'set reminder for Y in 2 hours']
+        examples: ['remind me to X in 30 minutes', 'set reminder for Y in 2 hours', 'remind me monthly to X', 'remind me every week to Y starting today']
       },
       
       // Software management

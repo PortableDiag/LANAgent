@@ -6289,7 +6289,7 @@ Important:
     (this._quotaAlertAt ||= new Map()).set(q.name, Date.now());
     const reset = q.resetsAt ? new Date(q.resetsAt) : null;
     const when = reset && Number.isFinite(reset.getTime()) ? ` It resets ${reset.toISOString().slice(0, 10)}.` : '';
-    this.notify(`⚠️ My AI budget is used up: ${q.name} refused with "${q.message.replace(/https?:\/\/\S+/g, '').slice(0, 160).trim()}".${when} ` +
+    this.notify(`⚠️ My AI budget is used up: ${q.name} refused with "${q.message.replace(/https?:\/\/\S+/g, '').replace(/[_*`\[\]]/g, ' ').slice(0, 160).trim()}".${when} ` +
       'Until then I cannot chat, answer on Telegram, take calls or auto-reply. The provider lock stops me spending on another provider; ' +
       'raise the key limit or change the lock to bring me back.', { urgent: true }).catch(() => {});
   }

@@ -6,6 +6,7 @@ import fs from 'fs/promises';
 import path from 'path';
 import os from 'os';
 import { resolveGitRemote } from '../../utils/gitRemote.js';
+import { normalizeRepeat, repeatFromText, resolveAnchor, anchorOf, firstRun, describeRepeat } from '../../services/reminderRecurrence.js';
 
 const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
@@ -76,8 +77,8 @@ export default class SystemPlugin extends BasePlugin {
       },
       {
         command: 'remind',
-        description: 'Set a reminder',
-        usage: 'remind [message] in [minutes]'
+        description: 'Set a reminder, once or repeating (daily, weekly, monthly, yearly)',
+        usage: 'remind({ message: "clean the vacuum bags", minutes: 30 }) or repeating: remind({ message: "clean the vacuum bags", repeat: "monthly", startAt: "today 9:00" })'
       }
     ];
     
@@ -722,6 +723,12 @@ export default class SystemPlugin extends BasePlugin {
         error: 'Reminder message is required'
       };
     }
+
+    // "remind me monthly starting today to …" was set as a one-off (2026-10-29): read the repeat from
+    // the parameters, or from the request itself when the extractor left it out.
+    const input = String(params._context?.originalInput || '');
+    const repeat = normalizeRepeat(params.repeat || params.recurrence || params.frequency) || repeatFromText(input);
+    if (repeat) return this.setRecurringReminder({ ...params, message, notificationMethod, repeat, input });
     
     if (!minutes || minutes <= 0) {
       return {
@@ -773,6 +780,26 @@ export default class SystemPlugin extends BasePlugin {
         error: `Failed to set reminder: ${error.message}`
       };
     }
+  }
+
+  async setRecurringReminder({ message, notificationMethod, repeat, input, startAt, minutes, userId }) {
+    if (!this.agent.scheduler?.scheduleRecurringReminder) {
+      return { success: false, error: 'The scheduler is not running, so a repeating reminder cannot be set' };
+    }
+    const now = new Date();
+    // The extractor turns "monthly" into minutes: 43200 (2026-10-29, the first run landed a month out at the wrong
+    // time). A delay counts only when the request says one ("in 20 minutes").
+    const saysDelay = !input || /\bin\s+(an?|\d+)\s*(min|minutes?|hours?|hrs?|h)\b/i.test(input);
+    const anchorAt = saysDelay && Number(minutes) > 0 ? new Date(now.getTime() + Number(minutes) * 60000) : resolveAnchor({ startAt, text: input, now });
+    const anchor = anchorOf(anchorAt);
+    const firstAt = firstRun(anchorAt, repeat, now);
+    const result = await this.agent.scheduler.scheduleRecurringReminder(message, { repeat, firstAt, anchor, userId, notificationMethod });
+    const first = firstAt.getTime() - now.getTime() <= 2 * 60000 ? 'the first one in a minute' : `the first on ${firstAt.toLocaleString()}`;
+    return {
+      success: true,
+      jobId: String(result.jobId),
+      result: `✅ ${repeat[0].toUpperCase()}${repeat.slice(1)} reminder set: "${message}", ${first}, then ${describeRepeat(repeat, anchor)}.`
+    };
   }
 
   // Multi-channel notification support for reminders

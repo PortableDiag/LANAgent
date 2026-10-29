@@ -415,9 +415,21 @@ class TaskScheduler {
 
     // Reminder job
     this.agenda.define('reminder', async (job) => {
-      const { message, userId, notificationMethod = 'telegram' } = job.attrs.data;
-      logger.info(`Sending reminder: ${message} via ${notificationMethod}`);
-      
+      const { message, userId, notificationMethod = 'telegram', repeat, anchor } = job.attrs.data;
+      logger.info(`Sending reminder: ${message} via ${notificationMethod}${repeat ? ` (${repeat})` : ''}`);
+
+      // A repeating reminder schedules its next occurrence first, so a failed send never ends the chain.
+      if (repeat && anchor) {
+        try {
+          const { nextOccurrence } = await import('./reminderRecurrence.js');
+          const next = nextOccurrence(new Date(), repeat, anchor);
+          await this.agenda.schedule(next, 'reminder', job.attrs.data);
+          logger.info(`Next ${repeat} reminder "${message}" scheduled for ${next.toLocaleString()}`);
+        } catch (error) {
+          logger.error(`Could not schedule the next ${repeat} reminder "${message}":`, error);
+        }
+      }
+
       try {
         // Rephrase the reminder from the agent's perspective using AI
         const rephrasePrompt = `Rephrase this reminder message from your perspective as an AI assistant. Keep it friendly but brief.
@@ -443,7 +455,8 @@ Respond with ONLY the rephrased message, no explanation:`;
         
         // Send via appropriate channels
         if (notificationMethod === 'telegram' || notificationMethod === 'both') {
-          await this.agent.notify(finalMessage, userId);
+          // urgent: a reminder must make a sound (notices are silent by default since 2.25.582)
+          await this.agent.notify(finalMessage, userId, { urgent: true });
         }
         
         if (notificationMethod === 'email' || notificationMethod === 'both') {
@@ -2756,6 +2769,12 @@ Respond with ONLY the rephrased message, no explanation:`;
       jobId: job.attrs._id,
       scheduledFor: runAt
     };
+  }
+
+  // Schedule a repeating reminder: the first run, then each run schedules the next (reminderRecurrence.js)
+  async scheduleRecurringReminder(message, { repeat, firstAt, anchor, userId, notificationMethod = 'telegram' }) {
+    const job = await this.agenda.schedule(firstAt, 'reminder', { message, userId, notificationMethod, repeat, anchor });
+    return { jobId: job.attrs._id, scheduledFor: firstAt };
   }
 
   /**
