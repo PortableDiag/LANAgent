@@ -2,6 +2,11 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.703] - 2026-10-28
+
+### Fixed
+- **The web UI's "Sync avatar" button pushes to every service.** `POST /api/agent/avatar/sync` had its own copy of the fan-out (Gravatar and the Telegram photo only); it now runs the same step as an upload, so MindSwarm and X are included, and the notification names each service that changed.
+
 ## [2.25.702] - 2026-10-28
 
 ### Fixed

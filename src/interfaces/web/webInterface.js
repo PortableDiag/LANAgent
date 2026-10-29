@@ -2769,28 +2769,11 @@ export class WebInterface {
           return res.status(404).json({ success: false, error: 'Avatar file not found on disk' });
         }
 
-        const results = {};
-
-        // Sync to Gravatar (pass agent email for selected_email_hash)
-        try {
-          const { uploadAvatarToGravatar } = await import('../../utils/gravatarHelper.js');
-          const agentEmail = process.env.EMAIL_USER || process.env.GMAIL_USER;
-          results.gravatar = await uploadAvatarToGravatar(fullPath, agentEmail);
-        } catch (error) {
-          results.gravatar = { success: false, error: error.message };
-        }
-
-        // Sync to Telegram bot profile photo
-        try {
-          const telegramInterface = this.agent.interfaces?.get('telegram');
-          if (telegramInterface?.isRunning) {
-            results.telegram = await telegramInterface.syncBotPhoto(fullPath);
-          } else {
-            results.telegram = { success: false, error: 'Telegram bot not running' };
-          }
-        } catch (error) {
-          results.telegram = { success: false, error: error.message };
-        }
+        // The same step a new avatar takes: one avatar.png, pushed to Telegram, MindSwarm, X and Gravatar.
+        const { applyAgentAvatar } = await import('../../services/avatar/applyAgentAvatar.js');
+        const applied = await applyAgentAvatar(this.agent, await fs.readFile(fullPath), { source: 'the web UI sync button' });
+        const results = Object.fromEntries(Object.entries(applied.services).filter(([, v]) => v !== 'not connected')
+          .map(([k, v]) => [k, v === 'updated' ? { success: true } : { success: false, error: v }]));
 
         const anySuccess = Object.values(results).some(r => r.success);
         logger.info('Avatar sync results:', results);

@@ -8270,11 +8270,13 @@ When the rate limit is exceeded, you'll receive:
   - Body: `{ "image": "base64data", "filename": "avatar.png", "description": "..." }`
   - Image optional if only updating description
   - Max 5MB, supports PNG, JPG, GIF, WebP
+  - Saved as one `data/agent/avatar.png` (1024×1024; other formats converted, stale copies removed) and pushed to every connected service: the Telegram bot's profile photo, MindSwarm, X, Gravatar
+  - Response adds `services`: `{ telegram, mindswarm, twitter, gravatar }` → `updated` | `not connected` | `not logged in` | `not updated: <reason>`
 - **GET** `/api/agent/identity` - Get agent identity card (auth required)
   - Returns: name, version, avatar URL, avatarDescription, personality, pluginCount, capabilities, interfaces
-- **POST** `/api/agent/avatar/sync` - Sync avatar to external services (Gravatar) (auth required)
-  - Auto-crops non-square images to square before uploading
-  - Uses OAuth token if connected, falls back to API key
+- **POST** `/api/agent/avatar/sync` - Push the current avatar to every connected service (Telegram bot photo, MindSwarm, X, Gravatar) (auth required)
+  - Same step as an upload; also available as the natural-language request "sync your avatar everywhere"
+  - Returns `{ success, results: { <service>: { success, error? } } }` for each connected service
 
 #### ERC-8004 Agent Identity
 - **GET** `/api/agent/erc8004/status` - Identity status, chain, agentId, staleness detection, gas estimate

@@ -5498,7 +5498,8 @@ class LANAgentDashboard {
             const response = await this.apiPost('/api/agent/avatar/sync', {});
             if (response.success) {
                 const parts = [];
-                if (response.results?.gravatar?.success) parts.push('Gravatar');
+                const names = { telegram: 'Telegram', mindswarm: 'MindSwarm', twitter: 'X', gravatar: 'Gravatar' };
+                for (const [svc, r] of Object.entries(response.results || {})) if (r.success) parts.push(names[svc] || svc);
                 if (parts.length > 0) {
                     this.showNotification(`Avatar synced to: ${parts.join(', ')}`, 'success');
                 } else {
