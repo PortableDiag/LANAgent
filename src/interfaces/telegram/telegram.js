@@ -1734,16 +1734,25 @@ export class TelegramInterface extends EventEmitter {
     }
     const fs = await import('fs');
 
-    // Try the newer Bot API method first
+    // Bot API setMyProfilePhoto takes an InputProfilePhoto: { type: 'static', photo: 'attach://<field>' } with the
+    // JPEG in that multipart field. Passing { photo: { source } } through callApi sent no file ("photo isn't
+    // specified"), so every avatar change fell back to asking the owner to use @BotFather (DELTA, 2026-10-28).
     try {
-      const photoStream = fs.createReadStream(imagePath);
-      await this.bot.telegram.callApi('setMyProfilePhoto', {
-        photo: { source: photoStream }
-      });
-      logger.info('Telegram bot profile photo updated via API');
-      return { success: true };
+      const { default: sharp } = await import('sharp');
+      const { default: FormData } = await import('form-data');
+      const { default: axios } = await import('axios');
+      const token = this.bot.telegram?.token || process.env.TELEGRAM_BOT_TOKEN;
+      const form = new FormData();
+      form.append('photo', JSON.stringify({ type: 'static', photo: 'attach://avatar' }));
+      form.append('avatar', await sharp(imagePath).jpeg({ quality: 92 }).toBuffer(), { filename: 'avatar.jpg', contentType: 'image/jpeg' });
+      const r = await axios.post(`https://api.telegram.org/bot${token}/setMyProfilePhoto`, form, { headers: form.getHeaders(), timeout: 30000, validateStatus: () => true });
+      if (r.data?.ok) {
+        logger.info('Telegram bot profile photo updated via API');
+        return { success: true };
+      }
+      logger.warn(`setMyProfilePhoto refused: ${r.data?.description || r.status}`);
     } catch (apiErr) {
-      logger.debug('setMyProfilePhoto not available:', apiErr.message);
+      logger.warn('setMyProfilePhoto failed:', apiErr.message);
     }
 
     // Fallback: send the photo to the bot owner so they can set it via BotFather

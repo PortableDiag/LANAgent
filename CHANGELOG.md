@@ -2,6 +2,11 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.702] - 2026-10-28
+
+### Fixed
+- **The Telegram bot's own photo changes too.** `setMyProfilePhoto` needs an `InputProfilePhoto` (a static JPEG attached by name); the old call sent no file, so every avatar change asked the owner to use @BotFather instead.
+
 ## [2.25.701] - 2026-10-28
 
 ### Changed
