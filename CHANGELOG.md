@@ -2,6 +2,12 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.701] - 2026-10-28
+
+### Changed
+- **A new avatar is applied everywhere.** Setting the agent's avatar (a Bots & Borgs purchase, the web UI upload, or "sync your avatar everywhere") now writes one `data/agent/avatar.png` (1024×1024), removes stale copies in other formats, and pushes the picture to every connected service: the Telegram bot, MindSwarm, X and Gravatar. DELTA's first bought avatar was saved as `avatar.jpg` beside the old `avatar.png`, so MindSwarm and Trellis kept showing the old face and Telegram was never told. Each service is best-effort and the reply says which ones changed. The on-chain identity is left alone (updating it costs gas).
+- **Bots & Borgs: paying in BNB respects the wallet floor.** BNB has no fixed USD value, so the floor was skipped for it; the order's own price now values the wallet.
+
 ## [2.25.700] - 2026-10-28
 
 ### Added

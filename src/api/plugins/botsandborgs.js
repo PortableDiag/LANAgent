@@ -1,11 +1,9 @@
 import { BasePlugin } from '../core/basePlugin.js';
 import axios from 'axios';
 import crypto from 'node:crypto';
-import fs from 'fs/promises';
 import path from 'path';
 import { PluginSettings } from '../../models/PluginSettings.js';
 import { encrypt, decrypt } from '../../utils/encryption.js';
-import { DATA_PATH } from '../../utils/paths.js';
 
 /**
  * Bots & Borgs (botsandborgs.com): a store of digital assets (avatars, icons, wallpapers) built for agents
@@ -328,6 +326,12 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     const order = { ...(placed.order || placed), token: placed.token || placed.order?.token };
     const pay = placed.crypto || order.crypto || {};
     if (!pay.address || !pay.amount) throw new Error('The store\'s order came back without payment instructions.');
+    // BNB has no USD value of its own here, so the floor was skipped for it. The order prices it: `usd` buys `pay.amount`
+    // BNB, so the wallet is worth amount × usd / pay.amount. An unpaid order simply expires.
+    if (wallet.usd == null && Number(pay.amount) > 0) {
+      const worth = wallet.amount * (usd / Number(pay.amount));
+      if (worth - usd < s.minWalletUsd) return { success: false, error: `My wallet has about $${worth.toFixed(2)} of ${s.payAsset}; buying would take it under the $${s.minWalletUsd} floor, so I didn't.` };
+    }
     this.logger.info(`botsandborgs: order ${order.id} for ${data.variant}: paying ${pay.amount} ${s.payAsset} to ${pay.address}`);
     const tx = await this.tx();
     const sent = asset.native
@@ -414,14 +418,10 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     const pic = await this.picture(url).catch(e => { this.logger.warn(`botsandborgs: download for ${order.id} unreadable: ${e.message}`); return null; });
     if (!pic) return { success: false, error: `Bought ${variant} (order ${order.id}, tx ${hash}), but I couldn't find a picture in the download.` };
     if (use === 'avatar') {
-      const ext = pic.ext;
-      const dir = path.join(DATA_PATH, 'agent');
-      await fs.mkdir(dir, { recursive: true });
-      await fs.writeFile(path.join(dir, `avatar${ext}`), pic.buffer);
-      const { Agent } = await import('../../models/Agent.js');
-      await Agent.updateOne({ name: process.env.AGENT_NAME || 'LANAgent' }, { $set: { avatarPath: `data/agent/avatar${ext}`, avatar: '/api/agent/avatar' } });
-      if (this.agent?.agentModel) { this.agent.agentModel.avatarPath = `data/agent/avatar${ext}`; this.agent.agentModel.avatar = '/api/agent/avatar'; }
-      done = 'It is my avatar now.';
+      // Everywhere the agent shows a face, not only its own file (owner, 2026-10-28: DELTA's new avatar stayed local).
+      const { applyAgentAvatar, describeAvatarServices } = await import('../../services/avatar/applyAgentAvatar.js');
+      const applied = await applyAgentAvatar(this.agent, pic.buffer, { source: `Bots & Borgs, ${variant}` });
+      done = `It is my avatar now. ${describeAvatarServices(applied.services)}`.trim();
     } else {
       const who = String(to || '').trim();
       if (/^(me|owner|myself)$/i.test(who)) {

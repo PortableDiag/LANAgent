@@ -2472,12 +2472,6 @@ export class WebInterface {
           return res.status(400).json({ success: false, error: `Unsupported format: ${ext}` });
         }
 
-        const projectRoot = path.join(__dirname, '../../..');
-        const destDir = path.join(projectRoot, 'data', 'agent');
-        await fs.mkdir(destDir, { recursive: true });
-
-        const destFilename = `avatar${ext}`;
-        const destPath = path.join(destDir, destFilename);
         const buffer = Buffer.from(image, 'base64');
 
         // Basic size check (max 5MB)
@@ -2485,29 +2479,18 @@ export class WebInterface {
           return res.status(400).json({ success: false, error: 'Image too large (max 5MB)' });
         }
 
-        await fs.writeFile(destPath, buffer);
+        // One avatar.png, pushed to every connected service (Telegram, MindSwarm, X, Gravatar).
+        const { applyAgentAvatar } = await import('../../services/avatar/applyAgentAvatar.js');
+        const applied = await applyAgentAvatar(this.agent, buffer, { source: 'the web UI' });
 
-        // Update agent model
-        const { Agent } = await import('../../models/Agent.js');
-        await Agent.updateOne({ name: process.env.AGENT_NAME || 'LANAgent' }, {
-          $set: {
-            avatarPath: `data/agent/${destFilename}`,
-            avatar: '/api/agent/avatar',
-            ...(description !== undefined && { avatarDescription: description })
-          }
-        });
-
-        // Update in-memory model
-        if (this.agent.agentModel) {
-          this.agent.agentModel.avatarPath = `data/agent/${destFilename}`;
-          this.agent.agentModel.avatar = '/api/agent/avatar';
-          if (description !== undefined) {
-            this.agent.agentModel.avatarDescription = description;
-          }
+        if (description !== undefined) {
+          const { Agent } = await import('../../models/Agent.js');
+          await Agent.updateOne({ name: process.env.AGENT_NAME || 'LANAgent' }, { $set: { avatarDescription: description } });
+          if (this.agent.agentModel) this.agent.agentModel.avatarDescription = description;
         }
 
-        logger.info(`Avatar uploaded: ${destFilename}`);
-        res.json({ success: true, url: '/api/agent/avatar', path: `data/agent/${destFilename}` });
+        logger.info(`Avatar uploaded: ${filename || 'avatar'} → data/agent/avatar.png`);
+        res.json({ success: true, url: '/api/agent/avatar', path: 'data/agent/avatar.png', services: applied.services });
       } catch (error) {
         logger.error('Upload avatar error:', error);
         res.status(500).json({ success: false, error: error.message });

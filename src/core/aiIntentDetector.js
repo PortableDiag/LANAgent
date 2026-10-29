@@ -1290,13 +1290,15 @@ export class AIIntentDetector {
       },
       111: {
         name: 'syncAvatarToServices',
-        description: 'Sync or upload the agent\'s avatar to Gravatar and other external services',
+        description: 'Sync the agent\'s current avatar everywhere it shows one: Telegram, MindSwarm, X, Gravatar',
         plugin: '_system',
         action: 'syncAvatar',
         examples: [
           'sync your avatar to gravatar',
           'upload your avatar to gravatar',
           'push your avatar to services',
+          'sync your avatar everywhere',
+          'update your avatar on telegram and mindswarm',
           'sync your profile picture',
           'update your gravatar',
           'send your avatar to gravatar',

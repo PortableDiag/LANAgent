@@ -1967,26 +1967,22 @@ If answering needs information that is not in the conversation above (messages, 
             }
 
             case 'syncAvatar': {
+              // Every service, not only Gravatar (owner, 2026-10-28: "it should have made it the telegram, mindswarm,
+              // EVERYWHERE"). The current avatar file is re-applied through the same step a new avatar takes.
               try {
                 const avatarPath = this.agentModel?.avatarPath;
                 if (!avatarPath) {
-                  const noAvatarMsg = 'I don\'t have an avatar set yet. Upload one in Settings > Agent Avatar first, then I can sync it to Gravatar.';
+                  const noAvatarMsg = 'I don\'t have an avatar set yet. Upload one in Settings > Agent Avatar first, then I can sync it everywhere.';
                   await this.memoryManager.storeConversation(context.userId, input, noAvatarMsg, context);
                   return { type: 'text', content: noAvatarMsg };
                 }
-
                 const path = await import('path');
-                const { fileURLToPath } = await import('url');
-                const projectRoot = path.default.join(path.default.dirname(fileURLToPath(import.meta.url)), '../..');
-                const fullPath = path.default.join(projectRoot, avatarPath);
-
-                const { uploadAvatarToGravatar } = await import('../utils/gravatarHelper.js');
-                const agentEmail = process.env.EMAIL_USER || process.env.GMAIL_USER;
-                const result = await uploadAvatarToGravatar(fullPath, agentEmail);
-
-                const syncMsg = result.success
-                  ? `Avatar synced to Gravatar successfully! (Image ID: ${result.imageId})`
-                  : `Avatar sync failed: ${result.error}`;
+                const fsp = await import('fs/promises');
+                const { DEPLOY_PATH } = await import('../utils/paths.js');
+                const fullPath = path.default.isAbsolute(avatarPath) ? avatarPath : path.default.join(DEPLOY_PATH, avatarPath);
+                const { applyAgentAvatar, describeAvatarServices } = await import('../services/avatar/applyAgentAvatar.js');
+                const applied = await applyAgentAvatar(this, await fsp.readFile(fullPath), { source: 'a sync request' });
+                const syncMsg = `Synced my avatar. ${describeAvatarServices(applied.services) || 'No outside service is connected, so only my own copy changed.'}`;
                 await this.memoryManager.storeConversation(context.userId, input, syncMsg, context);
                 return { type: 'text', content: syncMsg };
               } catch (error) {

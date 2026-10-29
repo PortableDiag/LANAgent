@@ -60,8 +60,13 @@ test('"buy yourself an avatar" looks at each one, picks the favorite, pays, and 
   const { p, store, calls, sent } = rig({ scores: { Sentinel: 4, Oracle: 9 } });
   let wrote = null;
   const fs = await import('fs/promises');
-  const realWrite = fs.default.writeFile;
+  const realWrite = fs.default.writeFile, realUnlink = fs.default.unlink, realMkdir = fs.default.mkdir;
   fs.default.writeFile = async (file, buf) => { wrote = { file, buf }; };
+  fs.default.unlink = async () => {};
+  fs.default.mkdir = async () => {};
+  const { default: sharp } = await import('sharp');
+  const png = await sharp({ create: { width: 8, height: 8, channels: 3, background: '#c33' } }).png().toBuffer();
+  p.fetchBytes = async () => ({ buffer: png, type: 'image/png' });
   const { Agent } = await import('../../src/models/Agent.js');
   const realUpdate = Agent.updateOne;
   Agent.updateOne = async () => ({});
@@ -75,7 +80,7 @@ test('"buy yourself an avatar" looks at each one, picks the favorite, pays, and 
     assert.deepEqual(sent, [{ token: 'TEST_USDT_TOKEN', to: '0xshop', amount: '0.5' }]);
     assert.match(wrote.file, /avatar\.png$/);
     assert.equal(store.ledger.purchases[0].used, true);
-  } finally { fs.default.writeFile = realWrite; Agent.updateOne = realUpdate; }
+  } finally { fs.default.writeFile = realWrite; fs.default.unlink = realUnlink; fs.default.mkdir = realMkdir; Agent.updateOne = realUpdate; }
 });
 
 test('the weekly budget and the wallet floor stop a purchase before anything is paid', async () => {
@@ -126,4 +131,20 @@ test('the store\'s zip is opened: the owner gets the picture itself, never the t
   const msg = told.at(-1);
   assert.equal(msg.photo.source.toString(), 'JPEGBYTES', 'the JPEG from inside the zip');
   assert.doesNotMatch(msg.text, /https?:|token/, 'no link, no token');
+});
+
+test('paying in BNB still respects the wallet floor, valued at the order\'s own rate', async () => {
+  const { p, sent } = rig();
+  const base = p.api;
+  p.api = async (method, route, opts) => {
+    if (route === '/api/crypto') return { assets: [{ symbol: 'BNB', native: true, decimals: 18, stable: false }] };
+    if (route === '/api/orders') return { order: { id: 'o1' }, token: 't1', crypto: { address: '0xshop', amount: '0.001' } };
+    return base(method, route, opts);
+  };
+  p.settings = async () => ({ weeklyBudgetUsd: 10, maxItemUsd: null, requireApproval: false, minWalletUsd: 25, payAsset: 'BNB', requireUse: true, allowAvatarChange: null });
+  p.walletUsd = async () => ({ amount: 0.0064, usd: null, address: '0xme' }); // $0.50 buys 0.001 BNB, so the wallet is worth $3.20
+  const r = await p.execute({ action: 'buy', variant: 'agent-avatar-singles-sentinel', use: 'send', to: 'me' });
+  assert.equal(r.success, false);
+  assert.match(r.error, /\$3\.20 of BNB.*\$25 floor/);
+  assert.equal(sent.length, 0, 'nothing paid');
 });

@@ -1728,7 +1728,7 @@ export class TelegramInterface extends EventEmitter {
    * Update the bot's profile photo from a file path.
    * Tries Bot API setMyProfilePhoto (7.3+), falls back to sending photo to owner.
    */
-  async syncBotPhoto(imagePath) {
+  async syncBotPhoto(imagePath, { caption } = {}) {
     if (!this.bot || !this.isRunning) {
       throw new Error('Telegram bot is not running');
     }
@@ -1751,7 +1751,7 @@ export class TelegramInterface extends EventEmitter {
     if (userId) {
       const photoStream = fs.createReadStream(imagePath);
       await this.bot.telegram.sendPhoto(userId, { source: photoStream }, {
-        caption: '📸 New avatar rendered from VRM model.\n\nTo set as bot profile photo:\n1. Open @BotFather\n2. Send /setuserpic\n3. Select this bot\n4. Forward this image'
+        caption: caption || '📸 New avatar rendered from VRM model.\n\nTo set as bot profile photo:\n1. Open @BotFather\n2. Send /setuserpic\n3. Select this bot\n4. Forward this image'
       });
       logger.info('Telegram avatar sent to owner for manual BotFather update');
       return { success: true, note: 'Photo sent to owner — set via @BotFather' };
