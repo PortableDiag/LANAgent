@@ -39,6 +39,12 @@ export const DIALX_TOOLS = ['dialx.say', 'dialx.hangup', 'dialx.list_approved_co
   'dialx.remove_allowed', 'dialx.list_blocked', 'dialx.block_number', 'dialx.unblock_number',
   // Realtime calls (Trellis 4293 #191/#195): the phone streams the call to OpenAI Realtime with a secret ALICE mints
   'dialx.realtime', 'dialx.realtime_tool_output',
+  // DialX 0.7.89 (4293 #452): a system line added to the live realtime session (a background result)
+  'dialx.realtime_note',
+  // DialX 0.7.94 (4293 #470): one call with the other agents on it
+  'dialx.call_together', 'dialx.list_call_agents',
+  // DialX 0.7.102 (4293 #501): answer every call the owner misses
+  'dialx.answer_all_calls',
   // DialX 0.7.48: the disclosure in the agent's own voice
   'dialx.disclosure_audio'];
 /** These wait on the owner's tap on the phone's confirm card, like a send. */
@@ -733,7 +739,7 @@ export class DialXCalls {
         s.notes = [`- ${this.names().owner}'s address-book note on ${s.contact} (background, not to be read out): ${note}`, s.notes].filter(Boolean).join('\n');
       }
       // DialX plays the opening itself (no round trip), so it never reaches the turns. Without it the
-      // model greeted Lizzy a second time on her first word (call 9, 2026-10-24).
+      // model greeted Jo a second time on her first word (call 9, 2026-10-24).
       if (planned?.opening && !s.transcript.some(l => l.role === 'agent')) s.transcript.unshift({ role: 'agent', text: String(planned.opening) });
       if (planned?.effect) s.effect = String(planned.effect); // every line of this call in the same theremin voice
     })().catch(e => this.logger.warn?.(`DialX: who is on call ${id}: ${e.message}`));
@@ -998,7 +1004,11 @@ export class DialXCalls {
     // One-to-one calls with a person only: a group call's lines are not marked by speaker, and a test
     // or agent-to-agent call is not that person talking (Trellis 4293 #402).
     if (s.person && !s.group && !s.test && !s.peerAgent) {
-      for (const l of transcript.filter(x => (x.role === 'callee' && !voicemail) || x.role === 'agent')) {
+      // On voicemail only the message left after their greeting reached them: an opening spoken over the carrier's
+      // "forwarded to voicemail" was kept as said to Jo (call 79, 2026-10-28).
+      const lastGreeting = voicemail ? transcript.map(x => x.role).lastIndexOf('callee') : -1;
+      const heard = voicemail ? transcript.filter((x, i) => x.role === 'agent' && i > lastGreeting) : transcript.filter(x => x.role === 'callee' || x.role === 'agent');
+      for (const l of heard) {
         await this.hub.rememberCall?.(s.person, l.role === 'callee' ? 'person' : 'assistant', l.text);
       }
       this.hub.learnAbout?.(s.person, { force: true });

@@ -34,7 +34,7 @@ export function isOnePhoneCall(input) {
 }
 
 /**
- * "Send Adam V a voice note … reminding him…" is one textx send: textx speaks the text in the agent's
+ * "Send Adam a voice note … reminding him…" is one textx send: textx speaks the text in the agent's
  * voice and attaches it. Split into voice.speak + a send, the audio never reached the send and the
  * owner got only the clip back (2026-10-27). A request that chains another action still splits.
  */
@@ -42,6 +42,16 @@ export function isOneVoiceText(input) {
   const t = stripAgentAddress(input);
   const chained = /\b(then|after that|afterwards|and also)\b|\band\s+(call|email|e-mail|search|schedule|book|post|tweet)\b/i.test(t);
   return asksToSendVoiceNote(t) && !chained;
+}
+
+/**
+ * "Go to Bots and Borgs and buy me a robot icon and send it to me" is one store buy: it looks, picks, pays and sends
+ * itself. Split, step 1 searched the catalog for the words "robot icon", found nothing and the chain stopped (2026-10-28).
+ */
+export function isOneStorePurchase(input) {
+  const t = stripAgentAddress(input);
+  return /\bbots\s*(?:&|and|n|'n'?)\s*borgs\b|\bbotsn?borgs\b|\bbotsandborgs\b/i.test(t) && /\b(buy|purchase|order|get (?:yourself|me))\b/i.test(t) &&
+    !/\b(then|after that|afterwards|and also)\b.*\b(call|email|text|schedule|post|tweet)\b/i.test(t);
 }
 
 /** Actions a plugin's execute() dispatches that are not in its command list. */
@@ -112,12 +122,13 @@ export class PluginChainProcessor {
 
   async analyzeComplexTask(input, context = {}) {
     try {
-      // "Call Lizzy in the ThereminVoice and give her a wellness check" is one phone call: the call
-      // action takes the voice, the purpose and the opening together. Split, it became "call Lizzy"
+      // "Call Jo in the ThereminVoice and give her a wellness check" is one phone call: the call
+      // action takes the voice, the purpose and the opening together. Split, it became "call Jo"
       // then "apply the theremin to the active call", which failed and reported an error for a call
       // that went fine (2026-10-24). A request that chains another action ("…, then text Sam") still splits.
       if (isOnePhoneCall(input)) return { isMultiStep: false, singleIntent: 'phone_call' };
       if (isOneVoiceText(input)) return { isMultiStep: false, singleIntent: 'voice_note_text' };
+      if (isOneStorePurchase(input)) return { isMultiStep: false, singleIntent: 'store_purchase' };
       logger.info(`Analyzing complex task: "${input}"`);
 
       // Get recent conversation context if available

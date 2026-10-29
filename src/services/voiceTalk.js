@@ -36,7 +36,8 @@ export function talkInstructions({ name, owner, recent = [] }) {
     .map(t => `${t.role === 'user' ? owner : name}: ${String(t.content).replace(/\s+/g, ' ').slice(0, 400)}`).join('\n');
   return `You are ${name}, ${owner}'s personal AI agent. ${owner} is talking with you by voice in the LANAgent app on their phone.\n` +
     'Speak naturally and briefly: one or two short sentences a reply, no lists, no markdown, never read out a URL or an id. ' +
-    'Never say your thinking or plans out loud ("let me think", "let me wrap up"); say only what you would say to them. ' +
+    // Call 86 (2026-10-28): quoted as what not to say, these phrases got said. The rule quotes none.
+    'Every word you say is heard, so say only words meant for them: never comment on your own reply, your wording or your plan. ' +
     'Answer general knowledge and small talk yourself.\n' +
     `You are only the voice. You know NOTHING about the current state of anything: not the system, the server or ${name} ` +
     `itself ("the system" means ${name}'s own machine), not ${owner}'s devices, messages, calls, email, reminders, schedule, ` +

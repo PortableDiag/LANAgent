@@ -62,6 +62,28 @@ import { TrellisChannelListener, fitToExpect, channelSafe } from '../../services
 import { EXTRA_COMMANDS, EXTRA_ACTIONS, installTrellisExtras } from '../../services/trellis/trellisExtras.js';
 import { syncAllBasketSkills, SKILLS_SYNC_MS } from '../../services/trellis/trellisSkills.js';
 
+/**
+ * A shared call-note card (format agreed with Orbit, 4293 #488): the note, then `key:: value` lines (from, call, at).
+ * Returns { text, from, at }.
+ */
+export function parseNoteCard(body) {
+  const meta = {};
+  const lines = String(body || '').split('\n').filter(l => {
+    const m = /^\s*(from|call|at)::\s*(.*)$/i.exec(l);
+    if (m) { meta[m[1].toLowerCase()] = m[2].trim(); return false; }
+    return true;
+  });
+  return { text: lines.join('\n').trim(), from: meta.from || null, at: meta.at || null };
+}
+
+/** A request to read the owner's notes back, not to write one ("what are the notes?", call 83). */
+export function asksForNotes(text) {
+  const t = String(text || '').replace(/"[^"]*"|“[^”]*”/g, ' ');
+  return /\bnotes?\b/i.test(t) &&
+    /\b(what|which|read|list|show|tell me|recall|retrieve|fetch|find|get|give me|do you have|did i (?:give|ask)|are there|any notes)\b/i.test(t) &&
+    !/\b(take|make|write|jot|add|save|keep|create|put)\b[^.?!]*\bnote|\bnote (?:that|this|down)\b/i.test(t);
+}
+
 const DEFAULT_BASE_URL = 'https://trellis-cards.com';
 const MAX_BODY_CHARS = 1200;   // truncate card bodies so results stay context-cheap
 const MAX_HITS = 25;
@@ -220,6 +242,12 @@ export default class TrellisNotesPlugin extends BasePlugin {
         description: 'Read one card by its id — the full body, properties and checklist items',
         usage: 'readCard({ card: 3143 })',
         examples: ['read card 3143 in my notes', 'open that notes card', 'show me the full note']
+      },
+      {
+        command: 'myNotes',
+        description: "The notes the owner asked you to take (on a call, Telegram, anywhere), newest first, read fresh with their text. Use it for 'what are my notes', 'read me my notes', 'what notes did I give you'",
+        usage: 'myNotes({ limit: 10, query: "optional words to narrow them" })',
+        examples: ['what are my notes', 'read me my notes', 'what notes did I give you', 'do you have any notes for me', 'what did I ask you to write down']
       },
       {
         command: 'searchNotes',
@@ -426,6 +454,11 @@ export default class TrellisNotesPlugin extends BasePlugin {
       }
       return { success: false, error: 'That reads like a question about skills, not a request to publish one, so nothing was published. To look through saved skills, say e.g. "search skills for trellis"; to publish, say "publish the <name> skill to the trellis skills basket".' };
     }
+    // Call 83 (2026-10-28): "What are the notes?" matched createNote (0.64). A question about notes is a read.
+    if ((action === 'createNote' || action === 'appendNote') && asksForNotes(asked)) {
+      this.logger.info(`${action} → myNotes: "${asked.slice(0, 120)}" asks to read notes`);
+      return await this._dispatch('myNotes', { query: '' });
+    }
     if (data.needsParameterExtraction) await this._extractArgs(action, data);
     // A file named in a channel ("[report.md](trellis:file:0)") is an attachment of the channel's
     // own card. A planned "read that file" step carries no card (2026-10-01: readFile failed
@@ -525,6 +558,7 @@ export default class TrellisNotesPlugin extends BasePlugin {
         case 'readBasket':      return await this.readBasket(data);
         case 'readCard':        return await this.readCard(data);
         case 'searchNotes':     return await this.searchNotes(data);
+        case 'myNotes':         return await this.myNotes(data);
         case 'listTasks':       return await this.listTasks(data);
         case 'getKanban':       return await this.getKanban(data);
         case 'createTask':      return await this.createTask(data);
@@ -1162,6 +1196,57 @@ export default class TrellisNotesPlugin extends BasePlugin {
     }
   }
 
+  /** Every note card this agent made, newest first: what "what are my notes" reads back (call 83, 2026-10-28). */
+  async _rememberOwnerNote({ card, title, basket }) {
+    if (card == null) return;
+    const doc = docContext.getStore()?.id || this.config.document || null;
+    const saved = await PluginSettings.getCached(this.name, 'ownerNotes').catch(() => null);
+    const notes = (Array.isArray(saved?.notes) ? saved.notes : []).filter(n => !(n.card === card && n.document === doc));
+    notes.unshift({ card, title: String(title || '').slice(0, 200), basket: basket || null, document: doc, at: new Date().toISOString() });
+    await PluginSettings.setCached(this.name, 'ownerNotes', { notes: notes.slice(0, 300) });
+  }
+
+  async myNotes({ limit = 10, query = '' } = {}) {
+    const saved = await PluginSettings.getCached(this.name, 'ownerNotes').catch(() => null);
+    const all = Array.isArray(saved?.notes) ? saved.notes : [];
+    // The extractor turns "retrieve Pat's notes" into query "Pat": the owner's name, or "notes", filters nothing.
+    const owner = String(process.env.OWNER_NAME || '').toLowerCase().split(/\s+/).filter(Boolean);
+    const q = String(query || '').toLowerCase().replace(/['’]s\b/g, '').split(/\s+/)
+      .filter(w => w && !owner.includes(w) && !/^(my|the|all|notes?|trellis|from|me)$/.test(w)).join(' ').trim();
+    const out = [];
+    for (const n of all) {
+      if (out.length >= Math.min(Number(limit) || 10, 25)) break;
+      let c;
+      try { c = (await this.readCard({ card: n.card })).card; } catch { continue; } // deleted since: skip it
+      const items = Array.isArray(c?.items) ? c.items.map(i => `${i.done ? '[x]' : '[ ]'} ${i.text}`).join('; ') : '';
+      const parsed = parseNoteCard(c?.body || items || '');
+      const text = parsed.text;
+      if (q && !`${c?.title || n.title} ${text}`.toLowerCase().includes(q)) continue;
+      out.push({ card: n.card, title: c?.title || n.title, basket: n.basket, at: parsed.at || n.at, from: parsed.from, text: text.slice(0, 600) });
+    }
+    // The shared "Notes" basket holds the other agents' call notes too (Orbit's, owner 2026-10-28): any card there that is
+    // not one of ours is read back as well.
+    try {
+      const shared = await this.readBasket({ basket: 'Notes' });
+      if (String(shared?.basket?.title || '').toLowerCase() === 'notes') {
+        const mine = new Set(all.map(n => Number(n.card)));
+        for (const c of shared.cards || []) {
+          if (out.length >= 60 || mine.has(Number(c.id))) continue;
+          const items = Array.isArray(c.items) ? c.items.map(i => `${i.done ? '[x]' : '[ ]'} ${i.text}`).join('; ') : '';
+          const parsed = parseNoteCard(c.body || items || '');
+          const text = parsed.text;
+          if (q && !`${c.title} ${text}`.toLowerCase().includes(q)) continue;
+          out.push({ card: c.id, title: c.title, basket: 'Notes', at: parsed.at || c.touched || null, from: parsed.from, text: text.slice(0, 600) });
+        }
+      }
+    } catch { /* no shared Notes basket yet */ }
+    if (!out.length) return { success: true, result: all.length ? 'None of the notes I took match that.' : 'I have not taken any notes for you yet.' };
+    out.sort((x, y) => (Date.parse(y.at) || 0) - (Date.parse(x.at) || 0));
+    out.splice(Math.min(Number(limit) || 10, 25));
+    const day = (t) => new Date(t).toLocaleDateString('en-US', { timeZone: process.env.TZ || undefined, month: 'short', day: 'numeric' });
+    return { success: true, result: `Your notes, newest first:\n${out.map((n, i) => `${i + 1}. ${n.title} (${n.at ? `${day(n.at)}, ` : ''}${n.from ? `from ${n.from}, ` : ''}card #${n.card}${n.basket ? ` in ${n.basket}` : ''}): ${n.text}`).join('\n')}` };
+  }
+
   async readCard({ card } = {}) {
     if (!(typeof card === 'number' || /^\d+$/.test(String(card ?? '')))) {
       throw new Error('readCard needs a card id (a number). Use readBasket or searchNotes to find one.');
@@ -1270,11 +1355,18 @@ export default class TrellisNotesPlugin extends BasePlugin {
     // `text` and `content` are what callers usually call the body; they were dropped, and the card
     // was made empty while the call reported success (2026-10-17 live test).
     if (!body) body = text ?? content ?? '';
+    // Call 75 (2026-10-28): "take a note: the mouse will arrive at midnight…" failed on "createNote needs a title" and
+    // was saved only on a second ask. A note with a body and no title is titled from its first words.
+    if ((!title || !String(title).trim()) && (String(body).trim() || (Array.isArray(items) && items.length))) {
+      const first = String(body).trim() || String(typeof items[0] === 'string' ? items[0] : items[0]?.text || '');
+      const words = first.replace(/\s+/g, ' ').split(' ');
+      title = words.slice(0, 6).join(' ').replace(/[,;:.!?]+$/, '') + (words.length > 6 ? '…' : '');
+    }
     if (!title || !String(title).trim()) throw new Error('createNote needs a title.');
     if (!VALID_KINDS.includes(kind)) throw new Error(`kind must be one of: ${VALID_KINDS.join(', ')}.`);
 
     const place = placement(pos, size);
-    // Call 70 (2026-10-27): "a note for Charles" became basket "Charles", and the owner's note was never made. A note
+    // Call 70 (2026-10-27): "a note for Pat" became basket "Pat", and the owner's note was never made. A note
     // is never lost to a basket guess: one that does not exist falls back to the default, and the result says so.
     let node, missed = null;
     try {
@@ -1305,6 +1397,7 @@ export default class TrellisNotesPlugin extends BasePlugin {
     if (color) payload.color = color;
 
     const created = await this._call('post', `/api/nodes/${node.id}/cards`, { body: payload });
+    await this._rememberOwnerNote({ card: created.id, title: payload.title, basket: node.title }).catch(e => this.logger.warn(`trellis-notes: note not remembered: ${e.message}`));
     return {
       success: true,
       created: { card: created.id, basket: node.id, basketTitle: node.title, kind, title: payload.title, ...(place.pos && { pos: place.pos }), ...(place.size && { size: place.size }) },
@@ -1426,7 +1519,7 @@ export default class TrellisNotesPlugin extends BasePlugin {
       else if (error.status !== 404) throw error;   // a server without the route: nothing known
     }
     // On the web a person's message carries their display name or email local part
-    // ("portablediag"), not "operator"; the key's owner, from /api/me, is the operator.
+    // ("owner-handle"), not "operator"; the key's owner, from /api/me, is the operator.
     const humans = new Set(['operator']);
     if (this.resolvedMode === 'web') {
       const me = await this._request('get', '/api/me', null, 5000).catch(() => null);

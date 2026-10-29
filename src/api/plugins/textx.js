@@ -51,7 +51,7 @@ export function mediaAttachments(data = {}) {
 }
 
 /**
- * "Send Adam V a voice note audio text message reminding him…" went out as plain text: a chain spoke
+ * "Send Adam a voice note audio text message reminding him…" went out as plain text: a chain spoke
  * it, then failed to attach it, and the retry sent text only (2026-10-27). A voice note is the message
  * spoken in the agent's voice and sent as audio. Quoted words and someone's own voice note ("tell Sam
  * I got his voice message") don't count.
@@ -95,7 +95,7 @@ const offlineRun = new AsyncLocalStorage();
  */
 export function messageTextRule(owner = process.env.OWNER_NAME || 'the user') {
   // The owner, 2026-10-27: "if i want it to send a phrase verbatim or literally, then ill include it in quotes
-  // otherwise alice should rephrase it" ("Text Adam V a gif of a funny cat" was sent as "a gif of a funny cat").
+  // otherwise alice should rephrase it" ("Text Adam a gif of a funny cat" was sent as "a gif of a funny cat").
   return `"text" is the message the recipient will read, sent from ${owner}'s phone. Only words in quotes are copied ` +
     'exactly. Anything else describes the message: write it in your own words. A GIF, picture or video the request asks ' +
     'for ("a gif of a funny cat") goes in gifSearch, never in the text; with no message described, leave text out. ' +
@@ -116,7 +116,7 @@ const agentName = () => process.env.AGENT_NAME || 'LANAgent';
 /**
  * A text the request has the agent say about itself ("tell her you just tried to call her") arrives
  * from the owner's number, so it must say who is writing. The model wrote "I just tried to call
- * you." and Lizzy read it as the owner (2026-10-26) although messageTextRule asks for the name.
+ * you." and Jo read it as the owner (2026-10-26) although messageTextRule asks for the name.
  * Quoted message text and "I"/"me" requests are the owner's own words: untouched.
  */
 export function identifyAgent(request, text, { name = agentName(), owner = process.env.OWNER_NAME || '' } = {}) {
@@ -480,7 +480,7 @@ export default class TextXPlugin extends BasePlugin {
 
   async _extractArgs(action, data) {
     // A redirected action ("gif" → send) carries the request only in _context: without it nothing was
-    // extracted and "Text 5599402727 a gif of a happy robot" asked who to send it to (2026-10-28).
+    // extracted and "Text 5550100199 a gif of a happy robot" asked who to send it to (2026-10-28).
     const request = String(data.originalInput || data._context?.originalInput || data.query || '').trim();
     for (const k of ['needsParameterExtraction', 'originalInput']) delete data[k];
     if (action !== 'search') delete data.query;
@@ -897,7 +897,7 @@ export default class TextXPlugin extends BasePlugin {
   }
 
   /**
-   * Words copied from an unquoted request are a description, not the message: "Text Adam V a gif of a
+   * Words copied from an unquoted request are a description, not the message: "Text Adam a gif of a
    * funny cat" went out as "a gif of a funny cat" (2026-10-27). Only quoted words go as they are.
    */
   async ownWords(text, request, who) {
@@ -943,7 +943,7 @@ export default class TextXPlugin extends BasePlugin {
       const res = await pm.generateResponse(
         `${process.env.OWNER_NAME || 'The user'} asked you to text ${name}: "${request.slice(0, 600)}"\n` +
         `Your draft: ${text}\n${process.env.OWNER_NAME || 'The user'}'s own instructions for talking with ${name}:\n${notes}\n\n` +
-        // Adam V's draft "Don't blab about Mars" went out as "…on your rides or in your writing", from
+        // Adam's draft "Don't blab about Mars" went out as "…on your rides or in your writing", from
         // stored facts ("Adam has talked about biking") read as instructions (2026-10-27).
         'Apply only the lines that tell you HOW to write to them (a tone, a persona, a way of speaking). Other lines are ' +
         'things known about them: background, never content. Never add a fact, topic, detail, reason, aside or sentence ' +

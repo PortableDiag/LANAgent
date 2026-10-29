@@ -18,10 +18,10 @@ test('a voice note to someone is hinted to textx send (2026-10-28: it asked a cl
   const { AIIntentDetector } = await import('../../src/core/aiIntentDetector.js');
   const d = new AIIntentDetector({ apiManager: { apis: new Map([['textx', { enabled: true }]]) } });
   d.getDynamicIntents = () => ({ 2033: { plugin: 'textx', action: 'send' }, 2034: { plugin: 'textx', action: 'status' } });
-  assert.equal(d._regexIntentHint('Send Adam V a voice note audio text message reminding him not to blab about Mars'), 2033);
+  assert.equal(d._regexIntentHint('Send Adam a voice note audio text message reminding him not to blab about Mars'), 2033);
   assert.equal(d._regexIntentHint('tell Sam I got his voice message'), null);
   // 2026-10-28 live test: no "text"/"message" in it, a number for the recipient; it ran voice.test.
-  assert.equal(d._regexIntentHint('Send 5599402727 a voice note saying this is a test of ALICE voice notes'), 2033);
+  assert.equal(d._regexIntentHint('Send 5550100199 a voice note saying this is a test of ALICE voice notes'), 2033);
   assert.equal(d._regexIntentHint('send me a voice note of that'), null, 'a voice note for the user is not a text');
 });
 
@@ -31,4 +31,30 @@ test('system status carries the host: uptime, load, memory and disk (call 73: "o
   assert.ok(h.uptimeHours >= 0 && h.cpus > 0 && h.load.length === 3);
   assert.ok(h.memoryGB.total > 0);
   assert.ok(h.diskGB.total > 0 && h.diskGB.free >= 0);
+});
+
+test('system status counts the last hour of errors, so "no errors" is never said blind (2026-10-28)', async () => {
+  const { recentErrors } = await import('../../src/api/plugins/system.js');
+  const fs = await import('node:fs/promises');
+  const os = await import('node:os');
+  const path = await import('node:path');
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'errs-'));
+  const file = path.join(dir, 'errors.log');
+  const at = (minAgo) => { const d = new Date(Date.UTC(2026, 9, 28, 12, 0) - minAgo * 60000); const p = (n) => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:00`; };
+  await fs.writeFile(file, [`${at(90)} [ERROR] old one`, `${at(10)} [ERROR] Scraping error for x`, `${at(5)} [ERROR] Scraping error for x`, '    at stack line', `${at(2)} [ERROR] other`].join('\n'));
+  const r = await recentErrors(file, { now: Date.UTC(2026, 9, 28, 12, 0) });
+  assert.equal(r.count, 3);
+  assert.deepEqual(r.top[0], { message: 'Scraping error for x', n: 2 });
+  assert.equal((await recentErrors(path.join(dir, 'missing.log'))).unavailable, true);
+  await fs.rm(dir, { recursive: true, force: true });
+});
+
+test('a request naming Bots & Borgs goes to the store plugin: buy wording buys, the rest browses (2026-10-28)', async () => {
+  const { AIIntentDetector } = await import('../../src/core/aiIntentDetector.js');
+  const d = new AIIntentDetector({ apiManager: { apis: new Map([['botsandborgs', { enabled: true }]]) } });
+  d.getDynamicIntents = () => ({ 3001: { plugin: 'botsandborgs', action: 'buy' }, 3002: { plugin: 'botsandborgs', action: 'browse' } });
+  assert.equal(d._regexIntentHint('hey lanagent go to botsnborgs.com and buy yourself an avatar'), 3001);
+  assert.equal(d._regexIntentHint('what does bots & borgs sell?'), 3002);
+  assert.equal(d._regexIntentHint('buy me a coffee'), null);
 });

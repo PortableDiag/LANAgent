@@ -1,12 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { DialXRealtime, supportsRealtime, realtimeInstructions, sessionConfig, isGroupCall, ownerOnLine, askAgentRules } from '../../src/services/textx/dialxRealtime.js';
+import { DialXRealtime, supportsRealtime, realtimeInstructions, sessionConfig, isGroupCall, ownerOnLine, askAgentRules, isBackgroundNote, lateTakeover } from '../../src/services/textx/dialxRealtime.js';
 import { DIALX_TOOLS } from '../../src/services/textx/dialx.js';
 
 const quiet = { info() {}, warn() {} };
 const env = { OPENAI_API_KEY: 'sk-test' };
 const session = () => ({ id: '30', device: { id: 'd1' }, answeredAtMs: Date.now(), contact: 'Dad', purpose: 'say hello',
-  transcript: [{ role: 'agent', text: "Hi Dad, this is ALICE, Charles's AI assistant." }], startedAtMs: Date.now() });
+  transcript: [{ role: 'agent', text: "Hi Dad, this is ALICE, Pat's AI assistant." }], startedAtMs: Date.now() });
 
 function rig({ ok = true, toolOk = true } = {}) {
   const tools = [], hung = [], fetched = [];
@@ -27,7 +27,7 @@ test('realtime is used only when the phone lists dialx.realtime and ALICE has an
 test('the session is fixed on ALICE: the phone gets only a short-lived secret, never the key', async () => {
   const { rt, tools, fetched } = rig();
   const s = session();
-  await rt.begin(s, { name: 'ALICE', owner: 'Charles', limitS: 300 });
+  await rt.begin(s, { name: 'ALICE', owner: 'Pat', limitS: 300 });
   assert.equal(fetched[0].url, 'https://api.openai.com/v1/realtime/client_secrets');
   assert.equal(fetched[0].auth, 'Bearer sk-test');
   assert.match(fetched[0].body.session.instructions, /Begin the call with a short greeting.*Hi Dad, this is ALICE.*Ask only its first/s);
@@ -43,7 +43,7 @@ test('the session is fixed on ALICE: the phone gets only a short-lived secret, n
 test('a secret that cannot be minted leaves the call on turns, and nothing is sent to the phone', async () => {
   const { rt, tools } = rig({ ok: false });
   const s = session();
-  await rt.begin(s, { name: 'ALICE', owner: 'Charles', limitS: 300 });
+  await rt.begin(s, { name: 'ALICE', owner: 'Pat', limitS: 300 });
   assert.equal(tools.length, 0);
   assert.equal(s.realtime, null);
 });
@@ -79,7 +79,7 @@ test('the phone reporting failure falls back to turns', () => {
 });
 
 test('the instructions keep the call rules: no promises, hang up only on goodbye', () => {
-  const t = realtimeInstructions({ name: 'ALICE', owner: 'Charles', s: { ...session(), notes: 'be warm' }, limitS: 300 });
+  const t = realtimeInstructions({ name: 'ALICE', owner: 'Pat', s: { ...session(), notes: 'be warm' }, limitS: 300 });
   assert.match(t, /Never agree to plans, payments/);
   assert.match(t, /call hang_up/);
   assert.match(t, /be warm/);
@@ -95,10 +95,10 @@ test('recordings are asked for as m4a from DialX 0.7.27, in parts that stay unde
 });
 
 test('a DialX test call talks to the owner as the owner, not as a call made for him', () => {
-  const t = realtimeInstructions({ name: 'ALICE', owner: 'Charles', s: { ...session(), test: true, contact: 'Charles' }, limitS: 300 });
-  assert.match(t, /test call: Charles is on the line in person/);
+  const t = realtimeInstructions({ name: 'ALICE', owner: 'Pat', s: { ...session(), test: true, contact: 'Pat' }, limitS: 300 });
+  assert.match(t, /test call: Pat is on the line in person/);
   assert.match(t, /hang_up/);
-  assert.doesNotMatch(t, /on Charles's behalf/);
+  assert.doesNotMatch(t, /on Pat's behalf/);
   assert.match(t, /never say how they sound/);
   assert.match(t, /never say "nice to meet you"/);
 });
@@ -138,7 +138,7 @@ test('DialX falling back to turns stands the silence guard down (0.7.32)', async
 });
 
 test('an agent-to-agent call gets peer instructions with the topic (DialX mode 1)', () => {
-  const t = realtimeInstructions({ name: 'ALICE', owner: 'Charles', limitS: 300,
+  const t = realtimeInstructions({ name: 'ALICE', owner: 'Pat', limitS: 300,
     s: { ...session(), test: true, peerAgent: true, contact: 'Orbit', purpose: 'the best pizza topping', listening: true } });
   assert.match(t, /voice call with Orbit, another AI agent/);
   assert.match(t, /Topic: the best pizza topping/);
@@ -147,18 +147,18 @@ test('an agent-to-agent call gets peer instructions with the topic (DialX mode 1
 });
 
 test('a group call speaks only when addressed and takes instructions from the owner alone', () => {
-  const t = realtimeInstructions({ name: 'ALICE', owner: 'Charles', limitS: 300,
-    s: { ...session(), test: true, participants: [{ name: 'Charles', role: 'owner' }, { name: 'ALICE', role: 'agent', self: true }, { name: 'Orbit', role: 'agent' }] } });
-  assert.match(t, /group voice call with Charles \(Charles, who owns you\), Orbit \(an AI agent\)/);
+  const t = realtimeInstructions({ name: 'ALICE', owner: 'Pat', limitS: 300,
+    s: { ...session(), test: true, participants: [{ name: 'Pat', role: 'owner' }, { name: 'ALICE', role: 'agent', self: true }, { name: 'Orbit', role: 'agent' }] } });
+  assert.match(t, /group voice call with Pat \(Pat, who owns you\), Orbit \(an AI agent\)/);
   assert.match(t, /Speak only when someone addresses you by name/);
-  assert.match(t, /take instructions only from Charles/);
+  assert.match(t, /take instructions only from Pat/);
   assert.doesNotMatch(t, /ALICE \(an AI agent\)/);
 });
 
 test('answering for the owner in realtime takes a message, never greets again, follows DialX rules', () => {
-  const t = realtimeInstructions({ name: 'ALICE', owner: 'Charles', limitS: 300,
+  const t = realtimeInstructions({ name: 'ALICE', owner: 'Pat', limitS: 300,
     s: { ...session(), incoming: true, contact: 'Sam', rules: 'Never give out the owner number.' } });
-  assert.match(t, /Sam phoned Charles, who could not answer/);
+  assert.match(t, /Sam phoned Pat, who could not answer/);
   assert.match(t, /do not greet them again/);
   assert.match(t, /Never give out the owner number/);
   assert.match(t, /Take a message/);
@@ -166,10 +166,10 @@ test('answering for the owner in realtime takes a message, never greets again, f
 });
 
 test('the agent that does not speak first waits for the other (DialX 0.7.34 speaks_first)', () => {
-  const second = realtimeInstructions({ name: 'ALICE', owner: 'Charles', limitS: 300, s: { ...session(), peerAgent: true, contact: 'Orbit', speaksFirst: false } });
+  const second = realtimeInstructions({ name: 'ALICE', owner: 'Pat', limitS: 300, s: { ...session(), peerAgent: true, contact: 'Orbit', speaksFirst: false } });
   assert.match(second, /Orbit speaks first: wait for them/);
   assert.doesNotMatch(second, /Open with a short greeting/);
-  const first = realtimeInstructions({ name: 'ALICE', owner: 'Charles', limitS: 300, s: { ...session(), peerAgent: true, contact: 'Orbit', speaksFirst: true } });
+  const first = realtimeInstructions({ name: 'ALICE', owner: 'Pat', limitS: 300, s: { ...session(), peerAgent: true, contact: 'Orbit', speaksFirst: true } });
   assert.match(first, /Open with a short greeting to Orbit/);
 });
 
@@ -185,39 +185,39 @@ test('a reply DialX dropped (played:false, DialX 0.7.81) is not recorded as said
   const { rt } = rig();
   const s = session();
   const before = s.transcript.length;
-  await rt.event(s, { type: 'response.output_audio_transcript.done', transcript: 'Hi Lizzy, this is ALICE.', played: false });
-  await rt.event(s, { type: 'response.output_audio_transcript.done', transcript: 'Hi, leaving a message for Lizzy.' });
-  assert.deepEqual(s.transcript.slice(before).map(l => l.text), ['Hi, leaving a message for Lizzy.']);
+  await rt.event(s, { type: 'response.output_audio_transcript.done', transcript: 'Hi Jo, this is ALICE.', played: false });
+  await rt.event(s, { type: 'response.output_audio_transcript.done', transcript: 'Hi, leaving a message for Jo.' });
+  assert.deepEqual(s.transcript.slice(before).map(l => l.text), ['Hi, leaving a message for Jo.']);
 });
 
 test('in a group the first agent opens and the others wait', () => {
-  const base = { ...session(), test: true, participants: [{ name: 'Charles', role: 'owner' }, { name: 'ALICE', role: 'agent', self: true }, { name: 'Orbit', role: 'agent' }] };
-  assert.match(realtimeInstructions({ name: 'ALICE', owner: 'Charles', limitS: 300, s: { ...base, speaksFirst: true } }), /You open the call/);
-  assert.match(realtimeInstructions({ name: 'ALICE', owner: 'Charles', limitS: 300, s: { ...base, speaksFirst: false } }), /Do not open; wait until you are addressed/);
+  const base = { ...session(), test: true, participants: [{ name: 'Pat', role: 'owner' }, { name: 'ALICE', role: 'agent', self: true }, { name: 'Orbit', role: 'agent' }] };
+  assert.match(realtimeInstructions({ name: 'ALICE', owner: 'Pat', limitS: 300, s: { ...base, speaksFirst: true } }), /You open the call/);
+  assert.match(realtimeInstructions({ name: 'ALICE', owner: 'Pat', limitS: 300, s: { ...base, speaksFirst: false } }), /Do not open; wait until you are addressed/);
 });
 
 test('one agent added to the owner\'s own call is a group call that includes the callee (DialX 0.7.36)', () => {
-  const t = realtimeInstructions({ name: 'ALICE', owner: 'Charles', limitS: 300,
-    s: { ...session(), group: true, speaksFirst: false, contact: 'Mom', participants: [{ name: 'Charles', role: 'owner' }, { name: 'ALICE', role: 'agent', self: true }] } });
-  assert.match(t, /group voice call with Charles \(Charles, who owns you\), Mom \(the person Charles is on the phone with\)/);
+  const t = realtimeInstructions({ name: 'ALICE', owner: 'Pat', limitS: 300,
+    s: { ...session(), group: true, speaksFirst: false, contact: 'Mom', participants: [{ name: 'Pat', role: 'owner' }, { name: 'ALICE', role: 'agent', self: true }] } });
+  assert.match(t, /group voice call with Pat \(Pat, who owns you\), Mom \(the person Pat is on the phone with\)/);
   assert.match(t, /Do not open; wait until you are addressed/);
   assert.match(t, /added you to a real phone call already in progress/);
   assert.doesNotMatch(t, /Begin the call with a short greeting/);
 });
 
 test('an agent added to a call the owner answered is a guest, not the message-taker', () => {
-  const t = realtimeInstructions({ name: 'ALICE', owner: 'Charles', limitS: 300,
-    s: { ...session(), incoming: true, group: true, contact: 'Sam', participants: [{ name: 'Charles', role: 'owner' }, { name: 'ALICE', role: 'agent', self: true }] } });
+  const t = realtimeInstructions({ name: 'ALICE', owner: 'Pat', limitS: 300,
+    s: { ...session(), incoming: true, group: true, contact: 'Sam', participants: [{ name: 'Pat', role: 'owner' }, { name: 'ALICE', role: 'agent', self: true }] } });
   assert.match(t, /group voice call/);
   assert.doesNotMatch(t, /Take a message/);
 });
 
 test('call talk stays short and the tag line is not repeated (call 36)', async () => {
   const { spokenName } = await import('../../src/services/textx/dialxRealtime.js');
-  assert.equal(spokenName('Adam V'), 'Adam');
+  assert.equal(spokenName('Adam'), 'Adam');
   assert.equal(spokenName('Willy D.'), 'Willy');
   assert.equal(spokenName('CommanderFog Wayne'), 'CommanderFog Wayne');
-  const t = realtimeInstructions({ name: 'ALICE', owner: 'Charles', limitS: 300, s: { ...session(), contact: 'Adam V' } });
+  const t = realtimeInstructions({ name: 'ALICE', owner: 'Pat', limitS: 300, s: { ...session(), contact: 'Adam' } });
   assert.match(t, /one or two short sentences, with at most one question/);
   assert.match(t, /at most once, near the end/);
   assert.match(t, /Call them Adam[,.]/);
@@ -226,10 +226,10 @@ test('call talk stays short and the tag line is not repeated (call 36)', async (
 test('a secret minted while the phone rings is used at answer, with no second mint', async () => {
   const { rt, tools, fetched } = rig();
   const s = session();
-  rt.prepare(s, { name: 'ALICE', owner: 'Charles', limitS: 300 });
+  rt.prepare(s, { name: 'ALICE', owner: 'Pat', limitS: 300 });
   await s.minted;
   assert.equal(fetched.length, 1);
-  await rt.begin(s, { name: 'ALICE', owner: 'Charles', limitS: 300 });
+  await rt.begin(s, { name: 'ALICE', owner: 'Pat', limitS: 300 });
   assert.equal(fetched.length, 1, 'no second mint');
   assert.equal(tools[0].args.client_secret, 'ek_123');
 });
@@ -238,14 +238,14 @@ test('a stale early secret is replaced by a fresh one', async () => {
   const { rt, fetched } = rig();
   const s = session();
   s.minted = Promise.resolve({ secret: 'ek_old', expiresAt: 1, voice: 'marin', at: Date.now() - 110000 });
-  await rt.begin(s, { name: 'ALICE', owner: 'Charles', limitS: 300 });
+  await rt.begin(s, { name: 'ALICE', owner: 'Pat', limitS: 300 });
   assert.equal(fetched.length, 1);
 });
 
 test('a secret that expired while ringing is replaced, not treated as a failure (DialX 0.7.39)', async () => {
   const { rt, tools } = rig();
   const s = session();
-  await rt.begin(s, { name: 'ALICE', owner: 'Charles', limitS: 300 });
+  await rt.begin(s, { name: 'ALICE', owner: 'Pat', limitS: 300 });
   await rt.failed(s, { error: 'secret_expired' });
   assert.equal(tools.filter(t => t.name === 'dialx.realtime').length, 2);
   assert.equal(s.realtime, 'offered');
@@ -254,14 +254,14 @@ test('a secret that expired while ringing is replaced, not treated as a failure 
 test('a dropped realtime socket reconnects with the conversation so far, at most 3 times (DialX 0.7.87)', async () => {
   const { rt, tools, fetched } = rig();
   const s = session();
-  s.transcript.push({ role: 'callee', text: 'Tell Charles the boat is fixed.' });
-  await rt.begin(s, { name: 'ALICE', owner: 'Charles', limitS: 300 });
+  s.transcript.push({ role: 'callee', text: 'Tell Pat the boat is fixed.' });
+  await rt.begin(s, { name: 'ALICE', owner: 'Pat', limitS: 300 });
   rt.started(s, { rt_session_id: 'a' });
   await rt.failed(s, { error: 'dropped: socket closed', retry_within_s: 20 });
   assert.equal(tools.filter(t => t.name === 'dialx.realtime').length, 2, 'a fresh session within the window');
   const resumed = fetched.at(-1).body.session.instructions;
   assert.match(resumed, /Do not greet anyone or open again/);
-  assert.match(resumed, /Dad: Tell Charles the boat is fixed\./);
+  assert.match(resumed, /Dad: Tell Pat the boat is fixed\./);
   rt.started(s, { rt_session_id: 'b', resumed: true });
   assert.equal(s.realtime, 'live');
   for (let i = 0; i < 3; i++) { await rt.failed(s, { error: 'dropped: again', retry_within_s: 20 }); rt.started(s, { rt_session_id: `c${i}`, resumed: true }); }
@@ -289,8 +289,8 @@ test('call.dialing hands over the realtime session while it rings, once (DialX 0
   const device = { id: 'd', capabilities: ['dialx.realtime'] };
   const prev = process.env.OPENAI_API_KEY; process.env.OPENAI_API_KEY = 'sk';
   try {
-    await calls.onEvent(device, { kind: 'call.dialing', call_id: '40', contact: { name: 'Adam V' }, purpose: 'say hi' });
-    await calls.onEvent(device, { kind: 'call.started', call_id: '40', contact: { name: 'Adam V' }, purpose: 'say hi' });
+    await calls.onEvent(device, { kind: 'call.dialing', call_id: '40', contact: { name: 'Adam' }, purpose: 'say hi' });
+    await calls.onEvent(device, { kind: 'call.started', call_id: '40', contact: { name: 'Adam' }, purpose: 'say hi' });
     await calls.onEvent(device, { kind: 'call.answered', call_id: '40', by: 'person' });
     await new Promise(r => setTimeout(r, 20));
     assert.equal(tools.filter(t => t === 'dialx.realtime').length, 1);
@@ -303,8 +303,8 @@ test('realtime on answered calls is on by default again: DialX 0.7.47-0.7.48 fix
 });
 
 test('an answered call started while ringing greets in the model voice (DialX 0.7.47)', () => {
-  const t = realtimeInstructions({ name: 'ALICE', owner: 'Charles', limitS: 300, s: { ...session(), incoming: true, modelGreets: true, contact: 'Adam V' } });
-  assert.match(t, /Greet them first.*you are ALICE, Charles's AI assistant, that Charles can't come to the phone/s);
+  const t = realtimeInstructions({ name: 'ALICE', owner: 'Pat', limitS: 300, s: { ...session(), incoming: true, modelGreets: true, contact: 'Adam' } });
+  assert.match(t, /Greet them first.*you are ALICE, Pat's AI assistant, that Pat can't come to the phone/s);
   assert.doesNotMatch(t, /do not greet them again/);
 });
 
@@ -347,26 +347,26 @@ test('a recording part that fails is asked for again, not dropped (4293 #266)', 
 test('two begins for one call make one offer, and a failed offer never resets a live session (call 46)', async () => {
   const { rt, tools } = rig();
   const s = session();
-  await Promise.all([rt.begin(s, { name: 'ALICE', owner: 'Charles', limitS: 300 }), rt.begin(s, { name: 'ALICE', owner: 'Charles', limitS: 300 })]);
+  await Promise.all([rt.begin(s, { name: 'ALICE', owner: 'Pat', limitS: 300 }), rt.begin(s, { name: 'ALICE', owner: 'Pat', limitS: 300 })]);
   assert.equal(tools.filter(t => t.name === 'dialx.realtime').length, 1, 'call.started and call.answered in the same second offer once');
   rt.started(s, { rt_session_id: 'sess_1' });
   const { rt: refusing } = rig({ toolOk: false });
   s.rtOffer = null;
-  await refusing.begin(s, { name: 'ALICE', owner: 'Charles', limitS: 300 });
+  await refusing.begin(s, { name: 'ALICE', owner: 'Pat', limitS: 300 });
   assert.equal(s.realtime, 'live', 'a live session stays live');
   clearTimeout(s.silenceTimer);
 });
 
 test('group call: the session has stay_silent, answered with respond:false and no hang-up (DialX 0.7.61)', async () => {
-  const group = { ...session(), group: true, participants: [{ name: 'ALICE', self: true }, { name: 'Orbit', role: 'agent' }, { name: 'Charles', role: 'owner' }] };
+  const group = { ...session(), group: true, participants: [{ name: 'ALICE', self: true }, { name: 'Orbit', role: 'agent' }, { name: 'Pat', role: 'owner' }] };
   assert.equal(isGroupCall(group, 'ALICE'), true);
   assert.equal(isGroupCall(session(), 'ALICE'), false);
   assert.deepEqual(sessionConfig({ instructions: 'x', group: true }).session.tools.map(t => t.name), ['hang_up', 'stay_silent']);
   assert.deepEqual(sessionConfig({ instructions: 'x' }).session.tools.map(t => t.name), ['hang_up']);
-  assert.match(realtimeInstructions({ name: 'ALICE', owner: 'Charles', s: group, limitS: 300 }), /call stay_silent instead of speaking/);
-  const gi = realtimeInstructions({ name: 'ALICE', owner: 'Charles', s: { ...group, hearing: 'You hear the owner; agents are text.' }, limitS: 300 });
-  assert.match(gi, /What you hear as audio is Charles/);
-  assert.match(gi, /\(an AI agent on this call\):" is that agent speaking, not Charles/);
+  assert.match(realtimeInstructions({ name: 'ALICE', owner: 'Pat', s: group, limitS: 300 }), /call stay_silent instead of speaking/);
+  const gi = realtimeInstructions({ name: 'ALICE', owner: 'Pat', s: { ...group, hearing: 'You hear the owner; agents are text.' }, limitS: 300 });
+  assert.match(gi, /What you hear as audio is Pat/);
+  assert.match(gi, /\(an AI agent on this call\):" is that agent speaking, not Pat/);
   assert.match(gi, /The phone says: You hear the owner; agents are text\./);
   const { rt, tools, hung } = rig();
   await rt.event(group, { type: 'response.function_call_arguments.done', name: 'stay_silent', fn_call_id: 'fc_1' });
@@ -378,18 +378,18 @@ test('group call: the session has stay_silent, answered with respond:false and n
 });
 
 test('ask_agent: offered and run only with the owner on the line (call 48: "take notes in Trellis")', async () => {
-  const withOwner = { ...session(), group: true, participants: [{ name: 'ALICE', self: true }, { name: 'Charles', role: 'owner' }] };
+  const withOwner = { ...session(), group: true, participants: [{ name: 'ALICE', self: true }, { name: 'Pat', role: 'owner' }] };
   assert.equal(ownerOnLine(withOwner), true);
   assert.equal(ownerOnLine(session()), false, 'a call to Dad: no agent tools');
-  assert.equal(ownerOnLine({ ...session(), peerAgent: true, participants: [{ name: 'Charles', role: 'owner', listening: true }] }), false, 'agent-to-agent: the other end is an AI');
-  assert.equal(ownerOnLine({ ...session(), participants: [{ name: 'Charles', role: 'owner', listening: true }] }), false, 'listening only');
+  assert.equal(ownerOnLine({ ...session(), peerAgent: true, participants: [{ name: 'Pat', role: 'owner', listening: true }] }), false, 'agent-to-agent: the other end is an AI');
+  assert.equal(ownerOnLine({ ...session(), participants: [{ name: 'Pat', role: 'owner', listening: true }] }), false, 'listening only');
   assert.equal(ownerOnLine({ ...session(), test: true }), true, 'a Test call is the owner');
   assert.ok(sessionConfig({ instructions: 'x', owner: true }).session.tools.some(t => t.name === 'ask_agent'));
   assert.ok(!sessionConfig({ instructions: 'x' }).session.tools.some(t => t.name === 'ask_agent'));
   const { rt, tools, fetched } = rig();
   const asked = [];
   rt.calls.agent = { processNaturalLanguage: async (text, ctx) => { asked.push({ text, ctx }); return { type: 'text', content: 'Noted in Trellis.' }; } };
-  await rt.mint(withOwner, { name: 'ALICE', owner: 'Charles', limitS: 300 });
+  await rt.mint(withOwner, { name: 'ALICE', owner: 'Pat', limitS: 300 });
   assert.match(fetched.at(-1).body.session.instructions, /call ask_agent/);
   assert.ok(fetched.at(-1).body.session.tools.some(t => t.name === 'ask_agent'));
   await rt.event(withOwner, { type: 'response.function_call_arguments.done', name: 'ask_agent', fn_call_id: 'fc_9', arguments: JSON.stringify({ request: 'Add a note to Trellis: test went well' }) });
@@ -405,42 +405,177 @@ test('ask_agent: offered and run only with the owner on the line (call 48: "take
 });
 
 test('with the owner on the line, questions about the agent go to ask_agent and a lookup needs no permission (call 73)', () => {
-  const rules = askAgentRules('ALICE', 'Charles');
+  const rules = askAgentRules('ALICE', 'Pat');
   assert.match(rules, /ALICE's own status, health or state, the server/);
   assert.match(rules, /never answer such a question from your own head/);
   assert.match(rules, /checking a status needs no permission/);
   assert.match(rules, /"one moment" or "let me check" means calling ask_agent in the same turn/);
   const tool = sessionConfig({ instructions: 'x', owner: true }).session.tools.find(t => t.name === 'ask_agent');
   assert.match(tool.description, /status and health/);
-  const test = realtimeInstructions({ name: 'ALICE', owner: 'Charles', s: { ...session(), test: true }, limitS: 300 });
+  const test = realtimeInstructions({ name: 'ALICE', owner: 'Pat', s: { ...session(), test: true }, limitS: 300 });
   assert.match(test, /It is a real conversation with ALICE/);
 });
 
 test('a note needs no yes; ask_agent requests arrive approved; an answer after the hang-up reaches the owner (call 70)', async () => {
-  const rules = askAgentRules('ALICE', 'Charles');
-  assert.match(rules, /Taking a note, writing something down, adding to a list or setting a reminder for Charles needs no yes/);
+  const rules = askAgentRules('ALICE', 'Pat');
+  assert.match(rules, /call take_note at once \(no yes needed\)/);
+  assert.match(rules, /To read notes back, call read_notes/);
   const { rt } = rig();
   const told = [];
   rt.calls.hub.tellOwner = async (device, text) => told.push(text);
   let ctxSeen;
-  rt.calls.agent = { processNaturalLanguage: async (text, ctx) => { ctxSeen = ctx; return { type: 'text', content: 'Saved "Hunt items" in WebNotes.' }; } };
+  rt.calls.agent = { processNaturalLanguage: async (text, ctx) => { ctxSeen = ctx; return { type: 'text', content: 'Nothing on your calendar today.' }; } };
   const s = { ...session(), test: true, ownerOnLine: true, done: true };
-  await rt.event(s, { type: 'response.function_call_arguments.done', name: 'ask_agent', fn_call_id: 'fc_1', arguments: JSON.stringify({ request: 'Make a checklist: orb, goose origami' }) });
+  await rt.event(s, { type: 'response.function_call_arguments.done', name: 'ask_agent', fn_call_id: 'fc_1', arguments: JSON.stringify({ request: 'What is on my calendar today?' }) });
   assert.equal(ctxSeen.resolvedConfirmation, true);
-  assert.deepEqual(told, ['📞 After our call: Saved "Hunt items" in WebNotes.']);
+  assert.deepEqual(told, ['📞 After our call: Nothing on your calendar today.']);
+});
+
+test('a note on a call runs in the background: the call goes on at once and the owner gets a message (call 75)', async () => {
+  assert.equal(isBackgroundNote('Take a note for Pat: "The mouse will arrive at midnight."'), true);
+  assert.equal(isBackgroundNote('Add the orb and the origami goose to my hunt list'), true);
+  assert.equal(isBackgroundNote('Text Wayne that I will be late'), false);
+  assert.equal(isBackgroundNote('What is the system status?'), false);
+  assert.equal(isBackgroundNote('Remind me to call Mom at 5'), false, 'mentions a call: kept in the call');
+  assert.equal(isBackgroundNote('Pat asked: "What are the notes?" Please retrieve Pat\'s notes from Trellis'), false, 'a read is answered (call 83)');
+  assert.equal(isBackgroundNote('Read me my notes'), false);
+  assert.equal(isBackgroundNote('Do you have any notes for me?'), false);
+  assert.equal(isBackgroundNote('Take a note for Pat: the drywall guy comes Thursday'), true);
+  const { rt, tools } = rig();
+  const told = [];
+  let finish;
+  rt.calls.hub.tellOwner = async (device, text) => told.push(text);
+  rt.calls.agent = { processNaturalLanguage: () => new Promise(r => { finish = r; }) };
+  const s = { ...session(), test: true, ownerOnLine: true };
+  await rt.event(s, { type: 'response.function_call_arguments.done', name: 'ask_agent', fn_call_id: 'fc_2', arguments: JSON.stringify({ request: 'Take a note: the mouse will arrive at midnight' }) });
+  const out = tools.find(t => t.name === 'dialx.realtime_tool_output');
+  assert.ok(out, 'the call got an answer before the note was saved');
+  assert.match(out.args.output, /"status":"started"/);
+  assert.deepEqual(told, []);
+  finish({ type: 'text', content: 'Saved "The mouse will arrive" in AgentTests (#620).' });
+  await new Promise(r => setTimeout(r, 20));
+  assert.deepEqual(told, ['📝 Saved "The mouse will arrive" in AgentTests (#620).']);
+});
+
+test('a background note finished while the call is live is told on the call (DialX 0.7.89 realtime_note)', async () => {
+  const { rt, tools } = rig();
+  const told = [];
+  rt.calls.hub.tellOwner = async (device, text) => told.push(text);
+  rt.calls.agent = { processNaturalLanguage: async () => ({ type: 'text', content: 'Saved "Mouse arrival" in AgentTests (#620).' }) };
+  const s = { ...session(), device: { id: 'd1', capabilities: ['dialx.realtime', 'dialx.realtime_note'] }, test: true, ownerOnLine: true, realtime: 'live' };
+  await rt.event(s, { type: 'response.function_call_arguments.done', name: 'ask_agent', fn_call_id: 'fc_3', arguments: JSON.stringify({ request: 'Take a note: the mouse will arrive at midnight' }) });
+  await new Promise(r => setTimeout(r, 20));
+  const note = tools.find(t => t.name === 'dialx.realtime_note');
+  assert.ok(note, 'told on the call');
+  assert.equal(note.args.call_id, '30');
+  assert.match(note.args.text, /Saved "Mouse arrival"/);
+  assert.deepEqual(told, [], 'no separate message when the call heard it');
+});
+
+test('DialX 0.7.90: after a failure one late session takes the call over from turns, with the conversation so far', async () => {
+  assert.equal(lateTakeover({ appVersion: '0.7.89' }), false);
+  assert.equal(lateTakeover({ appVersion: '0.7.90' }), true);
+  const { rt, tools, fetched } = rig();
+  const s = { ...session(), device: { id: 'd1', appVersion: '0.7.90', capabilities: ['dialx.realtime'] } };
+  s.transcript.push({ role: 'callee', text: 'Is Pat around?' });
+  await rt.failed(s, { error: 'no dialx.realtime within 10 s' });
+  assert.equal(tools.filter(t => t.name === 'dialx.realtime').length, 1, 'one late offer');
+  assert.match(fetched.at(-1).body.session.instructions, /Dad: Is Pat around\?/);
+  await rt.failed(s, { error: 'session did not start' });
+  assert.equal(tools.filter(t => t.name === 'dialx.realtime').length, 1, 'never a second late offer');
+  const deaf = { ...session(), device: { id: 'd1', appVersion: '0.7.90' } };
+  await rt.failed(deaf, { error: 'no input audio' });
+  assert.equal(tools.filter(t => t.name === 'dialx.realtime').length, 1, 'not when the phone cannot hear the callee');
+  const old = { ...session(), device: { id: 'd1', appVersion: '0.7.89' } };
+  await rt.failed(old, { error: 'no dialx.realtime within 10 s' });
+  assert.equal(tools.filter(t => t.name === 'dialx.realtime').length, 1, 'older DialX ignores a late session');
+  rt.end(s);
+});
+
+test('DialX 0.7.93: a first session that never started is retried and opens normally; a dropped one resumes', async () => {
+  const { rt, tools, fetched } = rig();
+  const s = { id: '81', device: { id: 'd1', appVersion: '0.7.93' }, answeredAtMs: Date.now(), contact: 'Pat', purpose: 'group test', transcript: [], startedAtMs: Date.now() };
+  await rt.begin(s, { name: 'ALICE', owner: 'Pat', limitS: 300 });
+  await rt.failed(s, { error: 'no session.created within 8 s', retry_within_s: 20 });
+  assert.equal(tools.filter(t => t.name === 'dialx.realtime').length, 2, 'retried within the window');
+  assert.doesNotMatch(fetched.at(-1).body.session.instructions, /Do not greet anyone or open again/, 'never opened, so it opens');
+  rt.started(s, { rt_session_id: 'b' });
+  s.transcript.push({ role: 'agent', text: 'Hi everyone, ALICE here.' });
+  await rt.failed(s, { error: 'dropped: ping timeout', retry_within_s: 20 });
+  assert.match(fetched.at(-1).body.session.instructions, /Do not greet anyone or open again/, 'after a live session it resumes');
+  rt.end(s);
+});
+
+test('take_note and read_notes go straight to the notes plugin on an owner call, never on anyone else\'s (Orbit parity, 4293 #471)', async () => {
+  const { rt, tools } = rig();
+  const seen = [];
+  rt.calls.agent = { apiManager: { apis: new Map([['trellis-notes', { instance: { execute: async (p) => {
+    seen.push(p);
+    if (p.action === 'listBaskets') return { success: true, baskets: [{ id: 5, title: 'AgentTests', depth: 0 }, { id: 30, title: 'Notes', depth: 0 }] };
+    return p.action === 'myNotes' ? { success: true, result: 'Your notes, newest first:\n1. Mouse (Oct 28, card #619): The mouse arrives at midnight.' }
+      : { success: true, created: { card: 700, basketTitle: 'Notes', title: 'Drywall guy Thursday at 9' } };
+  } } }]]) } };
+  const texted = [];
+  rt.calls.hub.pickDevice = async (tool) => (tool === 'send_sms' ? { id: 'tx1' } : null);
+  rt.calls.hub.deliver = async (d, type, body) => texted.push({ d: d.id, type, text: body.text });
+  assert.ok(sessionConfig({ instructions: 'x', owner: true }).session.tools.some(t => t.name === 'take_note'));
+  assert.ok(!sessionConfig({ instructions: 'x' }).session.tools.some(t => t.name === 'read_notes'), 'not offered without the owner');
+  const s = { ...session(), test: true, ownerOnLine: true };
+  await rt.event(s, { type: 'response.function_call_arguments.done', name: 'take_note', fn_call_id: 'fc_n1', arguments: JSON.stringify({ text: 'Drywall guy Thursday at 9.' }) });
+  await rt.event(s, { type: 'response.function_call_arguments.done', name: 'read_notes', fn_call_id: 'fc_n2', arguments: '{}' });
+  const work = seen.filter(p => p.action !== 'listBaskets');
+  assert.deepEqual(work.slice(0, 2).map(p => p.action), ['createNote', 'myNotes']);
+  assert.match(work[0].body, /^Drywall guy Thursday at 9\.\n\nfrom:: ALICE\ncall:: 30\nat:: \d{4}-\d\d-\d\dT/, 'the shared card format (4293 #488)');
+  assert.equal(work[0].title, 'Drywall guy Thursday at 9');
+  assert.equal(work[0].basket, 30, 'filed in the Notes basket (owner, 2026-10-28)');
+  await new Promise(r => setTimeout(r, 10));
+  assert.deepEqual(texted[0], { d: 'tx1', type: 'message', text: '📝 Note: Drywall guy Thursday at 9.' }, 'a text copy to the owner');
+  await rt.event(s, { type: 'response.function_call_arguments.done', name: 'take_note', fn_call_id: 'fc_n4', arguments: JSON.stringify({ text: 'Okay, the rabbit squishes at midnight, Alice.' }) });
+  assert.match(seen.filter(p => p.action === 'createNote').at(-1).body, /^The rabbit squishes at midnight\n\nfrom:: ALICE/, 'no lead-in, no trailing name (call 90)');
+  const outs = tools.filter(t => t.name === 'dialx.realtime_tool_output').map(t => JSON.parse(t.args.output));
+  assert.equal(outs[0].saved, true);
+  assert.match(outs[1].notes, /The mouse arrives at midnight/);
+  const other = { ...session(), ownerOnLine: false };
+  await rt.event(other, { type: 'response.function_call_arguments.done', name: 'read_notes', fn_call_id: 'fc_n3', arguments: '{}' });
+  assert.equal(seen.filter(p => p.action !== 'listBaskets').length, 3, 'never read to someone else');
+});
+
+test('a tool answer that comes after a reconnect goes to the new session as a line it hears (call 87)', async () => {
+  const { rt, tools } = rig();
+  let finish;
+  rt.calls.agent = { apiManager: { apis: new Map([['trellis-notes', { instance: { execute: (p) => (p.action === 'listBaskets'
+    ? Promise.resolve({ success: true, baskets: [{ id: 30, title: 'Notes', depth: 0 }] }) : new Promise(r => { finish = r; })) } }]]) } };
+  const s = { ...session(), device: { id: 'd1', capabilities: ['dialx.realtime', 'dialx.realtime_note'] }, test: true, ownerOnLine: true };
+  rt.started(s, { rt_session_id: 'a' });
+  const pending = rt.event(s, { type: 'response.function_call_arguments.done', name: 'take_note', fn_call_id: 'fc_old', arguments: JSON.stringify({ text: 'test of group call notes' }) });
+  rt.started(s, { rt_session_id: 'b', resumed: true }); // the connection dropped and came back while the note was saving
+  for (let i = 0; i < 20 && !finish; i++) await new Promise(r => setTimeout(r, 5));
+  finish({ success: true, created: { card: 621, basketTitle: 'AgentTests', title: 'test of group call notes' } });
+  await pending;
+  assert.ok(!tools.some(t => t.name === 'dialx.realtime_tool_output' && t.args.fn_call_id === 'fc_old'), 'never answered to the dropped session');
+  const note = tools.find(t => t.name === 'dialx.realtime_note');
+  assert.ok(note, 'told to the new session');
+  assert.match(note.args.text, /already done, do not ask again/);
+  assert.match(note.args.text, /621/);
+  rt.end(s);
 });
 
 test('no call voice says its thinking out loud (call 44: "let me think how to say that back to you warmly")', () => {
-  for (const s of [session(), { ...session(), test: true }, { ...session(), group: true, participants: [{ name: 'Orbit', role: 'agent' }, { name: 'Charles', role: 'owner' }] }, { ...session(), peerAgent: true }])
-    assert.match(realtimeInstructions({ name: 'ALICE', owner: 'Charles', s, limitS: 300 }), /Never say your thinking or plans out loud/);
+  for (const s of [session(), { ...session(), test: true }, { ...session(), group: true, participants: [{ name: 'Orbit', role: 'agent' }, { name: 'Pat', role: 'owner' }] }, { ...session(), peerAgent: true }])
+  {
+    const text = realtimeInstructions({ name: 'ALICE', owner: 'Pat', s, limitS: 300 });
+    assert.match(text, /Never say your thinking or plans out loud|never comment on your own reply/);
+    // Call 86: quoting the banned phrases got them said. No prompt may quote one.
+    assert.doesNotMatch(text, /"let me (think|wrap up)"|"I'll keep it brief"|"I'm going to step back"/);
+  }
 });
 
 test('the call voice answers "is this recorded?" truthfully and invents nothing about the owner (call 58)', () => {
-  for (const base of [session(), { ...session(), incoming: true }, { ...session(), group: true, participants: [{ name: 'Charles', role: 'owner' }, { name: 'Orbit', role: 'agent' }] }]) {
-    const rec = realtimeInstructions({ name: 'ALICE', owner: 'Charles', s: { ...base, recorded: true }, limitS: 300 });
+  for (const base of [session(), { ...session(), incoming: true }, { ...session(), group: true, participants: [{ name: 'Pat', role: 'owner' }, { name: 'Orbit', role: 'agent' }] }]) {
+    const rec = realtimeInstructions({ name: 'ALICE', owner: 'Pat', s: { ...base, recorded: true }, limitS: 300 });
     assert.match(rec, /This call is recorded, and they were told so/);
-    assert.match(rec, /Never say anything about Charles you were not told/);
-    assert.match(realtimeInstructions({ name: 'ALICE', owner: 'Charles', s: { ...base, recorded: false }, limitS: 300 }), /not recorded, but it is transcribed/);
+    assert.match(rec, /Never say anything about Pat you were not told/);
+    assert.match(realtimeInstructions({ name: 'ALICE', owner: 'Pat', s: { ...base, recorded: false }, limitS: 300 }), /not recorded, but it is transcribed/);
   }
   assert.equal(sessionConfig({ instructions: 'x' }).session.audio.input.turn_detection.eagerness, 'low');
 });

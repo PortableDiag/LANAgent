@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { newPairing, pairingUri, sealJson, openJson, sealBytes, openBytes, kidFromAuth, ulid, P2A, A2P } from '../../src/services/textx/textxCrypto.js';
-import { TextXHub, envelopeProblem, untrusted, textxRequest, encodeM4a, formatMessage, splitReplyQuote } from '../../src/services/textx/textxHub.js';
+import { TextXHub, envelopeProblem, untrusted, textxRequest, encodeM4a, formatMessage, splitReplyQuote, addressesOwner } from '../../src/services/textx/textxHub.js';
 import { memoryStore } from '../../src/services/textx/textxStore.js';
 import { createTransport } from '../../src/services/textx/textxTransport.js';
 import { TextXRelayClient, relaySignature } from '../../src/services/textx/textxRelayClient.js';
@@ -458,12 +458,12 @@ test('plugin: only quoted words are sent as written; a described message is rewo
   const plugin = new TextXPlugin(r.agent);
   assert.equal(await plugin.ownWords('see you soon', 'text Sam "see you soon"', 'Sam'), 'see you soon', 'quoted: verbatim');
   assert.equal(await plugin.ownWords('Running late, sorry!', 'tell Sam I am running late', 'Sam'), 'Running late, sorry!', 'already written by the model');
-  assert.equal(await plugin.ownWords('a gif of a funny cat', 'Text Adam V a gif of a funny cat', 'Adam V'), 'Hey! Thought this would make you smile.');
-  assert.equal(await plugin.ownWords('a gif of a sad robot', 'Send Lizzy a gif of a sad robot', 'Lizzy'), '', 'a GIF on its own needs no text');
+  assert.equal(await plugin.ownWords('a gif of a funny cat', 'Text Adam a gif of a funny cat', 'Adam'), 'Hey! Thought this would make you smile.');
+  assert.equal(await plugin.ownWords('a gif of a sad robot', 'Send Jo a gif of a sad robot', 'Jo'), '', 'a GIF on its own needs no text');
   assert.equal(asked.length, 2);
 });
 
-test('plugin: "Send Lizzy a gif of a sad robot" sends the GIF with no text (2026-10-27)', async () => {
+test('plugin: "Send Jo a gif of a sad robot" sends the GIF with no text (2026-10-27)', async () => {
   const { default: TextXPlugin } = await import('../../src/api/plugins/textx.js');
   const r = rig({ waits: { read: 500, readExpiry: 1000, confirm: 40, confirmExpiry: 2000, late: 10 } });
   const p = await pairedPhone(r, { tools: ['send_sms', 'contacts_lookup', 'gif_search'] });
@@ -475,12 +475,12 @@ test('plugin: "Send Lizzy a gif of a sad robot" sends the GIF with no text (2026
   const phone = setInterval(async () => {
     for (const e of p.sent.filter(x => x.type === 'tool_call' && !answered.has(x.body.call_id))) {
       answered.add(e.body.call_id);
-      if (e.body.name === 'contacts_lookup') await p.say(env('tool_result', { call_id: e.body.call_id, ok: true, result: [{ name: 'Lizzy', numbers: ['+15550111'] }] }));
+      if (e.body.name === 'contacts_lookup') await p.say(env('tool_result', { call_id: e.body.call_id, ok: true, result: [{ name: 'Jo', numbers: ['+15550111'] }] }));
       if (e.body.name === 'gif_search') await p.say(env('tool_result', { call_id: e.body.call_id, ok: true, result: [{ id: 'g1', title: 'sad robot', sizes: [{ url: 'https://media.example/robot.gif', bytes: 1000 }] }] }));
       if (e.body.name === 'send_sms') { sent = e.body.args; await p.say(env('tool_result', { call_id: e.body.call_id, ok: true, result: { status: 'sent' } })); }
     }
   }, 5);
-  const res = await textxRequest.run({ deviceId: p.device.id }, () => plugin.execute({ action: 'send', to: 'Lizzy', gifSearch: 'sad robot', _context: { originalInput: 'Send Lizzy a gif of a sad robot' } }));
+  const res = await textxRequest.run({ deviceId: p.device.id }, () => plugin.execute({ action: 'send', to: 'Jo', gifSearch: 'sad robot', _context: { originalInput: 'Send Jo a gif of a sad robot' } }));
   for (let i = 0; i < 30 && !sent; i++) await tick();
   clearInterval(phone);
   assert.equal(res.success, true, JSON.stringify(res));
@@ -493,7 +493,7 @@ test('plugin: a GIF action redirected to a send still finds the recipient (2026-
   const { default: TextXPlugin } = await import('../../src/api/plugins/textx.js');
   const r = rig({ waits: { read: 500, readExpiry: 1000, confirm: 40, confirmExpiry: 2000, late: 10 } });
   const p = await pairedPhone(r, { tools: ['send_sms', 'contacts_lookup', 'gif_search'] });
-  r.agent.providerManager.generateResponse = async (q) => ({ content: /^Extract the arguments/.test(q) ? '{"to":"5599402727","gifSearch":"happy robot"}' : 'NONE' });
+  r.agent.providerManager.generateResponse = async (q) => ({ content: /^Extract the arguments/.test(q) ? '{"to":"5550100199","gifSearch":"happy robot"}' : 'NONE' });
   const plugin = new TextXPlugin(r.agent);
   Object.defineProperty(plugin, 'svc', { value: { hub: r.hub } });
   let sent = null;
@@ -506,7 +506,7 @@ test('plugin: a GIF action redirected to a send still finds the recipient (2026-
       if (e.body.name === 'send_sms') { sent = e.body.args; await p.say(env('tool_result', { call_id: e.body.call_id, ok: true, result: { status: 'sent' } })); }
     }
   }, 5);
-  const res = await textxRequest.run({ deviceId: p.device.id }, () => plugin.execute({ action: 'gif', query: 'happy robot', _context: { originalInput: 'Text 5599402727 a gif of a happy robot' } }));
+  const res = await textxRequest.run({ deviceId: p.device.id }, () => plugin.execute({ action: 'gif', query: 'happy robot', _context: { originalInput: 'Text 5550100199 a gif of a happy robot' } }));
   for (let i = 0; i < 30 && !sent; i++) await tick();
   clearInterval(phone);
   assert.equal(res.success, true, JSON.stringify(res));
@@ -517,8 +517,8 @@ test('plugin: a GIF action redirected to a send still finds the recipient (2026-
 
 test('plugin: a voice note request is spoken and sent as audio, with no text (2026-10-27)', async () => {
   const { default: TextXPlugin, wantsVoiceNote } = await import('../../src/api/plugins/textx.js');
-  assert.equal(wantsVoiceNote('Send Adam V a voice note audio text message reminding him not to blab about Mars'), true);
-  assert.equal(wantsVoiceNote('text Lizzy by voice that dinner is ready'), true);
+  assert.equal(wantsVoiceNote('Send Adam a voice note audio text message reminding him not to blab about Mars'), true);
+  assert.equal(wantsVoiceNote('text Jo by voice that dinner is ready'), true);
   assert.equal(wantsVoiceNote('tell Sam I got his voice message'), false, 'his voice message is not one to send');
   assert.equal(wantsVoiceNote('Text mom "send me a voice note"'), false, 'quoted words');
   assert.equal(wantsVoiceNote('text mom that I am late'), false);
@@ -535,12 +535,12 @@ test('plugin: a voice note request is spoken and sent as audio, with no text (20
   const phone = setInterval(async () => {
     for (const e of p.sent.filter(x => x.type === 'tool_call' && !answered.has(x.body.call_id))) {
       answered.add(e.body.call_id);
-      if (e.body.name === 'contacts_lookup') await p.say(env('tool_result', { call_id: e.body.call_id, ok: true, result: [{ name: 'Adam V', numbers: ['+15550122'] }] }));
+      if (e.body.name === 'contacts_lookup') await p.say(env('tool_result', { call_id: e.body.call_id, ok: true, result: [{ name: 'Adam', numbers: ['+15550122'] }] }));
       if (e.body.name === 'send_sms') { sent = e.body.args; await p.say(env('tool_result', { call_id: e.body.call_id, ok: true, result: { status: 'sent' } })); }
     }
   }, 5);
-  const res = await textxRequest.run({ deviceId: p.device.id }, () => plugin.execute({ action: 'send', to: 'Adam V', text: "Don't blab about Mars.",
-    _context: { originalInput: 'Send Adam V a voice note audio text message reminding him not to blab about Mars' } }));
+  const res = await textxRequest.run({ deviceId: p.device.id }, () => plugin.execute({ action: 'send', to: 'Adam', text: "Don't blab about Mars.",
+    _context: { originalInput: 'Send Adam a voice note audio text message reminding him not to blab about Mars' } }));
   for (let i = 0; i < 30 && !sent; i++) await tick();
   clearInterval(phone);
   assert.equal(res.success, true, JSON.stringify(res));
@@ -552,22 +552,22 @@ test('plugin: a voice note request is spoken and sent as audio, with no text (20
   assert.match(res.result, /voice note/);
 });
 
-test('plugin: the style pass never adds what the draft does not say (Adam V, 2026-10-27)', async () => {
+test('plugin: the style pass never adds what the draft does not say (Adam, 2026-10-27)', async () => {
   const { default: TextXPlugin } = await import('../../src/api/plugins/textx.js');
   const prompts = [];
   const plugin = new TextXPlugin({ config: {}, providerManager: { generateResponse: async (q) => { prompts.push(q); return { content: "Don't blab about Mars on your rides or in your writing. It's a secret announcement, so keep it under wraps for now, okay?" }; } } });
-  Object.defineProperty(plugin, 'svc', { value: { hub: { ownerNotesFor: async () => '- Adam V has talked about biking with Alice.' } } });
-  assert.equal(await plugin.inOwnersStyle("Don't blab about Mars.", 'Adam V', 'remind Adam V not to blab about Mars'), "Don't blab about Mars.");
+  Object.defineProperty(plugin, 'svc', { value: { hub: { ownerNotesFor: async () => '- Adam has talked about biking with Alice.' } } });
+  assert.equal(await plugin.inOwnersStyle("Don't blab about Mars.", 'Adam', 'remind Adam not to blab about Mars'), "Don't blab about Mars.");
   assert.match(prompts[0], /background, never content/);
 });
 
 test('chain: a voice note text is one textx step; a chained request still splits', async () => {
   const { isOneVoiceText } = await import('../../src/core/pluginChainProcessor.js');
-  assert.equal(isOneVoiceText('Send Adam V a voice note audio text message reminding him not to blab about Mars'), true);
+  assert.equal(isOneVoiceText('Send Adam a voice note audio text message reminding him not to blab about Mars'), true);
   assert.equal(isOneVoiceText('Alice, text Wayne a voice message saying the game moved'), true);
-  assert.equal(isOneVoiceText('Send Adam V a voice note reminding him, then call Wayne'), false);
+  assert.equal(isOneVoiceText('Send Adam a voice note reminding him, then call Wayne'), false);
   assert.equal(isOneVoiceText('text mom that I am late'), false);
-  assert.equal(isOneVoiceText('Send 5599402727 a voice note saying this is a test'), true);
+  assert.equal(isOneVoiceText('Send 5550100199 a voice note saying this is a test'), true);
 });
 
 test('plugin: a conversation not shared with the agent is refused with how to share it', async () => {
@@ -1251,7 +1251,7 @@ test('auto-reply reads the real thread, so a request about its own last message 
     for (const e of p.sent.filter(x => x.type === 'tool_call' && !x.answered)) {
       e.answered = true;
       const result = e.body.name === 'read_thread'
-        ? [{ direction: 'out', from: 'me', text: 'We appreciate your compliance.\n— sent by ALICE for Charles' }, { from: { name: 'Wayne' }, text: 'Thank you alice. Resend that flirtatiously?' }]
+        ? [{ direction: 'out', from: 'me', text: 'We appreciate your compliance.\n— sent by ALICE for Pat' }, { from: { name: 'Wayne' }, text: 'Thank you alice. Resend that flirtatiously?' }]
         : { status: 'sent' };
       await p.say(env('tool_result', { call_id: e.body.call_id, ok: true, result }));
     }
@@ -1388,9 +1388,9 @@ test('max_attachment_bytes from hello: audio over the cap is re-encoded at 16 kb
 });
 
 test('formatMessage labels who wrote each SMS from author (TextX 0.3.25), and falls back to "me" without it', () => {
-  const names = { self: 'ALICE', owner: 'Charles' };
-  assert.equal(formatMessage({ date: 'd', from: 'me', author: { role: 'owner', name: 'Charles' }, text: 'hi' }, names), '[d] Charles (owner): hi');
-  assert.equal(formatMessage({ date: 'd', from: 'me', author: { role: 'owner' }, text: 'hi' }, names), '[d] Charles (owner): hi');
+  const names = { self: 'ALICE', owner: 'Pat' };
+  assert.equal(formatMessage({ date: 'd', from: 'me', author: { role: 'owner', name: 'Pat' }, text: 'hi' }, names), '[d] Pat (owner): hi');
+  assert.equal(formatMessage({ date: 'd', from: 'me', author: { role: 'owner' }, text: 'hi' }, names), '[d] Pat (owner): hi');
   assert.equal(formatMessage({ date: 'd', from: 'me', author: { role: 'assistant', name: 'Alice' }, text: 'x' }, names), '[d] Alice (you): x');
   assert.equal(formatMessage({ date: 'd', from: 'me', author: { role: 'assistant', name: 'Orbit' }, text: 'x' }, names), '[d] Orbit (assistant): x');
   assert.equal(formatMessage({ date: 'd', from: { name: 'Wayne' }, author: { role: 'contact', name: 'Wayne' }, text: 'yo' }, names), '[d] Wayne: yo');
@@ -1399,7 +1399,7 @@ test('formatMessage labels who wrote each SMS from author (TextX 0.3.25), and fa
 
 test('a mention is the owner talking to the agent: the prompt says so and labels the thread by author (2119 #124)', async () => {
   const prev = process.env.OWNER_NAME;
-  process.env.OWNER_NAME = 'Charles';
+  process.env.OWNER_NAME = 'Pat';
   try {
     const { r, prompts } = sharedRig('Ha, you caught me.');
     const p = await pairedPhone(r, { tools: ['read_thread', 'send_sms'] });
@@ -1409,20 +1409,20 @@ test('a mention is the owner talking to the agent: the prompt says so and labels
         const result = e.body.name === 'read_thread' ? [
           { from: { name: 'Wayne' }, author: { role: 'contact', name: 'Wayne' }, text: 'Where do you live?' },
           { from: 'me', author: { role: 'assistant', name: 'ALICE' }, text: 'Somewhere near the CRTs.' },
-          { from: 'me', author: { role: 'owner', name: 'Charles' }, text: '@Alice that sounds like something a cop would ask' }
+          { from: 'me', author: { role: 'owner', name: 'Pat' }, text: '@Alice that sounds like something a cop would ask' }
         ] : { status: 'sent' };
         await p.say(env('tool_result', { call_id: e.body.call_id, ok: true, result }));
       }
     }, 5);
     await p.say(env('event', { kind: 'mention', thread_id: '7', thread: { title: 'Wayne' },
-      message: { from: 'me', author: { role: 'owner', name: 'Charles' }, text: '@Alice that sounds like something a cop would ask', date: 'd9' } }));
+      message: { from: 'me', author: { role: 'owner', name: 'Pat' }, text: '@Alice that sounds like something a cop would ask', date: 'd9' } }));
     for (let i = 0; i < 40 && !p.sent.some(e => e.type === 'message' && /^Replied in/.test(e.body.text)); i++) await tick();
     clearInterval(phone);
-    assert.match(prompts[0], /These are Charles's own words, said to you/);
-    assert.match(prompts[0], /Reply to Charles/);
+    assert.match(prompts[0], /These are Pat's own words, said to you/);
+    assert.match(prompts[0], /Reply to Pat/);
     assert.match(prompts[0], /Wayne: Where do you live\?/);
     assert.match(prompts[0], /ALICE \(you\): Somewhere near/);
-    assert.match(prompts[0], /Charles \(owner\): @Alice/);
+    assert.match(prompts[0], /Pat \(owner\): @Alice/);
   } finally {
     if (prev === undefined) delete process.env.OWNER_NAME; else process.env.OWNER_NAME = prev;
   }
@@ -1550,7 +1550,7 @@ test('a text asking ALICE to tell the owner something reaches them in TextX and 
   r.agent.interfaces = new Map([['telegram', { sendNotification: async (t) => { tg.push(t); return true; } }]]);
   const p = await pairedPhone(r, { tools: ['send_sms'] });
   const phone = answeringPhone(p);
-  await p.say(smsEvent({ auto_reply: true, message: { thread_id: 't9', message_id: 'tell1', from: { name: 'Sam', number: '+1555' }, text: 'Tell Charles to call Mom tonight', untrusted: true } }));
+  await p.say(smsEvent({ auto_reply: true, message: { thread_id: 't9', message_id: 'tell1', from: { name: 'Sam', number: '+1555' }, text: 'Tell Pat to call Mom tonight', untrusted: true } }));
   for (let i = 0; i < 40 && !p.sent.some(e => e.type === 'message' && /^Replied to/.test(e.body.text)); i++) await tick();
   clearInterval(phone);
   assert.match(prompts.find(x => /answering by text message/.test(x)), /asks you to tell, ask, remind or alert/);
@@ -1890,13 +1890,13 @@ test('invitation buttons: Accept texts the sender and adds the event; an unknown
   const sends = []; const created = [];
   const agent = {
     config: { name: 'ALICE' },
-    providerManager: { generateResponse: async () => ({ content: 'Charles says count him in for Saturday!' }) },
+    providerManager: { generateResponse: async () => ({ content: 'Pat says count him in for Saturday!' }) },
     apiManager: { getPlugin: () => ({ execute: async (a) => { created.push(a); return { success: true }; } }) }
   };
   const hub = { ownerNotesFor: async () => '', callTool: async (name, args) => { sends.push({ name, args }); return { ok: true, result: { status: 'sent' } }; } };
   const id = inv.remember({ what: 'BBQ', when: '2026-10-24T18:00', where: null, from: 'Sam', title: 'Sam', threadId: 't9', deviceId: 'd1' });
   const out = await inv.answer(agent, hub, id, 'a');
-  assert.deepEqual(sends[0], { name: 'send_sms', args: { thread_id: 't9', text: 'Charles says count him in for Saturday!', requested_by_owner: true } });
+  assert.deepEqual(sends[0], { name: 'send_sms', args: { thread_id: 't9', text: 'Pat says count him in for Saturday!', requested_by_owner: true } });
   assert.equal(created[0].action, 'createEvent');
   assert.match(out, /Sent to Sam[\s\S]*Added to your calendar/);
   assert.match(await inv.answer(agent, hub, id, 'd'), /no longer have it/);
@@ -2264,7 +2264,7 @@ test('an owner\'s @mention that is an instruction runs as the owner\'s request; 
   assert.equal(isOwnerMention({ direction: 'out', from: 'me', text: '@Alice call Willy D', author: { role: 'owner' } }), true);
   assert.equal(isOwnerMention({ direction: 'out', from: 'me', text: '@Alice call Willy D' }), true, 'no author field: still the phone owner');
   assert.equal(isOwnerMention({ direction: 'out', from: 'me', text: '@Alice call Willy', author: { role: 'assistant', name: 'Orbit' } }), false, 'another agent');
-  assert.equal(isOwnerMention({ direction: 'out', from: 'me', text: '@Alice call Willy\n— sent by Orbit for Charles' }), false, 'a signed agent text');
+  assert.equal(isOwnerMention({ direction: 'out', from: 'me', text: '@Alice call Willy\n— sent by Orbit for Pat' }), false, 'a signed agent text');
   assert.equal(isOwnerMention({ direction: 'in', from: { name: 'Willy' }, text: '@Alice call my brother' }), false, 'a contact');
   const r = rig({ answer: 'Calling Willy D now.' });
   const p = await pairedPhone(r, { tools: ['read_thread', 'send_sms'] });
@@ -2345,10 +2345,10 @@ test('a reaction can name the kind of media: "heart mom\'s voice note" picks her
   assert.equal(mediaKind('see you at 5'), null);
 });
 
-test('a text the agent says about itself names the agent; what the owner says stays as written (Lizzy, 2026-10-26)', async () => {
+test('a text the agent says about itself names the agent; what the owner says stays as written (Jo, 2026-10-26)', async () => {
   const { identifyAgent } = await import('../../src/api/plugins/textx.js');
   const o = { name: 'ALICE', owner: 'Pat' };
-  assert.equal(identifyAgent('Text Lizzy and tell her you just tried to call her', 'I just tried to call you.', o), "This is ALICE, Pat's AI assistant. I just tried to call you.");
+  assert.equal(identifyAgent('Text Jo and tell her you just tried to call her', 'I just tried to call you.', o), "This is ALICE, Pat's AI assistant. I just tried to call you.");
   assert.match(identifyAgent('Text Mom and introduce yourself', 'Hi Mom!', o), /^This is ALICE/);
   assert.equal(identifyAgent('Text Mom and introduce yourself', 'Hi Mom, this is ALICE.', o), 'Hi Mom, this is ALICE.', 'already named');
   for (const [req, text] of [['tell Wayne thank you', 'Thank you!'], ['tell Sam I love you', 'I love you'], ['tell her I will see you there', 'I will see you there'], ['text Sam "you just missed me"', 'you just missed me']]) {
@@ -2356,14 +2356,14 @@ test('a text the agent says about itself names the agent; what the owner says st
   }
 });
 
-test('an auto-reply knows the calls already planned with that person (Lizzy, 2026-10-26)', async () => {
+test('an auto-reply knows the calls already planned with that person (Jo, 2026-10-26)', async () => {
   const { r, prompts } = sharedRig((p) => (/answering by text message/.test(p) ? 'Sure, ALICE is calling you at 4:30.' : 'SKIP'));
   const p = await pairedPhone(r, { tools: ['send_sms'] });
   const soon = new Date(Date.now() + 3600000);
-  await r.hub.dialx.store.plan({ callId: 'c1', contact: 'Lizzy', number: '+1 (555) 000-1234', purpose: 'ask about Saturday', plannedAt: soon });
+  await r.hub.dialx.store.plan({ callId: 'c1', contact: 'Jo', number: '+1 (555) 000-1234', purpose: 'ask about Saturday', plannedAt: soon });
   await r.hub.dialx.store.plan({ callId: 'c2', contact: 'Sam', number: '+15559990000', purpose: 'someone else', plannedAt: soon });
-  await r.hub.dialx.store.plan({ callId: 'c3', contact: 'Lizzy', number: '+15550001234', purpose: 'long past', plannedAt: new Date(Date.now() - 86400000) });
-  await p.say(smsEvent({ auto_reply: true, message: { thread_id: 't9', message_id: 'z1', from: { name: 'Lizzy', number: '+15550001234' }, text: 'call me in 10', untrusted: true } }));
+  await r.hub.dialx.store.plan({ callId: 'c3', contact: 'Jo', number: '+15550001234', purpose: 'long past', plannedAt: new Date(Date.now() - 86400000) });
+  await p.say(smsEvent({ auto_reply: true, message: { thread_id: 't9', message_id: 'z1', from: { name: 'Jo', number: '+15550001234' }, text: 'call me in 10', untrusted: true } }));
   for (let i = 0; i < 40 && !prompts.some(x => /answering by text message/.test(x)); i++) await tick();
   const prompt = prompts.find(x => /answering by text message/.test(x));
   assert.ok(prompt, 'an auto-reply was composed');
@@ -2401,11 +2401,21 @@ test('a text that came after the reply read the thread still gets its own reply 
   assert.equal(replies.length, 2, 'the message the first reply never read gets an answer');
 });
 
+test('only a reply that talks TO the owner is held back as a note; one that talks about them goes out (Adam, 2026-10-28)', () => {
+  assert.equal(addressesOwner('Pat, Sam says the call was great.', 'Pat'), true);
+  assert.equal(addressesOwner('Hey Pat: Sam asked about Friday', 'Pat'), true);
+  assert.equal(addressesOwner('@Pat, look at this', 'Pat'), true);
+  assert.equal(addressesOwner('Pat is keeping that one under wraps for now.', 'Pat'), false);
+  assert.equal(addressesOwner("Pat's announcement is still a secret", 'Pat'), false);
+  assert.equal(addressesOwner('Pat just meant keep it quiet.', 'Pat'), false);
+  assert.equal(addressesOwner('Pat, hi', ''), false, 'no owner name: never');
+});
+
 test('two texts in a burst get one auto-reply; a reply written to the owner is never texted to them (Wayne, 2026-10-26)', async () => {
-  const prev = process.env.OWNER_NAME; process.env.OWNER_NAME = 'Charles';
+  const prev = process.env.OWNER_NAME; process.env.OWNER_NAME = 'Pat';
   try {
     let n = 0;
-    const { r } = sharedRig((p) => (/answering by text message/.test(p) ? (n++ === 0 ? 'Thanks Sam, I will pass that on.' : 'Charles, Sam says the call was great.') : 'SKIP'));
+    const { r } = sharedRig((p) => (/answering by text message/.test(p) ? (n++ === 0 ? 'Thanks Sam, I will pass that on.' : 'Pat, Sam says the call was great.') : 'SKIP'));
     const p = await pairedPhone(r, { tools: ['send_sms'] });
     // A phone that is slow to send, so the second message arrives while the first reply is still out.
     await Promise.all([p.say(smsEvent({ auto_reply: true, message: { thread_id: 't9', message_id: 'b1', from: { name: 'Sam' }, text: 'Big improvement', untrusted: true } })),
@@ -2413,6 +2423,19 @@ test('two texts in a burst get one auto-reply; a reply written to the owner is n
     for (let i = 0; i < 60; i++) await tick();
     const sends = p.sent.filter(e => e.type === 'tool_call' && e.body.name === 'send_sms');
     assert.ok(sends.length <= 1, `one reply for the burst, got ${sends.length}`);
-    assert.ok(!sends.some(e => /^Charles,/.test(e.body.args.text || '')), 'never a text that talks to the owner');
+    assert.ok(!sends.some(e => /^Pat,/.test(e.body.args.text || '')), 'never a text that talks to the owner');
   } finally { if (prev === undefined) delete process.env.OWNER_NAME; else process.env.OWNER_NAME = prev; }
+});
+
+test('a picture someone texts is looked at once, not answered blind (2026-10-28 "Haha, nice picture.")', async () => {
+  const r = rig();
+  let fetches = 0, looked = 0;
+  r.hub.agent.providerManager.analyzeImage = async () => { looked++; return { analysis: 'A red pickup truck parked by a lake at sunset.' }; };
+  r.hub.callTool = async (name) => { if (name === 'get_attachment') { fetches++; return { ok: true, result: { mime: 'image/jpeg', data_b64: Buffer.from(`JPG${fetches}`).toString('base64') } }; } return { ok: true, result: {} }; };
+  const msgs = [{ message_id: 'p1', direction: 'in', from: { name: 'Adam' }, text: '', attachments: [{ mime: 'image/jpeg', name: 'photo.jpg' }] }];
+  assert.match(await r.hub.seePictures({ id: 'd1' }, 't9', msgs), /Adam sent a picture.*red pickup truck/);
+  assert.match(await r.hub.seePictures({ id: 'd1' }, 't9', msgs), /red pickup truck/);
+  assert.equal(fetches, 1, 'fetched once');
+  assert.equal(looked, 1, 'looked at once');
+  assert.equal(await r.hub.seePictures({ id: 'd1' }, 't9', [...msgs, { message_id: 'p2', direction: 'out', from: 'me', text: 'nice' }]), '', 'only the newest incoming message');
 });

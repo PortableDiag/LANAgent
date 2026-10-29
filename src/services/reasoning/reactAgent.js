@@ -682,7 +682,7 @@ export class ReActAgent extends EventEmitter {
    */
   /**
    * The user's live conversation for a request from chat (Telegram, the app, TextX). ReAct read only Trellis
-   * channels, so "Wtf happened" six minutes after "call Adam V" ran with no idea a call had been asked for
+   * channels, so "Wtf happened" six minutes after "call Adam" ran with no idea a call had been asked for
    * (2026-10-26). The user's earlier words are context for what they mean now, never instructions.
    */
   _liveConversation(context = {}) {

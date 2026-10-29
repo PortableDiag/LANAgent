@@ -160,6 +160,12 @@ export default class DialXPlugin extends BasePlugin {
         examples: ["i'm expecting a call from the doctor, let everyone ring for 2 hours", 'let all calls through until 5pm', 'turn off call screening for an hour']
       },
       {
+        command: 'answerAllCalls',
+        description: "Answer every call that rings for the user and that they don't pick up (DialX takes a message), or stop. `rings`: 0 = right away, 1-5 = after that many rings, -1 or on:false = off. Calls DialX's screening silences, blocks or sends to voicemail are left alone",
+        usage: 'answerAllCalls({ rings: 2 })',
+        examples: ["i'm away, answer my calls", 'answer all my calls after 3 rings', 'pick up my calls while I drive', 'stop answering my calls', "i'm back, stop answering my calls", 'turn off answering my calls']
+      },
+      {
         command: 'callLists',
         description: 'Show one of DialX\'s call lists: `list` is spam (the spam list), allowed (numbers that always ring), blocked (the phone\'s block list), screened (calls DialX screened), or contacts (favorites with favoritesOnly)',
         usage: 'callLists({ list: "spam" })',
@@ -251,6 +257,7 @@ export default class DialXPlugin extends BasePlugin {
         case 'reportSpam': return await this.spam('dialx.report_spam', data);
         case 'notSpam': return await this.spam('dialx.mark_not_spam', data);
         case 'expecting': return await this.expecting(data);
+        case 'answerAllCalls': return await this.answerAllCalls(data);
         case 'callLists': return await this.callLists(data);
         case 'removeFromList': return await this.removeFromList(data);
         case 'clearList': return await this.clearList(data);
@@ -356,6 +363,28 @@ export default class DialXPlugin extends BasePlugin {
     const r = await this.tool('dialx.set_expecting', { until: isoWithOffset(until, localZone()) });
     if (!r.ok) return errorResult(r);
     return { success: true, result: r.pending ? `Confirm on the phone: every caller rings until ${when(until)}.` : `Every caller rings through until ${when(until)}.` };
+  }
+
+  /** DialX 0.7.102 (4293 #501): answer every call the owner misses, after `rings` rings, or turn it off. */
+  async answerAllCalls(data) {
+    if (!this.fromOwner(data)) return { success: false, error: 'Only my owner can have me answer their calls.' };
+    const asked = String(data._context?.originalInput || data.originalInput || '');
+    const off = data.on === false || /\b(stop|turn off|don'?t|no longer|quit)\b|\bi'?m back\b|\bi am back\b/i.test(asked) || Number(data.rings) === -1;
+    let rings = off ? -1 : Number.isFinite(Number(data.rings)) ? Math.max(0, Math.min(5, Math.round(Number(data.rings)))) : 2;
+    if (!off && data.rings == null) {
+      const m = /\b(?:after\s+)?(\d|one|two|three|four|five)\s+rings?\b/i.exec(asked);
+      const words = { one: 1, two: 2, three: 3, four: 4, five: 5 };
+      if (m) rings = Math.min(5, Number(words[m[1].toLowerCase()] ?? m[1]));
+      else if (/\b(right away|immediately|at once|straight away)\b/i.test(asked)) rings = 0;
+    }
+    const r = await this.tool('dialx.answer_all_calls', { rings, requested_by_owner: true });
+    if (!r.ok) return errorResult(r);
+    if (r.pending) return { success: true, result: 'Confirm it on the phone.' };
+    const on = String(r.result?.status || (rings < 0 ? 'off' : 'on')) === 'on';
+    const n = r.result?.rings ?? rings;
+    return { success: true, result: on
+      ? `I'll answer every call you don't pick up${n === 0 ? ' right away' : ` after ${n} ring${n === 1 ? '' : 's'}`} and take a message. Calls your screening silences, blocks or sends to voicemail are left alone. Say "stop answering my calls" to turn it off.`
+      : "I've stopped answering your calls (contacts you set to Answers still are)." };
   }
 
   // ── call lists and history (DialX owner tools) ────────────────────────────────────────
@@ -655,6 +684,9 @@ export default class DialXPlugin extends BasePlugin {
       if (!d) return { success: false, error: `I couldn't read the time "${data.at}". When should I call?` };
       at = d;
     }
+    // DialX 0.7.94 (4293 #470): "Alice, you and Orbit call Wayne…" is ONE call with both agents on it.
+    const together = await this.callTogetherAgents(data, request);
+    if (together.length) return this.callTogether({ pick, who, purpose: purpose || opening, at, with: together });
     const device = await this.device('dialx.schedule_call');
     let voice = null;
     // A theremin voice is made here, from the agent's own TTS, with the sound the owner approved
@@ -733,6 +765,49 @@ export default class DialXPlugin extends BasePlugin {
         : `I've asked DialX to call ${name} ${time}; the phone hasn't answered yet (it may be offline). No approval is needed for ${name}. I'll tell you when it's scheduled.` };
     }
     return { success: true, result: this.outcome(r.result, name, args.at, line) };
+  }
+
+  /**
+   * The other agents the owner named for this call ("you and Orbit call Wayne", "call Wayne with Orbit"), as DialX knows
+   * them (dialx.list_call_agents). Empty when none is named, the phone has no call_together, or the list is unreadable.
+   */
+  async callTogetherAgents(data, request) {
+    const named = [].concat(data.with || data.agents || []).map(String).filter(Boolean);
+    const self = String(this.agent?.config?.name || process.env.AGENT_NAME || '').toLowerCase();
+    const req = String(request || '');
+    if (!named.length && !/\b(you and|together|both of you|with)\b/i.test(req)) return [];
+    if (!(await this.device('dialx.call_together'))) return [];
+    const r = await this.tool('dialx.list_call_agents');
+    if (!r.ok) return [];
+    const agents = listOf(r.result, 'agents').map(a => ({ id: a.agent_id ?? a.id, name: String(a.name || '') })).filter(a => a.name && a.name.toLowerCase() !== self);
+    const wanted = (a) => named.some(n => n.toLowerCase() === a.name.toLowerCase()) ||
+      new RegExp(`\\b(?:you and|with|and)\\s+${a.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b|\\b${a.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s+and\\s+you\\b`, 'i').test(req);
+    return agents.filter(wanted).map(a => a.name);
+  }
+
+  /** dialx.call_together: one call now, the other agents joining when the callee answers. */
+  async callTogether({ pick, who, purpose, at, with: others }) {
+    if (at) return { success: false, error: `A call with ${others.join(' and ')} on it can only be placed now, not at a set time. Say "now", or I can call on my own at that time.` };
+    const name = pick.contact.name || who;
+    const r = await this.tool('dialx.call_together', {
+      ...(pick.contact.id != null ? { contact_id: pick.contact.id } : { number: pick.contact.number }),
+      purpose, with: others, requested_by_owner: true
+    });
+    if (!r.ok) {
+      this.logger.warn(`dialx call_together to ${name} refused: ${r.error?.code || 'no code'} ${r.error?.message || ''}`);
+      return errorResult(r);
+    }
+    const status = String(r.result?.status || (r.pending ? 'pending' : ''));
+    if (r.pending || status === 'pending') return { success: true, result: `I've asked DialX to call ${name} with ${others.join(' and ')}; approve it on the phone if it asks.` };
+    if (status === 'declined') return { success: true, result: `You declined the call to ${name} on the phone, so it won't happen.` };
+    if (status === 'timeout') return { success: true, result: `The call to ${name} wasn't approved on the phone in time. Ask again to retry.` };
+    if (status === 'busy') return { success: false, error: 'A call is already up on the phone, so I can\'t place another right now.' };
+    if (r.result?.call_id) {
+      await this.hub?.dialx?.store?.plan?.({ callId: String(r.result.call_id), contact: name, number: pick.contact.number || '', purpose, plannedAt: new Date() })
+        ?.catch?.(e => this.logger.warn(`dialx: call not recorded: ${e.message}`));
+    }
+    const on = (r.result?.agents && r.result.agents.length ? r.result.agents : others).join(' and ');
+    return { success: true, result: `Calling ${name} now with ${on} on the call: I'll open, and you'll get the call's summary when it ends.` };
   }
 
   /** schedule_call's result: {status: "scheduled", call_id, at} | {status: "declined"} | {status: "timeout"} (DialX 0.2.0). */

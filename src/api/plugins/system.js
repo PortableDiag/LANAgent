@@ -449,7 +449,9 @@ export default class SystemPlugin extends BasePlugin {
         git: {},
         pm2: null,
         // Call 73 (2026-10-28): asked for the server's operating-system stats, the status had only the process's.
-        host: await hostStats(this.deployPath)
+        host: await hostStats(this.deployPath),
+        // "No errors or warnings" was said with no error data behind it (2026-10-28): the last hour's are counted here.
+        errorsLastHour: await recentErrors(path.join(this.deployPath, 'logs', 'errors.log'))
       };
       
       // Git status. The deploy directory is an rsync target, not a checkout, so fall back to the
@@ -1199,4 +1201,31 @@ export async function hostStats(dir = process.cwd()) {
     host.diskGB = { path: dir, total: gb(st.blocks * st.bsize), free: gb(st.bavail * st.bsize) };
   } catch { /* statfs unavailable */ }
   return host;
+}
+
+/** ERROR lines in the error log over the last `minutes`: the count and the most frequent messages. */
+export async function recentErrors(file, { minutes = 60, now = Date.now() } = {}) {
+  let text;
+  try {
+    const fh = await fs.open(file, 'r');
+    try {
+      const { size } = await fh.stat();
+      const len = Math.min(size, 512 * 1024);
+      const buf = Buffer.alloc(len);
+      await fh.read(buf, 0, len, size - len);
+      text = buf.toString('utf8');
+    } finally { await fh.close(); }
+  } catch { return { unavailable: true }; }
+  const since = now - minutes * 60000;
+  const counts = new Map();
+  let count = 0;
+  for (const line of text.split('\n')) {
+    const m = /^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) \[ERROR\] (.*)$/.exec(line);
+    if (!m || new Date(m[1].replace(' ', 'T')).getTime() < since) continue;
+    count++;
+    const msg = m[2].slice(0, 140);
+    counts.set(msg, (counts.get(msg) || 0) + 1);
+  }
+  const top = [...counts].sort((a, b) => b[1] - a[1]).slice(0, 3).map(([message, n]) => ({ message, n }));
+  return { minutes, count, ...(top.length ? { top } : {}) };
 }

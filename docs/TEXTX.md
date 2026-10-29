@@ -84,7 +84,7 @@ On the agent side:
 - SMS text is wrapped as **untrusted data** and never treated as instructions.
 - Watched-conversation events go to a plain model call, never to the command router.
 
-**Messages for the owner** ("tell Charles…", "ask him…", an alert, or anything else that needs them) go to
+**Messages for the owner** ("tell Pat…", "ask him…", an alert, or anything else that needs them) go to
 the owner's conversation with the agent in TextX **and** to Telegram, whether or not auto-reply is on for
 that conversation. If one channel fails, the other still delivers. The LANAgent Android app (1.5.0+) gets them
 as phone notifications too: its `hello` carries `notify: "owner" | "all" | "off"` (an agent extension; TextX
@@ -147,7 +147,7 @@ conversations and the agent weighs in there. TextX shares the conversation if it
 that conversation (no card for that one send) and tells you what it said. The mention is you talking to the
 agent: it answers you, in front of the others, and addresses them only when you ask it to. Someone else typing
 `@<agent>` grants nothing. With TextX 0.3.25+ each message carries `author` (owner, assistant or contact), and the
-agent sees the thread labelled that way ("Charles (owner)", "ALICE (you)", "Orbit (assistant)", "Wayne").
+agent sees the thread labelled that way ("Pat (owner)", "ALICE (you)", "Orbit (assistant)", "Wayne").
 
 **Auto-reply** is a separate per-conversation toggle in TextX, **off by default**: "Let <assistant> reply on
 its own".

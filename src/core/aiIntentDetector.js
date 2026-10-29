@@ -1807,7 +1807,16 @@ export class AIIntentDetector {
       }
     }
 
-    // "Send Adam V a voice note … reminding him…" was answered with a clarifying question (2026-10-28).
+    // "Hey lanagent go to botsnborgs.com and buy yourself an avatar" (2026-10-28): the store's own plugin, never the
+    // scraper or a clarifying question. Buy wording buys; anything else browses.
+    if (/\bbots\s*(?:&|and|n|'n'?)\s*borgs\b|\bbotsn?borgs\b|\bbotsandborgs\b/i.test(text) && this.agent?.apiManager?.apis?.get?.('botsandborgs')?.enabled) {
+      const want = /\b(buy|purchase|get (?:yourself|me|him|her|them)|pick (?:yourself|out)|order)\b/i.test(text) ? 'buy' : 'browse';
+      for (const [id, intent] of Object.entries(this.getDynamicIntents())) {
+        if (intent.plugin === 'botsandborgs' && intent.action === want) return parseInt(id);
+      }
+    }
+
+    // "Send Adam a voice note … reminding him…" was answered with a clarifying question (2026-10-28).
     // A voice note to someone is a textx send, which speaks it.
     if (this.agent?.apiManager?.apis?.get?.('textx')?.enabled && asksToSendVoiceNote(text)) {
       for (const [id, intent] of Object.entries(this.getDynamicIntents())) {

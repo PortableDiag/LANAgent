@@ -5596,6 +5596,13 @@ ${newCapsBlock}${reviewFlagsBlock}
         description: `Deployed ${drifted.length} merged file(s): ${drifted.slice(0, 10).join(', ')}${drifted.length > 10 ? '…' : ''}`
       });
 
+      // Docs never load at runtime: a CHANGELOG-only difference restarted ALICE in the middle of the owner's test
+      // (2026-10-28 12:29). Copied, no restart.
+      if (drifted.every(f => /\.md$/i.test(f) || f.startsWith('docs/'))) {
+        logger.info(`Deploy: only documentation changed (${drifted.join(', ')}); copied, no restart`);
+        return { success: true, deployed: drifted, skipped: [], reason: 'docs only, no restart' };
+      }
+
       // Arm a DETACHED watchdog, then restart.
       //
       // It has to be detached and outside this process: the restart kills us, so

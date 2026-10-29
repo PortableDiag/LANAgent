@@ -1078,7 +1078,10 @@ export class Agent extends EventEmitter {
       // Check if this is a personal question that memory can answer BEFORE intent detection.
       // Without this, "what is my name?" routes to song-ID, "favorite color" to smart home, etc.
       const personalQuestionPattern = /\b(what(?:'s| is| are) my |do (?:i|you) (?:know|remember)|what do i (?:like|love|hate|prefer|enjoy)|who am i|tell me about (?:me|myself)|my (?:name|favorite|fav|preference))\b/i;
-      if (personalQuestionPattern.test(input) && this.memoryManager) {
+      // "What are my notes?" is a question for the notes app, not for memory: answered here it was "Let me pull up your
+      // Trellis notes" with nothing pulled (2026-10-28). The same for my texts, calls, messages, tasks, files.
+      const aboutAThing = /\b(notes?|texts?|messages?|calls?|voicemails?|emails?|tasks?|reminders?|cards?|files?|photos?|events?|calendar|contacts?|lists?)\b/i.test(input);
+      if (personalQuestionPattern.test(input) && !aboutAThing && this.memoryManager) {
         try {
           const personalMemories = await this.memoryManager.recall(input, {
             limit: 5,
@@ -1091,11 +1094,13 @@ export class Agent extends EventEmitter {
               memoryContext += `- ${mem.content}\n`;
             }
             const contextualInput = `${memoryContext}\nUser's question: ${input}`;
-            const response = await this.providerManager.generateResponse(contextualInput, {
+            const res = await this.providerManager.generateResponse(contextualInput, {
               maxTokens: 300,
               temperature: 0.7,
               systemPrompt: this.getSystemPrompt()
             });
+            // generateResponse answers { content, model, usage }: the whole object went out as the reply (2026-10-28).
+            const response = String(res?.content ?? res ?? '').trim();
             await this.memoryManager.storeConversation(context.userId, input, response, context);
             return { type: 'text', content: response };
           }
@@ -1525,7 +1530,7 @@ If answering needs information that is not in the conversation above (messages, 
               // From a Trellis channel the conversation usually says what was meant
               // ("was unable to complete the task" right after the task): answer from it
               // as a question below rather than asking the operator to repeat themselves.
-              // The same holds for any live conversation: "Wtf happened" six minutes after "call Adam V" was
+              // The same holds for any live conversation: "Wtf happened" six minutes after "call Adam" was
               // met with a menu about disk space and web search (2026-10-26). With recent turns, the reasoning
               // agent (which reads them and can check the call) takes it; the menu is only for a cold start.
               const recentTurns = this.memoryManager?.getRecentTurns?.(context.userId || 'default', context.threadId, 4) || [];

@@ -114,7 +114,7 @@ export class VectorIntentDetector {
       });
       
       // The vectorStore returns transformed results with metadata
-      const metadata = bestMatch.metadata || bestMatch;
+      let metadata = bestMatch.metadata || bestMatch;
       const distance = bestMatch.distance !== undefined ? bestMatch.distance : (bestMatch._distance || 2);
       const similarity = bestMatch.similarity !== undefined ? bestMatch.similarity : Math.max(0, 1 - distance);
       
@@ -161,13 +161,26 @@ export class VectorIntentDetector {
       // Any action that makes or changes something needs a confident match: "Alice pick an avatar you
       // like from botsnborgs.com" ran mindswarm.uploadAvatar at 0.605, twice (2026-10-27). Below 0.7 the
       // AI classifier, which reads the whole request, decides; reads keep the 0.6 base.
-      if (writesSomething) threshold = Math.max(threshold, 0.7);
+      // The owner's own notes are the exception: a note or checklist line harms nothing, and on call 75 (2026-10-28) the
+      // 0.66 match for "take a note: …" went to the AI classifier and cost 7 s while the owner waited on the phone.
+      const ownNote = metadata.plugin === 'trellis-notes' && /^(createNote|appendNote|addChecklistItem)$/.test(metadata.action || '');
+      if (writesSomething && !ownNote) threshold = Math.max(threshold, 0.7);
       if (similarity < threshold) {
         logger.info(`Best match similarity ${similarity.toFixed(3)} below threshold ${threshold}${isDangerousAction ? ' (dangerous action)' : readVsWrite ? ' (a request to see matched an action that changes)' : ` (${metadata.plugin || 'system'})`}, falling back to AI`);
         return null;
       }
       
-      // "Send 5599402727 a voice note saying…" matched voice.test at 0.61 and only made speech; nothing was
+      // A store request that says buy is a buy, whichever store command it matched (it went to browse, 2026-10-28).
+      if (metadata.plugin === 'botsandborgs' && metadata.action !== 'buy' && /\b(buy|purchase|order|get (?:yourself|me|him|her|them))\b/i.test(String(input))) {
+        logger.info(`A Bots & Borgs buy matched ${metadata.action}; using buy`);
+        metadata = { ...metadata, action: 'buy', name: 'buy' };
+      }
+      // The Bots & Borgs store has its own plugin: a request naming it never runs another plugin's match (2026-10-28).
+      if (metadata.plugin !== 'botsandborgs' && /\bbots\s*(?:&|and|n|'n'?)\s*borgs\b|\bbotsn?borgs\b|\bbotsandborgs\b/i.test(String(input))) {
+        logger.info(`A Bots & Borgs request matched ${metadata.plugin}.${metadata.action}; falling back to AI (the store plugin)`);
+        return null;
+      }
+      // "Send 5550100199 a voice note saying…" matched voice.test at 0.61 and only made speech; nothing was
       // sent (2026-10-28). A voice note to someone is a text send: the AI classifier routes it to textx.
       if (metadata.plugin !== 'textx' && asksToSendVoiceNote(input)) {
         logger.info(`A voice note to someone matched ${metadata.plugin}.${metadata.action}; falling back to AI (a text send)`);

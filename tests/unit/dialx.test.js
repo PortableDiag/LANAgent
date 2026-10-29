@@ -14,7 +14,7 @@ import { createTransport } from '../../src/services/textx/textxTransport.js';
 import { memoryCallStore, isoWithOffset, parseTurn, CALL_SESSION, DIALX_TOOLS } from '../../src/services/textx/dialx.js';
 import DialXPlugin from '../../src/api/plugins/dialx.js';
 
-process.env.OWNER_NAME = process.env.OWNER_NAME || 'Charles';
+process.env.OWNER_NAME = process.env.OWNER_NAME || 'Pat';
 const quiet = { info() {}, warn() {}, error() {}, debug() {} };
 const env = (type, body = {}) => ({ v: 1, id: ulid(), type, ts: new Date().toISOString(), body });
 const tick = (ms = 20) => new Promise(r => setTimeout(r, ms));
@@ -196,8 +196,8 @@ test('call.ended: the record is closed and the owner gets the transcript', async
   const d = await phone(r);
   await d.say(started());
   await d.say(env('event', { kind: 'call.ended', call_id: 'c1', reason: 'callee hung up', duration_s: 72, transcript: [
-    { role: 'disclosure', text: 'Hi, this is ALICE, an AI assistant calling for Charles.' },
-    { role: 'agent', text: 'Happy birthday from Charles!' }, { role: 'filler', text: 'One moment.' }, { role: 'callee', text: 'Tell him thanks!' }] }));
+    { role: 'disclosure', text: 'Hi, this is ALICE, an AI assistant calling for Pat.' },
+    { role: 'agent', text: 'Happy birthday from Pat!' }, { role: 'filler', text: 'One moment.' }, { role: 'callee', text: 'Tell him thanks!' }] }));
   await tick(60);
   assert.ok(r.callStore.rows.get('c1').endedAt);
   const note = r.told.find(t => /Call with Wayne ended/.test(t));
@@ -251,10 +251,51 @@ function pluginRig({ approved = [{ contact_id: 'k7', name: 'Wayne Williams', num
   return { plugin, calls };
 }
 
+test('plugin: "Alice, you and Orbit call Wayne" is one call_together with Orbit (DialX 0.7.94)', async () => {
+  const { plugin, calls } = pluginRig();
+  plugin.hub.callTool = async (name, args, opts) => {
+    calls.push({ name, args, opts });
+    if (name === 'dialx.list_approved_contacts') return { ok: true, result: [{ contact_id: 'k7', name: 'Wayne Williams', number: '+15550199' }] };
+    if (name === 'dialx.list_call_agents') return { ok: true, result: [{ agent_id: 'a1', name: 'ALICE' }, { agent_id: 'a2', name: 'Orbit' }] };
+    if (name === 'dialx.call_together') return { ok: true, result: { status: 'calling', call_id: '90', agents: ['ALICE', 'Orbit'] } };
+    return { ok: true, result: [] };
+  };
+  const r = await plugin.execute({ action: 'call', contact: 'Wayne', purpose: 'ask how his day is going', opening: 'Hi Wayne!',
+    voicemail: 'Hi Wayne, call Pat back.', _context: { originalInput: 'Alice, you and Orbit call Wayne and ask how his day is going' } });
+  assert.equal(r.success, true, JSON.stringify(r));
+  const together = calls.find(c => c.name === 'dialx.call_together');
+  assert.ok(together, 'call_together sent');
+  assert.deepEqual(together.args.with, ['Orbit'], 'never names itself');
+  assert.equal(together.args.contact_id, 'k7');
+  assert.equal(together.args.requested_by_owner, true);
+  assert.ok(!calls.some(c => c.name === 'dialx.schedule_call'), 'not an ordinary call');
+  assert.match(r.result, /Calling Wayne Williams now with ALICE and Orbit/);
+});
+
+test('plugin: a call that names no other agent stays an ordinary call', async () => {
+  const { plugin, calls } = pluginRig();
+  await plugin.execute({ action: 'call', contact: 'Wayne', purpose: 'say hi', opening: 'Hi Wayne!', voicemail: 'Hi Wayne.', _context: { originalInput: 'call wayne and say hi' } });
+  assert.ok(!calls.some(c => c.name === 'dialx.list_call_agents'), 'no agent lookup without a named agent');
+  assert.ok(calls.some(c => c.name === 'dialx.schedule_call'));
+});
+
+test('plugin: "I\'m away, answer my calls after 3 rings" turns on answer_all_calls; "stop answering my calls" turns it off (DialX 0.7.102)', async () => {
+  const { plugin, calls } = pluginRig();
+  plugin.hub.callTool = async (name, args, opts) => { calls.push({ name, args, opts }); return { ok: true, result: { status: args.rings < 0 ? 'off' : 'on', rings: args.rings } }; };
+  const on = await plugin.execute({ action: 'answerAllCalls', _context: { originalInput: "I'm away, answer my calls after 3 rings" } });
+  assert.deepEqual(calls.at(-1).args, { rings: 3, requested_by_owner: true });
+  assert.match(on.result, /after 3 rings/);
+  const off = await plugin.execute({ action: 'answerAllCalls', _context: { originalInput: 'stop answering my calls' } });
+  assert.equal(calls.at(-1).args.rings, -1);
+  assert.match(off.result, /stopped answering/);
+  await plugin.execute({ action: 'answerAllCalls', _context: { originalInput: "I'm back" } });
+  assert.equal(calls.at(-1).args.rings, -1, '"I\'m back" turns it off');
+});
+
 test('plugin: the owner\'s call goes to DialX with the contact id, an offset time and the opening', async () => {
   const { plugin, calls } = pluginRig();
   const r = await plugin.execute({ action: 'call', contact: 'Wayne', at: '2099-10-23T17:00', purpose: 'wish him a happy birthday',
-    opening: "Hi Wayne, this is ALICE, Charles's AI assistant. Charles asked me to wish you a happy birthday.", _context: { originalInput: 'call wayne and tell him happy birthday at 5pm' } });
+    opening: "Hi Wayne, this is ALICE, Pat's AI assistant. Pat asked me to wish you a happy birthday.", _context: { originalInput: 'call wayne and tell him happy birthday at 5pm' } });
   assert.equal(r.success, true);
   assert.match(r.result, /No approval is needed for Wayne Williams/, 'an approved contact is never sent to the approval wording');
   assert.doesNotMatch(r.result, /Tap Approve/);
@@ -262,7 +303,7 @@ test('plugin: the owner\'s call goes to DialX with the contact id, an offset tim
   assert.equal(args.contact_id, 'k7');
   assert.equal(args.requested_by_owner, true);
   assert.match(args.at, /^2099-10-23T17:00:00[+-]\d\d:\d\d$/);
-  assert.equal(args.opening, "Hi Wayne, this is ALICE, Charles's AI assistant. Charles asked me to wish you a happy birthday.");
+  assert.equal(args.opening, "Hi Wayne, this is ALICE, Pat's AI assistant. Pat asked me to wish you a happy birthday.");
   assert.equal(args.opening_audio_b64, undefined, 'phone voice: no opening audio');
 });
 
@@ -464,21 +505,21 @@ test('a call to someone who texted before: the call knows the texts, and the cal
 });
 
 test('a call DialX names by number (one ALICE answered) joins that person; a group call joins nobody (4293 #401/#402)', async () => {
-  const r = rig({ answers: ['{"say":"Hi Lizzy!","hangup":false}', '{"say":"Hello all","hangup":false}'] });
+  const r = rig({ answers: ['{"say":"Hi Jo!","hangup":false}', '{"say":"Hello all","hangup":false}'] });
   const rows = [];
   const transcripts = { async insert(docs) { docs.forEach(d => rows.push({ ...d, createdAt: new Date(Date.UTC(2026, 9, 28, 9, rows.length)) })); },
     async recent(personId, { limit }) { return rows.filter(x => x.personId === personId).sort((a, b) => b.createdAt - a.createdAt).slice(0, limit); } };
   const directory = new PersonDirectory({ store: memoryPeopleStore(), logger: quiet });
   const memory = new PersonMemory({ directory, transcripts, logger: quiet });
   r.hub._people = { directory, memory };
-  const lizzy = await directory.resolve({ number: '+1 405 555 0111' }, { name: 'Lizzy', channel: 'sms' });
+  const lizzy = await directory.resolve({ number: '+1 405 555 0111' }, { name: 'Jo', channel: 'sms' });
   const d = await phone(r);
-  await d.say(env('event', { kind: 'call.started', call_id: 'in1', direction: 'incoming', contact: { name: 'Lizzy', number: '+14055550111' } }));
+  await d.say(env('event', { kind: 'call.started', call_id: 'in1', direction: 'incoming', contact: { name: 'Jo', number: '+14055550111' } }));
   await d.say(env('event', { kind: 'call.ended', call_id: 'in1', reason: 'remote_hangup', duration_s: 20,
-    transcript: [{ role: 'agent', text: 'Hi Lizzy!' }, { role: 'callee', text: 'Biscuit says hi.' }] }));
+    transcript: [{ role: 'agent', text: 'Hi Jo!' }, { role: 'callee', text: 'Biscuit says hi.' }] }));
   await tick(60);
-  assert.deepEqual(rows.filter(x => x.personId === String(lizzy._id)).map(x => x.content), ['Hi Lizzy!', 'Biscuit says hi.']);
-  await d.say(env('event', { kind: 'call.started', call_id: 'g1', group: true, contact: { name: 'Lizzy', number: '+14055550111' } }));
+  assert.deepEqual(rows.filter(x => x.personId === String(lizzy._id)).map(x => x.content), ['Hi Jo!', 'Biscuit says hi.']);
+  await d.say(env('event', { kind: 'call.started', call_id: 'g1', group: true, contact: { name: 'Jo', number: '+14055550111' } }));
   await d.say(env('event', { kind: 'call.ended', call_id: 'g1', reason: 'remote_hangup', duration_s: 20,
     transcript: [{ role: 'agent', text: 'Hello all' }, { role: 'callee', text: 'Someone else talking.' }] }));
   await tick(60);
@@ -499,11 +540,11 @@ test('a call with no recorded number still works, with no person block', async (
 import { voicemailText } from '../../src/services/textx/dialx.js';
 
 test('voicemail text: who for, why, call back; the owner\'s own words win; at most 500 characters', () => {
-  const t = voicemailText({ name: 'Wayne', owner: 'Charles', self: 'ALICE', purpose: 'the Saturday BBQ.' });
-  assert.equal(t, "Hi Wayne, this is ALICE, Charles's AI assistant. Charles asked me to call you about the Saturday BBQ. Please call Charles back when you get a chance. Thanks!");
-  assert.match(voicemailText({ name: 'Wayne', owner: 'Charles', self: 'ALICE', purpose: 'survey his enrichment center experience' }),
-    /asked me to call you to survey his enrichment center experience\. Please call Charles back/);
-  assert.equal(voicemailText({ given: 'Wayne, call me about Saturday. Charles.' }), 'Wayne, call me about Saturday. Charles.');
+  const t = voicemailText({ name: 'Wayne', owner: 'Pat', self: 'ALICE', purpose: 'the Saturday BBQ.' });
+  assert.equal(t, "Hi Wayne, this is ALICE, Pat's AI assistant. Pat asked me to call you about the Saturday BBQ. Please call Pat back when you get a chance. Thanks!");
+  assert.match(voicemailText({ name: 'Wayne', owner: 'Pat', self: 'ALICE', purpose: 'survey his enrichment center experience' }),
+    /asked me to call you to survey his enrichment center experience\. Please call Pat back/);
+  assert.equal(voicemailText({ given: 'Wayne, call me about Saturday. Pat.' }), 'Wayne, call me about Saturday. Pat.');
   assert.equal(voicemailText({ given: 'x'.repeat(900) }).length, 500);
 });
 
@@ -512,8 +553,8 @@ test('plugin: scheduling sends a voicemail message, the owner\'s words when give
   await plugin.execute({ action: 'call', contact: 'Wayne', purpose: 'the Saturday BBQ', opening: 'Hi Wayne!' });
   assert.match(calls.find(c => c.name === 'dialx.schedule_call').args.voicemail, /asked me to call you about the Saturday BBQ\. Please call/);
   const r2 = pluginRig();
-  await r2.plugin.execute({ action: 'call', contact: 'Wayne', purpose: 'the BBQ', opening: 'Hi!', voicemail: "Hi Wayne, this is ALICE, Charles's AI assistant. Wayne, ring Charles back about the BBQ." });
-  assert.equal(r2.calls.find(c => c.name === 'dialx.schedule_call').args.voicemail, "Hi Wayne, this is ALICE, Charles's AI assistant. Wayne, ring Charles back about the BBQ.");
+  await r2.plugin.execute({ action: 'call', contact: 'Wayne', purpose: 'the BBQ', opening: 'Hi!', voicemail: "Hi Wayne, this is ALICE, Pat's AI assistant. Wayne, ring Pat back about the BBQ." });
+  assert.equal(r2.calls.find(c => c.name === 'dialx.schedule_call').args.voicemail, "Hi Wayne, this is ALICE, Pat's AI assistant. Wayne, ring Pat back about the BBQ.");
 });
 
 test('voicemail with a scheduled message: ALICE says nothing, takes no turns, and the report says she left one', async () => {
@@ -598,7 +639,7 @@ test('voicemail: their greeting is never saved as their words, and the copy goes
   const r = rig();
   const remembered = [];
   r.hub.callPerson = async () => ({ _id: 'p1', name: 'Wayne' });
-  await r.callStore.plan({ callId: 'c1', contact: 'Wayne', number: '+15550199', purpose: 'x', voicemail: 'Hi Wayne, call Charles back.', plannedAt: new Date() });
+  await r.callStore.plan({ callId: 'c1', contact: 'Wayne', number: '+15550199', purpose: 'x', voicemail: 'Hi Wayne, call Pat back.', plannedAt: new Date() });
   r.hub.aboutPerson = async () => '';
   r.hub.rememberCall = async (p, who, text) => remembered.push(`${who}: ${text}`);
   r.hub.learnAbout = () => {};
@@ -610,9 +651,10 @@ test('voicemail: their greeting is never saved as their words, and the copy goes
   await d.say(env('event', { kind: 'call.answered', call_id: 'c1', by: 'voicemail' }));
   await d.say(env('event', { kind: 'call.ended', call_id: 'c1', reason: 'voicemail_left', detail: 'after the beep', duration_s: 46,
     voicemail_audio: { bytes: wav.length, format: 'wav/pcm16/16000', tool: 'dialx.get_call_audio' },
-    transcript: [{ role: 'callee', text: 'You have reached mailbox 405 555 0100' }, { role: 'disclosure', text: 'AI assistant' }, { role: 'agent', text: 'Hi Wayne, call Charles back.' }] }));
+    transcript: [{ role: 'callee', text: 'the call has been forwarded to voicemail' }, { role: 'agent', text: 'Hi Wayne, how is your day going?' },
+      { role: 'callee', text: 'You have reached mailbox 405 555 0100' }, { role: 'disclosure', text: 'AI assistant' }, { role: 'agent', text: 'Hi Wayne, call Pat back.' }] }));
   for (let i = 0; i < 300 && !sentTg.some(x => /voicemail I left/.test(x.t)); i++) await tick(10);
-  assert.deepEqual(remembered, ['assistant: Hi Wayne, call Charles back.'], 'the greeting is not Wayne speaking');
+  assert.deepEqual(remembered, ['assistant: Hi Wayne, call Pat back.'], 'the greeting is not Wayne speaking, and an opening over the carrier prompt never reached him (call 79)');
   assert.equal(d.calls('dialx.get_call_audio').length, 1);
   assert.equal(d.calls('dialx.get_call_audio')[0].body.args.call_id, 'c1');
   const copy = sentTg.find(x => /voicemail I left for Wayne/.test(x.t));
@@ -633,9 +675,9 @@ test('no voicemail copy is fetched for a call a person answered', async () => {
 test('plugin: the model writes the voicemail at scheduling, with the name the owner used', async () => {
   const { plugin, calls } = pluginRig({ approved: [{ contact_id: 'k7', name: 'CommanderFog Wayne', number: '+15550199' }] });
   plugin.agent.providerManager.generateResponse = async () => ({ content: JSON.stringify({ contact: 'Wayne', purpose: 'check in', opening: 'Hi Wayne!',
-    voicemail: "Hi Wayne, this is ALICE, Charles's AI assistant. He wanted to check in. Give him a call back when you can." }) });
+    voicemail: "Hi Wayne, this is ALICE, Pat's AI assistant. He wanted to check in. Give him a call back when you can." }) });
   await plugin.execute({ action: 'call', contact: 'Wayne', needsParameterExtraction: true, _context: { originalInput: 'call wayne and check in' } });
-  assert.equal(calls.find(c => c.name === 'dialx.schedule_call').args.voicemail, "Hi Wayne, this is ALICE, Charles's AI assistant. He wanted to check in. Give him a call back when you can.");
+  assert.equal(calls.find(c => c.name === 'dialx.schedule_call').args.voicemail, "Hi Wayne, this is ALICE, Pat's AI assistant. He wanted to check in. Give him a call back when you can.");
   const fb = pluginRig({ approved: [{ contact_id: 'k7', name: 'CommanderFog Wayne', number: '+15550199' }] });
   await fb.plugin.execute({ action: 'call', contact: 'Wayne', purpose: 'check in', opening: 'Hi!' });
   assert.match(fb.calls.find(c => c.name === 'dialx.schedule_call').args.voicemail, /^Hi Wayne, this is ALICE/, 'the fallback uses "Wayne", not the phone-book name');
@@ -902,12 +944,12 @@ test('the opening DialX played joins the call, so the first reply never re-intro
 
 test('the opening and the voicemail always say the agent is an AI, even when the model leaves it out (disclosure may be off)', async () => {
   const { withAiDisclosure } = await import('../../src/services/textx/dialx.js');
-  assert.equal(withAiDisclosure("Hi Lizzy, this is Alice. I'm calling to see how your Saturday is going.", { name: 'Lizzy', self: 'ALICE', owner: 'Charles' }),
-    "Hi Lizzy, this is ALICE, Charles's AI assistant. I'm calling to see how your Saturday is going.");
-  assert.equal(withAiDisclosure("Hi Wayne, this is ALICE, Charles's AI assistant. Happy birthday!", { name: 'Wayne' }), "Hi Wayne, this is ALICE, Charles's AI assistant. Happy birthday!", 'kept when it already says AI');
+  assert.equal(withAiDisclosure("Hi Jo, this is Alice. I'm calling to see how your Saturday is going.", { name: 'Jo', self: 'ALICE', owner: 'Pat' }),
+    "Hi Jo, this is ALICE, Pat's AI assistant. I'm calling to see how your Saturday is going.");
+  assert.equal(withAiDisclosure("Hi Wayne, this is ALICE, Pat's AI assistant. Happy birthday!", { name: 'Wayne' }), "Hi Wayne, this is ALICE, Pat's AI assistant. Happy birthday!", 'kept when it already says AI');
   const { plugin, calls } = pluginRig();
-  process.env.OWNER_NAME = 'Charles';
-  await plugin.execute({ action: 'call', contact: 'Wayne', purpose: 'say hi', opening: 'Hi Wayne! Just checking in.', voicemail: 'Hi Wayne, call Charles back.', _context: { originalInput: 'call wayne' } });
+  process.env.OWNER_NAME = 'Pat';
+  await plugin.execute({ action: 'call', contact: 'Wayne', purpose: 'say hi', opening: 'Hi Wayne! Just checking in.', voicemail: 'Hi Wayne, call Pat back.', _context: { originalInput: 'call wayne' } });
   const args = calls.find(c => c.name === 'dialx.schedule_call').args;
   assert.match(args.opening, /AI assistant/);
   assert.match(args.voicemail, /AI assistant/);
@@ -920,7 +962,7 @@ test('a call can carry a voice effect for the agent (DialX 0.7.14) only when the
   plugin.hub.callTool = async (name, args, opts) => name === 'dialx.voice_status'
     ? { ok: true, result: { voice: 'Off', choices: ['Off', 'Robot', 'Deep voice', 'Theremin'], agent_choices: ['Off', 'Robot', 'Deep voice', 'AutoTune'] } }
     : base(name, args, opts);
-  const ask = { action: 'call', contact: 'Wayne', purpose: 'say hi', opening: "Hi Wayne, this is ALICE, Charles's AI assistant.", voicemail: 'Hi Wayne, call Charles back.', _context: { originalInput: 'call wayne' } };
+  const ask = { action: 'call', contact: 'Wayne', purpose: 'say hi', opening: "Hi Wayne, this is ALICE, Pat's AI assistant.", voicemail: 'Hi Wayne, call Pat back.', _context: { originalInput: 'call wayne' } };
   await plugin.execute({ ...ask });
   assert.equal(calls.filter(c => c.name === 'dialx.schedule_call').at(-1).args.voice, undefined, 'no effect asked = no field');
   await plugin.execute({ ...ask, voice: 'robot voice' });
@@ -934,24 +976,24 @@ test('a call can carry a voice effect for the agent (DialX 0.7.14) only when the
 });
 
 test('answering for the owner (DialX 0.7.15): a message-taking prompt with DialX\'s rules, the greeting in the transcript, and an urgent report with the message', async () => {
-  const r = rig({ answers: ['{"say":"Got it, Wayne. I will tell Charles you called about the BBQ. Goodbye!","hangup":true}', 'Wayne called about Saturday\'s BBQ and asks Charles to call him back tonight.'] });
+  const r = rig({ answers: ['{"say":"Got it, Wayne. I will tell Pat you called about the BBQ. Goodbye!","hangup":true}', 'Wayne called about Saturday\'s BBQ and asks Pat to call him back tonight.'] });
   const urgent = [];
   r.hub.tellOwner = async (device, text, title, opts) => { r.told.push(text); urgent.push(opts?.urgent); };
   const d = await phone(r);
   await d.say(env('event', { kind: 'call.started', call_id: 'c1', contact: { name: 'Wayne' }, direction: 'incoming', answering: true, disclosure: true,
-    opening: "Hi, you've reached Charles. This is ALICE, an AI assistant. They can't come to the phone right now, but I can take a message. What can I help with?",
+    opening: "Hi, you've reached Pat. This is ALICE, an AI assistant. They can't come to the phone right now, but I can take a message. What can I help with?",
     rules: 'Take a message. Promise nothing. Share nothing about where the owner is.' }));
   await d.say(heard("It's Wayne, about the BBQ Saturday, have him call me tonight"));
   await tick(120);
   const p = r.prompts[0];
-  assert.match(p, /answered for Charles|answered for/);
+  assert.match(p, /answered for Pat|answered for/);
   assert.match(p, /take a message/i);
   assert.match(p, /Promise nothing/, "DialX's rules are in the prompt");
-  assert.match(p, /you've reached Charles/, 'the greeting DialX spoke is in the transcript');
+  assert.match(p, /you've reached Pat/, 'the greeting DialX spoke is in the transcript');
   assert.doesNotMatch(p, /never leave a message or ask them to call/, 'not the outgoing-call rules');
   await d.say(env('event', { kind: 'call.ended', call_id: 'c1', reason: 'agent_hung_up', duration_s: 40, transcript: [
-    { role: 'agent', text: "Hi, you've reached Charles..." }, { role: 'callee', text: "It's Wayne, about the BBQ Saturday, have him call me tonight" },
-    { role: 'agent', text: 'Got it, Wayne. I will tell Charles you called about the BBQ. Goodbye!' }] }));
+    { role: 'agent', text: "Hi, you've reached Pat..." }, { role: 'callee', text: "It's Wayne, about the BBQ Saturday, have him call me tonight" },
+    { role: 'agent', text: 'Got it, Wayne. I will tell Pat you called about the BBQ. Goodbye!' }] }));
   await tick(120);
   const rep = r.told.find(t => /called and I answered for you/.test(t));
   assert.ok(rep, r.told.join('\n'));
@@ -970,7 +1012,7 @@ test('agent theremin (DialX 0.7.16): "theremin" on a call means ThereminMix with
   plugin.hub.callTool = async (name, args, opts) => name === 'dialx.voice_status'
     ? { ok: true, result: { voice: 'Off', call_up: true, choices: ['Off', 'Robot', 'Theremin', 'ThereminVoice', 'ThereminMix'], agent_choices: ['Off', 'Robot', 'Theremin', 'ThereminVoice', 'ThereminMix'] } }
     : base(name, args, opts);
-  await plugin.execute({ action: 'call', contact: 'Wayne', purpose: 'play a riff', opening: "Hi Wayne, this is ALICE, Charles's AI assistant.", voicemail: 'Hi Wayne.', voice: 'theremin', _context: { originalInput: 'call wayne and play him a theremin riff' } });
+  await plugin.execute({ action: 'call', contact: 'Wayne', purpose: 'play a riff', opening: "Hi Wayne, this is ALICE, Pat's AI assistant.", voicemail: 'Hi Wayne.', voice: 'theremin', _context: { originalInput: 'call wayne and play him a theremin riff' } });
   const args = calls.filter(c => c.name === 'dialx.schedule_call').at(-1).args;
   assert.equal(args.voice, undefined, 'the theremin sound is rendered by the agent, not DialX');
   assert.equal(args.pad, undefined);
@@ -985,7 +1027,7 @@ test('a call-shaped request that matched the theremin, voice-effect or voicemail
   plugin.hub.callTool = async (name, args, opts) => name === 'dialx.voice_status'
     ? { ok: true, result: { voice: 'Off', call_up: false, choices: ['Off', 'Robot', 'ThereminMix'], agent_choices: ['Off', 'Robot', 'Theremin', 'ThereminVoice', 'ThereminMix'] } }
     : base(name, args, opts);
-  const common = { contact: 'Wayne', purpose: 'a riff', opening: "Hi Wayne, this is ALICE, Charles's AI assistant.", voicemail: 'Hi Wayne.' };
+  const common = { contact: 'Wayne', purpose: 'a riff', opening: "Hi Wayne, this is ALICE, Pat's AI assistant.", voicemail: 'Hi Wayne.' };
   await plugin.execute({ action: 'theremin', ...common, _context: { originalInput: 'call Wayne and play him a theremin riff' } });
   let sc = calls.filter(c => c.name === 'dialx.schedule_call').at(-1);
   assert.ok(sc, 'placed as a call');
@@ -1062,12 +1104,12 @@ test('the call prompt carries the elapsed time, and near the limit says to wind 
   assert.match(r.prompts[0], /The call has run \d+ s of its 300 s limit/);
 });
 
-test('"Call Lizzy in the ThereminVoice and …" stays one phone call: no chain split, and a preview match still places the call', async () => {
+test('"Call Jo in the ThereminVoice and …" stays one phone call: no chain split, and a preview match still places the call', async () => {
   const { isOnePhoneCall } = await import('../../src/core/pluginChainProcessor.js');
-  assert.equal(isOnePhoneCall('Call Lizzy in the ThereminVoice and give her a general wellness check see how shes doing.'), true);
+  assert.equal(isOnePhoneCall('Call Jo in the ThereminVoice and give her a general wellness check see how shes doing.'), true);
   assert.equal(isOnePhoneCall('call Wayne, then text Sam that I called'), false);
   const { plugin, calls } = pluginRig();
-  await plugin.execute({ action: 'voicePreview', contact: 'Mom', purpose: 'wellness check', opening: "Hi Mom, this is ALICE, Charles's AI assistant.", voicemail: 'Hi Mom.',
+  await plugin.execute({ action: 'voicePreview', contact: 'Mom', purpose: 'wellness check', opening: "Hi Mom, this is ALICE, Pat's AI assistant.", voicemail: 'Hi Mom.',
     _context: { originalInput: 'Call Mom in the ThereminVoice and give her a general wellness check' } });
   assert.ok(calls.some(c => c.name === 'dialx.schedule_call'), 'placed as a call');
   assert.ok(!calls.some(c => c.name === 'dialx.voice_preview'));
@@ -1126,7 +1168,7 @@ test('"Alice text Wayne and ask him to call…" is a text: the call action hands
   const { plugin, calls } = pluginRig();
   const sent = [];
   plugin.agent.apiManager = { apis: new Map([['textx', { instance: { execute: async (p) => { sent.push(p); return { success: true, result: 'texted' }; } } }]]) };
-  const res = await plugin.execute({ action: 'call', contact: 'Wayne', purpose: 'test', opening: "Hi Wayne, this is ALICE, Charles's AI assistant.", voicemail: 'Hi.',
+  const res = await plugin.execute({ action: 'call', contact: 'Wayne', purpose: 'test', opening: "Hi Wayne, this is ALICE, Pat's AI assistant.", voicemail: 'Hi.',
     _context: { originalInput: "Alice text Wayne and ask him to call so that it tests out Orbit's 3 ring auto answer." } });
   assert.equal(res.result, 'texted');
   assert.equal(sent[0].action, 'send');

@@ -2,6 +2,110 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.700] - 2026-10-28
+
+### Added
+- **Bots & Borgs: the agent picks icons and wallpapers too.** "Buy me a robot icon", "send Jo a phone wallpaper": with no item named, it looks at the matching icons or wallpapers and picks the best for that person, as it does for its own avatar. A store request that says buy is one step that goes to buy (it was split into browse → product → buy, and the browse searched the catalog for the literal words "robot icon"); a search that finds nothing by name lists the whole catalog.
+
+## [2.25.699] - 2026-10-28
+
+### Added
+- **Bots & Borgs store (botsandborgs.com).** A new `botsandborgs` plugin runs the store's whole agent flow: browse the catalog, look at a product's variants, and buy one: a quote, a crypto order paid in USDT from the agent's own BNB Chain wallet, the store's on-chain confirmation, then the item is used. "Buy yourself an avatar" with nothing named makes the agent look at every avatar with its vision model and pick the one it likes best, saying why. The agent registers its own store account (the store's challenge) so its orders are listed.
+- **Spending rules are settings** (`settings` command): a weekly budget (default $2; set per instance), an optional per-item cap, an optional approval step, a wallet floor below which nothing is spent (default $25 of the pay asset), and the pay asset. A purchase must name its use (the agent's avatar, or sent to someone); nothing is bought to keep. An agent with a VRM (3D) model never changes its avatar (`allowAvatarChange`, automatic by default).
+- Requests naming the store go to this plugin, not the scraper.
+
+## [2.25.698] - 2026-10-28
+
+### Fixed
+- **"I'm back" stops answering the owner's calls**, as "stop answering my calls" does.
+
+## [2.25.697] - 2026-10-28
+
+### Added
+- **"I'm away, answer my calls."** With DialX 0.7.102 ALICE answers every call the owner doesn't pick up and takes a message, right away or after 1-5 rings; "stop answering my calls" turns it off. Calls DialX's screening silences, blocks or sends to voicemail are left alone.
+
+### Fixed
+- **Background noise is no longer transcribed as other languages.** Call and app voice transcription is told the language (English; `DIALX_TRANSCRIBE_LANGUAGE` to change it): noise came out as "Das stimmt" or "好".
+- **The app's voice mode quotes no banned phrases.** Its rule against narration quoted the phrases the call voice then copied on call 86; it now quotes none.
+
+## [2.25.696] - 2026-10-28
+
+### Changed
+- **ALICE and Orbit share one notes basket and one card format.** Call notes go to the shared "Notes" basket in WebNotes as text cards titled from the note's first six words, with `from::`, `call::` and `at::` lines under the note (the format agreed with Orbit). "What are my notes?" reads every card there, shows who took each, strips those lines from the note, and lists them newest first.
+
+## [2.25.695] - 2026-10-28
+
+### Fixed
+- **Notes from a call go to a "Notes" basket and a text to the owner.** The owner's choice: each note taken on a call is filed in a shared "Notes" basket in Trellis (made once if missing; it was landing in AgentTests) and a copy is texted to the owner in TextX, as Orbit's are. Each note's time is logged. "What are my notes?" also reads the shared Notes basket, so notes another agent filed there come back too.
+- **A note taken on a call keeps only the note.** "Okay, the rabbit squishes at midnight, Alice." was saved with the lead-in; a leading okay/so/alright and a trailing ", Alice" are now dropped.
+
+## [2.25.694] - 2026-10-28
+
+### Changed
+- **Notes on a call are saved and read back in about a second.** On a call with the owner, the call voice has its own `take_note` and `read_notes` tools, wired straight to the notes plugin; through the general request path a note took 10 to 20 seconds (Orbit reads back in 0.6 s). Other requests still go to the agent. Only on the owner's own calls. And an answer that arrives after the call's connection dropped and came back goes to the new session as a line it hears, not to the dropped one: on call 87 the "note saved" answer was lost that way and the voice asked again.
+- **Group calls: no narration, a heads-up is not a task, and "Orbit, hang up" is for Orbit.** On call 87 the voice narrated itself ("let me put that into plain words"), went to "set up note-taking" when the owner only said they were about to test notes, and hung up when the owner told Orbit to. Live model: "Orbit, hang up" ended ALICE's part 3 of 3 times before, 0 of 3 now.
+
+## [2.25.693] - 2026-10-28
+
+### Added
+- **"Alice, you and Orbit call Wayne" places one call with both agents on it.** With DialX 0.7.94, a call that names another agent ("you and Orbit", "with Orbit") goes out as `dialx.call_together`: the agents DialX lists join when the callee answers, ALICE opens, and the same approval rules as any call apply. Joint calls are placed now only; a call that names no other agent is unchanged.
+
+## [2.25.692] - 2026-10-28
+
+### Fixed
+- **Call voice: no talk about its own replies, and an answered question stays answered.** On call 86 the voice said "let me think how to say it nicely" and "I'll keep it simple and wrap up warmly": the phrases the rule quoted as what not to say. The rule now quotes nothing, and a short yes, yeah or no counts as the answer to the question just asked, which is not asked again (the same call asked about the cats three times).
+
+## [2.25.691] - 2026-10-28
+
+### Fixed
+- **A one-word reaction in a texted conversation gets a natural answer.** A contact's "Oh" got "I'll let <the owner> know you said that."; a reaction ("oh", "ok", "lol", an emoji) is now answered from the conversation, never with "I'll pass that on".
+
+## [2.25.690] - 2026-10-28
+
+### Fixed
+- **The hourly self-update no longer restarts the agent for documentation.** A CHANGELOG-only difference restarted ALICE during a live test; changes only to `.md` files or `docs/` are now copied without a restart.
+
+## [2.25.689] - 2026-10-28
+
+### Fixed
+- **"What are my notes?" reads them back.** On call 83 the question went to the background as if it were a note to take, then matched "create a note": it made an empty card and the owner heard there were no notes. A question about notes is now a read, never a write, on the call and in the router.
+
+### Added
+- **The agent keeps a list of the notes it takes.** Every note card it makes is recorded, and the new `myNotes` action reads them back fresh, newest first ("what are my notes", "read me my notes", "what did I ask you to write down"), wherever they were filed. A note was found before only if its text happened to match a search. The owner's own name in the request ("<the owner>'s notes") is not used as a filter. "What are my notes?" (and "my texts / calls / tasks…") no longer takes the shortcut meant for personal questions such as "what is my name", which answered from memory alone: "Let me pull up your Trellis notes" with nothing pulled. That shortcut also sent the model's whole response object as the reply ("what is my name?"); it now sends the text.
+
+## [2.25.688] - 2026-10-28
+
+### Fixed
+- **A realtime session that never started is retried, and opens normally.** DialX 0.7.93 gives a first session that fails to start the same 20-second retry as a dropped one (group call 81 ended instead). ALICE now retries any failure that comes with a retry window, and tells the fresh session to skip its opening only when the call had already started talking.
+
+## [2.25.687] - 2026-10-28
+
+### Fixed
+- **A voicemail call records only the message left.** An opening spoken over the carrier's "forwarded to voicemail" was kept in the person's history as said to them (call 79); now only what was said after their greeting is.
+
+## [2.25.686] - 2026-10-28
+
+### Added
+- **A realtime call that failed to start gets one late session.** DialX 0.7.90 lets a fresh realtime session take a call over from turns after a failure. ALICE now offers one, carrying the conversation so far and told not to open again, except when the phone cannot hear the callee.
+
+## [2.25.685] - 2026-10-28
+
+### Added
+- **A note saved during a call is announced on the call.** DialX 0.7.89 lets the agent add a line to a live realtime call. When a note asked for on the call is saved (or fails) while the call is still on, the call voice says so; after the call, the owner gets a message as before.
+
+## [2.25.684] - 2026-10-28
+
+### Fixed
+- **An auto-reply that mentions the owner still goes to the person.** A reply to a contact that began "<the owner> is keeping that…" was taken as written to the owner: the contact got nothing (he was set to voice replies) and the owner got a contact's reply as a note. Only a reply that talks to the owner ("<the owner>, …", "Hey <the owner>:") is held back now.
+
+## [2.25.683] - 2026-10-28
+
+### Fixed
+- **Notes on a call are taken in the background.** "Take a note" held the call while the agent worked (20 s and more on call 75). Now the call voice says it is writing it down and carries on at once; the note is saved in the background and the owner gets a message when it is.
+- **A note without a title is saved.** "Take a note: the mouse will arrive at midnight…" failed on "createNote needs a title" and was saved only when asked again; a note with no title now takes its first words as the title.
+- **Taking a note routes faster.** A confident-enough match for a note went through the slower AI classifier (7 s on a call) because notes counted as actions that change something; the owner's own notes and checklist lines no longer do.
+- **System status counts recent errors.** It said "no errors or warnings" with no error data behind it. Status now carries the last hour's ERROR lines from the error log: the count and the three most frequent messages.
+
 ## [2.25.682] - 2026-10-28
 
 ### Fixed
@@ -53,7 +157,7 @@ All notable changes to LANAgent will be documented in this file.
 
 ### Fixed
 - **"Pick an avatar you like from <site>" looks at the site.** The AI classifier read it as "set your avatar" and the MindSwarm avatar upload matched it too. Both now run only when the request asks to set, change, use or upload an avatar; anything else goes to the reasoning agent, which can browse.
-- **A text that came after the reply read the thread gets its own answer.** Adam's "I can't see the gif" arrived while the reply to his tapback was being written, and was treated as already answered. A message now counts as covered only if the last reply actually read it.
+- **A text that came after the reply read the thread gets its own answer.** a contact's "I can't see the gif" arrived while the reply to his tapback was being written, and was treated as already answered. A message now counts as covered only if the last reply actually read it.
 
 ## [2.25.673] - 2026-10-28
 
@@ -73,8 +177,8 @@ All notable changes to LANAgent will be documented in this file.
 ## [2.25.671] - 2026-10-27
 
 ### Fixed
-- **Only quoted words are sent as written; anything else ALICE puts in its own words.** "Text Adam V a gif of a funny cat" was sent as the text "a gif of a funny cat", with no GIF. When the words of a text are copied from a request without quotes, ALICE now writes the message to the recipient instead, keeping every number, code, time, name and link exactly. Words in quotes still go exactly as given.
-- **"Send Lizzy a gif of a sad robot" sends the GIF.** It answered "What should the text say?": a GIF with no message was refused. A GIF, picture or video now goes on its own when no message is described, and a GIF request that matched the GIF search action keeps its search words when it turns into a send.
+- **Only quoted words are sent as written; anything else ALICE puts in its own words.** "Text a contact a gif of a funny cat" was sent as the text "a gif of a funny cat", with no GIF. When the words of a text are copied from a request without quotes, ALICE now writes the message to the recipient instead, keeping every number, code, time, name and link exactly. Words in quotes still go exactly as given.
+- **"Send Jo a gif of a sad robot" sends the GIF.** It answered "What should the text say?": a GIF with no message was refused. A GIF, picture or video now goes on its own when no message is described, and a GIF request that matched the GIF search action keeps its search words when it turns into a send.
 
 ## [2.25.670] - 2026-10-27
 
@@ -85,8 +189,8 @@ All notable changes to LANAgent will be documented in this file.
 ## [2.25.669] - 2026-10-27
 
 ### Fixed
-- **Auto-replies know the calls already planned with that person.** Lizzy texted "call me in 10" and the auto-reply answered without knowing ALICE was already calling her at 4:30. A reply now sees the owner's scheduled calls to the sender's number (time and purpose), so it can say so.
-- **A text the agent says about itself says who is writing.** "Text Lizzy and tell her you just tried to call her" sent "I just tried to call you." from the owner's number, and it read as the owner. When the request has the agent speak about itself ("tell her you…", "introduce yourself") and the text does not name the agent, it now opens "This is ALICE, <owner>'s AI assistant." Requests in the owner's own voice ("tell Sam I love you", "tell Wayne thank you") and quoted text are sent as written.
+- **Auto-replies know the calls already planned with that person.** Jo texted "call me in 10" and the auto-reply answered without knowing ALICE was already calling her at 4:30. A reply now sees the owner's scheduled calls to the sender's number (time and purpose), so it can say so.
+- **A text the agent says about itself says who is writing.** "Text Jo and tell her you just tried to call her" sent "I just tried to call you." from the owner's number, and it read as the owner. When the request has the agent speak about itself ("tell her you…", "introduce yourself") and the text does not name the agent, it now opens "This is ALICE, <owner>'s AI assistant." Requests in the owner's own voice ("tell Sam I love you", "tell Wayne thank you") and quoted text are sent as written.
 
 ## [2.25.668] - 2026-10-27
 
@@ -920,12 +1024,12 @@ All notable changes to LANAgent will be documented in this file.
 ## [2.25.535] - 2026-10-19
 
 ### Changed
-- **TextX auto-reply answers every message.** Per the owner's rule for auto-reply conversations, the agent no longer stays silent on a message meant for the owner. It sends a short holding reply ("I'll let Charles know you're asking about Friday — he'll get back to you"), and the owner gets a one-line note saying what they need to do. The note never goes to the contact.
+- **TextX auto-reply answers every message.** Per the owner's rule for auto-reply conversations, the agent no longer stays silent on a message meant for the owner. It sends a short holding reply ("I'll let the owner know you're asking about Friday — he'll get back to you"), and the owner gets a one-line note saying what they need to do. The note never goes to the contact.
 
 ## [2.25.534] - 2026-10-19
 
 ### Fixed
-- **TextX auto-reply when someone talks to the assistant itself.** In a conversation with Auto-reply on, a contact wrote "Thank you Alice… could you resend that last message worded flirtatiously?". The agent answered "Sorry, I can't do that. Charles is unavailable right now — this is an auto-reply", then couldn't explain itself. Two causes. The prompt only knew how to reply on the owner's behalf. And its context held only incoming texts, which a restart had wiped, so it never saw its own message. Auto-reply now reads the real thread, its own sent messages included. It answers messages meant for it as itself (rewording its own message, a joke, trivia), and gives only short holding replies for the owner. The limits are unchanged: no commitments, no personal details, no actions because a message asks.
+- **TextX auto-reply when someone talks to the assistant itself.** In a conversation with Auto-reply on, a contact wrote "Thank you Alice… could you resend that last message worded flirtatiously?". The agent answered "Sorry, I can't do that. the owner is unavailable right now — this is an auto-reply", then couldn't explain itself. Two causes. The prompt only knew how to reply on the owner's behalf. And its context held only incoming texts, which a restart had wiped, so it never saw its own message. Auto-reply now reads the real thread, its own sent messages included. It answers messages meant for it as itself (rewording its own message, a joke, trivia), and gives only short holding replies for the owner. The limits are unchanged: no commitments, no personal details, no actions because a message asks.
 
 ## [2.25.533] - 2026-10-19
 

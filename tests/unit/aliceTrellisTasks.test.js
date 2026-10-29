@@ -95,7 +95,7 @@ test('layoutFlow lays out the channel basket as a flowchart', async () => {
 
 function listener(result) {
   const said = []; const states = [];
-  const channel = { group: true, messages: [{ seq: 923, from: 'portablediag', kind: 'person', via: 'session', from_key_owner: true, to: ['Outrider', 'Alice', 'trellis'], at: '2026-09-30T00:00:00Z', text: '@agents each of you post a card with a picture of a purple frog' }] };
+  const channel = { group: true, messages: [{ seq: 923, from: 'owner-handle', kind: 'person', via: 'session', from_key_owner: true, to: ['Outrider', 'Alice', 'trellis'], at: '2026-09-30T00:00:00Z', text: '@agents each of you post a card with a picture of a purple frog' }] };
   let input = null;
   const plugin = {
     resolvedMode: 'web',
@@ -171,16 +171,68 @@ test('the reasoning path passes the channel to trellis-notes only', async () => 
   assert.equal(ws[1]._trellis, undefined, 'never sent to other plugins');
 });
 
-test('a note naming a basket that does not exist goes to the default and says so (call 70: basket "Charles")', async () => {
+test('a note naming a basket that does not exist goes to the default and says so (call 70: basket "Pat")', async () => {
   const calls = serve({ ...WEB, 'POST /api/nodes/5/cards': { __status: 201, id: 302 } });
   const p = plugin();
   p.config.defaultBasket = 5;
-  const r = await p.execute({ action: 'createNote', basket: 'Charles', title: 'Hunt items to find', kind: 'checklist',
+  const r = await p.execute({ action: 'createNote', basket: 'Pat', title: 'Hunt items to find', kind: 'checklist',
     body: 'a running checklist with: 1) a small trinket-like orb, 2) a little goose-like origami thing.' });
   assert.equal(r.success, true, r.error);
   const post = calls.find(c => c.key === 'POST /api/nodes/5/cards');
   assert.ok(post, 'created in the default basket');
   const sent = typeof post.body === 'string' ? JSON.parse(post.body) : post.body;
   assert.deepEqual(sent.items.map(i => i.text), ['a small trinket-like orb', 'a little goose-like origami thing']);
-  assert.match(JSON.stringify(r), /No basket is called \\"Charles\\"/);
+  assert.match(JSON.stringify(r), /No basket is called \\"Pat\\"/);
+});
+
+test('a note with no title is titled from its first words (call 75: "createNote needs a title")', async () => {
+  const calls = serve({ ...WEB, 'POST /api/nodes/5/cards': { __status: 201, id: 303 } });
+  const p = plugin();
+  p.config.defaultBasket = 5;
+  const r = await p.execute({ action: 'createNote', body: 'The mouse will arrive at midnight with the frozen cheese.' });
+  assert.equal(r.success, true, r.error);
+  const post = calls.find(c => c.key === 'POST /api/nodes/5/cards');
+  const sent = typeof post.body === 'string' ? JSON.parse(post.body) : post.body;
+  assert.equal(sent.title, 'The mouse will arrive at midnight…');
+  assert.equal(sent.body, 'The mouse will arrive at midnight with the frozen cheese.');
+});
+
+test('"what are the notes?" reads back the notes the agent took, newest first, never makes one (call 83)', async () => {
+  const { asksForNotes } = await import('../../src/api/plugins/trellis-notes.js');
+  assert.equal(asksForNotes('Pat asked: "What are the notes?" Please retrieve Pat\'s notes from Trellis'), true);
+  assert.equal(asksForNotes('Do you have any notes for me?'), true);
+  assert.equal(asksForNotes('Take a note: the drywall guy comes Thursday'), false);
+  const { PluginSettings } = await import('../../src/models/PluginSettings.js');
+  let stored = null;
+  const realGet = PluginSettings.getCached, realSet = PluginSettings.setCached;
+  PluginSettings.getCached = async () => stored;
+  PluginSettings.setCached = async (_p, _k, v) => { stored = v; };
+  try {
+    let next = 700;
+    const bodies = {};
+    const calls = serve({ ...WEB,
+      'POST /api/nodes/5/cards': (cfg) => { const b = typeof cfg.data === 'string' ? JSON.parse(cfg.data) : cfg.data; const id = next++; bodies[id] = b; return { __status: 201, id }; },
+      'GET /api/cards/700': () => ({ card: { id: 700, title: bodies[700].title, body: bodies[700].body } }),
+      'GET /api/cards/701': () => ({ card: { id: 701, title: bodies[701].title, body: bodies[701].body } }) });
+    const p = plugin();
+    p.config.defaultBasket = 5;
+    await p.execute({ action: 'createNote', title: 'Mouse', body: 'The mouse arrives at midnight.' });
+    await p.execute({ action: 'createNote', title: 'Drywall', body: 'Drywall guy Thursday at 9.' });
+    const before = calls.filter(c => c.key === 'POST /api/nodes/5/cards').length;
+    const r = await p.execute({ action: 'createNote', _context: { originalInput: 'What are the notes?' } });
+    assert.equal(calls.filter(c => c.key === 'POST /api/nodes/5/cards').length, before, 'no card made');
+    assert.match(r.result, /1\. Drywall .*Drywall guy Thursday at 9\.\n2\. Mouse .*The mouse arrives at midnight\./s);
+    const prev = process.env.OWNER_NAME; process.env.OWNER_NAME = 'Pat';
+    try {
+      const named = await p.execute({ action: 'myNotes', query: "Pat's notes" });
+      assert.match(named.result, /Drywall[\s\S]*Mouse/, 'the owner\'s name filters nothing');
+    } finally { if (prev === undefined) delete process.env.OWNER_NAME; else process.env.OWNER_NAME = prev; }
+  } finally { PluginSettings.getCached = realGet; PluginSettings.setCached = realSet; }
+});
+
+test('shared call-note cards: the from:: / call:: / at:: lines are read, not shown as the note (Orbit format, 4293 #488)', async () => {
+  const { parseNoteCard } = await import('../../src/api/plugins/trellis-notes.js');
+  const p = parseNoteCard('The duck flies at noon.\n\nfrom:: Orbit\ncall:: 88\nat:: 2026-10-28T21:05:00Z');
+  assert.deepEqual(p, { text: 'The duck flies at noon.', from: 'Orbit', at: '2026-10-28T21:05:00Z' });
+  assert.deepEqual(parseNoteCard('Plain note'), { text: 'Plain note', from: null, at: null });
 });

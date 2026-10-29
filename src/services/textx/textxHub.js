@@ -86,6 +86,17 @@ export async function encodeM4a(buffer, { kbps = 32 } = {}) {
   }
 }
 
+/**
+ * A reply that talks TO the owner ("Pat, Sam says…", "Hey Pat:"), not one that talks about them to the
+ * recipient. "Pat is keeping that one under wraps" was taken as written to the owner: Adam's voice reply was held
+ * back and the owner got Adam's reply as a note (2026-10-28).
+ */
+export function addressesOwner(text, ownerFirst) {
+  if (!ownerFirst || ownerFirst.length < 2) return false;
+  const name = ownerFirst.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`^(?:(?:hey|hi|ok|okay|so)[,!]?\\s+)?@?${name}\\s*(?:[,:!]|[—–-]\\s)`, 'i').test(String(text || '').trim());
+}
+
 /** A video as an animated GIF for MMS: 12 s at most, 10 fps, 320 px wide, one palette. */
 export async function encodeGif(buffer) {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'textx-gif-'));
@@ -747,7 +758,7 @@ export class TextXHub {
 
   /** Agent notifications, to phones that opted in on the agent side. */
   /**
-   * Something a text asked to pass on to the owner ("tell Charles…", "ask him…", an alert), or a
+   * Something a text asked to pass on to the owner ("tell Pat…", "ask him…", an alert), or a
    * note that a text needs them: it goes to their conversation with the agent in TextX and to
    * Telegram, so they see it wherever they are. Either channel failing leaves the other.
    */
@@ -1113,7 +1124,7 @@ export class TextXHub {
       const res = await this.agent.providerManager.generateResponse(
         // A mention is the owner talking to the assistant in front of the others. The first prompt
         // let the model take it for the contact's words, and it answered the contact, calling the
-        // owner "Charles" in the third person (2026-10-19, TextX 2119 #124).
+        // owner "Pat" in the third person (2026-10-19, TextX 2119 #124).
         `You are ${name}, ${owner}'s AI assistant. ${owner} just tagged you in their SMS conversation "${title}", ` +
         `in front of the others in it. These are ${owner}'s own words, said to you:\n"${String(m.text || '').slice(0, 1000)}"\n\n` +
         (threadNotes(body) ? `${owner}'s notes for this conversation (their instructions to you): ${threadNotes(body)}\n\n` : '') +
@@ -1186,6 +1197,38 @@ export class TextXHub {
   }
 
   /**
+   * The pictures in the newest message someone else sent in this thread, looked at (TextX get_attachment).
+   * The thread read gives only "[image/jpeg photo.jpg]": a contact's photo got "Haha, nice picture." with
+   * nothing seen (2026-10-28). Like voice notes: only the latest message, each picture fetched once.
+   */
+  async seePictures(device, threadId, messages) {
+    if (!this.agent?.providerManager) return '';
+    const last = messages[messages.length - 1];
+    if (!last || last.direction === 'out' || last.from === 'me') return '';
+    const indexes = (last.attachments || []).map((a, i) => (isPicture(a.mime, a.name) ? i : -1)).filter(i => i >= 0).slice(0, 4);
+    if (!indexes.length) return '';
+    this.seenPictures = this.seenPictures || new Map();
+    const key = `${device.id}:${threadId}:${last.message_id}`;
+    if (this.seenPictures.has(key)) return this.seenPictures.get(key);
+    const pictures = [];
+    for (const index of indexes) {
+      try {
+        const r = await this.callTool('get_attachment', { thread_id: threadId, message_id: last.message_id, index }, { deviceId: device.id, onlyDevice: device.id });
+        if (r.ok && r.result?.data_b64) pictures.push({ name: last.attachments[index].name || `picture-${index + 1}`, mime: r.result.mime || last.attachments[index].mime || 'image/jpeg', buffer: Buffer.from(r.result.data_b64, 'base64') });
+      } catch (e) {
+        this.logger.warn?.(`TextX: picture in ${threadId} not fetched: ${e.message}`);
+      }
+    }
+    if (!pictures.length) return '';
+    const seen = (await describeImages(this.agent.providerManager, pictures, last.text || '')).filter(d => d.text)
+      .map(d => `${last.from?.name || 'They'} sent a picture (${d.name}): ${d.text}`).join('\n\n');
+    if (seen) this.logger.info?.(`TextX: looked at ${pictures.length} picture(s) in ${threadId}`);
+    this.seenPictures.set(key, seen);
+    if (this.seenPictures.size > 200) this.seenPictures.delete(this.seenPictures.keys().next().value);
+    return seen;
+  }
+
+  /**
    * One auto-reply at a time per conversation. Wayne's "Big improvement" and "Yeah big time" 7 s apart got two replies
    * composed at once (2026-10-26); the second was written to the owner ("<owner>, that sounds like…") and texted to
    * Wayne. A message that arrived before the last reply was written is covered by it (that reply read the thread).
@@ -1233,14 +1276,16 @@ export class TextXHub {
     const history = read.ok && (read.result || []).length ? (read.result || []).map(x => formatMessage(x, { self: name, owner })) : recent;
     // A voice note is heard, not just seen as "[audio/mp4]" (TextX 0.4.46 hands AMR/3GP over as M4A).
     const heard = read.ok ? await this.hearVoiceNotes(device, threadId, read.result || []) : '';
+    const seen = read.ok ? await this.seePictures(device, threadId, read.result || []) : '';
     const context = (history.length ? `The conversation so far (oldest first; "(owner)" is ${owner}, "(you)" is you, "(assistant)" is ` +
       `another AI assistant, and "me" is ${owner}'s phone, written by ${owner} or an assistant):\n${untrusted('SMS', history.join('\n'))}\n` : '') +
-      (heard ? `${untrusted('VOICE NOTE', heard)}\n` : '');
+      (heard ? `${untrusted('VOICE NOTE', heard)}\n` : '') +
+      (seen ? `${untrusted('PICTURE', seen)}\n${VISION_CAVEAT}\n` : '');
     let text = '';
     try {
       // People in the conversation may talk to the assistant itself ("thanks Alice, now say it
       // flirtatiously"), not only to the owner. The first version only knew "reply on their
-      // behalf", refused that with "Charles is unavailable — this is an auto-reply" (2026-10-19).
+      // behalf", refused that with "Pat is unavailable — this is an auto-reply" (2026-10-19).
       // A question about public facts gets a web lookup: with no tools the model told Wayne it was
       // "strictly an offline assistant" and passed his research question on (2026-10-20).
       const saved = await this.ownerNotesFor(title, m);
@@ -1266,6 +1311,9 @@ export class TextXHub {
         'a bit of ASCII art, and looking up public information (news, people, places, history, facts).\n' +
         `- If it is for ${owner}: a short, friendly holding reply (for example that you'll pass it on and they'll get ` +
         'back to them). Never pretend to be them.\n' +
+        // Adam's "Oh" got "I'll let Pat know you said that." (2026-10-28): a reaction is conversation, not a message.
+        `- A short reaction ("oh", "ok", "lol", "haha", "nice", "wow", an emoji) answers what came before: reply to it ` +
+        `naturally from the conversation above, in a few words, never "I'll pass that on" or "I'll let ${owner} know".\n` +
         (found === null
           ? 'If a good answer needs public information you are not sure of or that may be recent, write only one line ' +
             '"SEARCH: <a web search query>" and nothing else; the results come back to you. You can search the web: never ' +
@@ -1302,7 +1350,7 @@ export class TextXHub {
     // A reply that talks to the owner is a note, never a text to someone else.
     // Only with a real name: the fallback "the person whose phone this is" made every "The …" reply look addressed.
     const ownerFirst = process.env.OWNER_NAME ? String(process.env.OWNER_NAME).trim().split(/\s+/)[0] : '';
-    if (ownerFirst && ownerFirst.length > 1 && new RegExp(`^(@?${ownerFirst.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})\\b[,:!\\s-]`, 'i').test(text) && !title.toLowerCase().includes(ownerFirst.toLowerCase())) {
+    if (addressesOwner(text, ownerFirst) && !title.toLowerCase().includes(ownerFirst.toLowerCase())) {
       this.logger.warn?.(`TextX: auto-reply in "${title}" was written to ${ownerFirst}; sent to them as a note, not as a text`);
       await this.tellOwner(device, text, title, {});
       return true;
@@ -1405,7 +1453,7 @@ export class TextXHub {
   }
 
   /**
-   * Calls the owner has planned with this number. Lizzy's "call me in 10" was answered without
+   * Calls the owner has planned with this number. Jo's "call me in 10" was answered without
    * knowing ALICE was already calling her at 4:30 (2026-10-26).
    */
   async plansFor(number) {

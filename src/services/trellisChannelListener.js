@@ -26,7 +26,7 @@
  *   server-recorded `kind: person`, `from_key_owner: true`, posted from a signed-in SESSION
  *   (`via: "session"`). Without `via`, nothing on a message tells the operator's browser from
  *   an API key on the same account posting with no X-Agent (verified 2026-09-26: both read
- *   `portablediag` / person / from_key_owner true), so the listener fails safe: conversation
+ *   `owner-handle` / person / from_key_owner true), so the listener fails safe: conversation
  *   only. A message whose kind is missing or inferred is never treated as the operator's.
  *
  * Safety: history is never answered (each channel's cursor starts at its current seq); one
