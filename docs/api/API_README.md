@@ -571,6 +571,12 @@ Live in-memory snapshot of download-token usage (tokens within their TTL window)
 
 ---
 
+## Recent Updates (October 29, 2026)
+
+### v2.25.705–707 — Bug reports for the developer; repeating reminders
+- **`devreports` plugin (new, owner only):** `POST /api/plugin` (JWT) with `{"plugin": "devreports", "action": "report", "text": "You hung up while I was still talking"}` saves a report with the conversation so far, the `[ERROR]` lines from the 5 minutes before, the version and the model, then adds it to the Trellis basket `Dev Inbox` (`DEV_REPORTS_BASKET`). Returns `{success, id, card}`; `card` is null when Trellis is unreachable (retried every 15 minutes). `{"action": "list", "status": "open"|"fixed"|"wontfix"|"all", "limit": 10}` lists them. In plain words: "log a bug: …". On realtime calls the same thing is the `report_bug` tool.
+- **`system` `remind` takes `repeat`:** `daily`, `weekly`, `monthly` or `yearly`, with an optional `startAt` (ISO date, or words such as "tomorrow at 7pm"; 9:00 by default). Also understood from plain words ("remind me monthly starting today to clean the vacuum bags"). Each reminder schedules the next; a monthly one keeps its day of the month, using the last day of shorter months. `minutes` is only a delay when the request names one. Reminder notifications now make a sound.
+
 ## Recent Updates (October 2, 2026)
 
 ### v2.25.501 — Self-improvement sweep: image orientation, plugin additions
