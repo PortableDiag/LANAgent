@@ -59,3 +59,8 @@ paths = [
     '''docs/proposals/multi-instance-framework.md''',
     '''docs/SECURITY-AUDIT-PRE-PUBLIC.md''',
 ]
+# Public 32-byte constants with the same shape as a private key. Listed one by one so the
+# private-key rule still fires for anything else of that shape.
+regexes = [
+    '''0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc''', # EIP-1967 implementation slot (public standard), abiManager.js
+]
