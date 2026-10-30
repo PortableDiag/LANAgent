@@ -1,6 +1,7 @@
 import { ethers } from 'ethers';
 import { logger } from '../../utils/logger.js';
 import walletService from './walletService.js';
+import contractServiceWrapper from './contractServiceWrapper.js';
 import { retryOperation } from '../../utils/retryUtils.js';
 
 // EIP-712 Domain Separator
@@ -86,8 +87,9 @@ class SignatureService {
 
             const { network = 'ethereum', purpose = MESSAGE_TYPES.CUSTOM } = options;
             
-            // Get the appropriate signer
-            const signer = walletService.getSigner(network);
+            // Get the appropriate signer. walletService has no getSigner, so this read
+            // `undefined` and every signature failed with "No signer available".
+            const signer = await contractServiceWrapper.getSigner(network);
             if (!signer) {
                 throw new Error(`No signer available for network: ${network}`);
             }
@@ -124,7 +126,7 @@ class SignatureService {
             return {
                 signature,
                 address,
-                messageHash: ethers.utils.hashMessage(message)
+                messageHash: ethers.hashMessage(message)
             };
         } catch (error) {
             logger.error('Failed to sign message:', error);
@@ -144,8 +146,9 @@ class SignatureService {
 
             const { network = 'ethereum' } = options;
             
-            // Get the appropriate signer
-            const signer = walletService.getSigner(network);
+            // Get the appropriate signer. walletService has no getSigner, so this read
+            // `undefined` and every signature failed with "No signer available".
+            const signer = await contractServiceWrapper.getSigner(network);
             if (!signer) {
                 throw new Error(`No signer available for network: ${network}`);
             }
@@ -154,7 +157,10 @@ class SignatureService {
             const signingDomain = domain || { ...EIP712_DOMAIN, chainId: this.getChainId(network) };
             
             // Sign typed data
-            const signature = await signer._signTypedData(signingDomain, types, value);
+            // ethers 6 derives the domain type itself and throws if EIP712Domain is listed
+            // in `types`, which is how eth_signTypedData_v4 payloads arrive.
+            const { EIP712Domain, ...signingTypes } = types || {};
+            const signature = await signer.signTypedData(signingDomain, signingTypes, value);
             
             // Get signer address
             const address = await signer.getAddress();
@@ -254,7 +260,7 @@ class SignatureService {
             }
 
             // Set address
-            const signer = walletService.getSigner('ethereum');
+            const signer = await contractServiceWrapper.getSigner('ethereum');
             params.address = await signer.getAddress();
 
             // Create SIWE message
@@ -324,9 +330,10 @@ class SignatureService {
     async verifyTypedDataSignature(domain, types, value, signature, expectedAddress = null) {
         try {
             // Recover signer address
+            const { EIP712Domain, ...verifyTypes } = types || {};
             const recoveredAddress = ethers.verifyTypedData(
                 domain,
-                types,
+                verifyTypes,
                 value,
                 signature
             );

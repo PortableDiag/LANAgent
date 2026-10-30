@@ -2,6 +2,11 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.710] - 2026-10-30
+
+### Fixed
+- **Wallet signing works.** Signing a message, typed data (EIP-712) or a Sign-In with Ethereum message failed on every call: the signature service asked the wallet service for a signer it does not provide, and then used ethers 5 calls against ethers 6. It now uses the same wallet signer as contract calls. Typed-data payloads that list `EIP712Domain` in their types (the eth_signTypedData_v4 shape) are accepted for signing and verifying.
+
 ## [2.25.709] - 2026-10-30
 
 ### Added
