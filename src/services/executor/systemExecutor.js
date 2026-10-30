@@ -7,6 +7,19 @@ import fs from 'fs/promises';
 
 const execAsync = promisify(exec);
 
+// Exit codes other than 0 that still mean the command worked: grep's 1 is "no match",
+// diff's/cmp's 1 is "files differ". Keyed by the command's first word (sudo stripped).
+// In a pipeline the shell reports the LAST command's status, so this only applies to a
+// command that is a single grep/diff/cmp.
+const OK_NONZERO_EXITS = { grep: [1], egrep: [1], fgrep: [1], diff: [1], cmp: [1] };
+
+export function isSuccessfulExit(command, code) {
+  if (code === 0) return true;
+  if (typeof code !== 'number' || /[|;&]/.test(command)) return false;
+  const base = String(command).trim().replace(/^sudo\s+/, '').split(/\s+/)[0];
+  return (OK_NONZERO_EXITS[path.basename(base)] || []).includes(code);
+}
+
 export class SystemExecutor {
   constructor(agent) {
     this.agent = agent;
@@ -225,15 +238,13 @@ export class SystemExecutor {
     } catch (error) {
       result.stderr = error.stderr || error.message;
       result.stdout = error.stdout || '';
-      result.exitCode = error.code || 1;
-      result.success = false;
+      result.exitCode = typeof error.code === 'number' ? error.code : 1;
       result.duration = Date.now() - startTime;
-      
-      // Don't treat non-zero exit codes as failures for some commands
-      if (error.code && !error.killed) {
-        result.success = true;
-      }
-      
+      // This used to set success for EVERY non-zero exit (exec puts the exit status in
+      // error.code), so a rejected `git push` or `ls /no/such/dir` came back as a success.
+      // Only the commands whose non-zero exit means "no difference / no match" pass.
+      result.success = !error.killed && isSuccessfulExit(command, result.exitCode);
+
       resolve(result);
     }
   }
@@ -274,7 +285,7 @@ export class SystemExecutor {
       
       result.exitCode = code;
       result.duration = Date.now() - startTime;
-      result.success = code === 0 && !result.timedOut;
+      result.success = !result.timedOut && isSuccessfulExit(command, code);
       
       resolve(result);
     });

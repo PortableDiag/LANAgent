@@ -359,10 +359,13 @@ export async function retryWithCondition(operation, shouldRetry, options = {}) {
   } = options;
 
   const dynamicParams = calculateDynamicRetryParams(context);
-  const finalRetries = dynamicParams.retries || retries;
-  const finalFactor = dynamicParams.factor || factor;
-  const finalMinTimeout = dynamicParams.minTimeout || minTimeout;
-  const finalMaxTimeout = dynamicParams.maxTimeout || maxTimeout;
+  // Same resolution as retryOperation, and for the same reasons: an explicit option wins
+  // over learned tuning, and `retries: 0` must stay zero. This copy still read
+  // `dynamicParams.retries || retries` until GitHub issue #1 (public repo) pointed it out.
+  const finalRetries = options.retries ?? dynamicParams.retries ?? retries;
+  const finalFactor = options.factor ?? dynamicParams.factor ?? factor;
+  const finalMinTimeout = options.minTimeout ?? dynamicParams.minTimeout ?? minTimeout;
+  const finalMaxTimeout = options.maxTimeout ?? dynamicParams.maxTimeout ?? maxTimeout;
 
   let lastError;
   let delay = finalMinTimeout;

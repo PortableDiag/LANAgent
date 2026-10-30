@@ -2,6 +2,12 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.708] - 2026-10-30
+
+### Fixed
+- **Command results follow the exit status.** SystemExecutor reported every failed simple command as a success (a rejected `git push`, `ls` of a missing directory), so callers and the operation log recorded failures as successes. Success now means exit 0, except "no match" / "files differ" (exit 1) from a single grep, diff or cmp. Reported in issue #2.
+- **`retries: 0` means no retry in `retryWithCondition` too.** Once an operation had three recorded attempts, learned tuning overrode the caller's retry count, timeouts and factor, so an operation marked unsafe to repeat could run up to five times. It now resolves options the same way as `retryOperation`. Reported in issue #1.
+
 ## [2.25.707] - 2026-10-29
 
 ### Fixed
