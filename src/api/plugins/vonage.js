@@ -56,6 +56,11 @@ export default class VonagePlugin extends BasePlugin {
         command: 'numberinsight',
         description: 'Look up a phone number: country and formatting (basic, free); carrier and line type with level "standard" (paid)',
         usage: 'numberinsight({ number: "phone_number", level: "basic" | "standard" })'
+      },
+      {
+        command: 'cancelScheduledMessage',
+        description: 'Cancel a scheduled message before it is sent',
+        usage: 'cancelScheduledMessage({ jobId: "job_id" })'
       }
     ];
 
@@ -95,6 +100,9 @@ export default class VonagePlugin extends BasePlugin {
 
         case 'numberinsight':
           return await this.numberInsight(params);
+
+        case 'cancelScheduledMessage':
+          return await this.cancelScheduledMessage(params);
 
         default:
           return { 
@@ -315,6 +323,25 @@ export default class VonagePlugin extends BasePlugin {
       logger.error('Message scheduling error:', error.message);
       return { success: false, error: error.message };
     }
+  }
+
+  /**
+   * Cancel a scheduled message before it is sent.
+   * @param {Object} params - Parameters containing 'jobId' (the ID returned by scheduleMessage).
+   */
+  async cancelScheduledMessage(params) {
+    const { jobId } = params;
+    this.validateParams(params, { jobId: { required: true, type: 'string' } });
+
+    const job = this.scheduledJobs.get(jobId);
+    if (!job) {
+      return { success: false, error: `No scheduled message found with jobId: ${jobId}` };
+    }
+
+    clearTimeout(job.timer);
+    this.scheduledJobs.delete(jobId);
+    logger.info(`Cancelled scheduled message ${jobId} to ${job.to}`);
+    return { success: true, data: `Scheduled message ${jobId} cancelled` };
   }
 
   /**

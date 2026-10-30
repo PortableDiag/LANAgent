@@ -22,15 +22,31 @@ const PER_USER_HOUR = 5;      // 'everyone' mode: summons answered per non-owner
 const GLOBAL_HOUR = 30;
 
 export class GuestLimiter {
-  constructor({ now = () => Date.now() } = {}) { this.now = now; this.users = new Map(); this.all = []; this.refused = new Map(); }
+  constructor({ now = () => Date.now() } = {}) {
+    this.now = now;
+    this.users = new Map();
+    this.all = [];
+    this.refused = new Map();
+
+    // Hourly limits can be overridden with GUEST_PER_USER_HOUR / GUEST_GLOBAL_HOUR;
+    // anything that is not a positive integer keeps the default.
+    const perUser = Number(process.env.GUEST_PER_USER_HOUR);
+    this.perUserHour = Number.isInteger(perUser) && perUser > 0 ? perUser : PER_USER_HOUR;
+
+    const global = Number(process.env.GUEST_GLOBAL_HOUR);
+    this.globalHour = Number.isInteger(global) && global > 0 ? global : GLOBAL_HOUR;
+  }
+
   _recent(l) { const t = this.now() - 3600_000; return l.filter(x => x > t); }
+
   allow(userId) {
     const u = this._recent(this.users.get(userId) || []);
     this.all = this._recent(this.all);
-    if (u.length >= PER_USER_HOUR || this.all.length >= GLOBAL_HOUR) return false;
+    if (u.length >= this.perUserHour || this.all.length >= this.globalHour) return false;
     u.push(this.now()); this.users.set(userId, u); this.all.push(this.now());
     return true;
   }
+
   /** One "I only answer my owner" per stranger per day, so the bot cannot be used to spam. */
   shouldRefuse(userId) {
     const last = this.refused.get(userId) || 0;

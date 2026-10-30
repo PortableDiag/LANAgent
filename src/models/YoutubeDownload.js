@@ -27,16 +27,47 @@ youtubeDownloadSchema.index({ agentId: 1, createdAt: -1 });
  * @param {string} agentId
  * @param {number} page - 1-indexed page
  * @param {number} limit
+ * @param {Object} [filters] - Optional filters to narrow results
+ * @param {string} [filters.status] - Filter by download status ('completed' or 'failed')
+ * @param {string} [filters.format] - Filter by format ('mp3' or 'mp4')
+ * @param {string} [filters.quality] - Filter by quality label (e.g., 'best', '1080p')
+ * @param {string|Date} [filters.startDate] - Include downloads on or after this date
+ * @param {string|Date} [filters.endDate] - Include downloads on or before this date
  * @returns {Promise<{items: Array, total: number, page: number, limit: number, totalPages: number}>}
  */
-youtubeDownloadSchema.statics.getHistory = async function(agentId, page = 1, limit = 20) {
+youtubeDownloadSchema.statics.getHistory = async function(agentId, page = 1, limit = 20, filters = {}) {
   const p = Math.max(1, parseInt(page) || 1);
   const l = Math.min(100, Math.max(1, parseInt(limit) || 20));
   const skip = (p - 1) * l;
 
+  // Filters come straight from the query string: only plain strings are used (an
+  // object such as ?status[$ne]=x would otherwise become a Mongo operator), enum
+  // fields must hold a schema value, and an unparseable date is ignored.
+  const str = (v) => (typeof v === 'string' && v.trim() ? v.trim() : null);
+  const date = (v) => {
+    const s = str(v);
+    if (!s) return null;
+    const d = new Date(s);
+    return Number.isNaN(d.getTime()) ? null : d;
+  };
+  const query = { agentId };
+  const status = str(filters.status);
+  if (status && this.schema.path('status').enumValues.includes(status)) query.status = status;
+  const format = str(filters.format);
+  if (format && this.schema.path('format').enumValues.includes(format)) query.format = format;
+  const quality = str(filters.quality);
+  if (quality) query.quality = quality;
+  const start = date(filters.startDate);
+  const end = date(filters.endDate);
+  if (start || end) {
+    query.createdAt = {};
+    if (start) query.createdAt.$gte = start;
+    if (end) query.createdAt.$lte = end;
+  }
+
   const [items, total] = await Promise.all([
-    this.find({ agentId }).sort({ createdAt: -1 }).skip(skip).limit(l).lean(),
-    this.countDocuments({ agentId })
+    this.find(query).sort({ createdAt: -1 }).skip(skip).limit(l).lean(),
+    this.countDocuments(query)
   ]);
 
   return { items, total, page: p, limit: l, totalPages: Math.ceil(total / l) };

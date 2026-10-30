@@ -10,8 +10,27 @@ import { logger } from '../utils/logger.js';
  * waiting for happened, it reports and the follow-up ends; if not, it answers NOT_YET silently
  * and the next attempt is scheduled, at most FOLLOW_UP_DELAYS_MIN.length times.
  */
+
+const DEFAULT_DELAYS_MIN = [5, 15, 45];
+const MAX_ATTEMPTS = 10;
+
+/**
+ * FOLLOW_UP_DELAYS_MIN="10,30,60" overrides the minutes before each check. Non-positive or
+ * non-numeric entries are dropped; at most MAX_ATTEMPTS are kept (each delay is still capped
+ * to 1..1440 minutes in scheduleFollowUp). Nothing valid → the defaults.
+ */
+export function parseDelays(raw) {
+  if (!raw) return DEFAULT_DELAYS_MIN;
+  const nums = String(raw).split(',').map(s => Number(s.trim())).filter(n => Number.isFinite(n) && n > 0);
+  if (!nums.length) {
+    logger.warn(`[follow-up] Invalid FOLLOW_UP_DELAYS_MIN "${raw}", using default [${DEFAULT_DELAYS_MIN.join(', ')}]`);
+    return DEFAULT_DELAYS_MIN;
+  }
+  return nums.slice(0, MAX_ATTEMPTS);
+}
+
 export const FOLLOW_UP_JOB = 'agent-follow-up';
-export const FOLLOW_UP_DELAYS_MIN = [5, 15, 45];
+export const FOLLOW_UP_DELAYS_MIN = parseDelays(process.env.FOLLOW_UP_DELAYS_MIN);
 export const NOT_YET = 'NOT_YET';
 
 /** Whether a reply promises to come back later. */

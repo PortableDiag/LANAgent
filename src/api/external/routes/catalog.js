@@ -103,13 +103,70 @@ const CATALOG_ALLOWED_FIELDS = [
 ];
 const CATALOG_SORT_FIELDS = ['name', 'price', 'serviceId'];
 
+/**
+ * Build the enriched services list (legacy + plugins) used by catalog endpoints.
+ * @param {import('express').Request} req - Express request object (needed for apiManager access)
+ * @returns {Promise<Array>} enriched services array
+ */
+async function getEnrichedServices(req) {
+  const services = await getCachedData('enabledServices', async () => {
+    return await retryOperation(() => ExternalServiceConfig.find({ enabled: true })
+      .select('serviceId name description price currency rateLimit estimatedTime inputFormat outputFormat')
+      .lean());
+  });
+
+  // Enrich legacy services with credit costs
+  const enrichedServices = services.map(svc => ({
+    ...svc,
+    creditCost: SERVICE_CREDIT_COSTS[svc.serviceId] || null,
+    type: 'legacy'
+  }));
+
+  // Add plugin services into the same services array.
+  // Gateway reads catalogRes.data.services and maps s.serviceId into its DB.
+  // Gateway uses "plugin-<name>" format for service IDs (hyphen, not colon).
+  try {
+    const apiManager = req.app.locals.agent?.apiManager || req.app.locals.agent?.services?.get('apiManager');
+    if (apiManager?.apis) {
+      for (const pluginName of ALLOWED_PLUGINS) {
+        const pluginEntry = apiManager.apis.get(pluginName);
+        if (!pluginEntry || pluginEntry.enabled === false) continue;
+
+        const instance = pluginEntry.instance || pluginEntry;
+        const creditCost = PLUGIN_CREDIT_COSTS[pluginName] || 1;
+        // Actions priced apart from the plugin's base price (what the route actually charges).
+        // Only actions a paid caller can invoke (blocked / offerAsService:false excluded).
+        const actionCosts = {};
+        const actions = [];
+        for (const c of offeredCommands(instance)) {
+          const name = c.command || c.name;
+          const cost = actionCreditCost(pluginName, name);
+          if (cost !== creditCost) actionCosts[name] = cost;
+          actions.push({ name, ...(c.description ? { description: c.description } : {}), creditCost: cost });
+        }
+
+        enrichedServices.push({
+          serviceId: `plugin-${pluginName}`,
+          name: instance.description || pluginName,
+          description: instance.description || '',
+          creditCost,
+          ...(Object.keys(actionCosts).length ? { actionCosts } : {}),
+          ...(actions.length ? { actions } : {}),
+          endpoint: `/api/external/service/${pluginName}/:action`,
+          type: 'plugin'
+        });
+      }
+    }
+  } catch (e) {
+    logger.error('Failed to add plugin services to catalog:', e.message);
+  }
+
+  return enrichedServices;
+}
+
 router.get('/', async (req, res) => {
   try {
-    const services = await getCachedData('enabledServices', async () => {
-      return await retryOperation(() => ExternalServiceConfig.find({ enabled: true })
-        .select('serviceId name description price currency rateLimit estimatedTime inputFormat outputFormat')
-        .lean());
-    });
+    const enrichedServices = await getEnrichedServices(req);
 
     // Get recipient address for payment info
     let paymentAddress = null;
@@ -122,52 +179,6 @@ router.get('/', async (req, res) => {
       }
     } catch (e) {
       logger.error('Failed to get payment address for catalog:', e);
-    }
-
-    // Enrich legacy services with credit costs
-    const enrichedServices = services.map(svc => ({
-      ...svc,
-      creditCost: SERVICE_CREDIT_COSTS[svc.serviceId] || null,
-      type: 'legacy'
-    }));
-
-    // Add plugin services into the same services array.
-    // Gateway reads catalogRes.data.services and maps s.serviceId into its DB.
-    // Gateway uses "plugin-<name>" format for service IDs (hyphen, not colon).
-    try {
-      const apiManager = req.app.locals.agent?.apiManager || req.app.locals.agent?.services?.get('apiManager');
-      if (apiManager?.apis) {
-        for (const pluginName of ALLOWED_PLUGINS) {
-          const pluginEntry = apiManager.apis.get(pluginName);
-          if (!pluginEntry || pluginEntry.enabled === false) continue;
-
-          const instance = pluginEntry.instance || pluginEntry;
-          const creditCost = PLUGIN_CREDIT_COSTS[pluginName] || 1;
-          // Actions priced apart from the plugin's base price (what the route actually charges).
-          // Only actions a paid caller can invoke (blocked / offerAsService:false excluded).
-          const actionCosts = {};
-          const actions = [];
-          for (const c of offeredCommands(instance)) {
-            const name = c.command || c.name;
-            const cost = actionCreditCost(pluginName, name);
-            if (cost !== creditCost) actionCosts[name] = cost;
-            actions.push({ name, ...(c.description ? { description: c.description } : {}), creditCost: cost });
-          }
-
-          enrichedServices.push({
-            serviceId: `plugin-${pluginName}`,
-            name: instance.description || pluginName,
-            description: instance.description || '',
-            creditCost,
-            ...(Object.keys(actionCosts).length ? { actionCosts } : {}),
-            ...(actions.length ? { actions } : {}),
-            endpoint: `/api/external/service/${pluginName}/:action`,
-            type: 'plugin'
-          });
-        }
-      }
-    } catch (e) {
-      logger.error('Failed to add plugin services to catalog:', e.message);
     }
 
     const { q, type, sort, fields, limit, offset } = req.query;
@@ -278,6 +289,32 @@ router.get('/', async (req, res) => {
   } catch (error) {
     logger.error('Failed to load service catalog:', error);
     res.status(500).json({ success: false, error: 'Failed to load catalog' });
+  }
+});
+
+/**
+ * GET /:serviceId
+ * Retrieve full details of a single service by its serviceId,
+ * including action costs, credit cost, and metadata.
+ */
+router.get('/:serviceId', async (req, res) => {
+  try {
+    const { serviceId } = req.params;
+    if (!serviceId) {
+      return res.status(400).json({ success: false, error: 'serviceId is required' });
+    }
+
+    const enrichedServices = await getEnrichedServices(req);
+    const service = enrichedServices.find(s => s.serviceId === serviceId);
+
+    if (!service) {
+      return res.status(404).json({ success: false, error: 'Service not found' });
+    }
+
+    return res.json({ success: true, service });
+  } catch (error) {
+    logger.error('Failed to get service details:', error);
+    return res.status(500).json({ success: false, error: 'Failed to get service details' });
   }
 });
 

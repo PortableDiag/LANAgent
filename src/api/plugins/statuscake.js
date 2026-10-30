@@ -70,6 +70,11 @@ export default class StatusCakePlugin extends BasePlugin {
         command: 'bulkupdatetests',
         description: 'Update multiple tests in bulk',
         usage: 'bulkUpdateTests([{ testId: "12345", name: "New Name 1" }, { testId: "67890", name: "New Name 2" }])'
+      },
+      {
+        command: 'gettesthistory',
+        description: 'Retrieve historical uptime periods for a test',
+        usage: 'getTestHistory({ testId: "12345", start: "2025-01-01", end: "2025-01-31", limit: 50 })'
       }
     ];
     
@@ -114,6 +119,9 @@ export default class StatusCakePlugin extends BasePlugin {
 
         case 'bulkupdatetests':
           return await this.bulkUpdateTests(params);
+
+        case 'gettesthistory':
+          return await this.getTestHistory(params);
 
         default:
           return { 
@@ -324,6 +332,55 @@ export default class StatusCakePlugin extends BasePlugin {
     } catch (error) {
       logger.error(`Error scheduling test ID ${params.testId}:`, error.message);
       return { success: false, error: 'Failed to schedule test' };
+    }
+  }
+
+  /**
+   * Retrieve the up/down periods of a test (StatusCake v1 GET /uptime/{id}/periods).
+   * The API filters with `after`/`before` as unix seconds and pages with `limit` (1-100);
+   * start/end are accepted as any date Date can parse and converted here.
+   * @param {Object} params
+   * @param {string} params.testId - The ID of the test.
+   * @param {string|number} [params.start] - Only periods after this date.
+   * @param {string|number} [params.end] - Only periods before this date.
+   * @param {number} [params.limit] - Periods to return (1-100).
+   */
+  async getTestHistory(params) {
+    this.validateParams(params, { testId: { required: true, type: 'string' } });
+    if (!this.apiKey) return { success: false, error: 'API key not configured' };
+
+    const unix = (v, label) => {
+      const ms = typeof v === 'number' ? (v < 1e12 ? v * 1000 : v) : Date.parse(v);
+      if (!Number.isFinite(ms)) throw new Error(`${label} is not a date: ${v}`);
+      return Math.floor(ms / 1000);
+    };
+
+    const queryParams = {};
+    try {
+      if (params.start !== undefined && params.start !== '') queryParams.after = unix(params.start, 'start');
+      if (params.end !== undefined && params.end !== '') queryParams.before = unix(params.end, 'end');
+      if (params.limit !== undefined) {
+        const limit = Number(params.limit);
+        if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new Error('limit must be a whole number from 1 to 100');
+        queryParams.limit = limit;
+      }
+    } catch (error) {
+      return { success: false, error: error.message };
+    }
+
+    try {
+      logger.info(`Fetching uptime periods for test ID: ${params.testId}`);
+      const response = await axios.get(`${this.baseUrl}/uptime/${encodeURIComponent(params.testId)}/periods`, {
+        params: queryParams,
+        headers: {
+          'Authorization': `Bearer ${this.apiKey}`,
+          'Content-Type': 'application/json'
+        }
+      });
+      return { success: true, data: response.data };
+    } catch (error) {
+      logger.error(`Error fetching test history for ID ${params.testId}:`, error.message);
+      return { success: false, error: 'Failed to fetch test history' };
     }
   }
 

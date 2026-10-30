@@ -284,7 +284,7 @@ class SignatureService {
     async verifySignature(message, signature, expectedAddress = null) {
         try {
             // Recover signer address
-            const recoveredAddress = ethers.utils.verifyMessage(message, signature);
+            const recoveredAddress = ethers.verifyMessage(message, signature);
             
             // Check if matches expected address
             const isValid = expectedAddress 
@@ -307,7 +307,7 @@ class SignatureService {
             return {
                 isValid,
                 recoveredAddress,
-                messageHash: ethers.utils.hashMessage(message)
+                messageHash: ethers.hashMessage(message)
             };
         } catch (error) {
             logger.error('Failed to verify signature:', error);
@@ -324,7 +324,7 @@ class SignatureService {
     async verifyTypedDataSignature(domain, types, value, signature, expectedAddress = null) {
         try {
             // Recover signer address
-            const recoveredAddress = ethers.utils.verifyTypedData(
+            const recoveredAddress = ethers.verifyTypedData(
                 domain,
                 types,
                 value,
@@ -456,8 +456,9 @@ class SignatureService {
      * Generate record ID
      */
     generateRecordId(address, message) {
-        return ethers.utils.keccak256(
-            ethers.utils.defaultAbiCoder.encode(
+        // ethers v6 API (v5's ethers.utils.* no longer exists)
+        return ethers.keccak256(
+            ethers.AbiCoder.defaultAbiCoder().encode(
                 ['address', 'string'],
                 [address, message]
             )

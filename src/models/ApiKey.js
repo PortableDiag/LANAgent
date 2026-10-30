@@ -89,6 +89,12 @@ const apiKeySchema = new mongoose.Schema({
     default: 100 // 100 requests per minute default
   },
   
+  // Maximum total usage count (lifetime limit). null means unlimited.
+  maxUsage: {
+    type: Number,
+    default: null
+  },
+  
   // Permissions/scopes (for future use)
   scopes: [{
     type: String,
@@ -243,7 +249,7 @@ apiKeySchema.methods.incrementUsage = async function() {
   await this.save();
 };
 
-// Check if key is valid (not expired, not revoked)
+// Check if key is valid (not expired, not revoked, not over max usage)
 apiKeySchema.methods.isValid = function() {
   if (this.status !== 'active') {
     return false;
@@ -263,7 +269,23 @@ apiKeySchema.methods.isValid = function() {
     }
   }
   
+  // Check max usage quota (lifetime limit)
+  if (this.maxUsage != null && this.usageCount >= this.maxUsage) {
+    return false;
+  }
+  
   return true;
+};
+
+/**
+ * Returns the remaining usage quota for this key.
+ * @returns {number} remaining uses, or Infinity if no maxUsage is set.
+ */
+apiKeySchema.methods.remainingQuota = function() {
+  if (this.maxUsage == null) {
+    return Infinity;
+  }
+  return Math.max(0, this.maxUsage - this.usageCount);
 };
 
 const ApiKey = mongoose.model('ApiKey', apiKeySchema);

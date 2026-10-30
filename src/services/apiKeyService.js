@@ -14,11 +14,19 @@ class ApiKeyService {
    * @param {string} params.createdBy - Who created it (user, agent, system)
    * @param {Date} params.expiresAt - Optional expiration date
    * @param {number} params.rateLimit - Requests per minute limit
+   * @param {number|null} params.maxUsage - Lifetime request cap (null = unlimited)
    * @returns {Object} The created key info including the raw key (only returned once)
    */
   async createApiKey(params) {
     try {
       const { name, description = '', createdBy = 'user', expiresAt = null, rateLimit = 100 } = params;
+      let maxUsage = params.maxUsage ?? null;
+      if (maxUsage !== null) {
+        maxUsage = Number(maxUsage);
+        if (!Number.isInteger(maxUsage) || maxUsage < 1) {
+          throw new Error('maxUsage must be a positive integer or null');
+        }
+      }
       
       // Generate a new key
       const rawKey = ApiKey.generateKey();
@@ -34,6 +42,7 @@ class ApiKeyService {
         createdBy,
         expiresAt,
         rateLimit,
+        maxUsage,
         status: 'active'
       });
       
@@ -59,6 +68,7 @@ class ApiKeyService {
         createdAt: apiKey.createdAt,
         expiresAt,
         rateLimit,
+        maxUsage,
         status: 'active'
       };
     } catch (error) {
@@ -95,6 +105,8 @@ class ApiKeyService {
         createdBy: currentKey.createdBy,
         isSystemKey: currentKey.isSystemKey,
         rateLimit: currentKey.rateLimit,
+        // A rotation must not reset a lifetime cap: the new key gets what is left.
+        maxUsage: currentKey.maxUsage == null ? null : currentKey.remainingQuota(),
         scopes: currentKey.scopes,
         alertConfig: currentKey.alertConfig,
         metadata: currentKey.metadata,
@@ -243,6 +255,7 @@ class ApiKeyService {
         expiresAt: key.expiresAt,
         createdBy: key.createdBy,
         rateLimit: key.rateLimit,
+        maxUsage: key.maxUsage ?? null,
         isSystemKey: key.isSystemKey || false
       }));
     } catch (error) {

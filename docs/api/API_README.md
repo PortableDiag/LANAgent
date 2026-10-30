@@ -483,6 +483,9 @@ X-Admin-Key: <admin-key>
 
 The gateway calls `GET /api/external/catalog` on your agent and reads the `services` array to discover what you offer. It also fetches pricing and credit balance. **You must re-call this endpoint after adding new services** — the gateway does not auto-refresh the services list (only pricing refreshes every 5 minutes).
 
+**`GET /api/external/catalog/:serviceId`** (no auth) — one catalog entry by `serviceId` (`web-scraping`, `plugin-<name>`, …), same shape as in the list, as `{ success: true, service }`; 404 `{ success: false, error: 'Service not found' }` otherwise.
+
+
 ### Per-agent admin endpoints (v2.25.35+)
 
 Operator-only endpoints exposed by each LANAgent for cross-agent visibility. The gateway calls these to surface per-agent `ExternalCreditBalance` rows (the customer wallets that pay each agent directly, plus the gateway-as-a-customer wallet that receives auto-replenishment SKYNET) in its `/admin/wallets` page. Auth is a shared secret in the `X-Admin-Key` header matched against `process.env.AGENT_ADMIN_KEY` on each agent — the same value must be set on the calling gateway. If the env var is unset on the agent, the endpoint returns 503; mismatch returns 401.
@@ -1208,7 +1211,8 @@ salvageable ones re-implemented correctly (no new dependencies; reused `node-cac
 - **`GET /admin/kill-switch/status`** (external gateway, auth) — `{ active, scheduledActive, schedule,
   lastCheck, nextCheck, checkInterval }`.
 - **`GET /api/external/youtube/history`** (external, auth) — paginated download history for the
-  requesting agent. Query: `page`, `limit`. Returns `{ items, total, page, limit, totalPages }`.
+  requesting agent. Query: `page`, `limit`, optional filters `status` (completed/failed), `format`
+  (mp3/mp4), `quality`, `startDate`/`endDate` (ISO). Returns `{ items, total, page, limit, totalPages }`.
 - **`GET /reports/comparison`** (auth) — compare averaged system-report metrics between two periods.
   Query: `period1Start`, `period1End`, `period2Start`, `period2End` (ISO), optional `metrics` (CSV).
 - **`POST /api/connections/bulk`** (auth) — bulk-create SSH connections. Body: `{ connections: [...] }`
@@ -7962,7 +7966,8 @@ API keys are managed through the web interface or API endpoints. Each key has th
     "name": "My Application",
     "description": "Production API key for monitoring",
     "expiresAt": "2025-12-31T23:59:59Z",  // Optional, null = no expiration
-    "rateLimit": 1000  // Optional, default is 100 requests/minute
+    "rateLimit": 1000,  // Optional, default is 100 requests/minute
+    "maxUsage": 500  // Optional lifetime request cap; null/omitted = unlimited. Exhausted keys are rejected; rotation carries the remainder
   }
   ```
   

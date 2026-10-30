@@ -449,10 +449,13 @@ export class WebInterface {
     // Create new API key
     this.app.post('/api/keys', authenticateToken, async (req, res) => {
       try {
-        const { name, description, expiresAt, rateLimit } = req.body;
+        const { name, description, expiresAt, rateLimit, maxUsage } = req.body;
         
         if (!name) {
           return res.status(400).json({ success: false, error: 'Name is required' });
+        }
+        if (maxUsage != null && (!Number.isInteger(Number(maxUsage)) || Number(maxUsage) < 1)) {
+          return res.status(400).json({ success: false, error: 'maxUsage must be a positive integer' });
         }
         
         const keyInfo = await apiKeyService.createApiKey({
@@ -460,6 +463,7 @@ export class WebInterface {
           description,
           expiresAt: expiresAt ? new Date(expiresAt) : null,
           rateLimit: rateLimit || 100,
+          maxUsage: maxUsage ?? null,
           createdBy: req.user?.authenticated ? 'user' : 'system'
         });
         

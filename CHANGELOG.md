@@ -2,6 +2,23 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.709] - 2026-10-30
+
+### Added
+- **JSON Feed support** in the feed reader, including discovery of a URL that is itself a JSON feed.
+- **Single-service catalog lookup**: `GET /api/external/catalog/:serviceId` (404 for an unknown service).
+- **Office document info** (`getDocumentInfo`): page, sheet and slide counts and the author, read from the document itself.
+- **YouTube download history filters** on `GET /youtube/history` (status and other fields; only plain values are accepted).
+- **API key usage caps**: `POST /api/keys` accepts `maxUsage`; the key list shows it and a rotated key keeps its remaining quota.
+- **Vonage**: cancel a scheduled message. **StatusCake**: test history by date range and limit. **MessageBird**: list messages with paging.
+- **Proxy contracts**: contract interfaces for EIP-1967 proxies are resolved through the implementation.
+- **Sign-In with Ethereum verification** at `/siwe/verify`: the signer must be the address the message names, and expiry / not-before are enforced. Signature verification works with ethers 6 again.
+- Overrides for guest-mode rate limits (`GUEST_PER_USER_HOUR`, `GUEST_GLOBAL_HOUR`) and follow-up delays (`FOLLOW_UP_DELAYS_MIN`).
+
+### Fixed
+- **Telegram voice settings** ("turn on voice replies in telegram") work when the request arrives without arguments, instead of answering "No valid settings provided".
+- The Telegram typing indicator stops after 10 minutes instead of never.
+
 ## [2.25.708] - 2026-10-30
 
 ### Fixed

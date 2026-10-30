@@ -1,6 +1,6 @@
 import { BasePlugin } from '../core/basePlugin.js';
 import { extractParams } from '../../services/webtools/extractParams.js';
-import { createDocx, createXlsx, createPptx, readOffice, editOffice, OUTPUT_DIR } from '../../services/webtools/officeDocs.js';
+import { createDocx, createXlsx, createPptx, readOffice, editOffice, officeInfo, OUTPUT_DIR } from '../../services/webtools/officeDocs.js';
 
 /** "home network security best practices" → "Home network security best practices" */
 const titleFrom = (topic) => {
@@ -34,7 +34,10 @@ export default class OfficePlugin extends BasePlugin {
         usage: 'readDocument({ path: "report.docx" })', examples: ['read the word document I sent', 'what does this spreadsheet contain', 'show me the text of the slides'] },
       { command: 'editDocument', description: 'Edit an office file: find and replace text in a .docx or .pptx, or set cells in an .xlsx; saves a new "-edited" copy unless overwrite is true',
         usage: 'editDocument({ path: "contract.docx", replacements: [{ find: "2025", replace: "2026" }] })  // xlsx: { path, cells: [{ sheet: "Sheet1", cell: "B2", value: 42 }] }',
-        examples: ['replace the old company name in the word document', 'change cell B2 in the spreadsheet to 42', 'update the date on the slides'] }
+        examples: ['replace the old company name in the word document', 'change cell B2 in the spreadsheet to 42', 'update the date on the slides'] },
+      { command: 'getDocumentInfo', description: 'Facts about an office file without its content: word count, slide count, sheet names and row counts, author, title, created/modified dates',
+        usage: 'getDocumentInfo({ path: "file.docx" })',
+        examples: ['get info about this word document', 'how many slides in the presentation', 'list sheet names in the spreadsheet'] }
     ];
   }
 
@@ -69,8 +72,14 @@ export default class OfficePlugin extends BasePlugin {
           if (!r.changes) return { success: false, error: 'nothing matched, so nothing was changed' };
           return this.deliver(r, `edited file (${r.changes} change${r.changes === 1 ? '' : 's'})`);
         }
+        case 'getDocumentInfo': {
+          const info = await officeInfo(p.path || p.file || p.filename);
+          const counts = [info.wordCount != null && `${info.wordCount} words`, info.slideCount != null && `${info.slideCount} slides`,
+            info.sheetCount != null && `${info.sheetCount} sheet${info.sheetCount === 1 ? '' : 's'} (${info.sheets.map(sh => `${sh.name}: ${sh.rows} rows`).join(', ')})`].filter(Boolean);
+          return { success: true, ...info, result: `${info.filename}: ${counts.join(', ')}${info.author ? `; author ${info.author}` : ''}` };
+        }
         default:
-          return { success: false, error: `Unknown action '${action}'. Use: createDocument, createSpreadsheet, createPresentation, readDocument, editDocument` };
+          return { success: false, error: `Unknown action '${action}'. Use: createDocument, createSpreadsheet, createPresentation, readDocument, editDocument, getDocumentInfo` };
       }
     } catch (error) {
       this.logger.warn(`office ${action} failed: ${error.message}`);

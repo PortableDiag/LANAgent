@@ -7,6 +7,42 @@ import fs from 'fs';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+
+// The router can reach telegram-voice with no arguments: an AI-detected intent arrives as
+// { query, originalInput, needsParameterExtraction }, so "turn on voice replies in telegram"
+// used to answer "No valid settings provided" (GitHub issue #2507). Accept booleans, the
+// strings an extractor tends to return ("true", "on"), and failing both, read the request.
+const ON = /^(true|on|yes|enable|enabled|1)$/i;
+const OFF = /^(false|off|no|disable|disabled|0)$/i;
+
+function toBool(value) {
+  if (typeof value === 'boolean') return value;
+  if (typeof value === 'string' && ON.test(value.trim())) return true;
+  if (typeof value === 'string' && OFF.test(value.trim())) return false;
+  return undefined;
+}
+
+export function telegramVoiceArgs(data = {}) {
+  const args = {
+    enabled: toBool(data.enabled),
+    autoConvert: toBool(data.autoConvert),
+    respondWithVoice: toBool(data.respondWithVoice)
+  };
+  if (Object.values(args).some(v => v !== undefined)) return args;
+
+  const text = String(data.originalInput || data.query || data.input || '').toLowerCase();
+  if (!text) return args;
+  // A bare "on" is not a switch: "stop replying with voice on telegram" contains one.
+  const off = /\b(turn off|switch off|disable|stop|don'?t|do not|no more|quit)\b|\boff\s*$/.test(text);
+  const on = /\b(turn on|switch on|enable|start|use)\b|\bon\s*$/.test(text);
+  if (off === on) return args; // neither, or both: do not guess
+  const value = on;
+  if (/transcri|convert|speech to text/.test(text)) args.autoConvert = value;
+  else if (/repl|respon|answer|talk back|speak back|with voice|voice messages? back/.test(text)) args.respondWithVoice = value;
+  else args.enabled = value;
+  return args;
+}
+
 export default class VoicePlugin extends BasePlugin {
   constructor(agent) {
     super(agent);
@@ -857,7 +893,7 @@ export default class VoicePlugin extends BasePlugin {
    */
   async configureTelegramVoice(data) {
     try {
-      const { enabled, autoConvert, respondWithVoice } = data;
+      const { enabled, autoConvert, respondWithVoice } = telegramVoiceArgs(data);
       const updates = {};
 
       if (typeof enabled === 'boolean') {
@@ -873,7 +909,7 @@ export default class VoicePlugin extends BasePlugin {
       if (Object.keys(updates).length === 0) {
         return {
           success: false,
-          error: 'No valid settings provided. Available: enabled, autoConvert, respondWithVoice'
+          error: 'I could not tell which Telegram voice setting to change. Say, for example, "turn on voice replies in Telegram", "stop transcribing voice notes" or "disable Telegram voice".'
         };
       }
 

@@ -41,6 +41,40 @@ async function getCachedData(key, fetchFunc) {
 }
 
 /**
+ * Parse a SIWE (EIP-4361) message to extract identity fields.
+ * The address is the line straight after "... wants you to sign in with your
+ * Ethereum account:" (see signatureService.createSIWEMessage).
+ * @param {string} message - SIWE formatted message
+ * @returns {Object} parsed fields: domain, address, chainId, nonce, uri, expiration, notBefore, issuedAt
+ */
+export function parseSIWEMessage(message) {
+    const text = String(message);
+    const lines = text.split('\n');
+    const header = (lines[0] || '').match(/^(.+) wants you to sign in with your Ethereum account:$/);
+    const domain = header ? header[1].trim() : undefined;
+    const addrLine = (lines[1] || '').trim();
+    const address = /^0x[a-fA-F0-9]{40}$/.test(addrLine) ? addrLine : undefined;
+
+    const field = (name) => {
+        const m = text.match(new RegExp(`^${name}:\\s*(.+)$`, 'm'));
+        return m ? m[1].trim() : undefined;
+    };
+    const chainIdRaw = field('Chain ID');
+    const chainId = chainIdRaw !== undefined ? parseInt(chainIdRaw, 10) : undefined;
+
+    return {
+        domain,
+        address,
+        chainId: Number.isNaN(chainId) ? undefined : chainId,
+        nonce: field('Nonce'),
+        uri: field('URI'),
+        expiration: field('Expiration Time'),
+        notBefore: field('Not Before'),
+        issuedAt: field('Issued At')
+    };
+}
+
+/**
  * Batch verify signatures
  */
 router.post('/verify-batch', async (req, res) => {
@@ -165,6 +199,78 @@ router.post('/siwe/sign', async (req, res) => {
         });
     } catch (error) {
         logger.error('Sign SIWE error:', error);
+        res.status(500).json({
+            error: error.message
+        });
+    }
+});
+
+/**
+ * Verify a SIWE message and signature, returning parsed identity details.
+ * The signer recovered from the EIP-191 signature must be the address the
+ * message names; the message must also be inside its validity window.
+ */
+router.post('/siwe/verify', async (req, res) => {
+    try {
+        const { message, signature, expectedAddress } = req.body;
+
+        if (!message || !signature) {
+            return res.status(400).json({
+                error: 'SIWE message and signature are required'
+            });
+        }
+
+        const parsed = parseSIWEMessage(message);
+        if (!parsed.address) {
+            return res.status(400).json({
+                error: 'Not a SIWE message: no account address after the sign-in header'
+            });
+        }
+
+        // Recovered signer must equal the address in the message
+        const verifyResult = await signatureService.verifySignature(message, signature, parsed.address);
+        if (!verifyResult.isValid) {
+            return res.json({
+                success: false,
+                verified: false,
+                error: verifyResult.error || 'Signature was not made by the address in the message',
+                parsed,
+                recoveredAddress: verifyResult.recoveredAddress
+            });
+        }
+
+        if (expectedAddress && String(expectedAddress).toLowerCase() !== parsed.address.toLowerCase()) {
+            return res.json({
+                success: false,
+                verified: false,
+                error: `Address mismatch: expected ${expectedAddress}, got ${parsed.address}`,
+                parsed
+            });
+        }
+
+        const now = Date.now();
+        if (parsed.expiration) {
+            const exp = Date.parse(parsed.expiration);
+            if (Number.isNaN(exp) || exp <= now) {
+                return res.json({ success: false, verified: false, error: 'SIWE message has expired', parsed });
+            }
+        }
+        if (parsed.notBefore) {
+            const nbf = Date.parse(parsed.notBefore);
+            if (Number.isNaN(nbf) || nbf > now) {
+                return res.json({ success: false, verified: false, error: 'SIWE message is not valid yet', parsed });
+            }
+        }
+
+        res.json({
+            success: true,
+            verified: true,
+            ...parsed,
+            recoveredAddress: verifyResult.recoveredAddress,
+            messageHash: verifyResult.messageHash
+        });
+    } catch (error) {
+        logger.error('SIWE verify error:', error);
         res.status(500).json({
             error: error.message
         });

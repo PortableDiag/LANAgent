@@ -46,6 +46,62 @@ function buildPendingKey(sessionScanId) {
 }
 
 /**
+ * Cache-or-fetch with in-flight coalescing, retry, and statistics. Keys must come from
+ * buildCountKey/buildPendingKey so invalidateSessionCache can find them.
+ *
+ * @param {string} key - Cache key
+ * @param {Function} fetchFn - Async function that returns the value to cache
+ * @param {Object} [options] - Optional settings
+ * @param {number} [options.ttl] - TTL in seconds (defaults to cache stdTTL)
+ * @param {number} [options.retries] - Number of retry attempts (defaults to 3)
+ * @returns {Promise<any>} - Cached or freshly fetched value
+ */
+async function _getOrSet(key, fetchFn, { ttl, retries = 3 } = {}) {
+    // Check cache first
+    const cached = scanCache.get(key);
+    if (cached !== undefined) {
+        stats.hits++;
+        logger.debug(`ScanProgress cache HIT: ${key}`);
+        return cached;
+    }
+
+    stats.misses++;
+
+    // Coalesce identical in-flight requests
+    const existingRequest = inFlightRequests.get(key);
+    if (existingRequest) {
+        logger.debug(`ScanProgress request COALESCED: ${key}`);
+        return existingRequest;
+    }
+
+    // Create a new request promise
+    let request;
+    request = (async () => {
+        try {
+            const value = await retryOperation(fetchFn, { retries });
+
+            // Cache the result — unless the session was invalidated while this
+            // query was in flight (the result may predate that write).
+            if (inFlightRequests.get(key) === request) {
+                if (ttl === undefined) scanCache.set(key, value);
+                else scanCache.set(key, value, ttl);
+                stats.sets++;
+                logger.debug(`ScanProgress cache SET: ${key}`);
+            }
+
+            return value;
+        } finally {
+            if (inFlightRequests.get(key) === request) {
+                inFlightRequests.delete(key);
+            }
+        }
+    })();
+
+    inFlightRequests.set(key, request);
+    return request;
+}
+
+/**
  * Get cached count or fetch from database
  *
  * @param {Model} ScanProgress - Mongoose model
@@ -56,55 +112,13 @@ function buildPendingKey(sessionScanId) {
 export async function getCachedCount(ScanProgress, sessionScanId, status = null) {
     const cacheKey = buildCountKey(sessionScanId, status);
 
-    // Check cache first
-    const cached = scanCache.get(cacheKey);
-    if (cached !== undefined) {
-        stats.hits++;
-        logger.debug(`ScanProgress cache HIT: ${cacheKey} = ${cached}`);
-        return cached;
-    }
-
-    stats.misses++;
-
-    const existingRequest = inFlightRequests.get(cacheKey);
-    if (existingRequest) {
-        logger.debug(`ScanProgress request COALESCED: ${cacheKey}`);
-        return existingRequest;
-    }
-
     // Build query
     const query = { sessionScanId };
     if (status) {
         query.status = status;
     }
 
-    // Fetch from database
-    let request;
-    request = (async () => {
-        try {
-            const count = await retryOperation(
-                () => ScanProgress.countDocuments(query),
-                { retries: 3 }
-            );
-
-            // Cache the result — unless the session was invalidated while this
-            // query was in flight (the result may predate that write).
-            if (inFlightRequests.get(cacheKey) === request) {
-                scanCache.set(cacheKey, count);
-                stats.sets++;
-                logger.debug(`ScanProgress cache SET: ${cacheKey} = ${count}`);
-            }
-
-            return count;
-        } finally {
-            if (inFlightRequests.get(cacheKey) === request) {
-                inFlightRequests.delete(cacheKey);
-            }
-        }
-    })();
-
-    inFlightRequests.set(cacheKey, request);
-    return request;
+    return _getOrSet(cacheKey, () => ScanProgress.countDocuments(query));
 }
 
 /**
@@ -117,52 +131,12 @@ export async function getCachedCount(ScanProgress, sessionScanId, status = null)
 export async function getCachedPendingEntries(ScanProgress, sessionScanId) {
     const cacheKey = buildPendingKey(sessionScanId);
 
-    // Check cache first
-    const cached = scanCache.get(cacheKey);
-    if (cached !== undefined) {
-        stats.hits++;
-        logger.debug(`ScanProgress cache HIT: ${cacheKey} (${cached.length} entries)`);
-        return cached;
-    }
-
-    stats.misses++;
-
-    const existingRequest = inFlightRequests.get(cacheKey);
-    if (existingRequest) {
-        logger.debug(`ScanProgress request COALESCED: ${cacheKey}`);
-        return existingRequest;
-    }
-
-    // Fetch from database
-    let request;
-    request = (async () => {
-        try {
-            const entries = await retryOperation(
-                () => ScanProgress.find({
-                    sessionScanId,
-                    status: 'pending'
-                }).sort({ fileSize: 1 }),
-                { retries: 3 }
-            );
-
-            // Cache the result — unless the session was invalidated while this
-            // query was in flight (the result may predate that write).
-            if (inFlightRequests.get(cacheKey) === request) {
-                scanCache.set(cacheKey, entries);
-                stats.sets++;
-                logger.debug(`ScanProgress cache SET: ${cacheKey} (${entries.length} entries)`);
-            }
-
-            return entries;
-        } finally {
-            if (inFlightRequests.get(cacheKey) === request) {
-                inFlightRequests.delete(cacheKey);
-            }
-        }
-    })();
-
-    inFlightRequests.set(cacheKey, request);
-    return request;
+    return _getOrSet(cacheKey, () =>
+        ScanProgress.find({
+            sessionScanId,
+            status: 'pending'
+        }).sort({ fileSize: 1 })
+    );
 }
 
 /**

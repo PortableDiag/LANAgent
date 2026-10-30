@@ -6,6 +6,10 @@ import { fetchPublic } from './fetchPublic.js';
  * RSS 2.0, Atom and RSS 1.0 (RDF) feeds, parsed with xml2js (already a dependency).
  * Items are normalised to { id, title, link, published, summary }; `id` is what the
  * watcher remembers to tell new items from old, so it prefers the feed's own guid.
+ *
+ * JSON Feed (https://www.jsonfeed.org/) is also supported.  When the input is valid
+ * JSON and contains a `version` field starting with `https://jsonfeed.org/version/1`,
+ * items are mapped from `url`, `date_published`, `summary` / `content_text`.
  */
 
 const arr = v => (v == null ? [] : Array.isArray(v) ? v : [v]);
@@ -32,15 +36,39 @@ function atomLink(links) {
   return alt?.href || '';
 }
 
-/** Parse feed XML. Throws when the document is not a feed. */
+/** Parse feed XML or JSON. Throws when the document is not a feed. */
 export async function parseFeed(xml, baseUrl = '') {
+  const abs = href => { try { return href ? new URL(href, baseUrl || undefined).toString() : ''; } catch { return href || ''; } };
+
+  // JSON Feed (https://jsonfeed.org/version/1 and /1.1). Only attempted when the body
+  // looks like a JSON object, so XML feeds never pay for a failed JSON.parse.
+  let jsonDoc;
+  if (/^\s*\{/.test(String(xml))) {
+    try { jsonDoc = JSON.parse(String(xml)); } catch { /* not JSON — fall through to XML */ }
+  }
+  if (typeof jsonDoc?.version === 'string' && jsonDoc.version.startsWith('https://jsonfeed.org/version/1')) {
+    const items = arr(jsonDoc.items).filter(item => item && typeof item === 'object').map(item => ({
+      // Version 1 allowed a numeric id; the watcher compares ids as strings.
+      id: String(item.id ?? item.url ?? `${item.title}|${item.date_published}`),
+      title: clean(item.title, 300) || '(untitled)',
+      link: abs(item.url || ''),
+      published: isoDate(item.date_published),
+      summary: clean(item.summary || item.content_text || item.content_html || '')
+    }));
+    return {
+      format: 'jsonfeed',
+      title: clean(jsonDoc.title, 200) || '',
+      link: abs(jsonDoc.home_page_url || ''),
+      items
+    };
+  }
+
   let doc;
   try {
     doc = await parseStringPromise(String(xml), { explicitArray: false, trim: true, strict: false, normalizeTags: true });
   } catch (e) {
     throw new Error(`not a readable feed (${e.message.split('\n')[0]})`);
   }
-  const abs = href => { try { return href ? new URL(href, baseUrl || undefined).toString() : ''; } catch { return href || ''; } };
 
   if (doc?.rss?.channel || doc?.['rdf:rdf']) {
     const channel = doc.rss?.channel || doc['rdf:rdf'].channel || {};
@@ -92,7 +120,9 @@ export async function parseFeed(xml, baseUrl = '') {
  * @returns {Promise<Object>} Parsed feed plus `headers: { etag?, lastModified? }`.
  */
 export async function readFeed(url, { limit = 20, previousHeaders = null, fetch = fetchPublic } = {}) {
-  const headers = { Accept: 'application/rss+xml, application/atom+xml, application/xml;q=0.9, text/xml;q=0.8, */*;q=0.5' };
+  const headers = {
+    Accept: 'application/feed+json, application/rss+xml, application/atom+xml, application/xml;q=0.9, text/xml;q=0.8, */*;q=0.5'
+  };
   if (previousHeaders?.etag) headers['If-None-Match'] = previousHeaders.etag;
   if (previousHeaders?.lastModified) headers['If-Modified-Since'] = previousHeaders.lastModified;
   const conditional = Boolean(headers['If-None-Match'] || headers['If-Modified-Since']);
@@ -126,7 +156,7 @@ export async function discoverFeeds(pageUrl) {
   const res = await fetchPublic(pageUrl);
   if (res.status !== 200) throw new Error(`HTTP ${res.status} from ${pageUrl}`);
   const body = String(res.data || '');
-  if (/^\s*(<\?xml[^>]*>\s*)?<(rss|feed|rdf:RDF)\b/i.test(body)) {
+  if (/^\s*(<\?xml[^>]*>\s*)?<(rss|feed|rdf:RDF)\b/i.test(body) || /^\s*\{[\s\S]*"version"\s*:\s*"https:\/\/jsonfeed\.org\/version\/1/.test(body)) {
     const feed = await parseFeed(body, res.url);
     return [{ url: res.url, title: feed.title, format: feed.format }];
   }

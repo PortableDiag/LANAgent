@@ -65,6 +65,16 @@ export default class MessageBirdPlugin extends BasePlugin {
           'what is the delivery status of my last SMS',
           'get delivery details for message id abcdef'
         ]
+      },
+      {
+        command: 'listMessages',
+        description: 'Retrieve paginated message history with optional filtering',
+        usage: 'listMessages({ limit: 20, offset: 0, status: "delivered", direction: "mt" })',
+        examples: [
+          'list recent messages',
+          'show message history for last week',
+          'get all delivered messages'
+        ]
       }
     ];
 
@@ -146,6 +156,9 @@ export default class MessageBirdPlugin extends BasePlugin {
 
         case 'getMessageStatus':
           return await this.getMessageStatus(data);
+
+        case 'listMessages':
+          return await this.listMessages(data);
 
         default:
           throw new Error(`Unknown action: ${action}`);
@@ -315,6 +328,61 @@ export default class MessageBirdPlugin extends BasePlugin {
       return { success: true, data: response.data };
     } catch (error) {
       this.logger.error('getMessageStatus failed:', error);
+      return { success: false, error: error.message };
+    }
+  }
+
+  /**
+   * Retrieve paginated message history with optional filtering by status,
+   * direction, and date range.
+   * @param {Object} params
+   * @param {number} [params.limit=20] - Number of messages to return (max 50).
+   * @param {number} [params.offset=0] - Offset for pagination.
+   * @param {string} [params.status] - Filter by message status (e.g., 'delivered', 'failed').
+   * @param {string} [params.direction] - Filter by direction ('mt' for mobile terminated, 'mo' for mobile originated).
+   * @returns {Promise<{success: boolean, data?: Object, error?: string}>}
+   */
+  async listMessages({ limit, offset, status, direction } = {}) {
+    // Parameters extracted from natural language often arrive as numeric
+    // strings ("10"), so accept anything that converts to an integer.
+    const toInt = (value) => (value === undefined || value === null || value === '' ? undefined : Number(value));
+    const limitNum = toInt(limit);
+    const offsetNum = toInt(offset);
+
+    if (limitNum !== undefined && (!Number.isInteger(limitNum) || limitNum < 1 || limitNum > 50)) {
+      throw new Error('limit must be a number between 1 and 50');
+    }
+    if (offsetNum !== undefined && (!Number.isInteger(offsetNum) || offsetNum < 0)) {
+      throw new Error('offset must be a non-negative number');
+    }
+    if (status !== undefined) {
+      // Message statuses documented for the MessageBird SMS API
+      const allowedStatuses = ['scheduled', 'sent', 'buffered', 'delivered', 'expired', 'delivery_failed'];
+      if (!allowedStatuses.includes(status)) {
+        throw new Error(`status must be one of: ${allowedStatuses.join(', ')}`);
+      }
+    }
+    if (direction !== undefined) {
+      const allowedDirections = ['mt', 'mo'];
+      if (!allowedDirections.includes(direction)) {
+        throw new Error(`direction must be one of: ${allowedDirections.join(', ')}`);
+      }
+    }
+
+    const queryParams = new URLSearchParams();
+    queryParams.set('limit', String(limitNum ?? 20));
+    queryParams.set('offset', String(offsetNum ?? 0));
+    if (status) queryParams.set('status', status);
+    if (direction) queryParams.set('direction', direction);
+
+    const url = `${this.config.baseUrl}/messages?${queryParams.toString()}`;
+    const headers = { Authorization: `AccessKey ${this.config.apiKey}` };
+
+    try {
+      const response = await retryOperation(() => axios.get(url, { headers }), { retries: 3, context: 'listMessages' });
+      return { success: true, data: response.data };
+    } catch (error) {
+      this.logger.error('listMessages failed:', error);
       return { success: false, error: error.message };
     }
   }

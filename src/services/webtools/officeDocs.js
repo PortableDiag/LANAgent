@@ -299,6 +299,44 @@ export async function readOffice(p, { maxChars = 20000 } = {}) {
   return { path: file, type: ext.slice(1), text: truncated ? `${text.slice(0, maxChars)}\n…(truncated)` : text, truncated, ...meta };
 }
 
+/**
+ * Facts about an office file without returning its content: size, the document properties the
+ * file itself records (docProps/core.xml: title, author, created/modified), and counts read from
+ * the whole text (words for .docx/.pptx, sheets + rows for .xlsx, slides for .pptx).
+ */
+export async function officeInfo(p) {
+  const file = await resolveInput(p);
+  const st = await fs.stat(file);
+  const r = await readOffice(file, { maxChars: Infinity });
+  const props = {};
+  try {
+    const zip = await JSZip.loadAsync(await fs.readFile(file));
+    const core = await zip.file('docProps/core.xml')?.async('string');
+    if (core) {
+      const tag = t => { const m = core.match(new RegExp(`<${t}(?:\\s[^>]*)?>([^<]*)</${t}>`)); return m ? decodeXml(m[1]).trim() || null : null; };
+      props.title = tag('dc:title');
+      props.author = tag('dc:creator');
+      props.lastModifiedBy = tag('cp:lastModifiedBy');
+      props.created = tag('dcterms:created');
+      props.modified = tag('dcterms:modified');
+    }
+  } catch { /* properties are optional; the counts below still stand */ }
+  const words = t => (t.match(/\S+/g) || []).length;
+  const info = { path: file, filename: path.basename(file), type: r.type, size: st.size, fileModifiedAt: st.mtime.toISOString(), ...props };
+  if (r.type === 'docx') {
+    info.wordCount = words(r.text);
+    info.paragraphCount = r.text.split(/\n+/).filter(l => l.trim()).length;
+  } else if (r.type === 'xlsx') {
+    info.sheetCount = r.sheets.length;
+    info.sheets = r.sheets;
+  } else if (r.type === 'pptx') {
+    info.slideCount = r.slides;
+    // readOffice heads each slide "## Slide N"; those lines are not the slides' words
+    info.wordCount = words(r.text.replace(/^## Slide \d+$/gm, ''));
+  }
+  return info;
+}
+
 // ── editing ──────────────────────────────────────────────────────────────
 
 /**

@@ -127,7 +127,9 @@ router.get('/history', externalAuthMiddleware, async (req, res) => {
   try {
     const page = parseInt(req.query.page) || 1;
     const limit = parseInt(req.query.limit) || 20;
-    const history = await YoutubeDownload.getHistory(req.externalAgentId, page, limit);
+    const { status, format, quality, startDate, endDate } = req.query;
+    const history = await YoutubeDownload.getHistory(req.externalAgentId, page, limit,
+      { status, format, quality, startDate, endDate });
     res.json({ success: true, ...history });
   } catch (error) {
     logger.error('YouTube history failed:', error);
