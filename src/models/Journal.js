@@ -191,6 +191,63 @@ journalSchema.methods.paginateEntries = function(page = 0, limit = 50) {
   };
 };
 
+/**
+ * Update an existing journal entry at the given index.
+ * Replaces the content and optionally the source, preserving the original timestamp.
+ * Recalculates metadata, flushes cache, and persists with retry.
+ *
+ * @param {number} index - Zero-based index of the entry to update
+ * @param {string} content - New content for the entry
+ * @param {string} [source] - Optional new source ('text' or 'voice'); if omitted, source is unchanged
+ * @returns {Promise<Object>} The saved journal document
+ * @throws {Error} If the index is out of range
+ */
+journalSchema.methods.updateEntry = async function(index, content, source) {
+  if (index < 0 || index >= this.entries.length) {
+    throw new Error(`Entry index ${index} out of range (0-${this.entries.length - 1})`);
+  }
+
+  const entry = this.entries[index];
+  entry.content = content;
+  if (source !== undefined) {
+    entry.source = source;
+  }
+  // Preserve original timestamp – do not modify entry.timestamp
+
+  this.metadata.entryCount = this.entries.length;
+  this.metadata.totalWordCount = this.entries.reduce(
+    (sum, e) => sum + e.content.split(/\s+/).length, 0
+  );
+
+  this.constructor.cache.flushAll();
+
+  return retryOperation(() => this.save(), { context: 'Journal.updateEntry' });
+};
+
+/**
+ * Delete a journal entry at the given index.
+ * Removes the entry, recalculates metadata, flushes cache, and persists with retry.
+ *
+ * @param {number} index - Zero-based index of the entry to delete
+ * @returns {Promise<Object>} The saved journal document
+ * @throws {Error} If the index is out of range
+ */
+journalSchema.methods.deleteEntry = async function(index) {
+  if (index < 0 || index >= this.entries.length) {
+    throw new Error(`Entry index ${index} out of range (0-${this.entries.length - 1})`);
+  }
+
+  this.entries.splice(index, 1);
+  this.metadata.entryCount = this.entries.length;
+  this.metadata.totalWordCount = this.entries.reduce(
+    (sum, e) => sum + e.content.split(/\s+/).length, 0
+  );
+
+  this.constructor.cache.flushAll();
+
+  return retryOperation(() => this.save(), { context: 'Journal.deleteEntry' });
+};
+
 // Static methods
 journalSchema.statics.findActiveSession = function(userId) {
   return this.findOne({ userId, status: 'active' });

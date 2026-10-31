@@ -2,6 +2,11 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.711] - 2026-10-31
+
+### Added
+- **Journal entries can be edited and deleted** (`updateEntry`, `deleteEntry` on a journal): the entry's original time is kept on an edit, and the entry and word counts are recalculated.
+
 ## [2.25.710] - 2026-10-30
 
 ### Fixed
