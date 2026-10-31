@@ -2,6 +2,11 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.712] - 2026-10-31
+
+### Added
+- **Who does what on a shared call.** When the owner puts other agents on a call and says who does what ("ALICE take notes, Orbit do the talking"), each agent's instruction is passed to DialX as that agent's brief (`call_together` `briefs`, DialX 0.7.107), so every agent hears only its own.
+
 ## [2.25.711] - 2026-10-31
 
 ### Added

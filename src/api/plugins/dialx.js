@@ -60,6 +60,22 @@ function when(iso) {
   return Number.isFinite(d.getTime()) ? d.toLocaleString('en-US', { weekday: 'short', hour: 'numeric', minute: '2-digit', month: 'short', day: 'numeric' }) : String(iso || '');
 }
 
+/**
+ * DialX 0.7.107 call_together `briefs`: the owner's words for each agent on the call ("ALICE take notes, Orbit do
+ * the talking"), keyed by name. Only agents actually on the call (or this agent) are kept, as plain strings; null when none.
+ */
+export function briefsFor(briefs, agents = [], self = '') {
+  if (!briefs || typeof briefs !== 'object' || Array.isArray(briefs)) return null;
+  const on = new Map([...agents, self].filter(Boolean).map(n => [String(n).toLowerCase(), String(n)]));
+  const out = {};
+  for (const [k, v] of Object.entries(briefs)) {
+    const name = on.get(String(k).trim().toLowerCase());
+    const text = typeof v === 'string' ? v.trim().slice(0, 500) : '';
+    if (name && text) out[name] = text;
+  }
+  return Object.keys(out).length ? out : null;
+}
+
 export default class DialXPlugin extends BasePlugin {
   constructor(agent) {
     super(agent);
@@ -686,7 +702,7 @@ export default class DialXPlugin extends BasePlugin {
     }
     // DialX 0.7.94 (4293 #470): "Alice, you and Orbit call Wayne…" is ONE call with both agents on it.
     const together = await this.callTogetherAgents(data, request);
-    if (together.length) return this.callTogether({ pick, who, purpose: purpose || opening, at, with: together });
+    if (together.length) return this.callTogether({ pick, who, purpose: purpose || opening, at, with: together, briefs: briefsFor(data.briefs, together, this.agent?.config?.name || process.env.AGENT_NAME) });
     const device = await this.device('dialx.schedule_call');
     let voice = null;
     // A theremin voice is made here, from the agent's own TTS, with the sound the owner approved
@@ -786,12 +802,12 @@ export default class DialXPlugin extends BasePlugin {
   }
 
   /** dialx.call_together: one call now, the other agents joining when the callee answers. */
-  async callTogether({ pick, who, purpose, at, with: others }) {
+  async callTogether({ pick, who, purpose, at, with: others, briefs }) {
     if (at) return { success: false, error: `A call with ${others.join(' and ')} on it can only be placed now, not at a set time. Say "now", or I can call on my own at that time.` };
     const name = pick.contact.name || who;
     const r = await this.tool('dialx.call_together', {
       ...(pick.contact.id != null ? { contact_id: pick.contact.id } : { number: pick.contact.number }),
-      purpose, with: others, requested_by_owner: true
+      purpose, with: others, requested_by_owner: true, ...(briefs ? { briefs } : {})
     });
     if (!r.ok) {
       this.logger.warn(`dialx call_together to ${name} refused: ${r.error?.code || 'no code'} ${r.error?.message || ''}`);
@@ -857,7 +873,9 @@ export default class DialXPlugin extends BasePlugin {
     try {
       const res = await pm.generateResponse(
         `${owner} asked you, ${name}, to make a phone call. Request: ${request}\n` +
-        'Extract one JSON object {"contact": who to call, "at": when, "purpose": why, "opening": first line, "voicemail": message to leave, "voice": a voice effect for your voice on this call}.\n' +
+        'Extract one JSON object {"contact": who to call, "at": when, "purpose": why, "opening": first line, "voicemail": message to leave, "voice": a voice effect for your voice on this call, "briefs": what each agent on the call should do}.\n' +
+        `- "briefs": only when the request puts other agents on the call AND says who does what ("${name} take notes, Orbit ` +
+        `do the talking"): {"<agent name>": "${owner}'s words for that agent"}, you as "${name}"; otherwise null.\n` +
         '- "voice": only when the request asks for one ("in a robot voice", "a deep voice", "autotune"): its name, e.g. "Robot"; otherwise null.\n' +
         '- "at": the wall-clock time they said, YYYY-MM-DDTHH:mm with no offset or Z (a time with no date that has ' +
         `already passed today means tomorrow); null for now. Local now is ${nowInZone()}.\n` +
@@ -874,6 +892,7 @@ export default class DialXPlugin extends BasePlugin {
         { maxTokens: 300, temperature: 0.3 });
       const raw = String(res?.content || '').replace(/^```(?:json)?\s*|\s*```$/g, '');
       const got = JSON.parse(raw.slice(raw.indexOf('{'), raw.lastIndexOf('}') + 1)) || {};
+      if (data.briefs == null && got.briefs && typeof got.briefs === 'object' && !Array.isArray(got.briefs)) data.briefs = got.briefs;
       for (const k of ['contact', 'at', 'purpose', 'opening', 'voicemail', 'voice']) {
         if ((data[k] == null || data[k] === '') && got[k] != null && got[k] !== '') data[k] = got[k];
       }

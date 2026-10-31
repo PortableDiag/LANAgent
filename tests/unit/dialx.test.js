@@ -12,7 +12,7 @@ import { TextXHub } from '../../src/services/textx/textxHub.js';
 import { memoryStore } from '../../src/services/textx/textxStore.js';
 import { createTransport } from '../../src/services/textx/textxTransport.js';
 import { memoryCallStore, isoWithOffset, parseTurn, CALL_SESSION, DIALX_TOOLS } from '../../src/services/textx/dialx.js';
-import DialXPlugin from '../../src/api/plugins/dialx.js';
+import DialXPlugin, { briefsFor } from '../../src/api/plugins/dialx.js';
 
 process.env.OWNER_NAME = process.env.OWNER_NAME || 'Pat';
 const quiet = { info() {}, warn() {}, error() {}, debug() {} };
@@ -268,8 +268,33 @@ test('plugin: "Alice, you and Orbit call Wayne" is one call_together with Orbit 
   assert.deepEqual(together.args.with, ['Orbit'], 'never names itself');
   assert.equal(together.args.contact_id, 'k7');
   assert.equal(together.args.requested_by_owner, true);
+  assert.ok(!('briefs' in together.args), 'no briefs when the owner gave none');
   assert.ok(!calls.some(c => c.name === 'dialx.schedule_call'), 'not an ordinary call');
   assert.match(r.result, /Calling Wayne Williams now with ALICE and Orbit/);
+});
+
+test('plugin: the owner\'s words for each agent go to call_together as briefs, only for agents on the call (DialX 0.7.107)', async () => {
+  const { plugin, calls } = pluginRig();
+  plugin.agent.config = { ...(plugin.agent.config || {}), name: 'ALICE' };
+  plugin.hub.callTool = async (name, args, opts) => {
+    calls.push({ name, args, opts });
+    if (name === 'dialx.list_approved_contacts') return { ok: true, result: [{ contact_id: 'k7', name: 'Wayne Williams', number: '+15550199' }] };
+    if (name === 'dialx.list_call_agents') return { ok: true, result: [{ agent_id: 'a1', name: 'ALICE' }, { agent_id: 'a2', name: 'Orbit' }] };
+    if (name === 'dialx.call_together') return { ok: true, result: { status: 'calling', call_id: '91', agents: ['ALICE', 'Orbit'] } };
+    return { ok: true, result: [] };
+  };
+  await plugin.execute({ action: 'call', contact: 'Wayne', purpose: 'plan the BBQ', opening: 'Hi Wayne!', voicemail: 'Hi Wayne.',
+    briefs: { alice: 'stay quiet and take notes', orbit: 'you do the talking', Nexus: 'not on this call' },
+    _context: { originalInput: 'Alice, you and Orbit call Wayne about the BBQ, Alice take notes, Orbit do the talking' } });
+  const together = calls.find(c => c.name === 'dialx.call_together');
+  assert.deepEqual(together.args.briefs, { ALICE: 'stay quiet and take notes', Orbit: 'you do the talking' });
+});
+
+test('briefsFor: null when nothing usable; never an agent off the call', () => {
+  assert.equal(briefsFor(null, ['Orbit'], 'ALICE'), null);
+  assert.equal(briefsFor(['x'], ['Orbit'], 'ALICE'), null);
+  assert.equal(briefsFor({ Nexus: 'hi', Orbit: '  ' }, ['Orbit'], 'ALICE'), null);
+  assert.deepEqual(briefsFor({ ORBIT: ' talk ' }, ['Orbit'], 'ALICE'), { Orbit: 'talk' });
 });
 
 test('plugin: a call that names no other agent stays an ordinary call', async () => {
