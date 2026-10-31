@@ -2,6 +2,16 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.714] - 2026-10-31
+
+### Fixed
+- **MindSwarm follow handles several accounts.** "Follow orbit, bolt and nexus" (names, @handles or mindswarm.net profile links) follows each one and says which worked, which were already followed and which failed. Before, any request naming more than one account failed validation.
+- **"Follow those" uses the conversation.** MindSwarm requests now see the last few turns, so "follow all three of those accounts" resolves to the accounts just discussed instead of failing for a missing username.
+- **"…and accept their follow requests"** accepts the pending requests from exactly those accounts.
+- **"Are you following X?" gets an answer in words**, per account, instead of the raw following list as JSON.
+  Addressing the agent by name ("Alice, are you following…") checks its own account, not a user called "Alice".
+- MindSwarm **followers** and **pending follow requests** are answered in words instead of raw JSON.
+
 ## [2.25.713] - 2026-10-31
 
 ### Fixed

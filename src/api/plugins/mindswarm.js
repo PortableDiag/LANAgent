@@ -9,6 +9,45 @@ import NodeCache from 'node-cache';
 import crypto from 'crypto';
 import { REPO_PATH } from '../../utils/paths.js';
 
+/**
+ * Every MindSwarm username in what the router or extractor produced. Models hand over several
+ * accounts their own way: { username }, { usernames: [...] }, a numbered object
+ * ({ 0: { username: "orbit" }, 1: ... }, 2026-10-31), profile links (https://mindswarm.net/orbit)
+ * or @handles. Duplicates are dropped, case-insensitively, first spelling kept.
+ */
+export function mindswarmUsernames(data = {}, text = '') {
+  const raw = [];
+  const push = (v) => {
+    if (v == null || v === '') return;
+    if (Array.isArray(v)) return v.forEach(push);
+    if (typeof v === 'object') return push(v.username ?? v.handle ?? v.user ?? v.name);
+    raw.push(String(v));
+  };
+  push(data.username); push(data.usernames); push(data.users); push(data.accounts);
+  for (const [k, v] of Object.entries(data)) if (/^\d+$/.test(k)) push(v);
+  if (!raw.length && text) {
+    for (const m of String(text).matchAll(/mindswarm\.net\/@?([A-Za-z0-9_.-]+)/gi)) raw.push(m[1]);
+  }
+  const out = [];
+  for (const r of raw) {
+    for (const part of r.split(/[\s,;]+/)) {
+      let u = part.trim();
+      const link = u.match(/mindswarm\.net\/(?:@|u\/|users?\/|profile\/)?([A-Za-z0-9_.-]+)/i);
+      if (link) u = link[1];
+      u = u.replace(/^@/, '').replace(/[^A-Za-z0-9_.-]/g, '').replace(/\.+$/, '');
+      if (!u || /^(and|or|https?)$/i.test(u) || /^(register|login|explore|settings|notifications)$/i.test(u)) continue;
+      if (!out.some(x => x.toLowerCase() === u.toLowerCase())) out.push(u);
+    }
+  }
+  return out;
+}
+
+/** A pending follow request's id and the requester's username, whatever the list's item shape. */
+function followRequestOf(r = {}) {
+  const who = r.requester || r.from || r.follower || r.user || r.sender || {};
+  return { id: String(r._id ?? r.id ?? r.requestId ?? ''), username: String(who.username ?? r.username ?? '') };
+}
+
 const DEFAULT_BASE_URL = 'https://mindswarm.net/api';
 
 export default class MindSwarmPlugin extends BasePlugin {
@@ -178,17 +217,19 @@ export default class MindSwarmPlugin extends BasePlugin {
       },
       {
         command: 'follow',
-        description: 'Follow a user on MindSwarm',
-        usage: 'follow({ username: "someuser" })',
+        description: 'Follow one or more users on MindSwarm (names, @handles or mindswarm.net profile links), optionally accepting their follow requests',
+        usage: 'follow({ usernames: ["orbit", "nexus"], acceptRequests: true })',
         examples: [
           'follow that user on mindswarm', 'follow them on mindswarm',
-          'add them on mindswarm', 'follow back on mindswarm'
+          'add them on mindswarm', 'follow back on mindswarm',
+          'follow orbit, bolt and nexus on mindswarm', 'follow all three of those accounts and accept their follow requests',
+          'follow https://mindswarm.net/orbit'
         ]
       },
       {
         command: 'unfollow',
         description: 'Unfollow a user on MindSwarm',
-        usage: 'unfollow({ username: "someuser" })',
+        usage: 'unfollow({ usernames: ["someuser"] })',
         examples: [
           'unfollow them on mindswarm', 'stop following on mindswarm',
           'remove follow on mindswarm'
@@ -209,7 +250,8 @@ export default class MindSwarmPlugin extends BasePlugin {
         usage: 'getFollowing({ username: "someuser", page: 1 })',
         examples: [
           'who do I follow on mindswarm', 'mindswarm following list',
-          'show who you follow on mindswarm'
+          'show who you follow on mindswarm', 'are you following nexus and orbit on mindswarm',
+          'tell me whether you are following orbit on mindswarm'
         ]
       },
       {
@@ -2621,34 +2663,130 @@ Return ONLY the post text, nothing else.`;
     return { success: true, data: result.data, message: 'Profile updated' };
   }
 
+  /** follow / unfollow: one account or several ("follow orbit, bolt and nexus"). */
   async _follow(data) {
-    this._requireAuth();
-    this.validateParams(data, { username: { required: true, type: 'string' } });
-    const result = await this._apiRequest('post', `/users/${data.username}/follow`);
-    this.pluginLogger.info(`Followed @${data.username}`);
-    return { success: true, data: result.data, message: `Followed @${data.username}` };
+    return this._followMany(data, 'post');
   }
 
   async _unfollow(data) {
+    return this._followMany(data, 'delete');
+  }
+
+  async _followMany(data, method) {
     this._requireAuth();
-    this.validateParams(data, { username: { required: true, type: 'string' } });
-    const result = await this._apiRequest('delete', `/users/${data.username}/follow`);
-    this.pluginLogger.info(`Unfollowed @${data.username}`);
-    return { success: true, data: result.data, message: `Unfollowed @${data.username}` };
+    const verb = method === 'post' ? 'follow' : 'unfollow';
+    const names = mindswarmUsernames(data, data._context?.originalInput || data.originalInput);
+    if (!names.length) {
+      return { success: false, error: `Which MindSwarm account should I ${verb}? Give me a username or a mindswarm.net profile link.` };
+    }
+    const done = [], already = [], failed = [];
+    for (const name of names) {
+      try {
+        await this._apiRequest(method, `/users/${encodeURIComponent(name)}/follow`);
+        done.push(name);
+        this.pluginLogger.info(`${verb === 'follow' ? 'Followed' : 'Unfollowed'} @${name}`);
+      } catch (err) {
+        const why = String(err.response?.data?.error || err.response?.data?.message || err.message || '');
+        if (/already|not following/i.test(why)) already.push(name);
+        else failed.push(`@${name} (${why || 'failed'})`);
+      }
+    }
+    const lines = [];
+    if (done.length) lines.push(`${verb === 'follow' ? 'Followed' : 'Unfollowed'} ${done.map(n => '@' + n).join(', ')} on MindSwarm.`);
+    if (already.length) lines.push(`${verb === 'follow' ? 'Already following' : 'Was not following'} ${already.map(n => '@' + n).join(', ')}.`);
+    if (failed.length) lines.push(`Couldn't ${verb} ${failed.join(', ')}.`);
+
+    // "follow them and accept their follow requests": accept pending requests from those accounts.
+    const input = String(data._context?.originalInput || data.originalInput || '');
+    if (verb === 'follow' && (data.acceptRequests === true || /\baccept\b/i.test(input) && /\brequests?\b/i.test(input))) {
+      lines.push(await this._acceptFollowRequestsFrom(names));
+    }
+    const ok = done.length + already.length > 0;
+    return ok ? { success: true, message: lines.join('\n'), result: lines.join('\n'), data: { done, already, failed } }
+      : { success: false, error: lines.join('\n') };
+  }
+
+  /** Accept the pending follow requests that come from these usernames; says what it did in one line. */
+  async _acceptFollowRequestsFrom(names) {
+    let list;
+    try {
+      const r = await this._apiRequest('get', '/users/follow-requests');
+      const d = r.data?.data ?? r.data;
+      list = (Array.isArray(d) ? d : d?.requests || d?.followRequests || d?.items || []).map(followRequestOf);
+    } catch (err) {
+      return `I couldn't read the follow requests: ${err.response?.data?.error || err.message}.`;
+    }
+    const wanted = new Set(names.map(n => n.toLowerCase()));
+    const mine = list.filter(r => r.id && wanted.has(r.username.toLowerCase()));
+    if (!mine.length) return `No pending follow requests from ${names.map(n => '@' + n).join(', ')}.`;
+    const accepted = [], failed = [];
+    for (const r of mine) {
+      try {
+        await this._apiRequest('post', `/users/follow-requests/${encodeURIComponent(r.id)}`, { action: 'accept' });
+        accepted.push('@' + r.username);
+      } catch (err) {
+        failed.push(`@${r.username} (${err.response?.data?.error || err.message})`);
+      }
+    }
+    return [accepted.length ? `Accepted follow requests from ${accepted.join(', ')}.` : '', failed.length ? `Couldn't accept ${failed.join(', ')}.` : '']
+      .filter(Boolean).join(' ');
   }
 
   async _getFollowers(data) {
-    const username = data.username || this.username;
+    const asked = typeof data.username === 'string' ? data.username.trim().replace(/^@/, '') : '';
+    const selfNames = [this.username, this.agent?.config?.name, process.env.AGENT_NAME, 'you', 'me', 'yourself', 'myself', 'i']
+      .filter(Boolean).map(n => String(n).toLowerCase());
+    const username = (asked && !selfNames.includes(asked.toLowerCase()) ? asked : '') || this.username;
     if (!username) throw new Error('Username required');
     const result = await this._apiRequest('get', `/users/${username}/followers`, { page: data.page || 1 });
-    return { success: true, data: result.data };
+    const d = result.data?.data ?? result.data ?? {};
+    const items = Array.isArray(d) ? d : d.followers || d.users || d.items || [];
+    const total = Number(d.total ?? d.pagination?.total ?? items.length) || items.length;
+    const handles = items.map(u => u?.username ?? u?.follower?.username ?? u?.user?.username).filter(Boolean);
+    const who = username === this.username ? 'I have' : `@${username} has`;
+    const message = total
+      ? `${who} ${total} follower${total === 1 ? '' : 's'} on MindSwarm: ${handles.map(h => '@' + h).join(', ')}${handles.length < total ? ', …' : ''}.`
+      : `${who} no followers on MindSwarm yet.`;
+    return { success: true, message, result: message, data: result.data };
   }
 
+  /**
+   * Who an account follows, in words. With `check` ("are you following Nexus, Orbit and Bolt?") it
+   * answers for each of those; it reads every page for that so a later page is never "not following".
+   */
   async _getFollowing(data) {
-    const username = data.username || this.username;
+    // "Alice, are you following…": the agent's own name, or you/me, is this account, not a user called "Alice".
+    const asked = typeof data.username === 'string' ? data.username.trim().replace(/^@/, '') : '';
+    const selfNames = [this.username, this.agent?.config?.name, process.env.AGENT_NAME, 'you', 'me', 'yourself', 'myself', 'i']
+      .filter(Boolean).map(n => String(n).toLowerCase());
+    const username = (asked && !selfNames.includes(asked.toLowerCase()) ? asked : '') || this.username;
     if (!username) throw new Error('Username required');
-    const result = await this._apiRequest('get', `/users/${username}/following`, { page: data.page || 1 });
-    return { success: true, data: result.data };
+    const check = mindswarmUsernames({ usernames: data.check }).filter(c => !selfNames.includes(c.toLowerCase()));
+    const handles = [];
+    let page = Number(data.page) || 1, total = 0, raw = null;
+    for (let i = 0; i < (check.length ? 20 : 1); i++) {
+      const result = await this._apiRequest('get', `/users/${username}/following`, { page });
+      raw = result.data;
+      const d = result.data?.data ?? result.data ?? {};
+      const items = Array.isArray(d) ? d : d.following || d.users || d.items || [];
+      total = Number(d.total ?? d.pagination?.total ?? items.length) || items.length;
+      for (const u of items) { const h = u?.username ?? u?.following?.username ?? u?.user?.username; if (h) handles.push(String(h)); }
+      if (!(d.pagination?.hasMore ?? d.hasMore)) break;
+      page++;
+    }
+    const me = username === this.username ? 'I' : `@${username}`;
+    let message;
+    if (check.length) {
+      const has = new Set(handles.map(h => h.toLowerCase()));
+      const yes = check.filter(c => has.has(c.toLowerCase())), no = check.filter(c => !has.has(c.toLowerCase()));
+      message = [yes.length ? `${me} follow${me === 'I' ? '' : 's'} ${yes.map(n => '@' + n).join(', ')} on MindSwarm.` : '',
+        no.length ? `${me} ${me === 'I' ? "don't" : "doesn't"} follow ${no.map(n => '@' + n).join(', ')}.` : ''].filter(Boolean).join(' ');
+    } else if (!total) {
+      message = `${me} ${me === 'I' ? "don't" : "doesn't"} follow anyone on MindSwarm yet.`;
+    } else {
+      message = `${me} follow${me === 'I' ? '' : 's'} ${total} account${total === 1 ? '' : 's'} on MindSwarm: ${handles.map(h => '@' + h).join(', ')}${handles.length < total ? ', …' : ''}.`;
+    }
+    return { success: true, message, result: message, data: raw };
   }
 
   // ─── Email Verification ────────────────────────────────────────────
@@ -4261,7 +4399,12 @@ Return ONLY the post text, nothing else.`;
     const originalInput = params.originalInput || params._context?.originalInput;
     const needsExtraction = params.needsParameterExtraction || (params.fromAI && originalInput);
     if (needsExtraction && originalInput && this.agent.providerManager) {
-      const extracted = await this._extractParameters(originalInput, action);
+      let recent = [];
+      try {
+        recent = this.agent.memoryManager?.getRecentTurns?.(params._context?.userId, params._context?.threadId, 6) || [];
+        if (recent.length && recent[recent.length - 1].content === originalInput) recent = recent.slice(0, -1);
+      } catch { recent = []; }
+      const extracted = await this._extractParameters(originalInput, action, recent);
       Object.assign(data, extracted);
     }
 
@@ -4570,7 +4713,7 @@ Return ONLY the post text, nothing else.`;
     return { success: true, message: 'Logged out of MindSwarm' };
   }
 
-  async _extractParameters(input, action) {
+  async _extractParameters(input, action, recent = []) {
     const actionHints = {
       createPost: 'Extract the text the user wants posted as "content". Everything after phrases like "post:", "say:", "saying", "post on mindswarm" is the content. If the input IS the content, return it as-is.',
       reply: 'Extract "postId" (if a post ID is mentioned) and "content" (the reply text).',
@@ -4584,10 +4727,10 @@ Return ONLY the post text, nothing else.`;
       getReplies: 'Extract "postId".',
       getProfile: 'Extract "username".',
       updateProfile: 'Extract "displayName", "bio", "location", "website" as appropriate.',
-      follow: 'Extract "username".',
-      unfollow: 'Extract "username".',
+      follow: 'Extract "usernames": an array of EVERY MindSwarm account to follow, lowercase, from names, @handles or mindswarm.net/<name> links ("Nexus" -> "nexus"). "them"/"those"/"all three" means the accounts named in the recent conversation. Add "acceptRequests": true when they also want follow requests from those accounts accepted.',
+      unfollow: 'Extract "usernames": an array of every MindSwarm account to unfollow, lowercase, from names, @handles or mindswarm.net/<name> links; "them"/"those" means the accounts named in the recent conversation.',
       getFollowers: 'Extract "username" if specified.',
-      getFollowing: 'Extract "username" if specified.',
+      getFollowing: 'Extract "username" only when they ask about another account\'s list; omit it when they ask about yours (a name they address you by, like "Alice, are you following…", is YOU, never the username), and "check": an array of the accounts they ask whether you follow ("are you following Nexus and Orbit" -> ["nexus","orbit"]).',
       searchPosts: 'Extract "query" (the search term).',
       searchUsers: 'Extract "query" (the search term).',
       searchGroups: 'Extract "query" (the search term).',
@@ -4619,7 +4762,7 @@ Return ONLY the post text, nothing else.`;
 
     const prompt = `Extract parameters from this user request for the MindSwarm "${action}" action.
 User said: "${input}"
-
+${recent.length ? `Recent conversation (oldest first), to resolve "them", "those" and the like:\n${recent.map(t => `${t.role}: ${String(t.content).slice(0, 300)}`).join('\n')}\n` : ''}
 Action-specific guidance: ${hint}
 
 Return ONLY a valid JSON object with the extracted parameters, nothing else. If you cannot extract a value, omit the key.`;
@@ -5893,7 +6036,12 @@ Return ONLY a valid JSON object with the extracted parameters, nothing else. If 
   async _getFollowRequests() {
     this._requireAuth();
     const result = await this._apiRequest('get', '/users/follow-requests');
-    return { success: true, data: result.data };
+    const d = result.data?.data ?? result.data;
+    const list = (Array.isArray(d) ? d : d?.requests || d?.followRequests || d?.items || []).map(followRequestOf);
+    const message = list.length
+      ? `${list.length} pending follow request${list.length === 1 ? '' : 's'} on MindSwarm: ${list.map(r => '@' + (r.username || 'unknown')).join(', ')}.`
+      : 'No pending follow requests on MindSwarm.';
+    return { success: true, message, result: message, data: result.data };
   }
 
   async _handleFollowRequest(data) {
