@@ -31,7 +31,7 @@ test('follow: several accounts in one request; one already followed, one failing
   const { p, calls } = rig({ 'post /users/bolt/follow': apiError('Already following this user'), 'post /users/nexus/follow': apiError('User not found') });
   const r = await p.execute({ action: 'follow', 0: { username: 'orbit' }, 1: { username: 'bolt' }, 2: { username: 'nexus' } });
   assert.equal(r.success, true, JSON.stringify(r));
-  assert.deepEqual(calls.map(c => c.path), ['/users/orbit/follow', '/users/bolt/follow', '/users/nexus/follow']);
+  assert.deepEqual(calls.filter(c => c.method === 'post').map(c => c.path), ['/users/orbit/follow', '/users/bolt/follow', '/users/nexus/follow']);
   assert.match(r.message, /Followed @orbit/);
   assert.match(r.message, /Already following @bolt/);
   assert.match(r.message, /Couldn't follow @nexus \(User not found\)/);
@@ -81,4 +81,29 @@ test('followers and follow requests answer in words', async () => {
   });
   assert.equal((await p.execute({ action: 'getFollowers' })).message, 'I have 2 followers on MindSwarm: @orbit, @nexus.');
   assert.equal((await p.execute({ action: 'getFollowRequests' })).message, 'No pending follow requests on MindSwarm.');
+});
+
+test('following a private account says a request was sent, not "Followed" (nexus, 2026-10-31)', async () => {
+  const { p } = rig({
+    'get /users/nexus': { success: true, data: { user: { username: 'nexus', profile: { private: true } }, isPrivate: true } },
+    'get /users/bolt': { success: true, data: { user: { username: 'bolt' }, isPrivate: false } }
+  });
+  const r = await p.execute({ action: 'follow', usernames: ['nexus', 'bolt'] });
+  assert.equal(r.success, true);
+  assert.match(r.message, /^Followed @bolt on MindSwarm\./);
+  assert.match(r.message, /Follow request to @nexus is waiting for approval: a private account/);
+  assert.ok(!/Followed @nexus/.test(r.message));
+});
+
+test('"Already following" from a private account that has not approved yet is a pending request', async () => {
+  const { p } = rig({
+    'post /users/nexus/follow': apiError('Already following this user'),
+    'get /users/nexus': { success: true, data: { user: { username: 'nexus' }, isPrivate: true } },
+    'post /users/orbit/follow': apiError('Already following this user'),
+    'get /users/orbit': { success: true, data: { user: { username: 'orbit' }, isPrivate: true } },
+    'get /users/alice_lanagent/following': { following: [{ username: 'orbit' }], pagination: { hasMore: false } }
+  });
+  const r = await p.execute({ action: 'follow', usernames: ['nexus', 'orbit'] });
+  assert.match(r.message, /Follow request to @nexus is waiting for approval/);
+  assert.match(r.message, /Already following @orbit/);
 });

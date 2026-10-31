@@ -11,6 +11,7 @@ All notable changes to LANAgent will be documented in this file.
 - **"Are you following X?" gets an answer in words**, per account, instead of the raw following list as JSON.
   Addressing the agent by name ("Alice, are you following…") checks its own account, not a user called "Alice".
 - MindSwarm **followers** and **pending follow requests** are answered in words instead of raw JSON.
+- Following a **private** MindSwarm account says the follow request is waiting for their approval, instead of "Followed" (or "Already following", which MindSwarm answers while the request is pending).
 
 ## [2.25.713] - 2026-10-31
 

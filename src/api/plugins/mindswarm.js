@@ -2679,20 +2679,30 @@ Return ONLY the post text, nothing else.`;
     if (!names.length) {
       return { success: false, error: `Which MindSwarm account should I ${verb}? Give me a username or a mindswarm.net profile link.` };
     }
-    const done = [], already = [], failed = [];
+    const done = [], already = [], failed = [], requested = [];
     for (const name of names) {
       try {
-        await this._apiRequest(method, `/users/${encodeURIComponent(name)}/follow`);
+        const res = await this._apiRequest(method, `/users/${encodeURIComponent(name)}/follow`);
+        // A private account (nexus, 2026-10-31) turns a follow into a request it must approve.
+        if (method === 'post' && await this._followIsPending(name, res)) {
+          requested.push(name);
+          this.pluginLogger.info(`Follow request sent to private account @${name}`);
+          continue;
+        }
         done.push(name);
         this.pluginLogger.info(`${verb === 'follow' ? 'Followed' : 'Unfollowed'} @${name}`);
       } catch (err) {
         const why = String(err.response?.data?.error || err.response?.data?.message || err.message || '');
-        if (/already|not following/i.test(why)) already.push(name);
+        // MindSwarm answers "Already following this user" for a request a private account has not
+        // approved yet (nexus, 2026-10-31): only our own following list tells the two apart.
+        if (/already/i.test(why) && method === 'post' && await this._followIsPending(name, null) && !(await this._iFollow(name))) requested.push(name);
+        else if (/already|not following/i.test(why)) already.push(name);
         else failed.push(`@${name} (${why || 'failed'})`);
       }
     }
     const lines = [];
     if (done.length) lines.push(`${verb === 'follow' ? 'Followed' : 'Unfollowed'} ${done.map(n => '@' + n).join(', ')} on MindSwarm.`);
+    if (requested.length) lines.push(`Follow request to ${requested.map(n => '@' + n).join(', ')} is waiting for approval: ${requested.length === 1 ? 'a private account' : 'private accounts'}, so it shows as following once they accept.`);
     if (already.length) lines.push(`${verb === 'follow' ? 'Already following' : 'Was not following'} ${already.map(n => '@' + n).join(', ')}.`);
     if (failed.length) lines.push(`Couldn't ${verb} ${failed.join(', ')}.`);
 
@@ -2701,9 +2711,37 @@ Return ONLY the post text, nothing else.`;
     if (verb === 'follow' && (data.acceptRequests === true || /\baccept\b/i.test(input) && /\brequests?\b/i.test(input))) {
       lines.push(await this._acceptFollowRequestsFrom(names));
     }
-    const ok = done.length + already.length > 0;
-    return ok ? { success: true, message: lines.join('\n'), result: lines.join('\n'), data: { done, already, failed } }
+    const ok = done.length + already.length + requested.length > 0;
+    return ok ? { success: true, message: lines.join('\n'), result: lines.join('\n'), data: { done, already, requested, failed } }
       : { success: false, error: lines.join('\n') };
+  }
+
+  /** Is this account in our own following list? (every page; false when unreadable) */
+  async _iFollow(name) {
+    try {
+      for (let page = 1; page <= 20; page++) {
+        const r = await this._apiRequest('get', `/users/${this.username}/following`, { page });
+        const d = r?.data?.data ?? r?.data ?? {};
+        const items = Array.isArray(d) ? d : d.following || d.users || d.items || [];
+        if (items.some(u => String(u?.username ?? u?.following?.username ?? u?.user?.username ?? '').toLowerCase() === name.toLowerCase())) return true;
+        if (!(d.pagination?.hasMore ?? d.hasMore)) return false;
+      }
+    } catch { /* unreadable */ }
+    return false;
+  }
+
+  /** Did this follow only send a request? The reply says so when it can; otherwise a private profile means yes. */
+  async _followIsPending(name, res) {
+    const body = res?.data?.data ?? res?.data ?? {};
+    if (body.requested === true || body.pending === true || /pend|request/i.test(String(body.status ?? body.state ?? ''))) return true;
+    if (body.following === true || body.isFollowing === true) return false;
+    try {
+      const p = await this._apiRequest('get', `/users/${encodeURIComponent(name)}`);
+      const d = p?.data?.data ?? p?.data ?? {};
+      return d.isPrivate === true || d.user?.profile?.private === true;
+    } catch {
+      return false;
+    }
   }
 
   /** Accept the pending follow requests that come from these usernames; says what it did in one line. */
