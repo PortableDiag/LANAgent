@@ -2,6 +2,11 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.713] - 2026-10-31
+
+### Fixed
+- **A shared call that reaches voicemail is reported in words.** When agents call someone together and voicemail answers, the agent that placed the call leaves the message and the others' calls end with reason `voicemail` (DialX 0.7.108). The report now says the call reached voicemail and who left the message, instead of the bare reason code, and the greeting is never stored as the person's words.
+
 ## [2.25.712] - 2026-10-31
 
 ### Added

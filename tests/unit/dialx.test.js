@@ -598,6 +598,15 @@ test('voicemail with a scheduled message: ALICE says nothing, takes no turns, an
   assert.ok(r.told.some(t => /I left a voicemail \(after the beep\)/.test(t)), r.told.join('\n'));
 });
 
+test('a shared call that reaches voicemail ends for ALICE with reason voicemail: the report says who left the message (DialX 0.7.108)', async () => {
+  const r = rig();
+  const d = await phone(r);
+  await d.say(started());
+  await d.say(env('event', { kind: 'call.ended', call_id: 'c1', reason: 'voicemail', duration_s: 12, transcript: [] }));
+  await tick(60);
+  assert.ok(r.told.some(t => /reached voicemail, and the agent who placed the call left the message/.test(t)), r.told.join('\n'));
+});
+
 test('voicemail without a scheduled message: ALICE leaves hers, then hangs up', async () => {
   const r = rig();
   const d = await phone(r);

@@ -58,6 +58,8 @@ const END_REASONS = {
   time_limit: 'it hit the 5-minute limit', owner_took_over: 'you took over', owner_ended: 'you ended it',
   no_answer: 'no answer', not_placed: "it wasn't placed", voice_path_failed: "the phone couldn't connect my voice to the call",
   skipped: 'it was skipped', voicemail_left: 'I left a voicemail',
+  // DialX 0.7.108: on a shared call that reaches voicemail, the agent that placed it leaves the message; the others end here.
+  voicemail: 'it reached voicemail, and the agent who placed the call left the message',
   lost: "the phone stopped reporting on it (DialX may have restarted), so I don't know how it ended. Say if you want me to call again",
   // DialX 0.7.71: sent at the next start for a call DialX stopped during (4293 #319).
   dialx_stopped: "the dialer stopped during the call, so it didn't finish and nothing was left. Say if you want me to call again"
@@ -999,7 +1001,7 @@ export class DialXCalls {
     }
     // The call joins the person's history, in order: what they said and what ALICE said. On voicemail
     // the "callee" is their greeting (a recording, often with their number), never their words.
-    const voicemail = s.voicemail || body.reason === 'voicemail_left';
+    const voicemail = s.voicemail || body.reason === 'voicemail_left' || body.reason === 'voicemail';
     await s.ready; // a short call can end before the person lookup has finished
     // One-to-one calls with a person only: a group call's lines are not marked by speaker, and a test
     // or agent-to-agent call is not that person talking (Trellis 4293 #402).
