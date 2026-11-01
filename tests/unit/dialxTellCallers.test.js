@@ -36,5 +36,5 @@ test('reportSpam sends report_spam for the thread and refuses a non-spam request
   p.confirmed = async (tool, args) => ({ tool, args });
   assert.deepEqual(await p.reportSpam({ thread: 'x', _context: { originalInput: 'report that text as spam' } }), { tool: 'report_spam', args: { thread_id: 't9' } });
   assert.equal((await p.reportSpam({ _context: { originalInput: 'delete it' } })).success, false);
-  assert.equal(p.outcomeText({ status: 'reported', forwarded: true, blocked: true, deleted: false }), 'Reported as spam: sent to 7726, number blocked.');
+  assert.equal(p.outcomeText({ status: 'reported', forwarded: true, blocked: true, deleted: false }), 'Reported as spam: sent to 7726, number blocked, conversation not deleted.');
 });

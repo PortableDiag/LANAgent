@@ -738,8 +738,11 @@ export default class TextXPlugin extends BasePlugin {
     if (status === 'scheduled' || (scheduled && status === 'confirmed')) return `Scheduled${res?.next_at ? ` for ${res.next_at}` : ''}.`;
     if (['updated', 'cancelled', 'retrying', 'deleted', 'blocked', 'unblocked', 'read'].includes(status)) return `Done: ${status}.`;
     if (status === 'reported') { // TextX 0.4.81 report_spam
-      const done = [res.forwarded && 'sent to 7726', res.blocked && 'number blocked', res.deleted && 'conversation deleted'].filter(Boolean);
-      return `Reported as spam${done.length ? `: ${done.join(', ')}` : ''}.`;
+      // Each step can be false (4293 #534: forwarded is false when the conversation has no incoming text): say which.
+      const steps = [['forwarded', 'sent to 7726', 'not sent to 7726'], ['blocked', 'number blocked', 'number not blocked'],
+        ['deleted', 'conversation deleted', 'conversation not deleted']];
+      const said = steps.filter(([k]) => typeof res[k] === 'boolean').map(([k, yes, no]) => res[k] ? yes : no);
+      return `Reported as spam${said.length ? `: ${said.join(', ')}` : ''}.`;
     }
     if (status === 'skipping_next') return 'The next one will be skipped.';
     if (status === 'will_send') return 'The next one will be sent after all.';

@@ -2,6 +2,11 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.721] - 2026-11-01
+
+### Changed
+- **TextX report spam reply** names each step that happened and each that did not ("not sent to 7726" when the conversation had no incoming text), from `report_spam`'s `forwarded`/`blocked`/`deleted` fields.
+
 ## [2.25.720] - 2026-11-01
 
 ### Added
