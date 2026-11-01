@@ -2,6 +2,11 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.719] - 2026-10-31
+
+### Fixed
+- **Avatar gallery always failed (`GET /api/avatar/gallery` 500).** The route stored Mongoose documents in node-cache, which deep-clones what it stores, and cloning a document throws ("Cannot read properties of undefined (reading '_defaultToObjectOptions')"). The gallery is now cached as plain objects (`toJSON()`, the same shape the response sends).
+
 ## [2.25.718] - 2026-10-31
 
 ### Added

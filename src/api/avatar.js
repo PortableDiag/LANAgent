@@ -92,7 +92,11 @@ router.get('/gallery', async (req, res) => {
             owner: req.query.owner
         };
 
-        const avatars = await retryOperation(() => avatarService.getGallery(limit, filters), { retries: 3 });
+        const docs = await retryOperation(() => avatarService.getGallery(limit, filters), { retries: 3 });
+        // node-cache deep-clones what it stores, and cloning a Mongoose document throws
+        // ("reading '_defaultToObjectOptions'"), so every gallery load was a 500 (2026-10-31).
+        // toJSON() is exactly what res.json sends.
+        const avatars = docs.map(d => (typeof d?.toJSON === 'function' ? d.toJSON() : d));
         cache.set(cacheKey, avatars);
         res.json({ success: true, data: avatars });
     } catch (error) {
