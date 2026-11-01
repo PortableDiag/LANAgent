@@ -5,6 +5,7 @@ import { textxRequest } from '../../services/textx/textxHub.js';
 import { OWNER_ASKED_REASON, isoWithOffset, getDialXSettings, agentAudio, clock, voicemailText, joinToMp3, RECORDING_PART_S, withAiDisclosure, riffPad, thereminize, thereminMode } from '../../services/textx/dialx.js';
 import { isTextRequest } from '../../core/pluginChainProcessor.js';
 import { supportsRealtime, realtimeVoiceAudio } from '../../services/textx/dialxRealtime.js';
+import { PluginSettings } from '../../models/PluginSettings.js';
 
 /**
  * Phone calls through the DialX dialer app ("call Wayne and tell him happy birthday at 5pm").
@@ -104,6 +105,13 @@ export function briefsFor(briefs, agents = [], self = '') {
     if (name && text) out[name] = text;
   }
   return Object.keys(out).length ? out : null;
+}
+
+/** The owner's line for callers in "tell callers I'm in the pool" / "if anyone calls, say ..." (DialX 0.7.113). */
+export function tellCallersIn(text) {
+  const m = /\b(?:tell|let)\s+(?:callers|anyone\s+who\s+calls|people\s+who\s+call|whoever\s+calls)(?:\s+who\s+ask(?:\s+about\s+me)?)?(?:\s+know)?(?:\s+that)?[,:]?\s+(.+)$/i.exec(text)
+    || /\bif\s+(?:anyone|someone|anybody|people)\s+calls?,?\s+(?:tell\s+them|say|let\s+them\s+know)(?:\s+that)?[,:]?\s+(.+)$/i.exec(text);
+  return m ? m[1].trim().replace(/^["“]|["”]$/g, '').slice(0, 400) : null;
 }
 
 export default class DialXPlugin extends BasePlugin {
@@ -213,6 +221,12 @@ export default class DialXPlugin extends BasePlugin {
         examples: ["i'm away, answer my calls", 'answer all my calls after 3 rings', 'pick up my calls while I drive', 'stop answering my calls', "i'm back, stop answering my calls", 'turn off answering my calls']
       },
       {
+        command: 'tellCallers',
+        description: "Set what to tell callers who ask about the user, on calls answered for them (DialX Tell callers), or clear it. `text` is the user's line in their own words, e.g. \"I'm in the pool, back around 4\"; `clear: true` removes it",
+        usage: 'tellCallers({ text: "I\'m at the dentist, back by 3" })',
+        examples: ["tell callers I'm in the pool, back around 4", "if anyone calls, say I'm at the dentist until 3", "let callers know I'm driving and will call back", 'stop telling callers where I am', 'clear the message for callers']
+      },
+      {
         command: 'callLists',
         description: 'Show one of DialX\'s call lists: `list` is spam (the spam list), allowed (numbers that always ring), blocked (the phone\'s block list), screened (calls DialX screened), or contacts (favorites with favoritesOnly)',
         usage: 'callLists({ list: "spam" })',
@@ -305,6 +319,7 @@ export default class DialXPlugin extends BasePlugin {
         case 'notSpam': return await this.spam('dialx.mark_not_spam', data);
         case 'expecting': return await this.expecting(data);
         case 'answerAllCalls': return await this.answerAllCalls(data);
+        case 'tellCallers': return await this.tellCallers(data);
         case 'callLists': return await this.callLists(data);
         case 'removeFromList': return await this.removeFromList(data);
         case 'clearList': return await this.clearList(data);
@@ -424,14 +439,50 @@ export default class DialXPlugin extends BasePlugin {
       if (m) rings = Math.min(5, Number(words[m[1].toLowerCase()] ?? m[1]));
       else if (/\b(right away|immediately|at once|straight away)\b/i.test(asked)) rings = 0;
     }
-    const r = await this.tool('dialx.answer_all_calls', { rings, requested_by_owner: true });
+    const tell = data.tellCallers ?? data.tell_callers ?? (off ? undefined : tellCallersIn(asked));
+    const r = await this.tool('dialx.answer_all_calls', { rings, ...(tell != null ? { tell_callers: String(tell) } : {}), requested_by_owner: true });
     if (!r.ok) return errorResult(r);
     if (r.pending) return { success: true, result: 'Confirm it on the phone.' };
     const on = String(r.result?.status || (rings < 0 ? 'off' : 'on')) === 'on';
     const n = r.result?.rings ?? rings;
-    return { success: true, result: on
+    await this.rememberRings(n);
+    const said = r.result?.tell_callers ?? tell;
+    return { success: true, result: (on
       ? `I'll answer every call you don't pick up${n === 0 ? ' right away' : ` after ${n} ring${n === 1 ? '' : 's'}`} and take a message. Calls your screening silences, blocks or sends to voicemail are left alone. Say "stop answering my calls" to turn it off.`
-      : "I've stopped answering your calls (contacts you set to Answers still are)." };
+      : "I've stopped answering your calls (contacts you set to Answers still are).") +
+      (on && said ? ` If a caller asks about you, I'll tell them: "${said}".` : '') };
+  }
+
+  /** The last `rings` ALICE set, so a Tell callers change alone does not switch answering on or off (rings is required). */
+  async rememberRings(n) {
+    if (Number.isFinite(Number(n))) await PluginSettings.setCached('dialx', 'answerAllRings', Number(n)).catch(() => {});
+  }
+
+  /**
+   * DialX 0.7.113 Tell callers (4293 #532): the owner's line for callers who ask about them, on calls the agent answers
+   * for them. Set through answer_all_calls (`""` clears). It only reaches callers when calls are answered, so when ALICE
+   * has no record of answering being on, setting a line turns it on after 2 rings, and the reply says so.
+   */
+  async tellCallers(data) {
+    if (!this.fromOwner(data)) return { success: false, error: 'Only my owner can change what I tell callers.' };
+    const asked = String(data._context?.originalInput || data.originalInput || '');
+    const clear = data.clear === true || /\b(stop|don'?t|no longer|quit)\s+(telling|saying)\b|\b(clear|remove|delete)\b.*\b(message|line|note)\b/i.test(asked);
+    const text = clear ? '' : String(data.text ?? data.message ?? tellCallersIn(asked) ?? '').trim().slice(0, 400);
+    if (!clear && !text) return { success: false, error: 'What should I tell callers who ask about you?' };
+    const raw = await PluginSettings.getCached('dialx', 'answerAllRings').catch(() => null);
+    const known = raw != null && Number.isFinite(Number(raw));
+    const saved = Number(raw);
+    const rings = known ? saved : clear ? -1 : 2;
+    const turnedOn = !clear && rings < 0 ? 2 : rings;
+    const r = await this.tool('dialx.answer_all_calls', { rings: turnedOn, tell_callers: text, requested_by_owner: true });
+    if (!r.ok) return errorResult(r);
+    if (r.pending) return { success: true, result: 'Confirm it on the phone.' };
+    const n = r.result?.rings ?? turnedOn;
+    await this.rememberRings(n);
+    if (clear) return { success: true, result: "Done: I won't tell callers anything about you." };
+    const changed = n >= 0 && !(known && saved >= 0);
+    return { success: true, result: `If a caller asks about you, I'll tell them: "${r.result?.tell_callers ?? text}".` +
+      (changed ? ` I'm also answering the calls you don't pick up${n === 0 ? ' right away' : ` after ${n} ring${n === 1 ? '' : 's'}`}, so callers hear it; say "stop answering my calls" to turn that off.` : '') };
   }
 
   // ── call lists and history (DialX owner tools) ────────────────────────────────────────

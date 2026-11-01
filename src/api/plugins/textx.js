@@ -81,7 +81,7 @@ const FIRST_TOOL = {
   // TextX 0.4.32
   thread: 'list_threads', customize: 'list_threads', pinMessage: 'list_threads', draft: 'list_threads',
   tabs: 'manage_tabs', templates: 'templates', gif: 'gif_search', edit: 'list_threads', forward: 'list_threads',
-  deleteThread: 'list_threads', blockRules: 'block_rules', settings: 'app_settings', pendingMms: 'pending_mms', backup: 'backup'
+  deleteThread: 'list_threads', reportSpam: 'report_spam', blockRules: 'block_rules', settings: 'app_settings', pendingMms: 'pending_mms', backup: 'backup'
 };
 // Actions a "text/tell/ask <someone> …" request can really mean; any other match becomes a send.
 const SEND_LIKE = new Set(['send', 'schedule', 'manageScheduled', 'edit', 'forward', 'draft']);
@@ -318,6 +318,12 @@ export default class TextXPlugin extends BasePlugin {
         examples: ['delete the whole conversation with that spam number']
       },
       {
+        command: 'reportSpam',
+        description: "Report a spam TEXT conversation to the carrier (TextX forwards its last incoming text to 7726), then block that number and delete the conversation. The user confirms on the phone. For spam CALLS use DialX",
+        usage: 'reportSpam({ thread: "+15550100" })',
+        examples: ['report that text as spam', 'report the spam text from 555-0100', 'send that scam text to 7726 and block it']
+      },
+      {
         command: 'blockRules',
         description: 'Spam blocking rules on the phone: list rules, add one (number, prefix, keyword or regex), remove one, see texts the rules caught, restore a caught text, or clear all rules (clearing asks the user)',
         usage: 'blockRules({ op: "add", kind: "keyword", pattern: "crypto giveaway" })  (op: list|add|remove|caught|restore|clear; id for remove/restore)',
@@ -466,6 +472,7 @@ export default class TextXPlugin extends BasePlugin {
         case 'retryMessage': return await this.retryMessage(data);
         case 'attachment': return await this.attachment(data);
         case 'deleteThread': return await this.deleteThread(data);
+        case 'reportSpam': return await this.reportSpam(data);
         case 'blockRules': return await this.blockRules(data);
         case 'settings': return await this.settings(data);
         case 'pendingMms': return await this.pendingMms(data);
@@ -730,6 +737,10 @@ export default class TextXPlugin extends BasePlugin {
     if (status === 'sent') return 'Sent.';
     if (status === 'scheduled' || (scheduled && status === 'confirmed')) return `Scheduled${res?.next_at ? ` for ${res.next_at}` : ''}.`;
     if (['updated', 'cancelled', 'retrying', 'deleted', 'blocked', 'unblocked', 'read'].includes(status)) return `Done: ${status}.`;
+    if (status === 'reported') { // TextX 0.4.81 report_spam
+      const done = [res.forwarded && 'sent to 7726', res.blocked && 'number blocked', res.deleted && 'conversation deleted'].filter(Boolean);
+      return `Reported as spam${done.length ? `: ${done.join(', ')}` : ''}.`;
+    }
     if (status === 'skipping_next') return 'The next one will be skipped.';
     if (status === 'will_send') return 'The next one will be sent after all.';
     if (status === 'declined') return 'You declined it on the phone, so nothing was sent.';
@@ -1412,6 +1423,17 @@ export default class TextXPlugin extends BasePlugin {
     const f = await this.findThread(data.thread || data.contact);
     if (f.error) return { success: false, error: f.error };
     return this.confirmed('delete_thread', { thread_id: f.thread.thread_id });
+  }
+
+  /** TextX 0.4.81 report_spam {thread_id} → {status:"reported", forwarded, blocked, deleted}; always asked on the phone. */
+  async reportSpam(data) {
+    const said = String(data._context?.originalInput ?? data.originalInput ?? '');
+    if (said && !/\b(spam|scam|7726|junk|phishing)\b/i.test(said)) {
+      return { success: false, error: "That didn't sound like a request to report a text as spam, so I didn't." };
+    }
+    const f = await this.findThread(data.thread || data.contact || data.number);
+    if (f.error) return { success: false, error: f.error };
+    return this.confirmed('report_spam', { thread_id: f.thread.thread_id });
   }
 
   async blockRules(data) {

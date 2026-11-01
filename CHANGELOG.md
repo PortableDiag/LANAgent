@@ -2,6 +2,13 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.720] - 2026-11-01
+
+### Added
+- **DialX Tell callers (DialX 0.7.113).** The owner can say "tell callers I'm in the pool, back around 4" or "if anyone calls, say I'm at the dentist" (new `dialx.tellCallers`; `answerAllCalls` also takes `tellCallers`), and "stop telling callers" clears it. It is sent as `answer_all_calls {tell_callers}`. The `rings` value ALICE last set is remembered so that changing the line alone leaves answering as it was. When ALICE has no record that answering is on, setting a line turns it on after 2 rings and the reply says so.
+- On calls ALICE answers for the owner, the Tell callers line (`call.started.owner_brief`, or the quoted line in `purpose`) is in both the turn and realtime prompts. It is the one exception to "never say where the owner is".
+- **TextX report spam (TextX 0.4.81).** New `textx.reportSpam`: "report that text as spam" calls `report_spam {thread_id}`. TextX forwards the last incoming text to 7726, then blocks the number and deletes the conversation, after the owner confirms on the phone. It uses the 0.7 dangerous-action intent threshold.
+
 ## [2.25.719] - 2026-10-31
 
 ### Fixed

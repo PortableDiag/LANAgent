@@ -41,7 +41,9 @@ export const TOOLS = ['send_sms', 'schedule_message', 'list_threads', 'read_thre
   // the phone's setup screen; listing them here is what lets that switch be turned on at all
   // (welcome.capabilities: TextX greys out what the agent does not call).
   'update_thread', 'customize_thread', 'pin_message', 'set_draft', 'manage_tabs', 'templates', 'gif_search',
-  'edit_message', 'forward_message', 'delete_thread', 'block_rules', 'app_settings', 'pending_mms', 'backup'];
+  'edit_message', 'forward_message', 'delete_thread', 'block_rules', 'app_settings', 'pending_mms', 'backup',
+  // TextX 0.4.81 (4293 #521): forward the last incoming text to 7726, then block the number and delete the conversation
+  'report_spam'];
 // The † tools of §5: they wait on the user's tap on the phone (§6.5), so their results can come
 // back long after the request that asked for them.
 export const CONFIRMED_TOOLS = new Set(['send_sms', 'schedule_message', 'update_scheduled', 'send_scheduled_now',
@@ -49,7 +51,7 @@ export const CONFIRMED_TOOLS = new Set(['send_sms', 'schedule_message', 'update_
   // 0.4.32: always asked (edit, forward, delete a conversation), or asked for some actions
   // (block_rules clear, a sensitive app setting, backup restore); waiting as for a tap is harmless
   // when the phone answers at once.
-  'edit_message', 'forward_message', 'delete_thread', 'block_rules', 'app_settings', 'backup']);
+  'edit_message', 'forward_message', 'delete_thread', 'block_rules', 'app_settings', 'backup', 'report_spam']);
 
 const INBOUND_TYPES = new Set(['hello', 'message', 'tool_result', 'event', 'ping', 'pong', 'ack', 'error']);
 // Agent extensions (`x.<name>`): requests a client makes of this agent beyond the shared

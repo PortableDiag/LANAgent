@@ -146,7 +146,7 @@ export class VectorIntentDetector {
       // Destructive or access-granting actions (restart, delete*, remove*, share*, block*) need the
       // highest threshold, whichever plugin owns them. block was missing: "Text 5551234567 …" matched
       // textx block at 0.60 because its example is a bare number (2026-10-18; the phone's tap held).
-      const isDangerousAction = metadata.action && /^(restart|redeploy|shutdown|stop|delete\w*|remove\w*|share\w*|unshare\w*|block\w*|unblock\w*)$/i.test(metadata.action);
+      const isDangerousAction = metadata.action && /^(restart|redeploy|shutdown|stop|delete\w*|remove\w*|share\w*|unshare\w*|block\w*|unblock\w*|reportSpam)$/i.test(metadata.action);
       let threshold = 0.6;
       if (isDangerousAction) threshold = Math.max(threshold, 0.7);
       // A request to see something ("show my trellis cards", "what's on…") matched to an action that
