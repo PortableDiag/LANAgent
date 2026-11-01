@@ -2,7 +2,7 @@ import { BasePlugin } from '../core/basePlugin.js';
 import { nowInZone, resolveRequestTime, localZone } from '../../utils/wallClock.js';
 import { getTextX } from '../../services/textx/index.js';
 import { textxRequest } from '../../services/textx/textxHub.js';
-import { isoWithOffset, getDialXSettings, agentAudio, clock, voicemailText, joinToMp3, RECORDING_PART_S, withAiDisclosure, riffPad, thereminize, thereminMode } from '../../services/textx/dialx.js';
+import { OWNER_ASKED_REASON, isoWithOffset, getDialXSettings, agentAudio, clock, voicemailText, joinToMp3, RECORDING_PART_S, withAiDisclosure, riffPad, thereminize, thereminMode } from '../../services/textx/dialx.js';
 import { isTextRequest } from '../../core/pluginChainProcessor.js';
 import { supportsRealtime, realtimeVoiceAudio } from '../../services/textx/dialxRealtime.js';
 
@@ -37,6 +37,36 @@ export { isTextRequest };
 
 /** How long a read of DialX's approved contacts is reused for the next call. */
 const APPROVED_TTL_MS = 10 * 60 * 1000;
+
+/**
+ * "Call me" from the owner: ring the owner's own phone (DialX 0.7.110 dialx.call_owner), never a contact search.
+ * "me" went to contacts_lookup and matched "Home Improvements", "James Bacon", "Megan…" (2026-10-31 21:44).
+ */
+export function callsTheOwner(request, who) {
+  if (who != null && /^(?:me|myself|my\s+(?:cell|cell\s*phone|phone|mobile|number))$/i.test(String(who).trim().replace(/[.!?]+$/, ''))) return true;
+  return OWNER_CALL_RE.test(String(request || '').trim());
+}
+const CALL_ME = String.raw`^(?:(?:hey|ok|okay)\s+)?(?:[a-z]+[,:]?\s+)?(?:please\s+)?(?:(?:can|could|would|will)\s+you\s+)?(?:(?:call|ring|phone)\s+me|give\s+me\s+a\s+(?:call|ring))\b`;
+const OWNER_CALL_RE = new RegExp(CALL_ME, 'i');
+
+/** What the owner added after "call me" ("…about the deploy"), or '' for a bare "call me". */
+export function ownerCallReason(request) {
+  return String(request || '').trim()
+    .replace(OWNER_CALL_RE, '')
+    .replace(/^[\s,.;:!?-]*(?:(?:and|to|about|so|re)\b\s*)?/i, '').replace(/[\s.!?]+$/, '').replace(/\bplease\b/gi, '').trim();
+}
+
+/** A time in the request ("in 10 minutes", "at 5", "tomorrow"): a ring is only ever now. */
+const LATER_RE = /\b(?:in\s+(?:\d+|a|an|a\s+few|half\s+an?)\s+(?:min|minute|minutes|hour|hours|hr|hrs|sec|seconds)|at\s+\d|tomorrow|tonight|later|this\s+(?:morning|afternoon|evening)|when\s+)\b/i;
+
+const OWNER_CALL_REFUSALS = {
+  not_allowed: 'DialX won\'t let me ring you: "May call me" is off for me. Turn it on on my page in DialX.',
+  busy: 'A call is already up on your phone (or another agent is ringing you), so I can\'t ring you right now.',
+  do_not_disturb: 'Your phone is on Do Not Disturb, so DialX won\'t ring you.',
+  limit: 'I\'ve used up today\'s rings to you in DialX (Calls to you a day).',
+  no_microphone: 'DialX can\'t use the microphone right now, so it can\'t ring you.',
+  not_supported: 'This DialX can\'t ring you. Update DialX to 0.7.110 or later.'
+};
 
 function errorResult(r) {
   const code = r?.error?.code || 'internal';
@@ -89,7 +119,8 @@ export default class DialXPlugin extends BasePlugin {
         description: 'Phone someone from the user\'s phone and talk with them. `purpose` is why the user wants the call; `opening` is the first thing to say to them; `at` is when (ISO-8601, omit for now). Only contacts approved in DialX; the user confirms on the phone',
         usage: 'call({ contact: "Wayne", at: "2026-10-23T17:00", purpose: "wish him a happy birthday", opening: "Hi Wayne! I\'m calling to wish you a happy birthday.", voicemail: "optional: what to leave if voicemail answers, in the user\'s words" })',
         examples: ['call wayne and tell him happy birthday at 5pm', 'phone mom and ask if she needs anything from the store', 'give the plumber a call tomorrow at 9 and confirm the appointment', 'ring Sam now and let him know I\'m running late',
-          'leave Adam a voicemail saying I\'ll be late', 'leave Adam a theremin voicemail', 'call Wayne and play him a theremin riff', 'call Sam in a robot voice and say hi']
+          'leave Adam a voicemail saying I\'ll be late', 'leave Adam a theremin voicemail', 'call Wayne and play him a theremin riff', 'call Sam in a robot voice and say hi',
+          'call me', 'ring me', 'give me a call', 'call me about the deploy']
       },
       {
         command: 'calls',
@@ -663,9 +694,12 @@ export default class DialXPlugin extends BasePlugin {
       if (plugin?.execute) return plugin.execute({ action: 'send', needsParameterExtraction: true, _context: data._context, originalInput: request });
       return { success: false, error: "That asks for a text, and I can't send texts right now, so I didn't call." };
     }
+    // "Call me": the owner's own phone, before any extraction or contact search.
+    if (callsTheOwner(request, data.contact)) return this.callOwner(request);
     if (data.needsParameterExtraction || !data.contact || !data.opening || !data.voicemail) await this.extract(data, request);
     const who = String(data.contact || data.to || data.name || '').trim();
     if (!who) return { success: false, error: 'Who should I call?' };
+    if (callsTheOwner('', who)) return this.callOwner(request, data.purpose);
     const purpose = String(data.purpose || data.message || '').trim();
     const opening = String(data.opening || '').trim();
     if (!purpose && !opening) return { success: false, error: `What should I say to ${who}?` };
@@ -784,6 +818,29 @@ export default class DialXPlugin extends BasePlugin {
   }
 
   /**
+   * Ring the owner's own phone (DialX 0.7.110, Trellis 4293 #522): it rings like an incoming call with the reason on screen.
+   * Answered → call.started {owner_call:true} and a realtime talk with no disclosure; not answered → the reason goes as a text.
+   */
+  async callOwner(request, purpose = '') {
+    if (LATER_RE.test(request)) return { success: false, error: 'DialX can only ring you right now, not at a set time. Say "call me" when you want the call, or ask me for a reminder.' };
+    const reason = (ownerCallReason(request) || String(purpose || '').trim()).slice(0, 200) || OWNER_ASKED_REASON;
+    const r = await this.tool('dialx.call_owner', { reason });
+    const code = r.ok ? String(r.result?.status || '') : String(r.error?.code || '');
+    if (!r.ok || code !== 'ringing') {
+      this.logger.warn(`dialx call_owner refused: ${code || 'no code'} ${r.error?.message || ''}`);
+      if (OWNER_CALL_REFUSALS[code]) return { success: false, error: OWNER_CALL_REFUSALS[code] };
+      if (code === 'none' || code === 'unknown_tool' || code === 'not_found') return { success: false, error: OWNER_CALL_REFUSALS.not_supported };
+      return r.ok ? { success: false, error: `DialX answered "${code}" and didn't ring you.` } : errorResult(r);
+    }
+    if (r.result?.call_id) {
+      await this.hub?.dialx?.store?.plan?.({ callId: String(r.result.call_id), contact: process.env.OWNER_NAME || 'owner', number: '', purpose: reason, plannedAt: new Date() })
+        ?.catch?.(e => this.logger.warn(`dialx: owner call not recorded: ${e.message}`));
+    }
+    this.logger.info(`dialx call_owner: ringing (call ${r.result?.call_id ?? '?'}, ${r.result?.ring_s ?? 30} s)`);
+    return { success: true, result: `Ringing your phone now (for ${r.result?.ring_s ?? 30} s).` };
+  }
+
+  /**
    * The other agents the owner named for this call ("you and Orbit call Wayne", "call Wayne with Orbit"), as DialX knows
    * them (dialx.list_call_agents). Empty when none is named, the phone has no call_together, or the list is unreadable.
    */
@@ -879,6 +936,7 @@ export default class DialXPlugin extends BasePlugin {
         '- "voice": only when the request asks for one ("in a robot voice", "a deep voice", "autotune"): its name, e.g. "Robot"; otherwise null.\n' +
         '- "at": the wall-clock time they said, YYYY-MM-DDTHH:mm with no offset or Z (a time with no date that has ' +
         `already passed today means tomorrow); null for now. Local now is ${nowInZone()}.\n` +
+        `- "contact": "me" when ${owner} wants you to call ${owner} themselves ("call me", "ring me").\n` +
         `- "purpose": what ${owner} wants from the call, in a few words ("wish Wayne a happy birthday").\n` +
         `- "opening": the first thing you will say to them. It may be the first thing they hear, so it must say who you ` +
         `are and that you are an AI: one or two warm, spoken sentences addressed to them, starting "Hi <name>, this is ${name}, ` +

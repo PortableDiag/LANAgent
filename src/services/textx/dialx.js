@@ -45,6 +45,8 @@ export const DIALX_TOOLS = ['dialx.say', 'dialx.hangup', 'dialx.list_approved_co
   'dialx.call_together', 'dialx.list_call_agents',
   // DialX 0.7.102 (4293 #501): answer every call the owner misses
   'dialx.answer_all_calls',
+  // DialX 0.7.110 (4293 #522): ring the owner's own phone ("call me"); the owner's "May call me" switch
+  'dialx.call_owner',
   // DialX 0.7.48: the disclosure in the agent's own voice
   'dialx.disclosure_audio'];
 /** These wait on the owner's tap on the phone's confirm card, like a send. */
@@ -225,6 +227,22 @@ export function callClock(s, now = Date.now()) {
   const left = CALL_LIMIT_S - run;
   return `The call has run ${run} s of its ${CALL_LIMIT_S} s limit.` +
     (left <= 20 ? ' Time is almost up: say a warm goodbye now and end the call ("hangup": true).' : '') + '\n\n';
+}
+
+/** The reason a call_owner ring carries when the owner asked for it ("call me"), not the agent. */
+export const OWNER_ASKED_REASON = 'You asked me to call you.';
+const OWNER_ASKED = /^you asked me to call you\b/i;
+
+/** Turn mode on a call the agent placed to the owner (DialX 0.7.110): no disclosure, the owner knows who is calling. */
+export function ownerCallPrompt({ name, owner, s, lines }) {
+  const asked = !s.purpose || OWNER_ASKED.test(s.purpose);
+  return `You are ${name}, ${owner}'s AI assistant. You phoned ${owner} on ${owner}'s own phone and ${owner} answered. ` +
+    (asked ? `${owner} asked you to call. ` : `Why you called: ${s.purpose}\n`) +
+    `${owner} knows who you are: no AI disclosure, no "nice to meet you".\n\nThe call so far (oldest first):\n${lines.join('\n')}\n\n` +
+    (asked ? `If nothing has been said yet, greet ${owner} by first name and ask what they need. ` : `If nothing has been said yet, greet ${owner} by first name and say why you called first. `) +
+    'Answer in one or two short spoken sentences: no lists, links, emoji or symbols. Never repeat a line. Never agree to ' +
+    'payments or share codes or passwords. End the call ("hangup": true, with a short goodbye) only when they say goodbye. ' +
+    'Answer one JSON object: {"say": "<what to say>", "hangup": true|false}.';
 }
 
 export function incomingPrompt({ name, owner, s, lines }) {
@@ -608,6 +626,8 @@ export class DialXCalls {
         transcript: [], turns: 0, busy: false, queued: [], seq: 0, done: false };
       this.calls.set(id, s);
     }
+    // DialX 0.7.110 dialx.call_owner (4293 #522): the agent rang the owner's own phone. Every event of that call says so.
+    if (body.owner_call || body.contact?.owner) s.ownerCall = true;
     return s;
   }
 
@@ -623,11 +643,13 @@ export class DialXCalls {
     // Call 51 (2026-10-26): DialX crashed as voicemail answered, no call.ended ever came, and the owner never heard
     // how it went. Past the call limit plus a margin, close it as lost and say so.
     if (!s.lostTimer) {
+      // A call to the owner has no Longest-call limit on the phone (DialX 0.7.110): closing it at 5 min would cut a live talk.
+      const limitS = s.ownerCall ? Math.max(this.limitS, 3600) : this.limitS;
       s.lostTimer = setTimeout(() => {
         if (s.done) return;
-        this.logger.warn?.(`DialX: call ${id} with ${s.contact}: no end report ${this.limitS + this.lostGraceS} s after it started; closing it as lost`);
+        this.logger.warn?.(`DialX: call ${id} with ${s.contact}: no end report ${limitS + this.lostGraceS} s after it started; closing it as lost`);
         this.ended(device, id, { reason: 'lost' }).catch(e => this.logger.warn?.(`DialX: lost call ${id} not closed: ${e.message}`));
-      }, (this.limitS + this.lostGraceS) * 1000);
+      }, (limitS + this.lostGraceS) * 1000);
       s.lostTimer.unref?.();
     }
     // DialX 0.7.30 Test call: nothing is dialed; the owner talks through the phone's mic and speaker.
@@ -876,7 +898,7 @@ export class DialXCalls {
     await s.ready;
     const { name, owner } = this.names();
     const lines = s.transcript.map(l => l.role === 'callee' ? untrustedCaller(l.text) : `${l.role === 'agent' ? name : l.role}: ${l.text}`);
-    const prompt = s.incoming ? incomingPrompt({ name, owner, s, lines }) :
+    const prompt = s.ownerCall ? ownerCallPrompt({ name, owner, s, lines }) : s.incoming ? incomingPrompt({ name, owner, s, lines }) :
       `You are ${name}, ${owner}'s AI assistant, on a live phone call with ${s.contact} on ${owner}'s behalf. ` +
       `The phone has already told them you are an AI assistant calling for ${owner}.\n` +
       `Why ${owner} wanted this call: ${s.purpose || 'not given'}\n\n` +
@@ -1024,7 +1046,17 @@ export class DialXCalls {
     // through the ringing, so a call answered after ~30 s was hung up at "hello" (call 6,
     // 2026-10-24). That is not the agent going quiet; say what happened and offer the call again.
     const nothingPlayed = !transcript.some(l => l.role === 'agent' || l.role === 'disclosure');
-    if (s.incoming) {
+    if (s.ownerCall) {
+      // The owner was on the line, so no call report. Not picked up: what the ring was for goes as a text (DialX #522).
+      if (body.reason === 'declined' || body.reason === 'no_answer') {
+        const planned = await this.store.get?.(id).catch(() => null);
+        const why = String(planned?.purpose || s.purpose || body.purpose || '').trim();
+        const asked = !why || OWNER_ASKED.test(why);
+        await this.hub.tellOwner(device, `📞 I rang you${body.reason === 'declined' ? ' and you declined it' : " but you didn't pick up"}` +
+          `${asked ? ', as you asked. Say "call me" to try again.' : `. It was about: ${why}`}`, null, { urgent: !asked })
+          .catch(e => this.logger.warn?.(`DialX: missed-ring text not sent: ${e.message}`));
+      }
+    } else if (s.incoming) {
       const summary = await this.messageSummary(s, transcript);
       await this.hub.tellOwner(device, `📞 ${s.contact} called and I answered for you${length}.${summary ? `\nTheir message: ${summary}` : ' They left no message.'}\n\n${shown || '(nothing was said)'}`, null, { urgent: true })
         .catch(e => this.logger.warn?.(`DialX: call report not sent: ${e.message}`));

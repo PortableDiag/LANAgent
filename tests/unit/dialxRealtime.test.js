@@ -579,3 +579,15 @@ test('the call voice answers "is this recorded?" truthfully and invents nothing 
   }
   assert.equal(sessionConfig({ instructions: 'x' }).session.audio.input.turn_detection.eagerness, 'low');
 });
+
+test('owner call (DialX 0.7.110): the owner is on the line, no disclosure, the reason first', () => {
+  const s = { ownerCall: true, contact: 'Pat', purpose: 'the deploy finished' };
+  assert.equal(ownerOnLine(s), true);
+  const t = realtimeInstructions({ name: 'ALICE', owner: 'Pat', s, limitS: 300 });
+  assert.match(t, /You phoned Pat on Pat's own phone/);
+  assert.match(t, /no AI disclosure/);
+  assert.match(t, /say why you called first/);
+  const asked = realtimeInstructions({ name: 'ALICE', owner: 'Pat', s: { ...s, purpose: 'You asked me to call you.' }, limitS: 300 });
+  assert.match(asked, /Pat asked you to call them/);
+  assert.match(asked, /ask what they need/);
+});

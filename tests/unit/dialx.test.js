@@ -1267,3 +1267,62 @@ test('a hello that names its app is that app, whatever tools it lists (PhoneAPI 
   assert.equal(isDialX({ client: 'DialX', capabilities: ['dialx.say', ...notifx] }), true);
   assert.equal(isDialX({ client: 'TextX', capabilities: ['dialx.say'] }), false);
 });
+
+// ── DialX 0.7.110 dialx.call_owner (Trellis 4293 #522): "call me" rings the owner's own phone ──────────────
+test('plugin: "Call me" rings the owner with dialx.call_owner, never a contact search (2026-10-31)', async () => {
+  const { plugin, calls } = pluginRig();
+  plugin.hub.callTool = async (name, args, opts) => {
+    calls.push({ name, args, opts });
+    if (name === 'dialx.call_owner') return { ok: true, result: { status: 'ringing', call_id: '100', ring_s: 30 } };
+    return { ok: true, result: [] };
+  };
+  const r = await plugin.execute({ action: 'call', contact: 'me', needsParameterExtraction: true, _context: { originalInput: 'Call me' } });
+  assert.equal(r.success, true, JSON.stringify(r));
+  assert.match(r.result, /Ringing your phone now/);
+  assert.deepEqual(calls.map(c => c.name), ['dialx.call_owner'], 'no approved-list read, no contacts_lookup');
+  assert.equal(calls[0].args.reason, 'You asked me to call you.');
+});
+
+test('plugin: "ring me about the deploy" carries the reason; a timed ring is refused', async () => {
+  const { plugin, calls } = pluginRig();
+  plugin.hub.callTool = async (name, args) => { calls.push({ name, args }); return { ok: true, result: { status: 'ringing', call_id: '101' } }; };
+  await plugin.execute({ action: 'call', _context: { originalInput: 'Alice, ring me about the deploy' } });
+  assert.equal(calls[0].args.reason, 'the deploy');
+  calls.length = 0;
+  const later = await plugin.execute({ action: 'call', _context: { originalInput: 'call me in 10 minutes' } });
+  assert.equal(later.success, false);
+  assert.match(later.error, /only ring you right now/);
+  assert.equal(calls.length, 0);
+});
+
+test('plugin: call_owner refusals read as words', async () => {
+  for (const [code, re] of [['not_allowed', /May call me/], ['do_not_disturb', /Do Not Disturb/], ['limit', /today's rings/], ['unknown_tool', /0\.7\.110/]]) {
+    const { plugin } = pluginRig();
+    plugin.hub.callTool = async () => ({ ok: false, error: { code } });
+    const r = await plugin.execute({ action: 'call', _context: { originalInput: 'call me' } });
+    assert.equal(r.success, false);
+    assert.match(r.error, re, code);
+  }
+});
+
+test('plugin: "call megan" and "call mom" are still ordinary calls', async () => {
+  const { callsTheOwner } = await import('../../src/api/plugins/dialx.js');
+  for (const t of ['call megan', 'call mom', 'call Wayne and tell him hi', 'tell Wayne to call me', 'call']) assert.equal(callsTheOwner(t, null), false, t);
+  for (const t of ['Call me', 'Alice, call me', 'Can you call me?', 'give me a call', 'phone me']) assert.equal(callsTheOwner(t, null), true, t);
+  assert.equal(callsTheOwner('', 'myself'), true);
+});
+
+test('owner call: not picked up, the reason goes as a text; answered, no call report', async () => {
+  const r = rig();
+  const d = await phone(r, { tools: [...DIALX_TOOLS] });
+  await r.callStore.plan({ callId: 'o1', contact: 'Pat', number: '', purpose: 'the deploy finished', plannedAt: new Date() });
+  await d.say(env('event', { kind: 'call.ended', call_id: 'o1', owner_call: true, reason: 'no_answer', duration_s: 0 }));
+  await tick(60);
+  assert.ok(r.told.some(t => /I rang you but you didn't pick up\. It was about: the deploy finished/.test(t)), r.told.join(' | '));
+  r.told.length = 0;
+  await d.say(env('event', { kind: 'call.started', call_id: 'o2', direction: 'outgoing', owner_call: true, contact: { name: 'Pat', owner: true }, purpose: 'You asked me to call you.' }));
+  await d.say(env('event', { kind: 'call.ended', call_id: 'o2', owner_call: true, reason: 'owner_ended', duration_s: 40, transcript: [{ role: 'agent', text: 'Hi Pat!' }] }));
+  await tick(60);
+  assert.ok(!r.told.some(t => /Call with/.test(t)), 'the owner was on the call: no report');
+  assert.ok(DIALX_TOOLS.includes('dialx.call_owner'), 'the hub only forwards listed tools');
+});

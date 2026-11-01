@@ -2,6 +2,14 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.716] - 2026-10-31
+
+### Added
+- **"Call me" rings the owner's own phone (DialX 0.7.110 `dialx.call_owner`).** "Call me", "ring me", "give me a call" and "call me about …" ring the owner like an incoming call with the reason on screen. When the owner answers, the call is a realtime talk with no AI disclosure: the agent greets by first name and says why it called (or asks what they need when the owner asked for the call), with the same agent tools as a call with the owner. Not picked up: the reason arrives as a text. Refusals (May call me off, Do Not Disturb, the daily limit, busy) are answered in words. A ring is only ever now: "call me in 10 minutes" says so.
+
+### Fixed
+- **"Call me" searched the phone book.** "me" went to contact lookup and matched every contact containing "me" ("Home Improvements", "James Bacon", "Megan…"), then asked which one to call.
+
 ## [2.25.714] - 2026-10-31
 
 ### Fixed
