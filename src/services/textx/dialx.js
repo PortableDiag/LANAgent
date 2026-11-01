@@ -603,7 +603,44 @@ export class DialXCalls {
       this.logger.warn?.(`DialX: call ${id} audio problem on the phone: ${s.audioProblem}`);
       return;
     }
+    if (body.kind === 'call.hold') return this.hold(device, id, body);
     if (body.kind === 'call.ended') return this.ended(device, id, body);
+  }
+
+  /**
+   * DialX 0.7.116 call.hold (4293 #536): the owner took a phone call during this one, or put it on hold. Nothing is
+   * heard either way while held, and the phone stops its own clocks; ours stop too (the call clock, the realtime silence
+   * guard and the lost-call timer all start later by the time held). Never fill the silence or hang up; on held:false
+   * pick up where the call was.
+   */
+  async hold(device, id, body) {
+    const s = this.calls.get(id);
+    if (!s || s.done) return;
+    const now = this.now();
+    if (body.held) {
+      if (s.held) return;
+      s.held = true;
+      s.heldSinceMs = now;
+      this.logger.info?.(`DialX: call ${id} with ${s.contact} on hold${body.why ? ` (${String(body.why).slice(0, 80)})` : ''}`);
+      return;
+    }
+    if (!s.held) return;
+    const ms = Math.max(0, now - (s.heldSinceMs || now));
+    s.held = false;
+    s.heldMs = (s.heldMs || 0) + ms;
+    if (s.startedAtMs != null) s.startedAtMs += ms;
+    if (s.answeredAtMs != null) s.answeredAtMs += ms;
+    this.logger.info?.(`DialX: call ${id} with ${s.contact} off hold after ${Math.round(ms / 1000)} s`);
+    const back = `The call was on hold for ${Math.round(ms / 1000)} s and is back now. Pick up where you left off, briefly ` +
+      '(for example "Sorry about that, where were we?"), without repeating what you already said.';
+    if (s.realtime === 'live') {
+      if ((s.device?.capabilities || []).includes('dialx.realtime_note')) {
+        await this.rt.tool(s, 'dialx.realtime_note', { text: back, respond: true })
+          .catch(e => this.logger.warn?.(`DialX: call ${id} resume note not sent: ${e.message}`));
+      }
+      return;
+    }
+    if (s.turns > 0 || s.transcript.length) await this.say(s, 'Sorry about that, where were we?').catch(() => {});
   }
 
   /**
@@ -646,11 +683,15 @@ export class DialXCalls {
     if (!s.lostTimer) {
       // A call to the owner has no Longest-call limit on the phone (DialX 0.7.110): closing it at 5 min would cut a live talk.
       const limitS = s.ownerCall ? Math.max(this.limitS, 3600) : this.limitS;
-      s.lostTimer = setTimeout(() => {
+      const lost = () => {
         if (s.done) return;
+        // DialX 0.7.116: time on hold does not count toward the limit (hold() moved startedAtMs on by it).
+        const due = s.startedAtMs + (limitS + this.lostGraceS) * 1000 - this.now();
+        if (s.held || due > 1000) { s.lostTimer = setTimeout(lost, s.held ? 30000 : due); s.lostTimer.unref?.(); return; }
         this.logger.warn?.(`DialX: call ${id} with ${s.contact}: no end report ${limitS + this.lostGraceS} s after it started; closing it as lost`);
         this.ended(device, id, { reason: 'lost' }).catch(e => this.logger.warn?.(`DialX: lost call ${id} not closed: ${e.message}`));
-      }, (limitS + this.lostGraceS) * 1000);
+      };
+      s.lostTimer = setTimeout(lost, (limitS + this.lostGraceS) * 1000);
       s.lostTimer.unref?.();
     }
     // DialX 0.7.30 Test call: nothing is dialed; the owner talks through the phone's mic and speaker.

@@ -410,7 +410,7 @@ export class DialXRealtime {
     const arm = (ms) => { s.silenceTimer = setTimeout(check, ms); };
     const check = () => {
       if (s.done || s.heardCallee || s.voicemail) return;
-      if (!s.answeredAtMs) return arm(5000);
+      if (!s.answeredAtMs || s.held) return arm(5000); // DialX 0.7.116: never while on hold (hold() moves answeredAtMs on)
       const left = this.silenceMs - (Date.now() - s.answeredAtMs);
       if (left > 0) return arm(left);
       this.logger.warn?.(`DialX: call ${s.id}: nothing heard from ${s.contact} ${Math.round(this.silenceMs / 1000)} s into the realtime call; hanging up`);

@@ -2,6 +2,11 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.722] - 2026-11-01
+
+### Added
+- **DialX on hold (DialX 0.7.116 `call.hold`).** When the owner takes a phone call during a call with ALICE, or puts the call on hold, ALICE waits: it doesn't fill the silence or hang up. While held, the call clock, the realtime silence guard and the lost-call timer stop. On `held:false` ALICE picks up where it left off: "Sorry about that, where were we?" on turn calls, a `dialx.realtime_note` on realtime calls. Logged: `call N with X on hold (why)` / `off hold after N s`.
+
 ## [2.25.721] - 2026-11-01
 
 ### Changed
