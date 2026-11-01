@@ -1094,11 +1094,12 @@ export class DialXCalls {
     const nothingPlayed = !transcript.some(l => l.role === 'agent' || l.role === 'disclosure');
     if (s.ownerCall) {
       // The owner was on the line, so no call report. Not picked up: what the ring was for goes as a text (DialX #522).
-      if (body.reason === 'declined' || body.reason === 'no_answer') {
+      // DialX 0.7.116 (4293 #536): a ring cut short by a phone call coming in ends `busy`; it is a missed ring too.
+      if (body.reason === 'declined' || body.reason === 'no_answer' || body.reason === 'busy') {
         const planned = await this.store.get?.(id).catch(() => null);
         const why = String(planned?.purpose || s.purpose || body.purpose || '').trim();
         const asked = !why || OWNER_ASKED.test(why);
-        await this.hub.tellOwner(device, `📞 I rang you${body.reason === 'declined' ? ' and you declined it' : " but you didn't pick up"}` +
+        await this.hub.tellOwner(device, `📞 I rang you${body.reason === 'declined' ? ' and you declined it' : body.reason === 'busy' ? ' but you were on another call' : " but you didn't pick up"}` +
           `${asked ? ', as you asked. Say "call me" to try again.' : `. It was about: ${why}`}`, null, { urgent: !asked })
           .catch(e => this.logger.warn?.(`DialX: missed-ring text not sent: ${e.message}`));
       }

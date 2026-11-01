@@ -1327,6 +1327,15 @@ test('owner call: not picked up, the reason goes as a text; answered, no call re
   assert.ok(DIALX_TOOLS.includes('dialx.call_owner'), 'the hub only forwards listed tools');
 });
 
+test('owner call: a ring cut short by a phone call (busy, DialX 0.7.116) is a missed ring', async () => {
+  const r = rig();
+  const d = await phone(r, { tools: [...DIALX_TOOLS] });
+  await r.callStore.plan({ callId: 'o3', contact: 'Pat', number: '', purpose: 'the backup failed', plannedAt: new Date() });
+  await d.say(env('event', { kind: 'call.ended', call_id: 'o3', owner_call: true, reason: 'busy', duration_s: 0 }));
+  await tick(60);
+  assert.ok(r.told.some(t => /I rang you but you were on another call\. It was about: the backup failed/.test(t)), r.told.join(' | '));
+});
+
 test('TextX chat_cleared: the agent drops its history of that chat (TextX 0.4.83)', async () => {
   const r = rig();
   const cleared = [];

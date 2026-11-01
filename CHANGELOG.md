@@ -2,6 +2,11 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.723] - 2026-11-01
+
+### Fixed
+- **A ring to the owner that ends `busy` was dropped silently.** Since DialX 0.7.116, a phone call coming in while ALICE rings the owner ends the ring as `busy`. ALICE now treats that as a missed ring, like `declined` and `no_answer`: "I rang you but you were on another call. It was about: …".
+
 ## [2.25.722] - 2026-11-01
 
 ### Added
