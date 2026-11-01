@@ -2,6 +2,11 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.718] - 2026-10-31
+
+### Added
+- **Clearing the TextX chat clears the agent's side (TextX 0.4.83 `chat_cleared`).** When the owner clears their chat with the agent on the phone, the agent drops that chat's live conversation, so nothing said before the clear comes back as "what we were just talking about", across a restart too (a cutoff in `chat_clears`). The transcript record stays and is still searchable.
+
 ## [2.25.717] - 2026-10-31
 
 ### Fixed

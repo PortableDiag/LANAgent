@@ -1326,3 +1326,13 @@ test('owner call: not picked up, the reason goes as a text; answered, no call re
   assert.ok(!r.told.some(t => /Call with/.test(t)), 'the owner was on the call: no report');
   assert.ok(DIALX_TOOLS.includes('dialx.call_owner'), 'the hub only forwards listed tools');
 });
+
+test('TextX chat_cleared: the agent drops its history of that chat (TextX 0.4.83)', async () => {
+  const r = rig();
+  const cleared = [];
+  r.agent.memoryManager = { clearConversation: async (u) => cleared.push(u) };
+  const t = await phone(r, { app: 'TextX', tools: ['send_sms'] });
+  await t.say(env('event', { kind: 'chat_cleared', by: 'user', date: new Date().toISOString() }));
+  await tick(40);
+  assert.deepEqual(cleared, [`textx:${t.device.id}`]);
+});

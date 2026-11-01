@@ -910,6 +910,14 @@ export class TextXHub {
     if (/^notification\./.test(String(body.kind || ''))) return isNotifX(device) ? this.notifx.onEvent(device, body) : undefined;
     if (body.message?.from?.name && body.message.from.number) await this.learnContacts([body.message.from], 'a text');
     if (body.kind === 'mention' && body.message) return this.onMention(device, body);
+    // TextX 0.4.83: the owner cleared their chat with this agent; drop ALICE's side of it too.
+    if (body.kind === 'chat_cleared') {
+      const userId = `textx:${device.id}`;
+      await this.agent?.memoryManager?.clearConversation?.(userId)
+        ?.catch?.(e => this.logger.warn?.(`TextX: chat clear not applied: ${e.message}`));
+      this.logger.info?.(`TextX: ${device.name} chat cleared by ${body.by === 'agent' ? 'the agent' : 'the owner'}; its conversation history is dropped`);
+      return;
+    }
     if (body.kind !== 'incoming' || !body.message) return;
     const m = body.message;
     if (m.direction === 'out' || m.from === 'me') return; // the user's own messages

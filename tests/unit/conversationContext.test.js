@@ -35,3 +35,18 @@ test('the send-text rule: quoted words exact, a described message written to the
   assert.match(rule, /addressing them directly/);
   assert.match(rule, /never put it in the text/);
 });
+
+test('a cleared chat (TextX 0.4.83 chat_cleared) drops its live turns, and only that user\'s', async () => {
+  const mm = new MemoryManager({});
+  await mm.storeConversation('textx:d1', 'Call me', 'Which one?');
+  await mm.storeConversation('textx:d1', 'hi', 'hello', { threadId: 4 });
+  await mm.storeConversation('telegram:9', 'keep', 'kept');
+  await mm.clearConversation('textx:d1');
+  assert.deepEqual(mm.getRecentTurns('textx:d1'), []);
+  assert.deepEqual(mm.getRecentTurns('textx:d1', 4), []);
+  assert.equal(mm.getRecentTurns('telegram:9').length, 2);
+  assert.ok(mm.clearedAt('textx:d1') > 0);
+  assert.equal(mm.clearedAt('telegram:9'), 0);
+  await mm.storeConversation('textx:d1', 'new', 'fresh');
+  assert.equal(mm.getRecentTurns('textx:d1').length, 2, 'talk after the clear is kept');
+});

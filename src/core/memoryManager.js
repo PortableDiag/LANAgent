@@ -318,6 +318,25 @@ export class MemoryManager {
     this._conversationBuffer.set(key, buf.slice(-10));
   }
 
+  /**
+   * The user cleared this chat on their side (TextX 0.4.83 `chat_cleared`): its live conversation is dropped and nothing
+   * said before now comes back as recent context, after a restart either. The transcript stays as the record.
+   */
+  async clearConversation(userId) {
+    const uid = String(userId || 'default');
+    for (const k of [...(this._conversationBuffer?.keys() || [])]) if (k === uid || k.startsWith(`${uid}#`)) this._conversationBuffer.delete(k);
+    const at = new Date();
+    (this._clearedAt ||= new Map()).set(uid, at.getTime());
+    if (Transcript.db?.readyState === 1) {
+      await Transcript.db.collection('chat_clears').updateOne({ userId: uid }, { $set: { clearedAt: at } }, { upsert: true })
+        .catch(err => logger.warn(`Chat clear for ${uid} not saved: ${err.message}`));
+    }
+    return at;
+  }
+
+  /** When this user last cleared their chat (ms), or 0. */
+  clearedAt(userId) { return this._clearedAt?.get(String(userId || 'default')) || 0; }
+
   getRecentTurns(userId, threadId, limit = 6) {
     const buf = this._conversationBuffer?.get(conversationKey(String(userId || 'default'), threadId)) || [];
     return buf.slice(-limit).map(m => ({ role: m.role, content: m.content }));
@@ -341,7 +360,7 @@ export class MemoryManager {
     if (Transcript.db?.readyState !== 1) return [];
     try {
       // Only today's thread of talk: a conversation from yesterday is not "what was just said".
-      const rows = await Transcript.find({ userId: String(userId), createdAt: { $gte: new Date(Date.now() - 6 * 3600_000) } }).sort({ _id: -1 }).limit(Math.min(Number(limit) || 20, 100)).lean();
+      const rows = await Transcript.find({ userId: String(userId), createdAt: { $gte: new Date(Math.max(Date.now() - 6 * 3600_000, this.clearedAt(userId) + 1)) } }).sort({ _id: -1 }).limit(Math.min(Number(limit) || 20, 100)).lean();
       return rows.map(r => shape(r.role, r.content, r.createdAt));
     } catch (err) {
       logger.debug(`Conversation context from the transcript failed: ${err.message}`);
@@ -356,10 +375,15 @@ export class MemoryManager {
   async restoreConversationBuffer() {
     try {
       const since = new Date(Date.now() - 30 * 60 * 1000);
+      // Chats the user cleared stay cleared across a restart (TextX 0.4.83 chat_cleared).
+      const clears = await Transcript.db.collection('chat_clears').find({}).toArray().catch(() => []);
+      this._clearedAt ||= new Map();
+      for (const c of clears) if (c?.userId && c.clearedAt) this._clearedAt.set(String(c.userId), new Date(c.clearedAt).getTime());
       const recent = await Transcript.find({ createdAt: { $gte: since } }).sort({ _id: -1 }).limit(500).lean();
       recent.reverse(); // newest 500, replayed in insertion order
       if (!this._conversationBuffer) this._conversationBuffer = new Map();
       for (const m of recent) {
+        if (new Date(m.createdAt).getTime() <= this.clearedAt(m.userId)) continue;
         const key = conversationKey(m.userId, m.threadId);
         const buffer = this._conversationBuffer.get(key) || [];
         buffer.push({ role: m.role, content: m.content.substring(0, 1000), ts: new Date(m.createdAt).getTime() });
