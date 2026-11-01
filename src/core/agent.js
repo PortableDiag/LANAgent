@@ -1189,7 +1189,10 @@ export class Agent extends EventEmitter {
           // A question about stored data ("what are the latest messages in the Wayne convo?") needs a
           // tool. Answered here from the chat alone, it was invented (2026-10-20).
           const asksForData = /\b(?:latest|newest|most recent|recent|last|new|unread)\b[^?.!]*\b(?:messages?|texts?|sms|emails?|mail|replies|notifications?|files?|logs?|events?)\b|\b(?:messages?|texts?|emails?)\b[^?.!]*\b(?:from|in|with)\b/i.test(input);
-          let looksLikeFollowUp = isShort && (hasFollowUpSignals || isQuestion || weAsked) && noStrongIntent && !asksForData;
+          // "Call me" right after ALICE asked "Which one?" was answered from the chat as a reply to that question,
+          // and nothing rang (2026-10-31 21:55). Asking to be called is always a new instruction.
+          const callsOwner = /^(?:(?:hey|ok|okay)\s+)?(?:[a-z]+[,:]?\s+)?(?:please\s+)?(?:(?:can|could|would|will)\s+you\s+)?(?:(?:call|ring|phone)\s+me|give\s+me\s+a\s+(?:call|ring))\b/i.test(input.trim());
+          let looksLikeFollowUp = isShort && (hasFollowUpSignals || isQuestion || weAsked) && noStrongIntent && !asksForData && !callsOwner;
 
           // "Text him back", "send her that", "ask him": a person known only from the chat. The
           // router reads the message alone, so it would text "him". Spell the request out first.

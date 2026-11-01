@@ -2,6 +2,11 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.717] - 2026-10-31
+
+### Fixed
+- **"Call me" right after the agent asked a question was answered as chat.** A short message after a reply ending in "?" goes to the conversational follow-up path; "Call me" was read as the answer to the previous "Which one?" and nothing rang. Asking to be called ("call me", "ring me", "give me a call") now always goes to the router.
+
 ## [2.25.716] - 2026-10-31
 
 ### Added
