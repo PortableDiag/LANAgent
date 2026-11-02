@@ -83,8 +83,11 @@ test('getCompletionTrends builds the expected aggregation pipeline with day wind
         assert.deepEqual(match.$match.status, { $in: ['Completed', 'Rejected'] });
         assert.ok(match.$match.createdAt && match.$match.createdAt.$gte instanceof Date,
             'createdAt.$gte is a Date');
-        const expectedMin = before - days * 86400000;
-        const expectedMax = after - days * 86400000;
+        // Calendar days, as the model computes them (setDate): a window that spans a DST
+        // change is 1 h off from days * 86400000, which failed this test on 2026-11-01.
+        const daysBack = (ms) => { const d = new Date(ms); d.setDate(d.getDate() - days); return d.getTime(); };
+        const expectedMin = daysBack(before);
+        const expectedMax = daysBack(after);
         const actual = match.$match.createdAt.$gte.getTime();
         assert.ok(actual >= expectedMin - 1000 && actual <= expectedMax + 1000,
             'startDate is ~days before now');
@@ -129,8 +132,9 @@ test('getCompletionTrends defaults to a 30 day window when called with no args',
         const pipeline = stub.getPipeline();
         const match = findStage(pipeline, '$match');
         const actual = match.$match.createdAt.$gte.getTime();
-        const expectedMin = before - 30 * 86400000;
-        const expectedMax = after - 30 * 86400000;
+        const daysBack = (ms) => { const d = new Date(ms); d.setDate(d.getDate() - 30); return d.getTime(); };
+        const expectedMin = daysBack(before);
+        const expectedMax = daysBack(after);
         assert.ok(actual >= expectedMin - 1000 && actual <= expectedMax + 1000,
             'defaults to 30 days');
     } finally {
