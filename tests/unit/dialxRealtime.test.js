@@ -591,3 +591,81 @@ test('owner call (DialX 0.7.110): the owner is on the line, no disclosure, the r
   assert.match(asked, /Pat asked you to call them/);
   assert.match(asked, /ask what they need/);
 });
+
+// Call 105/106 (2026-11-01): an Orbit call_together; the callee said "Hello?" four times and both agents stayed silent.
+function groupRig() {
+  const tools = [];
+  const calls = { limitS: 300, hub: { callTool: async (name, args) => { tools.push({ name, args }); return { ok: true }; } }, hangup: async () => {} };
+  const rt = new DialXRealtime({ calls, logger: quiet, env, fetch: async () => ({}), silenceMs: 60000, unansweredMs: 20 });
+  const s = { ...session(), contact: 'Wayne', rtGroup: true, device: { id: 'd1', capabilities: ['dialx.realtime_note'] } };
+  rt.started(s, { rt_session_id: 'sess_g', opening_played: false });
+  return { rt, s, tools };
+}
+const notes = (tools) => tools.filter(t => t.name === 'dialx.realtime_note');
+
+test('group call: a hello nobody answers makes ALICE answer it (call 105/106)', async () => {
+  const { rt, s, tools } = groupRig();
+  await rt.event(s, { type: 'conversation.item.input_audio_transcription.completed', transcript: 'Hello?' });
+  await new Promise(r => setTimeout(r, 60));
+  const n = notes(tools);
+  assert.equal(n.length, 1);
+  assert.equal(n[0].args.respond, true);
+  assert.match(n[0].args.text, /Wayne said "Hello\?"/);
+  rt.end(s);
+});
+
+test('group call: an agent reply or another agent taking the floor cancels the nudge', async () => {
+  const { rt, s, tools } = groupRig();
+  await rt.event(s, { type: 'conversation.item.input_audio_transcription.completed', transcript: 'Hello?' });
+  await rt.event(s, { type: 'response.output_audio_transcript.done', transcript: 'Hi Wayne, this is ALICE.' });
+  await rt.event(s, { type: 'conversation.item.input_audio_transcription.completed', transcript: 'Who is this?' });
+  await rt.event(s, { type: 'floor_busy', item_id: 'x' });
+  await new Promise(r => setTimeout(r, 60));
+  assert.equal(notes(tools).length, 0);
+  rt.end(s);
+});
+
+test('one-to-one call and a call on hold are never nudged', async () => {
+  const { rt, s, tools } = groupRig();
+  s.rtGroup = false;
+  await rt.event(s, { type: 'conversation.item.input_audio_transcription.completed', transcript: 'Hello?' });
+  const g = groupRig();
+  await g.rt.event(g.s, { type: 'conversation.item.input_audio_transcription.completed', transcript: 'Hello?' });
+  g.s.held = true;
+  await new Promise(r => setTimeout(r, 60));
+  assert.equal(notes(tools).length + notes(g.tools).length, 0);
+  rt.end(s); g.rt.end(g.s);
+});
+
+test('the group prompt tells ALICE never to leave a person talking into silence', () => {
+  const t = realtimeInstructions({ name: 'ALICE', owner: 'Pat', s: { ...session(), group: true, speaksFirst: false,
+    participants: [{ name: 'Orbit', role: 'agent' }, { name: 'Wayne', role: 'callee' }] }, limitS: 300 });
+  assert.match(t, /never be left in silence/);
+});
+
+test('group call: a line naming another agent is that agent\'s to answer, never nudged', async () => {
+  const { rt, s, tools } = groupRig();
+  s.participants = [{ name: 'Orbit', role: 'agent' }, { name: 'Wayne', role: 'callee' }];
+  await rt.event(s, { type: 'conversation.item.input_audio_transcription.completed', transcript: 'Orbit, what time is it?' });
+  await new Promise(r => setTimeout(r, 60));
+  assert.equal(notes(tools).length, 0);
+  rt.end(s);
+});
+
+test('an owner ring with other agents: the caller says why it rang, a joiner waits; neither hears "already in progress"', () => {
+  const base = { ...session(), group: true, ownerCall: true, contact: 'Pat', participants: [{ name: 'Pat', role: 'owner' }, { name: 'Orbit', role: 'agent' }] };
+  const caller = realtimeInstructions({ name: 'ALICE', owner: 'Pat', s: { ...base, speaksFirst: true }, limitS: 300 });
+  const joiner = realtimeInstructions({ name: 'ALICE', owner: 'Pat', s: { ...base, speaksFirst: false }, limitS: 300 });
+  assert.match(caller, /You rang Pat's own phone/);
+  assert.match(joiner, /Another agent rang Pat's own phone/);
+  for (const t of [caller, joiner]) assert.doesNotMatch(t, /already in progress/);
+});
+
+test('with the owner on the line a pause is never a cue for ALICE', async () => {
+  const { rt, s, tools } = groupRig();
+  s.ownerOnLine = true;
+  await rt.event(s, { type: 'conversation.item.input_audio_transcription.completed', transcript: 'So, anyway.' });
+  await new Promise(r => setTimeout(r, 60));
+  assert.equal(notes(tools).length, 0);
+  rt.end(s);
+});

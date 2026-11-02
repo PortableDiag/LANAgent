@@ -1345,3 +1345,32 @@ test('TextX chat_cleared: the agent drops its history of that chat (TextX 0.4.83
   await tick(40);
   assert.deepEqual(cleared, [`textx:${t.device.id}`]);
 });
+
+// ── DialX 0.7.117 (Trellis 4293 #545): call_owner {with} rings the owner with other agents on the call ──────────
+test('plugin: "you and Orbit call me" is one call_owner ring with Orbit joining', async () => {
+  const { plugin, calls } = pluginRig();
+  plugin.hub.callTool = async (name, args) => {
+    calls.push({ name, args });
+    if (name === 'dialx.list_call_agents') return { ok: true, result: [{ agent_id: 'a1', name: 'ALICE' }, { agent_id: 'a2', name: 'Orbit' }] };
+    if (name === 'dialx.call_owner') return { ok: true, result: { status: 'ringing', call_id: '110', ring_s: 30, with: ['Orbit'] } };
+    return { ok: true, result: [] };
+  };
+  const r = await plugin.execute({ action: 'call', contact: 'me', _context: { originalInput: 'Alice, you and Orbit call me' } });
+  assert.equal(r.success, true, JSON.stringify(r));
+  const ring = calls.find(c => c.name === 'dialx.call_owner');
+  assert.deepEqual(ring.args.with, ['Orbit'], 'never names itself');
+  assert.ok(!calls.some(c => c.name === 'dialx.call_together'), 'not a call to a contact');
+  assert.match(r.result, /with Orbit on the call/);
+});
+
+test('plugin: a plain "call me" sends no with; unknown_agent reads as words', async () => {
+  const { plugin, calls } = pluginRig();
+  plugin.hub.callTool = async (name, args) => { calls.push({ name, args }); return { ok: true, result: { status: 'ringing', call_id: '111' } }; };
+  await plugin.execute({ action: 'call', contact: 'me', _context: { originalInput: 'Call me' } });
+  assert.ok(!('with' in calls.find(c => c.name === 'dialx.call_owner').args));
+  plugin.hub.callTool = async (name) => name === 'dialx.list_call_agents'
+    ? { ok: true, result: [{ name: 'Orbit' }] } : { ok: false, error: { code: 'unknown_agent' } };
+  const r = await plugin.execute({ action: 'call', contact: 'me', _context: { originalInput: 'you and Orbit call me' } });
+  assert.equal(r.success, false);
+  assert.match(r.error, /doesn't know one of the agents/);
+});

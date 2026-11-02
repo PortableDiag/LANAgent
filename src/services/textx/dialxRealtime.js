@@ -24,6 +24,8 @@ import { fileDevReport } from '../devReports.js';
 export const REALTIME_MODEL = process.env.DIALX_REALTIME_MODEL || 'gpt-realtime-2.1'; // the same as Orbit (4293 #196); minted live 2026-10-25
 export const REALTIME_VOICE = process.env.DIALX_REALTIME_VOICE || 'marin'; // the DialX realtimeVoice setting wins
 const API = 'https://api.openai.com/v1/realtime';
+// A person's line on a group call that no agent answers this long gets an answer (call 105/106, 2026-11-01).
+export const UNANSWERED_MS = Number(process.env.DIALX_UNANSWERED_MS) || 4000;
 
 /** The phone streams to OpenAI Realtime (it lists dialx.realtime in its hello) and ALICE holds a key. */
 export function supportsRealtime(device, env = process.env) {
@@ -135,11 +137,18 @@ export function realtimeInstructions({ name, owner, s, limitS }) {
     const who = others.map(p => `${p.name}${p.role === 'agent' ? ' (an AI agent)' : p.role === 'owner' ? ` (${owner}, who owns you)` : p.role === 'callee' ? ` (the person ${owner} is on the phone with)` : ''}`).join(', ');
     return `You are ${name}, ${owner}'s AI assistant, on a group voice call with ${who}. ${s.purpose ? `Topic: ${s.purpose}.\n` : ''}` +
       (s.speaksFirst ? 'You open the call: a short greeting to everyone, then hand over. ' : s.speaksFirst === false ? 'Do not open; wait until you are addressed. ' : '') +
-      (!s.test ? `${owner} added you to a real phone call already in progress. ` : '') +
+      // DialX 0.7.117 (4293 #545): an owner ring with other agents on it is not a call already in progress.
+      (s.ownerCall ? (s.speaksFirst ? `You rang ${owner}'s own phone with the others on the line, and ${owner} answered: say why you called. `
+        : `Another agent rang ${owner}'s own phone with you on the line, and ${owner} answered. Wait to be addressed, or answer when ${owner} asks you all. `) +
+        `${owner} knows you well: no AI disclosure and never "nice to meet you". `
+        : !s.test ? `${owner} added you to a real phone call already in progress. ` : '') +
       `Speak only when someone addresses you by name, or when what was just said is clearly for you, and then keep it short. ` +
       // Call 46 (2026-10-26): ALICE and Orbit traded "I'll be here quietly if you need me" until the owner cut in.
       `When the turn is not for you, or you have nothing new to add (another agent standing by, signing off or thanking you), ` +
       `call stay_silent instead of speaking. Never answer another agent's standing-by or goodbye line. ` +
+      // Call 105/106 (2026-11-01): an Orbit call_together; Wayne said "Hello?" four times, both agents stayed silent 43 s.
+      `One exception: a person (never an agent) who says hello or asks something and gets no answer must never be left in ` +
+      `silence. If nobody has answered them, answer briefly yourself: who you are and, if you know, why the call. ` +
       // DialX 0.7.69 (4293 #315): the operator said the agents could not tell him from each other.
       `What you hear as audio is ${owner}${s.contact && s.contact !== owner && !s.test ? ` and ${s.contact}` : ''}, never an agent. ` +
       `A message that starts "<name> (an AI agent on this call):" is that agent speaking, not ${owner}: never take it as ${owner}'s ` +
@@ -332,8 +341,9 @@ export class DialXRealtime {
    * @param {object} o.calls    the DialXCalls that owns the sessions (hub, hangup, limitS)
    * @param {Function} o.fetch  fetch (tests pass a fake)
    */
-  constructor({ calls, logger = console, env = process.env, fetch: f = globalThis.fetch, silenceMs = 40000 }) {
+  constructor({ calls, logger = console, env = process.env, fetch: f = globalThis.fetch, silenceMs = 40000, unansweredMs = UNANSWERED_MS }) {
     this.silenceMs = silenceMs;
+    this.unansweredMs = unansweredMs;
     this.calls = calls;
     this.logger = logger;
     this.env = env;
@@ -354,7 +364,7 @@ export class DialXRealtime {
     const res = await this.fetch(`${API}/client_secrets`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${this.env.OPENAI_API_KEY}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify(sessionConfig({ instructions, voice, group: isGroupCall(s, name), owner: s.ownerOnLine }))
+      body: JSON.stringify(sessionConfig({ instructions, voice, group: (s.rtGroup = isGroupCall(s, name)), owner: s.ownerOnLine }))
     });
     const body = await res.json().catch(() => ({}));
     const secret = body?.value || body?.client_secret?.value;
@@ -471,12 +481,15 @@ export class DialXRealtime {
     if (e.type === 'conversation.item.input_audio_transcription.completed' && String(e.transcript || '').trim()) {
       s.heardCallee = true;
       s.transcript.push({ role: 'callee', text: String(e.transcript).trim() });
+      this.watchUnanswered(s, String(e.transcript).trim());
     } else if (e.type === 'response.output_audio_transcript.done' && e.played === false) {
       // DialX 0.7.81: a reply it held and dropped (the opening at pickup when voicemail answered) was never heard.
       this.logger.info?.(`DialX: call ${s.id}: a reply never reached the call, not recorded as said`);
     } else if (e.type === 'response.output_audio_transcript.done' && String(e.transcript || '').trim()) {
       s.transcript.push({ role: 'agent', text: String(e.transcript).trim(), ...(e.item_id ? { itemId: e.item_id } : {}) });
+      clearTimeout(s.unansweredTimer);
     } else if (e.type === 'floor_busy') {
+      clearTimeout(s.unansweredTimer); // another agent has the floor: someone is answering
       // DialX 0.7.35 group call: another agent held the floor, so this reply was cancelled and never played.
       const i = s.transcript.findIndex(l => l.role === 'agent' && e.item_id && l.itemId === e.item_id);
       if (i >= 0) s.transcript.splice(i, 1);
@@ -662,8 +675,32 @@ export class DialXRealtime {
     await this.answerTool(s, fn, gen, output, name);
   }
 
+  /**
+   * Group realtime call: a person's line that no agent answers within unansweredMs gets ALICE to answer it.
+   * Call 105/106 (2026-11-01): on an Orbit call_together both agents called stay_silent on every "Hello?" for 43 s,
+   * because neither was addressed by name. Any agent reply or another agent taking the floor cancels the nudge.
+   */
+  watchUnanswered(s, text) {
+    clearTimeout(s.unansweredTimer);
+    // Only on calls without the owner: with the owner on the line, a pause after anyone's words is theirs to fill
+    // (the owner talking to their callee, or to another agent), never a cue for ALICE.
+    if (!s.rtGroup || s.ownerOnLine || s.realtime !== 'live' || !(s.device?.capabilities || []).includes('dialx.realtime_note')) return;
+    // "Orbit, what's …" is for Orbit, however long Orbit takes to answer.
+    const otherAgents = (s.participants || []).filter(p => !p.self && p.role === 'agent' && p.name).map(p => p.name.toLowerCase());
+    if (otherAgents.some(n => text.toLowerCase().includes(n))) return;
+    s.unansweredTimer = setTimeout(async () => {
+      if (s.done || s.held || s.realtime !== 'live') return;
+      this.logger.info?.(`DialX: call ${s.id}: ${s.contact || 'the person'} unanswered ${this.unansweredMs / 1000} s; answering`);
+      await this.tool(s, 'dialx.realtime_note', { respond: true, text:
+        `${s.contact || 'The person on the call'} said "${text.slice(0, 200)}" and nobody has answered for ${this.unansweredMs / 1000} seconds. ` +
+        'Answer them now, briefly: who you are and, if you know, why the call. Do not call stay_silent for this.' })
+        .catch(e => this.logger.warn?.(`DialX: call ${s.id}: unanswered nudge not sent: ${e.message}`));
+    }, this.unansweredMs);
+  }
+
   end(s) {
     clearTimeout(s.silenceTimer);
+    clearTimeout(s.unansweredTimer);
     s.realtime = null;
   }
 }

@@ -604,6 +604,15 @@ export class DialXCalls {
       return;
     }
     if (body.kind === 'call.hold') return this.hold(device, id, body);
+    // DialX 0.7.117 (4293 #545): the owner added agents to a call this agent runs. DialX notes it in the live session;
+    // the agent still leads. Keep the roster current so the call is treated as a group call from here on.
+    if (body.kind === 'call.agents_joined') {
+      const s = this.session(device, id, body);
+      if (Array.isArray(body.participants)) s.participants = body.participants.slice(0, 12).map(p => ({ name: String(p?.name || '').slice(0, 80), role: String(p?.role || ''), self: !!p?.self, ...(p?.listening ? { listening: true } : {}) }));
+      s.group = true; s.rtGroup = true;
+      this.logger.info?.(`DialX: call ${id}: ${[].concat(body.agents || []).map(a => a?.name || a).join(', ') || 'agents'} joined`);
+      return;
+    }
     if (body.kind === 'call.ended') return this.ended(device, id, body);
   }
 

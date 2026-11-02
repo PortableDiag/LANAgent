@@ -2,6 +2,24 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.727] - 2026-11-01
+
+### Fixed
+- **Only pictures the vision model can read are sent to it.** Since TextX 0.4.84, an iPhone sticker arrives as its original (`image/heic-sequence`) plus a JPEG still. The HEIC also went to the vision model and failed there. Now only PNG, JPEG, GIF and WebP go, and the still describes the sticker. A file with no type or a generic one is still judged by its name.
+
+## [2.25.726] - 2026-11-01
+
+### Added
+- **"You and Orbit call me" (DialX 0.7.117 `call_owner {with}`).** One ring to the owner, with the named agents joining when the owner answers. The result names them; `unknown_agent` reads as words. On such a ring the caller says why it rang and a joining agent waits to be addressed, with no AI disclosure (it used to be told it had been added to a call already in progress). `call.agents_joined` (the owner adding agents to a call ALICE runs) keeps the roster current and is logged.
+
+### Changed
+- The 2.25.725 unanswered-person nudge runs only on calls without the owner on the line. With the owner there, a pause is theirs to fill.
+
+## [2.25.725] - 2026-11-01
+
+### Fixed
+- **On a group call, a person nobody answered was left in silence.** When another agent placed a `call_together`, the callee's "Hello?" named nobody, so ALICE (told to speak only when addressed) called `stay_silent` on every line. Now a person's hello or question is never left unanswered: the prompt says so, and if no agent replies within 4 s (`DIALX_UNANSWERED_MS`) ALICE is told to answer. A reply, another agent taking the floor, a hold, or a line naming another agent cancels it. Logged: `call N: <name> unanswered 4 s; answering`.
+
 ## [2.25.724] - 2026-11-01
 
 ### Added

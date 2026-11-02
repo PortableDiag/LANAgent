@@ -21,8 +21,14 @@ const PROMPT = 'Describe this picture in detail. Then transcribe every piece of 
 const imageDescriptionCache = new NodeCache({ stdTTL: 3600, checkperiod: 600, maxKeys: 500, useClones: false });
 
 /** True when the attachment is a picture the vision model can take. */
+// Only what vision APIs take. TextX 0.4.84 sends an iPhone sticker's original (image/heic-sequence) beside
+// its JPEG still: the HEIC went to the vision model too and failed there. Its still is described instead.
+const VISION_MIME = /^image\/(png|jpe?g|gif|webp)$/i;
 export function isPicture(mime, name = '') {
-  return /^image\//i.test(String(mime || '')) || /\.(png|jpe?g|gif|webp)$/i.test(String(name || ''));
+  const m = String(mime || '').split(';')[0].trim();
+  if (/^image\//i.test(m)) return VISION_MIME.test(m);
+  // No type, or a generic one (application/octet-stream): the file name decides, as before.
+  return /\.(png|jpe?g|gif|webp)$/i.test(String(name || ''));
 }
 
 /** Providers answer in different fields (OpenRouter: `analysis`); never stringify the object. */

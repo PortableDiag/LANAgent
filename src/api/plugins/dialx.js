@@ -66,6 +66,7 @@ const OWNER_CALL_REFUSALS = {
   do_not_disturb: 'Your phone is on Do Not Disturb, so DialX won\'t ring you.',
   limit: 'I\'ve used up today\'s rings to you in DialX (Calls to you a day).',
   no_microphone: 'DialX can\'t use the microphone right now, so it can\'t ring you.',
+  unknown_agent: 'DialX doesn\'t know one of the agents you named, so it didn\'t ring you. Ask me who can join a call.',
   not_supported: 'This DialX can\'t ring you. Update DialX to 0.7.110 or later.'
 };
 
@@ -746,11 +747,11 @@ export default class DialXPlugin extends BasePlugin {
       return { success: false, error: "That asks for a text, and I can't send texts right now, so I didn't call." };
     }
     // "Call me": the owner's own phone, before any extraction or contact search.
-    if (callsTheOwner(request, data.contact)) return this.callOwner(request);
+    if (callsTheOwner(request, data.contact)) return this.callOwner(request, '', data);
     if (data.needsParameterExtraction || !data.contact || !data.opening || !data.voicemail) await this.extract(data, request);
     const who = String(data.contact || data.to || data.name || '').trim();
     if (!who) return { success: false, error: 'Who should I call?' };
-    if (callsTheOwner('', who)) return this.callOwner(request, data.purpose);
+    if (callsTheOwner('', who)) return this.callOwner(request, data.purpose, data);
     const purpose = String(data.purpose || data.message || '').trim();
     const opening = String(data.opening || '').trim();
     if (!purpose && !opening) return { success: false, error: `What should I say to ${who}?` };
@@ -872,10 +873,13 @@ export default class DialXPlugin extends BasePlugin {
    * Ring the owner's own phone (DialX 0.7.110, Trellis 4293 #522): it rings like an incoming call with the reason on screen.
    * Answered → call.started {owner_call:true} and a realtime talk with no disclosure; not answered → the reason goes as a text.
    */
-  async callOwner(request, purpose = '') {
+  async callOwner(request, purpose = '', data = {}) {
     if (LATER_RE.test(request)) return { success: false, error: 'DialX can only ring you right now, not at a set time. Say "call me" when you want the call, or ask me for a reminder.' };
     const reason = (ownerCallReason(request) || String(purpose || '').trim()).slice(0, 200) || OWNER_ASKED_REASON;
-    const r = await this.tool('dialx.call_owner', { reason });
+    // DialX 0.7.117 (4293 #545): "you and Orbit call me" is one ring with the other agents joining when the owner answers.
+    const others = await this.callTogetherAgents(data, request);
+    const briefs = others.length ? briefsFor(data.briefs, others, this.agent?.config?.name || process.env.AGENT_NAME) : null;
+    const r = await this.tool('dialx.call_owner', { reason, ...(others.length ? { with: others } : {}), ...(briefs ? { briefs } : {}) });
     const code = r.ok ? String(r.result?.status || '') : String(r.error?.code || '');
     if (!r.ok || code !== 'ringing') {
       this.logger.warn(`dialx call_owner refused: ${code || 'no code'} ${r.error?.message || ''}`);
@@ -888,7 +892,8 @@ export default class DialXPlugin extends BasePlugin {
         ?.catch?.(e => this.logger.warn(`dialx: owner call not recorded: ${e.message}`));
     }
     this.logger.info(`dialx call_owner: ringing (call ${r.result?.call_id ?? '?'}, ${r.result?.ring_s ?? 30} s)`);
-    return { success: true, result: `Ringing your phone now (for ${r.result?.ring_s ?? 30} s).` };
+    const joined = [].concat(r.result?.with || others).filter(Boolean);
+    return { success: true, result: `Ringing your phone now${joined.length ? ` with ${joined.join(' and ')} on the call` : ''} (for ${r.result?.ring_s ?? 30} s).` };
   }
 
   /**
