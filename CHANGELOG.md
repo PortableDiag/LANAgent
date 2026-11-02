@@ -2,6 +2,12 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.728] - 2026-11-02
+
+### Fixed
+- **A binary file is refused at once instead of failing after every tier.** A `.zip` (or image or gzip) URL was decoded as text and parsed as HTML, which overflowed the stack ("Maximum call stack size exceeded"). The scrape route then tried Puppeteer, FlareSolverr and a direct fetch before failing: 19 s and five tiers for one zip. It now fails at the first fetch with `Unsupported content: application/zip file (N bytes) is not a web page or PDF` (HTTP 415, cached 1 h) and no further tiers run.
+- **A file the render tier's browser downloads is fetched directly.** A `.txt` sent as an attachment left FlareSolverr on Chrome's New Tab page, which was logged as "redirected off the public internet". The text was still served by the direct fetch that followed, but at the cost of a wasted browser call and an ERROR line (84 so far). Now that case fetches the file directly, as PDFs already do. Redirects to real addresses are still checked against the public-address guard.
+
 ## [2.25.727] - 2026-11-01
 
 ### Fixed

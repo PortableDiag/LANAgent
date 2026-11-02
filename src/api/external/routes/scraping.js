@@ -230,6 +230,10 @@ function classifyScrapeError(errMsg) {
     return { kind: 'dns_temp', status: 503, message: 'DNS resolution temporarily failed (transient)', cacheTtl: 30 };
   // Genuine "this host does not exist" — the resolver gave a definitive answer.
   // 1h (not 24h) so a flap-induced ENOTFOUND on a valid host still self-heals.
+  // A binary file (zip, image) is not a page on any tier: no browser, archive or
+  // VPN exit turns it into one, so it is final and never escalates.
+  if (/unsupported content: /i.test(errMsg))
+    return { kind: 'unsupported_content', status: 415, message: 'URL is a binary file, not a web page or PDF', cacheTtl: 3600 };
   if (/enotfound|nxdomain/i.test(errMsg))
     return { kind: 'nxdomain', status: 400, message: 'Invalid host — DNS resolution failed', cacheTtl: 3600 };
   if (/err_connection_closed|econnreset|socket hang up|err_connection_refused|econnrefused/i.test(errMsg))
@@ -788,6 +792,13 @@ async function executeScrape(req, { url, selectors, extractType = 'text', userAg
         cheerioError = err.message || String(err);
         if (!rawResult) rawResult = { success: false, error: cheerioError };
       }
+    }
+
+    // A binary file is final: skip Puppeteer, FlareSolverr and the archives.
+    const firstError = rawResult?.success ? '' : (cheerioError || rawResult?.error || '');
+    if (classifyScrapeError(firstError).kind === 'unsupported_content') {
+      logger.info(`[ExternalScrape] ${url} is a binary file, not a page; no further tiers`);
+      return cacheFailure(cacheKey, firstError);
     }
 
     // Detect Cloudflare/bot challenge pages that return 200 but aren't real content

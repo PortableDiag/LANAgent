@@ -194,6 +194,24 @@ export function isChromePdfViewer(html) {
   return /<embed\b[^>]*\btype=["']application\/pdf["']/i.test(html);
 }
 
+// A response body that is a binary file, not text. Text and HTML never hold a NUL
+// byte; the magic numbers catch the few binary formats that might not have one
+// near the start. Content-Type is not trusted: servers send octet-stream for .txt.
+const BINARY_MAGIC = [
+  [0x50, 0x4b, 0x03, 0x04], // zip, docx, xlsx, jar
+  [0x1f, 0x8b],             // gzip
+  [0x89, 0x50, 0x4e, 0x47], // png
+  [0xff, 0xd8, 0xff],       // jpeg
+  [0x47, 0x49, 0x46, 0x38], // gif
+  [0x52, 0x61, 0x72, 0x21], // rar
+  [0x37, 0x7a, 0xbc, 0xaf]  // 7z
+];
+export function isBinaryBody(buf) {
+  if (!buf || buf.length === 0) return false;
+  if (BINARY_MAGIC.some(m => m.every((b, i) => buf[i] === b))) return true;
+  return buf.subarray(0, 8192).includes(0);
+}
+
 function detectChromeErrorPage(html) {
   if (!html || typeof html !== 'string' || html.length > 200000) return null;
   const structural = /id=["']main-frame-error["']/i.test(html)
@@ -678,9 +696,19 @@ export default class ScraperPlugin extends BasePlugin {
     }
 
     const solution = await fsRequestGet(url, fsOptions);
+    // A file Chrome downloads (a .txt sent as an attachment, a .zip) never replaces the
+    // blank tab, so FlareSolverr returns Chrome's own New Tab page. That is not a
+    // redirect: fetch the file itself, as the PDF case below does. Logged until
+    // 2026-11-02 as "redirected off the public internet" (84 times).
+    const finalUrl = String(solution.url || '');
+    if (/^(chrome:\/\/new-tab-page|chrome:\/\/newtab|about:blank)/i.test(finalUrl)) {
+      logger.info(`[Scraper] FlareSolverr's Chrome downloaded ${url} instead of showing it; fetching the file directly`);
+      return this.scrapeWithCheerio(url, { ...options, bypassCache: true });
+    }
     // FlareSolverr's own browser follows redirects where no guard can see them: for a paid
     // caller, a final address on the agent's network is discarded, never returned.
-    if (options.publicOnly === true && solution.url && solution.url !== url) {
+    // chrome-error:// is Chrome's net-error page; detectChromeErrorPage below reports it.
+    if (options.publicOnly === true && finalUrl && finalUrl !== url && !/^chrome-error:/i.test(finalUrl)) {
       await assertPublicUrl(solution.url, 'redirect target').catch(err => {
         throw new Error(`FlareSolverr was redirected off the public internet; result discarded (${err.message})`);
       });
@@ -696,7 +724,7 @@ export default class ScraperPlugin extends BasePlugin {
     // error during a VPN flap) yet still return status 200 with the rendered
     // "This site can't be reached" interstitial as the body. Parsing that ships
     // a Chromium error page to the caller as success — detect + fail instead.
-    const fsNetErr = detectChromeErrorPage(html);
+    const fsNetErr = detectChromeErrorPage(html) || (/^chrome-error:/i.test(finalUrl) ? 'ERR_FAILED' : null);
     if (fsNetErr) {
       throw new Error(`net::${fsNetErr} for ${url} (FlareSolverr could not reach site)`);
     }
@@ -886,6 +914,13 @@ export default class ScraperPlugin extends BasePlugin {
       const body = Buffer.from(response.data);
       if (/application\/pdf/i.test(response.headers['content-type'] || '') || body.subarray(0, 5).toString('latin1') === '%PDF-') {
         return body;
+      }
+      // Any other binary file (zip, image, archive) is not a page. Parsed as HTML it
+      // overflowed the stack the same way PDFs did, and the route then ran every
+      // tier on it: GSS_stata.zip took 19 s and five tiers to fail (2026-11-01).
+      if (isBinaryBody(body)) {
+        const type = String(response.headers['content-type'] || 'unknown type').split(';')[0].trim();
+        throw new Error(`Unsupported content: ${type} file (${body.length} bytes) is not a web page or PDF`);
       }
       const html = body.toString('utf8');
 
