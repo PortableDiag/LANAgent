@@ -574,6 +574,14 @@ Live in-memory snapshot of download-token usage (tokens within their TTL window)
 
 ---
 
+## Recent Updates (November 1, 2026)
+
+### v2.25.724 — Flat list of paid actions
+
+`GET /api/external/catalog/actions` returns `{ success, actions: [{ serviceId, action, description, creditCost }] }`:
+one row per action a paid caller may use, from the same data as `GET /api/external/catalog`.
+Optional `?serviceId=plugin-<name>` and `?q=<text>` (case-insensitive match on action name or description).
+
 ## Recent Updates (October 29, 2026)
 
 ### v2.25.705–707 — Bug reports for the developer; repeating reminders

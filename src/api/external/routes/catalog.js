@@ -292,6 +292,56 @@ router.get('/', async (req, res) => {
   }
 });
 
+// Must stay ABOVE '/:serviceId': Express matches in order, so below it '/actions' is
+// read as a service id and this handler is never reached.
+/**
+ * GET /actions
+ * Retrieve a consolidated list of all available actions across all services,
+ * with their credit costs and associated service IDs.
+ * Supports optional query parameters:
+ *   - serviceId: filter actions by service ID
+ *   - q: search action name or description (case-insensitive substring match)
+ */
+router.get('/actions', async (req, res) => {
+  try {
+    const enrichedServices = await getEnrichedServices(req);
+    const { serviceId, q } = req.query;
+
+    // Build flat list of actions from services that have an actions array
+    let actions = [];
+    for (const svc of enrichedServices) {
+      if (!Array.isArray(svc.actions) || svc.actions.length === 0) continue;
+      for (const action of svc.actions) {
+        actions.push({
+          serviceId: svc.serviceId,
+          action: action.name,
+          description: action.description || '',
+          creditCost: action.creditCost
+        });
+      }
+    }
+
+    // Apply optional filters
+    if (serviceId) {
+      const targetServiceId = String(serviceId);
+      actions = actions.filter(a => a.serviceId === targetServiceId);
+    }
+
+    if (q) {
+      const needle = String(q).toLowerCase();
+      actions = actions.filter(a =>
+        a.action.toLowerCase().includes(needle) ||
+        a.description.toLowerCase().includes(needle)
+      );
+    }
+
+    return res.json({ success: true, actions });
+  } catch (error) {
+    logger.error('Failed to retrieve actions list:', error);
+    return res.status(500).json({ success: false, error: 'Failed to retrieve actions list' });
+  }
+});
+
 /**
  * GET /:serviceId
  * Retrieve full details of a single service by its serviceId,

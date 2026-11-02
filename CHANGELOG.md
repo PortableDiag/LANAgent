@@ -2,6 +2,14 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.724] - 2026-11-01
+
+### Added
+- **`GET /api/external/catalog/actions`**: every paid action across all services as a flat list (`serviceId`, `action`, `description`, `creditCost`), filtered by `?serviceId=` and `?q=` (name or description). Same prices as `GET /catalog`.
+
+### Changed
+- **Alchemy calls retry transient failures** (timeouts, 5xx, 429) up to twice, with backoff, before reporting no data.
+
 ## [2.25.723] - 2026-11-01
 
 ### Fixed
