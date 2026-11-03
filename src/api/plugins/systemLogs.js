@@ -1,7 +1,8 @@
 import { BasePlugin } from '../core/basePlugin.js';
 import { extractParams } from '../../services/webtools/extractParams.js';
 import { SystemLog } from '../../models/SystemLog.js';
-import { CATEGORIES } from '../../utils/systemLogTransport.js';
+import { CATEGORIES, SystemLogTransport } from '../../utils/systemLogTransport.js';
+import { logger } from '../../utils/logger.js';
 
 /**
  * The agent's own recent warnings and errors, from the SystemLog collection that the logger
@@ -38,9 +39,13 @@ export default class SystemLogsPlugin extends BasePlugin {
         examples: ['show the full log entry 6ac1...'] },
       { command: 'trend', description: 'Show counts grouped by hour or day to spot patterns',
         usage: 'trend({ hours: 48, interval: "hour", level: "error", category: "network" })',
-        examples: ['error trend last 48 hours', 'any spikes in warnings today?'] }
+        examples: ['error trend last 48 hours', 'any spikes in warnings today?'] },
+      { command: 'status', description: 'Is the stored log history complete: the log sink\'s buffer, entries dropped, floods being collapsed, database connection and last write',
+        usage: 'status()',
+        examples: ['is error logging working', 'are any log entries being dropped', 'when were logs last saved'] }
     ];
     this.model = SystemLog;
+    this.getTransport = () => logger.transports.find(t => t instanceof SystemLogTransport) || null;
   }
 
   async execute(params = {}) {
@@ -52,11 +57,31 @@ export default class SystemLogsPlugin extends BasePlugin {
         case 'summary': return await this.summary(p);
         case 'entry': return await this.entry(p);
         case 'trend': return await this.trend(p);
-        default: return { success: false, error: `Unknown action '${action}'. Use: recent, search, summary, entry, trend` };
+        case 'status': return this.status();
+        default: return { success: false, error: `Unknown action '${action}'. Use: recent, search, summary, entry, trend, status` };
       }
     } catch (error) {
       return { success: false, error: error.message };
     }
+  }
+
+  // Every other action reads what the sink stored; this says whether that is all of it.
+  status() {
+    const t = this.getTransport();
+    if (!t) return { success: true, active: false, message: 'Stored log history is off on this instance (SYSTEMLOG_DISABLED, or a test/load-check process).' };
+    const s = t.getStats();
+    const last = s.lastFlushTime ? new Date(s.lastFlushTime) : null;
+    const notes = [];
+    if (!s.isConnected) notes.push('the database is not connected, so new entries wait in the buffer');
+    if (s.dropped > 0) notes.push(`${s.dropped} entries were dropped since start, so the history is incomplete`);
+    if (s.floodsSuppressing > 0) notes.push(`${s.floodsSuppressing} message(s) are repeating fast enough that their repeats are counted into one entry instead of stored`);
+    return {
+      success: true,
+      active: true,
+      ...s,
+      lastFlushAt: last ? last.toISOString() : null,
+      message: notes.length ? `Log history: ${notes.join('; ')}.` : `Log history is complete${last ? `; last saved ${last.toISOString()}` : ''}.`
+    };
   }
 
   filter({ level, category, service, hours }, dfltHours = 24) {

@@ -62,6 +62,17 @@ export default class FREDPlugin extends BasePlugin {
           'what series are in the prices category',
           'tell me about economic indicators category'
         ]
+      },
+      {
+        command: 'get_latest_observation',
+        description: 'Fetch the most recent observation for a series',
+        usage: 'get_latest_observation({ seriesId: "GDP" })',
+        examples: [
+          'what is the latest GDP value',
+          'show me the most recent unemployment rate',
+          'get the current consumer price index',
+          'fetch the latest federal funds rate'
+        ]
       }
     ];
 
@@ -140,6 +151,8 @@ export default class FREDPlugin extends BasePlugin {
           return await this.getSeriesInfo(data);
         case 'get_category_info':
           return await this.getCategoryInfo(data);
+        case 'get_latest_observation':
+          return await this.getLatestObservation(data);
         default:
           throw new Error(`Unknown action: ${action}`);
       }
@@ -313,6 +326,57 @@ export default class FREDPlugin extends BasePlugin {
       return { success: true, data: result };
     } catch (error) {
       throw new Error(`Failed to fetch category info: ${error.message}`);
+    }
+  }
+
+  /**
+   * Fetch the latest observation for a given series.
+   * Uses sort_order=desc and limit=1 to retrieve only the most recent value.
+   * @param {Object} params - { seriesId: string }
+   * @returns {Object} { success: true, data: { observation: { date, value } } }
+   */
+  async getLatestObservation(params) {
+    this.validateParams(params, {
+      seriesId: { required: true, type: 'string' }
+    });
+
+    const cacheKey = `latest_${params.seriesId}`;
+    const cached = this.cache.get(cacheKey);
+    if (cached) {
+      return { success: true, data: cached, fromCache: true };
+    }
+
+    try {
+      const response = await retryOperation(() =>
+        axios.get(`${this.config.baseUrl}series/observations`, {
+          params: {
+            api_key: this.config.apiKey,
+            file_type: 'json',
+            series_id: params.seriesId,
+            sort_order: 'desc',
+            // FRED reports a missing value as "." (holidays on daily series, a
+            // revision gap), so the newest row can be empty; take the newest real one.
+            limit: 10
+          }
+        }),
+        { retries: 3, context: 'FRED latest observation' }
+      );
+
+      const observations = response.data?.observations;
+      const latest = Array.isArray(observations) ? observations.find(o => o?.value && o.value !== '.') : null;
+      if (!latest) {
+        throw new Error('No observations found for the given series');
+      }
+
+      const result = {
+        date: latest.date,
+        value: latest.value
+      };
+
+      this.cache.set(cacheKey, result);
+      return { success: true, data: result };
+    } catch (error) {
+      throw new Error(`Failed to fetch latest observation: ${error.message}`);
     }
   }
   

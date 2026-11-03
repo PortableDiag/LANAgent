@@ -152,3 +152,24 @@ test('other agents cannot reach the logs; the owner can', () => {
   assert.equal(excludedPlugins({ trellis: { peer: 'Orbit' } }).has('systemLogs'), true);
   assert.equal(excludedPlugins(null).has('systemLogs'), false);
 });
+
+test('status reports whether the stored history is complete', async () => {
+  const { p } = plugin();
+  p.getTransport = () => null;
+  let r = await p.execute({ action: 'status' });
+  assert.equal(r.active, false);
+
+  const stats = { bufferLength: 3, dropped: 0, floodCount: 0, isConnected: true, lastFlushTime: Date.parse('2026-11-03T17:00:00Z') };
+  p.getTransport = () => ({ getStats: () => stats });
+  r = await p.execute({ action: 'status' });
+  assert.equal(r.active, true);
+  assert.equal(r.lastFlushAt, '2026-11-03T17:00:00.000Z');
+  assert.match(r.message, /complete; last saved 2026-11-03T17:00:00.000Z/);
+
+  Object.assign(stats, { dropped: 12, floodCount: 40, floodsSuppressing: 2, isConnected: false });
+  r = await p.execute({ action: 'status' });
+  assert.match(r.message, /not connected/);
+  assert.match(r.message, /12 entries were dropped/);
+  assert.match(r.message, /2 message\(s\) are repeating/);
+  assert.doesNotMatch(r.message, /40/);
+});

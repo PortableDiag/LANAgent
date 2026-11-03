@@ -2,6 +2,13 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.732] - 2026-11-03
+
+### Added
+- **FRED: latest value of a series** (`get_latest_observation`, "what is the latest unemployment rate"). Returns the newest real observation; FRED's `.` rows for missing values (holidays on daily series) are skipped. (#2807)
+- **IP geolocation without an API key** (ipify plugin `getIpGeolocation`, "where is my IP located", "geolocate 1.1.1.1"), via ip-api.com, cached per IP. Private, loopback and link-local addresses are answered locally and never sent out. (#2811)
+- **systemLogs `status`**: says whether the stored warning/error history is complete — entries dropped, database not connected, messages repeating fast enough to be counted instead of stored, last save ("is error logging working"). Backed by the log sink's new `getStats()`. (#2809)
+
 ## [2.25.731] - 2026-11-03
 
 ### Added

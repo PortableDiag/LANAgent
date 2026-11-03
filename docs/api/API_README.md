@@ -679,6 +679,9 @@ Sync covering 2.25.417–2.25.423.
 - `followup.batch({ tasks: [{ task, inMinutes? }, ...] })`: up to 10; `success:false` when none were scheduled.
 - `priceWatch.watch({ ..., cooldownMin })`: minutes between percentage-move alerts; target alerts are exempt. `priceWatch.check` lists every offer when the page's product data has more than one.
 - `systemLogs.trend({ hours?, interval?: "hour"|"day", level?, category? })`: counts per bucket, empty buckets included.
+- `systemLogs.status()`: `{ active, bufferLength, dropped, floodCount, floodsSuppressing, isConnected, lastFlushAt, message }`; whether the stored history is complete (2.25.732).
+- `fred.get_latest_observation({ seriesId })`: `{ date, value }`, the newest non-missing observation (2.25.732).
+- `ipifyorg.getIpGeolocation({ ip?, forceRefresh?, cacheTtlSeconds? })`: country/region/city/zip/lat/lon/timezone/isp/org/as via ip-api.com, no key; defaults to the public IP; private addresses are refused locally (2.25.732).
 - `vonage.numberinsight({ number, level?: "basic"|"standard" })`: standard is a paid lookup.
 - `googlesecops.getDetection({ detectionId })`; `unsplash.getRandomPhoto({ query?, orientation?, count?, collections?, topics?, username? })` (collections/topics cannot be combined with `query`).
 

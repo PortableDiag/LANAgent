@@ -60,6 +60,17 @@ export default class ipifyorgPlugin extends BasePlugin {
           'refresh my IPv4 lookup cache',
           'invalidate formatted IP results'
         ]
+      },
+      {
+        command: 'getIpGeolocation',
+        description: 'Look up geolocation data for an IP address (defaults to your public IP)',
+        usage: 'getIpGeolocation({ ip: "8.8.8.8", forceRefresh: true, cacheTtlSeconds: 3600 })',
+        examples: [
+          'where is my IP located?',
+          'geolocate 1.1.1.1',
+          'look up location for 8.8.8.8',
+          'what country is my IP from?'
+        ]
       }
     ];
 
@@ -133,6 +144,8 @@ export default class ipifyorgPlugin extends BasePlugin {
           return await this.getPublicIpByProtocol(data);
         case 'clearCache':
           return await this.clearCache(data);
+        case 'getIpGeolocation':
+          return await this.getIpGeolocation(data);
         default:
           throw new Error(`Unknown action: ${action}`);
       }
@@ -155,7 +168,8 @@ export default class ipifyorgPlugin extends BasePlugin {
     - For getPublicIp: {}
     - For getFormattedIp: {"format": "json"} or {"format": "text"}
     - For getPublicIpByProtocol: {"protocol": "v4"}, {"protocol": "v6"}, or {"protocol": "dual"}
-    - For clearCache: {"scope": "all"}, {"scope": "v4"}, {"scope": "v6"}, or {"scope": "formatted"}`;
+    - For clearCache: {"scope": "all"}, {"scope": "v4"}, {"scope": "v6"}, or {"scope": "formatted"}
+    - For getIpGeolocation: {"ip": "8.8.8.8"} or {}`;
 
     const response = await this.agent.providerManager.generateResponse(prompt, {
       temperature: 0.3,
@@ -474,6 +488,122 @@ export default class ipifyorgPlugin extends BasePlugin {
         cleared: true
       },
       source: 'cache'
+    };
+  }
+
+  /**
+   * Look up geolocation data for an IP address using ip-api.com.
+   * If no IP is provided, the current public IP is used.
+   *
+   * @param {Object} params
+   * @param {string} [params.ip] - IP address to geolocate (defaults to public IP).
+   * @param {boolean} [params.forceRefresh=false] - Bypass cache and fetch fresh data.
+   * @param {number} [params.cacheTtlSeconds] - Custom TTL for caching this result (seconds, min 1).
+   * @returns {Promise<Object>} Structured geolocation data.
+   */
+  async getIpGeolocation(params = {}) {
+    const {
+      ip,
+      forceRefresh = false,
+      cacheTtlSeconds
+    } = params;
+
+    this.validateParams({ ip, forceRefresh, cacheTtlSeconds }, {
+      ip: {
+        required: false,
+        type: 'string'
+      },
+      forceRefresh: {
+        required: false,
+        type: 'boolean'
+      },
+      cacheTtlSeconds: {
+        required: false,
+        type: 'number',
+        min: 1
+      }
+    });
+
+    // Resolve target IP
+    let targetIp = ip;
+    if (!targetIp) {
+      const publicIpResult = await this.getPublicIp({ forceRefresh: false });
+      if (!publicIpResult.success || !publicIpResult.data?.ip) {
+        throw new Error('Unable to determine public IP for geolocation');
+      }
+      targetIp = publicIpResult.data.ip;
+    }
+
+    // Validate IP format
+    if (net.isIP(targetIp) === 0) {
+      throw new Error(`Invalid IP address: ${targetIp}`);
+    }
+    // A LAN/loopback/link-local address has no location, and sending it to a third
+    // party only leaks the network's layout. Answer locally.
+    if (/^(10\.|127\.|169\.254\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|0\.)/.test(targetIp) ||
+        /^(::1$|fe[89ab][0-9a-f]:|f[cd][0-9a-f]{2}:)/i.test(targetIp)) {
+      throw new Error(`${targetIp} is a private or local address; it has no public geolocation`);
+    }
+
+    const cacheKey = `geolocation-${targetIp}`;
+    const cached = forceRefresh ? undefined : this.cache.get(cacheKey);
+
+    if (cached !== undefined) {
+      this.logger.debug(`Returning cached geolocation for ${targetIp}`);
+      return {
+        success: true,
+        data: cached,
+        source: 'cache'
+      };
+    }
+
+    const fields = 'status,message,country,countryCode,region,regionName,city,zip,lat,lon,timezone,isp,org,as,query';
+    const url = `http://ip-api.com/json/${targetIp}?fields=${fields}`;
+
+    const response = await retryOperation(() =>
+      axios.get(url, {
+        headers: {
+          'User-Agent': 'LANAgent-Plugin/1.0'
+        },
+        timeout: 5000
+      }),
+      { retries: 3, context: 'ip-api.com geolocation call' }
+    );
+
+    const data = response.data;
+
+    if (data.status !== 'success') {
+      throw new Error(`Geolocation lookup failed: ${data.message || 'Unknown error'}`);
+    }
+
+    // Structure the result
+    const geolocationData = {
+      ip: data.query,
+      country: data.country,
+      countryCode: data.countryCode,
+      region: data.region,
+      regionName: data.regionName,
+      city: data.city,
+      zip: data.zip,
+      lat: data.lat,
+      lon: data.lon,
+      timezone: data.timezone,
+      isp: data.isp,
+      org: data.org,
+      as: data.as
+    };
+
+    // Cache the result
+    if (cacheTtlSeconds === undefined) {
+      this.cache.set(cacheKey, geolocationData);
+    } else {
+      this.cache.set(cacheKey, geolocationData, cacheTtlSeconds);
+    }
+
+    return {
+      success: true,
+      data: geolocationData,
+      source: 'fetched'
     };
   }
   

@@ -67,6 +67,7 @@ export class SystemLogTransport extends Transport {
     this.now = opts.now || (() => Date.now());
     this.lastComplaint = 0;
     this.flushing = false;
+    this.lastFlushTime = null;        // timestamp of last successful flush
     if (this.flushEvery > 0) {
       this.timer = setInterval(() => { this.flush().catch(() => {}); }, this.flushEvery);
       this.timer.unref?.();
@@ -191,6 +192,7 @@ export class SystemLogTransport extends Transport {
       const Model = await this.getModel();
       // Not lean: the schema defaults matter (findErrors() matches resolved.status === false).
       await Model.insertMany(batch, { ordered: false });
+      this.lastFlushTime = this.now(); // record successful flush timestamp
       return batch.length;
     } catch (e) {
       // Keep the batch for the next try unless it is the documents themselves that are bad.
@@ -200,6 +202,22 @@ export class SystemLogTransport extends Transport {
     } finally {
       this.flushing = false;
     }
+  }
+
+  /**
+   * Returns transport health metrics for monitoring and health checks.
+   * @returns {{ bufferLength: number, dropped: number, floodCount: number, floodsSuppressing: number, isConnected: boolean, lastFlushTime: number|null }}
+   */
+  getStats() {
+    return {
+      bufferLength: this.buffer.length,
+      dropped: this.dropped,
+      floodCount: this.floods.size,   // message keys tracked in the current window
+      // ...and the ones over the limit right now, whose repeats are counted, not stored
+      floodsSuppressing: [...this.floods.values()].filter(f => f.suppressed > 0 && this.now() - f.first < FLOOD_WINDOW_MS).length,
+      isConnected: this.isConnected(),
+      lastFlushTime: this.lastFlushTime
+    };
   }
 
   complain(text) {

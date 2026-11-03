@@ -156,3 +156,54 @@ test('a correlated entry passes the real SystemLog schema with the id intact', a
   assert.equal(docModel.validateSync(), undefined);
   assert.equal(docModel.context.requestId, 'req-abc');
 });
+
+test('getStats() returns transport health metrics', async () => {
+  const { t, advance } = sink();
+  // initial state
+  let stats = t.getStats();
+  assert.equal(stats.bufferLength, 0);
+  assert.equal(stats.dropped, 0);
+  assert.equal(stats.floodCount, 0);
+  assert.equal(stats.isConnected, true);
+  assert.equal(stats.lastFlushTime, null);
+
+  // add entries to buffer
+  await log(t, { level: 'warn', message: 'test1' });
+  await log(t, { level: 'warn', message: 'test2' });
+  stats = t.getStats();
+  assert.equal(stats.bufferLength, 2);
+
+  // simulate dropped entries
+  t.dropped = 5;
+  stats = t.getStats();
+  assert.equal(stats.dropped, 5);
+
+  // Clear flood map from previous entries (they share a key after digit normalisation)
+  advance(61_000);
+  await t.flush();
+  stats = t.getStats();
+  assert.equal(stats.floodCount, 0);
+
+  // create a flood entry
+  await log(t, { level: 'warn', message: 'flood msg' });
+  await log(t, { level: 'warn', message: 'flood msg' });
+  await log(t, { level: 'warn', message: 'flood msg' });
+  stats = t.getStats();
+  assert.equal(stats.floodCount, 1);
+  assert.equal(stats.floodsSuppressing, 0, 'three repeats are under the flood limit');
+
+  // after a flush, lastFlushTime should be set
+  await t.flush();
+  stats = t.getStats();
+  assert.ok(stats.lastFlushTime > 0);
+  assert.equal(stats.isConnected, true);
+});
+
+test('getStats() counts only the messages whose repeats are being suppressed', async () => {
+  const { t } = sink();
+  for (let i = 0; i < 6; i++) await log(t, { level: 'warn', message: 'burst' });
+  await log(t, { level: 'warn', message: 'once' });
+  const s = t.getStats();
+  assert.equal(s.floodCount, 2);
+  assert.equal(s.floodsSuppressing, 1);
+});
