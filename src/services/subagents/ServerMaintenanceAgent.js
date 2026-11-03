@@ -108,6 +108,10 @@ export class ServerMaintenanceAgent extends BaseAgentHandler {
         tmpFiles: true,
         dockerPrune: false
       },
+      // *arr apps update themselves, unattended, inside this local-time window: one
+      // app per hourly run (an update can take 13 min of a 20-min session), each
+      // behind its own built-in backup. Success is a silent notice, failure urgent.
+      arrAutoUpdate: { enabled: true, windowStartHour: 3, windowEndHour: 7 },
       approvalRequired: ['apt_upgrade', 'service_restart', 'reboot', 'docker_prune', 'disk_cleanup_large']
     };
   }
@@ -235,6 +239,10 @@ export class ServerMaintenanceAgent extends BaseAgentHandler {
 
       // Queue dangerous actions for approval if needed
       await this.queueApprovals(config);
+
+      // Unattended *arr updates (night window, one app per run)
+      await this.autoUpdateArrApps(config, hostname).catch(err =>
+        logger.error(`ServerMaintenanceAgent: arr auto-update failed: ${err.message}`));
 
       // Check for new alerts vs previously seen ones (suppress repeated warnings)
       const previousAlertKeys = new Set((this.getState().alertKeys || []));
@@ -872,6 +880,7 @@ export class ServerMaintenanceAgent extends BaseAgentHandler {
         running: false,
         manuallyStopped: prev.manuallyStopped || false,
         version: prev.version || null,
+        versionCheckedAt: prev.versionCheckedAt || null,
         lastSeen: prev.lastSeen || null,
         error: null,
         checkFailed: false,
@@ -910,9 +919,14 @@ export class ServerMaintenanceAgent extends BaseAgentHandler {
           }
         }
 
-        // Fetch version (throttled — only on first run or if we don't have one yet)
-        if (!appState.version) {
-          appState.version = await this.getAppVersion(app);
+        // Fetch version (throttled — once a day). It used to be read only when none was
+        // stored, so the first reading stuck forever: goliath's state still said radarr
+        // 5.28 / sonarr 3.0.10 / prowlarr 1.37 (old dpkg records) on 2026-11-03 while 7.0.1 /
+        // 5.0.0 / 3.0.0 ran. Apps that update themselves need a fresh reading.
+        const checkedAt = appState.versionCheckedAt ? new Date(appState.versionCheckedAt).getTime() : 0;
+        if (!appState.version || Date.now() - checkedAt > 24 * 3600 * 1000) {
+          appState.version = (await this.getAppVersion(app)) || appState.version;
+          appState.versionCheckedAt = new Date().toISOString();
         }
 
         if (appState.running) {
@@ -1135,21 +1149,34 @@ export class ServerMaintenanceAgent extends BaseAgentHandler {
     const updates = await this.arrApi(app, 'GET', 'update');
     const target = Array.isArray(updates) ? updates.find(u => u.installable && !u.installed) : null;
     if (!target) {
-      return { success: true, message: `**${hostname}**: ${app.name} is already up to date (${preVersion}, ${status.branch || 'unknown'} branch)` };
+      return { success: true, upToDate: true, message: `**${hostname}**: ${app.name} is already up to date (${preVersion}, ${status.branch || 'unknown'} branch)` };
     }
 
-    // 1. Backup — refuse to update without a completed one
+    // 1. Backup — refuse to update without a completed one. A Backups/ subfolder left
+    // owned by root (a manual root backup on goliath, 2026-04-03) makes the app's own
+    // backup fail "not writable", which blocked radarr/lidarr/prowlarr updates
+    // (2026-11-03). Give the folder back to the app's user first.
+    await this.runSSHCommand(
+      `D=/var/lib/${app.name}; [ -d "$D/Backups" ] && O=$(stat -c %U:%G "$D") && ` +
+      `[ -n "$(find "$D/Backups" ! -user "\${O%%:*}" -print -quit 2>/dev/null)" ] && ` +
+      `chown -R "$O" "$D/Backups" && echo fixed || true`
+    ).then(out => {
+      if (/fixed/.test(out)) logger.info(`ServerMaintenanceAgent: ${app.name} Backups folder was not owned by its user; fixed`);
+    }).catch(() => {});
     const backupCmd = await this.arrApi(app, 'POST', 'command', { name: 'Backup' });
     if (!backupCmd?.id) {
       return { success: false, message: `**${hostname}**: ${app.name} backup could not be started — update NOT attempted (${preVersion} → ${target.version} pending)` };
     }
     let backupState = backupCmd.status;
+    let backupInfo = null;
     for (let waited = 0; !['completed', 'failed', 'aborted', 'cancelled'].includes(backupState) && waited < ARR_BACKUP_TIMEOUT_MS; waited += ARR_POLL_MS) {
       await new Promise(r => setTimeout(r, ARR_POLL_MS));
-      backupState = (await this.arrApi(app, 'GET', `command/${backupCmd.id}`))?.status;
+      backupInfo = await this.arrApi(app, 'GET', `command/${backupCmd.id}`);
+      backupState = backupInfo?.status;
     }
     if (backupState !== 'completed') {
-      return { success: false, message: `**${hostname}**: ${app.name} backup ended "${backupState || 'unknown'}" — update NOT attempted (${preVersion} → ${target.version} pending)` };
+      const why = String(backupInfo?.exception || backupInfo?.message || '').split('\n')[0].slice(0, 200);
+      return { success: false, message: `**${hostname}**: ${app.name} backup ended "${backupState || 'unknown'}" — update NOT attempted (${preVersion} → ${target.version} pending)${why ? `\nReason: ${why}` : ''}` };
     }
     const backups = await this.arrApi(app, 'GET', 'system/backup');
     const backupName = Array.isArray(backups) && backups.length
@@ -1169,7 +1196,66 @@ export class ServerMaintenanceAgent extends BaseAgentHandler {
     if (postVersion === preVersion) {
       return { success: false, message: `**${hostname}**: ${app.name} update to ${target.version} did not take effect (still ${preVersion}, unit ${unitState}). Backup: ${backupName}. See /var/lib/${app.name}/UpdateLogs/` };
     }
-    return { success: true, message: `**${hostname}**: Updated ${app.name} (${preVersion} → ${postVersion})\nBackup: ${backupName}\nStatus: ${unitState}` };
+    if (unitState !== 'active') {
+      return { success: false, message: `**${hostname}**: ${app.name} updated ${preVersion} → ${postVersion} but the unit is ${unitState}. Backup: ${backupName}` };
+    }
+    return { success: true, updated: true, message: `**${hostname}**: Updated ${app.name} (${preVersion} → ${postVersion})\nBackup: ${backupName}\nStatus: ${unitState}` };
+  }
+
+  /**
+   * Unattended *arr updates, run from the hourly check. Inside the configured
+   * local-time window it walks the *arr apps not yet handled today; up-to-date
+   * apps cost one API call, and the run stops after the first app that needed an
+   * update (bounded by the 20-min session). Apps the owner stopped are skipped.
+   */
+  async autoUpdateArrApps(config, hostname) {
+    const cfg = { enabled: true, windowStartHour: 3, windowEndHour: 7, ...(config.arrAutoUpdate || {}) };
+    if (!cfg.enabled) return null;
+    const now = new Date();
+    const hour = now.getHours();
+    if (hour < cfg.windowStartHour || hour >= cfg.windowEndHour) return null;
+
+    const state = this.getState();
+    const today = now.toLocaleDateString('en-CA');
+    const prev = state.arrAutoUpdate || {};
+    const handled = prev.date === today ? [...(prev.handled || [])] : [];
+    const history = Array.isArray(prev.history) ? prev.history : [];
+    const apps = (config.monitoredServices?.apps || [])
+      .filter(a => ARR_API_VERSION[a.name] && a.port && !handled.includes(a.name));
+    if (apps.length === 0) return null;
+
+    let acted = null;
+    for (const app of apps) {
+      if (state.monitoredApps?.[app.name]?.manuallyStopped) { handled.push(app.name); continue; }
+      let result;
+      try {
+        result = await this.updateArrApp(app, hostname);
+      } catch (err) {
+        result = { success: false, message: `**${hostname}**: ${app.name} auto-update threw: ${err.message}` };
+      }
+      if (!result) continue; // API unreachable now: retry next hour; the app check alerts on its own
+      handled.push(app.name);
+      if (result.upToDate) continue;
+      acted = { app: app.name, at: now.toISOString(), success: !!result.success, message: result.message };
+      break;
+    }
+
+    await this.updateState({
+      arrAutoUpdate: {
+        date: today,
+        handled,
+        lastRun: now.toISOString(),
+        history: acted ? [...history, acted].slice(-20) : history
+      }
+    });
+    if (!acted) return null;
+
+    logger.info(`ServerMaintenanceAgent: arr auto-update ${acted.app}: ${acted.success ? 'ok' : 'FAILED'} — ${acted.message.replace(/\n/g, ' | ')}`);
+    await this.sendTelegramAlert(
+      `*${hostname} auto-update*\n\n${acted.message}`,
+      { urgent: !acted.success }
+    );
+    return acted;
   }
 
   // --- Cleanup ---
@@ -1211,6 +1297,38 @@ export class ServerMaintenanceAgent extends BaseAgentHandler {
 
   // --- Approvals ---
 
+  /**
+   * Ask the owner once, and keep working. The base model's requestApproval sets the
+   * agent's status to waiting_approval, and canRun() refuses every run in that state,
+   * so an optional "apt upgrade?" question stopped all monitoring of the host. Every
+   * hourly run also queued another identical question: goliath had 2,188 pending
+   * (2,173 apt_upgrade) and no check, restart or update ran from 2026-10-20 to
+   * 2026-11-03. Here a question is queued only if the same one is not already
+   * pending (apt_upgrade/docker_prune by action, service_restart per service), and
+   * the agent's status is never touched.
+   */
+  async requestApproval(action, description, data = {}) {
+    const key = a => `${a.action}:${a.data?.service || ''}`;
+    const wanted = key({ action, data });
+    const pending = (this.agentDoc.state?.pendingApprovals || [])
+      .find(a => a.status === 'pending' && key(a) === wanted);
+    if (pending) return pending;
+    const approval = { action, description, requestedAt: new Date(), data, status: 'pending' };
+    const SubAgent = this.agentDoc.constructor;
+    if (typeof SubAgent?.findByIdAndUpdate === 'function') {
+      const updated = await SubAgent.findByIdAndUpdate(
+        this.agentDoc._id,
+        { $push: { 'state.pendingApprovals': approval } },
+        { new: true }
+      );
+      if (updated?.state) this.agentDoc.state.pendingApprovals = updated.state.pendingApprovals;
+    } else {
+      (this.agentDoc.state.pendingApprovals ||= []).push(approval);
+    }
+    logger.info(`ServerMaintenanceAgent: queued approval ${wanted} — ${description}`);
+    return approval;
+  }
+
   async queueApprovals(config) {
     const approvalRequired = config.approvalRequired || [];
 
@@ -1222,7 +1340,6 @@ export class ServerMaintenanceAgent extends BaseAgentHandler {
         `${count} apt updates available on ${config.hostname}. Run apt-get upgrade?`,
         { updateCount: count }
       );
-      logger.info(`ServerMaintenanceAgent: Queued approval for apt_upgrade (${count} updates)`);
     }
 
     // Queue service restart if any watched service is down
@@ -1235,7 +1352,6 @@ export class ServerMaintenanceAgent extends BaseAgentHandler {
           `Service ${svc} is ${status} on ${config.hostname}. Restart it?`,
           { service: svc, currentStatus: status }
         );
-        logger.info(`ServerMaintenanceAgent: Queued approval for service_restart: ${svc}`);
       }
     }
 
@@ -1368,11 +1484,11 @@ export class ServerMaintenanceAgent extends BaseAgentHandler {
     return lines.join('\n');
   }
 
-  async sendTelegramAlert(message) {
+  async sendTelegramAlert(message, { urgent = false } = {}) {
     try {
       const telegram = this.mainAgent?.interfaces?.get('telegram');
       if (telegram) {
-        await telegram.sendNotification(message, { parse_mode: 'Markdown' });
+        await telegram.sendNotification(message, { parse_mode: 'Markdown', urgent });
         logger.info('ServerMaintenanceAgent: Telegram alert sent');
       } else {
         logger.debug('ServerMaintenanceAgent: Telegram interface not available');

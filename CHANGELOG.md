@@ -2,6 +2,16 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.731] - 2026-11-03
+
+### Added
+- **Server maintenance: unattended *arr updates.** The hourly maintenance check now installs pending Radarr/Sonarr/Lidarr/Readarr/Prowlarr updates by itself, inside a local-time night window (`arrAutoUpdate: { enabled: true, windowStartHour: 3, windowEndHour: 7 }` in the agent's config). Each update goes through the app's own updater behind its own built-in backup, as `update <app> on <host>` already did. It handles one app per hourly run, because an update can take 13 minutes of the 20-minute session. Apps the owner stopped are skipped. A success is a silent Telegram notice, a failure an urgent one. The last 20 results are kept in the agent's state (`arrAutoUpdate.history`).
+
+### Fixed
+- **Server maintenance stopped running for two weeks.** Each hourly run queued another identical approval ("N apt updates. Run apt-get upgrade?"), 2,188 of them, and a pending approval leaves the agent in `waiting_approval`, a status in which no run starts. No check, restart or update ran from 2026-10-20 until this fix. The maintenance agent now asks each question once (apt upgrade and docker prune by action, service restart per service) and keeps running while it waits.
+- ***arr update: a backup folder owned by root no longer blocks the update.** An app's `Backups/manual` folder left owned by root makes the app's own backup fail with "not writable", so the update was refused. The folder is now handed back to the app's user before the backup, and a failed backup reports the app's reason.
+- **Server maintenance: app versions are re-read daily.** A version was read only the first time an app was seen, so the stored versions never changed. goliath's state listed radarr 5.28, sonarr 3.0.10 and prowlarr 1.37 (old package records) while 7.0.1, 5.0.0 and 3.0.0 ran.
+
 ## [2.25.730] - 2026-11-03
 
 ### Fixed
