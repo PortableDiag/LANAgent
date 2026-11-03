@@ -2,6 +2,12 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.730] - 2026-11-03
+
+### Fixed
+- **Scraper: plain-text documents with a few stray NUL bytes are read, not refused.** A Federal Register full-text `.txt` (served as `text/plain`, 12 NULs in 7 KB) failed every tier with "Unsupported content: text/plain file … is not a web page or PDF", because any NUL in the first 8 KB counted as binary. A body with NULs is now binary only when control bytes are more than 0.5% of the first 8 KB or of an 8 KB window from the middle; real binaries measured 3–80%, that document 0.17%. Stray NULs are dropped from text before parsing.
+- More binary magic numbers (glTF/VRM, ELF, wasm, webm/mkv, ogg, RIFF, ID3 mp3, SQLite, mp4/mov `ftyp`), so a container that opens with a text header is still refused as a file.
+
 ## [2.25.728] - 2026-11-02
 
 ### Fixed

@@ -194,9 +194,12 @@ export function isChromePdfViewer(html) {
   return /<embed\b[^>]*\btype=["']application\/pdf["']/i.test(html);
 }
 
-// A response body that is a binary file, not text. Text and HTML never hold a NUL
-// byte; the magic numbers catch the few binary formats that might not have one
-// near the start. Content-Type is not trusted: servers send octet-stream for .txt.
+// A response body that is a binary file, not text. The magic numbers catch the few
+// binary formats that might not have a NUL near the start. Content-Type is not
+// trusted: servers send octet-stream for .txt. A NUL alone does not make a file
+// binary: Federal Register full-text documents carry a dozen stray NULs in 7 KB
+// and were refused as "not a web page" (2026-11-03). Binary and compressed data
+// run 3–80% control bytes; that document ran 0.17%.
 const BINARY_MAGIC = [
   [0x50, 0x4b, 0x03, 0x04], // zip, docx, xlsx, jar
   [0x1f, 0x8b],             // gzip
@@ -204,12 +207,32 @@ const BINARY_MAGIC = [
   [0xff, 0xd8, 0xff],       // jpeg
   [0x47, 0x49, 0x46, 0x38], // gif
   [0x52, 0x61, 0x72, 0x21], // rar
-  [0x37, 0x7a, 0xbc, 0xaf]  // 7z
+  [0x37, 0x7a, 0xbc, 0xaf], // 7z
+  [0x67, 0x6c, 0x54, 0x46], // glTF binary (.glb, .vrm): a JSON header, then buffers
+  [0x7f, 0x45, 0x4c, 0x46], // ELF
+  [0x00, 0x61, 0x73, 0x6d], // wasm
+  [0x1a, 0x45, 0xdf, 0xa3], // webm, mkv
+  [0x4f, 0x67, 0x67, 0x53], // ogg
+  [0x52, 0x49, 0x46, 0x46], // RIFF: wav, webp, avi
+  [0x49, 0x44, 0x33],       // mp3 with ID3
+  [0x53, 0x51, 0x4c, 0x69, 0x74, 0x65, 0x20, 0x66] // SQLite format 3
 ];
 export function isBinaryBody(buf) {
   if (!buf || buf.length === 0) return false;
   if (BINARY_MAGIC.some(m => m.every((b, i) => buf[i] === b))) return true;
-  return buf.subarray(0, 8192).includes(0);
+  if (buf.length >= 8 && buf.subarray(4, 8).toString('latin1') === 'ftyp') return true; // mp4, mov, m4a
+  // The start and the middle: a container can open with a text header.
+  const mid = buf.length > 16384 ? Math.floor(buf.length / 2) : -1;
+  const samples = [buf.subarray(0, 8192)];
+  if (mid > 0) samples.push(buf.subarray(mid, mid + 8192));
+  if (!samples.some(s => s.includes(0))) return false;
+  return samples.some(s => {
+    let control = 0;
+    for (const b of s) {
+      if (b < 9 || b === 11 || (b > 13 && b < 32) || b === 127) control++;
+    }
+    return control / s.length > 0.005;
+  });
 }
 
 function detectChromeErrorPage(html) {
@@ -922,7 +945,8 @@ export default class ScraperPlugin extends BasePlugin {
         const type = String(response.headers['content-type'] || 'unknown type').split(';')[0].trim();
         throw new Error(`Unsupported content: ${type} file (${body.length} bytes) is not a web page or PDF`);
       }
-      const html = body.toString('utf8');
+      // Stray NULs in a text body (see isBinaryBody) are dropped, not passed to the parser.
+      const html = body.toString('utf8').replace(/\0/g, '');
 
       const newHeaders = {};
       if (response.headers.etag) {
