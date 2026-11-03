@@ -9,6 +9,9 @@ All notable changes to LANAgent will be documented in this file.
 - **IP geolocation without an API key** (ipify plugin `getIpGeolocation`, "where is my IP located", "geolocate 1.1.1.1"), via ip-api.com, cached per IP. Private, loopback and link-local addresses are answered locally and never sent out. (#2811)
 - **systemLogs `status`**: says whether the stored warning/error history is complete — entries dropped, database not connected, messages repeating fast enough to be counted instead of stored, last save ("is error logging working"). Backed by the log sink's new `getStats()`. (#2809)
 
+### Fixed
+- **Server maintenance ran every two hours, not hourly.** Its cooldown (60 min, stamped at each start) equalled the heartbeat (`every 60 minutes`), so each next heartbeat arrived milliseconds early and was refused. The maintenance agent now keeps its cooldown at 55 minutes.
+
 ## [2.25.731] - 2026-11-03
 
 ### Added

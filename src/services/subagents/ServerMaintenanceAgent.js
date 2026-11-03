@@ -140,6 +140,18 @@ export class ServerMaintenanceAgent extends BaseAgentHandler {
   async initialize() {
     await super.initialize();
 
+    // The heartbeat is Agenda `every('60 minutes')`, and lastRunAt is stamped a few ms after
+    // each dispatch, so with the schema's default 60-min cooldown the next heartbeat lands at
+    // 59:59.9 and is refused: the hourly check really ran every two hours (2026-11-03). Keep
+    // the cooldown under the heartbeat; it still stops a manual run from doubling up.
+    if (!(this.agentDoc.config?.cooldownMinutes < 60)) {
+      const SubAgent = this.agentDoc.constructor;
+      if (typeof SubAgent?.findByIdAndUpdate === 'function') {
+        await SubAgent.findByIdAndUpdate(this.agentDoc._id, { $set: { 'config.cooldownMinutes': 55 } }).catch(() => {});
+      }
+      if (this.agentDoc.config) this.agentDoc.config.cooldownMinutes = 55;
+    }
+
     // Ensure domainConfig has defaults
     const config = this.getConfig();
     if (!config.targetHost) {
