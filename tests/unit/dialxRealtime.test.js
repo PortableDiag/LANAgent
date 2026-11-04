@@ -13,7 +13,7 @@ function rig({ ok = true, toolOk = true } = {}) {
   const calls = { limitS: 300, settings: async () => ({ realtimeVoice: 'coral' }), hub: { callTool: async (name, args) => { tools.push({ name, args }); return { ok: toolOk }; } }, hangup: async (s) => hung.push(s.id) };
   const fetch = async (url, init) => { fetched.push({ url, body: JSON.parse(init.body), auth: init.headers.Authorization });
     return { ok, status: ok ? 200 : 401, json: async () => ok ? { value: 'ek_123', expires_at: 1790000000 } : { error: { message: 'bad key' } } }; };
-  return { rt: new DialXRealtime({ calls, logger: quiet, env, fetch, silenceMs: 30 }), tools, hung, fetched };
+  return { rt: new DialXRealtime({ calls, logger: quiet, env, fetch, silenceMs: 30, retryGapsMs: [0] }), tools, hung, fetched };
 }
 
 test('realtime is used only when the phone lists dialx.realtime and ALICE has an OpenAI key', () => {
@@ -251,7 +251,7 @@ test('a secret that expired while ringing is replaced, not treated as a failure 
   assert.equal(s.realtime, 'offered');
 });
 
-test('a dropped realtime socket reconnects with the conversation so far, at most 3 times (DialX 0.7.87)', async () => {
+test('a dropped realtime socket reconnects with the conversation so far, every time it went live again (DialX 0.7.87)', async () => {
   const { rt, tools, fetched } = rig();
   const s = session();
   s.transcript.push({ role: 'callee', text: 'Tell Pat the boat is fixed.' });
@@ -265,7 +265,7 @@ test('a dropped realtime socket reconnects with the conversation so far, at most
   rt.started(s, { rt_session_id: 'b', resumed: true });
   assert.equal(s.realtime, 'live');
   for (let i = 0; i < 3; i++) { await rt.failed(s, { error: 'dropped: again', retry_within_s: 20 }); rt.started(s, { rt_session_id: `c${i}`, resumed: true }); }
-  assert.equal(tools.filter(t => t.name === 'dialx.realtime').length, 4, 'three reconnects, no fourth');
+  assert.equal(tools.filter(t => t.name === 'dialx.realtime').length, 5, 'each drop after a live session reconnects');
   assert.doesNotMatch(fetched[0].body.session.instructions, /connection dropped/, 'the first session is not a resume');
   rt.end(s);
 });
@@ -472,7 +472,7 @@ test('a background note finished while the call is live is told on the call (Dia
   assert.deepEqual(told, [], 'no separate message when the call heard it');
 });
 
-test('DialX 0.7.90: after a failure one late session takes the call over from turns, with the conversation so far', async () => {
+test('DialX 0.7.90: after a failure a late session takes the call over from turns, with the conversation so far, up to 5 tries', async () => {
   assert.equal(lateTakeover({ appVersion: '0.7.89' }), false);
   assert.equal(lateTakeover({ appVersion: '0.7.90' }), true);
   const { rt, tools, fetched } = rig();
@@ -481,14 +481,15 @@ test('DialX 0.7.90: after a failure one late session takes the call over from tu
   await rt.failed(s, { error: 'no dialx.realtime within 10 s' });
   assert.equal(tools.filter(t => t.name === 'dialx.realtime').length, 1, 'one late offer');
   assert.match(fetched.at(-1).body.session.instructions, /Dad: Is Pat around\?/);
-  await rt.failed(s, { error: 'session did not start' });
-  assert.equal(tools.filter(t => t.name === 'dialx.realtime').length, 1, 'never a second late offer');
+  for (let i = 0; i < 6; i++) await rt.failed(s, { error: 'session did not start' });
+  assert.equal(tools.filter(t => t.name === 'dialx.realtime').length, 5, 'five tries, then the phone voice');
+  assert.equal(s.realtime, null);
   const deaf = { ...session(), device: { id: 'd1', appVersion: '0.7.90' } };
   await rt.failed(deaf, { error: 'no input audio' });
-  assert.equal(tools.filter(t => t.name === 'dialx.realtime').length, 1, 'not when the phone cannot hear the callee');
+  assert.equal(tools.filter(t => t.name === 'dialx.realtime').length, 5, 'not when the phone cannot hear the callee');
   const old = { ...session(), device: { id: 'd1', appVersion: '0.7.89' } };
   await rt.failed(old, { error: 'no dialx.realtime within 10 s' });
-  assert.equal(tools.filter(t => t.name === 'dialx.realtime').length, 1, 'older DialX ignores a late session');
+  assert.equal(tools.filter(t => t.name === 'dialx.realtime').length, 5, 'older DialX ignores a late session');
   rt.end(s);
 });
 
@@ -667,5 +668,54 @@ test('with the owner on the line a pause is never a cue for ALICE', async () => 
   await rt.event(s, { type: 'conversation.item.input_audio_transcription.completed', transcript: 'So, anyway.' });
   await new Promise(r => setTimeout(r, 60));
   assert.equal(notes(tools).length, 0);
+  rt.end(s);
+});
+
+test('one failed hand-over is tried again: realtime gets 5 tries before the phone voice (the owner, 2026-11-03)', async () => {
+  const tools = [];
+  let refuse = 2;
+  const calls = { limitS: 300, settings: async () => ({}), hub: { callTool: async (name, args) => { tools.push({ name, args }); return refuse-- > 0 ? { ok: false, error: { code: 'timeout' } } : { ok: true }; } } };
+  const fetch = async () => ({ ok: true, status: 200, json: async () => ({ value: 'ek_1', expires_at: 1 }) });
+  const rt = new DialXRealtime({ calls, logger: quiet, env, fetch, retryGapsMs: [0] });
+  const s = session();
+  await rt.begin(s, { name: 'ALICE', owner: 'Pat', limitS: 300 });
+  assert.equal(tools.length, 3, 'two refusals, the third goes through');
+  assert.equal(s.realtime, 'offered');
+
+  const { rt: never, tools: t2 } = rig({ toolOk: false });
+  const s2 = session();
+  await never.begin(s2, { name: 'ALICE', owner: 'Pat', limitS: 300 });
+  assert.equal(t2.filter(t => t.name === 'dialx.realtime').length, 5, 'five tries');
+  assert.equal(s2.realtime, null, 'then turns');
+});
+
+test('a secret OpenAI will not mint is asked for 5 times before the phone voice', async () => {
+  const { rt, fetched, tools } = rig({ ok: false });
+  const s = session();
+  await rt.begin(s, { name: 'ALICE', owner: 'Pat', limitS: 300 });
+  assert.equal(fetched.length, 5);
+  assert.equal(tools.length, 0);
+});
+
+test('no realtime offer after the call ended, and retries stop when it ends (call 119)', async () => {
+  const { rt, tools } = rig({ toolOk: false });
+  const s = { ...session(), done: true };
+  await rt.begin(s, { name: 'ALICE', owner: 'Pat', limitS: 300 });
+  assert.equal(tools.length, 0);
+  const s2 = session();
+  rt.calls.hub.callTool = async (name) => { tools.push({ name }); s2.done = true; return { ok: false, error: { code: 'no_call' } }; };
+  await rt.begin(s2, { name: 'ALICE', owner: 'Pat', limitS: 300 });
+  assert.equal(tools.length, 1, 'the call ended during the first try: no second');
+});
+
+test('a session that went live resets the budget: a later drop gets its own 5 tries', async () => {
+  const { rt, tools } = rig();
+  const s = { ...session(), device: { id: 'd1', appVersion: '0.7.118' } };
+  await rt.begin(s, { name: 'ALICE', owner: 'Pat', limitS: 300 });
+  for (let i = 0; i < 4; i++) await rt.failed(s, { error: 'no session.created within 8 s', retry_within_s: 20 });
+  rt.started(s, { rt_session_id: 'a' });
+  assert.equal(s.rtTries, 0);
+  for (let i = 0; i < 7; i++) await rt.failed(s, { error: 'dropped', retry_within_s: 20 });
+  assert.equal(tools.filter(t => t.name === 'dialx.realtime').length, 10, '5 before it went live, 5 after the drop');
   rt.end(s);
 });

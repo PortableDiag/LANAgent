@@ -26,6 +26,13 @@ export const REALTIME_VOICE = process.env.DIALX_REALTIME_VOICE || 'marin'; // th
 const API = 'https://api.openai.com/v1/realtime';
 // A person's line on a group call that no agent answers this long gets an answer (call 105/106, 2026-11-01).
 export const UNANSWERED_MS = Number(process.env.DIALX_UNANSWERED_MS) || 4000;
+// The owner, 2026-11-03: the phone's own voice is the emergency fallback, never the answer to one failed connection.
+// Every way realtime can fail (the offer, the phone's session not starting, a drop) gets this many tries before turns.
+export const REALTIME_ATTEMPTS = Math.max(1, Number(process.env.DIALX_REALTIME_ATTEMPTS) || 5);
+// Between tries of one offer (mint + hand-over); a late offer after a phone-side failure goes at once.
+const RETRY_GAPS_MS = [500, 1000, 2000, 3000];
+// A flapping call (live, drop, live, drop…) stops offering here; each outage alone gets REALTIME_ATTEMPTS.
+const MAX_OFFERS_PER_CALL = 20;
 
 /** The phone streams to OpenAI Realtime (it lists dialx.realtime in its hello) and ALICE holds a key. */
 export function supportsRealtime(device, env = process.env) {
@@ -341,8 +348,10 @@ export class DialXRealtime {
    * @param {object} o.calls    the DialXCalls that owns the sessions (hub, hangup, limitS)
    * @param {Function} o.fetch  fetch (tests pass a fake)
    */
-  constructor({ calls, logger = console, env = process.env, fetch: f = globalThis.fetch, silenceMs = 40000, unansweredMs = UNANSWERED_MS }) {
+  constructor({ calls, logger = console, env = process.env, fetch: f = globalThis.fetch, silenceMs = 40000, unansweredMs = UNANSWERED_MS, attempts = REALTIME_ATTEMPTS, retryGapsMs = RETRY_GAPS_MS }) {
     this.silenceMs = silenceMs;
+    this.attempts = attempts;
+    this.retryGapsMs = retryGapsMs;
     this.unansweredMs = unansweredMs;
     this.calls = calls;
     this.logger = logger;
@@ -386,28 +395,51 @@ export class DialXRealtime {
    * and its catch reset the live session's state to turns. A second call returns the first offer.
    */
   begin(s, opts) {
-    if (s.realtime === 'live') return Promise.resolve();
+    // Call 119 (2026-11-03): the offer went out 2 s after the call had ended and the phone answered no_call.
+    if (s.realtime === 'live' || s.done) return Promise.resolve();
     if (!s.rtOffer) s.rtOffer = this.offer(s, opts);
     return s.rtOffer;
   }
 
   async offer(s, { name, owner, limitS }) {
     this.lastOpts = { name, owner, limitS };
-    try {
-      // A secret minted during ringing is used if it still has 20 s to live; otherwise a fresh one.
-      const early = s.minted ? await s.minted : null;
-      s.minted = null;
-      const fresh = early && Date.now() - early.at < 100000 ? early : await this.mint(s, { name, owner, limitS });
-      const { secret, expiresAt, voice } = fresh;
-      const r = await this.tool(s, 'dialx.realtime', { client_secret: secret, expires_at: expiresAt, model: REALTIME_MODEL });
-      if (!r.ok) throw new Error(`dialx.realtime ${r.error?.code || 'failed'}`);
-      s.realtime = 'offered';
-      this.logger.info?.(`DialX: call ${s.id} offered realtime (${REALTIME_MODEL}, ${voice}${fresh === early ? ', secret minted while ringing' : ''})`);
-    } catch (e) {
-      // A session the phone already started stays live, whatever happened to this offer.
-      if (s.realtime !== 'live') s.realtime = null;
-      this.logger.warn?.(`DialX: call ${s.id} realtime not started${s.realtime === 'live' ? ' (a session is already live, kept)' : ', using turns'}: ${e.message}`);
+    let last;
+    // Tries left in this outage. A try is one secret minted and handed to the phone; the phone's own failures
+    // (failed() below) spend the same budget, so the phone's voice comes only after REALTIME_ATTEMPTS in a row.
+    while (!s.done && s.realtime !== 'live' && (s.rtTries || 0) < this.attempts && (s.rtOffers || 0) < MAX_OFFERS_PER_CALL) {
+      s.rtTries = (s.rtTries || 0) + 1;
+      s.rtOffers = (s.rtOffers || 0) + 1;
+      const n = s.rtTries;
+      try {
+        // A secret minted during ringing is used if it still has 20 s to live; otherwise a fresh one.
+        const early = s.minted ? await s.minted : null;
+        s.minted = null;
+        const fresh = early && Date.now() - early.at < 100000 ? early : await this.mint(s, { name, owner, limitS });
+        if (s.done) return;
+        const { secret, expiresAt, voice } = fresh;
+        const r = await this.tool(s, 'dialx.realtime', { client_secret: secret, expires_at: expiresAt, model: REALTIME_MODEL });
+        if (!r.ok) throw new Error(`dialx.realtime ${r.error?.code || 'failed'}`);
+        s.realtime = 'offered';
+        this.logger.info?.(`DialX: call ${s.id} offered realtime (${REALTIME_MODEL}, ${voice}${fresh === early ? ', secret minted while ringing' : ''}${n > 1 ? `, try ${n}/${this.attempts}` : ''})`);
+        return;
+      } catch (e) {
+        last = e;
+        // A session the phone already started stays live, whatever happened to this offer.
+        if (s.realtime === 'live') {
+          this.logger.warn?.(`DialX: call ${s.id} realtime offer failed (a session is already live, kept): ${e.message}`);
+          return;
+        }
+        s.realtime = null;
+        if (s.done) return;
+        if (n < this.attempts) {
+          this.logger.warn?.(`DialX: call ${s.id} realtime try ${n}/${this.attempts} failed: ${e.message}; trying again`);
+          await new Promise(res => setTimeout(res, this.retryGapsMs[Math.min(n - 1, this.retryGapsMs.length - 1)] || 0));
+        }
+      }
     }
+    if (s.realtime === 'live' || s.done) return;
+    s.realtime = null;
+    this.logger.warn?.(`DialX: call ${s.id} realtime not started after ${s.rtTries || 0} tries, using turns${last ? `: ${last.message}` : ''}`);
   }
 
   /** call.realtime_started: the phone's socket to OpenAI is up; DialX's own turns are off from here. */
@@ -429,6 +461,7 @@ export class DialXRealtime {
     };
     arm(this.silenceMs);
     s.everLive = true;
+    s.rtTries = 0; // live again: the next outage gets the whole budget
     s.rtGen = (s.rtGen || 0) + 1; // a tool answer for an older session goes to this one as a note
     if (body.resumed) s.resuming = false;
     this.logger.info?.(`DialX: call ${s.id} is realtime (${body.rt_session_id || 'no session id'}${body.resumed ? ', resumed after a drop' : ''}${body.opening_played === false ? ', the model says the opening' : ''})`);
@@ -439,6 +472,7 @@ export class DialXRealtime {
     // DialX 0.7.39: a secret handed over while ringing ran out before pickup. Mint a fresh one; it is used at pickup.
     if (body?.error === 'secret_expired' && !s.done && (s.reminted || 0) < 3) {
       s.reminted = (s.reminted || 0) + 1;
+      s.rtTries = Math.max(0, (s.rtTries || 0) - 1); // an expired secret is not a failed try
       this.logger.info?.(`DialX: call ${s.id} realtime secret expired while ringing; sending a fresh one`);
       s.minted = null;
       s.rtOffer = null; // a deliberate second offer
@@ -448,22 +482,23 @@ export class DialXRealtime {
     // dialx.realtime. The new session carries the conversation so far and does not open again. Up to 3 drops a call.
     // DialX 0.7.93 (4293 #468): a FIRST session that never started gets the same retry window; that one opens normally,
     // so the fresh session carries the conversation only when the call already had one.
-    if (body?.retry_within_s && !s.done && (s.resumes || 0) < 3) {
+    // Up to REALTIME_ATTEMPTS tries per outage (was 3 drops a call; the owner, 2026-11-03).
+    if (body?.retry_within_s && !s.done && (s.rtTries || 0) < this.attempts && (s.rtOffers || 0) < MAX_OFFERS_PER_CALL) {
       s.resumes = (s.resumes || 0) + 1;
       s.resuming = !!s.everLive || (s.transcript || []).some(l => l.role === 'agent');
-      this.logger.warn?.(`DialX: call ${s.id} realtime dropped (${body.error}); reconnecting with the conversation so far (${s.resumes}/3)`);
+      this.logger.warn?.(`DialX: call ${s.id} realtime dropped (${body.error}); reconnecting with the conversation so far (try ${(s.rtTries || 0) + 1}/${this.attempts})`);
       s.realtime = null;
       s.minted = null;
       s.rtOffer = null;
       return this.begin(s, this.lastOpts || {});
     }
     // DialX 0.7.90 (4293 #455): on any call, a fresh dialx.realtime after a failure takes the call over from turns
-    // (call.realtime_started {resumed:true}), except when the phone cannot hear the callee. One late offer a call.
-    const late = !s.done && !s.lateOffered && lateTakeover(s.device) && !/no input audio/i.test(String(body?.error || ''));
+    // (call.realtime_started {resumed:true}), except when the phone cannot hear the callee. Was one late offer a call;
+    // now late offers until the outage has had REALTIME_ATTEMPTS tries (the owner, 2026-11-03).
+    const late = !s.done && (s.rtTries || 0) < this.attempts && (s.rtOffers || 0) < MAX_OFFERS_PER_CALL && lateTakeover(s.device) && !/no input audio/i.test(String(body?.error || ''));
     if (late) {
-      s.lateOffered = true;
       s.resuming = !!s.everLive || (s.transcript || []).some(l => l.role === 'agent');
-      this.logger.warn?.(`DialX: call ${s.id} realtime failed (${body?.error || 'no reason'}); offering a late session with the conversation so far`);
+      this.logger.warn?.(`DialX: call ${s.id} realtime failed (${body?.error || 'no reason'}); offering a late session with the conversation so far (try ${(s.rtTries || 0) + 1}/${this.attempts})`);
       clearTimeout(s.silenceTimer);
       s.realtime = null;
       s.minted = null;
@@ -473,7 +508,7 @@ export class DialXRealtime {
     // DialX 0.7.32 falls back to turns itself (no speech 25 s in); the call goes on, so the guard stands down.
     clearTimeout(s.silenceTimer);
     s.realtime = null;
-    this.logger.warn?.(`DialX: call ${s.id} realtime failed on the phone (${body?.error || 'no reason'}); using turns`);
+    this.logger.warn?.(`DialX: call ${s.id} realtime failed on the phone (${body?.error || 'no reason'}); using turns${(s.rtTries || 0) >= this.attempts ? ` after ${s.rtTries} tries` : ''}`);
   }
 
   /** call.realtime_event: both sides' transcripts, and the model's hang_up. */

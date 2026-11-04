@@ -2,6 +2,11 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.733] - 2026-11-03
+
+### Fixed
+- **Calls fell back to the phone's own voice after one failed realtime try.** A realtime hand-over that failed once (secret not minted, the phone refusing or timing out) put the call on turns in the phone's voice for good, and a session the phone could not start got one late retry. Every way realtime can fail now gets 5 tries (`DIALX_REALTIME_ATTEMPTS`) before the phone's voice, which is the emergency fallback only: the offer retries itself (0.5 s, 1 s, 2 s, 3 s apart), and the phone's failures and drops spend the same budget. A session that goes live starts a fresh budget for the next outage. No offer is made once the call has ended (it went out 2 s after the end and the phone answered `no_call`).
+
 ## [2.25.732] - 2026-11-03
 
 ### Added
