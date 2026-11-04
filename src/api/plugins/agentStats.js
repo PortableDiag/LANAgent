@@ -2,6 +2,7 @@ import NodeCache from 'node-cache';
 import { BasePlugin } from '../core/basePlugin.js';
 import { logger } from '../../utils/logger.js';
 import ImprovementMetrics from '../../models/ImprovementMetrics.js';
+import { TokenUsage } from '../../models/TokenUsage.js';
 
 export default class AgentStatsPlugin extends BasePlugin {
   constructor(agent) {
@@ -36,6 +37,12 @@ export default class AgentStatsPlugin extends BasePlugin {
         ]
       },
       {
+        command: 'latency',
+        description: 'How fast each AI model has answered: p50, p95 and p99 response time per provider and model',
+        usage: 'latency({ days: 7, provider: "openrouter", model: "deepseek/deepseek-v4-pro" })  // all optional',
+        examples: ['how fast are the ai models', 'model response time percentiles', 'p95 latency per model']
+      },
+      {
         command: 'export',
         description: 'Export agent statistics in structured JSON format',
         usage: 'export [format]   (format: json, the default)',
@@ -62,11 +69,36 @@ export default class AgentStatsPlugin extends BasePlugin {
         return this.getErrorStats(params);
       case 'compare':
         return this.compareStats(params);
+      case 'latency':
+        return this.getLatency(params);
       case 'export':
         return this.getStatsExport(params);
       default:
         throw new Error(`Unknown action: ${action}`);
     }
+  }
+
+  /** Response-time percentiles for the busiest models of the last `days` (or one provider/model). */
+  async getLatency(params = {}) {
+    const days = Math.min(Math.max(Number(params.days) || 7, 1), 90);
+    // Whole days, so the model's cache key repeats instead of changing every millisecond.
+    const since = new Date(Math.floor(Date.now() / 86400000 - days) * 86400000);
+    const match = { createdAt: { $gte: since } };
+    if (params.provider) match.provider = String(params.provider);
+    if (params.model) match.model = String(params.model);
+    const pairs = await TokenUsage.aggregate([
+      { $match: match },
+      { $group: { _id: { provider: '$provider', model: '$model' }, n: { $sum: 1 } } },
+      { $sort: { n: -1 } },
+      { $limit: 8 }
+    ]);
+    const models = [];
+    for (const { _id } of pairs) {
+      const p = await TokenUsage.getResponseTimePercentiles({ provider: _id.provider, model: _id.model, startDate: since });
+      if (p.count) models.push({ provider: _id.provider, model: _id.model, ...p });
+    }
+    const lines = models.map(m => `${m.model}: p50 ${m.p50} ms, p95 ${m.p95} ms, p99 ${m.p99} ms (${m.count} calls)`);
+    return { success: true, days, models, result: lines.join('\n') || `No AI calls recorded in the last ${days} days.` };
   }
 
   async getCachedData(key, fetchFunc) {

@@ -2,6 +2,11 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.737] - 2026-11-04
+
+### Added
+- **`agentstats.latency`:** p50, p95 and p99 response time per AI provider and model for the busiest models of the last N days; failed calls are left out.
+
 ## [2.25.736] - 2026-11-04
 
 ### Added

@@ -405,4 +405,106 @@ tokenUsageSchema.statics.getUsageReport = async function({
   }
 };
 
+/**
+ * Get response time percentiles (p50, p95, p99) for a given provider, model, and date range.
+ * Uses a manual approximation with $sort, $group, and $arrayElemAt for broad MongoDB compatibility.
+ * Results are cached for 10 minutes (default NodeCache TTL).
+ * @param {Object} params
+ * @param {String} params.provider - The provider name (required).
+ * @param {String} params.model - The model name (required).
+ * @param {Date|string} [params.startDate] - Inclusive start date.
+ * @param {Date|string} [params.endDate] - Exclusive end date.
+ * @returns {Promise<Object>} An object with p50, p95, p99 in milliseconds, and count of records.
+ */
+tokenUsageSchema.statics.getResponseTimePercentiles = async function({ provider, model, startDate, endDate }) {
+  if (!provider || !model) {
+    throw new Error('provider and model are required');
+  }
+
+  const cacheKey = `responseTimePercentiles-${provider}-${model}-${startDate || 'any'}-${endDate || 'any'}`;
+  const cached = cache.get(cacheKey);
+  if (cached) {
+    return cached;
+  }
+
+  // A failed call's time measures the failure (a timeout, an instant refusal), not the model.
+  const match = { provider, model, success: { $ne: false } };
+  if (startDate || endDate) {
+    const createdAt = {};
+    if (startDate) {
+      const parsedStart = new Date(startDate);
+      if (isNaN(parsedStart.getTime())) throw new TypeError('startDate must be a valid date');
+      createdAt.$gte = parsedStart;
+    }
+    if (endDate) {
+      const parsedEnd = new Date(endDate);
+      if (isNaN(parsedEnd.getTime())) throw new TypeError('endDate must be a valid date');
+      createdAt.$lt = parsedEnd;
+    }
+    match.createdAt = createdAt;
+  }
+
+  try {
+    const result = await retryOperation(() => this.aggregate([
+      { $match: match },
+      { $sort: { responseTime: 1 } },
+      {
+        $group: {
+          _id: null,
+          responseTimes: { $push: '$responseTime' }
+        }
+      },
+      {
+        $project: {
+          _id: 0,
+          count: { $size: '$responseTimes' },
+          p50: {
+            $cond: {
+              if: { $gt: [{ $size: '$responseTimes' }, 0] },
+              then: {
+                $arrayElemAt: [
+                  '$responseTimes',
+                  { $subtract: [{ $ceil: { $multiply: [0.5, { $size: '$responseTimes' }] } }, 1] }
+                ]
+              },
+              else: null
+            }
+          },
+          p95: {
+            $cond: {
+              if: { $gt: [{ $size: '$responseTimes' }, 0] },
+              then: {
+                $arrayElemAt: [
+                  '$responseTimes',
+                  { $subtract: [{ $ceil: { $multiply: [0.95, { $size: '$responseTimes' }] } }, 1] }
+                ]
+              },
+              else: null
+            }
+          },
+          p99: {
+            $cond: {
+              if: { $gt: [{ $size: '$responseTimes' }, 0] },
+              then: {
+                $arrayElemAt: [
+                  '$responseTimes',
+                  { $subtract: [{ $ceil: { $multiply: [0.99, { $size: '$responseTimes' }] } }, 1] }
+                ]
+              },
+              else: null
+            }
+          }
+        }
+      }
+    ]), { retries: 3, context: 'getResponseTimePercentiles' });
+
+    const percentiles = result[0] || { count: 0, p50: null, p95: null, p99: null };
+    cache.set(cacheKey, percentiles);
+    return percentiles;
+  } catch (error) {
+    logger.error('Error computing response time percentiles', { provider, model, startDate, endDate, error });
+    throw error;
+  }
+};
+
 export const TokenUsage = mongoose.model('TokenUsage', tokenUsageSchema);
