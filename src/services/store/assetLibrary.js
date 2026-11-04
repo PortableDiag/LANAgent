@@ -16,7 +16,7 @@ export function asksToUseStoreItem(text) {
 }
 
 const MAX_FILES = 500;
-const MAX_TOTAL_BYTES = 500 * 1024 * 1024;
+const MAX_TOTAL_BYTES = 2 * 1024 * 1024 * 1024; // a guard against a bad zip, not a size limit on products
 const MIME = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp', '.gif': 'image/gif',
   '.vrm': 'model/gltf-binary', '.webm': 'video/webm', '.mp4': 'video/mp4', '.txt': 'text/plain', '.md': 'text/markdown', '.pdf': 'application/pdf' };
 
@@ -47,11 +47,24 @@ export function fileKind(filename, kind = 'portrait') {
   if (/\.(txt|md|pdf)$/.test(n) || /(^|\/)(readme|licen[cs]e|credits)/.test(n)) return 'document';
   if (!/\.(png|jpe?g|webp|gif|webm|mp4)$/.test(n)) return null;
   if (/preview|thumbnail|contact.?sheet/.test(n)) return 'preview';
+  // Only a model or a bundle mixes kinds. Elsewhere a pack's name says nothing ("Agent Mode Wallpapers" is fine, a
+  // portrait pack called "Sticker Bots" would not be).
+  if (kind !== 'vrm' && kind !== 'bundle') return kind;
   if (/sticker/.test(n)) return 'sticker';
   if (/portrait/.test(n)) return 'portrait';
-  if (/emoji/.test(n)) return 'emoji';
-  if (/wallpaper/.test(n)) return 'wallpaper';
-  return kind === 'vrm' ? 'preview' : kind === 'bundle' ? 'portrait' : kind;
+  return kind === 'vrm' ? 'preview' : 'portrait';
+}
+
+/** Sticker numbers mean the same emote for every character (BotsAndBorgsAgent, Trellis 3910 #81). */
+const STICKER_MOODS = ['happy, sparkle', 'love, heart', 'flirty, wink', 'cheerful, music', 'surprised', 'angry', 'sad, tears',
+  'confused', 'questioning', 'awkward, sweat', 'sleepy, zzz', 'worried, nervous'];
+
+/** The feeling a sticker or emoji shows, from its name; no model is asked. */
+export function moodOf(name, kind) {
+  const base = path.parse(String(name || '')).name;
+  if (kind === 'sticker') return STICKER_MOODS[Number(/sticker\s*(\d+)/i.exec(base)?.[1]) - 1] || null;
+  if (kind === 'emoji') return base.replace(/[-_]+/g, ' ').trim().toLowerCase() || null;
+  return null;
 }
 
 /** Every usable file in a download: [{ name, kind, mime, buffer }]. A zip of any layout, or one plain file. */
@@ -65,8 +78,10 @@ export async function unpack(buffer, { type = '', kind = 'portrait', filename = 
   }
   const { default: JSZip } = await import('jszip');
   const zip = await JSZip.loadAsync(buffer);
-  const entries = Object.values(zip.files).filter(f => !f.dir && !/(^|\/)(__MACOSX|\.)/.test(f.name));
+  let entries = Object.values(zip.files).filter(f => !f.dir && !/(^|\/)(__MACOSX|\.)/.test(f.name));
   if (entries.length > MAX_FILES) throw new Error(`The download holds ${entries.length} files, over the ${MAX_FILES} limit.`);
+  // Emoji come at 512 and 128 px under the same names: the large one is the one to use.
+  if (entries.some(f => /(^|\/)512px\//.test(f.name))) entries = entries.filter(f => !/(^|\/)128px\//.test(f.name));
   const out = [];
   const seen = new Set();
   let total = 0;
@@ -75,12 +90,16 @@ export async function unpack(buffer, { type = '', kind = 'portrait', filename = 
     if (!k) continue;
     const bytes = await f.async('nodebuffer');
     total += bytes.length;
-    if (total > MAX_TOTAL_BYTES) throw new Error('The download unpacks to more than 500 MB.');
-    // Two folders may hold the same file name.
-    let name = safeName(f.name);
-    for (let i = 2; seen.has(name.toLowerCase()); i++) name = safeName(`${path.parse(f.name).name} ${i}${path.extname(f.name)}`);
+    if (total > MAX_TOTAL_BYTES) throw new Error('The download unpacks to more than 2 GB.');
+    // A wallpaper pack holds the same scene under desktop/ and phone/, so the folder goes in the name.
+    const format = /(^|\/)phone\//i.test(f.name) ? 'phone' : /(^|\/)desktop\//i.test(f.name) ? 'desktop' : null;
+    const wanted = format ? `${format} ${path.basename(f.name)}` : f.name;
+    let name = safeName(wanted);
+    for (let i = 2; seen.has(name.toLowerCase()); i++) name = safeName(`${path.parse(wanted).name} ${i}${path.extname(wanted)}`);
     seen.add(name.toLowerCase());
-    out.push({ name, kind: k, mime: MIME[path.extname(name).toLowerCase()] || 'application/octet-stream', buffer: bytes });
+    const file = { name, kind: k, mime: MIME[path.extname(name).toLowerCase()] || 'application/octet-stream', buffer: bytes };
+    if (format) file.format = format;
+    out.push(file);
   }
   return out;
 }

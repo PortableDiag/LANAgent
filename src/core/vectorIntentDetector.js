@@ -176,6 +176,11 @@ export class VectorIntentDetector {
         logger.info(`A Bots & Borgs buy matched ${metadata.action}; using buy`);
         metadata = { ...metadata, action: 'buy', name: 'buy' };
       }
+      // "Text Sam and tell him to check telegram" matched textx.watch at 0.62 (dry run, 2026-11-04): an order to text is a send.
+      if (metadata.plugin === 'textx' && metadata.action === 'watch' && /^\s*(?:\w+[,:]?\s+)?(?:text|sms|message)\s+\S+\s+(?:and\s+)?(?:tell|ask|say|let)\b/i.test(String(input))) {
+        logger.info('An order to text someone matched textx.watch; falling back to AI');
+        return null;
+      }
       // "Send me a happy sticker" is something owned from the store, not a plain text or a generated picture (2026-11-04).
       if (metadata.plugin !== 'botsandborgs' && asksToUseStoreItem(String(input))) {
         logger.info(`A store item request matched ${metadata.plugin}.${metadata.action}; falling back to AI (the store plugin)`);

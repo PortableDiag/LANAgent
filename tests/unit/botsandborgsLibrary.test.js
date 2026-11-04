@@ -8,7 +8,7 @@ import JSZip from 'jszip';
 import sharp from 'sharp';
 import BotsAndBorgsPlugin from '../../src/api/plugins/botsandborgs.js';
 import { PluginSettings } from '../../src/models/PluginSettings.js';
-import { variantKind, fileKind, unpack, readVrmInfo, installVrm, safeName, asksToUseStoreItem } from '../../src/services/store/assetLibrary.js';
+import { variantKind, fileKind, unpack, readVrmInfo, installVrm, safeName, asksToUseStoreItem, moodOf } from '../../src/services/store/assetLibrary.js';
 
 function glb(json) {
   const body = Buffer.from(JSON.stringify(json));
@@ -42,6 +42,7 @@ test('files are classified by name, then by what was bought', () => {
   assert.equal(fileKind('Bear portrait 1.png', 'bundle'), 'portrait');
   assert.equal(fileKind('preview.jpg', 'vrm'), 'preview');
   assert.equal(fileKind('happy-1.png', 'emoji'), 'emoji');
+  assert.equal(fileKind('Sticker Bots/square/01 Ace.jpg', 'portrait'), 'portrait', 'a pack name says nothing');
   assert.equal(fileKind('x.exe', 'emoji'), null);
 });
 
@@ -122,7 +123,7 @@ test('buying a bundle: model in the gallery, stickers and portraits in the libra
   assert.equal(agent.agentModel.activeVRMModel, 'nova', 'bought is not worn');
   const item = store.library.items[0];
   assert.deepEqual(item.files.map(f => f.kind).sort(), ['document', 'portrait', 'preview', 'sticker', 'sticker', 'vrm']);
-  assert.equal(item.files.find(f => f.kind === 'sticker').mood, 'very happy');
+  assert.equal(item.files.find(f => f.name === 'Bear sticker 2.png').mood, 'love, heart');
   assert.equal(store.ledger.purchases[0].used, true);
 });
 
@@ -183,4 +184,52 @@ test('a manifest replaced by a deploy gets bought models back; the budget still 
 test('plain requests for owned things are recognised; ordinary texts are not', () => {
   for (const t of ['send me a happy sticker', 'text Sam a sad sticker', 'wear the bear 3D model', 'use the bear vrm', 'install the vrm you bought']) assert.equal(asksToUseStoreItem(t), true, t);
   for (const t of ['text Sam and tell him to check telegram', 'send me the report', 'text Jo the thumbs up emoji', 'buy a house']) assert.equal(asksToUseStoreItem(t), false, t);
+});
+
+test('moods come from the name: fixed sticker numbers, emoji words', () => {
+  assert.equal(moodOf('Bear sticker 7.png', 'sticker'), 'sad, tears');
+  assert.equal(moodOf('Bear sticker 99.png', 'sticker'), null);
+  assert.equal(moodOf('big-grin.png', 'emoji'), 'big grin');
+  assert.equal(moodOf('x.png', 'portrait'), null);
+});
+
+test('emoji keep the large size; a wallpaper pack keeps desktop and phone apart and goes to a phone', async () => {
+  const emoji = await unpack(await zipOf({ 'Bot Emoji/512px/happy.png': await png(), 'Bot Emoji/128px/happy.png': await png() }), { kind: 'emoji' });
+  assert.deepEqual(emoji.map(f => f.name), ['happy.png']);
+  const walls = await unpack(await zipOf({ 'Pack/desktop/01 Warp.jpg': await png(), 'Pack/phone/01 Warp.jpg': await png() }), { kind: 'wallpaper' });
+  assert.deepEqual(walls.map(f => [f.name, f.format]).sort(), [['desktop 01 Warp.jpg', 'desktop'], ['phone 01 Warp.jpg', 'phone']]);
+  const { p, store } = rig({ download: await zipOf({ 'x.png': await png() }) });
+  store.library = { items: [{ variant: 'w', title: 'W', kind: 'wallpaper', files: [{ name: 'desktop 1.jpg', kind: 'wallpaper', format: 'desktop' }, { name: 'phone 1.jpg', kind: 'wallpaper', format: 'phone' }] }] };
+  assert.equal((await p.pickOwned({ kinds: ['wallpaper'] })).file.format, 'phone');
+});
+
+test('a sticker asked for by feeling: the named mood, with no model call', async () => {
+  const { p, store, agent } = rig({ download: await zipOf({ 'x.png': await png() }) });
+  agent.providerManager.generateResponse = async () => { throw new Error('no model call expected'); };
+  store.library = { items: [{ variant: 'v', title: 'V', kind: 'sticker', files: [{ name: 'a', kind: 'sticker', mood: 'happy, sparkle' }, { name: 'b', kind: 'sticker', mood: 'sad, tears' }] }] };
+  assert.equal((await p.pickOwned({ mood: 'sad', kinds: ['sticker'] })).file.name, 'b');
+});
+
+test('under the on-chain minimum: paid from the balance, topped up once when short, and not counted twice', async () => {
+  const download = await zipOf({ 'Pack/01 Tiny.jpg': await png() });
+  const { p, store, sent } = rig({ download, variantPrice: 10 });
+  let deposits = 0, tries = 0;
+  const base = p.api;
+  p.pause = async () => {};
+  p.api = async (m, route, o = {}) => {
+    if (route === '/api/orders') {
+      assert.equal(o.body.pay, 'balance');
+      if (tries++ === 0) { const e = new Error('insufficient_balance'); e.status = 402; throw e; }
+      return { order: { id: 'o2', status: 'paid' }, token: 't2', downloads: [{ url: 'https://x/t.zip' }] };
+    }
+    if (route === '/api/account/deposit') { deposits++; assert.equal(o.body.amount_cents, 100); return { order: { id: 'd1' }, token: 'td', crypto: { address: '0xshop', amount: '1' } }; }
+    if (route.startsWith('/api/orders/d1/crypto')) return { order: { id: 'd1', status: 'paid' } };
+    return base(m, route, o);
+  };
+  const r = await p.execute({ action: 'buy', variant: 'tiny-singles-x', use: 'keep' });
+  assert.equal(r.success, true, r.error);
+  assert.match(r.result, /paid from my store balance/);
+  assert.equal(deposits, 1);
+  assert.equal(sent.length, 1, 'one on-chain top-up');
+  assert.equal(p.spentThisWeek(store.ledger.purchases), 1, 'the $1 deposit counts; the item it paid for does not');
 });

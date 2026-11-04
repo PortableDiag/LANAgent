@@ -2,6 +2,17 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.741] - 2026-11-04
+
+### Added
+- **Bots & Borgs: prices under the on-chain minimum are paid from prepaid store credit,** refilled on-chain when it runs short. The refill counts against the spending rules; what it pays for is not counted again.
+
+### Changed
+- **Stickers and emoji are picked by mood from their names,** using the store's fixed sticker numbering and emoji file names, instead of a vision call on each file. Emoji keep the 512 px size; a wallpaper sent to someone is the phone version.
+
+### Fixed
+- **"Text Sam and tell him…" could route to watching a conversation instead of sending,** when the semantic match landed on `textx.watch`. It now goes to the classifier.
+
 ## [2.25.740] - 2026-11-04
 
 ### Added

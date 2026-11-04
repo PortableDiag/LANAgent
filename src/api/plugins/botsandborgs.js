@@ -6,7 +6,7 @@ import { PluginSettings } from '../../models/PluginSettings.js';
 import { encrypt, decrypt } from '../../utils/encryption.js';
 import fs from 'node:fs/promises';
 import { DATA_PATH } from '../../utils/paths.js';
-import { variantKind, unpack, installVrm, addToManifest, readVrmInfo, safeName, toStickerWebp } from '../../services/store/assetLibrary.js';
+import { variantKind, unpack, installVrm, addToManifest, readVrmInfo, safeName, toStickerWebp, moodOf } from '../../services/store/assetLibrary.js';
 
 /**
  * Bots & Borgs (botsandborgs.com): a store of digital assets (avatars, icons, wallpapers, emoji, VRM models,
@@ -23,6 +23,8 @@ import { variantKind, unpack, installVrm, addToManifest, readVrmInfo, safeName, 
  */
 const BASE = 'https://botsandborgs.com';
 const WEEK_MS = 7 * 24 * 3600 * 1000;
+const MIN_ONCHAIN_USD = 0.25; // the store's smallest on-chain payment; anything less comes from a prepaid balance
+const MIN_DEPOSIT_CENTS = 100;
 const DEFAULTS = {
   weeklyBudgetUsd: Number(process.env.BOTSANDBORGS_WEEKLY_BUDGET_USD) || 2,
   maxItemUsd: null,
@@ -144,7 +146,7 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
   }
 
   async fetchBytes(url) {
-    const r = await axios.get(url, { responseType: 'arraybuffer', timeout: 60000, headers: { 'User-Agent': this.userAgent() } });
+    const r = await axios.get(url, { responseType: 'arraybuffer', timeout: 180000, headers: { 'User-Agent': this.userAgent() } });
     return { buffer: Buffer.from(r.data), type: String(r.headers['content-type'] || '') };
   }
 
@@ -313,7 +315,7 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     if (!data.use && /\b(wear|become|as your (?:3d|vrm)|your (?:new )?(?:3d|vrm)(?: model| avatar)?)\b/i.test(asked)) data = { ...data, use: 'wear' };
     if (!data.use && ['vrm', 'bundle'].includes(buying)) data = { ...data, use: 'install' };
     if (!data.use && ['sticker', 'emoji', 'wallpaper'].includes(buying)) data = { ...data, use: 'keep' };
-    if (!data.use && buying && /-portraits$|-bundle$|^[a-z-]+-(?:avatars|wallpapers|emoji)$/.test(String(data.variant || ''))) data = { ...data, use: 'keep' };
+    if (!data.use && buying && /-portraits$|-bundle$|-pack$|^[a-z-]+-(?:avatars|wallpapers|emoji)$/.test(String(data.variant || ''))) data = { ...data, use: 'keep' };
     const use = String(data.use || '').toLowerCase();
     // The owner's rule: never buy to hold. A purchase names what it is for.
     if (s.requireUse && !USES.includes(use)) return { success: false, error: 'I only buy something I will use: say whether it is for my avatar, or who to send it to.' };
@@ -352,8 +354,48 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     if (wallet.usd != null && wallet.usd - usd < s.minWalletUsd) return { success: false, error: `My wallet has $${wallet.usd.toFixed(2)} of ${s.payAsset}; buying would take it under the $${s.minWalletUsd} floor, so I didn't.` };
 
     const key = await this.accountKey();
-    const idem = `lanagent-${crypto.randomUUID()}`;
-    const placed = await this.api('post', '/api/orders', { key, idem, body: { quote: quote.id, channel: 'agent', pay: 'crypto', pay_asset: s.payAsset } });
+    const entry = { at: new Date().toISOString(), variant: String(data.variant), usd, use, to: data.to || null, used: false };
+    // The store's smallest on-chain payment is $0.25; anything less is paid from a prepaid balance.
+    const paying = usd < MIN_ONCHAIN_USD
+      ? await this.payFromBalance({ quote, key, usd, s, asset, wallet, entry })
+      : await this.payOnChain({ quote, key, usd, s, asset, wallet, entry });
+    if (paying.refused) return { success: false, error: paying.refused };
+    const { order, hash, label } = paying;
+    const linksOf = (r) => r?.downloads || r?.order?.downloads || [];
+    let downloads = linksOf(paying.paid);
+    if (!downloads.length) downloads = linksOf(await this.api('get', `/api/orders/${order.id}?token=${encodeURIComponent(order.token)}`, { key }).catch(() => null));
+    if (!downloads.length) return { success: true, result: `Paid (${label}); the store is still confirming order ${order.id}. I'll use it once its download is ready.` };
+    const used = await this.use({ order, downloads, use, to: data.to, usd, hash, label, variant: String(data.variant) });
+    if (used.success && pickedWhy) used.result = `${pickedWhy}${used.result}`;
+    return used;
+  }
+
+  /** Send the store's exact amount from the wallet and wait for its confirmation. */
+  async sendAndConfirm({ order, pay, key, asset, s }) {
+    this.logger.info(`botsandborgs: order ${order.id}: paying ${pay.amount} ${s.payAsset} to ${pay.address}`);
+    const tx = await this.tx();
+    const sent = asset.native
+      ? await tx.sendNative(pay.address, String(pay.amount), 'bsc')
+      : await tx.sendToken(asset.token_address, pay.address, String(pay.amount), 'bsc', { decimals: asset.decimals || 18 });
+    const hash = sent?.hash || sent?.txHash;
+    return { hash, confirm: async () => {
+      // The store verifies on chain (6 confirmations): 202 until then.
+      for (let i = 0; i < 40; i++) {
+        try {
+          const r = await this.api('post', `/api/orders/${order.id}/crypto?token=${encodeURIComponent(order.token)}`, { key, body: { tx_hash: hash } });
+          const st = r?.order?.status || r?.status;
+          if (['paid', 'in_production', 'shipped', 'delivered'].includes(st) || r?.downloads?.length || r?.order?.downloads?.length) return r;
+        } catch (e) { if (e.status && e.status !== 409 && e.status !== 425) throw e; }
+        await this.pause(6000);
+      }
+      return null;
+    } };
+  }
+
+  pause(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+  async payOnChain({ quote, key, usd, s, asset, wallet, entry }) {
+    const placed = await this.api('post', '/api/orders', { key, idem: `lanagent-${crypto.randomUUID()}`, body: { quote: quote.id, channel: 'agent', pay: 'crypto', pay_asset: s.payAsset } });
     const order = { ...(placed.order || placed), token: placed.token || placed.order?.token };
     const pay = placed.crypto || order.crypto || {};
     if (!pay.address || !pay.amount) throw new Error('The store\'s order came back without payment instructions.');
@@ -361,34 +403,36 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     // BNB, so the wallet is worth amount × usd / pay.amount. An unpaid order simply expires.
     if (wallet.usd == null && Number(pay.amount) > 0) {
       const worth = wallet.amount * (usd / Number(pay.amount));
-      if (worth - usd < s.minWalletUsd) return { success: false, error: `My wallet has about $${worth.toFixed(2)} of ${s.payAsset}; buying would take it under the $${s.minWalletUsd} floor, so I didn't.` };
+      if (worth - usd < s.minWalletUsd) return { refused: `My wallet has about $${worth.toFixed(2)} of ${s.payAsset}; buying would take it under the $${s.minWalletUsd} floor, so I didn't.` };
     }
-    this.logger.info(`botsandborgs: order ${order.id} for ${data.variant}: paying ${pay.amount} ${s.payAsset} to ${pay.address}`);
-    const tx = await this.tx();
-    const sent = asset.native
-      ? await tx.sendNative(pay.address, String(pay.amount), 'bsc')
-      : await tx.sendToken(asset.token_address, pay.address, String(pay.amount), 'bsc', { decimals: asset.decimals || 18 });
-    const hash = sent?.hash || sent?.txHash;
-    await this.record({ at: new Date().toISOString(), order: order.id, token: order.token, variant: String(data.variant), usd, asset: s.payAsset, tx: hash, use, to: data.to || null, used: false });
+    const { hash, confirm } = await this.sendAndConfirm({ order, pay, key, asset, s });
+    await this.record({ ...entry, order: order.id, token: order.token, asset: s.payAsset, tx: hash });
+    return { order, hash, paid: await confirm(), label: `paid on BNB Chain, tx ${hash}` };
+  }
 
-    // The store verifies on chain (6 confirmations): 202 until then.
-    let paid = null;
-    for (let i = 0; i < 40 && !paid; i++) {
-      try {
-        const r = await this.api('post', `/api/orders/${order.id}/crypto?token=${encodeURIComponent(order.token)}`, { key, body: { tx_hash: hash } });
-        const st = r?.order?.status || r?.status;
-        if (['paid', 'in_production', 'shipped', 'delivered'].includes(st) || r?.downloads?.length || r?.order?.downloads?.length) paid = r;
-      } catch (e) { if (e.status && e.status !== 409 && e.status !== 425) throw e; }
-      if (!paid) await new Promise(r => setTimeout(r, 6000));
+  /** Pay a tiny price from the prepaid balance, topping it up once on-chain when it runs short. */
+  async payFromBalance({ quote, key, usd, s, asset, wallet, entry }) {
+    const place = () => this.api('post', '/api/orders', { key, idem: `lanagent-${crypto.randomUUID()}`, body: { quote: quote.id, channel: 'agent', pay: 'balance' } });
+    let placed;
+    try {
+      placed = await place();
+    } catch (e) {
+      if (e.status !== 402) throw e;
+      const cents = Math.max(MIN_DEPOSIT_CENTS, Math.ceil(usd * 100));
+      if (wallet.usd != null && wallet.usd - cents / 100 < s.minWalletUsd) return { refused: `Topping up my store balance would take my wallet under the $${s.minWalletUsd} floor, so I didn't.` };
+      const dep = await this.api('post', '/api/account/deposit', { key, idem: `lanagent-${crypto.randomUUID()}`, body: { amount_cents: cents, pay_asset: s.payAsset } });
+      const order = { ...(dep.order || dep), token: dep.token || dep.order?.token };
+      const pay = dep.crypto || order.crypto || {};
+      if (!pay.address || !pay.amount) throw new Error('The store\'s deposit came back without payment instructions.');
+      const { hash, confirm } = await this.sendAndConfirm({ order, pay, key, asset, s });
+      await this.record({ at: entry.at, variant: 'store balance', usd: cents / 100, use: 'deposit', used: true, order: order.id, token: order.token, asset: s.payAsset, tx: hash });
+      if (!await confirm()) return { refused: `I topped up my store balance (tx ${hash}) but the store is still confirming it; nothing was bought yet.` };
+      placed = await place();
     }
-    // The downloads come with the paid order ("once paid `downloads`"), at the top or inside `order`.
-    const linksOf = (r) => r?.downloads || r?.order?.downloads || [];
-    let downloads = linksOf(paid);
-    if (!downloads.length) downloads = linksOf(await this.api('get', `/api/orders/${order.id}?token=${encodeURIComponent(order.token)}`, { key }).catch(() => null));
-    if (!downloads.length) return { success: true, result: `Paid ${pay.amount} ${s.payAsset} (tx ${hash}); the store is still confirming order ${order.id}. I'll use it once its download is ready.` };
-    const used = await this.use({ order, downloads, use, to: data.to, usd, hash, variant: String(data.variant) });
-    if (used.success && pickedWhy) used.result = `${pickedWhy}${used.result}`;
-    return used;
+    const order = { ...(placed.order || placed), token: placed.token || placed.order?.token };
+    // A deposit already counted against the week's budget, so what it pays for does not count twice.
+    await this.record({ ...entry, usd: 0, priceUsd: usd, order: order.id, token: order.token, asset: 'balance', tx: null });
+    return { order, hash: null, paid: placed, label: 'paid from my store balance' };
   }
 
   /**
@@ -504,6 +548,9 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
       for (const f of await unpack(got.buffer, { type: got.type, kind, filename: typeof d === 'string' ? '' : (d.filename || d.name || '') })) {
         await fs.writeFile(path.join(dir, f.name), f.buffer);
         const entry = { name: f.name, kind: f.kind, mime: f.mime, size: f.buffer.length };
+        const mood = moodOf(f.name, f.kind);
+        if (mood) entry.mood = mood;
+        if (f.format) entry.format = f.format;
         if (f.kind === 'vrm') {
           const installed = await installVrm(f.buffer, { variant, name: product?.title?.replace(/\s*[—-]\s*VRM Avatar$/i, ''), description: `Bought from Bots & Borgs (${product?.title || variant})` }, this.vrmDir());
           entry.modelId = installed.id;
@@ -514,25 +561,8 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
       }
     }
     const item = { variant, title, kind, collection: product?.collection || null, order: order?.id || null, token: order?.token || null, at: new Date().toISOString(), files };
-    await this.describeFiles(item);
     await this.saveLibraryItem(item);
     return item;
-  }
-
-  /** A few words on what each sticker or emoji shows, so one can be picked by mood. Best effort. */
-  async describeFiles(item) {
-    const pm = this.agent?.providerManager;
-    if (!pm?.analyzeImage) return;
-    const list = item.files.filter(f => ['sticker', 'emoji'].includes(f.kind)).slice(0, 64);
-    for (let i = 0; i < list.length; i += 4) {
-      await Promise.all(list.slice(i, i + 4).map(async (f) => {
-        try {
-          const buffer = await fs.readFile(path.join(this.libraryDir(), safeName(item.variant), f.name));
-          const r = await pm.analyzeImage(buffer, 'A chat sticker. In five words or fewer, the feeling or reaction it shows. Answer with those words only.');
-          f.mood = String(r?.analysis ?? r?.content ?? '').trim().slice(0, 60);
-        } catch (e) { this.logger.debug?.(`botsandborgs: no mood for ${f.name}: ${e.message}`); }
-      }));
-    }
   }
 
   async library({ kind, query, refresh } = {}) {
@@ -590,16 +620,25 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
   async pickOwned({ item, kind, mood, kinds }) {
     let items = await this.libraryItems();
     if (item) items = items.filter(i => i.variant === item || this.matches(i, item));
-    const pool = items.flatMap(i => i.files.filter(f => (kind ? f.kind === kind : kinds.includes(f.kind))).map(f => ({ item: i, file: f })));
+    let pool = items.flatMap(i => i.files.filter(f => (kind ? f.kind === kind : kinds.includes(f.kind))).map(f => ({ item: i, file: f })));
+    // A wallpaper sent to someone goes to a phone.
+    if (pool.some(p => p.file.format === 'phone')) pool = pool.filter(p => p.file.format !== 'desktop');
     if (pool.length < 2) return pool[0] || null;
+    const any = (list) => list[Math.floor(Math.random() * list.length)];
+    if (!mood) return any(pool);
+    const word = String(mood).toLowerCase().trim();
+    const exact = pool.filter(p => p.file.mood?.toLowerCase().split(/,\s*/).includes(word) || p.file.mood?.toLowerCase().includes(word));
+    if (exact.length) return any(exact);
+    // "ecstatic" names no sticker exactly: the model picks the nearest.
     const moods = pool.filter(p => p.file.mood);
     const pm = this.agent?.providerManager;
-    if (mood && moods.length && pm?.generateResponse) {
-      const r = await pm.generateResponse(`Pick the sticker that best shows "${String(mood).slice(0, 60)}". Answer with its number only.\n${moods.map((p, n) => `${n + 1}. ${p.file.mood}`).join('\n')}`, { maxTokens: 10, temperature: 0 }).catch(() => null);
-      const n = Number(/\d+/.exec(String(r?.content || ''))?.[0]);
-      if (moods[n - 1]) return moods[n - 1];
+    if (moods.length && pm?.generateResponse) {
+      const unique = [...new Set(moods.map(p => p.file.mood))];
+      const r = await pm.generateResponse(`Which of these is closest to "${word.slice(0, 60)}"? Answer with its number only.\n${unique.map((m, n) => `${n + 1}. ${m}`).join('\n')}`, { maxTokens: 10, temperature: 0 }).catch(() => null);
+      const chosen = unique[Number(/\d+/.exec(String(r?.content || ''))?.[0]) - 1];
+      if (chosen) return any(moods.filter(p => p.file.mood === chosen));
     }
-    return (mood ? moods.find(p => p.file.mood.toLowerCase().includes(String(mood).toLowerCase())) : null) || pool[Math.floor(Math.random() * pool.length)];
+    return any(pool);
   }
 
   async readOwned({ item, file }) { return fs.readFile(path.join(this.libraryDir(), safeName(item.variant), file.name)); }
@@ -671,8 +710,8 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
   }
 
   /** Put what was bought to use, as the purchase said. */
-  async use({ order, downloads, use, to, usd, hash, variant }) {
-    const paid = `Bought ${variant} for $${usd.toFixed(2)} (paid on BNB Chain, tx ${hash}).`;
+  async use({ order, downloads, use, to, usd, hash, label, variant }) {
+    const paid = `Bought ${variant} for $${usd.toFixed(2)} (${label || `paid on BNB Chain, tx ${hash}`}).`;
     let item;
     try {
       item = await this.ingest({ order, downloads, variant });
