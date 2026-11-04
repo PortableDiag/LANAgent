@@ -1,3 +1,4 @@
+import { asksToUseStoreItem } from '../services/store/assetLibrary.js';
 import { logger } from '../utils/logger.js';
 import { embeddingService } from '../services/embeddingService.js';
 import { vectorStore } from '../services/vectorStore.js';
@@ -174,6 +175,11 @@ export class VectorIntentDetector {
       if (metadata.plugin === 'botsandborgs' && metadata.action !== 'buy' && /\b(buy|purchase|order|get (?:yourself|me|him|her|them))\b/i.test(String(input))) {
         logger.info(`A Bots & Borgs buy matched ${metadata.action}; using buy`);
         metadata = { ...metadata, action: 'buy', name: 'buy' };
+      }
+      // "Send me a happy sticker" is something owned from the store, not a plain text or a generated picture (2026-11-04).
+      if (metadata.plugin !== 'botsandborgs' && asksToUseStoreItem(String(input))) {
+        logger.info(`A store item request matched ${metadata.plugin}.${metadata.action}; falling back to AI (the store plugin)`);
+        return null;
       }
       // The Bots & Borgs store has its own plugin: a request naming it never runs another plugin's match (2026-10-28).
       if (metadata.plugin !== 'botsandborgs' && /\bbots\s*(?:&|and|n|'n'?)\s*borgs\b|\bbotsn?borgs\b|\bbotsandborgs\b/i.test(String(input))) {

@@ -1,3 +1,4 @@
+import { asksToUseStoreItem } from '../services/store/assetLibrary.js';
 import { logger } from '../utils/logger.js';
 import { StructuredOutputParser, JSONOutputParser } from '../services/outputParser.js';
 import { nowInZone, resolveRequestTime } from '../utils/wallClock.js';
@@ -1811,8 +1812,12 @@ export class AIIntentDetector {
 
     // "Hey lanagent go to botsnborgs.com and buy yourself an avatar" (2026-10-28): the store's own plugin, never the
     // scraper or a clarifying question. Buy wording buys; anything else browses.
-    if (/\bbots\s*(?:&|and|n|'n'?)\s*borgs\b|\bbotsn?borgs\b|\bbotsandborgs\b/i.test(text) && this.agent?.apiManager?.apis?.get?.('botsandborgs')?.enabled) {
-      const want = /\b(buy|purchase|get (?:yourself|me|him|her|them)|pick (?:yourself|out)|order)\b/i.test(text) ? 'buy' : 'browse';
+    const storeNamed = /\bbots\s*(?:&|and|n|'n'?)\s*borgs\b|\bbotsn?borgs\b|\bbotsandborgs\b/i.test(text);
+    const isBuy = /\b(buy|purchase|get (?:yourself|me|him|her|them)|pick (?:yourself|out)|order)\b/i.test(text);
+    if ((storeNamed || (asksToUseStoreItem(text) && !isBuy)) && this.agent?.apiManager?.apis?.get?.('botsandborgs')?.enabled) {
+      const want = isBuy ? 'buy'
+        : /\b(what|which)\b.{0,30}\b(have you got|do you (?:have|own)|you own|you bought)\b|\blibrary\b/i.test(text) ? 'library'
+          : asksToUseStoreItem(text) || /\b(send|wear|install)\b/i.test(text) ? 'use' : 'browse';
       for (const [id, intent] of Object.entries(this.getDynamicIntents())) {
         if (intent.plugin === 'botsandborgs' && intent.action === want) return parseInt(id);
       }

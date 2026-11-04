@@ -1,0 +1,162 @@
+/**
+ * What a bought store download holds, and where it goes. A download is one file or a zip of any layout;
+ * each file is classified by its name, then kept under data/store/<variant>/. A VRM model also goes into the
+ * agent's model gallery (data/vrm-models + manifest.json), where the avatar designer and every animation can use it.
+ *
+ * Bought models are licensed for this agent, not for redistribution: nothing here shares them, and they stay in
+ * the data directory, which is never in git.
+ */
+import fs from 'fs/promises';
+import path from 'path';
+
+/** "Send me a happy sticker", "wear the bear 3D model": a request for something owned, with no store name in it. */
+export function asksToUseStoreItem(text) {
+  const t = String(text || '');
+  return /\b(send|text|give)\b.{0,60}\b(stickers?|emotes?)\b/i.test(t) || /\b(wear|switch to|become|use|install)\b.{0,40}\b(vrm|3d (?:model|avatar))\b/i.test(t);
+}
+
+const MAX_FILES = 500;
+const MAX_TOTAL_BYTES = 500 * 1024 * 1024;
+const MIME = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp', '.gif': 'image/gif',
+  '.vrm': 'model/gltf-binary', '.webm': 'video/webm', '.mp4': 'video/mp4', '.txt': 'text/plain', '.md': 'text/markdown', '.pdf': 'application/pdf' };
+
+/** The name a file may have on disk: its last path part, nothing that can climb out of the folder. */
+export function safeName(name) {
+  const base = path.basename(String(name || '').replace(/\\/g, '/')).replace(/[^\p{L}\p{N} ._()-]+/gu, '_').replace(/^\.+/, '').trim();
+  return base.slice(0, 120) || 'file';
+}
+
+/** What a variant is, from the store's own naming: a slug suffix, then the product's collection. */
+export function variantKind(variant, collection = '') {
+  const id = String(variant || '');
+  if (/-bundle$/.test(id)) return 'bundle';
+  if (/-stickers$/.test(id)) return 'sticker';
+  if (/-portraits$/.test(id)) return 'portrait';
+  if (collection === '3d-avatars' || /^vrm-/.test(id)) return 'vrm';
+  if (collection === 'emoji' || /emoji/.test(id)) return 'emoji';
+  if (collection === 'wallpapers' || /wallpaper|-phone-/.test(id)) return 'wallpaper';
+  if (/-icons(?:-|$)/.test(id)) return 'icon';
+  return 'portrait';
+}
+
+/** What one file in a download is. The folder or file name wins; otherwise the variant's kind decides. */
+export function fileKind(filename, kind = 'portrait') {
+  const n = String(filename || '').toLowerCase().replace(/\\/g, '/');
+  const ext = path.extname(n);
+  if (ext === '.vrm') return 'vrm';
+  if (/\.(txt|md|pdf)$/.test(n) || /(^|\/)(readme|licen[cs]e|credits)/.test(n)) return 'document';
+  if (!/\.(png|jpe?g|webp|gif|webm|mp4)$/.test(n)) return null;
+  if (/preview|thumbnail|contact.?sheet/.test(n)) return 'preview';
+  if (/sticker/.test(n)) return 'sticker';
+  if (/portrait/.test(n)) return 'portrait';
+  if (/emoji/.test(n)) return 'emoji';
+  if (/wallpaper/.test(n)) return 'wallpaper';
+  return kind === 'vrm' ? 'preview' : kind === 'bundle' ? 'portrait' : kind;
+}
+
+/** Every usable file in a download: [{ name, kind, mime, buffer }]. A zip of any layout, or one plain file. */
+export async function unpack(buffer, { type = '', kind = 'portrait', filename = '' } = {}) {
+  const isZip = /zip/i.test(type) || buffer.subarray(0, 2).toString('latin1') === 'PK';
+  if (!isZip) {
+    const ext = path.extname(filename) || (/png/i.test(type) ? '.png' : /jpe?g/i.test(type) ? '.jpg' : /webp/i.test(type) ? '.webp' : buffer.subarray(0, 4).toString('latin1') === 'glTF' ? '.vrm' : '');
+    const name = safeName(filename || `file${ext}`);
+    const k = fileKind(name.endsWith(ext) ? name : `${name}${ext}`, kind);
+    return k ? [{ name: name.endsWith(ext) ? name : `${name}${ext}`, kind: k, mime: MIME[ext] || 'application/octet-stream', buffer }] : [];
+  }
+  const { default: JSZip } = await import('jszip');
+  const zip = await JSZip.loadAsync(buffer);
+  const entries = Object.values(zip.files).filter(f => !f.dir && !/(^|\/)(__MACOSX|\.)/.test(f.name));
+  if (entries.length > MAX_FILES) throw new Error(`The download holds ${entries.length} files, over the ${MAX_FILES} limit.`);
+  const out = [];
+  const seen = new Set();
+  let total = 0;
+  for (const f of entries) {
+    const k = fileKind(f.name, kind);
+    if (!k) continue;
+    const bytes = await f.async('nodebuffer');
+    total += bytes.length;
+    if (total > MAX_TOTAL_BYTES) throw new Error('The download unpacks to more than 500 MB.');
+    // Two folders may hold the same file name.
+    let name = safeName(f.name);
+    for (let i = 2; seen.has(name.toLowerCase()); i++) name = safeName(`${path.parse(f.name).name} ${i}${path.extname(f.name)}`);
+    seen.add(name.toLowerCase());
+    out.push({ name, kind: k, mime: MIME[path.extname(name).toLowerCase()] || 'application/octet-stream', buffer: bytes });
+  }
+  return out;
+}
+
+/** A model's facts from its own glTF header. Throws when the file is not a VRM. */
+export function readVrmInfo(buffer) {
+  if (buffer.length < 20 || buffer.subarray(0, 4).toString('latin1') !== 'glTF') throw new Error('not a glTF binary');
+  const length = buffer.readUInt32LE(12);
+  if (buffer.subarray(16, 20).toString('latin1') !== 'JSON' || 20 + length > buffer.length) throw new Error('no glTF JSON chunk');
+  const gltf = JSON.parse(buffer.subarray(20, 20 + length).toString('utf8'));
+  const ext = gltf.extensions || {};
+  const v1 = ext.VRMC_vrm;
+  const v0 = ext.VRM;
+  if (!v1 && !v0) throw new Error('a glTF model with no VRM data');
+  if (v1) {
+    const ex = v1.expressions || {};
+    return {
+      vrmVersion: '1.0',
+      title: v1.meta?.name || '',
+      expressions: [...Object.keys(ex.preset || {}), ...Object.keys(ex.custom || {})].sort(),
+      boneCount: Object.keys(v1.humanoid?.humanBones || {}).length,
+      springBoneCount: (ext.VRMC_springBone?.springs || []).length
+    };
+  }
+  return {
+    vrmVersion: '0.x',
+    title: v0.meta?.title || '',
+    expressions: (v0.blendShapeMaster?.blendShapeGroups || []).map(g => g.presetName || g.name).filter(Boolean).sort(),
+    boneCount: (v0.humanoid?.humanBones || []).length,
+    springBoneCount: (v0.secondaryAnimation?.boneGroups || []).length
+  };
+}
+
+async function writeAtomic(file, data) {
+  const tmp = `${file}.${process.pid}.${Date.now()}.tmp`;
+  await fs.writeFile(tmp, data);
+  await fs.rename(tmp, file);
+}
+
+/**
+ * Put a bought model in the gallery. Its id is store-<variant>, so it can never replace a model that was not bought.
+ * Installing twice updates the one entry. Returns the manifest entry.
+ */
+export async function installVrm(buffer, { variant, name, description = '' }, vrmDir) {
+  const info = readVrmInfo(buffer);
+  const id = `store-${String(variant).toLowerCase().replace(/[^a-z0-9-]+/g, '-')}`;
+  const file = `${id}.vrm`;
+  await fs.mkdir(vrmDir, { recursive: true });
+  await writeAtomic(path.join(vrmDir, file), buffer);
+  const entry = {
+    id, name: name || info.title || id, file,
+    sizeMB: Math.round(buffer.length / 104857.6) / 10,
+    vrmVersion: info.vrmVersion, expressions: info.expressions, boneCount: info.boneCount, springBoneCount: info.springBoneCount,
+    description: description || 'Bought from Bots & Borgs', source: 'botsandborgs'
+  };
+  await addToManifest(entry, vrmDir);
+  return entry;
+}
+
+/** Add or update a manifest entry. An unreadable manifest is an error: writing over it would empty the gallery. */
+export async function addToManifest(entry, vrmDir) {
+  const file = path.join(vrmDir, 'manifest.json');
+  let list = [];
+  try {
+    list = JSON.parse(await fs.readFile(file, 'utf8'));
+    if (!Array.isArray(list)) throw new Error('not a list');
+  } catch (e) {
+    if (e.code !== 'ENOENT') throw new Error(`The model gallery's manifest can't be read (${e.message}), so it was left alone.`);
+  }
+  const at = list.findIndex(m => m.id === entry.id);
+  if (at >= 0) list[at] = entry; else list.push(entry);
+  await writeAtomic(file, JSON.stringify(list, null, 2));
+}
+
+/** A picture as a Telegram sticker: 512 px on its longest side, WebP, transparency kept. */
+export async function toStickerWebp(buffer) {
+  const { default: sharp } = await import('sharp');
+  return sharp(buffer).resize(512, 512, { fit: 'inside' }).webp({ quality: 90 }).toBuffer();
+}

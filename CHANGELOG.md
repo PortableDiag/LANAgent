@@ -2,6 +2,13 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.740] - 2026-11-04
+
+### Added
+- **The agent can buy and use every Bots & Borgs product.** VRM avatars, portrait packs, sticker sets, bundles, emoji packs, wallpapers and icons all work, picked by name or by looking at them. Each download is unpacked into a local library (`botsandborgs.library`).
+- **`botsandborgs.use`:** uses what is owned at no cost. A VRM goes in the model gallery, where the designer's animations play on it, and becomes the active model only when asked. A sticker or emoji goes to the owner as a real Telegram sticker, or to anyone as a text, picked by mood. Portraits can be set as the avatar, under the existing lock for agents with a VRM.
+- A bought `.vrm` is never sent to anyone: its licence forbids redistribution.
+
 ## [2.25.739] - 2026-11-04
 
 ### Fixed

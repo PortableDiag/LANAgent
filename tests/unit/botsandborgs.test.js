@@ -2,6 +2,9 @@
 // pick-by-looking step, and a full crypto purchase with every outside call stubbed.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import BotsAndBorgsPlugin from '../../src/api/plugins/botsandborgs.js';
 import { PluginSettings } from '../../src/models/PluginSettings.js';
 
@@ -20,6 +23,8 @@ function rig({ settings = {}, wallet = 100, vrm = null, ledger = [], scores = {}
     providerManager: { analyzeImage: async (_b, prompt) => { const label = /This one is "([^"]+)"/.exec(prompt)[1]; return { analysis: JSON.stringify({ what: label, score: scores[label] ?? 5, why: `${label} looks great` }) }; } }
   };
   const p = new BotsAndBorgsPlugin(agent);
+  p.libraryRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'bnb-lib-'));
+  p.vrmRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'bnb-vrm-'));
   p.api = async (method, route, opts = {}) => {
     calls.push({ method, route, body: opts.body, idem: opts.idem });
     if (route.startsWith('/api/catalog')) return { products: [{ slug: 'agent-avatar-singles', title: 'Agent Avatar Singles', variants: [{ price_cents: 50 }] }] };
@@ -61,9 +66,11 @@ test('"buy yourself an avatar" looks at each one, picks the favorite, pays, and 
   let wrote = null;
   const fs = await import('fs/promises');
   const realWrite = fs.default.writeFile, realUnlink = fs.default.unlink, realMkdir = fs.default.mkdir;
-  fs.default.writeFile = async (file, buf) => { wrote = { file, buf }; };
+  // Only the agent's own avatar file is caught; the store library writes to its temp folder.
+  const isLib = (file) => String(file).includes('bnb-lib-');
+  fs.default.writeFile = async (file, buf) => { if (isLib(file)) return realWrite(file, buf); wrote = { file, buf }; };
   fs.default.unlink = async () => {};
-  fs.default.mkdir = async () => {};
+  fs.default.mkdir = async (dir, o) => (isLib(dir) ? realMkdir(dir, o) : undefined);
   const { default: sharp } = await import('sharp');
   const png = await sharp({ create: { width: 8, height: 8, channels: 3, background: '#c33' } }).png().toBuffer();
   p.fetchBytes = async () => ({ buffer: png, type: 'image/png' });
