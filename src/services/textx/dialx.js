@@ -76,7 +76,7 @@ export function voicemailText({ name, owner, self, purpose, given } = {}) {
   if (own) return own.slice(0, 500);
   // Only a fallback: the call request normally has the model write it (plugin extract). A purpose
   // is a few words of intent ("wish him a happy birthday"), so it reads as "asked me to call you to …".
-  // Call 118/119 (2026-11-03): a call_together purpose is the brief for the agents ("Charles asked for this call…
+  // Call 118/119 (2026-11-03): a call_together purpose is the brief for the agents ("<owner> asked for this call…
   // (1) Explain… Do not promise a time"), and it was read onto the callee's voicemail. Only a short single clause
   // of intent is ever spoken; anything longer is left out.
   const raw = String(purpose || '').trim().replace(/[.!?]+$/, '');

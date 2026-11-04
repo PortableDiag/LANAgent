@@ -104,6 +104,8 @@ export function messageTextRule(owner = process.env.OWNER_NAME || 'the user') {
     'addressing them directly ("Do you need any help…?"), never "ask him" or "tell her". Anything the user says to ' +
     'you about the message (tone, what to stress, "sell it", jokes or asides to you, emoji aimed at you) is guidance: ' +
     'follow it, and never put it in the text. ' +
+    // "the cake isn't a lie (it still is :D)" went to Wayne with the parenthesis and the emoticon (2026-11-03).
+    'A side remark in parentheses is never copied either: say its idea in other words, or leave it out if it is meant for you. ' +
     // "Text Mom and introduce yourself" was written as "Hi Mom, this is <the owner>!" (2026-10-25).
     `"Yourself", "you" and "introduce yourself" in the request mean you, ${agentName()}, ${owner}'s AI assistant, ` +
     `not ${owner}: then the text speaks as you, and since it arrives from ${owner}'s number it MUST say who is writing ` +
@@ -112,6 +114,20 @@ export function messageTextRule(owner = process.env.OWNER_NAME || 'the user') {
 }
 
 const agentName = () => process.env.AGENT_NAME || 'LANAgent';
+
+const flatWords = (v) => String(v || '').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+
+/** The owner's side remarks: parentheses outside quotes in the request. */
+export function unquotedAsides(request) {
+  const req = String(request || '').replace(/"[^"]*"|“[^”]*”/g, ' ');
+  return [...req.matchAll(/\(([^()]{1,300})\)/g)].map(m => m[1].trim()).filter(Boolean);
+}
+
+/** The aside as the owner typed it, when the text repeats it. Only quoted words are ever copied (2026-10-27). */
+export function copiedAside(request, text) {
+  const body = flatWords(text);
+  return unquotedAsides(request).find(a => flatWords(a) && body.includes(flatWords(a))) || null;
+}
 
 /**
  * A text the request has the agent say about itself ("tell her you just tried to call her") arrives
@@ -657,7 +673,7 @@ export default class TextXPlugin extends BasePlugin {
     }
 
     const originId = this.origin();
-    const request = String(data._context?.originalInput || '');
+    const request = String(data._context?.originalInput || data.originalInput || '');
     const file = await this.asGifIfAsked(data._context?.attachedFile, request);
     const found = data.gifSearch ? await this.findGif(data.gifSearch) : null;
     if (found?.error) return { success: false, error: found.error };
@@ -915,23 +931,35 @@ export default class TextXPlugin extends BasePlugin {
    * funny cat" went out as "a gif of a funny cat" (2026-10-27). Only quoted words go as they are.
    */
   async ownWords(text, request, who) {
-    const flat = (v) => String(v || '').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
     const req = String(request || '');
-    if (!req || !flat(req).includes(flat(text))) return text;
-    const quoted = [...req.matchAll(/"([^"]+)"|“([^”]+)”/g)].map(m => flat(m[1] || m[2]));
-    if (quoted.some(q => q && (q.includes(flat(text)) || flat(text).includes(q)))) return text;
+    if (!req) return text;
+    const body = flatWords(text);
+    const aside = copiedAside(req, text);
+    if (!aside && !flatWords(req).includes(body)) return text;
+    const quoted = [...req.matchAll(/"([^"]+)"|“([^”]+)”/g)].map(m => flatWords(m[1] || m[2]));
+    if (!aside && quoted.some(q => q && (q.includes(body) || body.includes(q)))) return text;
     const pm = this.agent?.providerManager;
     if (!pm?.generateResponse) return text;
-    try {
-      const res = await pm.generateResponse(
-        `${process.env.OWNER_NAME || 'The user'} asked you: "${req.slice(0, 600)}"
+    const ask = (extra = '') => pm.generateResponse(
+      `${process.env.OWNER_NAME || 'The user'} asked you: "${req.slice(0, 600)}"
 ` +
-        `Write the text message ${who ? `${who} ` : 'the recipient '}will read, in your own words, addressing them directly. ` +
-        'Short and natural, never a copy of the request. Say only what the request asks; add no detail, reason or aside of your own. Keep every number, code, time, date, name, address and link exactly as given. ' +
-        'If the request only asks to send a GIF, picture or video, answer exactly NONE. ' +
-        'Answer with the message only.', { maxTokens: 200, temperature: 0.6 });
-      const out = String(res?.content || '').trim().replace(/^"|"$/g, '');
+      `Write the text message ${who ? `${who} ` : 'the recipient '}will read, in your own words, addressing them directly. ` +
+      `It goes from ${process.env.OWNER_NAME || 'the user'}'s phone as their own words: their "I" stays "I", never their name in the third person, unless the request has you speak as yourself. ` +
+      'Short and natural, never a copy of the request. Say everything the request wants said and only that; add no detail, reason or aside of your own. Keep every number, code, time, date, name, address and link exactly as given. ' +
+      'Words in quotes stay exactly as quoted. Anything in parentheses is a side remark, never words to copy: say its idea in different words as part of the message, or leave it out if it is a remark to you. ' +
+      'If the request only asks to send a GIF, picture or video, answer exactly NONE. ' +
+      `Answer with the message only.${extra}`, { maxTokens: 200, temperature: 0.6 });
+    const clean = (res) => String(res?.content || '').trim().replace(/^"|"$/g, '');
+    try {
+      let out = clean(await ask());
       if (/^NONE\b/.test(out)) return '';
+      const stuck = copiedAside(req, out);
+      if (stuck) {
+        out = clean(await ask(` Your last try copied "${stuck}" from the request. Do not use those words.`));
+        // Twice copied: the side remark goes. A number or link in it stays, since a fact may be why it is there.
+        const still = copiedAside(req, out);
+        if (still && !/[\d/]|www\./i.test(still)) out = out.replace(/\s*\([^()]*\)/g, m => copiedAside(req, m) ? '' : m).trim();
+      }
       return out && out.length <= 1000 ? out : text;
     } catch (e) {
       this.logger.warn(`textx send: rewording failed: ${e.message}`);
@@ -961,7 +989,9 @@ export default class TextXPlugin extends BasePlugin {
         // stored facts ("Adam has talked about biking") read as instructions (2026-10-27).
         'Apply only the lines that tell you HOW to write to them (a tone, a persona, a way of speaking). Other lines are ' +
         'things known about them: background, never content. Never add a fact, topic, detail, reason, aside or sentence ' +
-        'the draft does not already say. If no line says how to write to them, answer the draft unchanged. ' +
+        'the draft does not already say, and keep everything it does say: a persona changes the voice, never the news. ' +
+        // "Subject: Test Subject <the owner> has successfully consumed a cake", and the tres leche was gone (2026-11-03).
+        'It is a text message: no subject line, header or label. If no line says how to write to them, answer the draft unchanged. ' +
         'Answer with the text only.', { maxTokens: 300, temperature: 0.4 });
       const out = String(res?.content || '').trim().replace(/^"|"$/g, '');
       // A tone pass keeps about the draft's length; a much longer answer added something.
@@ -969,6 +999,8 @@ export default class TextXPlugin extends BasePlugin {
         this.logger.info(`textx send: style pass grew the text (${text.length} → ${out.length} chars); keeping the draft`);
         return text;
       }
+      // The pass sees the request too: it must not bring back a side remark the draft left out.
+      if (copiedAside(request, out) && !copiedAside(request, text)) return text;
       return out && out.length <= 1000 ? out : text;
     } catch (e) {
       this.logger.warn(`textx send: style pass failed: ${e.message}`);

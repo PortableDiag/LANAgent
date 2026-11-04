@@ -2439,3 +2439,36 @@ test('a picture someone texts is looked at once, not answered blind (2026-10-28 
   assert.equal(looked, 1, 'looked at once');
   assert.equal(await r.hub.seePictures({ id: 'd1' }, 't9', [...msgs, { message_id: 'p2', direction: 'out', from: 'me', text: 'nice' }]), '', 'only the newest incoming message');
 });
+
+test('a parenthesis in the request is a side remark: never copied into the text unless quoted (2026-11-03)', async () => {
+  const { default: TextXPlugin, unquotedAsides, copiedAside } = await import('../../src/api/plugins/textx.js');
+  const req = "Alice text Wayne and tell him the cake I just ate was delicious. It was tres leche and the cake isn't a lie (it still is :D).";
+  assert.deepEqual(unquotedAsides(req), ['it still is :D']);
+  assert.deepEqual(unquotedAsides('text Sam "see you (maybe) soon"'), [], 'inside quotes it is the message');
+  assert.equal(copiedAside(req, "Tres leche, delicious. And the cake isn't a lie. (It still is. :D)"), 'it still is :D');
+  assert.equal(copiedAside(req, "Tres leche, delicious. Officially not a lie, or so they tell you."), null);
+
+  const plugin = new TextXPlugin({});
+  const prompts = [];
+  const answers = ["Just ate tres leche, delicious. The cake isn't a lie, or so they tell you."];
+  plugin.agent = { providerManager: { generateResponse: async (p) => { prompts.push(p); return { content: answers.shift() }; } } };
+  // The extractor changed a few words, so the draft is no copy of the request, yet the aside is still in it.
+  const draft = "Wow, tres leche, delicious! The cake isn't a lie (it still is :D).";
+  assert.equal(await plugin.ownWords(draft, req, 'Wayne'), "Just ate tres leche, delicious. The cake isn't a lie, or so they tell you.");
+  assert.match(prompts[0], /parentheses is a side remark/);
+
+  // Copied again: asked once more, naming the words.
+  answers.push("Cake was great (it still is :D)", "Cake was great. Still suspicious of it.");
+  prompts.length = 0;
+  assert.equal(await plugin.ownWords(draft, req, 'Wayne'), 'Cake was great. Still suspicious of it.');
+  assert.match(prompts[1], /Your last try copied "it still is :D"/);
+
+  // Copied twice: the remark comes out.
+  answers.push("Cake was great (it still is :D)", "Cake was great (it still is :D)");
+  assert.equal(await plugin.ownWords(draft, req, 'Wayne'), 'Cake was great');
+
+  // A parenthesis holding a fact stays, and a quoted one is the owner's words.
+  answers.push('Meet at the cafe (5 Main St)', 'Meet at the cafe (5 Main St)');
+  assert.equal(await plugin.ownWords('Meet at the cafe (5 Main St)', 'tell Sam to meet at the cafe (5 Main St)', 'Sam'), 'Meet at the cafe (5 Main St)');
+  assert.equal(await plugin.ownWords('see you (maybe) soon', 'text Sam "see you (maybe) soon"', 'Sam'), 'see you (maybe) soon');
+});

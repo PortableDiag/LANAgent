@@ -2,6 +2,13 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.735] - 2026-11-03
+
+### Fixed
+- **A text ALICE words could carry the owner's side remark word for word.** Nothing unquoted is verbatim, yet "tell him the cake isn't a lie (it still is :D)" went out with the parenthesis. A parenthesis outside quotes is now a side remark: its idea is reworded, or left out if it was meant for ALICE. A copy is caught even when the extractor changed other words, is asked for again once, and a second copy is removed unless it holds a number or link.
+- **The persona pass could change the news or add a header.** One text gained "Subject: Test Subject" and lost what the owner wanted said. A persona now changes the voice only, and a text has no subject line or label.
+- **Texts written for the owner could name them in the third person** ("Pat just ate…", from Pat's own phone). Their "I" stays "I" unless the request has the agent speak as itself.
+
 ## [2.25.734] - 2026-11-03
 
 ### Fixed
