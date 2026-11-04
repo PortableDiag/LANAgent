@@ -14,6 +14,33 @@ import { textxRequest, untrusted, formatMessage, encodeGif, encodeM4a } from '..
  * wrapped as untrusted data, never as instructions.
  */
 
+/**
+ * A model call that writes a text, with a limit. The main model has no deadline of its own that suits
+ * someone waiting on a text: one rewording of "check telegram" took 4 min 21 s (2026-11-04), and 5% of its
+ * calls ran over 60 s. Past the limit the fast model answers instead; the late answer is ignored, which is
+ * safe because this call only produces words. Throws if both miss, and each caller keeps its draft then.
+ */
+export async function wordWithin(pm, prompt, options, {
+  mainMs = Number(process.env.TEXTX_WORDING_DEADLINE_MS) || 15000,
+  auxMs = 15000,
+  logger
+} = {}) {
+  const within = (call, ms) => {
+    let timer;
+    return Promise.race([
+      call().finally(() => clearTimeout(timer)),
+      new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(`no answer in ${ms} ms`)), ms); })
+    ]);
+  };
+  try {
+    return await within(() => pm.generateResponse(prompt, options), mainMs);
+  } catch (e) {
+    if (!/^no answer in /.test(e.message) || !pm.generateAux) throw e;
+    logger?.warn?.(`textx send: wording ${e.message}; asking the fast model`);
+    return within(() => pm.generateAux(prompt, { ...options, auxTask: 'text-wording' }), auxMs);
+  }
+}
+
 const ERROR_TEXT = {
   // TextX 0.4.41 says too_big, DialX 0.7.8 too_large: a reply too big for the relay (the same thing).
   too_big: 'That is too big to come through from the phone.',
@@ -940,7 +967,7 @@ export default class TextXPlugin extends BasePlugin {
     if (!aside && quoted.some(q => q && (q.includes(body) || body.includes(q)))) return text;
     const pm = this.agent?.providerManager;
     if (!pm?.generateResponse) return text;
-    const ask = (extra = '') => pm.generateResponse(
+    const prompt = (extra = '') =>
       `${process.env.OWNER_NAME || 'The user'} asked you: "${req.slice(0, 600)}"
 ` +
       `Write the text message ${who ? `${who} ` : 'the recipient '}will read, in your own words, addressing them directly. ` +
@@ -948,11 +975,27 @@ export default class TextXPlugin extends BasePlugin {
       'Short and natural, never a copy of the request. Say everything the request wants said and only that; add no detail, reason or aside of your own. Keep every number, code, time, date, name, address and link exactly as given. ' +
       'Words in quotes stay exactly as quoted. Anything in parentheses is a side remark, never words to copy: say its idea in different words as part of the message, or leave it out if it is a remark to you. ' +
       'If the request only asks to send a GIF, picture or video, answer exactly NONE. ' +
-      `Answer with the message only.${extra}`, { maxTokens: 200, temperature: 0.6 });
+      `Answer with the message only.${extra}`;
+    const ask = (extra = '') => wordWithin(pm, prompt(extra), { maxTokens: 200, temperature: 0.6 }, { logger: this.logger });
     const clean = (res) => String(res?.content || '').trim().replace(/^"|"$/g, '');
+    // The model answering with the owner's own words is the same failure as never asking it ("check telegram").
+    // A greeting or their name in front changes nothing ("Hey Pat, check Telegram"). Nor may it name the
+    // owner: the text goes out from their phone as their own words.
+    const names = flatWords(who).split(' ').filter(Boolean);
+    const core = (o) => { let w = flatWords(o).split(' '); while (w.length > 1 && (/^(hey|hi|hello|yo|there)$/.test(w[0]) || names.includes(w[0]))) w = w.slice(1); return w.join(' '); };
+    const ownerName = flatWords(process.env.OWNER_NAME).split(' ')[0];
+    const speaksOfOwner = (o) => Boolean(ownerName) && !names.includes(ownerName) && !flatWords(req).split(' ').includes(ownerName) && flatWords(o).split(' ').includes(ownerName);
+    const repeats = (o) => { const f = core(o); return speaksOfOwner(o) || (Boolean(f) && flatWords(req).includes(f) && !quoted.some(q => q && (q.includes(f) || f.includes(q)))); };
+    const reword = ` Your last try repeated the request's own words or spoke of the sender by name. Write as the sender, "I". Say what it means the way a person would text it: a short, complete sentence to them, in different words, not the same words with a greeting in front.`;
+    const askFast = () => wordWithin({ generateResponse: (q, o) => pm.generateAux(q, o) }, prompt(reword), { maxTokens: 200, temperature: 0.9, auxTask: 'text-wording' }, { logger: this.logger });
     try {
+      const started = Date.now();
       let out = clean(await ask());
       if (/^NONE\b/.test(out)) return '';
+      // A main model that just stalled gets no second turn: the owner is waiting on this text.
+      if (repeats(out)) out = clean(await (Date.now() - started > 20000 && pm.generateAux ? askFast() : ask(reword)));
+      if (repeats(out) && pm.generateAux) out = clean(await askFast());
+      if (repeats(out)) this.logger.warn(`textx send: every model repeated the request's words: "${out.slice(0, 80)}"`);
       const stuck = copiedAside(req, out);
       if (stuck) {
         out = clean(await ask(` Your last try copied "${stuck}" from the request. Do not use those words.`));
@@ -982,7 +1025,7 @@ export default class TextXPlugin extends BasePlugin {
     if (!notes || !pm?.generateResponse) return text;
     const name = rcpt.name || who;
     try {
-      const res = await pm.generateResponse(
+      const res = await wordWithin(pm,
         `${process.env.OWNER_NAME || 'The user'} asked you to text ${name}: "${request.slice(0, 600)}"\n` +
         `Your draft: ${text}\n${process.env.OWNER_NAME || 'The user'}'s own instructions for talking with ${name}:\n${notes}\n\n` +
         // Adam's draft "Don't blab about Mars" went out as "…on your rides or in your writing", from
@@ -992,7 +1035,7 @@ export default class TextXPlugin extends BasePlugin {
         'the draft does not already say, and keep everything it does say: a persona changes the voice, never the news. ' +
         // "Subject: Test Subject <the owner> has successfully consumed a cake", and the tres leche was gone (2026-11-03).
         'It is a text message: no subject line, header or label. If no line says how to write to them, answer the draft unchanged. ' +
-        'Answer with the text only.', { maxTokens: 300, temperature: 0.4 });
+        'Answer with the text only.', { maxTokens: 300, temperature: 0.4 }, { logger: this.logger });
       const out = String(res?.content || '').trim().replace(/^"|"$/g, '');
       // A tone pass keeps about the draft's length; a much longer answer added something.
       if (out.length > text.length * 1.6 + 40) {
@@ -1028,14 +1071,14 @@ export default class TextXPlugin extends BasePlugin {
     }
     this.logger.info(`textx send: checking a composed text against ${facts.length} known fact(s)`);
     try {
-      const res = await pm.generateResponse(
+      const res = await wordWithin(pm,
         `${process.env.OWNER_NAME || 'The user'} asked: "${String(request).slice(0, 600)}"\nDraft text to ${who || 'the recipient'}: ${text}\n\n` +
         `What you know:\n${facts.length ? facts.map(f => `- ${f.slice(0, 1200)}`).join('\n') : '(nothing stored on this)'}\n\n` +
         'Check every factual claim in the draft about products, features, prices, dates, places or people. Keep a claim only if the ' +
         'request or "What you know" supports it; remove it or replace it with a supported fact otherwise. Questions, greetings, ' +
         'thanks and plans the request itself states need no support. Keep the tone and about the length. If the main point of ' +
         'the message cannot be made from supported facts, answer exactly NO_FACTS. Otherwise answer with the text only.',
-        { maxTokens: 500, temperature: 0.2 });
+        { maxTokens: 500, temperature: 0.2 }, { logger: this.logger });
       const out = String(res?.content || '').trim().replace(/^"|"$/g, '');
       if (/^NO_FACTS\b/.test(out)) {
         this.logger.info('textx send: not sent, nothing known supports the point');

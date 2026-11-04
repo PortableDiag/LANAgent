@@ -2,6 +2,17 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.739] - 2026-11-04
+
+### Fixed
+- **"Text X and tell him to check telegram" still sent the owner's words.** Only what ALICE was given was checked for a copy, not what the model wrote back. An answer that repeats the unquoted request now goes back to be reworded, then to the fast model. Words in quotes are still sent exactly.
+- **Every OpenRouter text call now has a fallback.** A stall, dropped connection, 429 or 5xx used to retry the same model silently for up to 120 s a try. The first model now gets 45 s or more by answer length (`OPENROUTER_FIRST_TRY_MS`), then a different model takes over, inside the provider lock and zero-data-retention rules.
+
+## [2.25.738] - 2026-11-04
+
+### Fixed
+- **A text could wait minutes on one slow model call.** Writing "tell him to check telegram" took 4 min 21 s before it was sent. Rewording, the persona pass and the fact check now get 15 s (`TEXTX_WORDING_DEADLINE_MS`), then the fast model gets 15 s; if both miss, the draft goes out as it would on any model failure.
+
 ## [2.25.737] - 2026-11-04
 
 ### Added

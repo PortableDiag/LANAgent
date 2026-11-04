@@ -458,6 +458,33 @@ export class OpenRouterProvider extends BaseProvider {
     return Math.min(600000, Math.max(base, 30000 + Math.ceil(tokens / 50) * 1000));
   }
 
+  /**
+   * How long the first model gets before another one takes over. Drops are common, and the SDK's silent
+   * retries spent 2 x 120 s on one model before a text could go out (2026-11-04). Sized by the answer's
+   * length so a long generation keeps room to finish.
+   */
+  _firstTryMs(maxTokens) {
+    const budget = this._generationTimeoutMs(maxTokens);
+    const tokens = Number(maxTokens) > 0 ? Number(maxTokens) : 0;
+    const wanted = Math.max(Number(process.env.OPENROUTER_FIRST_TRY_MS) || 45000, 15000 + Math.ceil(tokens / 50) * 1000);
+    return budget > 0 ? Math.min(budget, wanted) : wanted;
+  }
+
+  /** A failure another model could survive: a stall, a dropped connection, a busy or broken upstream. */
+  _isDrop(error) {
+    if (isConnectionError(error) || error?.constructor?.name === 'APIConnectionTimeoutError') return true;
+    if (/timed out|returned no choices/i.test(error?.message || '')) return true;
+    const status = Number(error?.status);
+    return status === 408 || status === 429 || (status >= 500 && status < 600);
+  }
+
+  /** The model to try after this failure, or null. Credit and key errors are not a model's fault. */
+  _nextModel(error, model) {
+    if (!this._noPolicyEndpoint(error) && !this._isDrop(error)) return null;
+    if (model !== this.zdrFallbackModel) return this.zdrFallbackModel;
+    return this._isDrop(error) && this.models.chat !== model ? this.models.chat : null;
+  }
+
   /** Budget for the call the caller is about to make (see providerManager.getGenerationTimeoutMs). */
   getGenerationTimeoutMs(options = {}) {
     const maxTokens = options.maxTokens ?? this.modelParams?.chat?.maxTokens;
@@ -470,18 +497,20 @@ export class OpenRouterProvider extends BaseProvider {
 
     try {
       let { model, params } = this._buildParams(prompt, options);
-      const create = (p) => withConnectionRetry(() => this.client.chat.completions.create(
+      const create = (p, timeout) => withConnectionRetry(() => this.client.chat.completions.create(
         { ...p, stream: false },
-        { timeout: this._generationTimeoutMs(p.max_tokens) }
+        { timeout, maxRetries: 0 }
       ));
       let completion;
       try {
-        completion = await create(params);
+        completion = await create(params, this._firstTryMs(params.max_tokens));
+        this._assertUsableCompletion(completion, model);
       } catch (error) {
-        if (!this._noPolicyEndpoint(error) || model === this.zdrFallbackModel) throw error;
-        logger.warn(`OpenRouter: no zero-retention upstream for ${model}; using ${this.zdrFallbackModel}`);
-        ({ model, params } = this._buildParams(prompt, { ...options, model: this.zdrFallbackModel }));
-        completion = await create(params);
+        const next = this._nextModel(error, model);
+        if (!next) throw error;
+        logger.warn(`OpenRouter: ${model} failed (${error.status || error.message}); using ${next}`);
+        ({ model, params } = this._buildParams(prompt, { ...options, model: next }));
+        completion = await create(params, this._generationTimeoutMs(params.max_tokens));
       }
       this._assertUsableCompletion(completion, model);
 
@@ -539,16 +568,17 @@ export class OpenRouterProvider extends BaseProvider {
 
     try {
       let { model, params } = this._buildParams(prompt, options);
-      const open = (p) => withConnectionRetry(() => this.client.chat.completions.create({ ...p, stream: true },
-        options.signal ? { signal: options.signal } : undefined), { signal: options.signal });
+      const open = (p, timeout) => withConnectionRetry(() => this.client.chat.completions.create({ ...p, stream: true },
+        { timeout, maxRetries: 0, ...(options.signal ? { signal: options.signal } : {}) }), { signal: options.signal });
       let stream;
       try {
-        stream = await open(params);
+        stream = await open(params, this._firstTryMs(params.max_tokens));
       } catch (error) {
-        if (!this._noPolicyEndpoint(error) || model === this.zdrFallbackModel) throw error;
-        logger.warn(`OpenRouter: no zero-retention upstream for ${model}; streaming with ${this.zdrFallbackModel}`);
-        ({ model, params } = this._buildParams(prompt, { ...options, model: this.zdrFallbackModel }));
-        stream = await open(params);
+        const next = options.signal?.aborted ? null : this._nextModel(error, model);
+        if (!next) throw error;
+        logger.warn(`OpenRouter: ${model} failed (${error.status || error.message}); streaming with ${next}`);
+        ({ model, params } = this._buildParams(prompt, { ...options, model: next }));
+        stream = await open(params, this._generationTimeoutMs(params.max_tokens));
       }
       servedModel = model;
 
