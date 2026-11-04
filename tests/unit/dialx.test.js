@@ -1379,3 +1379,29 @@ test('plugin: a plain "call me" sends no with; unknown_agent reads as words', as
   assert.equal(r.success, false);
   assert.match(r.error, /doesn't know one of the agents/);
 });
+
+test('a worded request: the plugin writes opening and purpose, so the owner\'s "I" never becomes the agent\'s (call 123)', async () => {
+  const { plugin } = pluginRig();
+  plugin.agent.providerManager.generateResponse = async (prompt) => {
+    assert.match(prompt, /"I", "me" and "my" in the request mean/);
+    return { content: JSON.stringify({ purpose: 'tell him the owner ate cake', opening: 'Hi Wayne, the owner ate cake.', voicemail: 'Call back.' }) };
+  };
+  const data = { contact: 'Wayne', purpose: 'tell him I ate cake', opening: 'Hi Wayne! I ate cake.', originalInput: 'call wayne and tell him I ate cake' };
+  await plugin.extract(data, data.originalInput);
+  assert.equal(data.purpose, 'tell him the owner ate cake');
+  assert.equal(data.opening, 'Hi Wayne, the owner ate cake.');
+  assert.equal(data.contact, 'Wayne');
+
+  // Words a caller chose itself, with no router extraction in front, are left alone.
+  const direct = { contact: 'Wayne', opening: 'Hi Wayne.', purpose: 'say hi' };
+  await plugin.extract(direct, 'call wayne');
+  assert.equal(direct.opening, 'Hi Wayne.');
+  assert.equal(direct.purpose, 'say hi');
+  assert.equal(direct.voicemail, 'Call back.');
+
+  // A failed extraction keeps what the router found.
+  plugin.agent.providerManager.generateResponse = async () => { throw new Error('down'); };
+  const kept = { contact: 'Wayne', opening: 'Hi Wayne.', originalInput: 'call wayne' };
+  await plugin.extract(kept, kept.originalInput);
+  assert.equal(kept.opening, 'Hi Wayne.');
+});

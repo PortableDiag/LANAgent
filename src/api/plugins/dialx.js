@@ -125,7 +125,7 @@ export default class DialXPlugin extends BasePlugin {
     this.commands = [
       {
         command: 'call',
-        description: 'Phone someone from the user\'s phone and talk with them. `purpose` is why the user wants the call; `opening` is the first thing to say to them; `at` is when (ISO-8601, omit for now). Only contacts approved in DialX; the user confirms on the phone',
+        description: 'Phone someone from the user\'s phone and talk with them. `purpose` is why the user wants the call; `opening` is the first thing to say to them; `at` is when (ISO-8601, omit for now). Purpose and opening are in your words as the assistant: the user\'s own "I" means the user, so "tell him I ate cake" is "tell him <the user\'s name> ate cake". Only contacts approved in DialX; the user confirms on the phone',
         usage: 'call({ contact: "Wayne", at: "2026-10-23T17:00", purpose: "wish him a happy birthday", opening: "Hi Wayne! I\'m calling to wish you a happy birthday.", voicemail: "optional: what to leave if voicemail answers, in the user\'s words" })',
         examples: ['call wayne and tell him happy birthday at 5pm', 'phone mom and ask if she needs anything from the store', 'give the plumber a call tomorrow at 9 and confirm the appointment', 'ring Sam now and let him know I\'m running late',
           'leave Adam a voicemail saying I\'ll be late', 'leave Adam a theremin voicemail', 'call Wayne and play him a theremin riff', 'call Sam in a robot voice and say hi',
@@ -748,7 +748,7 @@ export default class DialXPlugin extends BasePlugin {
     }
     // "Call me": the owner's own phone, before any extraction or contact search.
     if (callsTheOwner(request, data.contact)) return this.callOwner(request, '', data);
-    if (data.needsParameterExtraction || !data.contact || !data.opening || !data.voicemail) await this.extract(data, request);
+    if (data.needsParameterExtraction || data.originalInput || !data.contact || !data.opening || !data.voicemail) await this.extract(data, request);
     const who = String(data.contact || data.to || data.name || '').trim();
     if (!who) return { success: false, error: 'Who should I call?' };
     if (callsTheOwner('', who)) return this.callOwner(request, data.purpose, data);
@@ -983,6 +983,10 @@ export default class DialXPlugin extends BasePlugin {
     if (!request || !pm?.generateResponse) return;
     const owner = process.env.OWNER_NAME || 'the user';
     const name = this.agent?.config?.name || process.env.AGENT_NAME || 'the assistant';
+    const whoseI = ` ${owner}'s own "I", "me" and "my" in the request mean ${owner}, never you: write ${owner}'s name ("${owner} ate some cake"), because you did not do it.`;
+    // data.originalInput = the router's generic extractor ran first. It knows only this command's usage
+    // line, so its opening and purpose took the owner's "I" as the speaker (call 123); this prompt's win.
+    const ours = data.originalInput ? new Set(['purpose', 'opening']) : new Set();
     try {
       const res = await pm.generateResponse(
         `${owner} asked you, ${name}, to make a phone call. Request: ${request}\n` +
@@ -993,11 +997,11 @@ export default class DialXPlugin extends BasePlugin {
         '- "at": the wall-clock time they said, YYYY-MM-DDTHH:mm with no offset or Z (a time with no date that has ' +
         `already passed today means tomorrow); null for now. Local now is ${nowInZone()}.\n` +
         `- "contact": "me" when ${owner} wants you to call ${owner} themselves ("call me", "ring me").\n` +
-        `- "purpose": what ${owner} wants from the call, in a few words ("wish Wayne a happy birthday").\n` +
+        `- "purpose": what ${owner} wants from the call, in a few words ("wish Wayne a happy birthday").${whoseI}\n` +
         `- "opening": the first thing you will say to them. It may be the first thing they hear, so it must say who you ` +
         `are and that you are an AI: one or two warm, spoken sentences addressed to them, starting "Hi <name>, this is ${name}, ` +
         `${owner}'s AI assistant" and carrying ${owner}'s message ("Hi Wayne, this is ${name}, ${owner}'s AI assistant. ` +
-        `${owner} asked me to call and wish you a very happy birthday."). No emoji or symbols.\n` +
+        `${owner} asked me to call and wish you a very happy birthday."). No emoji or symbols.${whoseI}\n` +
         `- "voicemail": what to leave if voicemail answers, after the phone says you are ${owner}'s AI assistant: two or ` +
         `three short spoken sentences to them by first name: that you are ${name} calling for ${owner}, the message or ` +
         `reason in plain words, and to call ${owner} back. ${owner}'s own words when the request gives a message for ` +
@@ -1008,7 +1012,7 @@ export default class DialXPlugin extends BasePlugin {
       const got = JSON.parse(raw.slice(raw.indexOf('{'), raw.lastIndexOf('}') + 1)) || {};
       if (data.briefs == null && got.briefs && typeof got.briefs === 'object' && !Array.isArray(got.briefs)) data.briefs = got.briefs;
       for (const k of ['contact', 'at', 'purpose', 'opening', 'voicemail', 'voice']) {
-        if ((data[k] == null || data[k] === '') && got[k] != null && got[k] !== '') data[k] = got[k];
+        if ((ours.has(k) || data[k] == null || data[k] === '') && got[k] != null && got[k] !== '') data[k] = got[k];
       }
     } catch (err) {
       this.logger.warn(`dialx call: argument extraction failed: ${err.message}`);

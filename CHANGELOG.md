@@ -2,6 +2,17 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.736] - 2026-11-04
+
+### Added
+- **`POST /youtube/info` (1 credit):** title, channel, duration, upload date, thumbnail, live flag, available formats and an estimated size of the default MP4 download, without downloading. A bad URL costs nothing and a failed lookup is refunded.
+- **`ups.unresolved`:** power incidents from the last 7 days with no recovery recorded yet.
+
+### Fixed
+- **A YouTube URL with a query parameter was refused** ("Invalid url: contains characters that are not allowed"), so `watch?v=x&t=30s` and `&list=` links failed on every yt-dlp action. A `&name=` separator is now allowed in `url` only; `&&` and every other shell metacharacter stay refused.
+- **`ytdlp.info` on a watch URL inside a playlist failed to parse, and a channel URL enumerated the channel.** It now reads the one video, refuses channels and feeds, and has a 90 s limit and a larger output buffer.
+- **A call's opening and purpose could speak as the owner.** "Tell him I ate cake" became "I ate some cake" in ALICE's own opening line, because the router's generic extractor filled those fields first. The plugin's own prompt now writes them on a worded request, with the owner's "I" as the owner's name.
+
 ## [2.25.735] - 2026-11-03
 
 ### Fixed

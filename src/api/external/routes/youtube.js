@@ -10,6 +10,7 @@ import YoutubeDownload from '../../../models/YoutubeDownload.js';
 const router = Router();
 
 const CREDIT_COSTS = { mp4: 10, mp3: 8 };
+const INFO_CREDIT_COST = 1;
 
 // Determine service ID based on format
 function getServiceId(format) {
@@ -22,6 +23,34 @@ function recordDownload(fields) {
   YoutubeDownload.create(fields).catch(err =>
     logger.warn(`YouTube history: failed to record download: ${err.message}`)
   );
+}
+
+/** yt-dlp's format list without storyboards and signed media URLs. */
+export function summarizeFormats(formats) {
+  return (Array.isArray(formats) ? formats : [])
+    .filter(f => f && !(f.vcodec === 'none' && f.acodec === 'none') && f.format_note !== 'storyboard')
+    .map(f => ({
+      id: f.format_id,
+      ext: f.ext,
+      resolution: f.resolution || null,
+      height: f.height ?? null,
+      fps: f.fps ?? null,
+      videoCodec: f.vcodec && f.vcodec !== 'none' ? f.vcodec : null,
+      audioCodec: f.acodec && f.acodec !== 'none' ? f.acodec : null,
+      fileSize: f.filesize ?? f.filesize_approx ?? null
+    }));
+}
+
+/**
+ * Size of what /download fetches by default (best mp4 video + best m4a audio), from the sizes
+ * yt-dlp reports. Null when YouTube did not report them: a guess here would misstate a paid download.
+ */
+export function estimateMp4Bytes(formats) {
+  const pick = (list, rank) => list.reduce((best, f) => (!best || rank(f) > rank(best) ? f : best), null);
+  const all = summarizeFormats(formats);
+  const video = pick(all.filter(f => f.ext === 'mp4' && f.videoCodec), f => f.height || 0);
+  const audio = pick(all.filter(f => f.ext === 'm4a' && f.audioCodec), f => f.fileSize || 0);
+  return video?.fileSize && audio?.fileSize ? video.fileSize + audio.fileSize : null;
 }
 
 router.post('/download',
@@ -192,5 +221,59 @@ router.get('/quota', creditAuth(true), (req, res) => {
     });
   }
 });
+
+/**
+ * POST /info - what a download would give, without downloading it (1 credit).
+ * The URL is checked before the debit so a bad one costs nothing. Not recorded in the download
+ * history: nothing was downloaded, and that history's format field only holds mp3/mp4.
+ */
+router.post('/info',
+  creditAuth(true),
+  (req, res, next) => {
+    const url = req.body?.url;
+    if (!url || typeof url !== 'string') {
+      return res.status(400).json({ success: false, error: 'Missing url parameter' });
+    }
+    if (!/^https?:\/\/(www\.)?(youtube\.com|youtu\.be)\//i.test(url)) {
+      return res.status(400).json({ success: false, error: 'Invalid YouTube URL' });
+    }
+    next();
+  },
+  creditDebit(INFO_CREDIT_COST),
+  async (req, res) => {
+    try {
+      const ytdlpEntry = req.app.locals.agent?.apiManager?.apis?.get('ytdlp');
+      const ytdlp = ytdlpEntry?.instance || ytdlpEntry;
+      if (!ytdlp || ytdlpEntry?.enabled === false || typeof ytdlp.execute !== 'function') {
+        return res.status(503).json({ success: false, error: 'YouTube service not available', targetError: true });
+      }
+
+      const result = await ytdlp.execute({ action: 'info', url: req.body.url });
+      if (!result.success) {
+        return res.status(502).json({ success: false, error: result.error || 'Info retrieval failed', targetError: true });
+      }
+
+      // getVideoInfo returns display strings in `data` and yt-dlp's own JSON in `raw`.
+      const raw = result.raw || {};
+      res.json({
+        success: true,
+        data: {
+          title: raw.title || '',
+          channel: raw.channel || raw.uploader || '',
+          durationSeconds: raw.duration ?? null,
+          uploadDate: result.data?.uploadDate || null,
+          thumbnail: raw.thumbnail || '',
+          live: Boolean(raw.is_live),
+          url: raw.webpage_url || req.body.url,
+          estimatedMp4Bytes: estimateMp4Bytes(raw.formats),
+          formats: summarizeFormats(raw.formats)
+        }
+      });
+    } catch (error) {
+      logger.error('YouTube info retrieval failed:', error);
+      res.status(500).json({ success: false, error: 'Info retrieval failed', targetError: true });
+    }
+  }
+);
 
 export default router;

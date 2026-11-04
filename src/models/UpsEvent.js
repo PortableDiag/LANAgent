@@ -359,6 +359,25 @@ upsEventSchema.statics.getUnacknowledgedCritical = async function() {
 };
 
 /**
+ * Incidents still in progress: no recovery recorded and nothing newer for that UPS.
+ * The timeline keeps the OLDEST events when it hits its limit, which would hide the newest
+ * incident, so the window is a week at the largest limit rather than the 31-day default.
+ * @param {string} [upsName] - Optional UPS name to filter
+ * @returns {Promise<Array>} Unresolved incident records
+ */
+upsEventSchema.statics.getUnresolvedIncidents = async function(upsName = null) {
+  const end = new Date();
+  const start = new Date(end.getTime() - 7 * 24 * 60 * 60 * 1000);
+  const incidents = await this.buildIncidentTimeline({
+    start,
+    end,
+    limit: MAX_TIMELINE_LIMIT,
+    ...(upsName ? { upsName } : {})
+  });
+  return incidents.filter(incident => incident.unresolved === true);
+};
+
+/**
  * Record a new event
  */
 upsEventSchema.statics.recordEvent = async function(eventData) {

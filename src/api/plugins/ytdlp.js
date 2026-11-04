@@ -569,7 +569,10 @@ export default class YtDlpPlugin extends BasePlugin {
       const value = data[field];
       if (value === undefined || value === null) continue;
       if (typeof value !== 'string') continue;
-      if (YtDlpPlugin.SHELL_METACHARACTERS.test(value)) {
+      // A url is always interpolated inside double quotes, where a query separator is inert, and
+      // refusing it refused every "watch?v=x&t=30s". Only "&name=" is exempt: "&&" stays refused.
+      const checked = field === 'url' ? value.replace(/&(?=[\w.%-]+=)/g, '') : value;
+      if (YtDlpPlugin.SHELL_METACHARACTERS.test(checked)) {
         logger.warn(`[ytdlp] Refusing ${field} containing shell metacharacters`);
         return `Invalid ${field}: contains characters that are not allowed`;
       }
@@ -894,6 +897,10 @@ export default class YtDlpPlugin extends BasePlugin {
     if (!url) {
       return { success: false, error: 'URL required' };
     }
+    // -j on a channel or feed prints every item behind it.
+    if (isBulkUrl(url)) {
+      return { success: false, error: `"${url}" points at a channel or feed, not a single video.` };
+    }
 
     let cookieCtx = null;
     try {
@@ -904,11 +911,13 @@ export default class YtDlpPlugin extends BasePlugin {
     const enrichedData = cookieCtx
       ? { ...data, url, _cookieFile: cookieCtx.cookieFile, _cookieUserAgent: cookieCtx.userAgent }
       : { ...data, url };
-    const command = `${this._buildBaseCommand(enrichedData)} -j "${url}"`;
+    // --no-playlist: a watch URL with &list= would print one JSON per item and fail to parse.
+    const command = `${this._buildBaseCommand(enrichedData)} --no-playlist -j "${url}"`;
 
     try {
       logger.info(`Getting video info: ${command}`);
-      const { stdout } = await execAsync(command);
+      // A video's JSON ran 625 KB on 2026-11-04; captions can take it past exec's 1 MB default.
+      const { stdout } = await execAsync(command, { maxBuffer: 20 * 1024 * 1024, timeout: 90000 });
       
       const info = JSON.parse(stdout);
       

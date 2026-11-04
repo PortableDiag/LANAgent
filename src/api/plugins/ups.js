@@ -52,6 +52,12 @@ export default class UpsPlugin extends BasePlugin {
         examples: ['show ups incidents', 'power outage timeline', 'how long was the last outage']
       },
       {
+        command: 'unresolved',
+        description: 'Power incidents still open: started in the last 7 days with no recovery recorded yet',
+        usage: 'unresolved({ upsName: "ups" })',
+        examples: ['any open power incidents', 'unresolved ups incidents']
+      },
+      {
         command: 'acknowledge',
         description: 'Acknowledge a power event',
         usage: 'acknowledge({ eventId: "xxx" })',
@@ -81,6 +87,8 @@ export default class UpsPlugin extends BasePlugin {
         return await this.testUps(data);
       case 'incidents':
         return await this.getIncidents(data);
+      case 'unresolved':
+        return await this.getUnresolved(data);
       case 'acknowledge':
         return await this.acknowledgeEvent(data);
       case 'stats':
@@ -204,6 +212,18 @@ export default class UpsPlugin extends BasePlugin {
         ...(params.proximityMinutes !== undefined ? { proximityMinutes: params.proximityMinutes } : {})
       });
       return { success: true, days, count: incidents.length, incidents };
+    } catch (error) {
+      return { success: false, error: error.message };
+    }
+  }
+
+  /**
+   * Incidents with no recovery recorded yet
+   */
+  async getUnresolved(params = {}) {
+    try {
+      const incidents = await UpsEvent.getUnresolvedIncidents(params.upsName || null);
+      return { success: true, count: incidents.length, incidents };
     } catch (error) {
       return { success: false, error: error.message };
     }
