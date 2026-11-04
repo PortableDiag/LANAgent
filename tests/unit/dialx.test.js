@@ -571,6 +571,11 @@ test('voicemail text: who for, why, call back; the owner\'s own words win; at mo
     /asked me to call you to survey his enrichment center experience\. Please call Pat back/);
   assert.equal(voicemailText({ given: 'Wayne, call me about Saturday. Pat.' }), 'Wayne, call me about Saturday. Pat.');
   assert.equal(voicemailText({ given: 'x'.repeat(900) }).length, 500);
+  // Call 119: a call_together brief must never reach the callee's voicemail.
+  const brief = "Charles asked for this call, with Alice on it. (1) Explain to Lizzy that on the previous call Orbit was stuck. Do not promise a time.";
+  const vm = voicemailText({ name: 'Lizzy', owner: 'Charles', self: 'ALICE', purpose: brief });
+  assert.doesNotMatch(vm, /Explain|promise|Orbit|asked for this call/);
+  assert.match(vm, /^Hi Lizzy, this is ALICE, Charles's AI assistant\. Charles asked me to call you\. Please call Charles back/);
 });
 
 test('plugin: scheduling sends a voicemail message, the owner\'s words when given', async () => {

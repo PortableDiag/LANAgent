@@ -2,6 +2,11 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.734] - 2026-11-03
+
+### Fixed
+- **A joint call's brief could be read onto the callee's voicemail.** With no voicemail text stored (a `call_together` call), the voicemail fallback said "asked me to call you to <purpose>", and on a joint call the purpose is the agents' brief, instructions included. The fallback now speaks the purpose only when it is a short single clause of intent; otherwise it leaves it out ("… asked me to call you. Please call back …").
+
 ## [2.25.733] - 2026-11-03
 
 ### Fixed
