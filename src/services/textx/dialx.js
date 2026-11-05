@@ -218,6 +218,12 @@ export function splitFirstSentence(text) {
   return m && m[2].length >= 12 ? [m[1], m[2]] : [t, ''];
 }
 
+/** DialX 0.7.119 takes `voicemail` and `voicemail_audio_b64` on call_together, as on schedule_call (Trellis 4293 #563). */
+export function supportsTogetherVoicemail(device) {
+  const v = String(device?.appVersion || '').split('.').map(n => parseInt(n, 10) || 0);
+  return (v[0] || 0) > 0 || (v[1] || 0) > 7 || ((v[1] || 0) === 7 && (v[2] || 0) >= 119);
+}
+
 /** DialX 0.7.20 and later join `more: true` parts with no turn cue between them. */
 export function supportsMore(device) {
   const v = String(device?.appVersion || '').split('.').map(n => parseInt(n, 10) || 0);

@@ -2,6 +2,11 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.745] - 2026-11-04
+
+### Added
+- **A shared call's voicemail is sent with the call on DialX 0.7.119 and later,** as text and in the agent's voice, so it cannot miss the 8 seconds after `call.voicemail_ready`. Older DialX behaves as before.
+
 ## [2.25.744] - 2026-11-04
 
 ### Changed

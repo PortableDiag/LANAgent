@@ -2,7 +2,7 @@ import { BasePlugin } from '../core/basePlugin.js';
 import { nowInZone, resolveRequestTime, localZone } from '../../utils/wallClock.js';
 import { getTextX } from '../../services/textx/index.js';
 import { textxRequest } from '../../services/textx/textxHub.js';
-import { OWNER_ASKED_REASON, isoWithOffset, getDialXSettings, agentAudio, clock, voicemailText, joinToMp3, RECORDING_PART_S, withAiDisclosure, riffPad, thereminize, thereminMode } from '../../services/textx/dialx.js';
+import { OWNER_ASKED_REASON, isoWithOffset, getDialXSettings, agentAudio, clock, voicemailText, supportsTogetherVoicemail, joinToMp3, RECORDING_PART_S, withAiDisclosure, riffPad, thereminize, thereminMode } from '../../services/textx/dialx.js';
 import { isTextRequest } from '../../core/pluginChainProcessor.js';
 import { supportsRealtime, realtimeVoiceAudio } from '../../services/textx/dialxRealtime.js';
 import { PluginSettings } from '../../models/PluginSettings.js';
@@ -788,7 +788,7 @@ export default class DialXPlugin extends BasePlugin {
     }
     // DialX 0.7.94 (4293 #470): "Alice, you and Orbit call Wayne…" is ONE call with both agents on it.
     const together = await this.callTogetherAgents(data, request);
-    if (together.length) return this.callTogether({ pick, who, purpose: purpose || opening, at, with: together, briefs: briefsFor(data.briefs, together, this.agent?.config?.name || process.env.AGENT_NAME) });
+    if (together.length) return this.callTogether({ pick, who, said: data.contact, voicemail: data.voicemail, purpose: purpose || opening, at, with: together, briefs: briefsFor(data.briefs, together, this.agent?.config?.name || process.env.AGENT_NAME) });
     const device = await this.device('dialx.schedule_call');
     let voice = null;
     // A theremin voice is made here, from the agent's own TTS, with the sound the owner approved
@@ -915,12 +915,37 @@ export default class DialXPlugin extends BasePlugin {
   }
 
   /** dialx.call_together: one call now, the other agents joining when the callee answers. */
-  async callTogether({ pick, who, purpose, at, with: others, briefs }) {
+  /**
+   * The message for a shared call's voicemail, sent with the call since DialX 0.7.119 so it cannot miss the 8 s after
+   * call.voicemail_ready. Older DialX gets neither field, and voicemailReady speaks it live as before. The call's purpose
+   * is a brief for the agents: voicemailText speaks it only when it is a short single clause (calls 118/119).
+   */
+  async togetherVoicemail({ pick, said, voicemail, purpose }) {
+    const device = await this.device('dialx.call_together').catch(() => null);
+    if (!supportsTogetherVoicemail(device)) return {};
+    const self = this.agent?.config?.name || process.env.AGENT_NAME;
+    const owner = process.env.OWNER_NAME;
+    const word = String(said || '').trim();
+    const spoken = word && String(pick.contact.name || '').toLowerCase().split(/\s+/).includes(word.toLowerCase()) ? word : pick.contact.name;
+    const text = withAiDisclosure(voicemailText({ name: spoken, owner, self, purpose: purpose || '', given: voicemail }), { name: spoken, self, owner }).slice(0, 500);
+    let audio = null;
+    try {
+      const settings = await this.settings();
+      const rtVoice = supportsRealtime(device) && settings.realtimeCalls === 'all' ? settings.realtimeVoice : null;
+      audio = (rtVoice && await realtimeVoiceAudio(text, { voice: rtVoice, maxBytes: device?.maxAudioBytes || 262144 })) || await agentAudio(this.agent, device, text, settings, this.logger);
+    } catch (e) {
+      this.logger.warn(`dialx call_together: voicemail audio failed, the phone will speak it: ${e.message}`);
+    }
+    return { voicemail: text, ...(audio ? { voicemail_audio_b64: audio.audio_b64 } : {}) };
+  }
+
+  async callTogether({ pick, who, said, voicemail, purpose, at, with: others, briefs }) {
     if (at) return { success: false, error: `A call with ${others.join(' and ')} on it can only be placed now, not at a set time. Say "now", or I can call on my own at that time.` };
     const name = pick.contact.name || who;
+    const vm = await this.togetherVoicemail({ pick, said, voicemail, purpose });
     const r = await this.tool('dialx.call_together', {
       ...(pick.contact.id != null ? { contact_id: pick.contact.id } : { number: pick.contact.number }),
-      purpose, with: others, requested_by_owner: true, ...(briefs ? { briefs } : {})
+      purpose, with: others, requested_by_owner: true, ...(briefs ? { briefs } : {}), ...vm
     });
     if (!r.ok) {
       this.logger.warn(`dialx call_together to ${name} refused: ${r.error?.code || 'no code'} ${r.error?.message || ''}`);
@@ -932,7 +957,7 @@ export default class DialXPlugin extends BasePlugin {
     if (status === 'timeout') return { success: true, result: `The call to ${name} wasn't approved on the phone in time. Ask again to retry.` };
     if (status === 'busy') return { success: false, error: 'A call is already up on the phone, so I can\'t place another right now.' };
     if (r.result?.call_id) {
-      await this.hub?.dialx?.store?.plan?.({ callId: String(r.result.call_id), contact: name, number: pick.contact.number || '', purpose, plannedAt: new Date() })
+      await this.hub?.dialx?.store?.plan?.({ callId: String(r.result.call_id), contact: name, number: pick.contact.number || '', purpose, ...(vm.voicemail ? { voicemail: vm.voicemail } : {}), plannedAt: new Date() })
         ?.catch?.(e => this.logger.warn(`dialx: call not recorded: ${e.message}`));
     }
     const on = (r.result?.agents && r.result.agents.length ? r.result.agents : others).join(' and ');

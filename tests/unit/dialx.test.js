@@ -1405,3 +1405,38 @@ test('a worded request: the plugin writes opening and purpose, so the owner\'s "
   await plugin.extract(kept, kept.originalInput);
   assert.equal(kept.opening, 'Hi Wayne.');
 });
+
+test('plugin: a shared call carries its voicemail only on DialX 0.7.119+, and ALICE then leaves it to DialX (4293 #563)', async () => {
+  const { supportsTogetherVoicemail } = await import('../../src/services/textx/dialx.js');
+  assert.equal(supportsTogetherVoicemail({ appVersion: '0.7.118' }), false);
+  assert.equal(supportsTogetherVoicemail({ appVersion: '0.7.119' }), true);
+  assert.equal(supportsTogetherVoicemail({ appVersion: '0.8.0' }), true);
+  assert.equal(supportsTogetherVoicemail({}), false);
+
+  const run = async (appVersion) => {
+    const { plugin, calls } = pluginRig();
+    const planned = [];
+    plugin.device = async () => ({ id: 'd1', name: 'DialX', appVersion, audioFormats: ['mp3'] });
+    plugin.hub.dialx = { store: { plan: async (r) => { planned.push(r); } } };
+    plugin.hub.callTool = async (name, args, opts) => {
+      calls.push({ name, args, opts });
+      if (name === 'dialx.list_approved_contacts') return { ok: true, result: [{ contact_id: 'k7', name: 'Wayne Williams', number: '+15550199' }] };
+      if (name === 'dialx.list_call_agents') return { ok: true, result: [{ agent_id: 'a1', name: 'ALICE' }, { agent_id: 'a2', name: 'Orbit' }] };
+      if (name === 'dialx.call_together') return { ok: true, result: { status: 'calling', call_id: '90', agents: ['ALICE', 'Orbit'] } };
+      return { ok: true, result: [] };
+    };
+    const r = await plugin.execute({ action: 'call', contact: 'Wayne', purpose: 'ask how his day is going', opening: 'Hi Wayne!', voicemail: 'Hi Wayne, call Pat back.',
+      _context: { originalInput: 'Alice, you and Orbit call Wayne and ask how his day is going' } });
+    assert.equal(r.success, true, JSON.stringify(r));
+    return { together: calls.find(c => c.name === 'dialx.call_together').args, planned: planned[0] };
+  };
+
+  const old = await run('0.7.118');
+  assert.ok(!('voicemail' in old.together) && !('voicemail_audio_b64' in old.together), 'an older DialX gets neither field');
+  assert.ok(!old.planned.voicemail, 'so ALICE still speaks it live at voicemail_ready');
+
+  const now = await run('0.7.119');
+  assert.match(now.together.voicemail, /call Pat back/);
+  assert.ok(now.together.voicemail.length <= 500);
+  assert.equal(now.planned.voicemail, now.together.voicemail, 'recorded, so voicemailReady does not speak over DialX');
+});
