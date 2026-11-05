@@ -45,6 +45,15 @@ export class TelegramDashboard extends TelegramInterface {
     if (!sent) await this.sendLargeMessage(ctx, content);
   }
 
+  /** A sticker the agent owns, if one suits this exchange. Owner's private chat only; never awaited by the reply. */
+  stickerAfterReply(ctx, userText, replyText) {
+    if (!ctx.isMaster || ctx.chat?.type !== 'private') return;
+    const entry = this.agent?.apiManager?.apis?.get?.('botsandborgs');
+    const store = entry?.instance || entry;
+    store?.autoSticker?.({ userText, replyText, chatId: ctx.chat.id, threadId: ctx.message?.message_thread_id })
+      .catch(e => logger.warn(`botsandborgs: no sticker sent: ${e.message}`));
+  }
+
   async sendLargeMessage(ctx, outStr, channelId = null) {
     try {
       if (!outStr) { return; }
@@ -1615,7 +1624,8 @@ export class TelegramDashboard extends TelegramInterface {
               // Use sendLargeMessage for handling messages that might exceed Telegram's limit
               await this.sendReply(ctx, replyContent);
             }
-          
+            this.stickerAfterReply(ctx, text, replyContent);
+
             // Generate voice response if enabled (copied from TelegramInterface)
             const hasTtsService = !!this.agent.ttsService;
             const telegramEnabled = hasTtsService ? await this.agent.ttsService.isTelegramEnabled() : false;
@@ -1780,6 +1790,7 @@ export class TelegramDashboard extends TelegramInterface {
         // Send text response
         const replyContent = response.content || response.text || 'I processed your request.';
         await this.sendReply(ctx, replyContent);
+        this.stickerAfterReply(ctx, transcription, replyContent);
 
         // Generate voice response if TTS is enabled for Telegram
         const hasTtsService = !!this.agent.ttsService;

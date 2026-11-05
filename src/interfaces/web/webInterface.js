@@ -2421,6 +2421,21 @@ export class WebInterface {
       }
     });
 
+    // The wallpaper behind the dashboard, from what the agent owns. Signed in only: the store's licence is personal.
+    this.app.get('/api/agent/backdrop', authenticateToken, async (req, res) => {
+      try {
+        const entry = this.agent.apiManager?.apis?.get?.('botsandborgs');
+        const found = await (entry?.instance || entry)?.backdrop?.();
+        if (!found || !fsSync.existsSync(found.path)) return res.status(404).json({ success: false, error: 'No wallpaper to show' });
+        res.setHeader('Content-Type', found.mime || 'image/jpeg');
+        res.setHeader('Cache-Control', 'private, max-age=3600');
+        fsSync.createReadStream(found.path).pipe(res);
+      } catch (error) {
+        logger.error('Serve backdrop error:', error);
+        res.status(500).json({ success: false, error: error.message });
+      }
+    });
+
     // Serve agent avatar image (no auth - usable in external contexts)
     this.app.get('/api/agent/avatar', async (req, res) => {
       try {

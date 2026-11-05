@@ -7,6 +7,7 @@ import { encrypt, decrypt } from '../../utils/encryption.js';
 import fs from 'node:fs/promises';
 import { DATA_PATH } from '../../utils/paths.js';
 import { variantKind, unpack, installVrm, addToManifest, readVrmInfo, safeName, toStickerWebp, moodOf } from '../../services/store/assetLibrary.js';
+import { moodChoices, chooseSticker, stickerCouldFit, wallpaperFor } from '../../services/store/selfUse.js';
 
 /**
  * Bots & Borgs (botsandborgs.com): a store of digital assets (avatars, icons, wallpapers, emoji, VRM models,
@@ -20,6 +21,9 @@ import { variantKind, unpack, installVrm, addToManifest, readVrmInfo, safeName, 
  *   Extended 2026-11-04 (the owner: "fully able to buy any/all products ... and use any/all"): a VRM installs into the
  *   model gallery, and stickers, emoji, packs and wallpapers join the library for `use`. A model never becomes
  *   this agent's active one, and its .vrm file never goes to anyone but the owner, unless asked / by licence.
+ * - what it owns gets used unasked (2026-11-05, `autoUse`; services/store/selfUse.js): stickers and emoji after a reply
+ *   to the owner, wallpapers behind the dashboard. Wearing a bought model is separate (`autoWear`, off by default)
+ *   because of the avatar rule below.
  */
 const BASE = 'https://botsandborgs.com';
 const WEEK_MS = 7 * 24 * 3600 * 1000;
@@ -34,9 +38,13 @@ const DEFAULTS = {
   requireUse: true,
   // null = automatic: off while the agent has a VRM (3D) model, whose look is tied to its avatar (the owner, 2026-10-28:
   // "i dont want ALICE changing avatars ... it has a VRM model thats associated with its current avatar").
-  allowAvatarChange: null
+  allowAvatarChange: null,
+  autoUse: true,
+  autoWear: false
 };
-const USES = ['avatar', 'send', 'install', 'wear', 'keep'];
+const AUTO_STICKER_EVERY_MS = Number(process.env.BOTSANDBORGS_STICKER_EVERY_MS) || 20 * 60 * 1000;
+const AUTO_STICKER_ASK_EVERY_MS = 60 * 1000;
+const USES =['avatar', 'send', 'install', 'wear', 'keep'];
 const KIND_WORDS = 'avatar, icon, portrait, sticker, emoji, wallpaper, vrm';
 
 export default class BotsAndBorgsPlugin extends BasePlugin {
@@ -74,7 +82,7 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
         command: 'use',
         description: 'Use something already bought from Bots & Borgs, at no cost: as "send" (a sticker, emoji, portrait or wallpaper to `to`, "me" for the owner; `mood` picks a sticker), "avatar", "install" (a VRM into the model gallery) or "wear" (make a VRM this agent\'s active 3D model)',
         usage: 'use({ item: "vrm-mm-bear-stickers", as: "send", to: "me", mood: "happy" })',
-        examples: ['send me a happy sticker', 'send Sam a sad robot emoji', 'use the bear vrm model as your 3d model', 'wear the bear model', 'install the bear model you bought', 'send me the bear portrait']
+        examples: ['send me a happy sticker', 'send Sam a sad robot emoji', 'use the bear vrm model as your 3d model', 'wear the bear model', 'install the bear model you bought', 'send me the bear portrait', 'send me a wallpaper from your wallpapers', 'set my wallpaper from my bots and borgs wallpapers']
       },
       {
         command: 'orders',
@@ -84,7 +92,7 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
       },
       {
         command: 'settings',
-        description: 'Read or change the Bots & Borgs spending rules: weeklyBudgetUsd, maxItemUsd (null = no cap), requireApproval, minWalletUsd (no spending below it), payAsset (USDT, USDC or BNB)',
+        description: 'Read or change the Bots & Borgs rules: weeklyBudgetUsd, maxItemUsd (null = no cap), requireApproval, minWalletUsd (no spending below it), payAsset (USDT, USDC or BNB), autoUse (use owned stickers, emoji and wallpapers unasked), autoWear (wear a bought model and its portrait unasked)',
         usage: 'settings({ weeklyBudgetUsd: 10 })',
         examples: ['set your bots and borgs budget to 10 dollars a week', 'show your bots and borgs spending settings']
       }
@@ -179,14 +187,14 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
 
   async settingsCommand(data) {
     const s = await this.settings();
-    const keys = ['weeklyBudgetUsd', 'maxItemUsd', 'requireApproval', 'minWalletUsd', 'payAsset', 'allowAvatarChange'];
+    const keys = ['weeklyBudgetUsd', 'maxItemUsd', 'requireApproval', 'minWalletUsd', 'payAsset', 'allowAvatarChange', 'autoUse', 'autoWear'];
     const change = Object.fromEntries(keys.filter(k => data[k] !== undefined).map(k => [k, data[k]]));
     if (Object.keys(change).length) {
       if (change.payAsset && !['USDT', 'USDC', 'BNB'].includes(String(change.payAsset).toUpperCase())) return { success: false, error: 'payAsset must be USDT, USDC or BNB.' };
       if (change.payAsset) change.payAsset = String(change.payAsset).toUpperCase();
       for (const k of ['weeklyBudgetUsd', 'minWalletUsd']) if (change[k] !== undefined) change[k] = Math.max(0, Number(change[k]) || 0);
       if (change.maxItemUsd !== undefined) change.maxItemUsd = change.maxItemUsd === null || change.maxItemUsd === '' ? null : Math.max(0, Number(change.maxItemUsd));
-      if (change.requireApproval !== undefined) change.requireApproval = change.requireApproval === true || change.requireApproval === 'true';
+      for (const k of ['requireApproval', 'autoUse', 'autoWear']) if (change[k] !== undefined) change[k] = change[k] === true || change[k] === 'true';
       if (change.allowAvatarChange !== undefined) change.allowAvatarChange = change.allowAvatarChange === null || change.allowAvatarChange === 'auto' ? null : (change.allowAvatarChange === true || change.allowAvatarChange === 'true');
       Object.assign(s, change);
       await PluginSettings.setCached(this.name, 'settings', s);
@@ -313,7 +321,7 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     const named = data.variant ? variantKind(data.variant) : null;
     const buying = named || wantKind;
     if (!data.use && /\b(wear|become|as your (?:3d|vrm)|your (?:new )?(?:3d|vrm)(?: model| avatar)?)\b/i.test(asked)) data = { ...data, use: 'wear' };
-    if (!data.use && ['vrm', 'bundle'].includes(buying)) data = { ...data, use: 'install' };
+    if (!data.use && ['vrm', 'bundle'].includes(buying)) data = { ...data, use: s.autoWear ? 'wear' : 'install' };
     if (!data.use && ['sticker', 'emoji', 'wallpaper'].includes(buying)) data = { ...data, use: 'keep' };
     if (!data.use && buying && /-portraits$|-bundle$|-pack$|^[a-z-]+-(?:avatars|wallpapers|emoji)$/.test(String(data.variant || ''))) data = { ...data, use: 'keep' };
     const use = String(data.use || '').toLowerCase();
@@ -706,7 +714,50 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     const { Agent } = await import('../../models/Agent.js');
     await Agent.updateOne({ name: process.env.AGENT_NAME || 'LANAgent' }, { $set: { activeVRMModel: entry.id } });
     if (this.agent?.agentModel) this.agent.agentModel.activeVRMModel = entry.id;
+    // The picture follows the model, so the two never disagree. Only when allowed unasked.
+    const portrait = (await this.settings()).autoWear ? pick.item.files.find(f => f.kind === 'portrait') : null;
+    if (portrait) {
+      const { applyAgentAvatar, describeAvatarServices } = await import('../../services/avatar/applyAgentAvatar.js');
+      const applied = await applyAgentAvatar(this.agent, await this.readOwned({ item: pick.item, file: portrait }), { source: `Bots & Borgs, ${pick.item.variant}` });
+      return { success: true, result: `${entry.name} is my 3D model now, and its portrait is my avatar. ${describeAvatarServices(applied.services)}`.trim() };
+    }
     return { success: true, result: `${entry.name} is my 3D model now.` };
+  }
+
+  /**
+   * After a reply to the owner: send a sticker or emoji if one fits. Never held up by, and never fails, the reply.
+   * Returns the mood sent, or null.
+   */
+  async autoSticker({ userText, replyText, chatId, threadId } = {}) {
+    const now = Date.now();
+    if (now - (this._stickerSentAt || 0) < AUTO_STICKER_EVERY_MS || now - (this._stickerAskedAt || 0) < AUTO_STICKER_ASK_EVERY_MS) return null;
+    if (!stickerCouldFit(replyText)) return null;
+    const s = await this.settings();
+    if (!s.autoUse) return null;
+    const choices = moodChoices(await this.libraryItems());
+    const pm = this.agent?.providerManager;
+    const tg = this.agent?.interfaces?.get?.('telegram')?.bot?.telegram;
+    if (!choices.length || !pm?.generateAux || !tg?.sendSticker || !chatId) return null;
+    this._stickerAskedAt = now;
+    const choice = await chooseSticker({
+      generate: (prompt) => pm.generateAux(prompt, { maxTokens: 10, temperature: 0, auxTask: 'store-sticker' }),
+      choices, userText, replyText, agentName: process.env.AGENT_NAME || 'The assistant'
+    });
+    if (!choice) return null;
+    const pick = choice.picks[Math.floor(Math.random() * choice.picks.length)];
+    const webp = await toStickerWebp(await this.readOwned(pick));
+    await tg.sendSticker(chatId, { source: webp, filename: 'sticker.webp' }, threadId ? { message_thread_id: threadId } : {});
+    this._stickerSentAt = Date.now();
+    this.logger.info(`botsandborgs: sent a ${pick.file.kind} unasked (${choice.mood}, ${pick.item.variant})`);
+    return choice.mood;
+  }
+
+  /** The wallpaper behind the dashboard today: { path, mime }, or null when none is owned or it is switched off. */
+  async backdrop() {
+    if (!(await this.settings()).autoUse) return null;
+    const pick = wallpaperFor(await this.libraryItems(), { format: 'desktop' });
+    if (!pick) return null;
+    return { path: path.join(this.libraryDir(), safeName(pick.item.variant), pick.file.name), mime: pick.file.mime };
   }
 
   /** Put what was bought to use, as the purchase said. */
@@ -752,6 +803,12 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
       done = `${model.gallery?.name || 'It'} is in my model gallery, and every animation in the designer plays on it.${pictures.length ? ` ${counts()} in my library.` : ''}`;
     } else {
       done = `${counts()} in my library, ready to use.`;
+      // A phone wallpaper can't be set from here, so the owner gets one to set.
+      const phone = (await this.settings()).autoUse ? wallpaperFor([item], { format: 'phone' }) : null;
+      if (phone) {
+        const sent = await this.sendFile(phone, 'me');
+        done += sent.success ? ' I sent you one for your phone.' : ` I couldn't send you one for your phone: ${sent.error}`;
+      }
     }
     const all = await this.ledger();
     const mine = all.find(p => p.order === order.id);

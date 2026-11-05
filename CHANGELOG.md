@@ -2,6 +2,16 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.749] - 2026-11-05
+
+### Added
+- **The agent uses what it owns from Bots & Borgs without being asked.** A sticker or emoji follows a reply to the owner on Telegram when it fits, at most one every 20 minutes (`BOTSANDBORGS_STICKER_EVERY_MS`), and never goes to a contact. A desktop wallpaper sits behind the dashboard and the 3D viewer, changing daily (`GET /api/agent/backdrop`, signed in). A new wallpaper pack also sends the owner one for their phone. Turn this off with the store setting `autoUse`.
+- **`autoWear` store setting, off by default.** When on, a bought model becomes the agent's 3D model and its portrait becomes its avatar.
+
+### Fixed
+- **"Set my wallpaper" routing to the store's catalog** instead of what the agent owns.
+- **A duplicate email no longer logs as an error.** It means the message is already stored.
+
 ## [2.25.748] - 2026-11-05
 
 ### Added

@@ -1166,7 +1166,8 @@ Sent by {{agentName}}
                           });
                         }
                       } catch (saveError) {
-                        this.logger.error('Failed to save email to database:', saveError);
+                        // Two readers can race past the check above; 11000 means the email is already stored.
+                        if (saveError?.code !== 11000) this.logger.error('Failed to save email to database:', saveError);
                       }
                       
                       bodyParsed = true;

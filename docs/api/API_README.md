@@ -8295,6 +8295,7 @@ When the rate limit is exceeded, you'll receive:
   - Max 5MB, supports PNG, JPG, GIF, WebP
   - Saved as one `data/agent/avatar.png` (1024×1024; other formats converted, stale copies removed) and pushed to every connected service: the Telegram bot's profile photo, MindSwarm, X, Gravatar
   - The replaced picture is kept in `data/agent/avatar-history` (newest 20).
+- `GET /api/agent/backdrop`: the wallpaper the agent shows behind its dashboard and 3D viewer, from what it owns. Signed in; 404 when it owns none or `autoUse` is off.
   - Response adds `services`: `{ telegram, mindswarm, twitter, gravatar }` → `updated` | `not connected` | `not logged in` | `not updated: <reason>`
 - **GET** `/api/agent/identity` - Get agent identity card (auth required)
   - Returns: name, version, avatar URL, avatarDescription, personality, pluginCount, capabilities, interfaces

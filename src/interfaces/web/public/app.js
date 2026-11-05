@@ -593,7 +593,23 @@ class LANAgentDashboard {
         });
     }
 
+    /** The agent's own wallpaper behind the dashboard, dimmed so the text stays readable. None owned: nothing changes. */
+    async applyBackdrop() {
+        try {
+            const res = await fetch('/api/agent/backdrop', { headers: { 'Authorization': `Bearer ${this.token}` } });
+            if (!res.ok) return;
+            const url = URL.createObjectURL(await res.blob());
+            Object.assign(document.body.style, {
+                backgroundImage: `linear-gradient(rgba(0,0,0,0.65), rgba(0,0,0,0.65)), url("${url}")`,
+                backgroundSize: 'cover', backgroundPosition: 'center', backgroundAttachment: 'fixed'
+            });
+            // The main panel is opaque and would hide it.
+            document.querySelectorAll('.main-content').forEach(el => { el.style.background = 'transparent'; });
+        } catch { /* the plain background stays */ }
+    }
+
     showDashboard() {
+        this.applyBackdrop();
         try {
             const loginScreen = document.getElementById('login-screen');
             const dashboardScreen = document.getElementById('dashboard-screen');
