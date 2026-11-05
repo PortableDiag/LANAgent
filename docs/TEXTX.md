@@ -322,6 +322,17 @@ Two kinds of phone app pair with an agent over this protocol. Each pairing is on
 | **TextX** (SMS app) | chat + phone tools (§5) | Pair by QR, or on the same phone via **Open in TextX** (dashboard) / **Use in TextX** (LANAgent app) |
 | **LANAgent Android** 1.4.0+ | chat + `x.status` / `x.transcribe` / `x.speak` | Pairs itself the first time it reaches the agent at home; uses the relay only when the home address doesn't answer. No phone tools |
 
+
+## Who a written text speaks as
+
+Since 2.25.743 an unquoted request is a message the agent passes on as the owner's assistant, not words it sends as the owner.
+
+- The owner's "I", "me" and "my" become their first name and then a pronoun ("tell her I ate cake" becomes "Pat ate cake"). `OWNER_PRONOUNS` sets the pronoun, as subject/object/possessive such as `he/him/his`. It is never guessed from a name, and the default is they/them/their.
+- "You" and "yourself" in the request mean the agent, which speaks as itself.
+- Words go out exactly only when the request quotes them and says "verbatim" (2.25.744). Quotation marks alone are reworded like anything else.
+- The text arrives from the owner's number, so it opens "This is <agent>, <owner>'s AI assistant." at most once per person every 12 hours, and always when the agent speaks of itself. Words sent verbatim are left alone.
+- An auto-reply follows the same rule, and never says what the owner feels, thinks or will do (2.25.746).
+
 ## Security model
 
 What each layer guarantees, and what it doesn't.

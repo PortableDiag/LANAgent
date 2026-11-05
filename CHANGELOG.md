@@ -2,6 +2,14 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.747] - 2026-11-04
+
+### Fixed
+- **The line saying who is writing could be dropped from a text.** It was added before the persona pass, which removes headers, so a text to a contact with notes lost it. It is now added last.
+
+### Documentation
+- `docs/TEXTX.md` describes who a written text speaks as, and when words go out exactly.
+
 ## [2.25.746] - 2026-11-04
 
 ### Changed

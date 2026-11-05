@@ -709,15 +709,6 @@ export default class TextXPlugin extends BasePlugin {
     const copied = text;
     if (text && !fromChat) text = await this.ownWords(text, data.originalInput || data._context?.originalInput, data.to || data.thread);
     const reworded = text !== copied;
-    if (!fromChat && !data.replyTo) {
-      // Who is writing is said once to a person: not on each text of a back-and-forth.
-      const key = flatWords(String(data.to || data.thread || ''));
-      const told = this.introducedAt ||= new Map();
-      const recent = Date.now() - (told.get(key) || 0) < INTRO_EVERY_MS;
-      const before = text;
-      text = identifyAgent(data.originalInput || data._context?.originalInput, text, { recent });
-      if (text !== before) told.set(key, Date.now());
-    }
     if (scheduled && data.at != null) data.at = resolveRequestTime(data.at, '')?.toISOString() || data.at;
     if (scheduled && !Number.isFinite(Date.parse(data.at))) return { success: false, error: 'When should it be sent? Give a date and time.' };
     // A named conversation (a group) is addressed by its thread; people by their numbers.
@@ -752,6 +743,16 @@ export default class TextXPlugin extends BasePlugin {
     const checked = fromChat || reworded ? { text } : await this.grounded(text, request, data.to || data.thread);
     if (checked.error) return { success: false, error: checked.error };
     text = checked.text;
+    if (!fromChat && !data.replyTo) {
+      // Who is writing is said once to a person: not on each text of a back-and-forth. Last, after the persona pass,
+      // which drops headers and took this line with it (a text to a contact with notes, 2026-11-04).
+      const key = flatWords(String(data.to || data.thread || ''));
+      const told = this.introducedAt ||= new Map();
+      const recent = Date.now() - (told.get(key) || 0) < INTRO_EVERY_MS;
+      const before = text;
+      text = identifyAgent(data.originalInput || data._context?.originalInput, text, { recent });
+      if (text !== before) told.set(key, Date.now());
+    }
     // A voice note is that text spoken, sent as audio with no text beside it.
     const spoken = !file?.base64 && (data.voice === true || data.voice === 'true' || wantsVoiceNote(request));
     if (spoken) {

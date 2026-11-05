@@ -544,7 +544,8 @@ test('plugin: a voice note request is spoken and sent as audio, with no text (20
   for (let i = 0; i < 30 && !sent; i++) await tick();
   clearInterval(phone);
   assert.equal(res.success, true, JSON.stringify(res));
-  assert.deepEqual(spoke, ["Don't blab about Mars."]);
+  assert.equal(spoke.length, 1);
+  assert.ok(spoke[0].endsWith("Don't blab about Mars."), 'spoken as written, after saying who is speaking');
   assert.equal(sent.text, undefined, 'a voice note goes without text');
   assert.equal(sent.attachments.length, 1);
   assert.equal(sent.attachments[0].mime, 'audio/mp4');
@@ -2098,7 +2099,7 @@ test('known facts reach the check, and its corrected text is what goes out', asy
     _context: { originalInput: 'Tell Wayne what TextX does that other apps dont' } });
   ph.stop();
   assert.equal(res.success, true, res.error);
-  assert.equal(ph.seen.find(c => c.name === 'send_sms').args.text, 'TextX lets an AI assistant text for you, and you tap to approve each send.');
+  assert.ok(String(ph.seen.find(c => c.name === 'send_sms').args.text).endsWith('TextX lets an AI assistant text for you, and you tap to approve each send.'));
   assert.match(prompts.join('\n'), /assistants send only after the owner taps Send/);
 });
 
@@ -2557,4 +2558,27 @@ test('an auto-reply speaks as the assistant and never for the owner\'s feelings 
   assert.ok(prompt, 'the auto-reply prompt ran');
   assert.match(prompt, /is always third person/);
   assert.match(prompt, /Never say what .* feels, thinks or will do/);
+});
+
+test('the line saying who is writing survives the persona pass, and is said once (the owner, 2026-11-04)', async () => {
+  const { plugin, p, r } = await plugin432(['contacts_lookup', 'send_sms']);
+  const env = { o: process.env.OWNER_NAME, a: process.env.AGENT_NAME };
+  process.env.OWNER_NAME = 'Pat'; process.env.AGENT_NAME = 'ALICE';
+  r.hub.ownerNotesFor = async () => '- Talk to Sam like a pirate.';
+  // The persona pass answers with no header, as its prompt tells it to.
+  r.agent.providerManager = { generateResponse: async (q) => ({ content: /Your draft:/.test(q) ? 'Arr, Pat be late.' : /Write the text message/.test(q) ? 'Pat will be late.' : 'Arr, Pat be late.' }) };
+  const ph = fakePhone(p, { contacts_lookup: () => [{ name: 'Sam', numbers: ['+15550100'] }], send_sms: () => ({ status: 'sent' }) });
+  try {
+    const send = () => plugin.execute({ action: 'send', to: 'Sam', text: 'I will be late', _context: { originalInput: 'text Sam I will be late' } });
+    let res = await send();
+    assert.equal(res.success, true, res.error);
+    res = await send();
+    assert.equal(res.success, true, res.error);
+    const texts = ph.seen.filter(c => c.name === 'send_sms').map(c => c.args.text);
+    assert.equal(texts[0], "This is ALICE, Pat's AI assistant. Arr, Pat be late.");
+    assert.equal(texts[1], 'Arr, Pat be late.', 'said once');
+  } finally {
+    ph.stop();
+    for (const [k, v] of [['OWNER_NAME', env.o], ['AGENT_NAME', env.a]]) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
+  }
 });
