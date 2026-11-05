@@ -247,6 +247,7 @@ export function getRetryPolicyInfo(operationName) {
  * @param {string} options.context - Context for logging (default: 'Operation')
  * @param {CircuitBreaker} options.circuitBreaker - Circuit breaker instance
  * @param {Function} options.customErrorClassifier - Custom function to classify errors for retry (default: null)
+ * @param {Function} options.isExpectedError - An error the caller handles as a normal answer; its final failure logs at info, not error (default: null)
  * @returns {Promise} Result of the operation
  */
 export async function retryOperation(operation, options = {}) {
@@ -258,7 +259,8 @@ export async function retryOperation(operation, options = {}) {
     onRetry = null,
     context = 'Operation',
     circuitBreaker = new CircuitBreaker(),
-    customErrorClassifier = null
+    customErrorClassifier = null,
+    isExpectedError = null
   } = options;
 
   const dynamicParams = calculateDynamicRetryParams(context);
@@ -305,7 +307,7 @@ export async function retryOperation(operation, options = {}) {
       const shouldRetry = customErrorClassifier ? customErrorClassifier(error) : isRetryableError(error);
 
       if (!shouldRetry || attempt > finalRetries) {
-        logger.error(
+        logger[isExpectedError?.(error) ? 'info' : 'error'](
           shouldRetry
             ? `${context} failed after ${finalRetries} retries`
             : `${context} failed on attempt ${attempt} (non-retryable error, not retried)`,

@@ -2137,7 +2137,9 @@ Respond with ONLY the rephrased message, no explanation:`;
             if (!savedModel) continue;
             const provider = pm.providers.get(provName);
             if (!provider) continue;
-            const available = provider.getAvailableModels ? provider.getAvailableModels() : [];
+            // The list holds plain ids or, once the updater has refreshed it, { id, name, … } objects.
+            const available = (provider.getAvailableModels ? provider.getAvailableModels() : [])
+              .map(m => (typeof m === 'string' ? m : m?.id));
             if (available.length > 0 && !available.includes(savedModel)) {
               logger.warn(`Model ${savedModel} for ${provName} not in available list — leaving user choice intact (lock=${lock?.enabled ? 'on' : 'off'})`);
             }
@@ -2676,27 +2678,6 @@ Respond with ONLY the rephrased message, no explanation:`;
       }
     });
 
-    // Automated backup
-    this.agenda.define('backup-full', async (job) => {
-      try {
-        logger.info('Running scheduled full backup...', { service: 'backup' });
-        const backupPlugin = this.agent?.apiManager?.plugins?.get('backupStrategy');
-        if (!backupPlugin) {
-          logger.warn('Backup strategy plugin not available', { service: 'backup' });
-          return;
-        }
-        const result = await backupPlugin.execute({ action: 'createFullBackup' });
-        if (result.success) {
-          logger.info(`Scheduled backup completed: ${result.backup?.backupName} (${result.backup?.size ? (result.backup.size / 1024 / 1024).toFixed(1) + 'MB' : '?'})`, { service: 'backup' });
-        } else {
-          logger.error(`Scheduled backup failed: ${result.error}`, { service: 'backup' });
-          try { await this.agent.notify(`⚠️ Scheduled backup failed: ${result.error}`); } catch {}
-        }
-      } catch (error) {
-        logger.error('Scheduled backup job error:', error, { service: 'backup' });
-      }
-    });
-
     // *arr service update checker — daily check for Prowlarr, Radarr, Sonarr, Lidarr, Readarr updates
     this.agenda.define('arr-update-check', async (job) => {
       try {
@@ -2984,8 +2965,10 @@ Respond with ONLY the rephrased message, no explanation:`;
     // peer reachability; auto-bounces if stale. Silent no-op when healthy.
     await this.agenda.every('2 minutes', 'vpn-wireguard-watchdog');
 
-    // Automated full backup - daily at 1 AM
-    await this.agenda.every('0 1 * * *', 'backup-full');
+    // The nightly 'backup-full' job looked its plugin up in apiManager.plugins, which does not exist,
+    // so it did nothing but warn. Backups run off-box (scripts/deployment/backup-alice.sh), and the
+    // backupStrategy plugin still takes a backup on request. Remove the stored job.
+    await this.agenda.cancel({ name: 'backup-full' }).catch(() => {});
 
     // ENS renewal check - daily at 7 AM
     await this.agenda.every('0 7 * * *', 'ens-renewal-check');

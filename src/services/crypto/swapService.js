@@ -1633,7 +1633,9 @@ class SwapService {
 
             return discovered;
         } catch (err) {
-            logger.warn(`V4 discovery failed for ${addrA.slice(0, 10)}/${addrB.slice(0, 10)} on ${network}: ${err.message?.slice(0, 150)}`);
+            // ethers buries the RPC's own reason past any short slice of err.message.
+            const rpcBody = err.info?.responseBody ? ` (RPC said: ${String(err.info.responseBody).slice(0, 200)})` : '';
+            logger.warn(`V4 discovery failed for ${addrA.slice(0, 10)}/${addrB.slice(0, 10)} on ${network}: ${(err.shortMessage || err.message)?.slice(0, 150)}${rpcBody}`);
             return [];
         }
     }

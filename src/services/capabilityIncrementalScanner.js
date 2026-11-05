@@ -540,10 +540,10 @@ export class CapabilityIncrementalScanner {
       //     would read as a rejection and cool its own file down.
       //  2. A flat `--limit N` is a COUNT, and the cooldown is a DURATION, so a
       //     limit that is too small silently shortens the cooldown instead of
-      //     failing. `--limit 50` reached back about eighteen days against this
-      //     repo's ~83-closures-a-month; 200 reaches back roughly eighty, and
-      //     the coverage assertion below says so out loud if that ever stops
-      //     being true.
+      //     failing. `--limit 50` reached back about eighteen days at ~83 closures
+      //     a month; by 2026-11 closures ran near 230 a month and 200 reached only
+      //     26 days of the 30. 400 reaches back about fifty, and the coverage
+      //     assertion below says so out loud if that ever stops being true.
       //  3. Do NOT reach for `--search "closed:>=<date>"` to make the window a
       //     duration directly. It looks like the precise form and it is the
       //     wrong one: measured 2026-09-17, that query returned nothing closed
@@ -551,8 +551,8 @@ export class CapabilityIncrementalScanner {
       //     morning — the search index lagged by eleven days and omitted every
       //     rejection this cooldown exists to catch, with no error.
       const closedPRsPromise = this.agent.systemExecutor.execute(
-        'gh pr list --state closed --json title,headRefName,body,state,closedAt --limit 200',
-        { cwd: workingDir, timeout: 15000 }
+        'gh pr list --state closed --json title,headRefName,body,state,closedAt --limit 400',
+        { cwd: workingDir, timeout: 30000 }
       );
 
       const [openResult, mergedResult, closedResult] = await Promise.all([

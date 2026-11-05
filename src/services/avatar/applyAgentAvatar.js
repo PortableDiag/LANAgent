@@ -8,6 +8,9 @@
  * and every connected service gets the new picture. Each service is best-effort: one that is not
  * connected or refuses is reported, never fatal.
  *
+ * The picture being replaced goes to data/agent/avatar-history first: DELTA's original avatar was
+ * lost to an overwrite. To put one back, apply that file again.
+ *
  * Not changed here: the on-chain ERC-8004 identity (updating it costs gas; it is a separate,
  * deliberate step) and TextX/DialX (the apps fetch /textx/v1/avatar from avatarPath on their own).
  */
@@ -18,6 +21,25 @@ import { DATA_PATH } from '../../utils/paths.js';
 import { logger } from '../../utils/logger.js';
 
 const OTHER_EXTS = ['.jpg', '.jpeg', '.webp', '.gif'];
+const HISTORY_KEEP = 20;
+
+/** Copy the avatar about to be replaced into avatar-history, newest 20 kept. A failure here never blocks the change. */
+async function keepPrevious(dir, png) {
+  const historyDir = path.join(dir, 'avatar-history');
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  try {
+    for (const ext of ['.png', ...OTHER_EXTS]) {
+      const old = await fs.readFile(path.join(dir, `avatar${ext}`)).catch(() => null);
+      if (!old || old.equals(png)) continue;
+      await fs.mkdir(historyDir, { recursive: true });
+      await fs.writeFile(path.join(historyDir, `avatar-${stamp}${ext}`), old);
+    }
+    const kept = (await fs.readdir(historyDir).catch(() => [])).filter(n => n.startsWith('avatar-')).sort();
+    for (const name of kept.slice(0, -HISTORY_KEEP)) await fs.unlink(path.join(historyDir, name));
+  } catch (e) {
+    logger.warn(`Avatar: could not keep the previous picture: ${e.message}`);
+  }
+}
 
 /** The plugin instance behind an apiManager entry, or null. */
 function pluginOf(agent, name) {
@@ -38,6 +60,7 @@ export async function applyAgentAvatar(agent, buffer, { source = 'a new picture'
   const dir = path.join(DATA_PATH, 'agent');
   await fs.mkdir(dir, { recursive: true });
   const file = path.join(dir, 'avatar.png');
+  await keepPrevious(dir, png);
   await fs.writeFile(file, png);
   for (const ext of OTHER_EXTS) await fs.unlink(path.join(dir, `avatar${ext}`)).catch(() => {});
 

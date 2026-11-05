@@ -6,15 +6,73 @@ import fs from 'fs/promises';
 import { applyAgentAvatar, describeAvatarServices } from '../../src/services/avatar/applyAgentAvatar.js';
 import { Agent } from '../../src/models/Agent.js';
 
-async function withStubbedDisk(run) {
-  const real = { writeFile: fs.writeFile, unlink: fs.unlink, mkdir: fs.mkdir }, realUpdate = Agent.updateOne;
+async function withStubbedDisk(run, { existing = {}, history = [] } = {}) {
+  const real = { writeFile: fs.writeFile, unlink: fs.unlink, mkdir: fs.mkdir, readFile: fs.readFile, readdir: fs.readdir }, realUpdate = Agent.updateOne;
   const wrote = [], removed = [], updates = [];
   fs.writeFile = async (file, buf) => { wrote.push({ file, buf }); };
   fs.unlink = async (file) => { removed.push(file); };
   fs.mkdir = async () => {};
+  fs.readFile = async (file) => {
+    const name = String(file).split(/[\\/]/).pop();
+    if (existing[name]) return existing[name];
+    throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+  };
+  fs.readdir = async () => [...history, ...wrote.filter(w => /avatar-history/.test(w.file)).map(w => String(w.file).split(/[\\/]/).pop())];
   Agent.updateOne = async (_q, u) => { updates.push(u); return {}; };
   try { return await run({ wrote, removed, updates }); } finally { Object.assign(fs, real); Agent.updateOne = realUpdate; }
 }
+
+const tinyJpeg = async () => {
+  const { default: sharp } = await import('sharp');
+  return sharp({ create: { width: 8, height: 8, channels: 3, background: '#000' } }).jpeg().toBuffer();
+};
+
+test('the picture being replaced is kept, in every format it was in', async () => {
+  const oldPng = Buffer.from('old png'), oldJpg = Buffer.from('old jpg');
+  await withStubbedDisk(async ({ wrote }) => {
+    await applyAgentAvatar({}, await tinyJpeg(), { only: [] });
+    const kept = wrote.filter(w => /avatar-history/.test(w.file));
+    assert.equal(kept.length, 2);
+    assert.ok(kept.some(w => /avatar-[^/\\]+\.png$/.test(w.file) && w.buf.equals(oldPng)));
+    assert.ok(kept.some(w => /avatar-[^/\\]+\.jpg$/.test(w.file) && w.buf.equals(oldJpg)));
+    assert.match(wrote[wrote.length - 1].file, /agent[\/\\]avatar\.png$/, 'the new picture is written after the copies');
+  }, { existing: { 'avatar.png': oldPng, 'avatar.jpg': oldJpg } });
+});
+
+test('a first avatar, or the same picture again, adds nothing to the history', async () => {
+  await withStubbedDisk(async ({ wrote }) => {
+    await applyAgentAvatar({}, await tinyJpeg(), { only: [] });
+    assert.equal(wrote.filter(w => /avatar-history/.test(w.file)).length, 0);
+  });
+  const { default: sharp } = await import('sharp');
+  const same = await sharp(await tinyJpeg()).rotate().resize(1024, 1024, { fit: 'cover' }).png().toBuffer();
+  await withStubbedDisk(async ({ wrote }) => {
+    await applyAgentAvatar({}, await tinyJpeg(), { only: [] });
+    assert.equal(wrote.filter(w => /avatar-history/.test(w.file)).length, 0);
+  }, { existing: { 'avatar.png': same } });
+});
+
+test('the history keeps the newest 20', async () => {
+  const history = Array.from({ length: 20 }, (_, i) => `avatar-2026-01-${String(i + 1).padStart(2, '0')}.png`);
+  await withStubbedDisk(async ({ removed }) => {
+    await applyAgentAvatar({}, await tinyJpeg(), { only: [] });
+    const gone = removed.filter(f => /avatar-history/.test(f));
+    assert.equal(gone.length, 1);
+    assert.match(gone[0], /avatar-2026-01-01\.png$/, 'the oldest goes');
+  }, { existing: { 'avatar.png': Buffer.from('old') }, history });
+});
+
+test('failing to keep the old picture does not stop the change', async () => {
+  await withStubbedDisk(async ({ wrote }) => {
+    const realWrite = fs.writeFile;
+    fs.writeFile = async (file, buf) => {
+      if (/avatar-history/.test(file)) throw new Error('disk full');
+      return realWrite(file, buf);
+    };
+    await applyAgentAvatar({}, await tinyJpeg(), { only: [] });
+    assert.match(wrote[0].file, /agent[\/\\]avatar\.png$/);
+  }, { existing: { 'avatar.png': Buffer.from('old') } });
+});
 
 test('one avatar.png, stale copies removed, every connected service told', async () => {
   const { default: sharp } = await import('sharp');

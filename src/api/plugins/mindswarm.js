@@ -2119,6 +2119,8 @@ Return ONLY valid JSON.`;
       minTimeout: 1000,
       maxTimeout: 8000,
       context: `MindSwarm ${method.toUpperCase()} ${path}`,
+      // followUsers reports these to the user as a normal outcome.
+      isExpectedError: (e) => /already following|not following/i.test(String(e?.message)),
       // Permanent errors (banned/suspended 403, normalized non-axios errors)
       // should never be retried — defer to default classifier otherwise.
       customErrorClassifier: (err) => {

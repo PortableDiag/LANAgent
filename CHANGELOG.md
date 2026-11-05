@@ -2,6 +2,20 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.748] - 2026-11-05
+
+### Added
+- **Changing the avatar keeps the old picture.** The replaced image goes to `data/agent/avatar-history` in its own format, newest 20 kept. To go back, apply that file again.
+
+### Fixed
+- **Self-modification could re-propose rejected work.** The closed-PR list reached back 26 days against a 30-day cooldown, so older rejections were invisible. It now reads 400 PRs.
+- **False nightly "model not in available list" warning.** The check compared a model name against a list of objects, so it could never match once the list was refreshed.
+- **MindSwarm "Already following" no longer logs as an error.** It is a normal answer, reported to the user as such. `retryOperation` takes `isExpectedError` for cases like this.
+- **Pool discovery failures now log the RPC's own reason,** which was cut off before.
+
+### Removed
+- **The nightly `backup-full` job.** Its plugin lookup could never succeed, so it only logged a warning. Backups run off-box, and the `backupStrategy` plugin still takes one on request.
+
 ## [2.25.747] - 2026-11-04
 
 ### Fixed
