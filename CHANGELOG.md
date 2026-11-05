@@ -2,6 +2,11 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.742] - 2026-11-04
+
+### Fixed
+- **"Removed a heart from an audio message" was read as a real text.** An iPhone names the tapback in words when one is taken back; TextX 0.4.87 counts it as a reaction, and now the agent does too.
+
 ## [2.25.741] - 2026-11-04
 
 ### Added

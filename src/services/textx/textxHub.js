@@ -152,6 +152,8 @@ export function isReactionMessage(m) {
   const t = String(m?.text || '').trim();
   if (!t || t.length > 300 || (m?.attachments || []).length) return false;
   return /^(Reacted|Removed)\s+[^\p{L}\p{N}\s]{1,12}\s+(to|from)\s+(a|an|the|“|")/u.test(t) ||
+    // An iPhone names the tapback in words. Only those words: "Removed a tooth from the dog" is a message.
+    /^Removed\s+an?\s+(like|dislike|heart|laugh|exclamation(?: mark)?|question(?: mark)?)\s+from\s+(“|"|an?\s)/u.test(t) ||
     /^(Liked|Loved|Disliked|Laughed at|Emphasi[sz]ed|Questioned)\s+(“|"|an? (image|movie|video|photo|picture|voice note|audio message|attachment|message))/u.test(t);
 }
 

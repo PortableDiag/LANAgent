@@ -2472,3 +2472,13 @@ test('a parenthesis in the request is a side remark: never copied into the text 
   assert.equal(await plugin.ownWords('Meet at the cafe (5 Main St)', 'tell Sam to meet at the cafe (5 Main St)', 'Sam'), 'Meet at the cafe (5 Main St)');
   assert.equal(await plugin.ownWords('see you (maybe) soon', 'text Sam "see you (maybe) soon"', 'Sam'), 'see you (maybe) soon');
 });
+
+test('a tapback taken back in words is a reaction; a text that only starts the same way is not', async () => {
+  const { isReactionMessage } = await import('../../src/services/textx/textxHub.js');
+  for (const text of ['Removed a heart from an audio message', 'Removed a like from “See you at 6”', 'Removed an exclamation mark from an image', 'Removed ❤️ from an audio message', 'Loved an audio message']) {
+    assert.equal(isReactionMessage({ text }), true, text);
+  }
+  for (const text of ['Removed a tooth from the dog', 'Removed a heart from my to-do list today', 'Loved the movie']) {
+    assert.equal(isReactionMessage({ text }), false, text);
+  }
+});
