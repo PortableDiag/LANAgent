@@ -2,6 +2,11 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.746] - 2026-11-04
+
+### Changed
+- **An auto-reply never speaks for the owner's feelings or plans.** Its "I" is the assistant and the owner stays third person; the most it says is that it will pass the message on and they will get back to the person.
+
 ## [2.25.745] - 2026-11-04
 
 ### Added

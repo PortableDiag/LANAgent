@@ -2547,3 +2547,14 @@ test('exact words need quotes AND "verbatim", the same rule as Orbit (the owner,
   assert.match(identifyAgent('text Mom "I love you"', 'Pat loves you.', o), /^This is ALICE/);
   assert.equal(identifyAgent('text Mom verbatim "I love you"', 'I love you', o), 'I love you');
 });
+
+test('an auto-reply speaks as the assistant and never for the owner\'s feelings or plans (the owner, 2026-11-04)', async () => {
+  const { r, prompts } = sharedRig((q) => (/answering by text message/.test(q) ? 'Thanks, I will pass it on.' : 'SKIP'));
+  const p = await pairedPhone(r, { tools: ['send_sms'] });
+  await p.say(smsEvent({ shared: false, auto_reply: true, thread: { title: 'Sam', picked: false } }));
+  for (let i = 0; i < 20 && !p.sent.some(e => e.type === 'tool_call'); i++) await tick();
+  const prompt = prompts.find(x => /answering by text message/.test(x));
+  assert.ok(prompt, 'the auto-reply prompt ran');
+  assert.match(prompt, /is always third person/);
+  assert.match(prompt, /Never say what .* feels, thinks or will do/);
+});
