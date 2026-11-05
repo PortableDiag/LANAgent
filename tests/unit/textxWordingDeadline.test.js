@@ -49,13 +49,14 @@ test('ownWords: an answer repeating the unquoted request goes back; quoted words
   const greeted = await make(seq('Hey Pat, check Telegram.', 'Did you see what I sent you on Telegram?')).ownWords('Check Telegram', req, 'Pat');
   assert.equal(greeted, 'Did you see what I sent you on Telegram?');
 
-  process.env.OWNER_NAME = 'Jo';
-  const third = await make(seq('Hey Pat, Jo asked me to tell you to look at Telegram.', 'Can you look at Telegram? I sent you something.')).ownWords('Check Telegram', req, 'Pat');
-  assert.equal(third, 'Can you look at Telegram? I sent you something.');
-  delete process.env.OWNER_NAME;
+  // The owner, 2026-11-04: an assistant passing it on. Speaking AS the owner goes back; speaking OF them is right.
+  process.env.OWNER_NAME = 'Jo'; process.env.OWNER_PRONOUNS = 'she/her/her';
+  const asOwner = await make(seq('Pat, I sent you something on Telegram.', 'Hey Pat, Jo sent you something on Telegram, can you take a look?')).ownWords('Check Telegram', req, 'Pat');
+  assert.equal(asOwner, 'Hey Pat, Jo sent you something on Telegram, can you take a look?');
+  delete process.env.OWNER_NAME; delete process.env.OWNER_PRONOUNS;
 
   let asked = 0;
-  const quoted = await make(async () => { asked++; return { content: 'no' }; }).ownWords('check telegram', 'text Pat "check telegram"', 'Pat');
+  const quoted = await make(async () => { asked++; return { content: 'no' }; }).ownWords('check telegram', 'text Pat verbatim "check telegram"', 'Pat');
   assert.equal(quoted, 'check telegram');
   assert.equal(asked, 0);
 });

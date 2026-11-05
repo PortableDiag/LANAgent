@@ -30,7 +30,7 @@ test('getConversationContext returns the live conversation, newest first, in the
 test('the send-text rule: quoted words exact, a described message written to the recipient, asides left out', () => {
   const rule = messageTextRule('Pat');
   assert.match(rule, /sent from Pat's phone/);
-  assert.match(rule, /Only words in quotes are copied exactly/);
+  assert.match(rule, /copied exactly only when the request puts them in quotes AND says "verbatim"/);
   assert.match(rule, /goes in gifSearch, never in the text/);
   assert.match(rule, /addressing them directly/);
   assert.match(rule, /never put it in the text/);

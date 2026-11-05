@@ -2,6 +2,16 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.744] - 2026-11-04
+
+### Changed
+- **A text goes out word for word only when the request quotes it and says "verbatim".** Quotation marks alone now get reworded like anything else. This matches Orbit's rule, so the two agents behave the same.
+
+## [2.25.743] - 2026-11-04
+
+### Changed
+- **A text ALICE writes speaks of the owner in the third person.** "Tell her I ate cake and I'll call" becomes "Pat ate cake and they will call you", as an assistant passing a message on, not someone pretending to be the owner. This reverses 2.25.735. The text says who is writing at the start, at most once per person every 12 hours. `OWNER_PRONOUNS` ("he/him/his") sets how the owner is referred to; it is never guessed, and the default is they/them/their.
+
 ## [2.25.742] - 2026-11-04
 
 ### Fixed

@@ -121,10 +121,11 @@ const offlineRun = new AsyncLocalStorage();
  * sell him on yourself you know ;)" went to Wayne word for word, aside and all (2026-10-19).
  */
 export function messageTextRule(owner = process.env.OWNER_NAME || 'the user') {
-  // The owner, 2026-10-27: "if i want it to send a phrase verbatim or literally, then ill include it in quotes
+  // The owner, 2026-11-04: exact words need quotes AND the word "verbatim", the same rule as Orbit, so the two agents
+  // don't behave differently. Before that, 2026-10-27: "if i want it to send a phrase verbatim or literally, then ill include it in quotes
   // otherwise alice should rephrase it" ("Text Adam a gif of a funny cat" was sent as "a gif of a funny cat").
-  return `"text" is the message the recipient will read, sent from ${owner}'s phone. Only words in quotes are copied ` +
-    'exactly. Anything else describes the message: write it in your own words. A GIF, picture or video the request asks ' +
+  return `"text" is the message the recipient will read, sent from ${owner}'s phone. Words are copied exactly only when the request puts them in quotes AND says "verbatim". ` +
+    'Anything else, quotation marks alone included, describes the message: write it in your own words. A GIF, picture or video the request asks ' +
     'for ("a gif of a funny cat") goes in gifSearch, never in the text; with no message described, leave text out. ' +
     'If it describes the message ("ask Wayne if he needs ' +
     'help", "tell her I\'m running late", "let him know the game moved"), write that message to the recipient, ' +
@@ -137,12 +138,38 @@ export function messageTextRule(owner = process.env.OWNER_NAME || 'the user') {
     `"Yourself", "you" and "introduce yourself" in the request mean you, ${agentName()}, ${owner}'s AI assistant, ` +
     `not ${owner}: then the text speaks as you, and since it arrives from ${owner}'s number it MUST say who is writing ` +
     `("Hi Mom, this is ${agentName()}, ${owner}'s AI assistant. …"); "I want to show you my new voice" alone read as ${owner} (2026-10-25). ` +
-    `Otherwise it is ${owner}'s own words.`;
+    // The owner, 2026-11-04: an assistant passing a message on, not someone wearing their skin.
+    `Otherwise you are passing on a message as ${owner}'s assistant, so the text speaks of ${owner} in the third person: ` +
+    `${owner}'s own "I", "me" and "my" become ${owner}'s first name or ${ownerPronouns().subject}, never "I". Only quoted words the request calls verbatim stay as written.`;
+}
+
+/** How texts refer to the owner. Never guessed from a name; neutral unless OWNER_PRONOUNS says otherwise ("he/him/his"). */
+export function ownerPronouns(value = process.env.OWNER_PRONOUNS) {
+  const [subject, object, possessive] = String(value || 'they/them/their').toLowerCase().split('/').map(w => w.trim());
+  return { subject: subject || 'they', object: object || 'them', possessive: possessive || 'their' };
+}
+
+/** A sentence still speaking as the owner: first person, with no mention of the owner at all. */
+export function speaksAsOwner(text, { owner = process.env.OWNER_NAME || '', pronouns = ownerPronouns() } = {}) {
+  const words = String(text || '').toLowerCase().replace(/[’']/g, "'").split(/[^\p{L}\p{N}']+/u).filter(Boolean);
+  const firstPerson = words.some(w => /^(i|i'm|i'd|i've|i'll|me|my|mine|myself)$/.test(w));
+  if (!firstPerson) return false;
+  const named = String(owner).toLowerCase().split(/\s+/).filter(Boolean);
+  const ofOwner = new Set([...named, ...Object.values(pronouns), `${named[0] || ''}'s`, 'they', 'them', 'their']);
+  return !words.some(w => ofOwner.has(w));
 }
 
 const agentName = () => process.env.AGENT_NAME || 'LANAgent';
+const INTRO_EVERY_MS = 12 * 3600 * 1000;
 
 const flatWords = (v) => String(v || '').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+
+/** The words to send exactly: quoted, in a request that says "verbatim". Quotes alone are not enough (the owner, 2026-11-04). */
+export function verbatimQuotes(request) {
+  const req = String(request || '');
+  if (!/\bverbatim\b/i.test(req)) return [];
+  return [...req.matchAll(/"([^"]+)"|“([^”]+)”/g)].map(m => flatWords(m[1] || m[2])).filter(Boolean);
+}
 
 /** The owner's side remarks: parentheses outside quotes in the request. */
 export function unquotedAsides(request) {
@@ -156,21 +183,29 @@ export function copiedAside(request, text) {
   return unquotedAsides(request).find(a => flatWords(a) && body.includes(flatWords(a))) || null;
 }
 
-/**
- * A text the request has the agent say about itself ("tell her you just tried to call her") arrives
- * from the owner's number, so it must say who is writing. The model wrote "I just tried to call
- * you." and Jo read it as the owner (2026-10-26) although messageTextRule asks for the name.
- * Quoted message text and "I"/"me" requests are the owner's own words: untouched.
- */
-export function identifyAgent(request, text, { name = agentName(), owner = process.env.OWNER_NAME || '' } = {}) {
+/** The request has the agent speak of itself ("introduce yourself", "tell her you just tried to call"). */
+export function speaksAsAgent(request) {
   const req = String(request || '').replace(/"[^"]*"|“[^”]*”/g, ' ');
-  const t = String(text || '');
-  if (!t || !name || new RegExp(`\\b${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i').test(t)) return t;
-  const aboutAgent = /\byourself\b/i.test(req) ||
+  return /\byourself\b/i.test(req) ||
     // "tell her you just tried…": the recipient (one or two words, never "I"), then "you" and a verb.
-    // "tell Wayne thank you" and "tell Sam I love you" are the owner's words.
+    // "tell Wayne thank you" and "tell Sam I love you" are messages from the owner.
     /\b(tell|remind|let|inform|warn)\s+(?:(?!I\b)\S+\s+){1,2}?(?:know\s+)?(?:that\s+)?you(?:'re|'ve|'ll|'d|\s+(?:are|have|had|will|just|were|did|tried|called|can|could|want|wanted|need|got|sent|found|missed|saw|heard|left|booked|scheduled))\b/i.test(req);
-  if (!aboutAgent) return t;
+}
+
+/**
+ * A text ALICE writes arrives from the owner's number, so it must say who is writing. "He enjoyed the cake" reads as
+ * nonsense from his own phone, and "I just tried to call you" read as the owner (2026-10-26). Words the owner quoted and called
+ * verbatim are theirs and stay untouched. A passed-on message says so once (`recent`: this person was told lately); one where the
+ * agent speaks of itself always does.
+ */
+export function identifyAgent(request, text, { name = agentName(), owner = process.env.OWNER_NAME || '', recent = false } = {}) {
+  const full = String(request || '');
+  const req = full.replace(/"[^"]*"|“[^”]*”/g, ' ');
+  const t = String(text || '');
+  if (!full.trim() || !t || !name || new RegExp(`\\b${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i').test(t)) return t;
+  if (verbatimQuotes(full).some(q => flatWords(t).includes(q))) return t;
+  const aboutAgent = speaksAsAgent(req);
+  if (!aboutAgent && recent) return t;
   return `This is ${name}${owner ? `, ${owner}'s AI assistant` : ', an AI assistant'}. ${t}`;
 }
 
@@ -674,7 +709,15 @@ export default class TextXPlugin extends BasePlugin {
     const copied = text;
     if (text && !fromChat) text = await this.ownWords(text, data.originalInput || data._context?.originalInput, data.to || data.thread);
     const reworded = text !== copied;
-    if (!fromChat && !data.replyTo) text = identifyAgent(data.originalInput || data._context?.originalInput, text);
+    if (!fromChat && !data.replyTo) {
+      // Who is writing is said once to a person: not on each text of a back-and-forth.
+      const key = flatWords(String(data.to || data.thread || ''));
+      const told = this.introducedAt ||= new Map();
+      const recent = Date.now() - (told.get(key) || 0) < INTRO_EVERY_MS;
+      const before = text;
+      text = identifyAgent(data.originalInput || data._context?.originalInput, text, { recent });
+      if (text !== before) told.set(key, Date.now());
+    }
     if (scheduled && data.at != null) data.at = resolveRequestTime(data.at, '')?.toISOString() || data.at;
     if (scheduled && !Number.isFinite(Date.parse(data.at))) return { success: false, error: 'When should it be sent? Give a date and time.' };
     // A named conversation (a group) is addressed by its thread; people by their numbers.
@@ -955,38 +998,44 @@ export default class TextXPlugin extends BasePlugin {
 
   /**
    * Words copied from an unquoted request are a description, not the message: "Text Adam a gif of a
-   * funny cat" went out as "a gif of a funny cat" (2026-10-27). Only quoted words go as they are.
+   * funny cat" went out as "a gif of a funny cat" (2026-10-27). Only quoted words called verbatim go as they are.
    */
   async ownWords(text, request, who) {
     const req = String(request || '');
     if (!req) return text;
     const body = flatWords(text);
     const aside = copiedAside(req, text);
-    if (!aside && !flatWords(req).includes(body)) return text;
-    const quoted = [...req.matchAll(/"([^"]+)"|“([^”]+)”/g)].map(m => flatWords(m[1] || m[2]));
+    const owner = process.env.OWNER_NAME || 'the user';
+    const pron = ownerPronouns();
+    const asAgent = speaksAsAgent(req);
+    const asOwner = (o) => !asAgent && speaksAsOwner(o, { owner, pronouns: pron });
+    const quoted = verbatimQuotes(req);
     if (!aside && quoted.some(q => q && (q.includes(body) || body.includes(q)))) return text;
+    if (!aside && !asOwner(text) && !flatWords(req).includes(body)) return text;
     const pm = this.agent?.providerManager;
     if (!pm?.generateResponse) return text;
     const prompt = (extra = '') =>
       `${process.env.OWNER_NAME || 'The user'} asked you: "${req.slice(0, 600)}"
 ` +
       `Write the text message ${who ? `${who} ` : 'the recipient '}will read, in your own words, addressing them directly. ` +
-      `It goes from ${process.env.OWNER_NAME || 'the user'}'s phone as their own words: their "I" stays "I", never their name in the third person, unless the request has you speak as yourself. ` +
+      (asAgent ? `Write as yourself, ${agentName()}, ${owner}'s AI assistant. ` :
+        // The owner, 2026-11-04: "its supposed to be an assistant, not a skinsuiter".
+        `You are ${owner}'s assistant passing the message on, never pretending to be ${owner}: speak of ${owner} in the third person, by first name once and then ${pron.subject}/${pron.object}/${pron.possessive}. ` +
+        `${owner}'s own "I", "me" and "my" in the request mean ${owner}: "I ate cake and I'll call you" becomes "${owner.split(' ')[0]} ate cake and ${pron.subject} will call you". `) +
       'Short and natural, never a copy of the request. Say everything the request wants said and only that; add no detail, reason or aside of your own. Keep every number, code, time, date, name, address and link exactly as given. ' +
-      'Words in quotes stay exactly as quoted. Anything in parentheses is a side remark, never words to copy: say its idea in different words as part of the message, or leave it out if it is a remark to you. ' +
+      (quoted.length ? 'Words in quotes stay exactly as quoted. ' : 'Quotation marks here only show what to say: reword it too. ') + 'Anything in parentheses is a side remark, never words to copy: say its idea in different words as part of the message, or leave it out if it is a remark to you. ' +
       'If the request only asks to send a GIF, picture or video, answer exactly NONE. ' +
       `Answer with the message only.${extra}`;
     const ask = (extra = '') => wordWithin(pm, prompt(extra), { maxTokens: 200, temperature: 0.6 }, { logger: this.logger });
     const clean = (res) => String(res?.content || '').trim().replace(/^"|"$/g, '');
     // The model answering with the owner's own words is the same failure as never asking it ("check telegram").
-    // A greeting or their name in front changes nothing ("Hey Pat, check Telegram"). Nor may it name the
-    // owner: the text goes out from their phone as their own words.
+    // A greeting or their name in front changes nothing ("Hey Pat, check Telegram").
     const names = flatWords(who).split(' ').filter(Boolean);
     const core = (o) => { let w = flatWords(o).split(' '); while (w.length > 1 && (/^(hey|hi|hello|yo|there)$/.test(w[0]) || names.includes(w[0]))) w = w.slice(1); return w.join(' '); };
-    const ownerName = flatWords(process.env.OWNER_NAME).split(' ')[0];
-    const speaksOfOwner = (o) => Boolean(ownerName) && !names.includes(ownerName) && !flatWords(req).split(' ').includes(ownerName) && flatWords(o).split(' ').includes(ownerName);
-    const repeats = (o) => { const f = core(o); return speaksOfOwner(o) || (Boolean(f) && flatWords(req).includes(f) && !quoted.some(q => q && (q.includes(f) || f.includes(q)))); };
-    const reword = ` Your last try repeated the request's own words or spoke of the sender by name. Write as the sender, "I". Say what it means the way a person would text it: a short, complete sentence to them, in different words, not the same words with a greeting in front.`;
+    const repeats = (o) => { const f = core(o); return asOwner(o) || (Boolean(f) && flatWords(req).includes(f) && !quoted.some(q => q && (q.includes(f) || f.includes(q)))); };
+    const reword = asAgent
+      ? ` Your last try repeated the request's own words. Say it the way a person would text it, in different words.`
+      : ` Your last try repeated the request's own words or spoke as ${owner}. You are ${owner}'s assistant: say ${owner.split(' ')[0]} or ${pron.subject}, never "I" for ${owner}, in different words.`;
     const askFast = () => wordWithin({ generateResponse: (q, o) => pm.generateAux(q, o) }, prompt(reword), { maxTokens: 200, temperature: 0.9, auxTask: 'text-wording' }, { logger: this.logger });
     try {
       const started = Date.now();
@@ -995,7 +1044,7 @@ export default class TextXPlugin extends BasePlugin {
       // A main model that just stalled gets no second turn: the owner is waiting on this text.
       if (repeats(out)) out = clean(await (Date.now() - started > 20000 && pm.generateAux ? askFast() : ask(reword)));
       if (repeats(out) && pm.generateAux) out = clean(await askFast());
-      if (repeats(out)) this.logger.warn(`textx send: every model repeated the request's words: "${out.slice(0, 80)}"`);
+      if (repeats(out)) this.logger.warn(`textx send: every model repeated the request or spoke as the owner: "${out.slice(0, 80)}"`);
       const stuck = copiedAside(req, out);
       if (stuck) {
         out = clean(await ask(` Your last try copied "${stuck}" from the request. Do not use those words.`));
@@ -1035,6 +1084,7 @@ export default class TextXPlugin extends BasePlugin {
         'the draft does not already say, and keep everything it does say: a persona changes the voice, never the news. ' +
         // "Subject: Test Subject <the owner> has successfully consumed a cake", and the tres leche was gone (2026-11-03).
         'It is a text message: no subject line, header or label. If no line says how to write to them, answer the draft unchanged. ' +
+        `The draft speaks of ${process.env.OWNER_NAME || 'the user'} in the third person: keep it that way, never "I" for them. ` +
         'Answer with the text only.', { maxTokens: 300, temperature: 0.4 }, { logger: this.logger });
       const out = String(res?.content || '').trim().replace(/^"|"$/g, '');
       // A tone pass keeps about the draft's length; a much longer answer added something.

@@ -456,7 +456,7 @@ test('plugin: only quoted words are sent as written; a described message is rewo
   const r = rig({ waits: { read: 200, readExpiry: 400, late: 10 } });
   r.agent.providerManager.generateResponse = async (p) => { asked.push(p); return { content: /gif of a sad robot"/.test(p) ? 'NONE' : 'Hey! Thought this would make you smile.' }; };
   const plugin = new TextXPlugin(r.agent);
-  assert.equal(await plugin.ownWords('see you soon', 'text Sam "see you soon"', 'Sam'), 'see you soon', 'quoted: verbatim');
+  assert.equal(await plugin.ownWords('see you soon', 'text Sam verbatim "see you soon"', 'Sam'), 'see you soon', 'quoted: verbatim');
   assert.equal(await plugin.ownWords('Running late, sorry!', 'tell Sam I am running late', 'Sam'), 'Running late, sorry!', 'already written by the model');
   assert.equal(await plugin.ownWords('a gif of a funny cat', 'Text Adam a gif of a funny cat', 'Adam'), 'Hey! Thought this would make you smile.');
   assert.equal(await plugin.ownWords('a gif of a sad robot', 'Send Jo a gif of a sad robot', 'Jo'), '', 'a GIF on its own needs no text');
@@ -1682,7 +1682,7 @@ test('plugin: "remind Sam via text message that…" sends a text even when match
   clearInterval(phone);
   assert.deepEqual(asked, ['send']);
   const send = p.sent.find(e => e.type === 'tool_call' && e.body.name === 'send_sms');
-  assert.equal(send.body.args.text, 'Hey Sam, the cake is on its way!');
+  assert.ok(String(send.body.args.text).endsWith('Hey Sam, the cake is on its way!'));
   assert.equal(res.success, true);
 });
 
@@ -2108,7 +2108,7 @@ test('quoted words the owner dictated are not rewritten or checked', async () =>
   r.agent.providerManager = { generateResponse: async () => { calls++; return { content: 'NO_FACTS' }; } };
   const ph = fakePhone(p, { contacts_lookup: () => [{ name: 'Sam', numbers: ['+15550100'] }], send_sms: () => ({ status: 'sent' }) });
   const res = await plugin.execute({ action: 'send', to: 'Sam', text: 'the gate code changed to 4471',
-    _context: { originalInput: 'text Sam "the gate code changed to 4471"' } });
+    _context: { originalInput: 'text Sam verbatim "the gate code changed to 4471"' } });
   ph.stop();
   assert.equal(res.success, true, res.error);
   assert.equal(ph.seen.find(c => c.name === 'send_sms').args.text, 'the gate code changed to 4471');
@@ -2124,7 +2124,7 @@ test('unquoted words are reworded, never fact-checked into a refusal, and keep t
     _context: { originalInput: 'text Sam the gate code changed to 4471' } });
   ph.stop();
   assert.equal(res.success, true, res.error);
-  assert.equal(ph.seen.find(c => c.name === 'send_sms').args.text, 'Heads up, the gate code is now 4471.');
+  assert.ok(String(ph.seen.find(c => c.name === 'send_sms').args.text).endsWith('Heads up, the gate code is now 4471.'));
   assert.match(prompts[0], /Keep every number, code/);
   assert.ok(!prompts.some(q => /NO_FACTS/.test(q)), 'the owner\'s own content is not fact-checked');
 });
@@ -2351,8 +2351,48 @@ test('a text the agent says about itself names the agent; what the owner says st
   assert.equal(identifyAgent('Text Jo and tell her you just tried to call her', 'I just tried to call you.', o), "This is ALICE, Pat's AI assistant. I just tried to call you.");
   assert.match(identifyAgent('Text Mom and introduce yourself', 'Hi Mom!', o), /^This is ALICE/);
   assert.equal(identifyAgent('Text Mom and introduce yourself', 'Hi Mom, this is ALICE.', o), 'Hi Mom, this is ALICE.', 'already named');
-  for (const [req, text] of [['tell Wayne thank you', 'Thank you!'], ['tell Sam I love you', 'I love you'], ['tell her I will see you there', 'I will see you there'], ['text Sam "you just missed me"', 'you just missed me']]) {
-    assert.equal(identifyAgent(req, text, o), text, req);
+  // A passed-on message says who is writing too, once; quoted words are the owner's own (the owner, 2026-11-04).
+  assert.equal(identifyAgent('tell Sam I will be late', 'Pat will be late.', o), "This is ALICE, Pat's AI assistant. Pat will be late.");
+  assert.equal(identifyAgent('tell Sam I will be late', 'Pat will be late.', { ...o, recent: true }), 'Pat will be late.', 'told lately');
+  assert.match(identifyAgent('Text Jo and tell her you just tried to call her', 'I just tried to call you.', { ...o, recent: true }), /^This is ALICE/, 'the agent speaking of itself always says so');
+  assert.equal(identifyAgent('text Sam verbatim "you just missed me"', 'you just missed me', o), 'you just missed me');
+  assert.equal(identifyAgent('', 'hello', o), 'hello', 'no request: the caller chose the words');
+});
+
+test('the owner is spoken of in the third person, by the pronouns set, and never guessed (the owner, 2026-11-04)', async () => {
+  const { default: TextXPlugin, ownerPronouns, speaksAsOwner } = await import('../../src/api/plugins/textx.js');
+  assert.deepEqual(ownerPronouns('he/him/his'), { subject: 'he', object: 'him', possessive: 'his' });
+  assert.deepEqual(ownerPronouns(undefined), { subject: 'they', object: 'them', possessive: 'their' });
+  const o = { owner: 'Pat Lee', pronouns: ownerPronouns('she/her/her') };
+  assert.equal(speaksAsOwner("Mom, I had cake and I'd do it again.", o), true);
+  assert.equal(speaksAsOwner("Mom, Pat had cake and she'd do it again.".replace("she'd", 'she would'), o), false);
+  assert.equal(speaksAsOwner('Pat asked me to tell you the game moved.', o), false, 'the assistant may say "me" about itself');
+  assert.equal(speaksAsOwner('See you at 6!', o), false);
+
+  const env = { o: process.env.OWNER_NAME, p: process.env.OWNER_PRONOUNS };
+  process.env.OWNER_NAME = 'Pat'; process.env.OWNER_PRONOUNS = 'she/her/her';
+  try {
+    const plugin = new TextXPlugin({});
+    const prompts = [];
+    const answers = ['Mom, I had cake and I got sick.', 'Mom, Pat had cake and she got sick, but she says it was worth it.'];
+    plugin.agent = { providerManager: { generateResponse: async (p) => { prompts.push(p); return { content: answers.shift() }; } } };
+    const req = 'Alice text Mom and tell her I had cake and got sick but it was worth it';
+    assert.equal(await plugin.ownWords('I had cake and got sick, but it was worth it.', req, 'Mom'), 'Mom, Pat had cake and she got sick, but she says it was worth it.');
+    assert.match(prompts[0], /third person/);
+    assert.match(prompts[1], /never "I" for Pat/);
+
+    // Quoted words go as written, with no model call.
+    prompts.length = 0;
+    assert.equal(await plugin.ownWords('I love you', 'text Mom verbatim "I love you"', 'Mom'), 'I love you');
+    assert.equal(prompts.length, 0);
+
+    // The agent asked to speak as itself keeps its own "I".
+    answers.push('Hi Mom, I am ALICE.');
+    assert.equal(await plugin.ownWords('I am ALICE', 'text Mom and introduce yourself', 'Mom'), 'I am ALICE', 'not a copy, not the owner speaking');
+  } finally {
+    process.env.OWNER_NAME = env.o; process.env.OWNER_PRONOUNS = env.p;
+    if (env.o === undefined) delete process.env.OWNER_NAME;
+    if (env.p === undefined) delete process.env.OWNER_PRONOUNS;
   }
 });
 
@@ -2470,7 +2510,7 @@ test('a parenthesis in the request is a side remark: never copied into the text 
   // A parenthesis holding a fact stays, and a quoted one is the owner's words.
   answers.push('Meet at the cafe (5 Main St)', 'Meet at the cafe (5 Main St)');
   assert.equal(await plugin.ownWords('Meet at the cafe (5 Main St)', 'tell Sam to meet at the cafe (5 Main St)', 'Sam'), 'Meet at the cafe (5 Main St)');
-  assert.equal(await plugin.ownWords('see you (maybe) soon', 'text Sam "see you (maybe) soon"', 'Sam'), 'see you (maybe) soon');
+  assert.equal(await plugin.ownWords('see you (maybe) soon', 'text Sam verbatim "see you (maybe) soon"', 'Sam'), 'see you (maybe) soon');
 });
 
 test('a tapback taken back in words is a reaction; a text that only starts the same way is not', async () => {
@@ -2481,4 +2521,29 @@ test('a tapback taken back in words is a reaction; a text that only starts the s
   for (const text of ['Removed a tooth from the dog', 'Removed a heart from my to-do list today', 'Loved the movie']) {
     assert.equal(isReactionMessage({ text }), false, text);
   }
+});
+
+test('exact words need quotes AND "verbatim", the same rule as Orbit (the owner, 2026-11-04)', async () => {
+  const { default: TextXPlugin, verbatimQuotes, identifyAgent } = await import('../../src/api/plugins/textx.js');
+  assert.deepEqual(verbatimQuotes('text Mom "I love you"'), [], 'quotes alone');
+  assert.deepEqual(verbatimQuotes('text Mom I love you verbatim'), [], 'the word alone');
+  assert.deepEqual(verbatimQuotes('text Mom verbatim "I love you"'), ['i love you']);
+  assert.deepEqual(verbatimQuotes('text Mom “I love you”, verbatim'), ['i love you']);
+
+  const prompts = [];
+  const plugin = new TextXPlugin({ config: {}, providerManager: { generateResponse: async (p) => { prompts.push(p); return { content: 'Pat loves you.' }; } } });
+  const env = process.env.OWNER_NAME;
+  process.env.OWNER_NAME = 'Pat';
+  try {
+    assert.equal(await plugin.ownWords('I love you', 'text Mom "I love you"', 'Mom'), 'Pat loves you.');
+    assert.match(prompts[0], /Quotation marks here only show what to say/);
+    prompts.length = 0;
+    assert.equal(await plugin.ownWords('I love you', 'text Mom verbatim "I love you"', 'Mom'), 'I love you');
+    assert.equal(prompts.length, 0);
+  } finally {
+    if (env === undefined) delete process.env.OWNER_NAME; else process.env.OWNER_NAME = env;
+  }
+  const o = { name: 'ALICE', owner: 'Pat' };
+  assert.match(identifyAgent('text Mom "I love you"', 'Pat loves you.', o), /^This is ALICE/);
+  assert.equal(identifyAgent('text Mom verbatim "I love you"', 'I love you', o), 'I love you');
 });
