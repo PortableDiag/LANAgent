@@ -11,8 +11,9 @@
  * The picture being replaced goes to data/agent/avatar-history first: DELTA's original avatar was
  * lost to an overwrite. To put one back, apply that file again.
  *
- * Not changed here: the on-chain ERC-8004 identity (updating it costs gas; it is a separate,
- * deliberate step) and TextX/DialX (the apps fetch /textx/v1/avatar from avatarPath on their own).
+ * The on-chain ERC-8004 identity shows the avatar too, so a changed picture goes there as well (owner, 2026-11-05):
+ * a new IPFS upload and one setAgentURI transaction, only when the picture really changed. TextX/DialX fetch
+ * /textx/v1/avatar from avatarPath on their own.
  */
 
 import fs from 'fs/promises';
@@ -23,10 +24,14 @@ import { logger } from '../../utils/logger.js';
 const OTHER_EXTS = ['.jpg', '.jpeg', '.webp', '.gif'];
 const HISTORY_KEEP = 20;
 
-/** Copy the avatar about to be replaced into avatar-history, newest 20 kept. A failure here never blocks the change. */
+/**
+ * Copy the avatar about to be replaced into avatar-history, newest 20 kept. A failure here never blocks the change.
+ * Returns whether the picture differs from the current avatar.png.
+ */
 async function keepPrevious(dir, png) {
   const historyDir = path.join(dir, 'avatar-history');
   const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const current = await fs.readFile(path.join(dir, 'avatar.png')).catch(() => null);
   try {
     for (const ext of ['.png', ...OTHER_EXTS]) {
       const old = await fs.readFile(path.join(dir, `avatar${ext}`)).catch(() => null);
@@ -39,6 +44,7 @@ async function keepPrevious(dir, png) {
   } catch (e) {
     logger.warn(`Avatar: could not keep the previous picture: ${e.message}`);
   }
+  return !current?.equals(png);
 }
 
 /** The plugin instance behind an apiManager entry, or null. */
@@ -60,7 +66,7 @@ export async function applyAgentAvatar(agent, buffer, { source = 'a new picture'
   const dir = path.join(DATA_PATH, 'agent');
   await fs.mkdir(dir, { recursive: true });
   const file = path.join(dir, 'avatar.png');
-  await keepPrevious(dir, png);
+  const changed = await keepPrevious(dir, png);
   await fs.writeFile(file, png);
   for (const ext of OTHER_EXTS) await fs.unlink(path.join(dir, `avatar${ext}`)).catch(() => {});
 
@@ -82,7 +88,7 @@ export async function applyAgentAvatar(agent, buffer, { source = 'a new picture'
   await attempt('telegram', async () => {
     const tg = agent?.interfaces?.get?.('telegram');
     if (!tg?.syncBotPhoto) return 'not connected';
-    const r = await tg.syncBotPhoto(file, { caption: `🖼 My new avatar (${source}).\n\nTelegram doesn't let a bot change its own photo here: in @BotFather send /setuserpic, pick this bot, and send this picture.` });
+    const r = await tg.syncBotPhoto(file, { caption: `🖼 My new avatar (${source}).\n\nTelegram refused my request to set it myself, so: in @BotFather send /setuserpic, pick this bot, and send this picture.` });
     if (!r?.success) throw new Error(r?.error || 'refused');
     return r.note ? 'sent to the owner to set in @BotFather' : 'updated';
   });
@@ -107,6 +113,21 @@ export async function applyAgentAvatar(agent, buffer, { source = 'a new picture'
     if (!r?.success) throw new Error(r?.error || 'refused');
     return 'updated';
   });
+  await attempt('trellis', async () => {
+    const listener = pluginOf(agent, 'trellis-notes')?.listener;
+    if (!listener?._publishCard) return 'not connected';
+    await listener._publishCard();
+    return 'updated';
+  });
+  await attempt('identity', async () => {
+    const minted = agent?.agentModel?.erc8004;
+    if (!minted?.agentId || minted.status !== 'active') return 'not connected';
+    if (!changed) return 'unchanged';
+    const { default: identity } = await import('../crypto/agentIdentityService.js');
+    const r = await identity.updateRegistration({ forceAvatarReupload: true });
+    logger.info(`Avatar: on-chain identity ${r.agentId} now points at ${r.agentURI} (tx ${r.txHash})`);
+    return 'updated';
+  });
 
   logger.info(`Avatar applied from ${source}: ${Object.entries(services).map(([k, v]) => `${k} ${v}`).join(', ') || 'local only'}`);
   return { path: file, services };
@@ -114,8 +135,8 @@ export async function applyAgentAvatar(agent, buffer, { source = 'a new picture'
 
 /** "Telegram updated, MindSwarm not logged in, …" for a reply to the owner. */
 export function describeAvatarServices(services) {
-  const names = { telegram: 'Telegram', mindswarm: 'MindSwarm', twitter: 'X', gravatar: 'Gravatar' };
+  const names = { telegram: 'Telegram', mindswarm: 'MindSwarm', twitter: 'X', gravatar: 'Gravatar', trellis: 'Trellis', identity: 'my on-chain identity' };
   const done = Object.entries(services).filter(([, v]) => v === 'updated').map(([k]) => names[k] || k);
-  const other = Object.entries(services).filter(([, v]) => v !== 'updated' && v !== 'not connected').map(([k, v]) => `${names[k] || k} ${v}`);
+  const other = Object.entries(services).filter(([, v]) => !['updated', 'not connected', 'unchanged'].includes(v)).map(([k, v]) => `${names[k] || k} ${v}`);
   return [done.length ? `Updated on ${done.join(', ')}.` : '', other.join('; ')].filter(Boolean).join(' ');
 }

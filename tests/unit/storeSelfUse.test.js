@@ -110,3 +110,30 @@ test('backdrop finds the desktop wallpaper it owns', async () => {
   assert.match(b.path, /walls[\\/]d\.jpg$/);
   assert.equal(b.mime, 'image/jpeg');
 });
+
+test('choosing a model to become skips the painted robots with no expressions', async () => {
+  const { p } = await plugin();
+  const products = [
+    { slug: 'vrm-robot', collection: '3d-avatars', specs: [{ label: 'Face', value: 'its own painted eyes (no expression overlays)' }] },
+    { slug: 'vrm-pilot', collection: '3d-avatars', specs: [{ label: 'Body', value: 'curvy' }] }
+  ];
+  const looked = [];
+  p.agent.providerManager.analyzeImage = async () => ({ analysis: '{"what":"a pilot","score":8,"why":"fits"}' });
+  p.fetchBytes = async (u) => { looked.push(u); return { buffer: Buffer.from('x') }; };
+  p.api = async (_m, url) => (url === '/api/catalog' ? { products } : { product: {
+    title: 'Pilot', variants: [{ id: 'vrm-pilot' }, { id: 'vrm-pilot-bundle' }], images: [{ url: 'https://x/pilot.png', caption: 'portrait' }] } });
+  const pick = await p.pickFavorite({ kind: 'vrm' });
+  assert.equal(pick.variant, 'vrm-pilot');
+  assert.deepEqual(looked, ['https://x/pilot.png']);
+});
+
+test('asking for a bundle buys the picked model\'s bundle', async () => {
+  const { p } = await plugin({ settings: { weeklyBudgetUsd: 1, requireUse: true, autoWear: true } });
+  p.pickFavorite = async ({ kind }) => { assert.equal(kind, 'vrm'); return { variant: 'vrm-pilot', label: 'Pilot', why: 'fits', seen: 1 }; };
+  let quoted;
+  p.api = async (_m, url, o) => { if (url === '/api/quotes') { quoted = o.body.items[0].variant; return { quote: { total_cents: 1500 } }; } return {}; };
+  p.ledger = async () => [];
+  const r = await p.buy({ _context: { originalInput: 'buy yourself a vrm bundle from bots and borgs' } });
+  assert.equal(quoted, 'vrm-pilot-bundle');
+  assert.match(r.error, /costs \$15\.00/, 'stops at the budget, spending nothing');
+});

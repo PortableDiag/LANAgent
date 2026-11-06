@@ -2,6 +2,16 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.750] - 2026-11-05
+
+### Added
+- **A changed avatar reaches the on-chain identity and the Trellis agent card.** The new picture is pinned and the identity is pointed at it, with one transaction, only when the picture really changed. A failed update is reported and does not stop the change.
+- **The agent chooses its own model bundle.** Asking for a bundle has it look at the models with expressions and buy the one it likes best.
+
+### Fixed
+- **A failed picture upload no longer loses the identity's recorded avatar.**
+- **The fallback caption said Telegram doesn't let a bot change its photo.** It can; the caption now says Telegram refused that one request.
+
 ## [2.25.749] - 2026-11-05
 
 ### Added

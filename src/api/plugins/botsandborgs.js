@@ -336,11 +336,12 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     let pickedWhy = '';
     if (!data.variant) {
       // "Buy me a robot icon", "send Jo a phone wallpaper": the agent picks among what the request names.
-      const kind = wantKind && wantKind !== 'bundle' ? wantKind : 'avatar';
-      const forWhom = use === 'avatar' ? 'yourself' : String(data.to || 'the owner');
+      // A bundle is a model with its portraits and stickers, so the pick is made among the models.
+      const kind = wantKind === 'bundle' ? 'vrm' : wantKind || 'avatar';
+      const forWhom = use === 'avatar' || use === 'wear' ? 'yourself' : String(data.to || 'the owner');
       const pick = await this.pickFavorite({ kind, forWhom });
       if (!pick) return { success: false, error: `I couldn't see any of the store's ${kind}s, so I didn't buy one.` };
-      data = { ...data, variant: pick.variant };
+      data = { ...data, variant: wantKind === 'bundle' ? `${pick.variant}-bundle` : pick.variant };
       pickedWhy = `I looked at ${pick.seen} ${kind}s and picked ${pick.label}: ${pick.why} `;
     }
 
@@ -456,8 +457,9 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     const want = kind === 'icon' ? (p) => /icons?$/.test(p.slug)
       : kind === 'wallpaper' ? (p) => /phone|wallpaper/i.test(`${p.slug} ${p.title}`)
         : kind === 'emoji' ? (p) => /emoji-minis$/.test(p.slug)
-          : tier[kind] ? (p) => p.collection === '3d-avatars'
-            : (p) => /singles$/.test(p.slug) && /avatar|mech|menagerie/i.test(`${p.slug} ${p.title}`);
+          // A model to become needs a face that can blink and talk; the store's painted robots can't.
+          : tier[kind] ? (p) => p.collection === '3d-avatars' && !(kind === 'vrm' && /no expression/i.test(JSON.stringify(p.specs || [])))
+            : (p) =>/singles$/.test(p.slug) && /avatar|mech|menagerie/i.test(`${p.slug} ${p.title}`);
     const products = (cat.products || []).filter(want);
     const candidates = [];
     for (const summary of products) {

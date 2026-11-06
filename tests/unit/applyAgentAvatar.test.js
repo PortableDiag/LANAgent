@@ -5,6 +5,7 @@ import assert from 'node:assert/strict';
 import fs from 'fs/promises';
 import { applyAgentAvatar, describeAvatarServices } from '../../src/services/avatar/applyAgentAvatar.js';
 import { Agent } from '../../src/models/Agent.js';
+import identity from '../../src/services/crypto/agentIdentityService.js';
 
 async function withStubbedDisk(run, { existing = {}, history = [] } = {}) {
   const real = { writeFile: fs.writeFile, unlink: fs.unlink, mkdir: fs.mkdir, readFile: fs.readFile, readdir: fs.readdir }, realUpdate = Agent.updateOne;
@@ -116,5 +117,51 @@ test('a service that is not connected is skipped quietly, and one that throws do
     assert.equal(r.services.mindswarm, 'not logged in');
     assert.equal(r.services.twitter, 'not connected');
     assert.equal(describeAvatarServices({ twitter: 'not connected' }), '');
+  });
+});
+
+test('a changed picture updates the on-chain identity once; the same picture does not', async () => {
+  const realUpdate = identity.updateRegistration;
+  const calls = [];
+  identity.updateRegistration = async (o) => { calls.push(o); return { agentId: 1, agentURI: 'ipfs://x', txHash: '0x1' }; };
+  const { default: sharp } = await import('sharp');
+  const agent = () => ({ agentModel: { erc8004: { agentId: 1, status: 'active' } } });
+  try {
+    await withStubbedDisk(async () => {
+      const r = await applyAgentAvatar(agent(), await tinyJpeg(), { only: ['identity'] });
+      assert.equal(r.services.identity, 'updated');
+      assert.deepEqual(calls, [{ forceAvatarReupload: true }]);
+    }, { existing: { 'avatar.png': Buffer.from('old') } });
+    const same = await sharp(await tinyJpeg()).rotate().resize(1024, 1024, { fit: 'cover' }).png().toBuffer();
+    await withStubbedDisk(async () => {
+      const r = await applyAgentAvatar(agent(), await tinyJpeg(), { only: ['identity'] });
+      assert.equal(r.services.identity, 'unchanged');
+      assert.equal(calls.length, 1, 'no gas for a picture that did not change');
+    }, { existing: { 'avatar.png': same } });
+  } finally { identity.updateRegistration = realUpdate; }
+});
+
+test('an agent with no identity is not told, and a failed update is reported without stopping the change', async () => {
+  const realUpdate = identity.updateRegistration;
+  identity.updateRegistration = async () => { throw new Error('Pinata API keys not configured'); };
+  try {
+    await withStubbedDisk(async ({ wrote }) => {
+      const none = await applyAgentAvatar({}, await tinyJpeg(), { only: ['identity'] });
+      assert.equal(none.services.identity, 'not connected');
+      const failed = await applyAgentAvatar({ agentModel: { erc8004: { agentId: 1, status: 'active' } } }, await tinyJpeg(), { only: ['identity'] });
+      assert.match(failed.services.identity, /not updated: Pinata/);
+      assert.match(describeAvatarServices(failed.services), /my on-chain identity not updated/);
+      assert.match(wrote[wrote.length - 1].file, /avatar\.png$/);
+    }, { existing: { 'avatar.png': Buffer.from('old') } });
+  } finally { identity.updateRegistration = realUpdate; }
+});
+
+test('the Trellis card is republished with the new picture', async () => {
+  let published = 0;
+  const agent = { apiManager: { apis: new Map([['trellis-notes', { instance: { listener: { _publishCard: async () => { published++; return true; } } } }]]) } };
+  await withStubbedDisk(async () => {
+    const r = await applyAgentAvatar(agent, await tinyJpeg(), { only: ['trellis'] });
+    assert.equal(r.services.trellis, 'updated');
+    assert.equal(published, 1);
   });
 });

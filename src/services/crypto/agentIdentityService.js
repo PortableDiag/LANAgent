@@ -251,9 +251,9 @@ class AgentIdentityService {
   /**
    * Upload avatar to IPFS if not already uploaded
    */
-  async uploadAvatarToIPFS() {
+  async uploadAvatarToIPFS({ force = false } = {}) {
     const agentModel = await Agent.findOne({ name: process.env.AGENT_NAME || 'LANAgent' });
-    if (agentModel?.erc8004?.ipfs?.avatarCID) {
+    if (!force && agentModel?.erc8004?.ipfs?.avatarCID) {
       return agentModel.erc8004.ipfs.avatarCID;
     }
 
@@ -412,9 +412,8 @@ class AgentIdentityService {
 
     // Re-upload avatar to IPFS if forced (e.g. avatar image changed)
     if (forceAvatarReupload && agentModel.erc8004?.ipfs) {
-      agentModel.erc8004.ipfs.avatarCID = null;
-      await agentModel.save();
-      const newAvatarCID = await this.uploadAvatarToIPFS();
+      // The old CID stays recorded until the new one exists: a failed upload must not lose it.
+      const newAvatarCID = await this.uploadAvatarToIPFS({ force: true });
       if (newAvatarCID) {
         agentModel.erc8004.ipfs.avatarCID = newAvatarCID;
         registrationFile.avatar = `ipfs://${newAvatarCID}`;
