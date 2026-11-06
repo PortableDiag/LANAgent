@@ -5,12 +5,16 @@
  * the library really holds.
  */
 
-/** Sticker and emoji files grouped by the feeling they show: [{ mood, picks: [{ item, file }] }]. */
+// Unasked, only light feelings are on offer. In replay a model told "never for grief" still chose a crying sticker
+// for "my dog died" and "lol" for "the cake made me sick"; one that isn't offered can't be sent. All stay usable on request.
+const NOT_UNASKED = /sad|cry|tear|angry|worried|nervous|scream|shock|dizzy|meh|confused|questioning|awkward|error|glitch|lowbatt|bug|loading|money|surprised/i;
+
+/** Light sticker and emoji files grouped by the feeling they show: [{ mood, picks: [{ item, file }] }]. */
 export function moodChoices(items = []) {
   const byMood = new Map();
   for (const item of items) {
     for (const file of item.files || []) {
-      if (!['sticker', 'emoji'].includes(file.kind) || !file.mood) continue;
+      if (!['sticker', 'emoji'].includes(file.kind) || !file.mood || NOT_UNASKED.test(file.mood)) continue;
       if (!byMood.has(file.mood)) byMood.set(file.mood, []);
       byMood.get(file.mood).push({ item, file });
     }
@@ -27,10 +31,11 @@ export function stickerCouldFit(replyText) {
 /**
  * The choice that suits this exchange, or null. A slow or failed model means no sticker, never a late one.
  */
-export async function chooseSticker({ generate, choices, userText, replyText, agentName = 'The assistant', timeoutMs = 8000 }) {
+export async function chooseSticker({ generate, choices, userText, replyText, agentName = 'The assistant', timeoutMs = 12000 }) {
   if (!choices?.length || !stickerCouldFit(replyText)) return null;
-  const prompt = `${agentName} is chatting with its owner and has just replied. Should a sticker follow the reply, the way a friend adds one?\n` +
-    'Yes for warmth, thanks, a joke, good news, sympathy, surprise or playful chat. No for plain facts, data, instructions, errors, or anything serious or upsetting.\n\n' +
+  const prompt = `${agentName} is chatting with its owner and has just replied. Decide whether a sticker follows the reply, the way a friend adds one.\n\n` +
+    'Send one for: thanks, compliments, hello and goodbye, good night, a joke or laughter, good news, relief such as feeling better, playful chat.\n' +
+    'Never send one for: death, grief, illness or pain, anything upsetting or worrying, plain facts, data, instructions, errors, or a task just done.\n\n' +
     `Owner: ${String(userText || '').slice(0, 500)}\n${agentName}: ${String(replyText).slice(0, 800)}\n\nStickers by feeling:\n` +
     `${choices.map((c, n) => `${n + 1}. ${c.mood}`).join('\n')}\n\nAnswer with one number, or 0 for no sticker.`;
   let timer;

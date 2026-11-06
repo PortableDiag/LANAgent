@@ -2,6 +2,11 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.756] - 2026-11-05
+
+### Changed
+- **Better judgement on unasked stickers.** Only light feelings are offered, so a sad sticker can't follow bad news; all remain usable on request. The prompt names when to send one, and on OpenRouter a stronger model decides (`BOTSANDBORGS_STICKER_MODEL`).
+
 ## [2.25.755] - 2026-11-05
 
 ### Added

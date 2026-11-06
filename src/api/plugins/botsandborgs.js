@@ -746,16 +746,30 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     if (!choices.length || !pm?.generateAux || !tg?.sendSticker || !chatId) return null;
     this._stickerAskedAt = now;
     const choice = await chooseSticker({
-      generate: (prompt) => pm.generateAux(prompt, { maxTokens: 10, temperature: 0, auxTask: 'store-sticker' }),
+      generate: (prompt) => this.askStickerModel(pm, prompt),
       choices, userText, replyText, agentName: process.env.AGENT_NAME || 'The assistant'
     });
-    if (!choice) return null;
+    if (!choice) { this.logger.info('botsandborgs: no sticker suits this reply'); return null; }
     const pick = choice.picks[Math.floor(Math.random() * choice.picks.length)];
     const webp = await toStickerWebp(await this.readOwned(pick));
     await tg.sendSticker(chatId, { source: webp, filename: 'sticker.webp' }, threadId ? { message_thread_id: threadId } : {});
     this._stickerSentAt = Date.now();
     this.logger.info(`botsandborgs: sent a ${pick.file.kind} unasked (${choice.mood}, ${pick.item.variant})`);
     return choice.mood;
+  }
+
+  /**
+   * Which sticker fits takes judgement: replayed on 12 exchanges, gpt-5.6-luna got all 12 and gpt-4.1-nano, the fast
+   * model, sent "lol" for "the cake made me sick". On OpenRouter it gets the better model. A failure means no sticker:
+   * this is decoration, and a worse model guessing is worse than nothing.
+   */
+  async askStickerModel(pm, prompt) {
+    const provider = await pm.getCurrentProvider?.().catch?.(() => null);
+    if (pm.providerNameOf?.(provider) === 'openrouter') {
+      const model = process.env.BOTSANDBORGS_STICKER_MODEL || 'openai/gpt-5.6-luna';
+      return pm.generateResponse(prompt, { model, maxTokens: 200, temperature: 0 });
+    }
+    return pm.generateAux(prompt, { maxTokens: 10, temperature: 0, auxTask: 'store-sticker' });
   }
 
   /** The wallpaper behind the dashboard today: { path, mime }, or null when none is owned or it is switched off. */

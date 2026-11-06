@@ -17,8 +17,8 @@ const library = [
 
 test('moods come only from stickers and emoji the library holds', () => {
   const c = moodChoices(library);
-  assert.deepEqual(c.map(x => x.mood), ['happy, sparkle', 'sad, tears', 'party']);
-  assert.equal(c[2].picks.length, 2);
+  assert.deepEqual(c.map(x => x.mood), ['happy, sparkle', 'party'], 'a sad sticker is never offered unasked');
+  assert.equal(c[1].picks.length, 2);
   assert.deepEqual(moodChoices([]), []);
 });
 
@@ -35,7 +35,7 @@ test('long replies and code never get a sticker, and the model is not asked', as
 test('the model picks a number; 0, nonsense and out of range mean no sticker', async () => {
   const choices = moodChoices(library);
   const ask = (content) => chooseSticker({ generate: async () => ({ content }), choices, userText: 'thanks!', replyText: 'Any time.' });
-  assert.equal((await ask('3')).mood, 'party');
+  assert.equal((await ask('2')).mood, 'party');
   assert.equal(await ask('0'), null);
   assert.equal(await ask('none'), null);
   assert.equal(await ask('99'), null);
@@ -151,3 +151,23 @@ test('without autoWear, "buy yourself a model" stays refused while it has a VRM'
   assert.equal(quoted, false);
 });
 
+test('no sad, angry or worried sticker can be chosen unasked', () => {
+  const moods = ['sad, tears', 'cry', 'angry', 'worried, nervous', 'scream', 'error', 'bug', 'lol', 'trophy', 'sleepy, zzz'];
+  const c = moodChoices([{ variant: 'x', files: moods.map((mood, i) => sticker(`s${i}.png`, mood)) }]);
+  assert.deepEqual(c.map(x => x.mood), ['lol', 'trophy', 'sleepy, zzz']);
+});
+
+test('on OpenRouter the better model decides; elsewhere the fast one', async () => {
+  const { p } = await plugin();
+  const calls = [];
+  const pm = {
+    getCurrentProvider: async () => 'prov', providerNameOf: () => 'openrouter',
+    generateResponse: async (_p, o) => { calls.push(['main', o.model]); return { content: '0' }; },
+    generateAux: async () => { calls.push(['aux']); return { content: '0' }; }
+  };
+  await p.askStickerModel(pm, 'x');
+  assert.deepEqual(calls, [['main', 'openai/gpt-5.6-luna']]);
+  calls.length = 0;
+  await p.askStickerModel({ ...pm, providerNameOf: () => 'anthropic' }, 'x');
+  assert.deepEqual(calls, [['aux']]);
+});
