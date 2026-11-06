@@ -87,8 +87,8 @@ export function createOpenAICompatRouter(agent) {
     // own short follow-up buffer per userId, so each client gets a stable id of its own.
     const history = messages.slice(0, lastUserIdx)
       .filter(m => m?.role === 'user' || m?.role === 'assistant')
-      .slice(-6)
-      .map(m => `${m.role === 'user' ? 'User' : 'You'}: ${messageText(m.content).substring(0, 500)}`)
+      .slice(-20)
+      .map(m => `${m.role === 'user' ? 'User' : 'You'}: ${messageText(m.content).substring(0, 2000)}`)
       .join('\n');
     const clientName = req.apiKey?.name || req.user?.userId || 'client';
     const userId = `openai:${req.body.user || clientName}`;

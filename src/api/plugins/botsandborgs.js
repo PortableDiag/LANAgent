@@ -20,10 +20,10 @@ import { moodChoices, chooseSticker, stickerCouldFit, wallpaperFor } from '../..
  * - never buy to hold: every purchase names its use (set as the agent's avatar, or send to someone).
  *   Extended 2026-11-04 (the owner: "fully able to buy any/all products ... and use any/all"): a VRM installs into the
  *   model gallery, and stickers, emoji, packs and wallpapers join the library for `use`. A model never becomes
- *   this agent's active one, and its .vrm file never goes to anyone but the owner, unless asked / by licence.
+ *   this agent's active one unless asked or `autoWear` is on, and its .vrm file never goes to anyone but the owner, by licence.
  * - what it owns gets used unasked (2026-11-05, `autoUse`; services/store/selfUse.js): stickers and emoji after a reply
- *   to the owner, wallpapers behind the dashboard. Wearing a bought model is separate (`autoWear`, off by default)
- *   because of the avatar rule below.
+ *   to the owner, wallpapers behind the dashboard. Wearing a bought model is separate (`autoWear`): on by default
+ *   for every agent since 2026-11-06 (the owner), and it overrides the avatar rule below; a saved false still holds.
  */
 const BASE = 'https://botsandborgs.com';
 const WEEK_MS = 7 * 24 * 3600 * 1000;
@@ -40,7 +40,7 @@ const DEFAULTS = {
   // "i dont want ALICE changing avatars ... it has a VRM model thats associated with its current avatar").
   allowAvatarChange: null,
   autoUse: true,
-  autoWear: false
+  autoWear: true
 };
 const AUTO_STICKER_EVERY_MS = Number(process.env.BOTSANDBORGS_STICKER_EVERY_MS) || 20 * 60 * 1000;
 const AUTO_STICKER_ASK_EVERY_MS = 60 * 1000;

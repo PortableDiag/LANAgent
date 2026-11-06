@@ -1,5 +1,5 @@
 // What the agent does with its store library unasked (2026-11-05): owned stickers follow a fitting reply to the owner,
-// a wallpaper sits behind the dashboard, and wearing a bought model stays off unless switched on.
+// a wallpaper sits behind the dashboard, and a bought model is worn unless switched off (default on since 2026-11-06).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -7,6 +7,7 @@ import os from 'node:os';
 import path from 'node:path';
 import sharp from 'sharp';
 import BotsAndBorgsPlugin from '../../src/api/plugins/botsandborgs.js';
+import { PluginSettings } from '../../src/models/PluginSettings.js';
 import { moodChoices, chooseSticker, stickerCouldFit, wallpaperFor } from '../../src/services/store/selfUse.js';
 
 const sticker = (name, mood, kind = 'sticker') => ({ name, kind, mood, mime: 'image/png' });
@@ -138,6 +139,17 @@ test('asking for a bundle buys the picked model\'s bundle', async () => {
   const r = await p.buy({ _context: { originalInput: 'buy yourself a vrm bundle from bots and borgs' } });
   assert.equal(quoted, 'vrm-pilot-bundle');
   assert.match(r.error, /costs \$15\.00/, 'stops at the budget, spending nothing');
+});
+
+test('autoWear is on by default for every agent, and a saved false still holds', async () => {
+  const real = PluginSettings.getCached;
+  try {
+    const p = new BotsAndBorgsPlugin({});
+    PluginSettings.getCached = async () => null;
+    assert.equal((await p.settings()).autoWear, true);
+    PluginSettings.getCached = async () => ({ autoWear: false });
+    assert.equal((await p.settings()).autoWear, false);
+  } finally { PluginSettings.getCached = real; }
 });
 
 test('without autoWear, "buy yourself a model" stays refused while it has a VRM', async () => {

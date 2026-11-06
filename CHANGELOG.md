@@ -2,6 +2,14 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.757] - 2026-11-06
+
+### Changed
+- **Agents wear the 3D model they buy, by default.** `autoWear` in the Bots & Borgs plugin is now on for every agent: a model or bundle bought without another stated use becomes the active model and its portrait the avatar. An agent with `autoWear` saved as false keeps it off.
+
+### Fixed
+- The chat endpoint change listed under 2.25.754 now actually ships here: `/v1/chat/completions` keeps the last 20 messages, up to 2,000 characters each.
+
 ## [2.25.756] - 2026-11-05
 
 ### Changed
