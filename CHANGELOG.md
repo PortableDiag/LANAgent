@@ -2,6 +2,11 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.755] - 2026-11-05
+
+### Added
+- **The AvatarX push trusts AvatarX's own certificate** through `AVATARX_CA_FILE`, and verifies it.
+
 ## [2.25.754] - 2026-11-05
 
 ### Changed
