@@ -2543,6 +2543,10 @@ export class WebInterface {
           this.agent.agentModel.activeVRMModel = modelId;
         }
         logger.info(`Active VRM model set to: ${modelId}`);
+        // AvatarX, when set up, shows the same model. The designer stays the source of it.
+        import('../../services/avatar/avatarx.js')
+          .then(({ pushModelToAvatarX }) => pushModelToAvatarX(modelId))
+          .catch(e => logger.warn(`AvatarX not told: ${e.message}`));
         res.json({ success: true, activeVRMModel: modelId });
       } catch (error) {
         logger.error('Set active VRM error:', error);

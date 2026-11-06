@@ -1,4 +1,5 @@
 import fs from 'fs/promises';
+import { statSync } from 'node:fs';
 import path from 'path';
 import crypto from 'node:crypto';
 import { P2A, A2P, kidFromAuth, openJson, sealJson, openBytes, sealBytes } from './textxCrypto.js';
@@ -58,7 +59,19 @@ export function createTransport(hub, { filesDir, avatarFile = () => null, logger
     if (data.length <= INLINE_MAX) return { name, mime, size: data.length, data_b64: data.toString('base64') };
     return { name, mime, size: data.length, url: fileUrl(device, await saveFile(device, data, { name, mime })) };
   };
-  hub.avatarUrl = (device) => (device.base ? `${String(device.base).replace(/\/+$/, '')}/textx/v1/avatar` : undefined);
+  // The apps re-fetch at once when this address changes, otherwise only on their own timers, so it carries the
+  // picture's version (2026-11-05: a new avatar has to reach TextX, DialX and NotifX straight away).
+  const avatarVersion = () => {
+    try {
+      const file = avatarFile();
+      return typeof file === 'string' ? Math.floor(statSync(file).mtimeMs).toString(36) : null;
+    } catch { return null; }
+  };
+  hub.avatarUrl = (device) => {
+    if (!device.base) return undefined;
+    const v = avatarVersion();
+    return `${String(device.base).replace(/\/+$/, '')}/textx/v1/avatar${v ? `?v=${v}` : ''}`;
+  };
 
   async function auth(headers = {}) {
     const kid = kidFromAuth(headers.authorization);
@@ -127,6 +140,7 @@ export function createTransport(hub, { filesDir, avatarFile = () => null, logger
         const file = await avatarFile();
         const data = file ? await fs.readFile(file).catch(() => null) : null;
         if (!data) return json(404, { error: 'no avatar' });
+        logger.info?.(`TextX: ${device.name} fetched the avatar (${data.length} bytes)`);
         return { status: 200, headers: { 'content-type': 'application/octet-stream' }, body: sealBytes(device.key, device.kid, A2P, data) };
       }
       return json(404, { error: 'not found' });

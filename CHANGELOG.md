@@ -2,6 +2,31 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.754] - 2026-11-05
+
+### Changed
+- **`/v1/chat/completions` keeps more of a client's conversation:** the last 20 turns at up to 2,000 characters each, up from 6 at 500.
+
+## [2.25.753] - 2026-11-05
+
+### Added
+- **AvatarX can show the model the agent wears.** Setting `AVATARX_URL` and `AVATARX_AGENT_KEY_FILE` makes a model change push to an AvatarX sidecar on the same machine. AvatarX is an addition: the avatar designer and playground are unchanged.
+
+### Fixed
+- **MindSwarm picture uploads failed on an expired token,** which every other MindSwarm request renews. A retried upload also resent an already-read file.
+- **The store's rules message** now mentions unasked use and wearing.
+
+## [2.25.752] - 2026-11-05
+
+### Fixed
+- **With `autoWear` on, "buy yourself a model" was refused** as a request for a new picture. It now means wearing the model.
+
+## [2.25.751] - 2026-11-05
+
+### Fixed
+- **A changed avatar reaches TextX, DialX, NotifX and the LANAgent app at once.** They kept one address and only looked again on their own timers, up to an hour later. The address now carries the picture's version, and every paired app is sent a new `welcome` when it changes. An app with no connection hears on its next check-in.
+- **An avatar too big for the apps.** DialX and TextX silently refuse one over 2 MB, so a large picture is now reduced first.
+
 ## [2.25.750] - 2026-11-05
 
 ### Added

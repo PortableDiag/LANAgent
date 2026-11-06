@@ -201,7 +201,7 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     }
     return { success: true, result: `Bots & Borgs rules: up to $${s.weeklyBudgetUsd} a week, ${s.maxItemUsd == null ? 'no per-item cap' : `at most $${s.maxItemUsd} an item`}, ` +
       `${s.requireApproval ? 'asks before each purchase' : 'no approval needed'}, no spending below $${s.minWalletUsd} of ${s.payAsset} in the wallet, every purchase must be used (avatar or sent), ` +
-      `and my own avatar ${(await this.avatarChangeAllowed(s)) ? 'may' : 'may not'} be changed${s.allowAvatarChange == null ? ' (automatic: locked while I have a VRM model)' : ''}.` };
+      `${s.autoUse ? 'owned stickers, emoji and wallpapers get used unasked, ' : ''}${s.autoWear ? 'I wear a model I buy, with its portrait as my avatar, ' : ''}and otherwise my own avatar ${(await this.avatarChangeAllowed(s)) ? 'may' : 'may not'} be changed${s.allowAvatarChange == null ? ' (automatic: locked while I have a VRM model)' : ''}.` };
   }
 
   /** Whether a purchase may become this agent's own avatar: the setting, or (automatic) not while it has a VRM model. */
@@ -321,7 +321,9 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     const named = data.variant ? variantKind(data.variant) : null;
     const buying = named || wantKind;
     if (!data.use && /\b(wear|become|as your (?:3d|vrm)|your (?:new )?(?:3d|vrm)(?: model| avatar)?)\b/i.test(asked)) data = { ...data, use: 'wear' };
-    if (!data.use && ['vrm', 'bundle'].includes(buying)) data = { ...data, use: s.autoWear ? 'wear' : 'install' };
+    // Allowed to wear what it buys: "buy yourself a model" means become it, which also brings its portrait.
+    if (s.autoWear && ['vrm', 'bundle'].includes(buying) && (!data.use || String(data.use).toLowerCase() === 'avatar')) data = { ...data, use: 'wear' };
+    if (!data.use && ['vrm', 'bundle'].includes(buying)) data = { ...data, use: 'install' };
     if (!data.use && ['sticker', 'emoji', 'wallpaper'].includes(buying)) data = { ...data, use: 'keep' };
     if (!data.use && buying && /-portraits$|-bundle$|-pack$|^[a-z-]+-(?:avatars|wallpapers|emoji)$/.test(String(data.variant || ''))) data = { ...data, use: 'keep' };
     const use = String(data.use || '').toLowerCase();
@@ -716,6 +718,8 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     const { Agent } = await import('../../models/Agent.js');
     await Agent.updateOne({ name: process.env.AGENT_NAME || 'LANAgent' }, { $set: { activeVRMModel: entry.id } });
     if (this.agent?.agentModel) this.agent.agentModel.activeVRMModel = entry.id;
+    const { pushModelToAvatarX } = await import('../../services/avatar/avatarx.js');
+    await pushModelToAvatarX(entry.id).catch(e => this.logger.warn(`botsandborgs: AvatarX not told: ${e.message}`));
     // The picture follows the model, so the two never disagree. Only when allowed unasked.
     const portrait = (await this.settings()).autoWear ? pick.item.files.find(f => f.kind === 'portrait') : null;
     if (portrait) {

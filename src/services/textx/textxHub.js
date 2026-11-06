@@ -610,6 +610,18 @@ export class TextXHub {
     if (cut) this.logger.info?.(`DialX: ${cut} call(s) were cut off by a restart`);
   }
 
+  /** The picture changed: every bound phone app hears the new address now, connected or not. Returns how many. */
+  async avatarChanged() {
+    let told = 0;
+    for (const d of await this.store.listDevices()) {
+      if (d.revokedAt || !d.deviceId) continue;
+      await this.store.outboxAckType(d.id, 'welcome');
+      await this.deliver(d, 'welcome', this.welcomeBody(d));
+      told++;
+    }
+    return told;
+  }
+
   welcomeBody(device) {
     const name = this.agent?.config?.name || process.env.AGENT_NAME || 'LANAgent';
     return {

@@ -46,7 +46,7 @@ test('a first avatar, or the same picture again, adds nothing to the history', a
     assert.equal(wrote.filter(w => /avatar-history/.test(w.file)).length, 0);
   });
   const { default: sharp } = await import('sharp');
-  const same = await sharp(await tinyJpeg()).rotate().resize(1024, 1024, { fit: 'cover' }).png().toBuffer();
+  const same = await sharp(await tinyJpeg()).rotate().resize(1024, 1024, { fit: 'cover' }).png({ compressionLevel: 9 }).toBuffer();
   await withStubbedDisk(async ({ wrote }) => {
     await applyAgentAvatar({}, await tinyJpeg(), { only: [] });
     assert.equal(wrote.filter(w => /avatar-history/.test(w.file)).length, 0);
@@ -132,7 +132,7 @@ test('a changed picture updates the on-chain identity once; the same picture doe
       assert.equal(r.services.identity, 'updated');
       assert.deepEqual(calls, [{ forceAvatarReupload: true }]);
     }, { existing: { 'avatar.png': Buffer.from('old') } });
-    const same = await sharp(await tinyJpeg()).rotate().resize(1024, 1024, { fit: 'cover' }).png().toBuffer();
+    const same = await sharp(await tinyJpeg()).rotate().resize(1024, 1024, { fit: 'cover' }).png({ compressionLevel: 9 }).toBuffer();
     await withStubbedDisk(async () => {
       const r = await applyAgentAvatar(agent(), await tinyJpeg(), { only: ['identity'] });
       assert.equal(r.services.identity, 'unchanged');
@@ -165,3 +165,18 @@ test('the Trellis card is republished with the new picture', async () => {
     assert.equal(published, 1);
   });
 });
+
+test('an oversized picture is cut under the limit the apps accept', async () => {
+  const { default: sharp } = await import('sharp');
+  const { randomBytes } = await import('node:crypto');
+  const raw = randomBytes(1024 * 1024 * 3);
+  const noisy = await sharp(raw, { raw: { width: 1024, height: 1024, channels: 3 } }).png().toBuffer();
+  assert.ok(noisy.length > 1500 * 1024, 'the sample really is oversized');
+  await withStubbedDisk(async ({ wrote }) => {
+    await applyAgentAvatar({}, noisy, { only: [] });
+    const out = wrote[wrote.length - 1].buf;
+    assert.ok(out.length <= 1500 * 1024, `got ${out.length}`);
+    assert.equal((await sharp(out).metadata()).format, 'png');
+  });
+});
+

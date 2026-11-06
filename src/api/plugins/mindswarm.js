@@ -3448,23 +3448,36 @@ Return ONLY the post text, nothing else.`;
       throw new Error(`File not found: ${filePath}`);
     }
 
-    const form = new FormData();
     const fieldName = endpoint.includes('/avatar') || endpoint.includes('/banner') ? 'file' : 'media';
-    form.append(fieldName, fs.createReadStream(filePath), path.basename(filePath));
-
     const url = `${this.baseUrl}${endpoint}`;
+    // A form holds a stream that can be read once, so each attempt builds its own.
+    const send = async () => {
+      const form = new FormData();
+      form.append(fieldName, fs.createReadStream(filePath), path.basename(filePath));
+      const response = await axios.post(url, form, {
+        headers: { ...form.getHeaders(), 'Authorization': `Bearer ${this.accessToken}` },
+        timeout: 30000
+      });
+      return { success: true, data: response.data?.data || response.data, message: 'Upload successful' };
+    };
+    let renewed = false;
     return await retryOperation(async () => {
       try {
-        const response = await axios.post(url, form, {
-          headers: {
-            ...form.getHeaders(),
-            'Authorization': `Bearer ${this.accessToken}`
-          },
-          timeout: 30000
-        });
-        return { success: true, data: response.data?.data || response.data, message: 'Upload successful' };
+        return await send();
       } catch (error) {
         const status = error.response?.status;
+        // An expired token, as every other request here already handles (avatar change, 2026-11-05).
+        if (status === 401 && !renewed) {
+          renewed = true;
+          try {
+            if (!this.refreshToken) throw new Error('no refresh token');
+            await this._getRefreshPromise();
+          } catch (refreshErr) {
+            this.pluginLogger.warn(`Token refresh failed before an upload, logging in again: ${refreshErr.message}`);
+            await this._login();
+          }
+          return await send();
+        }
         const apiError = error.response?.data?.error || error.response?.data?.message;
         throw new Error(apiError ? `MindSwarm API ${status}: ${apiError}` : error.message);
       }

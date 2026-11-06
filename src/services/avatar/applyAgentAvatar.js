@@ -13,7 +13,7 @@
  *
  * The on-chain ERC-8004 identity shows the avatar too, so a changed picture goes there as well (owner, 2026-11-05):
  * a new IPFS upload and one setAgentURI transaction, only when the picture really changed. TextX/DialX fetch
- * /textx/v1/avatar from avatarPath on their own.
+ * /textx/v1/avatar from avatarPath, and are told the new address at once. AvatarX is not hooked up to this agent yet.
  */
 
 import fs from 'fs/promises';
@@ -23,6 +23,7 @@ import { logger } from '../../utils/logger.js';
 
 const OTHER_EXTS = ['.jpg', '.jpeg', '.webp', '.gif'];
 const HISTORY_KEEP = 20;
+const MAX_AVATAR_BYTES = 1500 * 1024;
 
 /**
  * Copy the avatar about to be replaced into avatar-history, newest 20 kept. A failure here never blocks the change.
@@ -62,7 +63,9 @@ function pluginOf(agent, name) {
 export async function applyAgentAvatar(agent, buffer, { source = 'a new picture', only = null } = {}) {
   const { default: sharp } = await import('sharp');
   // 1024×1024 PNG: Telegram, X and Gravatar all take it, and Trellis shrinks it to 256 itself.
-  const png = await sharp(buffer).rotate().resize(1024, 1024, { fit: 'cover' }).png().toBuffer();
+  let png = await sharp(buffer).rotate().resize(1024, 1024, { fit: 'cover' }).png({ compressionLevel: 9 }).toBuffer();
+  // DialX and TextX refuse a sealed avatar over 2 MB, and say nothing to the user.
+  if (png.length > MAX_AVATAR_BYTES) png = await sharp(png).png({ palette: true, compressionLevel: 9 }).toBuffer();
   const dir = path.join(DATA_PATH, 'agent');
   await fs.mkdir(dir, { recursive: true });
   const file = path.join(dir, 'avatar.png');
@@ -119,6 +122,16 @@ export async function applyAgentAvatar(agent, buffer, { source = 'a new picture'
     await listener._publishCard();
     return 'updated';
   });
+  // TextX, DialX, NotifX and the LANAgent app, all through their pairing.
+  await attempt('apps', async () => {
+    const { textxIfStarted } = await import('../textx/index.js');
+    const hub = textxIfStarted()?.hub;
+    if (!hub?.avatarChanged) return 'not connected';
+    if (!changed) return 'unchanged';
+    const told = await hub.avatarChanged();
+    logger.info(`Avatar: told ${told} paired app(s) about the new picture`);
+    return told ? 'updated' : 'not connected';
+  });
   await attempt('identity', async () => {
     const minted = agent?.agentModel?.erc8004;
     if (!minted?.agentId || minted.status !== 'active') return 'not connected';
@@ -135,7 +148,7 @@ export async function applyAgentAvatar(agent, buffer, { source = 'a new picture'
 
 /** "Telegram updated, MindSwarm not logged in, …" for a reply to the owner. */
 export function describeAvatarServices(services) {
-  const names = { telegram: 'Telegram', mindswarm: 'MindSwarm', twitter: 'X', gravatar: 'Gravatar', trellis: 'Trellis', identity: 'my on-chain identity' };
+  const names = { telegram: 'Telegram', mindswarm: 'MindSwarm', twitter: 'X', gravatar: 'Gravatar', trellis: 'Trellis', apps: 'TextX, DialX and NotifX', identity: 'my on-chain identity' };
   const done = Object.entries(services).filter(([, v]) => v === 'updated').map(([k]) => names[k] || k);
   const other = Object.entries(services).filter(([, v]) => !['updated', 'not connected', 'unchanged'].includes(v)).map(([k, v]) => `${names[k] || k} ${v}`);
   return [done.length ? `Updated on ${done.join(', ')}.` : '', other.join('; ')].filter(Boolean).join(' ');

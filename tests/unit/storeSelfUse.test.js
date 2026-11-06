@@ -129,6 +129,8 @@ test('choosing a model to become skips the painted robots with no expressions', 
 
 test('asking for a bundle buys the picked model\'s bundle', async () => {
   const { p } = await plugin({ settings: { weeklyBudgetUsd: 1, requireUse: true, autoWear: true } });
+  // A live refusal on 2026-11-05: "yourself" read as a new picture, which the VRM lock refuses.
+  p.agent.agentModel = { activeVRMModel: 'nova' };
   p.pickFavorite = async ({ kind }) => { assert.equal(kind, 'vrm'); return { variant: 'vrm-pilot', label: 'Pilot', why: 'fits', seen: 1 }; };
   let quoted;
   p.api = async (_m, url, o) => { if (url === '/api/quotes') { quoted = o.body.items[0].variant; return { quote: { total_cents: 1500 } }; } return {}; };
@@ -137,3 +139,15 @@ test('asking for a bundle buys the picked model\'s bundle', async () => {
   assert.equal(quoted, 'vrm-pilot-bundle');
   assert.match(r.error, /costs \$15\.00/, 'stops at the budget, spending nothing');
 });
+
+test('without autoWear, "buy yourself a model" stays refused while it has a VRM', async () => {
+  const { p } = await plugin({ settings: { weeklyBudgetUsd: 100, requireUse: true, autoWear: false, allowAvatarChange: null } });
+  p.agent.agentModel = { activeVRMModel: 'nova' };
+  let quoted = false;
+  p.api = async () => { quoted = true; return {}; };
+  const r = await p.buy({ _context: { originalInput: 'buy yourself a vrm bundle from bots and borgs' } });
+  assert.equal(r.success, false);
+  assert.match(r.error, /tied to my 3D/);
+  assert.equal(quoted, false);
+});
+

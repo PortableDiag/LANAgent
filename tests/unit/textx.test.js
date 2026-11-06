@@ -2582,3 +2582,41 @@ test('the line saying who is writing survives the persona pass, and is said once
     for (const [k, v] of [['OWNER_NAME', env.o], ['AGENT_NAME', env.a]]) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
   }
 });
+
+test('a changed avatar reaches every bound phone at once, under a new address', async () => {
+  const fsSync = (await import('node:fs'));
+  const file = path.join(os.tmpdir(), `textx-avatar-${process.pid}.png`);
+  fsSync.writeFileSync(file, 'one');
+  fsSync.utimesSync(file, new Date(1000000000000), new Date(1000000000000));
+  const store = memoryStore();
+  const hub = new TextXHub({ store, agent: { config: { name: 'ALICE' } }, logger: quiet });
+  const transport = createTransport(hub, { filesDir: os.tmpdir(), avatarFile: () => file, logger: quiet });
+  const { kid, key } = newPairing();
+  const device = await store.createDevice({ name: 'Pixel', kid, key, base: 'https://relay.test/r/abc' });
+  const sent = [];
+  const handlers = await transport.ws({ headers: { authorization: `Bearer ${kid}` }, send: (t) => sent.push(openJson(key, kid, A2P, t)), close() {} });
+  await handlers.onMessage(JSON.stringify(sealJson(key, kid, P2A, env('hello', { protocol: 1, app: 'TextX', app_version: '0.3.0', capabilities: [], device: 'phone-1' }))));
+  const first = sent.filter(e => e.type === 'welcome').pop().body.avatar_url;
+  assert.match(first, /\/textx\/v1\/avatar\?v=\w+$/);
+
+  fsSync.utimesSync(file, new Date(1000000500000), new Date(1000000500000));
+  assert.equal(await hub.avatarChanged(), 1);
+  const second = sent.filter(e => e.type === 'welcome').pop().body.avatar_url;
+  assert.notEqual(second, first, 'DialX and NotifX only re-fetch at once when the address moves');
+
+  // The apps add ?device= with & when the address already has a query, and the picture still comes back.
+  const res = await transport.http({ method: 'GET', path: '/textx/v1/avatar', query: `${new URL(second).search.slice(1)}&device=phone-1`, headers: { authorization: `Bearer ${kid}` } });
+  assert.equal(res.status, 200);
+  assert.equal(openBytes(key, kid, A2P, res.body).toString(), 'one');
+
+  await store.updateDevice(device.id, { revokedAt: new Date() });
+  assert.equal(await hub.avatarChanged(), 0, 'a revoked pairing is not told');
+  fsSync.unlinkSync(file);
+});
+
+test('no avatar file: the address stays plain', async () => {
+  const hub = new TextXHub({ store: memoryStore(), agent: { config: { name: 'A' } }, logger: quiet });
+  createTransport(hub, { filesDir: os.tmpdir(), avatarFile: () => '/nonexistent/avatar.png', logger: quiet });
+  assert.equal(hub.avatarUrl({ base: 'https://x/r/a' }), 'https://x/r/a/textx/v1/avatar');
+});
+
