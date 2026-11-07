@@ -2,6 +2,11 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.761] - 2026-11-06
+
+### Fixed
+- **No 5-minute goodbye to the owner.** On a Test call or a call to the owner's own phone, the agent no longer tells itself time is up and hangs up. Calls to other people keep the limit.
+
 ## [2.25.760] - 2026-11-06
 
 ### Changed

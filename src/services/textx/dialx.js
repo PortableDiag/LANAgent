@@ -233,6 +233,9 @@ export function supportsMore(device) {
 /** How long the call has run, so the agent winds down before DialX's time limit cuts it off. */
 export function callClock(s, now = Date.now()) {
   if (s?.startedAtMs == null) return '';
+  // Call 129 (2026-11-06): 5 minutes in, the prompt told the model to say goodbye and it hung up on the owner mid-test. The
+  // limit is for calls to other people; DialX does not cap a Test call, and an owner call runs until the owner ends it.
+  if (s.test || s.ownerCall) return '';
   const run = Math.max(0, Math.round((now - s.startedAtMs) / 1000));
   const left = CALL_LIMIT_S - run;
   return `The call has run ${run} s of its ${CALL_LIMIT_S} s limit.` +

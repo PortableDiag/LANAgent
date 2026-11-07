@@ -395,7 +395,9 @@ export class DialXRealtime {
   async mint(s, { name, owner, limitS }, attempt = 1) {
     await s.ready;
     s.ownerOnLine = ownerOnLine(s);
-    const instructions = realtimeInstructions({ name, owner, s, limitS }) + (s.ownerOnLine ? askAgentRules(name, owner) : '') + resumeNote(s, name);
+    // No 5-minute goodbye to the owner (call 129): only calls to other people have that limit.
+    const limit = s.test || s.ownerCall ? Math.max(limitS || 0, 3600) : limitS;
+    const instructions = realtimeInstructions({ name, owner, s, limitS: limit }) + (s.ownerOnLine ? askAgentRules(name, owner) : '') + resumeNote(s, name);
     const chosen = (await this.calls.settings?.().catch?.(() => null))?.realtimeVoice || REALTIME_VOICE;
     const chain = realtimeChain(chosen);
     const { model, voice } = chain[Math.min(attempt, chain.length) - 1];

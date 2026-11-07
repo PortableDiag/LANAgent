@@ -11,7 +11,7 @@ import { newPairing, sealJson, openJson, ulid, P2A, A2P } from '../../src/servic
 import { TextXHub } from '../../src/services/textx/textxHub.js';
 import { memoryStore } from '../../src/services/textx/textxStore.js';
 import { createTransport } from '../../src/services/textx/textxTransport.js';
-import { agentAudio, memoryCallStore, isoWithOffset, parseTurn, CALL_SESSION, DIALX_TOOLS, splitMessage, DialXCalls } from '../../src/services/textx/dialx.js';
+import { agentAudio, callClock, memoryCallStore, isoWithOffset, parseTurn, CALL_SESSION, DIALX_TOOLS, splitMessage, DialXCalls } from '../../src/services/textx/dialx.js';
 import DialXPlugin, { briefsFor } from '../../src/api/plugins/dialx.js';
 
 process.env.OWNER_NAME = process.env.OWNER_NAME || 'Pat';
@@ -1491,4 +1491,11 @@ test('a line tries every voice before the phone, the call voice first once the c
     globalThis.fetch = realFetch;
     if (key === undefined) delete process.env.OPENAI_API_KEY; else process.env.OPENAI_API_KEY = key;
   }
+});
+
+test('call 129: the clock never tells the model to say goodbye to the owner', () => {
+  const startedAtMs = Date.now() - 295000;
+  assert.match(callClock({ startedAtMs }), /say a warm goodbye now/, 'a call to someone else winds down');
+  assert.equal(callClock({ startedAtMs, test: true }), '');
+  assert.equal(callClock({ startedAtMs, ownerCall: true }), '');
 });

@@ -827,3 +827,11 @@ test('a drop is counted for call_status', () => {
   assert.equal(s.rtDrops, 1);
   assert.match(s.rtLastDrop, /nothing from OpenAI/);
 });
+
+test('call 129: the session tells a call with the owner it has no 5-minute limit', async () => {
+  const { rt, fetched } = rig();
+  await rt.mint({ ...session(), test: true }, { name: 'ALICE', owner: 'Pat', limitS: 300 });
+  await rt.mint(session(), { name: 'ALICE', owner: 'Pat', limitS: 300 });
+  assert.doesNotMatch(fetched[0].body.session.instructions, /at most 5 minutes/);
+  assert.match(fetched[1].body.session.instructions, /at most 5 minutes/);
+});
