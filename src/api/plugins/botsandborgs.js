@@ -74,7 +74,7 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
       },
       {
         command: 'buy',
-        description: 'Buy one Bots & Borgs variant with the agent wallet and use it. `use` is required: "avatar" (set it as your own avatar) or "send" (send it to `to`, a contact name or number, or "me" for the owner). Respects the weekly budget, wallet floor and approval settings',
+        description: 'Buy one Bots & Borgs variant with the agent wallet and use it. `use` is required: "avatar" (set it as your own avatar) or "send" (send it to `to`, a contact name or number, or "me" for the owner). Respects the weekly budget, wallet floor and approval settings. With no variant the agent picks one itself, never one it owns or that another agent wears; `avoid` lists names the request rules out ("Nexus already has Sentinel" → avoid: "sentinel"); `dryRun: true` picks and quotes without paying',
         usage: 'buy({ variant: "agent-avatar-singles-sentinel", use: "avatar" })',
         examples: ['buy an avatar you like from botsandborgs and use it', 'buy the sentinel avatar from bots and borgs and set it as your avatar', 'buy a phone wallpaper from botsnborgs and send it to me', 'buy Jo a robot icon from bots and borgs']
       },
@@ -135,11 +135,12 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
       `Action: ${action}. Give only what the request says, as JSON with any of: "query" (words to search for), "slug" (a product id), ` +
       '"variant" (an exact variant id like agent-avatar-singles-sentinel, only if named), "use" ("avatar" if it is for the agent\'s own avatar, ' +
       '"send" if it is to be given to someone, "wear" if the agent should become that 3D model), "to" (who to send it to; "me" for the person asking), ' +
-      `"item" (words naming something already owned), "as" ("send", "avatar", "install" or "wear"), "mood" (the feeling a sticker should show), "kind" (one of: ${KIND_WORDS}). Leave out what is not said. JSON only.`,
+      `"item" (words naming something already owned), "as" ("send", "avatar", "install" or "wear"), "mood" (the feeling a sticker should show), "kind" (one of: ${KIND_WORDS}), ` +
+      '"avoid" (names the request says are taken or not wanted, comma-separated, e.g. "Sentinel" from "Nexus already picked Sentinel"). Leave out what is not said. JSON only.',
     { maxTokens: 200, temperature: 0 });
     const raw = String(res?.content || '');
     const j = JSON.parse(raw.slice(raw.indexOf('{'), raw.lastIndexOf('}') + 1) || '{}');
-    return Object.fromEntries(Object.entries(j || {}).filter(([k, v]) => ['query', 'slug', 'variant', 'use', 'to', 'item', 'as', 'mood', 'kind'].includes(k) && v != null && v !== ''));
+    return Object.fromEntries(Object.entries(j || {}).filter(([k, v]) => ['query', 'slug', 'variant', 'use', 'to', 'item', 'as', 'mood', 'kind', 'avoid'].includes(k) && v != null && v !== ''));
   }
 
   // ── HTTP ────────────────────────────────────────────────────────────────────────────────
@@ -357,12 +358,17 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
       // A bundle is a model with its portraits and stickers, so the pick is made among the models.
       const kind = wantNow === 'bundle' ? 'vrm' : wantNow || 'avatar';
       const forWhom = use === 'avatar' || use === 'wear' ? 'yourself' : String(data.to || 'the owner');
-      // Never the same thing twice: what it already owns is out (a "pick another one" re-picked Sentinel).
-      const owned = new Set((await this.libraryItems()).map(i => String(i.variant).replace(/-(?:portraits|stickers|bundle)$/, '')));
-      const pick = await this.pickFavorite({ kind, forWhom, exclude: owned });
-      if (!pick) return { success: false, error: `I couldn't see any of the store's ${kind}s I don't already have, so I didn't buy one.` };
+      // Never the same look twice: what it already owns, what its peers wear (P2P), and what the request says is taken.
+      const base = (v) => String(v).replace(/-(?:portraits|stickers|bundle)$/, '');
+      const exclude = new Set((await this.libraryItems()).map(i => base(i.variant)));
+      const worn = use === 'wear' || kind === 'vrm' ? await this.wornByPeers() : [];
+      for (const w of worn) exclude.add(base(w.variant));
+      const avoid = [].concat(data.avoid || []).flatMap(a => String(a).toLowerCase().split(/[,;]+/)).map(a => a.trim()).filter(a => a.length >= 3);
+      const pick = await this.pickFavorite({ kind, forWhom, exclude, avoid });
+      if (!pick) return { success: false, error: `I couldn't see any of the store's ${kind}s that I or another agent don't already have, so I didn't buy one.` };
+      if (worn.length) pickedWhy = `Left out ${worn.map(w => `${w.variant} (${w.agent})`).join(', ')}, worn by other agents. `;
       data = { ...data, variant: wantNow === 'bundle' ? `${pick.variant}-bundle` : pick.variant };
-      pickedWhy = `I looked at ${pick.seen} ${kind}s and picked ${pick.label}: ${pick.why} `;
+      pickedWhy += `I looked at ${pick.seen} ${kind}s and picked ${pick.label}: ${pick.why} `;
     }
 
     // The store nests its answers: { quote: {...} }, { order: {...}, crypto: {...}, token } (live, 2026-10-28).
@@ -374,6 +380,7 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     const spent = this.spentThisWeek(ledger);
     if (spent + usd > s.weeklyBudgetUsd + 1e-9) return { success: false, error: `That costs $${usd.toFixed(2)} and I have $${Math.max(0, s.weeklyBudgetUsd - spent).toFixed(2)} of this week's $${s.weeklyBudgetUsd} left, so I didn't buy it.` };
     if (s.maxItemUsd != null && usd > s.maxItemUsd) return { success: false, error: `That costs $${usd.toFixed(2)}, over my $${s.maxItemUsd} per-item limit.` };
+    if (data.dryRun === true || data.dryRun === 'true') return { success: true, dryRun: true, variant: String(data.variant), usd, result: `${pickedWhy}Would buy ${data.variant} for $${usd.toFixed(2)} (${use}); nothing was paid.` };
     if (s.requireApproval && data.confirm !== true) return { success: true, result: `It costs $${usd.toFixed(2)} (${data.variant}, for ${use === 'avatar' ? 'my avatar' : `sending to ${data.to}`}). Say yes and I'll buy it.` };
 
     const rail = await this.api('get', '/api/crypto');
@@ -468,7 +475,8 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
    * Look at the store's avatar singles and pick the one this agent likes best for itself: each preview goes to the
    * vision model with who the agent is, and the highest score wins. Returns { variant, label, why, seen } or null.
    */
-  async pickFavorite({ kind = 'avatar', forWhom = 'yourself', exclude = new Set() } = {}) {
+  async pickFavorite({ kind = 'avatar', forWhom = 'yourself', exclude = new Set(), avoid = [] } = {}) {
+    const avoided = (c) => avoid.some(a => `${c.variant} ${c.label}`.toLowerCase().includes(a));
     const pm = this.agent?.providerManager;
     if (!pm?.analyzeImage) return null;
     const cat = await this.api('get', '/api/catalog');
@@ -488,12 +496,12 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
       if (tier[kind]) {
         const v = (p.variants || []).find(tier[kind]);
         const img = (p.images || []).find(i => new RegExp(kind === 'sticker' ? 'sticker' : 'portrait', 'i').test(String(i.caption || i.alt))) || (p.images || [])[0];
-        if (v && img?.url && !exclude.has(v.id)) candidates.push({ variant: v.id, label: p.title, url: kind === 'vrm' ? (p.images[0]?.url || img.url) : img.url, product: p.title });
+        if (v && img?.url && !exclude.has(v.id) && !avoided({ variant: v.id, label: p.title })) candidates.push({ variant: v.id, label: p.title, url: kind === 'vrm' ? (p.images[0]?.url || img.url) : img.url, product: p.title });
         continue;
       }
       for (const v of p.variants || []) {
         const img = (p.images || []).find(i => String(i.caption || i.alt).toLowerCase() === String(v.label || '').toLowerCase());
-        if (img?.url && !exclude.has(v.id)) candidates.push({ variant: v.id, label: v.label, url: img.url, product: p.title });
+        if (img?.url && !exclude.has(v.id) && !avoided({ variant: v.id, label: v.label })) candidates.push({ variant: v.id, label: v.label, url: img.url, product: p.title });
       }
     }
     if (!candidates.length) return null;
@@ -758,6 +766,30 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
       return { success: true, result: `${entry.name} is my 3D model now, and its picture is my avatar. ${describeAvatarServices(applied.services)}`.trim() };
     }
     return { success: true, result: `${entry.name} is my 3D model now. It came with no picture, so my avatar picture didn't change.` };
+  }
+
+  /**
+   * The store models other LANAgent agents wear, from their P2P capabilities ([{ variant, agent }]). Online peers are
+   * asked again first (answers land within a few seconds), so a model a peer put on today counts. Never throws.
+   */
+  async wornByPeers({ waitMs = 4000 } = {}) {
+    try {
+      const { P2PPeer } = await import('../../models/P2PPeer.js');
+      const p2p = this.agent?.p2pService;
+      if (p2p?.sendMessage && waitMs > 0) {
+        const online = await P2PPeer.getOnlinePeers().catch(() => []);
+        if (online.length) {
+          await Promise.all(online.map(peer => p2p.sendMessage(peer.fingerprint, { type: 'capabilities_request' }).catch(() => null)));
+          await this.pause(waitMs);
+        }
+      }
+      const peers = await P2PPeer.find({ 'capabilities.name': 'wears_store_model' }, { displayName: 1, fingerprint: 1, capabilities: 1 }).lean();
+      return peers.flatMap(peer => (peer.capabilities || []).filter(c => c.name === 'wears_store_model' && c.description)
+        .map(c => ({ variant: c.description, agent: peer.displayName || String(peer.fingerprint).slice(0, 8) })));
+    } catch (e) {
+      this.logger.warn(`botsandborgs: could not ask peers what they wear: ${e.message}`);
+      return [];
+    }
   }
 
   /** The picture of the Bots & Borgs model this agent wears, for a sync: { variant, title, buffer } or null. */

@@ -3755,7 +3755,7 @@ Decision Guide:
           params.kelvin = parseInt(kelvinMatch[1]);
         } else {
           // Extract named temperatures (warm white, cool white, daylight, etc.)
-          const tempMatch = text.match(/\b(warm(?:\s+white)?|cool(?:\s+white)?|cold(?:\s+white)?|daylight|neutral|candle(?:light)?|soft(?:\s+white)?)\b/i);
+          const tempMatch = text.match(/\b((?:bright|pure|natural|daylight)\s+white|warm(?:\s+white)?|cool(?:\s+white)?|cold(?:\s+white)?|daylight|neutral|candle(?:light)?|soft(?:\s+white)?)\b/i);
           if (tempMatch) {
             params.temperature = tempMatch[1].toLowerCase().trim();
           }
@@ -3807,7 +3807,48 @@ Decision Guide:
         break;
     }
 
+    // "change my Master Toilet light so it's bright white" matched none of the phrasings above, so the command ran
+    // with no device and no value, failed, and the reasoning agent spent 4 minutes looking for the light (2026-11-07).
+    // The device is usually "my/the <name> light(s)"; anything still missing is read by a model.
+    // It also wins over a phrase the rules above over-captured ("Master Toilet light so it's bright").
+    if (command !== 'schedules' && (!params.device || /\b(?:lights?|lamps?|so|it'?s|is|to|be)\b/i.test(params.device))) {
+      const named = text.match(/\b(?:my|the)\s+(.+?)\s+(?:lights?|lamps?|bulbs?|strips?|leds?)\b/i);
+      if (named) params.device = named[1].trim();
+    }
+    const needs = { power: ['state'], brightness: ['level'], color: ['color'], temperature: ['kelvin', 'temperature'], scene: ['scene'], toggle: ['feature'] }[command];
+    if (needs && (!params.device || !needs.some(k => params[k] != null))) {
+      Object.assign(params, await this.extractGoveeParametersWithAI(command, text, params));
+    }
     return params;
+  }
+
+  /** What a regex could not read: the device's name and the value, as JSON from the aux model. Never throws. */
+  async extractGoveeParametersWithAI(command, text, have = {}) {
+    const fields = {
+      power: '"state": "on" | "off" | "toggle"',
+      brightness: '"level": 1-100',
+      color: '"color": a colour name such as "red" or "bright white"',
+      temperature: '"temperature": words such as "bright white", "warm white", "daylight", or "kelvin": a number 2000-9000',
+      scene: '"scene": the scene name',
+      toggle: '"feature": "nightlight" | "oscillation" | "airdeflector"'
+    }[command];
+    const prompt = `Extract the smart-light command from this request. Command: ${command}.
+Request: "${String(text).slice(0, 300)}"
+Return ONLY JSON with "device": the device's name as the person said it, without the words light/lights/lamp and without "my"/"the" (e.g. "Master Toilet"), and ${fields}. Leave out what is not said.`;
+    try {
+      const r = await this.agent.providerManager.generateAux(prompt, { maxTokens: 80, temperature: 0 });
+      const raw = String(r?.content || '');
+      const j = JSON.parse(raw.slice(raw.indexOf('{'), raw.lastIndexOf('}') + 1));
+      const out = {};
+      if (!have.device && typeof j.device === 'string' && j.device.trim()) out.device = j.device.trim();
+      for (const k of ['state', 'color', 'temperature', 'scene', 'feature']) if (have[k] == null && typeof j[k] === 'string' && j[k].trim()) out[k] = j[k].trim().toLowerCase();
+      for (const k of ['level', 'kelvin']) if (have[k] == null && Number.isFinite(Number(j[k])) && j[k] !== null && j[k] !== '') out[k] = Number(j[k]);
+      logger.info(`Govee parameters read by the model for ${command}: ${JSON.stringify(out)}`);
+      return out;
+    } catch (e) {
+      logger.warn(`Govee parameter extraction by the model failed: ${e.message}`);
+      return {};
+    }
   }
 
   /**

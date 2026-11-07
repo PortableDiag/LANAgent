@@ -65,6 +65,13 @@ class PluginSharing {
       logger.error('Failed to get local capabilities:', error.message);
     }
 
+    // The Bots & Borgs model this agent wears, so a peer picking a new one never picks the same look
+    // (DELTA 2026-11-07 picked Racer Blue, which ALICE already wore).
+    const worn = String(this.agent?.agentModel?.activeVRMModel || '');
+    if (worn.startsWith('store-')) {
+      capabilities.push({ name: 'wears_store_model', version: '1.0', description: worn.slice(6).replace(/-(?:portraits|stickers|bundle)$/, '') });
+    }
+
     return capabilities;
   }
 

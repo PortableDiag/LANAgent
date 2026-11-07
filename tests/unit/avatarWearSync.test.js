@@ -170,3 +170,32 @@ test('"pick another avatar … get the pack and apply it" while wearing one: a n
   assert.ok(Math.abs(await red(path.join(agentDir, 'avatar.png')) - 180) < 15, 'the bear portrait is the avatar');
   assert.equal(photos.length, 1, 'and Telegram got it');
 });
+
+test('a model another agent wears (P2P) or the request rules out is never picked', async () => {
+  const { P2PPeer } = await import('../../src/models/P2PPeer.js');
+  const real = { find: P2PPeer.find, online: P2PPeer.getOnlinePeers };
+  P2PPeer.getOnlinePeers = async () => [];
+  P2PPeer.find = () => ({ lean: async () => [{ displayName: 'ALICE', capabilities: [{ name: 'wears_store_model', description: 'vrm-racer-blue' }] }] });
+  try {
+    const { p, agent } = await rig();
+    await p.execute({ action: 'buy', variant: 'vrm-overseer-sentinel' });
+    const mk = (slug, title) => ({ slug, title, collection: '3d-avatars', variants: [{ id: slug }, { id: `${slug}-bundle` }], images: [{ url: `https://x/${slug}.jpg` }] });
+    const products = { 'vrm-overseer-sentinel': mk('vrm-overseer-sentinel', 'Sentinel'), 'vrm-racer-blue': mk('vrm-racer-blue', 'Racer Blue'), 'vrm-nr-daemon': mk('vrm-nr-daemon', 'Daemon'), 'vrm-mm-fox': mk('vrm-mm-fox', 'Fox') };
+    const api = p.api;
+    p.api = async (m, route, o) => {
+      if (route === '/api/catalog') return { products: Object.values(products) };
+      if (route.startsWith('/api/products/')) return { product: products[route.split('/').pop()] };
+      if (route === '/api/quotes') return { quote: { id: 'q3', total_cents: 1500 } };
+      return api(m, route, o);
+    };
+    const looked = [];
+    agent.providerManager = { analyzeImage: async (_b, prompt) => { looked.push(/"(.+?)"/.exec(prompt)[1]); return { analysis: '{"score":8,"why":"ok"}' }; } };
+    p.fetchBytes = async () => ({ buffer: await pic(1), type: 'image/jpeg' });
+    const r = await p.execute({ action: 'buy', avoid: 'daemon', dryRun: true, _context: { originalInput: 'pick another avatar, get the pack and apply it' } });
+    assert.equal(r.success, true, r.error);
+    assert.deepEqual(looked, ['Fox'], 'Sentinel (owned), Racer Blue (ALICE wears it) and Daemon (ruled out) are not candidates');
+    assert.equal(r.variant, 'vrm-mm-fox-bundle');
+    assert.match(r.result, /vrm-racer-blue \(ALICE\)/);
+    assert.equal(agent.agentModel.activeVRMModel, 'store-vrm-overseer-sentinel', 'a dry run changes nothing');
+  } finally { P2PPeer.find = real.find; P2PPeer.getOnlinePeers = real.online; }
+});

@@ -2,6 +2,18 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.769] - 2026-11-07
+
+### Fixed
+- **A light's name is read cleanly.** "Change my Master Toilet light so it's bright white" now names "Master Toilet", not "Master Toilet light so it's bright".
+
+## [2.25.768] - 2026-11-07
+
+### Fixed
+- **Light commands in plain words work.** "Change my Master Toilet light so it's bright white" found the right command but no device or colour, failed, and the agent spent minutes searching for the light. The device ("my/the … light") and named whites are read directly, and anything still missing is read by a model before the command runs.
+- **A slow request no longer holds up the chat.** Messages sent within a few seconds of each other still run in order. A message sent while an earlier one has been running longer now runs at once, instead of waiting unread until the first finishes.
+- **Agents don't pick the same 3D model.** Each agent tells its peers which store model it wears, and an agent picking a new model leaves those out, along with anything it owns and anything the request says is taken (`avoid`). `dryRun` picks and quotes without paying.
+
 ## [2.25.767] - 2026-11-07
 
 ### Fixed
