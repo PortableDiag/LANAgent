@@ -28,9 +28,24 @@ const API = 'https://api.openai.com/v1/realtime';
 export const UNANSWERED_MS = Number(process.env.DIALX_UNANSWERED_MS) || 4000;
 // The owner, 2026-11-03: the phone's own voice is the emergency fallback, never the answer to one failed connection.
 // Every way realtime can fail (the offer, the phone's session not starting, a drop) gets this many tries before turns.
-export const REALTIME_ATTEMPTS = Math.max(1, Number(process.env.DIALX_REALTIME_ATTEMPTS) || 5);
+// The owner, 2026-11-06: the main voice plus at least 5 backups; the phone's voice only on the 6th failure. Each backup is
+// another model and, where the family has one, another voice, so one model or voice failing can't take every try with it.
+export const REALTIME_ATTEMPTS = Math.max(1, Number(process.env.DIALX_REALTIME_ATTEMPTS) || 6);
 // Between tries of one offer (mint + hand-over); a late offer after a phone-side failure goes at once.
-const RETRY_GAPS_MS = [500, 1000, 2000, 3000];
+const RETRY_GAPS_MS = [500, 1000, 2000, 3000, 5000];
+// Each spoke on ALICE's key on 2026-11-06 with the session below. Keep the assistant's gender across backups (owner, 2026-11-05).
+const REALTIME_MODELS = ['gpt-realtime-2.1', 'gpt-realtime-2', 'gpt-realtime-1.5', 'gpt-realtime', 'gpt-realtime-2.1-mini', 'gpt-realtime-mini'];
+const VOICE_FAMILIES = [['marin', 'coral', 'shimmer', 'sage', 'alloy'], ['cedar', 'ash', 'echo', 'verse', 'ballad']];
+// gpt-realtime-1.5, gpt-realtime and gpt-realtime-mini answer 400 "Unsupported option for this model" to `reasoning`.
+const reasons = (model) => /^gpt-realtime-2/.test(model);
+
+/** The tries for one outage, in order: { model, voice }, the configured pair first, then 5 backups. */
+export function realtimeChain(voice = REALTIME_VOICE, model = REALTIME_MODEL) {
+  const family = VOICE_FAMILIES.find(f => f.includes(voice)) || VOICE_FAMILIES[0];
+  const voices = [voice, ...family.filter(v => v !== voice)];
+  const models = [model, ...REALTIME_MODELS.filter(m => m !== model)];
+  return models.slice(0, 6).map((m, i) => ({ model: m, voice: voices[i % voices.length] }));
+}
 // A flapping call (live, drop, live, drop…) stops offering here; each outage alone gets REALTIME_ATTEMPTS.
 const MAX_OFFERS_PER_CALL = 20;
 
@@ -315,7 +330,7 @@ export function sessionConfig({ instructions, voice = REALTIME_VOICE, model = RE
     session: {
       type: 'realtime', model, instructions,
       // gpt-realtime-2.1 reasons by default; low effort brought first audio from 1.19 s to 0.97 s (Orbit, 4293 #262).
-      reasoning: { effort: 'low' },
+      ...(reasons(model) ? { reasoning: { effort: 'low' } } : {}),
       audio: {
         input: { format: pcm, noise_reduction: { type: 'far_field' }, transcription: { model: 'gpt-4o-mini-transcribe', language: TRANSCRIBE_LANGUAGE }, turn_detection: { type: 'semantic_vad', eagerness: 'low' } },
         // eagerness low: 8 barge-ins in 10 replies on call 58 at the default; Orbit's calls improved with low (4293 #349).
@@ -365,20 +380,22 @@ export class DialXRealtime {
 
   /** Mint the client secret and hand it to the phone. Any failure leaves the call in turn mode. */
   /** POST /v1/realtime/client_secrets for this call: { secret, expiresAt, voice, at }. */
-  async mint(s, { name, owner, limitS }) {
+  async mint(s, { name, owner, limitS }, attempt = 1) {
     await s.ready;
     s.ownerOnLine = ownerOnLine(s);
     const instructions = realtimeInstructions({ name, owner, s, limitS }) + (s.ownerOnLine ? askAgentRules(name, owner) : '') + resumeNote(s, name);
-    const voice = (await this.calls.settings?.().catch?.(() => null))?.realtimeVoice || REALTIME_VOICE;
+    const chosen = (await this.calls.settings?.().catch?.(() => null))?.realtimeVoice || REALTIME_VOICE;
+    const chain = realtimeChain(chosen);
+    const { model, voice } = chain[Math.min(attempt, chain.length) - 1];
     const res = await this.fetch(`${API}/client_secrets`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${this.env.OPENAI_API_KEY}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify(sessionConfig({ instructions, voice, group: (s.rtGroup = isGroupCall(s, name)), owner: s.ownerOnLine }))
+      body: JSON.stringify(sessionConfig({ instructions, voice, model, group: (s.rtGroup = isGroupCall(s, name)), owner: s.ownerOnLine }))
     });
     const body = await res.json().catch(() => ({}));
     const secret = body?.value || body?.client_secret?.value;
     if (!res.ok || !secret) throw new Error(`client secret ${res.status}: ${body?.error?.message || 'no value'}`);
-    return { secret, expiresAt: body.expires_at ?? body.client_secret?.expires_at, voice, at: Date.now() };
+    return { secret, expiresAt: body.expires_at ?? body.client_secret?.expires_at, voice, model, at: Date.now() };
   }
 
   /**
@@ -414,13 +431,13 @@ export class DialXRealtime {
         // A secret minted during ringing is used if it still has 20 s to live; otherwise a fresh one.
         const early = s.minted ? await s.minted : null;
         s.minted = null;
-        const fresh = early && Date.now() - early.at < 100000 ? early : await this.mint(s, { name, owner, limitS });
+        const fresh = early && Date.now() - early.at < 100000 ? early : await this.mint(s, { name, owner, limitS }, n);
         if (s.done) return;
-        const { secret, expiresAt, voice } = fresh;
-        const r = await this.tool(s, 'dialx.realtime', { client_secret: secret, expires_at: expiresAt, model: REALTIME_MODEL });
+        const { secret, expiresAt, voice, model } = fresh;
+        const r = await this.tool(s, 'dialx.realtime', { client_secret: secret, expires_at: expiresAt, model });
         if (!r.ok) throw new Error(`dialx.realtime ${r.error?.code || 'failed'}`);
         s.realtime = 'offered';
-        this.logger.info?.(`DialX: call ${s.id} offered realtime (${REALTIME_MODEL}, ${voice}${fresh === early ? ', secret minted while ringing' : ''}${n > 1 ? `, try ${n}/${this.attempts}` : ''})`);
+        this.logger.info?.(`DialX: call ${s.id} offered realtime (${model}, ${voice}${n > 1 ? `, backup ${n - 1}` : ''}${fresh === early ? ', secret minted while ringing' : ''}${n > 1 ? `, try ${n}/${this.attempts}` : ''})`);
         return;
       } catch (e) {
         last = e;

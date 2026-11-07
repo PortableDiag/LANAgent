@@ -2,6 +2,14 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.758] - 2026-11-06
+
+### Changed
+- **Five backup realtime voices on calls.** A realtime failure now moves through the main voice and 5 backups, each on another OpenAI model and, where one is free, another voice of the same gender, before the phone's own voice takes over on the 6th failure. Each backup reaches the phone with its own model name, and models that refuse `reasoning` are no longer sent it. `DIALX_REALTIME_ATTEMPTS` now defaults to 6.
+
+### Fixed
+- **Long call transcripts arrive whole.** A call report or voicemail is split across as many messages as it needs, numbered, instead of being cut off at 3,000 characters (1,500 for voicemail). Only the first part of an urgent report is urgent.
+
 ## [2.25.757] - 2026-11-06
 
 ### Changed

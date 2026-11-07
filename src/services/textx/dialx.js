@@ -331,6 +331,27 @@ export function isDialX(device) {
 export const VOICES = ['agent', 'phone'];
 // realtimeVoice: OpenAI Realtime speaks only its own voices, so Ara (xAI) cannot carry over. marin is the
 // closest to Ara; cedar (Orbit's) sounds male (owner, 2026-10-25).
+// Telegram refuses a message over 4096 characters; room is left for the prefix and the (1/3).
+const MESSAGE_LIMIT = 3800;
+/** Split between lines, then between words, and only inside a word when one is longer than a whole message. */
+export function splitMessage(text, max = MESSAGE_LIMIT) {
+  const parts = [];
+  let cur = '';
+  for (let line of String(text).split('\n')) {
+    while (line.length > max) {
+      if (cur) { parts.push(cur); cur = ''; }
+      const at = line.lastIndexOf(' ', max);
+      const cut = at > 0 ? at : max;
+      parts.push(line.slice(0, cut));
+      line = line.slice(cut).trimStart();
+    }
+    if (cur && cur.length + 1 + line.length > max) { parts.push(cur); cur = ''; }
+    cur = cur ? `${cur}\n${line}` : line;
+  }
+  if (cur) parts.push(cur);
+  return parts.length ? parts : [''];
+}
+
 export const REALTIME_VOICES = ['marin', 'coral', 'shimmer', 'sage', 'ballad', 'alloy', 'verse', 'ash', 'echo', 'cedar'];
 // realtimeCalls: which calls use OpenAI Realtime. 'all' (owner, 2026-10-25) once call 32's silence turned out to be
 // the phone's capture, not realtime (DialX 0.7.32 reopens it and falls back to turns). 'test' = DialX Test calls only.
@@ -671,8 +692,8 @@ export class DialXCalls {
     const len = body.duration_s ? ` (${clock(body.duration_s)})` : '';
     const words = String(body.transcript || '').trim();
     this.logger.info?.(`DialX: new voicemail from ${who}${len}`);
-    await this.hub.tellOwner(device, `📞 New voicemail from ${who}${body.name && body.number ? ` (${body.number})` : ''}${len}:\n` +
-      (words ? `"${words.slice(0, 1500)}"` : '(no transcript; ask me to fetch the audio if Listen to voicemail audio is on in DialX)'), null)
+    await this.tellOwnerInParts(device, `📞 New voicemail from ${who}${body.name && body.number ? ` (${body.number})` : ''}${len}:\n` +
+      (words ? `"${words}"` : '(no transcript; ask me to fetch the audio if Listen to voicemail audio is on in DialX)'), null)
       .catch(e => this.logger.warn?.(`DialX: voicemail notice not sent: ${e.message}`));
   }
 
@@ -1104,7 +1125,7 @@ export class DialXCalls {
     }
     const { name } = this.names();
     const who = (role) => role === 'callee' ? s.contact : role === 'agent' ? name : role;
-    const shown = transcript.filter(l => l.role !== 'filler').map(l => `${who(l.role)}: ${l.text}`).join('\n').slice(0, 3000);
+    const shown = transcript.filter(l => l.role !== 'filler').map(l => `${who(l.role)}: ${l.text}`).join('\n');
     const length = secs ? ` (${clock(secs)})` : '';
     const reason = body.reason ? `: ${END_REASONS[body.reason] || body.reason}${body.detail ? ` (${body.detail})` : ''}` : '';
     // DialX can end a call as agent_silent before anything was played: its 30 s silence clock ran
@@ -1124,7 +1145,7 @@ export class DialXCalls {
       }
     } else if (s.incoming) {
       const summary = await this.messageSummary(s, transcript);
-      await this.hub.tellOwner(device, `📞 ${s.contact} called and I answered for you${length}.${summary ? `\nTheir message: ${summary}` : ' They left no message.'}\n\n${shown || '(nothing was said)'}`, null, { urgent: true })
+      await this.tellOwnerInParts(device, `📞 ${s.contact} called and I answered for you${length}.${summary ? `\nTheir message: ${summary}` : ' They left no message.'}\n\n${shown || '(nothing was said)'}`, null, { urgent: true })
         .catch(e => this.logger.warn?.(`DialX: call report not sent: ${e.message}`));
     } else if (body.reason === 'agent_silent' && nothingPlayed) {
       this.logger.warn?.(`DialX: call ${id} ended as agent_silent before the disclosure or opening played (DialX's silence clock)`);
@@ -1136,13 +1157,21 @@ export class DialXCalls {
       // (Orbit's call 39, 2026-10-25; fixed DialX 0.7.41), and the report would have blamed the capture.
       const deaf = s.audioProblem === 'no_input_audio' && !s.heardCallee && !transcript.some(l => l.role === 'callee') ? `\n⚠️ The phone could not pick up ${s.contact}'s side of the call, so I couldn't hear them.` : '';
       const silent = s.silentEnd ? `\n⚠️ I couldn't hear ${s.contact} on the realtime line, so I hung up rather than leave them in silence. Say "call ${s.contact.split(/\s+/).pop()} again" to retry.` : '';
-      await this.hub.tellOwner(device, `📞 Call with ${s.contact} ended${length}${reason}.${deaf || silent}\n${shown || '(nothing was said)'}`, null)
+      await this.tellOwnerInParts(device, `📞 Call with ${s.contact} ended${length}${reason}.${deaf || silent}\n${shown || '(nothing was said)'}`, null)
         .catch(e => this.logger.warn?.(`DialX: call report not sent: ${e.message}`));
     }
     // DialX 0.7.0: with the owner's "Record every call" on, the whole call (both sides) comes as
     // 60 s parts; it covers a voicemail call too, so the mono voicemail copy is fetched only without it.
     if (body.call_audio) await this.sendCallRecording(device, s, body.call_audio);
     else if (body.reason === 'voicemail_left' && body.voicemail_audio) await this.sendVoicemailCopy(device, s);
+  }
+
+  /** A long report goes as several messages, in order; only the first can be urgent (the owner, 2026-11-06). */
+  async tellOwnerInParts(device, text, title, opts = {}) {
+    const parts = splitMessage(text);
+    for (const [i, part] of parts.entries()) {
+      await this.hub.tellOwner(device, parts.length > 1 ? `${part}\n(${i + 1}/${parts.length})` : part, title, i ? { ...opts, urgent: false } : opts);
+    }
   }
 
   /**
