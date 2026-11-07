@@ -199,3 +199,20 @@ test('a model another agent wears (P2P) or the request rules out is never picked
     assert.equal(agent.agentModel.activeVRMModel, 'store-vrm-overseer-sentinel', 'a dry run changes nothing');
   } finally { P2PPeer.find = real.find; P2PPeer.getOnlinePeers = real.online; }
 });
+
+test('"apply the avatar you bought" with no name wears the newest model, never a random older one', async () => {
+  const { p, agent } = await rig();
+  await p.execute({ action: 'buy', variant: 'vrm-overseer-sentinel' });
+  const lib = (await PluginSettings.getCached('botsandborgs', 'library')).items;
+  // a second, newer model in the library (the store would have put it first)
+  const newer = { ...lib[0], variant: 'vrm-pilot-white-bundle', title: 'Pilot White' };
+  const dir = path.join(p.libraryRoot, 'vrm-pilot-white-bundle');
+  fs.cpSync(path.join(p.libraryRoot, 'vrm-overseer-sentinel'), dir, { recursive: true });
+  await PluginSettings.setCached('botsandborgs', 'library', { items: [newer, ...lib] });
+  for (let i = 0; i < 8; i++) {
+    agent.agentModel.activeVRMModel = 'nova';
+    const r = await p.execute({ action: 'use', as: 'wear' });
+    assert.equal(r.success, true, r.error);
+    assert.equal(agent.agentModel.activeVRMModel, 'store-vrm-pilot-white-bundle');
+  }
+});

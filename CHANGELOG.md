@@ -2,6 +2,11 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.770] - 2026-11-07
+
+### Fixed
+- **"Apply the avatar you bought" wears the one just bought.** With no item named, wearing or applying an avatar uses the newest purchase. It used to pick at random among owned models, and put an older one back on a second after the new one was worn.
+
 ## [2.25.769] - 2026-11-07
 
 ### Fixed

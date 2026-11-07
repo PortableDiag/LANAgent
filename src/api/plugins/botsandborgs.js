@@ -701,7 +701,11 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     if (as === 'avatar') {
       const s = await this.settings();
       if (!(await this.avatarChangeAllowed(s))) return { success: false, error: "My avatar is tied to my 3D (VRM) model, so I don't change it." };
-      const pick = await this.pickOwned({ item, kind: kind && kind !== 'vrm' ? kind : null, kinds: ['portrait', 'icon'] });
+      let pick = item ? await this.pickOwned({ item, kind: kind && kind !== 'vrm' ? kind : null, kinds: ['portrait', 'icon'] }) : null;
+      if (!item) {
+        const newest = (await this.libraryItems()).find(i => i.files.some(f => ['portrait', 'icon'].includes(f.kind)));
+        if (newest) pick = { item: newest, file: newest.files.find(f => ['portrait', 'icon'].includes(f.kind)) };
+      }
       if (!pick) return { success: false, error: 'I have no picture like that from Bots & Borgs.' };
       const { applyAgentAvatar, describeAvatarServices } = await import('../../services/avatar/applyAgentAvatar.js');
       const applied = await applyAgentAvatar(this.agent, await this.readOwned(pick), { source: `Bots & Borgs, ${pick.item.variant}`, variant: pick.item.variant });
@@ -745,7 +749,13 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
 
   /** A bought model: into the gallery, and active only when the request says so. */
   async useModel({ item, wear }) {
-    const pick = await this.pickOwned({ item, kind: 'vrm', kinds: ['vrm'] });
+    // No model named = the one bought last (the library is newest first). A random pick among owned models put
+    // DELTA back in Racer Blue a second after it bought and wore Pilot White (2026-11-07, a plan's "apply it" step).
+    let pick = item ? await this.pickOwned({ item, kind: 'vrm', kinds: ['vrm'] }) : null;
+    if (!item) {
+      const newest = (await this.libraryItems()).find(i => i.files.some(f => f.kind === 'vrm'));
+      if (newest) pick = { item: newest, file: newest.files.find(f => f.kind === 'vrm') };
+    }
     if (!pick) return { success: false, error: "I don't own a model like that. I can buy it first if you want." };
     const buffer = await this.readOwned(pick);
     readVrmInfo(buffer);
