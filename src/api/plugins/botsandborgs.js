@@ -519,14 +519,18 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     if (!candidates.length) return null;
     const name = this.agent?.config?.name || process.env.AGENT_NAME || 'the agent';
     const persona = String(this.agent?.agentModel?.personality || this.agent?.config?.personality || '').slice(0, 300);
+    // The owner's stated taste is a rule, not a hint: DELTA picked an anime-style girl while USER.md said "Prefers
+    // avatars that are not anime-style girls" (2026-11-07).
+    const taste = forWhom === 'yourself' ? await this.ownerTaste() : '';
     const scored = [];
     for (let i = 0; i < candidates.length; i += 4) {
       await Promise.all(candidates.slice(i, i + 4).map(async (c) => {
         try {
           const img = await this.fetchBytes(c.url);
           const r = await pm.analyzeImage(img.buffer, `You are ${name}, an AI agent${persona ? ` (${persona})` : ''}, choosing ${kind === 'avatar' && forWhom === 'yourself' ? 'a new avatar for yourself' : `a ${kind} for ${forWhom}`}. ` +
-            `This one is "${c.label}". In one short sentence say what it shows, then rate from 1 to 10 how good a pick it is. ` +
-            'Reply as JSON: {"what":"...","score":7,"why":"..."}');
+            `This one is "${c.label}". ${taste ? `Your owner has said:\n${taste}\nAnything that goes against what your owner said is ruled out: set "against_owner": true. ` : ''}` +
+            'In one short sentence say what it shows, then rate from 1 to 10 how good a pick it is. ' +
+            'Reply as JSON: {"what":"...","score":7,"why":"...","against_owner":false}');
           // providerManager.analyzeImage answers { analysis } (the first live run read .content and saw nothing, 2026-10-28).
           const raw = String(r?.analysis ?? r?.content ?? (typeof r === 'string' ? r : ''));
           let j = {};
@@ -535,6 +539,10 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
             j = { score: m ? Number(m[1]) : 0, why: raw.replace(/\s+/g, ' ').slice(0, 200) };
           }
           if (!raw.trim()) throw new Error('the vision model returned nothing');
+          if (j.against_owner === true || j.against_owner === 'true') {
+            this.logger.info(`botsandborgs: ${c.label} ruled out by the owner's taste: ${String(j.what || j.why || '').slice(0, 120)}`);
+            return;
+          }
           scored.push({ ...c, score: Number(j.score) || 0, why: String(j.why || j.what || '').slice(0, 200) });
         } catch (e) { this.logger.warn(`botsandborgs: could not look at ${c.label}: ${e.message}`); }
       }));
@@ -814,6 +822,15 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
       this.logger.warn(`botsandborgs: could not ask peers what they wear: ${e.message}`);
       return [];
     }
+  }
+
+  /** What the owner has said about looks and avatars, from the user profile (USER.md), or ''. Never throws. */
+  async ownerTaste() {
+    try {
+      const { getUserProfile } = await import('../../services/skills/userProfile.js');
+      const text = String(await getUserProfile().text() || '');
+      return text.split('\n').filter(l => /avatar|model|look|anime|character|style|appearance|wear|outfit|skin/i.test(l)).join('\n').slice(0, 1200);
+    } catch { return ''; }
   }
 
   /** The picture of the Bots & Borgs model this agent wears, for a sync: { variant, title, buffer } or null. */

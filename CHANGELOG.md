@@ -2,6 +2,11 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.772] - 2026-11-07
+
+### Fixed
+- **The agent's own pick follows what the owner said about looks.** When it picks something for itself, the owner's stated preferences from the user profile go with every candidate, and a candidate that goes against them is ruled out, however well it scores.
+
 ## [2.25.771] - 2026-11-07
 
 ### Fixed

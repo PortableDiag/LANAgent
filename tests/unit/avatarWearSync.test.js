@@ -228,3 +228,24 @@ test('"the avatar you just bought" names no product: it means the newest one', a
   assert.equal(r.success, true, r.error);
   assert.equal(agent.agentModel.activeVRMModel, 'store-vrm-overseer-sentinel');
 });
+
+test('the owner’s stated taste rules a candidate out', async () => {
+  const { p, agent } = await rig();
+  p.ownerTaste = async () => '- Prefers avatars that are not anime-style girls.';
+  const mk = (slug, title) => ({ slug, title, collection: '3d-avatars', variants: [{ id: slug }], images: [{ url: `https://x/${slug}.jpg` }] });
+  const products = { 'vrm-pilot-white': mk('vrm-pilot-white', 'Pilot White'), 'vrm-mm-fox': mk('vrm-mm-fox', 'Fox') };
+  p.api = async (m, route) => {
+    if (route === '/api/catalog') return { products: Object.values(products) };
+    if (route.startsWith('/api/products/')) return { product: products[route.split('/').pop()] };
+    throw new Error(route);
+  };
+  const prompts = [];
+  agent.providerManager = { analyzeImage: async (_b, prompt) => {
+    prompts.push(prompt);
+    return { analysis: /Pilot White/.test(prompt) ? '{"what":"an anime girl","score":9,"against_owner":true}' : '{"what":"a fox robot","score":6,"against_owner":false}' };
+  } };
+  p.fetchBytes = async () => ({ buffer: await pic(1), type: 'image/jpeg' });
+  const pick = await p.pickFavorite({ kind: 'vrm', forWhom: 'yourself' });
+  assert.equal(pick.variant, 'vrm-mm-fox', 'the higher score was against the owner');
+  assert.match(prompts[0], /not anime-style girls/);
+});
