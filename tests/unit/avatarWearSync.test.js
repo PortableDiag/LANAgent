@@ -138,3 +138,35 @@ test('a sync while wearing a model rebuilds its picture from the model, and an i
   assert.equal(history(), kept, 'no new history entry: the picture did not change');
   assert.ok(photos.length >= 2);
 });
+
+test('"pick another avatar … get the pack and apply it" while wearing one: a new model, not owned, bundle, worn', async () => {
+  const { p, agent, photos } = await rig();
+  await p.execute({ action: 'buy', variant: 'vrm-overseer-sentinel' });
+  assert.equal(agent.agentModel.activeVRMModel, 'store-vrm-overseer-sentinel');
+  const z = new JSZip();
+  z.file('Bear/bear.vrm', vrm()); z.file('Bear/Bear portrait 1.png', await sharp(await pic(180)).png().toBuffer()); z.file('Bear/Bear sticker 1.png', await pic(90));
+  const bundle = await z.generateAsync({ type: 'nodebuffer' });
+  const products = {
+    'vrm-overseer-sentinel': { slug: 'vrm-overseer-sentinel', title: 'Sentinel — VRM Avatar', collection: '3d-avatars', variants: [{ id: 'vrm-overseer-sentinel' }, { id: 'vrm-overseer-sentinel-bundle' }], images: [{ url: 'https://x/s.jpg', caption: 'Sentinel' }] },
+    'vrm-mm-bear': { slug: 'vrm-mm-bear', title: 'Bear — VRM Avatar', collection: '3d-avatars', variants: [{ id: 'vrm-mm-bear' }, { id: 'vrm-mm-bear-bundle' }], images: [{ url: 'https://x/b.jpg', caption: 'Bear' }] }
+  };
+  const quoted = [];
+  const api = p.api;
+  p.api = async (m, route, o) => {
+    if (route === '/api/catalog') return { products: Object.values(products) };
+    if (route.startsWith('/api/products/')) return { product: products[route.split('/').pop()] };
+    if (route === '/api/quotes') { quoted.push(o.body.items[0].variant); return { quote: { id: 'q2', total_cents: 1500 } }; }
+    return api(m, route, o);
+  };
+  const looked = [];
+  agent.providerManager = { analyzeImage: async (_b, prompt) => { looked.push(prompt); return { analysis: '{"what":"a robot","score":8,"why":"fits me"}' }; } };
+  p.fetchBytes = async (url) => (/x\/[sb]\.jpg/.test(url) ? { buffer: await pic(1), type: 'image/jpeg' } : { buffer: bundle, type: 'application/zip' });
+  photos.length = 0;
+  const r = await p.execute({ action: 'buy', _context: { originalInput: "Pick another avatar, Nexus already picked that one. Pick one that's fitting and get the pack and apply it." } });
+  assert.equal(r.success, true, r.error);
+  assert.deepEqual(quoted, ['vrm-mm-bear-bundle'], 'the bundle of a model it does not own');
+  assert.equal(looked.length, 1, 'Sentinel, already owned, was not even looked at');
+  assert.equal(agent.agentModel.activeVRMModel, 'store-vrm-mm-bear-bundle');
+  assert.ok(Math.abs(await red(path.join(agentDir, 'avatar.png')) - 180) < 15, 'the bear portrait is the avatar');
+  assert.equal(photos.length, 1, 'and Telegram got it');
+});

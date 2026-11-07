@@ -2,6 +2,11 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.767] - 2026-11-07
+
+### Fixed
+- **An agent wearing a 3D model can pick and wear a new one.** "Pick another avatar and apply it" from an agent that wears a model now picks a new model and wears it, instead of refusing because its avatar is tied to its model. "The pack" or "the kit" means the model's complete bundle. The pick never includes something the agent already owns.
+
 ## [2.25.766] - 2026-11-07
 
 ### Fixed

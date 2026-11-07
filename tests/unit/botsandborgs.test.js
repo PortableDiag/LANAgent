@@ -52,8 +52,10 @@ test('never buys to hold: a purchase needs a use', async () => {
   assert.equal(calls.length, 0);
 });
 
-test('an agent with a VRM model never changes its avatar (ALICE, owner 2026-10-28)', async () => {
-  const { p, calls, sent } = rig({ vrm: 'nova' });
+// Since 2.25.757 (autoWear on by default) an agent wearing a model picks a new MODEL for "a new avatar"
+// (avatarWearSync.test.js). With autoWear off, the 2026-10-28 rule still holds.
+test('an agent with a VRM model and autoWear off never changes its avatar (ALICE, owner 2026-10-28)', async () => {
+  const { p, calls, sent } = rig({ vrm: 'nova', settings: { autoWear: false } });
   const r = await p.execute({ action: 'buy', _context: { originalInput: 'go to botsnborgs.com and buy yourself an avatar' } });
   assert.equal(r.success, false);
   assert.match(r.error, /tied to my 3D \(VRM\) model/);

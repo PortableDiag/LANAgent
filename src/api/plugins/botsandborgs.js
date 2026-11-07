@@ -320,6 +320,8 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     if (/\bsend (?:it|them|that)? ?(?:to )?me\b|\bto me\b|\bbuy me\b/i.test(asked) && !data.use) data = { ...data, use: 'send', to: data.to || 'me' };
     // "buy yourself an avatar" / "… and use it as your avatar" is for the agent's avatar; "send it to X" / "buy X a …" is a send.
     if (!data.use && /\b(yourself|your (?:own )?(?:new )?avatar|as your avatar|for you)\b/i.test(asked)) data = { ...data, use: 'avatar' };
+    // "Pick another avatar … and apply it" is for itself too.
+    if (!data.use && /\bavatar\b/i.test(asked) && /\b(?:another|new|different) avatar\b|\b(?:apply|wear|equip|use) (?:it|that|them)\b|\bput (?:it|that) on\b/i.test(asked) && !/\b(?:send|for|to|give)\s+(?!you\b|yourself\b)\w+/i.test(asked.replace(/\bfor (?:it|that|one)\b/gi, ''))) data = { ...data, use: 'avatar' };
     if (!data.use && /\b(send (?:it )?to|for)\s+(me|\w+)/i.test(asked)) data = { ...data, use: 'send', to: data.to || /\b(?:send (?:it )?to|for)\s+(me|\w+)/i.exec(asked)[1] };
     // What was asked for: a named variant says it, otherwise the words. A model installs; stickers, emoji and the like
     // are bought to use from the library. A single picture with no stated use still asks.
@@ -330,6 +332,14 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     // Allowed to wear what it buys: "buy yourself a model" means become it, which also brings its portrait.
     if (s.autoWear && ['vrm', 'bundle'].includes(buying) && (!data.use || String(data.use).toLowerCase() === 'avatar')) data = { ...data, use: 'wear' };
     if (!data.use && ['vrm', 'bundle'].includes(buying)) data = { ...data, use: 'install' };
+    // "Pick another avatar and apply it" from an agent that wears a model: its avatar IS its model, so it picks and
+    // wears a new model (DELTA 2026-11-07 was refused "my avatar is tied to my 3D model" and never bought one).
+    let wantNow = wantKind;
+    if (String(data.use || '').toLowerCase() === 'avatar' && !data.variant && s.autoWear && !(await this.avatarChangeAllowed({ allowAvatarChange: null }))
+      && !['portrait', 'icon', 'sticker', 'emoji', 'wallpaper'].includes(wantKind) && s.allowAvatarChange !== false) {
+      data = { ...data, use: 'wear' };
+      wantNow = wantKind === 'bundle' ? 'bundle' : 'vrm';
+    }
     if (!data.use && ['sticker', 'emoji', 'wallpaper'].includes(buying)) data = { ...data, use: 'keep' };
     if (!data.use && buying && /-portraits$|-bundle$|-pack$|^[a-z-]+-(?:avatars|wallpapers|emoji)$/.test(String(data.variant || ''))) data = { ...data, use: 'keep' };
     const use = String(data.use || '').toLowerCase();
@@ -345,11 +355,13 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     if (!data.variant) {
       // "Buy me a robot icon", "send Jo a phone wallpaper": the agent picks among what the request names.
       // A bundle is a model with its portraits and stickers, so the pick is made among the models.
-      const kind = wantKind === 'bundle' ? 'vrm' : wantKind || 'avatar';
+      const kind = wantNow === 'bundle' ? 'vrm' : wantNow || 'avatar';
       const forWhom = use === 'avatar' || use === 'wear' ? 'yourself' : String(data.to || 'the owner');
-      const pick = await this.pickFavorite({ kind, forWhom });
-      if (!pick) return { success: false, error: `I couldn't see any of the store's ${kind}s, so I didn't buy one.` };
-      data = { ...data, variant: wantKind === 'bundle' ? `${pick.variant}-bundle` : pick.variant };
+      // Never the same thing twice: what it already owns is out (a "pick another one" re-picked Sentinel).
+      const owned = new Set((await this.libraryItems()).map(i => String(i.variant).replace(/-(?:portraits|stickers|bundle)$/, '')));
+      const pick = await this.pickFavorite({ kind, forWhom, exclude: owned });
+      if (!pick) return { success: false, error: `I couldn't see any of the store's ${kind}s I don't already have, so I didn't buy one.` };
+      data = { ...data, variant: wantNow === 'bundle' ? `${pick.variant}-bundle` : pick.variant };
       pickedWhy = `I looked at ${pick.seen} ${kind}s and picked ${pick.label}: ${pick.why} `;
     }
 
@@ -456,7 +468,7 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
    * Look at the store's avatar singles and pick the one this agent likes best for itself: each preview goes to the
    * vision model with who the agent is, and the highest score wins. Returns { variant, label, why, seen } or null.
    */
-  async pickFavorite({ kind = 'avatar', forWhom = 'yourself' } = {}) {
+  async pickFavorite({ kind = 'avatar', forWhom = 'yourself', exclude = new Set() } = {}) {
     const pm = this.agent?.providerManager;
     if (!pm?.analyzeImage) return null;
     const cat = await this.api('get', '/api/catalog');
@@ -476,12 +488,12 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
       if (tier[kind]) {
         const v = (p.variants || []).find(tier[kind]);
         const img = (p.images || []).find(i => new RegExp(kind === 'sticker' ? 'sticker' : 'portrait', 'i').test(String(i.caption || i.alt))) || (p.images || [])[0];
-        if (v && img?.url) candidates.push({ variant: v.id, label: p.title, url: kind === 'vrm' ? (p.images[0]?.url || img.url) : img.url, product: p.title });
+        if (v && img?.url && !exclude.has(v.id)) candidates.push({ variant: v.id, label: p.title, url: kind === 'vrm' ? (p.images[0]?.url || img.url) : img.url, product: p.title });
         continue;
       }
       for (const v of p.variants || []) {
         const img = (p.images || []).find(i => String(i.caption || i.alt).toLowerCase() === String(v.label || '').toLowerCase());
-        if (img?.url) candidates.push({ variant: v.id, label: v.label, url: img.url, product: p.title });
+        if (img?.url && !exclude.has(v.id)) candidates.push({ variant: v.id, label: v.label, url: img.url, product: p.title });
       }
     }
     if (!candidates.length) return null;
@@ -516,7 +528,8 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
   // ── library ───────────────────────────────────────────────────
   kindAsked(words) {
     const w = String(words || '');
-    if (/\b(bundle|everything for)\b/i.test(w)) return 'bundle';
+    // "Get the pack" / "the avatar kit" for a model is its complete bundle; a portrait or sticker pack is not.
+    if (/\b(bundle|everything for)\b/i.test(w) || /\b(?<!(?:portrait|sticker|emoji|wallpaper|icon)s? )(?:pack|kit)\b/i.test(w)) return 'bundle';
     if (/\b(vrm|vroid|3d|three.?d)\b/i.test(w)) return 'vrm';
     if (/\bstickers?\b|\bemotes?\b/i.test(w)) return 'sticker';
     if (/\bemoji/i.test(w)) return 'emoji';
