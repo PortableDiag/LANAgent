@@ -753,3 +753,77 @@ test('every offer asks DialX to hold its fillers (0.7.123)', async () => {
   await rt.begin(session(), { name: 'ALICE', owner: 'Pat', limitS: 300 });
   assert.equal(tools.find(t => t.name === 'dialx.realtime').args.hold_fillers, true);
 });
+
+function askRig({ slowMs = 0, caps = ['dialx.realtime_note'], report = { overallHealth: 'healthy', summary: 'All systems operational', timestamp: new Date() } } = {}) {
+  const tools = [], told = [];
+  const calls = { limitS: 300, settings: async () => ({}), hub: { callTool: async (name, args) => { tools.push({ name, args }); return { ok: true, result: {} }; }, tellOwner: async (d, t) => told.push(t) },
+    agent: { processNaturalLanguage: () => new Promise(res => setTimeout(res, slowMs, { content: 'all good' })), selfDiagnosticsService: { getReport: async () => report } } };
+  const rt = new DialXRealtime({ calls, logger: quiet, env, fetch: async () => ({}), retryGapsMs: [0], askWaitMs: 20, lateAnswerWaitMs: 30 });
+  const s = { ...session(), ownerOnLine: true, realtime: 'live', rtGen: 1, device: { id: 'd1', capabilities: caps } };
+  return { rt, s, tools, told };
+}
+const ask = (rt, s) => rt.event(s, { type: 'response.function_call_arguments.done', name: 'ask_agent', fn_call_id: 'f1', arguments: JSON.stringify({ request: 'how is the server' }) });
+const output = (tools) => JSON.parse(tools.find(t => t.name === 'dialx.realtime_tool_output').args.output);
+
+test('call 127: a fast lookup answers as before', async () => {
+  const { rt, s, tools } = askRig({ slowMs: 1 });
+  await ask(rt, s);
+  assert.equal(output(tools).answer, 'all good');
+  assert.equal(tools.filter(t => t.name === 'dialx.realtime_note').length, 0);
+});
+
+test('call 127: a slow lookup lets the call go on and the answer comes in as a line', async () => {
+  const { rt, s, tools } = askRig({ slowMs: 60 });
+  const done = ask(rt, s);
+  await new Promise(r => setTimeout(r, 40));
+  assert.equal(output(tools).status, 'working', 'told within the wait, before the answer');
+  assert.equal(s.rtAsking, 1);
+  await done;
+  const note = tools.find(t => t.name === 'dialx.realtime_note').args;
+  assert.match(note.text, /all good/);
+  assert.equal(note.respond, true);
+  assert.equal(s.rtAsking, 0);
+});
+
+test('a slow lookup goes to a message when the call has ended or no session comes back', async () => {
+  for (const after of [(s) => { s.done = true; }, (s) => { s.realtime = null; }]) {
+    const { rt, s, tools, told } = askRig({ slowMs: 40 });
+    const done = ask(rt, s);
+    await new Promise(r => setTimeout(r, 30));
+    after(s);
+    await done;
+    assert.equal(tools.filter(t => t.name === 'dialx.realtime_note').length, 0);
+    assert.match(told[0], /After our call: all good/);
+  }
+});
+
+test('a phone without notes keeps waiting for the answer', async () => {
+  const { rt, s, tools } = askRig({ slowMs: 40, caps: [] });
+  await ask(rt, s);
+  assert.equal(output(tools).answer, 'all good');
+});
+
+test('call_status answers at once with the model, the drops and the health, with no agent run', async () => {
+  const { rt, s, tools } = askRig();
+  let ran = 0;
+  rt.calls.agent.processNaturalLanguage = async () => { ran++; };
+  s.rtModel = 'gpt-realtime-2'; s.rtVoice = 'coral';
+  rt.failed({ ...s, done: true, rtTries: 99 }, { error: 'x' });
+  await rt.event(s, { type: 'response.function_call_arguments.done', name: 'call_status', fn_call_id: 'f2', arguments: '{}' });
+  const o = output(tools);
+  assert.match(o.service, /OpenAI Realtime/);
+  assert.equal(o.model, 'gpt-realtime-2');
+  assert.equal(o.health, 'healthy');
+  assert.equal(o.connection, 'realtime, live');
+  assert.equal(ran, 0);
+  assert.ok(sessionConfig({ instructions: 'x', owner: true }).session.tools.some(t => t.name === 'call_status'));
+  assert.ok(!sessionConfig({ instructions: 'x', owner: false }).session.tools.some(t => t.name === 'call_status'), 'only with the owner on the line');
+});
+
+test('a drop is counted for call_status', () => {
+  const { rt, s } = askRig();
+  s.done = true;
+  rt.failed(s, { error: 'dropped: nothing from OpenAI for 31 s' });
+  assert.equal(s.rtDrops, 1);
+  assert.match(s.rtLastDrop, /nothing from OpenAI/);
+});

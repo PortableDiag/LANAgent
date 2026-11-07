@@ -2,6 +2,14 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.760] - 2026-11-06
+
+### Changed
+- **Lookups no longer hold up a live call.** On a realtime call with the owner, the voice waits at most 4 s (`DIALX_ASK_AGENT_WAIT_MS`) for the agent, then says it is still being checked and carries on; the answer comes into the call when ready, or as a message after it.
+
+### Added
+- **`call_status` on owner calls.** The call voice answers questions about the call and whether the agent is up (service, model, drops, health) at once, with no agent run.
+
 ## [2.25.759] - 2026-11-06
 
 ### Changed
