@@ -281,6 +281,8 @@ the same frames Orbit speaks):
 - **Silence guard:** no callee transcript 40 s into a realtime call → ALICE hangs up and tells the owner why.
 - Overrides: `DIALX_REALTIME=off`, `DIALX_REALTIME_MODEL`, `DIALX_REALTIME_VOICE`.
 
+**When realtime fails (v2.25.758-762).** A failed or dropped session walks a main voice and 5 backups, each another OpenAI model and a same-gender voice, before the phone's own voice stays on after the 6th failure (`DIALX_REALTIME_ATTEMPTS`). Every offer carries `hold_fillers:true`, so DialX's fillers stay quiet during retries. A spoken line tries every voice the agent has before the phone's. On a call with the owner, `call_status` answers questions about the call and the agent at once, and `ask_agent` waits at most 4 s (`DIALX_ASK_AGENT_WAIT_MS`): the call goes on and the answer comes in as a `dialx.realtime_note`, resent to the next session if the connection drops within 10 s. Call reports and voicemails go whole, split across numbered messages.
+
 ## Notifications: NotifX (v2.25.586)
 
 NotifX (the owner's notification history app, frames doc `docs/agent-protocol-notifx.md` in the NotifX repo,
