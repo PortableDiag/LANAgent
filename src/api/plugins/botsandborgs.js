@@ -487,7 +487,7 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
    * Look at the store's avatar singles and pick the one this agent likes best for itself: each preview goes to the
    * vision model with who the agent is, and the highest score wins. Returns { variant, label, why, seen } or null.
    */
-  async pickFavorite({ kind = 'avatar', forWhom = 'yourself', exclude = new Set(), avoid = [] } = {}) {
+  async pickFavorite({ kind = 'avatar', forWhom = 'yourself', exclude = new Set(), avoid = [], anyFace = false } = {}) {
     const avoided = (c) => avoid.some(a => `${c.variant} ${c.label}`.toLowerCase().includes(a));
     const pm = this.agent?.providerManager;
     if (!pm?.analyzeImage) return null;
@@ -498,7 +498,7 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
       : kind === 'wallpaper' ? (p) => /phone|wallpaper/i.test(`${p.slug} ${p.title}`)
         : kind === 'emoji' ? (p) => /emoji-minis$/.test(p.slug)
           // A model to become needs a face that can blink and talk; the store's painted robots can't.
-          : tier[kind] ? (p) => p.collection === '3d-avatars' && !(kind === 'vrm' && /no expression/i.test(JSON.stringify(p.specs || [])))
+          : tier[kind] ? (p) => p.collection === '3d-avatars' && (anyFace || !(kind === 'vrm' && /no expression/i.test(JSON.stringify(p.specs || []))))
             : (p) =>/singles$/.test(p.slug) && /avatar|mech|menagerie/i.test(`${p.slug} ${p.title}`);
     const products = (cat.products || []).filter(want);
     const candidates = [];
@@ -522,9 +522,11 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     // The owner's stated taste is a rule, not a hint: DELTA picked an anime-style girl while USER.md said "Prefers
     // avatars that are not anime-style girls" (2026-11-07).
     const taste = forWhom === 'yourself' ? await this.ownerTaste() : '';
+    let ruledOut = 0;
     const scored = [];
-    for (let i = 0; i < candidates.length; i += 4) {
-      await Promise.all(candidates.slice(i, i + 4).map(async (c) => {
+    const batch = candidates.length > 20 ? 8 : 4;
+    for (let i = 0; i < candidates.length; i += batch) {
+      await Promise.all(candidates.slice(i, i + batch).map(async (c) => {
         try {
           const img = await this.fetchBytes(c.url);
           const r = await pm.analyzeImage(img.buffer, `You are ${name}, an AI agent${persona ? ` (${persona})` : ''}, choosing ${kind === 'avatar' && forWhom === 'yourself' ? 'a new avatar for yourself' : `a ${kind} for ${forWhom}`}. ` +
@@ -540,6 +542,7 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
           }
           if (!raw.trim()) throw new Error('the vision model returned nothing');
           if (j.against_owner === true || j.against_owner === 'true') {
+            ruledOut++;
             this.logger.info(`botsandborgs: ${c.label} ruled out by the owner's taste: ${String(j.what || j.why || '').slice(0, 120)}`);
             return;
           }
@@ -547,7 +550,15 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
         } catch (e) { this.logger.warn(`botsandborgs: could not look at ${c.label}: ${e.message}`); }
       }));
     }
-    if (!scored.length) return null;
+    if (!scored.length) {
+      // Every model with a talking face went against the owner's taste (on 2026-11-07 all 12 were anime-style girls
+      // and the owner had said no to those): what the owner said comes first, so look at the rest of the models too.
+      if (kind === 'vrm' && !anyFace && ruledOut > 0) {
+        this.logger.info(`botsandborgs: every model with expressions went against the owner's taste (${ruledOut}); looking at the others`);
+        return this.pickFavorite({ kind, forWhom, exclude, avoid, anyFace: true });
+      }
+      return null;
+    }
     scored.sort((a, b) => b.score - a.score);
     this.logger.info(`botsandborgs: looked at ${scored.length} ${kind}s; top: ${scored.slice(0, 3).map(s => `${s.label} ${s.score}`).join(', ')}`);
     return { ...scored[0], seen: scored.length };

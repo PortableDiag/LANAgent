@@ -2,6 +2,11 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.773] - 2026-11-07
+
+### Fixed
+- **The owner's taste comes before "a face that can talk".** When every model with facial expressions goes against what the owner said, the agent also considers the store's other models instead of giving up.
+
 ## [2.25.772] - 2026-11-07
 
 ### Fixed
