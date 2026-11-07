@@ -124,3 +124,17 @@ test('a wide preview sheet is cut to its first figure (the front view), squared 
   const narrow = await pic(100);
   assert.equal(await portraitFromPreview(narrow), narrow, 'a square picture is left alone');
 });
+
+test('a sync while wearing a model rebuilds its picture from the model, and an identical result changes nothing', async () => {
+  const { p, agent, photos } = await rig();
+  await p.execute({ action: 'buy', variant: 'vrm-overseer-sentinel' });
+  fs.writeFileSync(path.join(agentDir, 'avatar.png'), await sharp(await pic(5)).png().toBuffer()); // an older cut, recorded as this model
+  const a = await syncAgentAvatar(agent);
+  assert.match(a.picture, /model I wear/);
+  assert.ok(await red(path.join(agentDir, 'avatar.png')) > 200);
+  const history = () => fs.readdirSync(path.join(agentDir, 'avatar-history')).length;
+  const kept = history();
+  await syncAgentAvatar(agent);
+  assert.equal(history(), kept, 'no new history entry: the picture did not change');
+  assert.ok(photos.length >= 2);
+});

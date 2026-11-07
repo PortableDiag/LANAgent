@@ -169,10 +169,11 @@ export async function syncAgentAvatar(agent, { source = 'a sync request' } = {})
     logger.warn(`Avatar: could not read the worn model's picture: ${e.message}`);
     return null;
   });
-  // Since this record exists, wearing a model always applies its picture, so a newer record is a later, deliberate
-  // choice and is kept. No record = set before that: the worn model's picture wins.
-  if (worn && !record) {
-    logger.info(`Avatar: ${worn.variant} is worn but its picture was not my avatar; applying it`);
+  // Since this record exists, wearing a model always applies its picture, so a record naming something else is a
+  // later, deliberate choice and is kept. No record = set before that: the worn model's picture wins. A record naming
+  // the worn model is rebuilt from it, so a better cut reaches an agent already wearing it (same bytes = no change).
+  if (worn && (!record || record.variant === worn.variant)) {
+    if (!record) logger.info(`Avatar: ${worn.variant} is worn but its picture was not my avatar; applying it`);
     const applied = await applyAgentAvatar(agent, worn.buffer, { source: `Bots & Borgs, ${worn.variant}`, variant: worn.variant });
     return { ...applied, picture: `the picture of ${worn.title || worn.variant}, the model I wear` };
   }

@@ -2,6 +2,11 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.766] - 2026-11-07
+
+### Fixed
+- **Syncing the avatar rebuilds a worn model's picture.** When the avatar is the worn model's picture, a sync makes it again from the model, so an improved cut reaches an agent already wearing it. An identical result changes nothing anywhere.
+
 ## [2.25.765] - 2026-11-07
 
 ### Fixed
