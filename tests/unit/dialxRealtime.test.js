@@ -835,3 +835,21 @@ test('call 129: the session tells a call with the owner it has no 5-minute limit
   assert.doesNotMatch(fetched[0].body.session.instructions, /at most 5 minutes/);
   assert.match(fetched[1].body.session.instructions, /at most 5 minutes/);
 });
+
+test('a lookup answer sent just before a drop is resent to the new session, an older one is not', async () => {
+  const { rt, s, tools } = askRig({ slowMs: 30 });
+  await ask(rt, s);
+  assert.equal(tools.filter(t => t.name === 'dialx.realtime_note').length, 1);
+  rt.started(s, { resumed: true, rt_session_id: 'b' });
+  clearTimeout(s.silenceTimer);
+  const notes = tools.filter(t => t.name === 'dialx.realtime_note');
+  assert.equal(notes.length, 2);
+  assert.equal(notes[1].args.text, notes[0].args.text);
+  rt.started(s, { resumed: true, rt_session_id: 'c' });
+  clearTimeout(s.silenceTimer);
+  assert.equal(tools.filter(t => t.name === 'dialx.realtime_note').length, 2, 'once only');
+  s.rtNotesSent = [{ text: 'old', at: Date.now() - 11000 }];
+  rt.started(s, { resumed: true, rt_session_id: 'd' });
+  clearTimeout(s.silenceTimer);
+  assert.equal(tools.filter(t => t.name === 'dialx.realtime_note').length, 2, 'older than 10 s stays out');
+});

@@ -2,6 +2,11 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.762] - 2026-11-06
+
+### Fixed
+- **A lookup answer can't vanish in a drop.** An answer sent to a realtime session in the 10 s before it dropped is sent again to the session that replaces it.
+
 ## [2.25.761] - 2026-11-06
 
 ### Fixed
