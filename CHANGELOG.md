@@ -2,6 +2,19 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.764] - 2026-11-07
+
+### Fixed
+- **A worn model's picture becomes the avatar, everywhere.** A Bots & Borgs model sold on its own has no portrait, only the store's preview, so wearing it left the old picture on Telegram and every other service. Its preview is now its picture. Wearing a model always brings its picture.
+- **"Sync my avatar" sends the right picture.** If the agent wears a model whose picture was never applied, a sync applies that picture instead of re-sending the old one and calling it updated. A picture chosen after the model was worn is kept.
+- **"Apply / equip that avatar" no longer asks who to send it to.** Asking to apply, equip or put on an owned avatar wears the model (or applies the picture) instead of treating it as a send.
+- **Re-syncing the same picture no longer counts as a change**, so it no longer pays for a new on-chain identity update.
+
+## [2.25.763] - 2026-11-07
+
+### Fixed
+- **Asking for diagnostics twice no longer fails the request.** A health check asked for within a minute of the last one (or while one runs) now answers with that run's result instead of an error that stopped the whole multi-step request.
+
 ## [2.25.762] - 2026-11-06
 
 ### Fixed

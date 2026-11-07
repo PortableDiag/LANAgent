@@ -23,6 +23,7 @@ class EnhancedSelfDiagnosticsService {
     this.agent = agent;
     this.isRunning = false;
     this.lastRun = null;
+    this.lastResult = null; // last successful run, reused when asked again within minTimeBetweenRuns
     this.lastNotification = null;
     this.agentApiKey = null;
     this.apiClient = null;
@@ -167,7 +168,22 @@ class EnhancedSelfDiagnosticsService {
       };
     }
     
+    // A person (chat, call, plugin chain) asking while a run is in flight or just
+    // finished gets that run's result. Returning success:false here failed whole
+    // plugin chains on a rate limit (2026-11-06 16:44, owner's call lookup).
+    const interactive = triggeredBy !== 'scheduled';
+
     if (this.isRunning) {
+      if (interactive) {
+        const waitUntil = Date.now() + 120000;
+        while (this.isRunning && Date.now() < waitUntil) {
+          await new Promise(r => setTimeout(r, 1000));
+        }
+        if (!this.isRunning && this.lastResult && this.lastRun) {
+          logger.info('Diagnostics finished while waiting; reusing that run', { service: 'diagnostics' });
+          return { ...this.lastResult, cached: true, ageSeconds: Math.floor((Date.now() - this.lastRun.getTime()) / 1000) };
+        }
+      }
       logger.warn('Diagnostics already running, skipping...', { service: 'diagnostics' });
       return { success: false, error: 'Diagnostics already in progress' };
     }
@@ -175,6 +191,10 @@ class EnhancedSelfDiagnosticsService {
     // Check minimum time between runs
     if (this.lastRun && (Date.now() - this.lastRun.getTime() < this.config.minTimeBetweenRuns)) {
       const secondsSinceLastRun = Math.floor((Date.now() - this.lastRun.getTime()) / 1000);
+      if (interactive && this.lastResult) {
+        logger.info(`Diagnostics ran ${secondsSinceLastRun}s ago - reusing that result`, { service: 'diagnostics' });
+        return { ...this.lastResult, cached: true, ageSeconds: secondsSinceLastRun };
+      }
       logger.info(`Skipping diagnostics - ran ${secondsSinceLastRun}s ago (min: ${this.config.minTimeBetweenRuns / 1000}s)`, { service: 'diagnostics' });
       return { 
         success: false, 
@@ -291,7 +311,7 @@ class EnhancedSelfDiagnosticsService {
       this.lastRun = new Date();
       this.isRunning = false;
 
-      return {
+      this.lastResult = {
         success: true,
         reportId: report._id,
         overallHealth: overallHealth,
@@ -304,6 +324,7 @@ class EnhancedSelfDiagnosticsService {
           warnings: warningTests.length
         }
       };
+      return this.lastResult;
 
     } catch (error) {
       logger.error('Enhanced diagnostics failed:', error, { service: 'diagnostics' });

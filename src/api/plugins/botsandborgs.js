@@ -45,6 +45,12 @@ const DEFAULTS = {
 const AUTO_STICKER_EVERY_MS = Number(process.env.BOTSANDBORGS_STICKER_EVERY_MS) || 20 * 60 * 1000;
 const AUTO_STICKER_ASK_EVERY_MS = 60 * 1000;
 const USES =['avatar', 'send', 'install', 'wear', 'keep'];
+
+/** A model's picture: its portrait, else the store's preview image of it. */
+function modelPicture(item) {
+  const image = (f) => /^image\//.test(f.mime || '') || /\.(png|jpe?g|webp)$/i.test(f.name || '');
+  return item.files.find(f => f.kind === 'portrait' && image(f)) || item.files.find(f => f.kind === 'preview' && image(f)) || null;
+}
 const KIND_WORDS = 'avatar, icon, portrait, sticker, emoji, wallpaper, vrm';
 
 export default class BotsAndBorgsPlugin extends BasePlugin {
@@ -658,17 +664,26 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
   /** Use something already owned. Nothing here costs anything. */
   async useOwned(data = {}) {
     const asked = String(data._context?.originalInput || data.originalInput || '');
-    const as = String(data.as || data.use || (/\b(wear|become)\b|as your (?:3d|vrm)/i.test(asked) ? 'wear' : /\binstall\b/i.test(asked) ? 'install' : /\bas your avatar\b/i.test(asked) ? 'avatar' : 'send')).toLowerCase();
-    const kind = data.kind && data.kind !== 'avatar' ? data.kind : this.kindAsked(asked);
     const item = data.item || data.variant || data.query;
+    let as = String(data.as || data.use || (/\b(wear|become)\b|as your (?:3d|vrm)/i.test(asked) ? 'wear' : /\binstall\b/i.test(asked) ? 'install' : /\bas your avatar\b/i.test(asked) ? 'avatar' : '')).toLowerCase();
+    // "Re-apply/equip the Sentinel avatar", "update your profile picture": becoming it, never a send that asks "Who
+    // should I send it to?" (DELTA 2026-11-06, twice). A model is worn, which brings its picture; a picture is applied.
+    if (!as && !data.to && /\b(avatars?|equip|apply|re-?apply|put on|profile (?:pic(?:ture)?|photo|image)|pfp|look like)\b/i.test(asked)) {
+      as = (await this.pickOwned({ item, kind: 'vrm', kinds: ['vrm'] })) ? 'wear' : 'avatar';
+    }
+    if (!as) as = 'send';
+    const kind = data.kind && data.kind !== 'avatar' ? data.kind : this.kindAsked(asked);
     if (as === 'install' || as === 'wear') return this.useModel({ item, wear: as === 'wear' });
+    if (as === 'avatar' && item && !(await this.pickOwned({ item, kinds: ['portrait', 'icon'] })) && (await this.pickOwned({ item, kind: 'vrm', kinds: ['vrm'] }))) {
+      return this.useModel({ item, wear: true });
+    }
     if (as === 'avatar') {
       const s = await this.settings();
       if (!(await this.avatarChangeAllowed(s))) return { success: false, error: "My avatar is tied to my 3D (VRM) model, so I don't change it." };
       const pick = await this.pickOwned({ item, kind: kind && kind !== 'vrm' ? kind : null, kinds: ['portrait', 'icon'] });
       if (!pick) return { success: false, error: 'I have no picture like that from Bots & Borgs.' };
       const { applyAgentAvatar, describeAvatarServices } = await import('../../services/avatar/applyAgentAvatar.js');
-      const applied = await applyAgentAvatar(this.agent, await this.readOwned(pick), { source: `Bots & Borgs, ${pick.item.variant}` });
+      const applied = await applyAgentAvatar(this.agent, await this.readOwned(pick), { source: `Bots & Borgs, ${pick.item.variant}`, variant: pick.item.variant });
       return { success: true, result: `${pick.item.title} is my avatar now. ${describeAvatarServices(applied.services)}`.trim() };
     }
     if (as !== 'send') return { success: false, error: 'Use it how? As "send", "avatar", "install" or "wear".' };
@@ -720,14 +735,30 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     if (this.agent?.agentModel) this.agent.agentModel.activeVRMModel = entry.id;
     const { pushModelToAvatarX } = await import('../../services/avatar/avatarx.js');
     await pushModelToAvatarX(entry.id).catch(e => this.logger.warn(`botsandborgs: AvatarX not told: ${e.message}`));
-    // The picture follows the model, so the two never disagree. Only when allowed unasked.
-    const portrait = (await this.settings()).autoWear ? pick.item.files.find(f => f.kind === 'portrait') : null;
-    if (portrait) {
+    // The picture follows the model, so the two never disagree. Wearing only happens when asked or allowed unasked
+    // (autoWear), so the picture comes with it either way. A model sold alone has no portrait, only the store's
+    // preview of it: that is its picture (DELTA 2026-11-06 wore Sentinel and kept its old picture everywhere).
+    const picture = modelPicture(pick.item);
+    if (picture) {
       const { applyAgentAvatar, describeAvatarServices } = await import('../../services/avatar/applyAgentAvatar.js');
-      const applied = await applyAgentAvatar(this.agent, await this.readOwned({ item: pick.item, file: portrait }), { source: `Bots & Borgs, ${pick.item.variant}` });
-      return { success: true, result: `${entry.name} is my 3D model now, and its portrait is my avatar. ${describeAvatarServices(applied.services)}`.trim() };
+      const applied = await applyAgentAvatar(this.agent, await this.readOwned({ item: pick.item, file: picture }), { source: `Bots & Borgs, ${pick.item.variant}`, variant: pick.item.variant });
+      return { success: true, result: `${entry.name} is my 3D model now, and its picture is my avatar. ${describeAvatarServices(applied.services)}`.trim() };
     }
-    return { success: true, result: `${entry.name} is my 3D model now.` };
+    return { success: true, result: `${entry.name} is my 3D model now. It came with no picture, so my avatar picture didn't change.` };
+  }
+
+  /** The picture of the Bots & Borgs model this agent wears, for a sync: { variant, title, buffer } or null. */
+  async wornModelPicture() {
+    let id = this.agent?.agentModel?.activeVRMModel;
+    if (id === undefined) {
+      id = (await (await import('../../models/Agent.js')).Agent.findOne({ name: process.env.AGENT_NAME || 'LANAgent' }, { activeVRMModel: 1 }).lean().catch(() => null))?.activeVRMModel;
+    }
+    if (!id || !String(id).startsWith('store-')) return null;
+    const vrmId = (v) => `store-${String(v).toLowerCase().replace(/[^a-z0-9-]+/g, '-')}`;
+    const item = (await this.libraryItems()).find(i => vrmId(i.variant) === id);
+    const file = item && modelPicture(item);
+    if (!file) return null;
+    return { variant: item.variant, title: item.title, buffer: await this.readOwned({ item, file }) };
   }
 
   /**
@@ -805,7 +836,7 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
       if (!pic) return { success: false, error: `${paid} It holds no picture, so my avatar didn't change.` };
       // Everywhere the agent shows a face, not only its own file (owner, 2026-10-28: DELTA's new avatar stayed local).
       const { applyAgentAvatar, describeAvatarServices } = await import('../../services/avatar/applyAgentAvatar.js');
-      const applied = await applyAgentAvatar(this.agent, await this.readOwned({ item, file: pic }), { source: `Bots & Borgs, ${variant}` });
+      const applied = await applyAgentAvatar(this.agent, await this.readOwned({ item, file: pic }), { source: `Bots & Borgs, ${variant}`, variant });
       done = `It is my avatar now. ${describeAvatarServices(applied.services)}`.trim();
     } else if (use === 'send') {
       const who = String(to || '').trim();

@@ -114,6 +114,7 @@ function rig({ download, variantPrice = 1500, vrm = 'nova', slug = 'vrm-mm-bear'
 test('buying a bundle: model in the gallery, stickers and portraits in the library, avatar and active model untouched', async () => {
   const download = await zipOf({ 'Bear/bear.vrm': vrm1(), 'Bear/README.txt': 'licence', 'Bear/preview.png': await png(), 'Bear sticker 1.png': await png(), 'Bear sticker 2.png': await png(), 'Bear portrait 1.png': await png() });
   const { p, store, agent, sent } = rig({ download });
+  store.settings.autoWear = false; // wearing what it buys is the default since 2.25.757; this test is the opt-out
   const r = await p.execute({ action: 'buy', variant: 'vrm-mm-bear-bundle' });
   assert.equal(r.success, true, r.error);
   assert.equal(sent.length, 1);

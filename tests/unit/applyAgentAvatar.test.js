@@ -23,6 +23,8 @@ async function withStubbedDisk(run, { existing = {}, history = [] } = {}) {
   try { return await run({ wrote, removed, updates }); } finally { Object.assign(fs, real); Agent.updateOne = realUpdate; }
 }
 
+const lastPng = (wrote) => wrote.filter(w => /avatar\.png$/.test(w.file)).pop();
+
 const tinyJpeg = async () => {
   const { default: sharp } = await import('sharp');
   return sharp({ create: { width: 8, height: 8, channels: 3, background: '#000' } }).jpeg().toBuffer();
@@ -36,7 +38,7 @@ test('the picture being replaced is kept, in every format it was in', async () =
     assert.equal(kept.length, 2);
     assert.ok(kept.some(w => /avatar-[^/\\]+\.png$/.test(w.file) && w.buf.equals(oldPng)));
     assert.ok(kept.some(w => /avatar-[^/\\]+\.jpg$/.test(w.file) && w.buf.equals(oldJpg)));
-    assert.match(wrote[wrote.length - 1].file, /agent[\/\\]avatar\.png$/, 'the new picture is written after the copies');
+    assert.match(lastPng(wrote).file, /agent[\/\\]avatar\.png$/, 'the new picture is written after the copies');
   }, { existing: { 'avatar.png': oldPng, 'avatar.jpg': oldJpg } });
 });
 
@@ -151,7 +153,7 @@ test('an agent with no identity is not told, and a failed update is reported wit
       const failed = await applyAgentAvatar({ agentModel: { erc8004: { agentId: 1, status: 'active' } } }, await tinyJpeg(), { only: ['identity'] });
       assert.match(failed.services.identity, /not updated: Pinata/);
       assert.match(describeAvatarServices(failed.services), /my on-chain identity not updated/);
-      assert.match(wrote[wrote.length - 1].file, /avatar\.png$/);
+      assert.match(lastPng(wrote).file, /avatar\.png$/);
     }, { existing: { 'avatar.png': Buffer.from('old') } });
   } finally { identity.updateRegistration = realUpdate; }
 });
@@ -174,7 +176,7 @@ test('an oversized picture is cut under the limit the apps accept', async () => 
   assert.ok(noisy.length > 1500 * 1024, 'the sample really is oversized');
   await withStubbedDisk(async ({ wrote }) => {
     await applyAgentAvatar({}, noisy, { only: [] });
-    const out = wrote[wrote.length - 1].buf;
+    const out = lastPng(wrote).buf;
     assert.ok(out.length <= 1500 * 1024, `got ${out.length}`);
     assert.equal((await sharp(out).metadata()).format, 'png');
   });

@@ -24,6 +24,7 @@ import { logger } from '../../utils/logger.js';
 const OTHER_EXTS = ['.jpg', '.jpeg', '.webp', '.gif'];
 const HISTORY_KEEP = 20;
 const MAX_AVATAR_BYTES = 1500 * 1024;
+const SOURCE_FILE = 'avatar-source.json';
 
 /**
  * Copy the avatar about to be replaced into avatar-history, newest 20 kept. A failure here never blocks the change.
@@ -60,17 +61,25 @@ function pluginOf(agent, name) {
  * @param {object} [opts]   { source: 'where it came from, for the log', only: ['telegram', …] to limit the services }
  * @returns {Promise<{ path: string, services: Record<string, string> }>} what each service did
  */
-export async function applyAgentAvatar(agent, buffer, { source = 'a new picture', only = null } = {}) {
-  const { default: sharp } = await import('sharp');
-  // 1024×1024 PNG: Telegram, X and Gravatar all take it, and Trellis shrinks it to 256 itself.
-  let png = await sharp(buffer).rotate().resize(1024, 1024, { fit: 'cover' }).png({ compressionLevel: 9 }).toBuffer();
-  // DialX and TextX refuse a sealed avatar over 2 MB, and say nothing to the user.
-  if (png.length > MAX_AVATAR_BYTES) png = await sharp(png).png({ palette: true, compressionLevel: 9 }).toBuffer();
+export async function applyAgentAvatar(agent, buffer, { source = 'a new picture', only = null, variant = null } = {}) {
   const dir = path.join(DATA_PATH, 'agent');
   await fs.mkdir(dir, { recursive: true });
   const file = path.join(dir, 'avatar.png');
+  // Re-applying avatar.png itself (a sync) keeps its bytes: re-encoding made them differ, so every sync counted as a
+  // change and paid for a new on-chain identity (DELTA 2026-11-06: two setAgentURI txs for the same picture).
+  const current = await fs.readFile(file).catch(() => null);
+  let png = buffer;
+  if (!current?.equals(buffer)) {
+    const { default: sharp } = await import('sharp');
+    // 1024×1024 PNG: Telegram, X and Gravatar all take it, and Trellis shrinks it to 256 itself.
+    png = await sharp(buffer).rotate().resize(1024, 1024, { fit: 'cover' }).png({ compressionLevel: 9 }).toBuffer();
+    // DialX and TextX refuse a sealed avatar over 2 MB, and say nothing to the user.
+    if (png.length > MAX_AVATAR_BYTES) png = await sharp(png).png({ palette: true, compressionLevel: 9 }).toBuffer();
+  }
   const changed = await keepPrevious(dir, png);
   await fs.writeFile(file, png);
+  // Where this picture came from, so a sync can tell whether it still matches the model being worn.
+  await fs.writeFile(path.join(dir, SOURCE_FILE), JSON.stringify({ source, variant, at: new Date().toISOString() })).catch(() => {});
   for (const ext of OTHER_EXTS) await fs.unlink(path.join(dir, `avatar${ext}`)).catch(() => {});
 
   const { Agent } = await import('../../models/Agent.js');
@@ -144,6 +153,39 @@ export async function applyAgentAvatar(agent, buffer, { source = 'a new picture'
 
   logger.info(`Avatar applied from ${source}: ${Object.entries(services).map(([k, v]) => `${k} ${v}`).join(', ') || 'local only'}`);
   return { path: file, services };
+}
+
+/**
+ * "Sync my avatar" / "change your Telegram avatar to your new one": push the agent's picture everywhere again.
+ * When the agent wears a Bots & Borgs model whose picture was never applied (DELTA 2026-11-06: it wore Sentinel, a
+ * model with no portrait, and every sync re-sent the old picture and said "updated"), the model's picture goes out
+ * instead. A picture set after the model was worn is kept.
+ * @returns {Promise<{ path, services, picture: string }>}
+ */
+export async function syncAgentAvatar(agent, { source = 'a sync request' } = {}) {
+  const dir = path.join(DATA_PATH, 'agent');
+  const record = JSON.parse(await fs.readFile(path.join(dir, SOURCE_FILE), 'utf8').catch(() => 'null'));
+  const worn = await pluginOf(agent, 'botsandborgs')?.wornModelPicture?.().catch(e => {
+    logger.warn(`Avatar: could not read the worn model's picture: ${e.message}`);
+    return null;
+  });
+  // Since this record exists, wearing a model always applies its picture, so a newer record is a later, deliberate
+  // choice and is kept. No record = set before that: the worn model's picture wins.
+  if (worn && !record) {
+    logger.info(`Avatar: ${worn.variant} is worn but its picture was not my avatar; applying it`);
+    const applied = await applyAgentAvatar(agent, worn.buffer, { source: `Bots & Borgs, ${worn.variant}`, variant: worn.variant });
+    return { ...applied, picture: `the picture of ${worn.title || worn.variant}, the model I wear` };
+  }
+  const file = path.join(dir, 'avatar.png');
+  let buffer = await fs.readFile(file).catch(() => null);
+  const legacy = agent?.agentModel?.avatarPath;
+  if (!buffer && legacy) {
+    const { DEPLOY_PATH } = await import('../../utils/paths.js');
+    buffer = await fs.readFile(path.isAbsolute(legacy) ? legacy : path.join(DEPLOY_PATH, legacy)).catch(() => null);
+  }
+  if (!buffer) throw new Error("I don't have an avatar set yet. Upload one in Settings > Agent Avatar first.");
+  const applied = await applyAgentAvatar(agent, buffer, { source, variant: record?.variant || null });
+  return { ...applied, picture: record?.variant ? `the picture from ${record.variant}` : 'my current picture' };
 }
 
 /** "Telegram updated, MindSwarm not logged in, …" for a reply to the owner. */

@@ -1979,13 +1979,10 @@ If answering needs information that is not in the conversation above (messages, 
                   await this.memoryManager.storeConversation(context.userId, input, noAvatarMsg, context);
                   return { type: 'text', content: noAvatarMsg };
                 }
-                const path = await import('path');
-                const fsp = await import('fs/promises');
-                const { DEPLOY_PATH } = await import('../utils/paths.js');
-                const fullPath = path.default.isAbsolute(avatarPath) ? avatarPath : path.default.join(DEPLOY_PATH, avatarPath);
-                const { applyAgentAvatar, describeAvatarServices } = await import('../services/avatar/applyAgentAvatar.js');
-                const applied = await applyAgentAvatar(this, await fsp.readFile(fullPath), { source: 'a sync request' });
-                const syncMsg = `Synced my avatar. ${describeAvatarServices(applied.services) || 'No outside service is connected, so only my own copy changed.'}`;
+                // The worn model's picture when it never became the avatar (DELTA 2026-11-06), else the current one.
+                const { syncAgentAvatar, describeAvatarServices } = await import('../services/avatar/applyAgentAvatar.js');
+                const applied = await syncAgentAvatar(this, { source: 'a sync request' });
+                const syncMsg = `Synced my avatar (${applied.picture}). ${describeAvatarServices(applied.services) || 'No outside service is connected, so only my own copy changed.'}`;
                 await this.memoryManager.storeConversation(context.userId, input, syncMsg, context);
                 return { type: 'text', content: syncMsg };
               } catch (error) {

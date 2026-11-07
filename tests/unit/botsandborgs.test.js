@@ -68,7 +68,7 @@ test('"buy yourself an avatar" looks at each one, picks the favorite, pays, and 
   const realWrite = fs.default.writeFile, realUnlink = fs.default.unlink, realMkdir = fs.default.mkdir;
   // Only the agent's own avatar file is caught; the store library writes to its temp folder.
   const isLib = (file) => String(file).includes('bnb-lib-');
-  fs.default.writeFile = async (file, buf) => { if (isLib(file)) return realWrite(file, buf); wrote = { file, buf }; };
+  fs.default.writeFile = async (file, buf) => { if (isLib(file)) return realWrite(file, buf); if (!/avatar-source\.json$/.test(file)) wrote = { file, buf }; };
   fs.default.unlink = async () => {};
   fs.default.mkdir = async (dir, o) => (isLib(dir) ? realMkdir(dir, o) : undefined);
   const { default: sharp } = await import('sharp');

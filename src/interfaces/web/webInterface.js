@@ -2793,8 +2793,8 @@ export class WebInterface {
         }
 
         // The same step a new avatar takes: one avatar.png, pushed to Telegram, MindSwarm, X and Gravatar.
-        const { applyAgentAvatar } = await import('../../services/avatar/applyAgentAvatar.js');
-        const applied = await applyAgentAvatar(this.agent, await fs.readFile(fullPath), { source: 'the web UI sync button' });
+        const { syncAgentAvatar } = await import('../../services/avatar/applyAgentAvatar.js');
+        const applied = await syncAgentAvatar(this.agent, { source: 'the web UI sync button' });
         const results = Object.fromEntries(Object.entries(applied.services).filter(([, v]) => v !== 'not connected')
           .map(([k, v]) => [k, v === 'updated' ? { success: true } : { success: false, error: v }]));
 
