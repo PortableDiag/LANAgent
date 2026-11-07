@@ -318,6 +318,14 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
   }
 
   /**
+   * Picking looks over every model in the store (vision, in batches) and then pays and waits for the store: far past
+   * a plan step's 60 s. Cut off, the step went on and could pay with nobody told (DELTA, 2026-11-07).
+   */
+  stepTimeoutMs(action) {
+    return ['buy', 'use', 'wear', 'useModel', 'useOwned'].includes(action) ? 6 * 60 * 1000 : 0;
+  }
+
+  /**
    * One purchase, start to finish: rules, quote, crypto order, payment from the wallet, the store's confirmation,
    * then the use. Every refusal is said plainly; nothing is sent once any rule fails.
    */

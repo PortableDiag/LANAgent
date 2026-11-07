@@ -2,6 +2,11 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.774] - 2026-11-07
+
+### Fixed
+- **A store purchase in a plan is no longer cut off at 60 seconds.** Picking a model means looking over the whole store first, so a plan step that bought one timed out and the request failed, while the cut-off step went on in the background. A plugin can now give a slow action more time (store buys and wears get 6 minutes).
+
 ## [2.25.773] - 2026-11-07
 
 ### Fixed

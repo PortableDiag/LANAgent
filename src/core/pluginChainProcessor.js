@@ -71,6 +71,19 @@ export class PluginChainProcessor {
   }
 
   /**
+   * A step's time limit. A plugin whose action is slow by nature (looking over a whole store before paying)
+   * declares stepTimeoutMs(action); the chain gives it that, never less than the default. A step cut off
+   * mid-run keeps going in the background, so a buy cut at 60 s could still pay with nobody told.
+   */
+  stepTimeoutFor(step) {
+    try {
+      const plugin = this.agent?.apiManager?.getPlugin?.(step.plugin) || this.agent?.apiManager?.apis?.get?.(step.plugin)?.instance;
+      const asked = typeof plugin?.stepTimeoutMs === 'function' ? Number(plugin.stepTimeoutMs(step.action)) : 0;
+      return Number.isFinite(asked) && asked > this.stepTimeout ? asked : this.stepTimeout;
+    } catch { return this.stepTimeout; }
+  }
+
+  /**
    * Parse chain analysis response with optional schema validation
    */
   parseChainAnalysis(text) {
@@ -399,7 +412,7 @@ Analyze the request:`;
         // Set timeout for this step
         const stepPromise = this.executeStep(step, sharedData, context);
         const timeoutPromise = new Promise((_, reject) => 
-          setTimeout(() => reject(new Error(`Step ${stepNumber} timeout`)), this.stepTimeout)
+          setTimeout(() => reject(new Error(`Step ${stepNumber} timeout`)), this.stepTimeoutFor(step))
         );
 
         const stepResult = await Promise.race([stepPromise, timeoutPromise]);

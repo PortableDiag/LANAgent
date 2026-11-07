@@ -1,13 +1,14 @@
 {
   "name": "lan-agent",
-  "version": "2.25.773",
+  "version": "2.25.774",
   "description": "AI-powered personal assistant agent for home server management",
   "type": "module",
   "main": "src/index.js",
   "scripts": {
     "start": "node src/index.js",
     "dev": "node --watch src/index.js",
-    "test": "jest",
+    "test": "npm run test:unit",
+    "test:unit": "node --test --test-force-exit tests/unit/*.test.js",
     "test:framework": "node tests/run-tests.js",
     "test:selfmod": "node -e \"console.log('Self-modification testing via TestFramework')\"",
     "test:crypto": "node test/crypto/runTestnetTests.js",
