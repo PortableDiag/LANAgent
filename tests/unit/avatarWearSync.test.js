@@ -107,3 +107,20 @@ test('a picture chosen after the model was worn is kept by a sync', async () => 
   assert.equal(r.picture, 'my current picture');
   assert.ok(await red(path.join(agentDir, 'avatar.png')) < 30);
 });
+
+test('a wide preview sheet is cut to its first figure (the front view), squared on its own background', async () => {
+  const { portraitFromPreview } = await import('../../src/services/store/assetLibrary.js');
+  const box = (r, w, h) => ({ input: { create: { width: w, height: h, channels: 3, background: { r, g: 0, b: 0 } } } });
+  const sheet = await sharp({ create: { width: 1600, height: 1000, channels: 3, background: { r: 27, g: 27, b: 35 } } })
+    .composite([{ ...box(250, 280, 620), left: 70, top: 220 }, { ...box(120, 260, 560), left: 470, top: 250 }, { ...box(60, 280, 600), left: 820, top: 230 }])
+    .png().toBuffer();
+  const out = await portraitFromPreview(sheet);
+  const { width, height } = await sharp(out).metadata();
+  assert.equal(width, height);
+  const { data, info } = await sharp(out).raw().toBuffer({ resolveWithObject: true });
+  const count = (r) => { let n = 0; for (let i = 0; i < data.length; i += info.channels) if (data[i] === r && data[i + 1] === 0) n++; return n; };
+  assert.equal(count(250), 280 * 620, 'the whole front figure');
+  assert.equal(count(120) + count(60), 0, 'none of the other views');
+  const narrow = await pic(100);
+  assert.equal(await portraitFromPreview(narrow), narrow, 'a square picture is left alone');
+});

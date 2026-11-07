@@ -2,6 +2,11 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.765] - 2026-11-07
+
+### Fixed
+- **A model's avatar shows its front.** A store preview is a wide sheet of several views; the avatar is now the first one (the front view) on its own, squared on the sheet's background, instead of a centre crop that showed the model from behind.
+
 ## [2.25.764] - 2026-11-07
 
 ### Fixed

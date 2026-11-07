@@ -6,7 +6,7 @@ import { PluginSettings } from '../../models/PluginSettings.js';
 import { encrypt, decrypt } from '../../utils/encryption.js';
 import fs from 'node:fs/promises';
 import { DATA_PATH } from '../../utils/paths.js';
-import { variantKind, unpack, installVrm, addToManifest, readVrmInfo, safeName, toStickerWebp, moodOf } from '../../services/store/assetLibrary.js';
+import { variantKind, unpack, installVrm, addToManifest, readVrmInfo, safeName, toStickerWebp, moodOf, portraitFromPreview } from '../../services/store/assetLibrary.js';
 import { moodChoices, chooseSticker, stickerCouldFit, wallpaperFor } from '../../services/store/selfUse.js';
 
 /**
@@ -741,7 +741,7 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     const picture = modelPicture(pick.item);
     if (picture) {
       const { applyAgentAvatar, describeAvatarServices } = await import('../../services/avatar/applyAgentAvatar.js');
-      const applied = await applyAgentAvatar(this.agent, await this.readOwned({ item: pick.item, file: picture }), { source: `Bots & Borgs, ${pick.item.variant}`, variant: pick.item.variant });
+      const applied = await applyAgentAvatar(this.agent, await this.pictureBytes(pick.item, picture), { source: `Bots & Borgs, ${pick.item.variant}`, variant: pick.item.variant });
       return { success: true, result: `${entry.name} is my 3D model now, and its picture is my avatar. ${describeAvatarServices(applied.services)}`.trim() };
     }
     return { success: true, result: `${entry.name} is my 3D model now. It came with no picture, so my avatar picture didn't change.` };
@@ -758,7 +758,13 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     const item = (await this.libraryItems()).find(i => vrmId(i.variant) === id);
     const file = item && modelPicture(item);
     if (!file) return null;
-    return { variant: item.variant, title: item.title, buffer: await this.readOwned({ item, file }) };
+    return { variant: item.variant, title: item.title, buffer: await this.pictureBytes(item, file) };
+  }
+
+  /** A model's picture as avatar bytes: a portrait as is, a preview sheet cut to its front view. */
+  async pictureBytes(item, file) {
+    const bytes = await this.readOwned({ item, file });
+    return file.kind === 'preview' ? portraitFromPreview(bytes).catch(() => bytes) : bytes;
   }
 
   /**

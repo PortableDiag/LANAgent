@@ -179,3 +179,45 @@ export async function toStickerWebp(buffer) {
   const { default: sharp } = await import('sharp');
   return sharp(buffer).resize(512, 512, { fit: 'inside' }).webp({ quality: 90 }).toBuffer();
 }
+
+/**
+ * A square avatar from a model's store preview. A preview is a wide turnaround sheet (front, three-quarter, back, …,
+ * with the name top left), and a centre crop of it showed the model from behind (DELTA's Sentinel, 2026-11-07).
+ * The first figure from the left is the front view: crop a square around it. A preview that is not wide is returned as is.
+ */
+export async function portraitFromPreview(buffer) {
+  const { default: sharp } = await import('sharp');
+  const img = sharp(buffer).rotate();
+  const { width: W, height: H } = await img.metadata();
+  if (!W || !H || W / H < 1.25) return buffer;
+  const { data, info } = await img.clone().removeAlpha().raw().toBuffer({ resolveWithObject: true });
+  const ch = info.channels;
+  const px = (x, y) => (y * W + x) * ch;
+  const bg = [0, 1, 2].map(c => data[px(W - 1, H - 1) + c]);
+  const ink = (x, y) => { const i = px(x, y); return Math.abs(data[i] - bg[0]) + Math.abs(data[i + 1] - bg[1]) + Math.abs(data[i + 2] - bg[2]) > 40; };
+  const top = Math.floor(H * 0.12); // below the name label
+  const colInk = (x) => { let n = 0; for (let y = top; y < H; y += 2) if (ink(x, y)) n++; return n; };
+  const minInk = Math.max(3, Math.floor((H - top) / 2 * 0.05));
+  let x0 = -1, x1 = -1;
+  for (let x = 0; x < W; x++) {
+    const on = colInk(x) >= minInk;
+    if (on && x0 < 0) x0 = x;
+    if (!on && x0 >= 0) { x1 = x - 1; break; }
+  }
+  if (x0 < 0) return buffer;
+  if (x1 < 0) x1 = W - 1;
+  let y0 = H, y1 = -1;
+  for (let y = top; y < H; y++) for (let x = x0; x <= x1; x += 2) if (ink(x, y)) { if (y < y0) y0 = y; if (y > y1) y1 = y; break; }
+  if (y1 < 0) return buffer;
+  // The figure alone (never a slice of its neighbour), then padded to a square in the sheet's own background.
+  let next = W;
+  for (let x = x1 + 1; x < W; x++) if (colInk(x) >= minInk) { next = x; break; }
+  const m = Math.round(Math.max(x1 - x0, y1 - y0) * 0.08);
+  const left = Math.max(0, x0 - m), right = Math.min(W - 1, x1 + m, Math.floor((x1 + next) / 2));
+  const up = Math.max(top, y0 - m), down = Math.min(H - 1, y1 + m);
+  const w = right - left + 1, h = down - up + 1, side = Math.max(w, h);
+  const padX = side - w, padY = side - h;
+  return sharp(buffer).rotate().extract({ left, top: up, width: w, height: h })
+    .extend({ left: Math.floor(padX / 2), right: Math.ceil(padX / 2), top: Math.floor(padY / 2), bottom: Math.ceil(padY / 2), background: { r: bg[0], g: bg[1], b: bg[2] } })
+    .png().toBuffer();
+}
