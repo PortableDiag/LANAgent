@@ -216,3 +216,15 @@ test('"apply the avatar you bought" with no name wears the newest model, never a
     assert.equal(agent.agentModel.activeVRMModel, 'store-vrm-pilot-white-bundle');
   }
 });
+
+test('"the avatar you just bought" names no product: it means the newest one', async () => {
+  const { isGenericItem } = await import('../../src/api/plugins/botsandborgs.js');
+  for (const t of ['the avatar you just bought', 'your new model', 'it', 'the one you just got', 'latest avatar pack']) assert.equal(isGenericItem(t), true, t);
+  for (const t of ['Sentinel', 'the pilot white model', 'racer blue']) assert.equal(isGenericItem(t), false, t);
+  const { p, agent } = await rig();
+  await p.execute({ action: 'buy', variant: 'vrm-overseer-sentinel' });
+  agent.agentModel.activeVRMModel = 'nova';
+  const r = await p.execute({ action: 'use', as: 'wear', item: 'the avatar you just bought' });
+  assert.equal(r.success, true, r.error);
+  assert.equal(agent.agentModel.activeVRMModel, 'store-vrm-overseer-sentinel');
+});

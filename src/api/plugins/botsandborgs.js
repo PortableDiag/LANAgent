@@ -46,6 +46,18 @@ const AUTO_STICKER_EVERY_MS = Number(process.env.BOTSANDBORGS_STICKER_EVERY_MS) 
 const AUTO_STICKER_ASK_EVERY_MS = 60 * 1000;
 const USES =['avatar', 'send', 'install', 'wear', 'keep'];
 
+/**
+ * "the avatar you just bought", "your new model", "it": words that name no product, only the latest purchase
+ * (DELTA 2026-11-07: "I don't own a model like that" for "wear the avatar you just bought").
+ */
+export function isGenericItem(item) {
+  const generic = new Set(['the', 'a', 'an', 'my', 'your', 'you', 'yours', 'model', 'vrm', '3d', 'avatar', 'avatars', 'pack', 'kit', 'bundle',
+    'just', 'bought', 'buy', 'purchased', 'got', 'get', 'new', 'newest', 'latest', 'last', 'recent', 'recently', 'one', 'it', 'that', 'this',
+    'and', 'apply', 'wear', 'use', 'everywhere', 'now', 'i', 'we', 'have', 'own', 'owned', 'picture', 'pic', 'portrait', 'look', 'skin', 'character']);
+  const words = String(item || '').toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
+  return words.length > 0 && words.every(w => generic.has(w));
+}
+
 /** A model's picture: its portrait, else the store's preview image of it. */
 function modelPicture(item) {
   const image = (f) => /^image\//.test(f.mime || '') || /\.(png|jpe?g|webp)$/i.test(f.name || '');
@@ -701,8 +713,9 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     if (as === 'avatar') {
       const s = await this.settings();
       if (!(await this.avatarChangeAllowed(s))) return { success: false, error: "My avatar is tied to my 3D (VRM) model, so I don't change it." };
-      let pick = item ? await this.pickOwned({ item, kind: kind && kind !== 'vrm' ? kind : null, kinds: ['portrait', 'icon'] }) : null;
-      if (!item) {
+      const named = item && !isGenericItem(item) ? item : undefined;
+      let pick = named ? await this.pickOwned({ item: named, kind: kind && kind !== 'vrm' ? kind : null, kinds: ['portrait', 'icon'] }) : null;
+      if (!named) {
         const newest = (await this.libraryItems()).find(i => i.files.some(f => ['portrait', 'icon'].includes(f.kind)));
         if (newest) pick = { item: newest, file: newest.files.find(f => ['portrait', 'icon'].includes(f.kind)) };
       }
@@ -751,6 +764,7 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
   async useModel({ item, wear }) {
     // No model named = the one bought last (the library is newest first). A random pick among owned models put
     // DELTA back in Racer Blue a second after it bought and wore Pilot White (2026-11-07, a plan's "apply it" step).
+    if (item && isGenericItem(item)) item = undefined;
     let pick = item ? await this.pickOwned({ item, kind: 'vrm', kinds: ['vrm'] }) : null;
     if (!item) {
       const newest = (await this.libraryItems()).find(i => i.files.some(f => f.kind === 'vrm'));

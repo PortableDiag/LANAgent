@@ -2,6 +2,11 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.771] - 2026-11-07
+
+### Fixed
+- **"Wear the avatar you just bought" works.** An item described only in general words ("the one you just bought", "your new model") means the newest purchase, instead of "I don't own a model like that".
+
 ## [2.25.770] - 2026-11-07
 
 ### Fixed
