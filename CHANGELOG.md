@@ -2,6 +2,11 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.759] - 2026-11-06
+
+### Changed
+- **The phone's voice is the last resort on calls.** While realtime is being retried, DialX's own fillers stay silent (`hold_fillers`, DialX 0.7.123). A spoken line now tries every voice the agent has before it goes to the phone: on a call that has been realtime, the call's own voice comes first, so a drop doesn't change who the caller hears.
+
 ## [2.25.758] - 2026-11-06
 
 ### Changed

@@ -434,7 +434,7 @@ export class DialXRealtime {
         const fresh = early && Date.now() - early.at < 100000 ? early : await this.mint(s, { name, owner, limitS }, n);
         if (s.done) return;
         const { secret, expiresAt, voice, model } = fresh;
-        const r = await this.tool(s, 'dialx.realtime', { client_secret: secret, expires_at: expiresAt, model });
+        const r = await this.tool(s, 'dialx.realtime', { client_secret: secret, expires_at: expiresAt, model, hold_fillers: true });
         if (!r.ok) throw new Error(`dialx.realtime ${r.error?.code || 'failed'}`);
         s.realtime = 'offered';
         this.logger.info?.(`DialX: call ${s.id} offered realtime (${model}, ${voice}${n > 1 ? `, backup ${n - 1}` : ''}${fresh === early ? ', secret minted while ringing' : ''}${n > 1 ? `, try ${n}/${this.attempts}` : ''})`);

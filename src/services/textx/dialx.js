@@ -540,10 +540,46 @@ export function thereminMode(asked) {
   return /mix|behind|background|under/.test(q) ? 'mix' : 'voice';
 }
 
-export async function agentAudio(agent, device, text, settings, logger = console) {
+/**
+ * The owner, 2026-11-06: the phone's voice is the last resort, so a line tries every voice the agent has first. On a call
+ * that has been realtime, its own voice comes first so a drop doesn't change who the caller hears (1.3-1.9 s, against
+ * Ara's 0.8-1.4 s on call 125). Then the chosen profile, the realtime voice, and TTS with no profile. Each gets ttsTimeoutMs.
+ */
+export async function agentAudio(agent, device, text, settings, logger = console, { callVoiceFirst = false, budgetMs = 0 } = {}) {
+  if (settings.voice !== 'agent') return null;
+  const formats = device?.audioFormats || [];
+  if (formats.length && !formats.includes('mp3')) return profileAudio(agent, device, text, settings, logger);
+  const callVoice = async (set) => {
+    if (!set.realtimeVoice) return null;
+    const r = await withTimeout(realtimeVoiceAudio(text, { voice: set.realtimeVoice, maxBytes: device?.maxAudioBytes || 262144 }), set.ttsTimeoutMs).catch(() => null);
+    return r?.audio_b64 ? { audio_b64: r.audio_b64, format: r.format || 'mp3' } : null;
+  };
+  const named = settings.voiceProfile && agent?.ttsService?.findVoiceProfile?.(settings.voiceProfile);
+  const tries = [
+    ...(callVoiceFirst && !settings.effect ? [['the call voice', callVoice]] : []),
+    ['the chosen voice', (set) => profileAudio(agent, device, text, set, logger)],
+    ...(callVoiceFirst || settings.effect ? [] : [['the call voice', callVoice]]),
+    ...(named ? [['the default voice', (set) => profileAudio(agent, device, text, { ...set, voiceProfile: null }, logger)]] : [])
+  ];
+  const started = Date.now();
+  for (const [i, [name, voice]] of tries.entries()) {
+    // A caller with a deadline (voicemail: DialX waits 8 s) shares it across the tries.
+    const left = budgetMs ? budgetMs - (Date.now() - started) : Infinity;
+    if (left <= 0) break;
+    const audio = await voice({ ...settings, ttsTimeoutMs: Math.min(settings.ttsTimeoutMs, left) });
+    if (audio) {
+      if (i > 0) logger.info?.(`DialX: speaking with ${name} after ${i} failed`);
+      return audio;
+    }
+  }
+  logger.info?.("DialX: every voice failed; speaking with the phone's voice");
+  return null;
+}
+
+async function profileAudio(agent, device, text, settings, logger) {
   if (settings.voice !== 'agent') return null;
   const tts = agent?.ttsService;
-  const why = (r) => { logger.info?.(`DialX: speaking with the phone's voice (${r})`); return null; };
+  const why = (r) => { logger.info?.(`DialX: agent voice failed (${r})`); return null; };
   if (!tts?.generateSpeech) return why('no TTS on this agent');
   const formats = device?.audioFormats || [];
   if (formats.length && !formats.includes('mp3')) return why(`the phone plays ${formats.join(', ')}, not mp3`);
@@ -1057,7 +1093,7 @@ export class DialXCalls {
     // A caller with a deadline (voicemail: DialX waits 8 s) caps the agent voice; past it the phone speaks.
     const settings = ttsTimeoutMs ? { ...base, ttsTimeoutMs: Math.min(base.ttsTimeoutMs || ttsTimeoutMs, ttsTimeoutMs) } : base;
     const v0 = Date.now();
-    const audio = await agentAudio(this.agent, s.device, text, s.effect ? { ...settings, effect: s.effect } : settings, this.logger);
+    const audio = await agentAudio(this.agent, s.device, text, s.effect ? { ...settings, effect: s.effect } : settings, this.logger, { callVoiceFirst: !!s.everLive, budgetMs: ttsTimeoutMs || 0 });
     if (audio) this.logger.info?.(`DialX: call ${s.id} voice ${Date.now() - v0} ms`);
     return audio;
   }

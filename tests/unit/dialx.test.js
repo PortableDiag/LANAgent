@@ -11,7 +11,7 @@ import { newPairing, sealJson, openJson, ulid, P2A, A2P } from '../../src/servic
 import { TextXHub } from '../../src/services/textx/textxHub.js';
 import { memoryStore } from '../../src/services/textx/textxStore.js';
 import { createTransport } from '../../src/services/textx/textxTransport.js';
-import { memoryCallStore, isoWithOffset, parseTurn, CALL_SESSION, DIALX_TOOLS, splitMessage, DialXCalls } from '../../src/services/textx/dialx.js';
+import { agentAudio, memoryCallStore, isoWithOffset, parseTurn, CALL_SESSION, DIALX_TOOLS, splitMessage, DialXCalls } from '../../src/services/textx/dialx.js';
 import DialXPlugin, { briefsFor } from '../../src/api/plugins/dialx.js';
 
 process.env.OWNER_NAME = process.env.OWNER_NAME || 'Pat';
@@ -1460,4 +1460,35 @@ test('a long call report goes whole, in several messages, and only the first is 
   assert.ok(told.slice(1).every(x => x.o.urgent === false));
   assert.match(told[0].t, new RegExp(`\\(1/${parts.length}\\)$`));
   assert.match(told.at(-1).t, /line 299/);
+});
+
+test('a line tries every voice before the phone, the call voice first once the call has been realtime', async () => {
+  const realFetch = globalThis.fetch, key = process.env.OPENAI_API_KEY;
+  process.env.OPENAI_API_KEY = 'sk-test';
+  const asked = [];
+  let openaiUp = true, profileUp = true;
+  globalThis.fetch = async (url, init) => { asked.push(`call:${JSON.parse(init.body).voice}`); return openaiUp ? { ok: true, arrayBuffer: async () => new TextEncoder().encode('clip').buffer } : { ok: false }; };
+  const agent = { ttsService: {
+    findVoiceProfile: (n) => n ? { provider: 'x', voice: n } : null,
+    generateSpeech: async (t, o) => { asked.push(o.voice ? `profile:${o.voice}` : 'default'); if (o.voice && !profileUp) throw new Error('down'); return { buffer: Buffer.from('clip') }; } } };
+  const device = { audioFormats: ['mp3'] };
+  const set = { voice: 'agent', voiceProfile: 'Ara', realtimeVoice: 'marin', ttsTimeoutMs: 200 };
+  try {
+    assert.ok(await agentAudio(agent, device, 'hi', set, quiet, { callVoiceFirst: true }));
+    assert.deepEqual(asked.splice(0), ['call:marin'], 'stays in the call voice');
+    assert.ok(await agentAudio(agent, device, 'hi', set, quiet));
+    assert.deepEqual(asked.splice(0), ['profile:Ara'], 'the chosen voice before any realtime');
+    openaiUp = false;
+    assert.ok(await agentAudio(agent, device, 'hi', set, quiet, { callVoiceFirst: true }));
+    assert.deepEqual(asked.splice(0), ['call:marin', 'profile:Ara']);
+    profileUp = false;
+    assert.ok(await agentAudio(agent, device, 'hi', set, quiet));
+    assert.deepEqual(asked.splice(0), ['profile:Ara', 'call:marin', 'default'], 'all tried, the last one speaks');
+    agent.ttsService.generateSpeech = async () => { asked.push('tts'); throw new Error('down'); };
+    assert.equal(await agentAudio(agent, device, 'hi', set, quiet), null, 'only then the phone');
+    assert.equal(asked.length, 3);
+  } finally {
+    globalThis.fetch = realFetch;
+    if (key === undefined) delete process.env.OPENAI_API_KEY; else process.env.OPENAI_API_KEY = key;
+  }
 });

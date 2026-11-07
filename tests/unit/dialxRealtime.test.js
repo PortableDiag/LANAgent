@@ -35,7 +35,7 @@ test('the session is fixed on ALICE: the phone gets only a short-lived secret, n
   assert.deepEqual(fetched[0].body.session.reasoning, { effort: 'low' });
   assert.equal(fetched[0].body.session.tools[0].name, 'hang_up');
   assert.equal(fetched[0].body.session.audio.output.voice, 'coral', 'the owner\'s realtimeVoice setting');
-  assert.deepEqual(tools[0], { name: 'dialx.realtime', args: { call_id: '30', client_secret: 'ek_123', expires_at: 1790000000, model: 'gpt-realtime-2.1' } });
+  assert.deepEqual(tools[0], { name: 'dialx.realtime', args: { call_id: '30', client_secret: 'ek_123', expires_at: 1790000000, model: 'gpt-realtime-2.1', hold_fillers: true } });
   assert.ok(!JSON.stringify(tools).includes('sk-test'));
   assert.equal(s.realtime, 'offered');
 });
@@ -746,4 +746,10 @@ test('each failed try moves to the next backup, and only the 6th falls to the ph
   assert.deepEqual(minted, realtimeChain('marin'));
   assert.deepEqual(offered, minted.map(m => m.model), 'the phone is told the model that was minted');
   assert.match(warned.at(-1), /after 6 tries, using turns/);
+});
+
+test('every offer asks DialX to hold its fillers (0.7.123)', async () => {
+  const { rt, tools } = rig();
+  await rt.begin(session(), { name: 'ALICE', owner: 'Pat', limitS: 300 });
+  assert.equal(tools.find(t => t.name === 'dialx.realtime').args.hold_fillers, true);
 });
