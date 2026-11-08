@@ -8299,7 +8299,7 @@ When the rate limit is exceeded, you'll receive:
   - Response adds `services`: `{ telegram, mindswarm, twitter, gravatar }` → `updated` | `not connected` | `not logged in` | `not updated: <reason>`
 - **GET** `/api/agent/identity` - Get agent identity card (auth required)
   - Returns: name, version, avatar URL, avatarDescription, personality, pluginCount, capabilities, interfaces
-- **POST** `/api/agent/avatar/sync` - Push the current avatar to every connected service (Telegram bot photo, MindSwarm, X, Gravatar) (auth required)
+- **POST** `/api/agent/avatar/sync` - Push the current avatar to every connected service (Telegram bot photo, MindSwarm, X, Gravatar). An agent wearing a store model gets that model's picture (auth required)
   - Same step as an upload; also available as the natural-language request "sync your avatar everywhere"
   - Returns `{ success, results: { <service>: { success, error? } } }` for each connected service
 
