@@ -171,6 +171,12 @@ export default class HuggingFacePlugin extends BasePlugin {
       return { success: false, error: 'Action is required. Available: ' + this.commands.map(c => c.command).join(', ') };
     }
 
+    // Customers send the words as `text` (or prompt/input/query) as often as `inputs` (gateway call 2026-11-09).
+    if (data.inputs == null) {
+      const alias = ['text', 'prompt', 'input', 'query', 'sentence'].find(k => data[k] != null);
+      if (alias) { data.inputs = data[alias]; delete data[alias]; }
+    }
+
     // Lazy-load credentials if initialize() wasn't called
     if (!this.config.apiKey) {
       try {

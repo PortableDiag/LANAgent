@@ -157,14 +157,18 @@ export default class NASAPlugin extends BasePlugin {
     try {
       logger.info('Fetching Astronomy Picture of the Day');
       const response = await retryOperation(
-        () => axios.get(`${this.baseUrl}planetary/apod?api_key=${this.apiKey}`),
-        { retries: 3, context: 'apod' }
+        () => axios.get(`${this.baseUrl}planetary/apod?api_key=${this.apiKey}`, { timeout: 20000 }),
+        { retries: 1, context: 'apod' }
       );
       this.cache.set(cacheKey, response.data);
       return { success: true, data: response.data };
     } catch (error) {
       logger.error('Error fetching APOD:', error.message);
-      return { success: false, error: 'Failed to fetch Astronomy Picture of the Day' };
+      // NASA's APOD API answered 503 to every key, its own DEMO_KEY too, on 2026-11-09: say so instead of a bare failure.
+      const status = error.response?.status;
+      return { success: false, error: status >= 500
+        ? `NASA's Astronomy Picture of the Day service is down (HTTP ${status} from api.nasa.gov); try again later`
+        : `Failed to fetch Astronomy Picture of the Day: ${error.message}` };
     }
   }
 
@@ -425,6 +429,10 @@ export default class NASAPlugin extends BasePlugin {
    * @param {string} endDate - The end date in YYYY-MM-DD format.
    */
   async getNeo(startDate, endDate) {
+    // No dates means today (NASA's feed takes at most 7 days); a lone start date means that one day.
+    const today = new Date().toISOString().slice(0, 10);
+    startDate = startDate || endDate || today;
+    endDate = endDate || startDate;
     this.validateParams({ startDate, endDate }, {
       startDate: { required: true, type: 'string' },
       endDate: { required: true, type: 'string' }

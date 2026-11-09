@@ -179,7 +179,7 @@ export default class WeatherstackPlugin extends BasePlugin {
 
     try {
       const url = `${this.config.baseUrl}/current?access_key=${this.config.apiKey}&query=${encodeURIComponent(location)}`;
-      const response = await retryOperation(() => axios.get(url), { retries: 3, context: 'getCurrentWeather' });
+      const response = await retryOperation(() => axios.get(url), { retries: 1, context: 'getCurrentWeather' });
 
       const data = response.data;
       if (data.error) {
@@ -187,8 +187,8 @@ export default class WeatherstackPlugin extends BasePlugin {
       }
       return { success: true, data };
     } catch (error) {
-      this.logger.error('getCurrentWeather error:', error);
-      return { success: false, error: error.message };
+      this.logger.error('getCurrentWeather error:', error.message);
+      return await this.viaOpenMeteo('current', { location }, error);
     }
   }
 
@@ -221,7 +221,7 @@ export default class WeatherstackPlugin extends BasePlugin {
 
     try {
       const url = `${this.config.baseUrl}/historical?access_key=${this.config.apiKey}&query=${encodeURIComponent(location)}&historical_date=${encodeURIComponent(date)}`;
-      const response = await retryOperation(() => axios.get(url), { retries: 3, context: 'getHistoricalWeather' });
+      const response = await retryOperation(() => axios.get(url), { retries: 1, context: 'getHistoricalWeather' });
 
       const data = response.data;
       if (data.error) {
@@ -229,23 +229,24 @@ export default class WeatherstackPlugin extends BasePlugin {
       }
       return { success: true, data };
     } catch (error) {
-      this.logger.error('getHistoricalWeather error:', error);
-      return { success: false, error: error.message };
+      this.logger.error('getHistoricalWeather error:', error.message);
+      return await this.viaOpenMeteo('historical', { location, date }, error);
     }
   }
 
   /**
    * New feature: Retrieve weather forecast data
    */
-  async getWeatherForecast({ location, days }) {
+  async getWeatherForecast({ location, days = 3 }) {
     this.validateParams({ location, days }, {
       location: { required: true, type: 'string' },
       days: { required: true, type: 'number' }
     });
+    days = Math.max(1, Math.min(16, Number(days) || 3));
 
     try {
       const url = `${this.config.baseUrl}/forecast?access_key=${this.config.apiKey}&query=${encodeURIComponent(location)}&forecast_days=${encodeURIComponent(days)}`;
-      const response = await retryOperation(() => axios.get(url), { retries: 3, context: 'getWeatherForecast' });
+      const response = await retryOperation(() => axios.get(url), { retries: 1, context: 'getWeatherForecast' });
 
       const data = response.data;
       if (data.error) {
@@ -253,8 +254,50 @@ export default class WeatherstackPlugin extends BasePlugin {
       }
       return { success: true, data };
     } catch (error) {
-      this.logger.error('getWeatherForecast error:', error);
-      return { success: false, error: error.message };
+      this.logger.error('getWeatherForecast error:', error.message);
+      return await this.viaOpenMeteo('forecast', { location, days }, error);
+    }
+  }
+
+  /**
+   * Open-Meteo (free, no key) answers when Weatherstack does not: on 2026-11-09 Weatherstack refused the configured key
+   * (401) and every paid weather call failed. The answer keeps Weatherstack's shape (location, current.temperature,
+   * current.weather_descriptions, forecast / historical by date), so callers and the gateway see no difference but `source`.
+   */
+  async viaOpenMeteo(kind, { location, date, days = 3 }, cause) {
+    const WMO = { 0: 'Clear sky', 1: 'Mainly clear', 2: 'Partly cloudy', 3: 'Overcast', 45: 'Fog', 48: 'Depositing rime fog',
+      51: 'Light drizzle', 53: 'Drizzle', 55: 'Dense drizzle', 56: 'Freezing drizzle', 57: 'Dense freezing drizzle',
+      61: 'Light rain', 63: 'Rain', 65: 'Heavy rain', 66: 'Freezing rain', 67: 'Heavy freezing rain',
+      71: 'Light snow', 73: 'Snow', 75: 'Heavy snow', 77: 'Snow grains', 80: 'Light rain showers', 81: 'Rain showers',
+      82: 'Violent rain showers', 85: 'Snow showers', 86: 'Heavy snow showers', 95: 'Thunderstorm', 96: 'Thunderstorm with hail', 99: 'Thunderstorm with heavy hail' };
+    try {
+      const geo = (await axios.get('https://geocoding-api.open-meteo.com/v1/search', { params: { name: String(location).split(',')[0].trim(), count: 1 }, timeout: 15000 })).data?.results?.[0];
+      if (!geo) return { success: false, error: `No place called '${location}' was found` };
+      const place = { name: geo.name, country: geo.country, region: geo.admin1, lat: String(geo.latitude), lon: String(geo.longitude), timezone_id: geo.timezone };
+      const daily = 'weather_code,temperature_2m_max,temperature_2m_min,precipitation_sum,wind_speed_10m_max';
+      const common = { latitude: geo.latitude, longitude: geo.longitude, timezone: 'auto' };
+      const dayRows = (d) => Object.fromEntries((d?.time || []).map((day, i) => [day, {
+        date: day, maxtemp: d.temperature_2m_max[i], mintemp: d.temperature_2m_min[i], totalprecip: d.precipitation_sum[i],
+        maxwind: d.wind_speed_10m_max[i], weather_descriptions: [WMO[d.weather_code[i]] || `Code ${d.weather_code[i]}`] }]));
+      let data;
+      if (kind === 'current') {
+        const c = (await axios.get('https://api.open-meteo.com/v1/forecast', { params: { ...common,
+          current: 'temperature_2m,relative_humidity_2m,apparent_temperature,weather_code,wind_speed_10m,wind_direction_10m,pressure_msl,precipitation,cloud_cover,is_day' }, timeout: 15000 })).data.current;
+        data = { location: place, current: { observation_time: c.time, temperature: c.temperature_2m, feelslike: c.apparent_temperature,
+          humidity: c.relative_humidity_2m, wind_speed: c.wind_speed_10m, wind_degree: c.wind_direction_10m, pressure: c.pressure_msl,
+          precip: c.precipitation, cloudcover: c.cloud_cover, is_day: c.is_day ? 'yes' : 'no',
+          weather_code: c.weather_code, weather_descriptions: [WMO[c.weather_code] || `Code ${c.weather_code}`] } };
+      } else if (kind === 'forecast') {
+        const d = (await axios.get('https://api.open-meteo.com/v1/forecast', { params: { ...common, daily, forecast_days: Math.max(1, Math.min(16, Number(days) || 3)) }, timeout: 15000 })).data.daily;
+        data = { location: place, forecast: dayRows(d) };
+      } else if (kind === 'historical') {
+        const d = (await axios.get('https://archive-api.open-meteo.com/v1/archive', { params: { ...common, daily, start_date: date, end_date: date }, timeout: 15000 })).data.daily;
+        data = { location: place, historical: dayRows(d) };
+      } else return { success: false, error: cause?.message || 'unknown weather request' };
+      this.logger.info(`Weather from Open-Meteo (${kind}, ${place.name}); Weatherstack: ${cause?.message || 'not used'}`);
+      return { success: true, data, source: 'open-meteo' };
+    } catch (e) {
+      return { success: false, error: `Weatherstack failed (${cause?.message}) and Open-Meteo failed (${e.message})` };
     }
   }
 

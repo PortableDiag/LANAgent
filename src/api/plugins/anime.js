@@ -236,6 +236,8 @@ export default class AnimePlugin extends BasePlugin {
       return { success: true, data: cached, cached: true };
     }
 
+    if (this.jikanDown()) return await this.viaAniList('search', { query, limit });
+
     await this.rateLimit();
 
     try {
@@ -247,7 +249,7 @@ export default class AnimePlugin extends BasePlugin {
             sfw: true
           }
         }),
-        { retries: 3, context: 'Jikan Anime Search' }
+        { retries: 1, minTimeout: 1000, context: 'Jikan Anime Search' }
       );
 
       const results = response.data.data.map(anime => this.formatAnimeBasic(anime));
@@ -262,6 +264,7 @@ export default class AnimePlugin extends BasePlugin {
       return { success: true, data };
     } catch (error) {
       this.logger.error('Anime search failed:', error);
+      if (!error.response || error.response.status >= 500) { this.markJikanDown(error); return await this.viaAniList('search', { query, limit }); }
       return {
         success: false,
         error: error.response?.data?.message || error.message
@@ -283,12 +286,14 @@ export default class AnimePlugin extends BasePlugin {
       return { success: true, data: cached, cached: true };
     }
 
+    if (this.jikanDown()) return await this.viaAniList('details', { id });
+
     await this.rateLimit();
 
     try {
       const response = await retryOperation(
         () => axios.get(`${this.config.baseUrl}/anime/${id}/full`),
-        { retries: 3, context: 'Jikan Anime Details' }
+        { retries: 1, minTimeout: 1000, context: 'Jikan Anime Details' }
       );
 
       const anime = response.data.data;
@@ -325,6 +330,7 @@ export default class AnimePlugin extends BasePlugin {
       return { success: true, data };
     } catch (error) {
       this.logger.error('Anime details failed:', error);
+      if (!error.response || error.response.status >= 500) { this.markJikanDown(error); return await this.viaAniList('details', { id }); }
       if (error.response?.status === 404) {
         return { success: false, error: `Anime with ID ${id} not found` };
       }
@@ -345,6 +351,8 @@ export default class AnimePlugin extends BasePlugin {
       return { success: true, data: cached, cached: true };
     }
 
+    if (this.jikanDown()) return await this.viaAniList('top', { type, filter, limit });
+
     await this.rateLimit();
 
     try {
@@ -360,7 +368,7 @@ export default class AnimePlugin extends BasePlugin {
 
       const response = await retryOperation(
         () => axios.get(`${this.config.baseUrl}/top/anime`, { params }),
-        { retries: 3, context: 'Jikan Top Anime' }
+        { retries: 1, minTimeout: 1000, context: 'Jikan Top Anime' }
       );
 
       const results = response.data.data.map(anime => this.formatAnimeBasic(anime));
@@ -376,6 +384,7 @@ export default class AnimePlugin extends BasePlugin {
       return { success: true, data };
     } catch (error) {
       this.logger.error('Top anime failed:', error);
+      if (!error.response || error.response.status >= 500) { this.markJikanDown(error); return await this.viaAniList('top', { type, filter, limit }); }
       return {
         success: false,
         error: error.response?.data?.message || error.message
@@ -398,6 +407,8 @@ export default class AnimePlugin extends BasePlugin {
       return { success: true, data: cached, cached: true };
     }
 
+    if (this.jikanDown()) return await this.viaAniList('seasonal', { year: currentYear, season: currentSeason, limit });
+
     await this.rateLimit();
 
     try {
@@ -408,7 +419,7 @@ export default class AnimePlugin extends BasePlugin {
             sfw: true
           }
         }),
-        { retries: 3, context: 'Jikan Seasonal Anime' }
+        { retries: 1, minTimeout: 1000, context: 'Jikan Seasonal Anime' }
       );
 
       const results = response.data.data.map(anime => this.formatAnimeBasic(anime));
@@ -424,6 +435,7 @@ export default class AnimePlugin extends BasePlugin {
       return { success: true, data };
     } catch (error) {
       this.logger.error('Seasonal anime failed:', error);
+      if (!error.response || error.response.status >= 500) { this.markJikanDown(error); return await this.viaAniList('seasonal', { year: currentYear, season: currentSeason, limit }); }
       return {
         success: false,
         error: error.response?.data?.message || error.message
@@ -445,12 +457,14 @@ export default class AnimePlugin extends BasePlugin {
       return { success: true, data: cached, cached: true };
     }
 
+    if (this.jikanDown()) return await this.viaAniList('recommendations', { id });
+
     await this.rateLimit();
 
     try {
       const response = await retryOperation(
         () => axios.get(`${this.config.baseUrl}/anime/${id}/recommendations`),
-        { retries: 3, context: 'Jikan Anime Recommendations' }
+        { retries: 1, minTimeout: 1000, context: 'Jikan Anime Recommendations' }
       );
 
       const recommendations = response.data.data.slice(0, 10).map(rec => ({
@@ -471,6 +485,7 @@ export default class AnimePlugin extends BasePlugin {
       return { success: true, data };
     } catch (error) {
       this.logger.error('Recommendations failed:', error);
+      if (!error.response || error.response.status >= 500) { this.markJikanDown(error); return await this.viaAniList('recommendations', { id }); }
       if (error.response?.status === 404) {
         return { success: false, error: `Anime with ID ${id} not found` };
       }
@@ -485,12 +500,14 @@ export default class AnimePlugin extends BasePlugin {
    * Get a random anime
    */
   async getRandomAnime() {
+    if (this.jikanDown()) return await this.viaAniList('random', {});
+
     await this.rateLimit();
 
     try {
       const response = await retryOperation(
         () => axios.get(`${this.config.baseUrl}/random/anime`),
-        { retries: 3, context: 'Jikan Random Anime' }
+        { retries: 1, minTimeout: 1000, context: 'Jikan Random Anime' }
       );
 
       const anime = response.data.data;
@@ -499,10 +516,98 @@ export default class AnimePlugin extends BasePlugin {
       return { success: true, data };
     } catch (error) {
       this.logger.error('Random anime failed:', error);
+      if (!error.response || error.response.status >= 500) { this.markJikanDown(error); return await this.viaAniList('random', {}); }
       return {
         success: false,
         error: error.response?.data?.message || error.message
       };
+    }
+  }
+
+  /**
+   * Jikan (api.jikan.moe) was unreachable from every network on 2026-11-09 (the TLS handshake is cut), so every anime
+   * request failed. AniList (graphql.anilist.co, free, no key) answers the same questions in the same shapes; ids stay
+   * MyAnimeList ids where AniList knows them. After a network failure Jikan is skipped for 10 minutes.
+   */
+  jikanDown() { return (this.jikanDownUntil || 0) > Date.now(); }
+
+  markJikanDown(error) {
+    this.jikanDownUntil = Date.now() + 10 * 60 * 1000;
+    this.logger.warn(`Jikan unreachable (${error?.message}); using AniList for 10 minutes`);
+  }
+
+  async anilist(query, variables) {
+    const res = await axios.post('https://graphql.anilist.co', { query, variables }, { timeout: 15000, headers: { 'Content-Type': 'application/json', Accept: 'application/json' } });
+    if (res.data?.errors?.length) throw new Error(res.data.errors[0].message);
+    return res.data.data;
+  }
+
+  fromAniList(m) {
+    const synopsis = (m.description || '').replace(/<[^>]+>/g, '').trim();
+    return {
+      id: m.idMal || m.id,
+      anilistId: m.id,
+      title: m.title?.romaji || m.title?.english,
+      titleEnglish: m.title?.english || null,
+      type: m.format,
+      episodes: m.episodes,
+      status: m.status,
+      score: m.averageScore != null ? m.averageScore / 10 : null,
+      popularity: m.popularity,
+      synopsis: synopsis.substring(0, 300) + (synopsis.length > 300 ? '...' : ''),
+      genres: m.genres || [],
+      imageUrl: m.coverImage?.large || m.coverImage?.medium,
+      url: m.idMal ? `https://myanimelist.net/anime/${m.idMal}` : m.siteUrl
+    };
+  }
+
+  async viaAniList(kind, args = {}) {
+    const F = 'id idMal title { romaji english native } format episodes status averageScore popularity description genres coverImage { large medium } siteUrl';
+    const per = Math.min(args.limit || 10, 25);
+    const SEASON = { winter: 'WINTER', spring: 'SPRING', summer: 'SUMMER', fall: 'FALL', autumn: 'FALL' };
+    const byId = (id) => (/^\d+$/.test(String(id)) ? { idMal: Number(id) } : null);
+    try {
+      let data;
+      if (kind === 'search') {
+        const d = await this.anilist(`query($s:String,$n:Int){Page(perPage:$n){media(search:$s,type:ANIME,isAdult:false){${F}}}}`, { s: args.query, n: per });
+        const results = d.Page.media.map(m => this.fromAniList(m));
+        data = { query: args.query, count: results.length, results };
+      } else if (kind === 'top') {
+        const fmt = { tv: 'TV', movie: 'MOVIE', ova: 'OVA', ona: 'ONA', special: 'SPECIAL' }[String(args.type || 'tv').toLowerCase()] || 'TV';
+        const airing = args.filter === 'airing';
+        const d = await this.anilist(`query($n:Int,$f:MediaFormat,$st:[MediaSort]${airing ? ',$a:MediaStatus' : ''}){Page(perPage:$n){media(type:ANIME,format:$f,sort:$st,isAdult:false${airing ? ',status:$a' : ''}){${F}}}}`,
+          { n: per, f: fmt, st: [args.filter === 'bypopularity' ? 'POPULARITY_DESC' : 'SCORE_DESC'], ...(airing ? { a: 'RELEASING' } : {}) });
+        const results = d.Page.media.map(m => this.fromAniList(m));
+        data = { type: args.type || 'tv', filter: args.filter || 'default', count: results.length, results };
+      } else if (kind === 'seasonal') {
+        const d = await this.anilist(`query($n:Int,$y:Int,$s:MediaSeason){Page(perPage:$n){media(type:ANIME,season:$s,seasonYear:$y,sort:POPULARITY_DESC,isAdult:false){${F}}}}`,
+          { n: per, y: Number(args.year), s: SEASON[String(args.season).toLowerCase()] || 'FALL' });
+        const results = d.Page.media.map(m => this.fromAniList(m));
+        data = { year: args.year, season: args.season, count: results.length, results };
+      } else if (kind === 'details') {
+        const v = byId(args.id); if (!v) return { success: false, error: 'Anime ID is required' };
+        const d = await this.anilist(`query($idMal:Int){Media(idMal:$idMal,type:ANIME){${F} duration season seasonYear studios(isMain:true){nodes{name}} trailer{site id}}}`, v);
+        const m = d.Media;
+        data = { ...this.fromAniList(m), synopsis: (m.description || '').replace(/<[^>]+>/g, '').trim(), duration: m.duration ? `${m.duration} min per ep` : null,
+          season: m.season?.toLowerCase(), year: m.seasonYear, studios: m.studios?.nodes?.map(s => s.name) || [],
+          trailerUrl: m.trailer?.site === 'youtube' ? `https://www.youtube.com/watch?v=${m.trailer.id}` : null };
+      } else if (kind === 'recommendations') {
+        const v = byId(args.id); if (!v) return { success: false, error: 'Anime ID is required for recommendations' };
+        const d = await this.anilist(`query($idMal:Int){Media(idMal:$idMal,type:ANIME){recommendations(perPage:10,sort:RATING_DESC){nodes{rating mediaRecommendation{${F}}}}}}`, v);
+        const recommendations = (d.Media?.recommendations?.nodes || []).filter(n => n.mediaRecommendation).map(n => {
+          const r = this.fromAniList(n.mediaRecommendation);
+          return { id: r.id, title: r.title, imageUrl: r.imageUrl, url: r.url, votes: n.rating };
+        });
+        data = { basedOn: args.id, count: recommendations.length, recommendations };
+      } else if (kind === 'random') {
+        const d = await this.anilist(`query($p:Int){Page(page:$p,perPage:1){media(type:ANIME,sort:POPULARITY_DESC,isAdult:false){${F}}}}`, { p: 1 + Math.floor(Math.random() * 200) });
+        data = this.fromAniList(d.Page.media[0]);
+      } else return null;
+      return { success: true, data, source: 'anilist' };
+    } catch (e) {
+      this.logger.error(`AniList ${kind} failed:`, e.message);
+      if (/Not Found/i.test(e.message)) return { success: false, error: `Anime with ID ${args.id} not found` };
+      return { success: false, error: `Jikan is unreachable and AniList failed: ${e.message}` };
     }
   }
 

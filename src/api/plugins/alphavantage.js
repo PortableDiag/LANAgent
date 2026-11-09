@@ -64,9 +64,24 @@ export default class AlphaVantagePlugin extends BasePlugin {
       logger.info(`Executing ${this.name}.${action} with params:`, params);
       
       if (!this.apiKey) {
-        return { error: 'Alpha Vantage API key not configured. Please set ALPHA_VANTAGE_API_KEY environment variable.' };
+        return await this.keyless(action, params);
       }
-      
+
+      const viaKey = await this.withKey(action, params);
+      // Alpha Vantage's free tier is 25 calls a day; past that (or on any failure) the keyless sources answer.
+      if (viaKey?.error && action !== 'overview' && /limit|Failed|No data|Invalid API/i.test(viaKey.error)) {
+        const alt = await this.keyless(action, params);
+        if (!alt.error) return alt;
+      }
+      return viaKey;
+    } catch (error) {
+      logger.error(`Error in ${this.name}.${action}:`, error);
+      return { error: error.message || 'An error occurred' };
+    }
+  }
+
+  async withKey(action, params) {
+    try {
       switch (action) {
         case 'quote':
           return await this.getQuote(params);
@@ -396,6 +411,69 @@ export default class AlphaVantagePlugin extends BasePlugin {
     } catch (error) {
       logger.error('Alpha Vantage crypto error:', error);
       return { error: 'Failed to fetch crypto data' };
+    }
+  }
+
+  /**
+   * Market data with no Alpha Vantage key (ALICE had none on 2026-11-09, so every call failed): Yahoo Finance's public
+   * chart and search endpoints for stocks and crypto, Frankfurter (ECB rates) for currencies. Same shapes as above.
+   */
+  async keyless(action, params = {}) {
+    const UA = { 'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) LANAgent/1.0', Accept: 'application/json' };
+    const chart = async (sym, range, interval = '1d') => {
+      const r = await axios.get(`https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(sym)}`, { params: { range, interval }, headers: UA, timeout: 15000 });
+      const res = r.data?.chart?.result?.[0];
+      if (!res) throw new Error(r.data?.chart?.error?.description || `No data found for symbol ${sym}`);
+      const q = res.indicators?.quote?.[0] || {};
+      const rows = (res.timestamp || []).map((ts, i) => ({ date: new Date(ts * 1000).toISOString().slice(0, 10), open: q.open?.[i], high: q.high?.[i], low: q.low?.[i], close: q.close?.[i], volume: q.volume?.[i] }))
+        .filter(x => x.close != null);
+      return { meta: res.meta, rows };
+    };
+    try {
+      if (action === 'quote') {
+        if (!params.symbol) return { error: 'Stock symbol is required' };
+        const { meta, rows } = await chart(params.symbol.toUpperCase(), '5d');
+        const last = rows[rows.length - 1] || {};
+        const prev = rows.length > 1 ? rows[rows.length - 2].close : meta.chartPreviousClose;
+        const price = meta.regularMarketPrice ?? last.close;
+        const change = prev != null ? price - prev : null;
+        return { symbol: meta.symbol, price, open: last.open, high: meta.regularMarketDayHigh ?? last.high, low: meta.regularMarketDayLow ?? last.low,
+          volume: meta.regularMarketVolume ?? last.volume, latestTradingDay: last.date, previousClose: prev,
+          change, changePercent: change != null && prev ? `${((change / prev) * 100).toFixed(4)}%` : null, currency: meta.currency,
+          timestamp: new Date().toISOString(), source: 'yahoo' };
+      }
+      if (action === 'daily') {
+        if (!params.symbol) return { error: 'Stock symbol is required' };
+        const full = params.outputsize === 'full';
+        const { meta, rows } = await chart(params.symbol.toUpperCase(), full ? '5y' : '6mo');
+        const dailyData = rows.reverse().slice(0, full ? 1000 : 100);
+        return { symbol: meta.symbol, lastRefreshed: dailyData[0]?.date, outputSize: full ? 'Full size' : 'Compact', timezone: meta.exchangeTimezoneName,
+          dailyData, dataPoints: dailyData.length, source: 'yahoo' };
+      }
+      if (action === 'search') {
+        if (!params.keywords) return { error: 'Search keywords are required' };
+        const r = await axios.get('https://query1.finance.yahoo.com/v1/finance/search', { params: { q: params.keywords, quotesCount: 10, newsCount: 0 }, headers: UA, timeout: 15000 });
+        const matches = (r.data?.quotes || []).filter(q => q.symbol).map(q => ({ symbol: q.symbol, name: q.longname || q.shortname, type: q.typeDisp || q.quoteType, region: q.exchDisp, currency: null, matchScore: null }));
+        return { keywords: params.keywords, matches, count: matches.length, source: 'yahoo' };
+      }
+      if (action === 'forex') {
+        const { from_currency: f, to_currency: to } = params;
+        if (!f || !to) return { error: 'Both from_currency and to_currency are required' };
+        const r = await axios.get('https://api.frankfurter.dev/v1/latest', { params: { base: f.toUpperCase(), symbols: to.toUpperCase() }, timeout: 15000 });
+        const rate = r.data?.rates?.[to.toUpperCase()];
+        if (rate == null) return { error: 'No forex data found for the specified currency pair' };
+        return { fromCurrencyCode: f.toUpperCase(), toCurrencyCode: to.toUpperCase(), exchangeRate: rate, lastRefreshed: r.data.date, timezone: 'UTC (ECB reference rate)', source: 'frankfurter' };
+      }
+      if (action === 'crypto') {
+        const sym = String(params.symbol || 'BTC').toUpperCase(), market = String(params.market || 'USD').toUpperCase();
+        const { meta } = await chart(`${sym}-${market}`, '1d', '5m');
+        return { fromCurrency: sym, toCurrency: market, exchangeRate: meta.regularMarketPrice, lastRefreshed: new Date((meta.regularMarketTime || Date.now() / 1000) * 1000).toISOString(), timezone: 'UTC', source: 'yahoo' };
+      }
+      if (action === 'overview') return { error: 'Company overview needs an Alpha Vantage API key (set ALPHA_VANTAGE_API_KEY); quote, daily, search, forex and crypto work without one' };
+      return { error: `Unknown action: ${action}` };
+    } catch (error) {
+      logger.error(`Keyless ${action} failed:`, error.message);
+      return { error: error.response?.status === 404 ? `No data found for symbol ${params.symbol}` : `Market data unavailable: ${error.message}` };
     }
   }
 

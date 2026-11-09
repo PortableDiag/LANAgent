@@ -201,7 +201,7 @@ export default class SpoonacularPlugin extends BasePlugin {
     params.number = params.number ?? 5;
 
     if (!this.config.apiKey) {
-      throw new Error('API key not configured');
+      return await this.viaMealDB('search', params);
     }
 
     const cacheKey = `search_${params.query}_${params.number}`;
@@ -289,7 +289,7 @@ export default class SpoonacularPlugin extends BasePlugin {
     }
 
     if (!this.config.apiKey) {
-      throw new Error('API key not configured');
+      return await this.viaMealDB('ingredients', { ingredients: uniqueIngredients, number });
     }
 
     const ingredientList = uniqueIngredients.join(',');
@@ -325,7 +325,7 @@ export default class SpoonacularPlugin extends BasePlugin {
     });
 
     if (!this.config.apiKey) {
-      throw new Error('API key not configured');
+      return await this.viaMealDB('info', params);
     }
 
     const cacheKey = `recipe_info_${params.id}`;
@@ -381,7 +381,7 @@ export default class SpoonacularPlugin extends BasePlugin {
     }
 
     if (!this.config.apiKey) {
-      throw new Error('API key not configured');
+      return await this.viaMealDB('ingredient', params);
     }
 
     const amountKey = params.amount ?? '';
@@ -423,7 +423,7 @@ export default class SpoonacularPlugin extends BasePlugin {
     params.number = params.number ?? 10;
 
     if (!this.config.apiKey) {
-      throw new Error('API key not configured');
+      return await this.viaMealDB('autocomplete', params);
     }
 
     const cacheKey = `autocomplete_${params.query}_${params.number}`;
@@ -457,7 +457,7 @@ export default class SpoonacularPlugin extends BasePlugin {
     params.limit = params.limit ?? 1;
 
     if (!this.config.apiKey) {
-      throw new Error('API key not configured');
+      return await this.viaMealDB('random', params);
     }
 
     const cacheKey = `random_${params.limit}`;
@@ -483,6 +483,58 @@ export default class SpoonacularPlugin extends BasePlugin {
     return { success: true, data: response.data };
   }
   
+  /**
+   * TheMealDB (free, no key) when there is no Spoonacular key. ALICE had none on 2026-11-09, so every recipe request
+   * failed. Answers keep Spoonacular's shapes (results[{id,title,image}], recipes[], extendedIngredients[{original}]).
+   * TheMealDB searches by dish name and by one main ingredient; its recipe ids are its own.
+   */
+  async viaMealDB(kind, args = {}) {
+    const base = 'https://www.themealdb.com/api/json/v1/1';
+    const get = async (path, params) => (await axios.get(`${base}/${path}`, { params, timeout: 12000 })).data?.meals || [];
+    const brief = (m) => ({ id: Number(m.idMeal), title: m.strMeal, image: m.strMealThumb, imageType: 'jpg' });
+    const full = (m) => {
+      const extendedIngredients = [];
+      for (let i = 1; i <= 20; i++) {
+        const name = (m[`strIngredient${i}`] || '').trim();
+        if (name) extendedIngredients.push({ name, amount: (m[`strMeasure${i}`] || '').trim(), original: `${(m[`strMeasure${i}`] || '').trim()} ${name}`.trim() });
+      }
+      return { ...brief(m), instructions: m.strInstructions, extendedIngredients, cuisines: m.strArea ? [m.strArea] : [], dishTypes: m.strCategory ? [m.strCategory] : [],
+        sourceUrl: m.strSource || null, video: m.strYoutube || null };
+    };
+    try {
+      let data;
+      const n = Math.max(1, Math.min(Number(args.number || args.limit) || 5, 25));
+      if (kind === 'search') {
+        const meals = await get('search.php', { s: args.query });
+        data = { results: meals.slice(0, n).map(brief), offset: 0, number: n, totalResults: meals.length };
+      } else if (kind === 'autocomplete') {
+        data = (await get('search.php', { s: args.query })).slice(0, n).map(m => ({ id: Number(m.idMeal), title: m.strMeal, imageType: 'jpg' }));
+      } else if (kind === 'ingredients') {
+        const list = (args.ingredients || []).map(s => String(s).trim()).filter(Boolean);
+        const seen = new Map();
+        for (const ing of list.slice(0, 5)) {
+          for (const m of await get('filter.php', { i: ing.replace(/\s+/g, '_') })) {
+            const e = seen.get(m.idMeal) || { ...brief(m), usedIngredientCount: 0, usedIngredients: [] };
+            e.usedIngredientCount++; e.usedIngredients.push({ name: ing }); seen.set(m.idMeal, e);
+          }
+        }
+        data = [...seen.values()].sort((a, b) => b.usedIngredientCount - a.usedIngredientCount).slice(0, n);
+      } else if (kind === 'info') {
+        const m = (await get('lookup.php', { i: args.id }))[0];
+        if (!m) return { success: false, error: `No recipe with id ${args.id} (without a Spoonacular key, ids are TheMealDB's)` };
+        data = full(m);
+      } else if (kind === 'random') {
+        const k = Math.max(1, Math.min(Number(args.limit || args.number) || 1, 10));
+        data = { recipes: (await Promise.all(Array.from({ length: k }, () => get('random.php')))).map(r => full(r[0])) };
+      } else {
+        return { success: false, error: 'Ingredient details need a Spoonacular API key (set SPOONACULAR_API_KEY)' };
+      }
+      return { success: true, data, source: 'themealdb' };
+    } catch (e) {
+      return { success: false, error: `No Spoonacular key, and TheMealDB failed: ${e.message}` };
+    }
+  }
+
   async cleanup() {
     this.logger.info(`Cleaning up ${this.name} plugin...`);
     this.cache.flushAll();

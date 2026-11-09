@@ -2,6 +2,20 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.785] - 2026-11-09
+
+### Fixed
+Every plugin was tested live; these failed and now work. When a provider is down, its key is missing, or its key is refused, the plugin answers from a free source in the same shape, with `source` naming where the answer came from.
+- **Anime** (paid on the gateway): Jikan (api.jikan.moe) drops every connection, so every anime request failed. AniList answers search, details, top, seasonal, recommendations and random. Jikan is skipped for 10 minutes after a failure.
+- **Weather** (paid): Weatherstack refused its key. Open-Meteo now answers current, forecast and historical weather by place name.
+- **NASA** (paid): a near-Earth-object request with no dates now means today. While NASA's own Astronomy Picture of the Day API is down (503, even with NASA's demo key), the plugin says so within seconds instead of retrying for a minute and a half.
+- **HuggingFace** (paid): the words can be sent as `text`, `prompt`, `input` or `query` as well as `inputs`.
+- **Lyrics** (paid): search no longer puts junk uploads first, the ones that repeat the title as the artist.
+- **Stocks and currencies** (Alpha Vantage, no key): quotes, daily prices, symbol search and crypto come from Yahoo Finance; currency rates from the ECB via Frankfurter. With a key, a refused or rate-limited call falls back the same way. Company overview still needs a key and says so.
+- **Recipes** (Spoonacular, no key): search, by ingredients, details, autocomplete and random come from TheMealDB. Ingredient details still need a key.
+- **Photos** (Unsplash, no key): search uses Openverse's openly licensed photos, with each photo's licence. A random photo with no subject comes from Lorem Picsum.
+- **IP location** (ipstack, no key): lookups and time zones come from ipwho.is. A refused ipstack key (which ipstack answers with HTTP 200) is no longer taken as a result.
+
 ## [2.25.784] - 2026-11-09
 
 ### Fixed

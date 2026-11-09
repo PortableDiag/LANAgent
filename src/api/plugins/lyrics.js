@@ -130,6 +130,14 @@ export default class LyricsPlugin extends BasePlugin {
         return { success: false, error: `No lyrics found for: "${query}"` };
       }
 
+      // LRCLIB's first hit is often a junk upload whose artist and album repeat the title ("Bohemian Rhapsody - Queen"
+      // as the artist, 2026-11-09). Rank real entries first: artist differs from the title, then the artist named in
+      // the query, then synced lyrics.
+      const q = query.toLowerCase();
+      const junk = (i) => !i.artistName || i.artistName === i.trackName || /\s-\s/.test(i.artistName);
+      const rank = (i) => (junk(i) ? 0 : 4) + (i.artistName && q.includes(String(i.artistName).toLowerCase()) ? 2 : 0) + (i.syncedLyrics ? 1 : 0);
+      response.data = response.data.map((i, n) => ({ i, n })).sort((a, b) => rank(b.i) - rank(a.i) || a.n - b.n).map(x => x.i);
+
       const results = response.data.slice(0, 5).map(item => ({
         artist: item.artistName,
         title: item.trackName,

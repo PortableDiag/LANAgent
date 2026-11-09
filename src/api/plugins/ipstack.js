@@ -200,14 +200,41 @@ export default class IPstackPlugin extends BasePlugin {
   }
 
   async fetchGeolocation(ip) {
-    const url = `${this.config.baseUrl}/${ip}?access_key=${this.config.apiKey}`;
-    
+    return await this.lookup(ip);
+  }
+
+  /**
+   * ipstack when it has a working key, else ipwho.is (free, no key) in ipstack's shape. On 2026-11-09 ALICE had no
+   * ipstack key and every lookup failed; ipstack also answers a bad key with HTTP 200 {success:false}, which was
+   * passed on as a success.
+   */
+  async lookup(ip, { timezoneOnly = false } = {}) {
+    let why = 'no ipstack key';
+    if (this.config.apiKey) {
+      try {
+        const url = `${this.config.baseUrl}/${ip === 'check' ? 'check' : encodeURIComponent(ip)}?access_key=${this.config.apiKey}${timezoneOnly ? '&fields=timezone' : ''}`;
+        const r = await retryOperation(() => axios.get(url, { timeout: 10000 }), { retries: 1, context: 'IPstack API' });
+        if (r.data && r.data.success !== false && !r.data.error) return { success: true, data: r.data, source: 'ipstack' };
+        why = r.data?.error?.info || 'ipstack refused the request';
+      } catch (error) {
+        why = error.message;
+      }
+    }
     try {
-      const response = await retryOperation(() => axios.get(url), { retries: 3, context: 'IPstack API' });
-      return { success: true, data: response.data };
+      const r = await axios.get(`https://ipwho.is/${ip === 'check' ? '' : encodeURIComponent(ip)}`, { timeout: 10000 });
+      const w = r.data;
+      if (!w || w.success === false) return { success: false, error: `Lookup failed: ${w?.message || why}` };
+      const timezone = { id: w.timezone?.id, current_time: w.timezone?.current_time, gmt_offset: w.timezone?.offset, code: w.timezone?.abbr, is_daylight_saving: w.timezone?.is_dst };
+      const data = timezoneOnly ? { timezone } : {
+        ip: w.ip, type: w.type, continent_code: w.continent_code, continent_name: w.continent, country_code: w.country_code,
+        country_name: w.country, region_code: w.region_code, region_name: w.region, city: w.city, zip: w.postal,
+        latitude: w.latitude, longitude: w.longitude, location: { calling_code: w.calling_code, is_eu: w.is_eu, capital: w.capital },
+        timezone, connection: { asn: w.connection?.asn, isp: w.connection?.isp, org: w.connection?.org }
+      };
+      return { success: true, data, source: 'ipwho.is' };
     } catch (error) {
-      this.logger.error('Error fetching geolocation data:', error);
-      return { success: false, error: 'Failed to fetch geolocation data.' };
+      this.logger.error('IP lookup failed:', error.message);
+      return { success: false, error: `Lookup failed: ${why}; ipwho.is: ${error.message}` };
     }
   }
 
@@ -221,15 +248,7 @@ export default class IPstackPlugin extends BasePlugin {
   }
 
   async getOwnLocation() {
-    const url = `${this.config.baseUrl}/check?access_key=${this.config.apiKey}`;
-    
-    try {
-      const response = await retryOperation(() => axios.get(url), { retries: 3, context: 'IPstack API' });
-      return { success: true, data: response.data };
-    } catch (error) {
-      this.logger.error('Error fetching own location data:', error);
-      return { success: false, error: 'Failed to fetch own location data.' };
-    }
+    return await this.lookup('check');
   }
 
   async getTimezone(data) {
@@ -241,28 +260,13 @@ export default class IPstackPlugin extends BasePlugin {
   }
 
   async fetchTimezone(ip) {
-    const url = `${this.config.baseUrl}/${ip}?access_key=${this.config.apiKey}&fields=timezone`;
-    
-    try {
-      const response = await retryOperation(() => axios.get(url), { retries: 3, context: 'IPstack API' });
-      return { success: true, data: response.data };
-    } catch (error) {
-      this.logger.error('Error fetching timezone data:', error);
-      return { success: false, error: 'Failed to fetch timezone data.' };
-    }
+    return await this.lookup(ip, { timezoneOnly: true });
   }
 
   async getOwnTimezone() {
-    const url = `${this.config.baseUrl}/check?access_key=${this.config.apiKey}&fields=timezone`;
-    
-    try {
-      const response = await retryOperation(() => axios.get(url), { retries: 3, context: 'IPstack API' });
-      return { success: true, data: response.data };
-    } catch (error) {
-      this.logger.error('Error fetching own timezone data:', error);
-      return { success: false, error: 'Failed to fetch own timezone data.' };
-    }
+    return await this.lookup('check', { timezoneOnly: true });
   }
+
 
   /**
    * New feature: Batch timezone retrieval for multiple IP addresses

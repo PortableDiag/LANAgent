@@ -193,7 +193,7 @@ export default class UnsplashPlugin extends BasePlugin {
     });
 
     if (!this.config.apiKey) {
-      throw new Error('Unsplash API key not configured');
+      return await this.viaOpenverse({ query, per_page, page });
     }
 
     const cacheKey = `search_${query}_${page}_${per_page}`;
@@ -231,6 +231,10 @@ export default class UnsplashPlugin extends BasePlugin {
       this.cache.set(cacheKey, results);
       return { success: true, data: results };
     } catch (error) {
+      if (!error.response || error.response.status === 401 || error.response.status === 403 || error.response.status >= 429) {
+        this.logger.warn(`Unsplash search failed (${error.message}); using Openverse`);
+        return await this.viaOpenverse({ query, per_page, page });
+      }
       throw new Error(`Failed to search photos: ${error.response?.data?.errors?.[0] || error.message}`);
     }
   }
@@ -267,7 +271,19 @@ export default class UnsplashPlugin extends BasePlugin {
     }
 
     if (!this.config.apiKey) {
-      throw new Error('Unsplash API key not configured');
+      const n = Math.max(1, Math.min(30, Number(count) || 1));
+      if (!query) {
+        // No subject: Lorem Picsum's photos (Unsplash photographers, free, no key) answer at once.
+        const r = await axios.get('https://picsum.photos/v2/list', { params: { page: 1 + Math.floor(Math.random() * 30), limit: 30 }, timeout: 10000 });
+        const picks = [...r.data].sort(() => Math.random() - 0.5).slice(0, n).map(p => ({
+          id: p.id, url: `https://picsum.photos/id/${p.id}/1080/720`, thumb: `https://picsum.photos/id/${p.id}/200/133`,
+          description: null, photographer: { name: p.author, profile: p.url }, page: p.url, full: p.download_url
+        }));
+        return { success: true, data: n > 1 ? picks : picks[0], source: 'picsum' };
+      }
+      const r = await this.viaOpenverse({ query, per_page: 20, page: 1 });
+      const picks = [...r.data].sort(() => Math.random() - 0.5).slice(0, n);
+      return { success: true, data: n > 1 ? picks : picks[0], source: 'openverse' };
     }
 
     // Build query parameters, only including those that are provided
@@ -309,6 +325,30 @@ export default class UnsplashPlugin extends BasePlugin {
     } catch (error) {
       throw new Error(`Failed to get random photo: ${error.response?.data?.errors?.[0] || error.message}`);
     }
+  }
+
+  /**
+   * Openverse (api.openverse.org, free, no key; openly licensed photos from Flickr, Wikimedia and others) when Unsplash
+   * has no key or refuses it. ALICE had no Unsplash key on 2026-11-09, so every photo search failed. Results keep
+   * the Unsplash shape plus the licence, which the photographer's credit requires.
+   */
+  async viaOpenverse({ query, per_page = 10, page = 1 }) {
+    const r = await retryOperation(() => axios.get('https://api.openverse.org/v1/images/', {
+      params: { q: query, page_size: Math.min(Number(per_page) || 10, 20), page, mature: false },
+      timeout: 20000, headers: { 'User-Agent': 'LANAgent/1.0' }
+    }), { retries: 2, minTimeout: 1000, context: 'Openverse search' });
+    const data = (r.data?.results || []).map(p => ({
+      id: p.id,
+      url: p.url,
+      thumb: p.thumbnail || p.url,
+      description: p.title,
+      photographer: { name: p.creator || 'unknown', profile: p.creator_url || p.foreign_landing_url },
+      source: p.source,
+      page: p.foreign_landing_url,
+      license: `${String(p.license || '').toUpperCase()} ${p.license_version || ''}`.trim(),
+      licenseUrl: p.license_url
+    }));
+    return { success: true, data, source: 'openverse' };
   }
 
   async getPhotoById(params) {
