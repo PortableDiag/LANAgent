@@ -85,7 +85,9 @@ export const ALLOWED_PLUGINS = new Set([
   // Crypto analysis
   'tokenProfiler', 'walletProfiler', 'contractAudit',
   // Image processing
-  'imageTools'
+  'imageTools',
+  // Memes: public-domain/CC0 pictures and the caller's own (the popular templates are refused on paid calls)
+  'memes'
 ]);
 
 // Actions blocked even on allowed plugins
@@ -130,7 +132,8 @@ export const PLUGIN_CREDIT_COSTS = {
   tokenProfiler: 3,  // $0.03 — token scam/honeypot detection
   walletProfiler: 3,  // $0.03 — wallet profiling and risk scoring
   contractAudit: 5,  // $0.05 — smart contract security audit
-  imageTools: 2      // $0.02 — image processing (optimize, resize, crop, convert, watermark)
+  imageTools: 2,     // $0.02 — image processing (optimize, resize, crop, convert, watermark)
+  memes: 2           // $0.02 — a meme (templates and find: 1)
 };
 
 /**
@@ -152,6 +155,8 @@ const AI_DETECTION_COSTS = { text: 5, image: 5, audio: 8, video: 10 };
  * so the same download was a third of the price depending on the door (operator, 2026-10-01).
  */
 const YTDLP_ACTION_COSTS = { download: 10, audio: 8 };
+/** Listing or finding pictures is a search, not a render. */
+const MEMES_ACTION_COSTS = { templates: 1, find: 1 };
 
 /** What aiDetector's auto `detect` will treat the input as — the same routing its autoDetect uses. */
 export function aiDetectKind(params = {}) {
@@ -173,6 +178,7 @@ export function actionCreditCost(plugin, action, params = {}) {
     if (kind) return AI_DETECTION_COSTS[kind];
   }
   if (plugin === 'ytdlp' && YTDLP_ACTION_COSTS[action] !== undefined) return YTDLP_ACTION_COSTS[action];
+  if (plugin === 'memes' && MEMES_ACTION_COSTS[action] !== undefined) return MEMES_ACTION_COSTS[action];
   return PLUGIN_CREDIT_COSTS[plugin] || 3;
 }
 

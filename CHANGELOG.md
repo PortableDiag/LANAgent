@@ -2,6 +2,17 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.787] - 2026-11-09
+
+### Added
+- **Memes** (new `memes` plugin, also sold through the API gateway). Pick a picture, give the text for each spot, get the meme back. "Make a drake meme: writing tests / shipping on Friday" or "send me a meme about Mondays" sends it on Telegram as a photo.
+  - **Two kinds of picture:**
+    - **Popular templates** (Drake, Distracted Boyfriend, Two Buttons, Change My Mind and the rest of the top 100) are for the agent's own owner only. A paid caller is refused.
+    - **Public-domain and CC0 pictures** come from Wikimedia Commons, then Openverse, and are checked against each file's licence. They are sold with the licence attached. A caller's own picture (URL or base64) works for both.
+  - **Text placement:** eight well-known templates have their text spots measured, such as Drake's right-hand panels and Gru's boards. Any other picture gets top and bottom, or spots given as `top`, `bottom-left` and so on, or exact fractions.
+  - **Look:** text is white with a black outline in Anton, an open-licence font close to Impact. On white areas such as Drake's side or Gru's boards it is dark with no outline.
+  - **Price on the gateway:** a meme costs 2 credits; listing or finding pictures costs 1.
+
 ## [2.25.786] - 2026-11-09
 
 ### Fixed
