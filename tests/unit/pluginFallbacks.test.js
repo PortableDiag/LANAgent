@@ -75,3 +75,26 @@ test('nasa neo with no dates means today', async () => {
   const r = await n.getNeo();
   assert.equal(r.error, 'API key not configured', 'it got past the date check');
 });
+
+test('paid gateway calls never get the non-commercial free sources (weather, anime)', async (t) => {
+  const { default: W } = await import('../../src/api/plugins/weatherstack.js');
+  t.mock.method(axios, 'get', async () => { const e = new Error('Request failed with status code 401'); e.response = { status: 401 }; throw e; });
+  const w = new W({}); w.logger = quiet; w.config.apiKey = 'bad';
+  const r = await w.execute({ action: 'getTemperature', location: 'London', _caller: 'external' });
+  assert.equal(r.success, false);
+  assert.match(r.error, /401/);
+  const { default: A } = await import('../../src/api/plugins/anime.js');
+  const a = new A({}); a.logger = quiet; a.jikanDownUntil = Date.now() + 60000;
+  const paid = await a.execute({ action: 'top', _caller: 'external' });
+  assert.equal(paid.success, false);
+  assert.match(paid.error, /Jikan/);
+});
+
+test('plugins that now work without a key load enabled; weather stays key-gated', async () => {
+  for (const name of ['spoonacular', 'unsplash', 'ipstack']) {
+    const { default: P } = await import(`../../src/api/plugins/${name}.js`);
+    assert.deepEqual(await new P({}).missingRequiredCredentials(), [], name);
+  }
+  const { default: W } = await import('../../src/api/plugins/weatherstack.js');
+  assert.equal(new W({}).worksWithoutCredentials, undefined);
+});

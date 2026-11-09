@@ -4269,6 +4269,18 @@ export class WebInterface {
             error: `Plugin '${plugin}' not found or not loaded` 
           });
         }
+        // A plugin switched off in the Plugins list (by the owner, or at load for a missing API key) does not run
+        // from here either: this route ran disabled plugins and answered with their "API key not configured" errors.
+        const entry = this.agent.apiManager.apis.get(plugin);
+        if (entry && entry.enabled === false) {
+          return res.status(409).json({
+            success: false,
+            disabled: true,
+            error: entry.disabledReason === 'missing_credentials'
+              ? `Plugin '${plugin}' is disabled until its API key is added (${entry.error || 'missing credentials'}). Add it under Plugins, then enable it.`
+              : `Plugin '${plugin}' is disabled. Enable it under Plugins.`
+          });
+        }
         
         // Execute the plugin action — unwrap nested params if present
         const execData = data.params && typeof data.params === 'object' && !Array.isArray(data.params)

@@ -14,6 +14,8 @@ export default class SpoonacularPlugin extends BasePlugin {
     this.requiredCredentials = [
       { key: 'apiKey', label: 'API Key', envVar: 'SPOONACULAR_API_KEY', required: true }
     ];
+    // Works without the key since 2.25.785 (TheMealDB answers), so it loads enabled; the key, when added in Settings, is used first.
+    this.worksWithoutCredentials = true;
 
     this.commands = [
       {

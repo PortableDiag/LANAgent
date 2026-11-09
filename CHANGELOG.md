@@ -2,6 +2,13 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.786] - 2026-11-09
+
+### Fixed
+- **A plugin switched off in the Plugins list does not run.** A plugin without its API key is switched off when it loads; add the key under Plugins and it switches back on. `POST /api/plugin` used to run such plugins anyway and answer with their "API key not configured" errors. It now answers 409 with `disabled: true` and says what to do.
+- **Recipes, photos and IP location are switched on without a key**, since 2.25.785 lets them work without one. A key added later is used first.
+- **Weather stays off until it has a Weatherstack key.** It is sold on the gateway, and Open-Meteo's free service is for non-commercial use only, so a paid weather call never gets Open-Meteo. Anime's AniList fallback likewise answers only the agent's own requests. Paid anime calls still wait for Jikan.
+
 ## [2.25.785] - 2026-11-09
 
 ### Fixed

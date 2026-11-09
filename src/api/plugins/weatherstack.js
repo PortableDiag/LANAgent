@@ -172,7 +172,7 @@ export default class WeatherstackPlugin extends BasePlugin {
     return parsed;
   }
 
-  async getCurrentWeather({ location }) {
+  async getCurrentWeather({ location, _caller }) {
     this.validateParams({ location }, {
       location: { required: true, type: 'string' }
     });
@@ -188,12 +188,12 @@ export default class WeatherstackPlugin extends BasePlugin {
       return { success: true, data };
     } catch (error) {
       this.logger.error('getCurrentWeather error:', error.message);
-      return await this.viaOpenMeteo('current', { location }, error);
+      return await this.viaOpenMeteo('current', { location, _caller }, error);
     }
   }
 
-  async getWeatherDescription({ location }) {
-    const result = await this.getCurrentWeather({ location });
+  async getWeatherDescription({ location, _caller }) {
+    const result = await this.getCurrentWeather({ location, _caller });
     if (result.success) {
       const description = result.data.current.weather_descriptions[0];
       return { success: true, data: description };
@@ -201,8 +201,8 @@ export default class WeatherstackPlugin extends BasePlugin {
     return result;
   }
 
-  async getTemperature({ location }) {
-    const result = await this.getCurrentWeather({ location });
+  async getTemperature({ location, _caller }) {
+    const result = await this.getCurrentWeather({ location, _caller });
     if (result.success) {
       const temperature = result.data.current.temperature;
       return { success: true, data: temperature };
@@ -213,7 +213,7 @@ export default class WeatherstackPlugin extends BasePlugin {
   /**
    * New feature: Retrieve historical weather data
    */
-  async getHistoricalWeather({ location, date }) {
+  async getHistoricalWeather({ location, date, _caller }) {
     this.validateParams({ location, date }, {
       location: { required: true, type: 'string' },
       date: { required: true, type: 'string' }
@@ -230,14 +230,14 @@ export default class WeatherstackPlugin extends BasePlugin {
       return { success: true, data };
     } catch (error) {
       this.logger.error('getHistoricalWeather error:', error.message);
-      return await this.viaOpenMeteo('historical', { location, date }, error);
+      return await this.viaOpenMeteo('historical', { location, date, _caller }, error);
     }
   }
 
   /**
    * New feature: Retrieve weather forecast data
    */
-  async getWeatherForecast({ location, days = 3 }) {
+  async getWeatherForecast({ location, days = 3, _caller }) {
     this.validateParams({ location, days }, {
       location: { required: true, type: 'string' },
       days: { required: true, type: 'number' }
@@ -255,16 +255,18 @@ export default class WeatherstackPlugin extends BasePlugin {
       return { success: true, data };
     } catch (error) {
       this.logger.error('getWeatherForecast error:', error.message);
-      return await this.viaOpenMeteo('forecast', { location, days }, error);
+      return await this.viaOpenMeteo('forecast', { location, days, _caller }, error);
     }
   }
 
   /**
-   * Open-Meteo (free, no key) answers when Weatherstack does not: on 2026-11-09 Weatherstack refused the configured key
+   * Open-Meteo (free, no key, non-commercial) answers the agent's own requests when Weatherstack does not: on 2026-11-09 Weatherstack refused the configured key
    * (401) and every paid weather call failed. The answer keeps Weatherstack's shape (location, current.temperature,
    * current.weather_descriptions, forecast / historical by date), so callers and the gateway see no difference but `source`.
    */
-  async viaOpenMeteo(kind, { location, date, days = 3 }, cause) {
+  async viaOpenMeteo(kind, { location, date, days = 3, _caller }, cause) {
+    // Open-Meteo's free API is for non-commercial use: a paid gateway call (_caller 'external') never gets it.
+    if (_caller === 'external') return { success: false, error: cause?.message || 'Weatherstack failed' };
     const WMO = { 0: 'Clear sky', 1: 'Mainly clear', 2: 'Partly cloudy', 3: 'Overcast', 45: 'Fog', 48: 'Depositing rime fog',
       51: 'Light drizzle', 53: 'Drizzle', 55: 'Dense drizzle', 56: 'Freezing drizzle', 57: 'Dense freezing drizzle',
       61: 'Light rain', 63: 'Rain', 65: 'Heavy rain', 66: 'Freezing rain', 67: 'Heavy freezing rain',

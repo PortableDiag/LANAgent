@@ -14,6 +14,10 @@ import { PluginSettings } from '../../models/PluginSettings.js';
 import { retryOperation } from '../../utils/retryUtils.js';
 import { safeJsonParse } from '../../utils/jsonUtils.js';
 import axios from 'axios';
+import { AsyncLocalStorage } from 'node:async_hooks';
+
+// Who is asking, for the length of one execute(): a paid gateway call (_caller 'external') or the agent itself.
+const caller = new AsyncLocalStorage();
 import NodeCache from 'node-cache';
 
 export default class AnimePlugin extends BasePlugin {
@@ -152,6 +156,10 @@ export default class AnimePlugin extends BasePlugin {
   }
 
   async execute(params) {
+    return caller.run({ external: params?._caller === 'external' }, () => this.run(params));
+  }
+
+  async run(params) {
     const { action, ...data } = params;
 
     this.validateParams(params, {
@@ -562,6 +570,10 @@ export default class AnimePlugin extends BasePlugin {
   }
 
   async viaAniList(kind, args = {}) {
+    // Paid gateway calls stay on Jikan until the owner clears AniList's terms for resale (2026-11-09).
+    if (caller.getStore()?.external) {
+      return { success: false, error: 'The anime source (Jikan) is unreachable right now; try again later' };
+    }
     const F = 'id idMal title { romaji english native } format episodes status averageScore popularity description genres coverImage { large medium } siteUrl';
     const per = Math.min(args.limit || 10, 25);
     const SEASON = { winter: 'WINTER', spring: 'SPRING', summer: 'SUMMER', fall: 'FALL', autumn: 'FALL' };

@@ -15,6 +15,8 @@ export default class UnsplashPlugin extends BasePlugin {
     this.requiredCredentials = [
       { key: 'apiKey', label: 'API Key', envVar: 'UNSPLASH_API_KEY', required: true }
     ];
+    // Works without the key since 2.25.785 (Openverse and Lorem Picsum answers), so it loads enabled; the key, when added in Settings, is used first.
+    this.worksWithoutCredentials = true;
 
     // Commands array - CRITICAL for AI natural language support
     this.commands = [
