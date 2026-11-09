@@ -44,7 +44,7 @@ const DEFAULTS = {
 };
 const AUTO_STICKER_EVERY_MS = Number(process.env.BOTSANDBORGS_STICKER_EVERY_MS) || 20 * 60 * 1000;
 const AUTO_STICKER_ASK_EVERY_MS = 60 * 1000;
-const USES =['avatar', 'send', 'install', 'wear', 'keep', 'play', 'stop'];
+const USES =['avatar', 'send', 'install', 'wear', 'keep', 'play', 'stop', 'video'];
 
 /**
  * "the avatar you just bought", "your new model", "it": words that name no product, only the latest purchase
@@ -98,9 +98,9 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
       },
       {
         command: 'use',
-        description: 'Use something already bought from Bots & Borgs, at no cost: as "send" (a sticker, emoji, portrait or wallpaper to `to`, "me" for the owner; `mood` picks a sticker), "avatar", "install" (a VRM into the model gallery) or "wear" (make a VRM this agent\'s active 3D model), or "play" (an owned animation clip, e.g. a wave or a dance, on its 3D body now)',
+        description: 'Use something already bought from Bots & Borgs, at no cost: as "send" (a sticker, emoji, portrait or wallpaper to `to`, "me" for the owner; `mood` picks a sticker), "avatar", "install" (a VRM into the model gallery) or "wear" (make a VRM this agent\'s active 3D model), "play" (an owned animation clip, e.g. a wave or a dance, on its 3D body now), "stop", or "video" (film its 3D body doing a clip and send the video, to the owner on Telegram by default)',
         usage: 'use({ item: "vrm-mm-bear-stickers", as: "send", to: "me", mood: "happy" })',
-        examples: ['send me a happy sticker', 'send Sam a sad robot emoji', 'use the bear vrm model as your 3d model', 'wear the bear model', 'install the bear model you bought', 'send me the bear portrait', 'send me a wallpaper from your wallpapers', 'set my wallpaper from my bots and borgs wallpapers', 'do the rumba you bought', 'play your wave animation', 'dance for me with your new dance pack']
+        examples: ['send me a happy sticker', 'send Sam a sad robot emoji', 'use the bear vrm model as your 3d model', 'wear the bear model', 'install the bear model you bought', 'send me the bear portrait', 'send me a wallpaper from your wallpapers', 'set my wallpaper from my bots and borgs wallpapers', 'do the rumba you bought', 'play your wave animation', 'dance for me with your new dance pack', 'send me a video of you doing the pole dance', 'film yourself doing the rumba and send it to me']
       },
       {
         command: 'orders',
@@ -821,6 +821,10 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     }
     const kind = data.kind && data.kind !== 'avatar' ? data.kind : this.kindAsked(asked);
     if (as === 'stop' || (!as && /\bstop (?:dancing|the (?:dance|animation|clip))\b/i.test(asked))) return this.stopClip();
+    // "Send me a video of you doing the pole dance": film it and send it.
+    if (as === 'video' || ((kind === 'animation' || /\b(dance|dancing|wave|waving|bow|cheer|clap|laugh|dab|rumba|pole)\b/i.test(asked)) && /\b(video|film|clip of you|record(?:ing)?)\b/i.test(asked))) {
+      return this.sendClipVideo({ item, clip: data.clip || data.mood, asked, to: String(data.to || (/\b(me|to me)\b/i.test(asked) || !/\bsend\s+(?!me\b)\w+/i.test(asked) ? 'me' : /\bsend\s+(\w+)/i.exec(asked)[1])), wait: data.wait });
+    }
     if (as === 'play' || as === 'dance' || kind === 'animation' || (!as && !data.to && /\b(dance|do (?:the|a) |wave|bow|cheer|clap|laugh|dab)\b/i.test(asked) && !/\b(stickers?|emoji|portraits?|wallpapers?|icons?|vrm|model)\b/i.test(asked))) {
       return this.playClip({ item, clip: data.clip || data.mood, asked });
     }
@@ -911,9 +915,10 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
   }
 
   /** Play an owned clip on the agent's 3D body: by name ("rumba"), by what it is for ("wave", "dance"), or any one. */
-  async playClip({ item, clip, asked = '' }) {
+  /** Which owned clip a request means: { choice, entry, rel } or { error }. */
+  async chooseClip({ item, clip, asked = '' }) {
     let pool = (await this.libraryItems()).flatMap(i => i.files.filter(f => f.kind === 'animation').map(f => ({ item: i, file: f })));
-    if (!pool.length) return { success: false, error: "I don't own any animations yet. I can buy a pack from Bots & Borgs if you want." };
+    if (!pool.length) return { error: "I don't own any animations yet. I can buy a pack from Bots & Borgs if you want." };
     if (item && !isGenericItem(item)) {
       const inItem = pool.filter(p => p.item.variant === item || this.matches(p.item, item));
       if (inItem.length) pool = inItem;
@@ -931,11 +936,18 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     const specific = /pole|rumba|belly|can.?can|cabbage|running man|roger|go.?go|booty|twerk|samba|ballet|hip.?hop|dab/i.exec(`${clip || ''} ${asked}`);
     const fits = named.length ? named : specific ? [] : purpose ? pool.filter(p => p.file.gesture === purpose) : [];
     const choice = (fits.length ? fits : pool)[Math.floor(Math.random() * (fits.length ? fits : pool).length)];
-    if (!fits.length && (clip || purpose || specific)) return { success: false, error: `I have no ${specific ? specific[0] : clip || purpose} clip. Mine: ${[...new Set(pool.map(p => p.file.label))].join(', ')}.` };
-    // Everywhere its body is: every open playground or designer page (no AvatarX needed), and AvatarX when it has one.
+    if (!fits.length && (clip || purpose || specific)) return { error: `I have no ${specific ? specific[0] : clip || purpose} clip. Mine: ${[...new Set(pool.map(p => p.file.label))].join(', ')}.` };
     const rel = `store/${safeName(choice.item.variant)}/${choice.file.name}`;
     const listed = await fs.readFile(path.join(this.vrmDir(), 'animations', 'store.json'), 'utf8').then(JSON.parse).catch(() => []);
     const entry = listed.find(c => c.file === rel) || { file: rel, label: choice.file.label, loop: !!choice.file.loop };
+    return { choice, entry, rel };
+  }
+
+  async playClip({ item, clip, asked = '' }) {
+    const picked = await this.chooseClip({ item, clip, asked });
+    if (picked.error) return { success: false, error: picked.error };
+    const { choice, entry, rel } = picked;
+    // Everywhere its body is: every open playground or designer page (no AvatarX needed), and AvatarX when it has one.
     const pages = await this.playOnPages({ file: entry.file, label: entry.label, loop: !!entry.loop, prop: entry.prop || null });
     const { playOnAvatarX, pushClipsToAvatarX } = await import('../../services/avatar/avatarx.js');
     let avatarx = 'not connected';
@@ -948,6 +960,55 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     if (!places.length && avatarx === 'failed') return { success: false, error: `I couldn't play ${choice.file.label}: AvatarX refused it and no 3D page is open.`, clip: choice.file.label };
     return { success: true, clip: choice.file.label, pages, avatarx,
       result: places.length ? `Doing ${choice.file.label} now, ${places.join(' and ')}.` : `${choice.file.label} is ready, but my 3D body isn't open anywhere: open the 3D playground (or AvatarX) and ask again.` };
+  }
+
+  /**
+   * A video of this agent's own 3D body doing an owned clip, sent to the owner on Telegram (or texted to someone).
+   * Rendered here (services/avatar/clipVideo.js); a long routine takes a minute or two, so the answer comes at once
+   * and the video follows. `wait: true` waits for it (tests, API).
+   */
+  async sendClipVideo({ item, clip, asked = '', to = 'me', wait = false }) {
+    const picked = await this.chooseClip({ item, clip, asked });
+    if (picked.error) return { success: false, error: picked.error };
+    const { choice, entry, rel } = picked;
+    const worn = this.agent?.agentModel?.activeVRMModel;
+    const manifest = await fs.readFile(path.join(this.vrmDir(), 'manifest.json'), 'utf8').then(JSON.parse).catch(() => []);
+    const model = manifest.find(m => m.id === worn);
+    if (!model?.file) return { success: false, error: "I'm not wearing a 3D model, so there's nothing to film." };
+    const label = entry.label || choice.file.label;
+    const job = (async () => {
+      const { renderClipVideo } = await import('../../services/avatar/clipVideo.js');
+      const v = await (this.renderVideo || renderClipVideo)({ modelPath: path.join(this.vrmDir(), model.file), clipPath: path.join(this.vrmDir(), 'animations', rel),
+        loop: !!entry.loop, prop: entry.prop || null });
+      const filename = `${String(label).toLowerCase().replace(/[^a-z0-9]+/g, '-')}.mp4`;
+      if (/^(me|owner|myself)$/i.test(to)) {
+        const tg = this.agent?.interfaces?.get?.('telegram');
+        if (!tg?.bot?.telegram?.sendVideo || !tg.authorizedUserId) throw new Error("Telegram isn't connected");
+        await tg.bot.telegram.sendVideo(tg.authorizedUserId, { source: v.video, filename },
+          { caption: `${label} (${model.name || 'me'})`, supports_streaming: true, width: v.width, height: v.height, duration: Math.round(v.seconds) });
+      } else {
+        const tx = this.agent?.apiManager?.apis?.get?.('textx');
+        const textx = tx?.instance || tx;
+        if (!textx?.execute) throw new Error("I can't text right now");
+        const r = await textx.execute({ action: 'send', to, text: '', _context: { originalInput: `send ${to} the video`,
+          attachedFile: { filename, mimeType: 'video/mp4', size: v.video.length, base64: v.video.toString('base64') } } });
+        if (!r?.success) throw new Error(r?.error || 'the text failed');
+      }
+      this.logger.info(`botsandborgs: sent a video of ${label} to ${to} (${v.seconds}s, ${(v.bytes / 1048576).toFixed(1)} MB)`);
+      return v;
+    })();
+    const who = /^(me|owner|myself)$/i.test(to) ? 'you' : to;
+    if (wait === true || wait === 'true') {
+      const v = await job.catch(e => ({ error: e.message }));
+      if (v.error) return { success: false, error: `The video of ${label} failed: ${v.error}` };
+      return { success: true, clip: label, seconds: v.seconds, result: `Sent ${who} a ${Math.round(v.seconds)}-second video of me doing ${label}.` };
+    }
+    job.catch(async (e) => {
+      this.logger.warn(`botsandborgs: video of ${label} failed: ${e.message}`);
+      const tg = this.agent?.interfaces?.get?.('telegram');
+      await tg?.sendNotification?.(`The video of ${label} didn't work: ${e.message}`).catch(() => {});
+    });
+    return { success: true, clip: label, result: `Filming me doing ${label}; I'll send ${who} the video in a minute or so.` };
   }
 
   /** Every open 3D page of this agent gets the clip. 0 when the web interface isn't running. */

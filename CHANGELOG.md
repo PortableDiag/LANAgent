@@ -2,6 +2,11 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.781] - 2026-11-08
+
+### Added
+- **The agent sends a video of itself doing a move.** "Send me a video of you doing the pole dance", "film yourself doing the rumba": the agent films its own 3D body (the model it wears) doing the clip, pole included, and sends the MP4 on Telegram, or texts it to someone else. It renders on its own machine, frame by frame, with the same loader and face tracks as the playground. The answer comes at once and the video follows, about a minute for a long routine.
+
 ## [2.25.780] - 2026-11-08
 
 ### Fixed
