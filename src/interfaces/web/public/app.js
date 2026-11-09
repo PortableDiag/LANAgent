@@ -769,6 +769,7 @@ class LANAgentDashboard {
             case 'settings':
                 this.loadReportSettings();
                 this.loadTelegramAgentFeatures();
+                this.loadMemeSettings();
                 this.loadTextX();
                 this.loadDialX();
                 this.loadAutonomousDeploymentSetting();
@@ -6136,6 +6137,35 @@ class LANAgentDashboard {
     async updateReportTime() {
         const time = document.getElementById('report-time').value;
         this.showNotification(`Report time updated to ${time}`, 'info');
+    }
+
+    async loadMemeSettings() {
+        try {
+            const r = await this.apiPost('/api/plugin', { plugin: 'memes', action: 'settings' });
+            const section = document.getElementById('memes-section');
+            if (!r?.success) { if (section && r?.disabled) section.querySelector('.setting-description').textContent = 'The memes plugin is switched off under Plugins.'; return; }
+            document.getElementById('memes-auto').checked = !!r.settings.autoMemes;
+            const every = document.getElementById('memes-every');
+            const v = String(r.settings.autoMemeEveryMinutes);
+            if (![...every.options].some(o => o.value === v)) every.add(new Option(`${v} minutes`, v));
+            every.value = v;
+        } catch (error) {
+            console.error('Failed to load meme settings:', error);
+        }
+    }
+
+    async saveMemeSettings() {
+        try {
+            const r = await this.apiPost('/api/plugin', {
+                plugin: 'memes', action: 'settings',
+                autoMemes: document.getElementById('memes-auto').checked,
+                autoMemeEveryMinutes: Number(document.getElementById('memes-every').value)
+            });
+            this.showNotification(r.success ? r.message : `Not saved: ${r.error}`, r.success ? 'success' : 'error');
+            this.loadMemeSettings();
+        } catch (error) {
+            this.showNotification(`Not saved: ${error.message}`, 'error');
+        }
     }
 
     async loadTelegramAgentFeatures() {

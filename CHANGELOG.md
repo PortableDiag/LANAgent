@@ -2,6 +2,16 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.788] - 2026-11-09
+
+### Added
+- **Unasked memes.** After a reply in the owner's private Telegram chat, the agent may add a meme when one would land: a joke, banter, an everyday frustration, good news.
+  - **Never** for anything sad, worrying or serious, for plain facts or code, or to anyone else.
+  - **Setting:** on by default, at most one an hour. Set under Settings → Memes, or say "stop sending me memes".
+  - **With stickers:** a meme takes the place of a sticker after that reply. A sticker and a meme never follow the same reply, and no meme comes within 20 minutes of a sticker.
+  - **Choice:** the same model that picks stickers chooses the template and writes the texts, in the template's box order.
+- `memes` action `settings {autoMemes, autoMemeEveryMinutes}` (10 minutes to a day). It is never offered through the API gateway.
+
 ## [2.25.787] - 2026-11-09
 
 ### Added

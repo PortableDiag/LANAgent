@@ -52,3 +52,43 @@ test('memes is sold: 2 credits a meme, 1 to list or find pictures', () => {
   assert.equal(actionCreditCost('memes', 'find'), 1);
 });
 
+
+test('unasked memes: off means no model call; on, one fitting meme goes as a photo, then waits its interval', async () => {
+  const sent = [];
+  let asked = 0;
+  const agent = {
+    providerManager: { generateResponse: async () => { asked++; return { content: '{"meme": true, "template": "own-test", "texts": ["mondays", "again"]}' }; } },
+    interfaces: { get: () => ({ bot: { telegram: { sendPhoto: async (chat, photo) => sent.push({ chat, bytes: photo.source.length }) } } }) }
+  };
+  const m = new MemesPlugin(agent); m.logger = quiet;
+  let settings = { autoMemes: false, autoMemeEveryMinutes: 60 };
+  m.settings = async () => settings;
+  const base = await grey();
+  m.make = async (d) => ({ success: true, name: 'test', file: { path: await (async () => { const f = `/tmp/claude-meme-test-${process.pid}.jpg`; await (await import('fs/promises')).writeFile(f, base); return f; })() } });
+  const at = { userText: 'ugh mondays', replyText: 'Hang in there, Monday is nearly over.', chatId: 1 };
+  assert.equal(await m.autoMeme(at), null);
+  assert.equal(asked, 0, 'switched off: the model is never asked');
+  settings = { autoMemes: true, autoMemeEveryMinutes: 60 };
+  assert.equal(await m.autoMeme({ ...at, stickerSentAt: Date.now() }), null, 'a sticker just went');
+  assert.equal(await m.autoMeme(at), 'test');
+  assert.equal(sent.length, 1);
+  m._memeAskedAt = 0;
+  assert.equal(await m.autoMeme(at), null, 'within the hour: no second meme');
+  assert.equal(await m.autoMeme({ ...at, replyText: '```js\ncode\n```' }), null);
+});
+
+test('settings: switch and interval are kept within bounds', async () => {
+  const { PluginSettings } = await import('../../src/models/PluginSettings.js');
+  const saved = [];
+  const orig = [PluginSettings.getCached, PluginSettings.setCached];
+  PluginSettings.getCached = async () => null;
+  PluginSettings.setCached = async (n, k, v) => saved.push(v);
+  try {
+    const m = new MemesPlugin({}); m.logger = quiet;
+    const r = await m.execute({ action: 'settings', autoMemes: 'false', autoMemeEveryMinutes: 2 });
+    assert.deepEqual(r.settings, { autoMemes: false, autoMemeEveryMinutes: 10 });
+    assert.equal(saved.length, 1);
+    const paid = await m.execute({ action: 'settings', autoMemes: true, _caller: 'external' });
+    assert.equal(paid.success, false, 'a paid caller cannot change them');
+  } finally { [PluginSettings.getCached, PluginSettings.setCached] = orig; }
+});

@@ -12,12 +12,23 @@ import fs from 'fs/promises';
 import path from 'path';
 import axios from 'axios';
 import { BasePlugin } from '../core/basePlugin.js';
+import { PluginSettings } from '../../models/PluginSettings.js';
 import { TEMP_PATH } from '../../utils/paths.js';
 import { safeJsonParse } from '../../utils/jsonUtils.js';
 import { renderMeme, defaultBoxes, namedBox } from '../../services/memes/render.js';
 import { popularTemplates, freeTemplates, freeById, findPopular, boxesFor, templateImage, keptFree, ROLES } from '../../services/memes/templates.js';
 
 const MAX_INPUT = 10 * 1024 * 1024;
+
+/** Unasked memes (owner, 2026-11-09): on by default, at most one an hour; both set under Settings → Memes. */
+export const DEFAULTS = { autoMemes: true, autoMemeEveryMinutes: 60 };
+const ASK_EVERY_MS = 60 * 1000; // never ask the model more than once a minute
+
+/** Replies a meme would only cheapen: code, long reports, lists. */
+export function memeCouldFit(replyText) {
+  const r = String(replyText || '').trim();
+  return !!r && r.length <= 800 && !r.includes('```') && (r.match(/\n\s*[-*\d]/g) || []).length < 3;
+}
 
 /** The texts and where they go, from any of: texts[], top/bottom, boxes[{text, position | x,y,w,h}]. */
 export function placements(params, template) {
@@ -52,6 +63,13 @@ export default class MemesPlugin extends BasePlugin {
         examples: ['make a drake meme: tests passing / tests actually testing something', 'send me a meme about mondays',
           'make a meme with distracted boyfriend: me, new side project, my unfinished projects', 'meme this: when the deploy works first try'],
         offerAsService: true
+      },
+      {
+        command: 'settings',
+        description: 'Read or change the meme settings: autoMemes (send a fitting meme unasked after a reply to the owner), autoMemeEveryMinutes',
+        usage: 'settings({ autoMemes: true, autoMemeEveryMinutes: 60 })',
+        examples: ['stop sending me memes', 'send memes less often'],
+        offerAsService: false
       },
       {
         command: 'templates',
@@ -94,6 +112,9 @@ export default class MemesPlugin extends BasePlugin {
         case 'make': return await this.make(data, external);
         case 'templates': return await this.templates(data, external);
         case 'find': return await this.find(data, external);
+        case 'settings':
+          if (external) return { success: false, error: 'Unknown action: settings' };
+          return await this.settingsCommand(data);
         default: return { success: false, error: `Unknown action: ${action}. Available: make, templates, find` };
       }
     } catch (error) {
@@ -176,6 +197,77 @@ ${roles}
     const file = path.join(dir, filename);
     await fs.writeFile(file, out.buffer);
     return { success: true, ...info, file: { path: file, filename }, message: `Here's your ${template.name} meme.` };
+  }
+
+  async settings() {
+    const saved = await PluginSettings.getCached(this.name, 'settings').catch(() => null);
+    return { ...DEFAULTS, ...(saved || {}) };
+  }
+
+  async settingsCommand(data = {}) {
+    const s = await this.settings();
+    let changed = false;
+    if (data.autoMemes !== undefined) { s.autoMemes = data.autoMemes === true || data.autoMemes === 'true'; changed = true; }
+    if (data.autoMemeEveryMinutes !== undefined) {
+      s.autoMemeEveryMinutes = Math.max(10, Math.min(24 * 60, Math.round(Number(data.autoMemeEveryMinutes) || DEFAULTS.autoMemeEveryMinutes)));
+      changed = true;
+    }
+    if (changed) await PluginSettings.setCached(this.name, 'settings', s);
+    return { success: true, settings: s,
+      message: s.autoMemes ? `Unasked memes are on, at most one every ${s.autoMemeEveryMinutes} minutes.` : 'Unasked memes are off.' };
+  }
+
+  /**
+   * After a reply in the owner's private chat: a meme, if one would land. Light moments only, like the stickers;
+   * never held up by, and never fails, the reply. Returns the template name sent, or null.
+   */
+  async autoMeme({ userText, replyText, chatId, threadId, stickerSentAt = 0 } = {}) {
+    const now = Date.now();
+    const s = await this.settings();
+    if (!s.autoMemes || !chatId || !memeCouldFit(replyText)) return null;
+    if (now - (this._memeSentAt || 0) < s.autoMemeEveryMinutes * 60000) return null;
+    if (now - (this._memeAskedAt || 0) < ASK_EVERY_MS) return null;
+    if (now - stickerSentAt < 20 * 60000) return null; // a sticker just went: no meme on top of it
+    const pm = this.agent?.providerManager;
+    const tg = this.agent?.interfaces?.get?.('telegram')?.bot?.telegram;
+    if (!pm || !tg?.sendPhoto) return null;
+    this._memeAskedAt = now;
+    const names = (await popularTemplates().catch(() => [])).slice(0, 60).map(t => t.name).join(', ');
+    const roles = Object.entries(ROLES).map(([id, r]) => `${id}: ${r.join(' | ')}`).join('\n');
+    const agentName = process.env.AGENT_NAME || 'The assistant';
+    const prompt = `${agentName} is chatting with its owner and has just replied. Decide whether a meme should follow, the way a funny friend sometimes adds one.
+Send one only for: a joke or banter, a relatable everyday frustration (Mondays, bugs, waiting), good news worth celebrating, playful chat.
+Never for: death, grief, illness, pain, money worries, anything upsetting, plain facts, data, instructions, errors, or a task just done. When unsure, no meme.
+
+Owner: ${String(userText || '').slice(0, 500)}
+${agentName}: ${String(replyText).slice(0, 600)}
+
+Templates: ${names}
+Box order of these (by imgflip id):
+${roles}
+
+Answer JSON only: {"meme": false} or {"meme": true, "template": "<template name>", "texts": ["box 1", "box 2"]}. Texts short, about this exchange, never mean to the owner.`;
+    let r;
+    try {
+      r = await Promise.race([this.askModel(pm, prompt), new Promise((_, rej) => setTimeout(() => rej(new Error('timed out')), 15000))]);
+    } catch (e) { this.logger.info(`memes: no unasked meme (${e.message})`); return null; }
+    const pick = safeJsonParse(r?.content ?? r, null);
+    if (!pick?.meme || !pick.template || !Array.isArray(pick.texts) || !pick.texts.length) { this.logger.info('memes: no meme suits this reply'); return null; }
+    const made = await this.make({ template: pick.template, texts: pick.texts }, false);
+    if (!made.success) { this.logger.info(`memes: unasked meme not made: ${made.error}`); return null; }
+    await tg.sendPhoto(chatId, { source: await fs.readFile(made.file.path) }, threadId ? { message_thread_id: threadId } : {});
+    this._memeSentAt = Date.now();
+    this.logger.info(`memes: sent a meme unasked (${made.name})`);
+    return made.name;
+  }
+
+  /** The same model choice as the unasked stickers: gpt-5.6-luna on OpenRouter, else the aux model. */
+  async askModel(pm, prompt) {
+    const provider = await pm.getCurrentProvider?.().catch?.(() => null);
+    if (pm.providerNameOf?.(provider) === 'openrouter') {
+      return pm.generateResponse(prompt, { model: process.env.MEMES_MODEL || process.env.BOTSANDBORGS_STICKER_MODEL || 'openai/gpt-5.6-luna', maxTokens: 250, temperature: 0.4 });
+    }
+    return pm.generateAux ? pm.generateAux(prompt, { maxTokens: 250, temperature: 0.4, auxTask: 'memes' }) : pm.generateResponse(prompt, { maxTokens: 250, temperature: 0.4 });
   }
 
   async templates(data, external) {

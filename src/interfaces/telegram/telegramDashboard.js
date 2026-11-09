@@ -48,10 +48,17 @@ export class TelegramDashboard extends TelegramInterface {
   /** A sticker the agent owns, if one suits this exchange. Owner's private chat only; never awaited by the reply. */
   stickerAfterReply(ctx, userText, replyText) {
     if (!ctx.isMaster || ctx.chat?.type !== 'private') return;
-    const entry = this.agent?.apiManager?.apis?.get?.('botsandborgs');
-    const store = entry?.instance || entry;
-    store?.autoSticker?.({ userText, replyText, chatId: ctx.chat.id, threadId: ctx.message?.message_thread_id })
-      .catch(e => logger.warn(`botsandborgs: no sticker sent: ${e.message}`));
+    const plugin = (name) => { const e = this.agent?.apiManager?.apis?.get?.(name); return e?.enabled === false ? null : (e?.instance || e); };
+    const store = plugin('botsandborgs');
+    const memes = plugin('memes');
+    const where = { userText, replyText, chatId: ctx.chat.id, threadId: ctx.message?.message_thread_id };
+    // At most one extra after a reply: a meme when one is due and fits (rarer), else a sticker.
+    (async () => {
+      const meme = await memes?.autoMeme?.({ ...where, stickerSentAt: store?._stickerSentAt || 0 })
+        .catch(e => { logger.warn(`memes: no meme sent: ${e.message}`); return null; });
+      if (meme) { if (store) store._stickerSentAt = Date.now(); return; }
+      await store?.autoSticker?.(where);
+    })().catch(e => logger.warn(`botsandborgs: no sticker sent: ${e.message}`));
   }
 
   async sendLargeMessage(ctx, outStr, channelId = null) {

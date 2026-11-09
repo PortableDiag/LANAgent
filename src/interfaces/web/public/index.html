@@ -1321,6 +1321,32 @@
                             </div>
                         </div>
 
+                        <div class="settings-section" id="memes-section">
+                            <h3><i class="fas fa-face-grin-squint"></i> Memes</h3>
+                            <p class="setting-description">After a reply in your private Telegram chat, the agent can add a meme when one would land: a joke, banter, an everyday frustration, good news. Never for anything sad, worrying or serious, and never to anyone else. A meme takes the place of a sticker; they never come together.</p>
+                            <div class="setting-item">
+                                <label>
+                                    <input type="checkbox" id="memes-auto">
+                                    <span>Send memes unasked</span>
+                                </label>
+                            </div>
+                            <div class="setting-item">
+                                <label for="memes-every">At most one every:</label>
+                                <select id="memes-every">
+                                    <option value="30">30 minutes</option>
+                                    <option value="60">hour</option>
+                                    <option value="120">2 hours</option>
+                                    <option value="240">4 hours</option>
+                                    <option value="720">12 hours</option>
+                                    <option value="1440">day</option>
+                                </select>
+                                <p class="setting-description">Asking for one ("send me a meme about Mondays") works any time, with this switch on or off.</p>
+                            </div>
+                            <div class="setting-item">
+                                <button class="btn btn-primary" onclick="dashboard.saveMemeSettings()"><i class="fas fa-save"></i> Save meme settings</button>
+                            </div>
+                        </div>
+
                         <div class="settings-section" id="textx-section">
                             <h3><i class="fas fa-comment-sms"></i> TextX — texting app</h3>
                             <p class="setting-description">Use this agent as a conversation in the TextX SMS app on your phone (the LANAgent Android app pairs here too). It works from anywhere: the phone reaches this agent through the api.lanagent.net relay, which only ever sees encrypted data. In TextX you choose what the agent may do (send texts, read the conversations you share); every text it sends needs your tap on the phone. <strong>For phone calls, use the DialX section below, not this one.</strong></p>
