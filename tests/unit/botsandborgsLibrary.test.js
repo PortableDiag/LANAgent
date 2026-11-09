@@ -40,6 +40,9 @@ test('files are classified by name, then by what was bought', () => {
   assert.equal(fileKind('README.txt'), 'document');
   assert.equal(fileKind('Bear sticker 3.png', 'bundle'), 'sticker');
   assert.equal(fileKind('Bear portrait 1.png', 'bundle'), 'portrait');
+  assert.equal(fileKind('Racer Blue/Racer Blue lol.png', 'bundle'), 'sticker', 'named by word, no "sticker" in it');
+  assert.equal(fileKind('Racer Blue cool.png', 'vrm'), 'sticker');
+  assert.equal(fileKind('Racer Blue portrait 8.png', 'bundle'), 'portrait');
   assert.equal(fileKind('preview.jpg', 'vrm'), 'preview');
   assert.equal(fileKind('happy-1.png', 'emoji'), 'emoji');
   assert.equal(fileKind('Sticker Bots/square/01 Ace.jpg', 'portrait'), 'portrait', 'a pack name says nothing');
@@ -190,6 +193,10 @@ test('plain requests for owned things are recognised; ordinary texts are not', (
 test('moods come from the name: fixed sticker numbers, emoji words', () => {
   assert.equal(moodOf('Bear sticker 7.png', 'sticker'), 'sad, tears');
   assert.equal(moodOf('Bear sticker 99.png', 'sticker'), null);
+  // Store v0.16.7: stickers are named by word, the same 12 in every pack (3910 #109).
+  assert.equal(moodOf('Racer Blue lol.png', 'sticker'), 'lol');
+  assert.equal(moodOf('Mech Bear sleep.png', 'sticker'), 'sleep');
+  assert.equal(moodOf('Racer Blue portrait 3.png', 'sticker'), null);
   assert.equal(moodOf('big-grin.png', 'emoji'), 'big grin');
   assert.equal(moodOf('x.png', 'portrait'), null);
 });

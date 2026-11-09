@@ -183,3 +183,12 @@ test('on OpenRouter the better model decides; elsewhere the fast one', async () 
   await p.askStickerModel({ ...pm, providerNameOf: () => 'anthropic' }, 'x');
   assert.deepEqual(calls, [['aux']]);
 });
+
+test('word-named stickers (store v0.16.7): light ones are offered unasked, the rest only on request', async () => {
+  const { moodChoices } = await import('../../src/services/store/selfUse.js');
+  const words = ['lol', 'love', 'wink', 'cool', 'shock', 'angry', 'nervous', 'confused', 'think', 'cry', 'sleep', 'sad'];
+  const items = [{ variant: 'vrm-racer-blue-bundle', files: words.map(w => ({ name: `Racer Blue ${w}.png`, kind: 'sticker', mood: w })) }];
+  const offered = moodChoices(items).map(c => c.mood).sort();
+  const { strict: assert } = await import('node:assert');
+  assert.deepEqual(offered, ['cool', 'lol', 'love', 'sleep', 'wink']);
+});

@@ -55,19 +55,30 @@ export function fileKind(filename, kind = 'portrait') {
   // Only a model or a bundle mixes kinds. Elsewhere a pack's name says nothing ("Agent Mode Wallpapers" is fine, a
   // portrait pack called "Sticker Bots" would not be).
   if (kind !== 'vrm' && kind !== 'bundle') return kind;
-  if (/sticker/.test(n)) return 'sticker';
+  if (/sticker/.test(n) || STICKER_NAMED.test(n)) return 'sticker';
   if (/portrait/.test(n)) return 'portrait';
   return kind === 'vrm' ? 'preview' : 'portrait';
 }
 
-/** Sticker numbers mean the same emote for every character (BotsAndBorgsAgent, Trellis 3910 #81). */
+/**
+ * Since store v0.16.7 (2026-11-09, Trellis 3910 #109) every character's stickers are named by one word, the same 12
+ * in every pack and the same words as the Bot Emoji pack: "<Name> <word>.png" ("Racer Blue lol.png").
+ */
+export const STICKER_WORDS = ['lol', 'love', 'wink', 'cool', 'shock', 'angry', 'nervous', 'confused', 'think', 'cry', 'sleep', 'sad'];
+const STICKER_NAMED = new RegExp(`\\s(?:${STICKER_WORDS.join('|')})\\.(?:png|webp|gif|jpe?g)$`, 'i');
+
+/** Older downloads number them instead; the numbers meant these (BotsAndBorgsAgent, Trellis 3910 #81). */
 const STICKER_MOODS = ['happy, sparkle', 'love, heart', 'flirty, wink', 'cheerful, music', 'surprised', 'angry', 'sad, tears',
   'confused', 'questioning', 'awkward, sweat', 'sleepy, zzz', 'worried, nervous'];
 
 /** The feeling a sticker or emoji shows, from its name; no model is asked. */
 export function moodOf(name, kind) {
   const base = path.parse(String(name || '')).name;
-  if (kind === 'sticker') return STICKER_MOODS[Number(/sticker\s*(\d+)/i.exec(base)?.[1]) - 1] || null;
+  if (kind === 'sticker') {
+    const word = /\s([a-z]+)$/i.exec(base)?.[1]?.toLowerCase();
+    if (word && STICKER_WORDS.includes(word)) return word;
+    return STICKER_MOODS[Number(/sticker\s*(\d+)/i.exec(base)?.[1]) - 1] || null;
+  }
   if (kind === 'emoji') return base.replace(/[-_]+/g, ' ').trim().toLowerCase() || null;
   return null;
 }

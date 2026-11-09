@@ -7,7 +7,7 @@
 
 // Unasked, only light feelings are on offer. In replay a model told "never for grief" still chose a crying sticker
 // for "my dog died" and "lol" for "the cake made me sick"; one that isn't offered can't be sent. All stay usable on request.
-const NOT_UNASKED = /sad|cry|tear|angry|worried|nervous|scream|shock|dizzy|meh|confused|questioning|awkward|error|glitch|lowbatt|bug|loading|money|surprised/i;
+const NOT_UNASKED = /sad|cry|tear|angry|worried|nervous|scream|shock|dizzy|meh|confused|questioning|think|awkward|error|glitch|lowbatt|bug|loading|money|surprised/i;
 
 /** Light sticker and emoji files grouped by the feeling they show: [{ mood, picks: [{ item, file }] }]. */
 export function moodChoices(items = []) {

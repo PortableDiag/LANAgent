@@ -2,6 +2,11 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.782] - 2026-11-09
+
+### Fixed
+- **Stickers named by word are read right.** Bots & Borgs now names every character's stickers by one word (`Racer Blue lol.png`): lol, love, wink, cool, shock, angry, nervous, confused, think, cry, sleep, sad, the same words as its emoji pack. In a bundle such a file was taken for a portrait, with no mood. The word is now the sticker's mood; older numbered files keep their numbered moods. "Think" joins the moods never sent unasked, like "questioning".
+
 ## [2.25.781] - 2026-11-08
 
 ### Added
