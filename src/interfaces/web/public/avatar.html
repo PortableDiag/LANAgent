@@ -290,6 +290,29 @@
                             <div id="vrm-expression-options" class="customize-options"></div>
                         </div>
                         <div class="customize-group">
+                            <h4><i class="fas fa-running"></i> Motion</h4>
+                            <div class="customize-options">
+                                <span class="customize-option" id="vrm-jump-btn" onclick="avatarDesigner.jumpVRM()" title="Jump once to test the spring bones">Jump</span>
+                            </div>
+                            <label style="font-size:12px;color:var(--text-secondary);display:block;margin:4px 0;">
+                                <input type="checkbox" id="vrm-jump-loop" onchange="if (this.checked) avatarDesigner.jumpVRM()"> Keep jumping
+                            </label>
+                            <label style="font-size:12px;color:var(--text-secondary);display:block;margin:4px 0;" title="Slows the jump, the animation and the spring physics together">
+                                <input type="checkbox" id="vrm-slowmo"> Slow motion (¼ speed)
+                            </label>
+                            <div style="display:flex;gap:6px;align-items:center;margin-top:8px;flex-wrap:wrap;">
+                                <select id="vrm-anim-select" style="flex:1;min-width:140px;font-size:12px;padding:4px;background:var(--bg-secondary,#222);color:var(--text-primary,#eee);border:1px solid var(--border-color,#444);border-radius:4px;" title="Animation clips">
+                                    <option value="">Loading animations…</option>
+                                </select>
+                                <span class="customize-option" onclick="avatarDesigner.playCatalogAnimation()" title="Play the selected clip">Play</span>
+                                <span class="customize-option" onclick="avatarDesigner.playAnimation('idle'); avatarDesigner._showAnimCredit(null)" title="Back to the idle loop">Idle</span>
+                            </div>
+                            <label style="font-size:12px;color:var(--text-secondary);display:block;margin:4px 0;">
+                                <input type="checkbox" id="vrm-anim-loop" checked> Loop clip
+                            </label>
+                            <div id="vrm-anim-status" style="font-size:11px;color:var(--text-secondary);min-height:14px;"></div>
+                        </div>
+                        <div class="customize-group">
                             <h4><i class="fas fa-sliders-h"></i> Controls</h4>
                             <label style="font-size:12px;color:var(--text-secondary);display:block;margin:4px 0;">
                                 <input type="checkbox" id="vrm-lookat" checked> Eyes follow cursor / VR headset
@@ -705,6 +728,18 @@
             const container = document.getElementById('viewer-canvas');
             this.scene = new THREE.Scene();
             this.scene.background = new THREE.Color(0x0a0a1a);
+            // The agent's own wallpaper behind its model, when it owns one.
+            fetch('/api/agent/backdrop', { headers: { 'Authorization': `Bearer ${localStorage.getItem('lanagent_token')}` } })
+                .then(r => (r.ok ? r.blob() : null))
+                .then(blob => {
+                    if (!blob) return;
+                    const url = URL.createObjectURL(blob);
+                    new THREE.TextureLoader().load(url, (tex) => {
+                        tex.colorSpace = THREE.SRGBColorSpace;
+                        this.scene.background = tex;
+                    });
+                })
+                .catch(() => {});
 
             this.camera = new THREE.PerspectiveCamera(45, container.clientWidth / container.clientHeight, 0.01, 100);
             this.camera.position.set(0, 1.2, 3);
@@ -741,6 +776,29 @@
             const bottomLight = new THREE.DirectionalLight(0xffffff, 0.3);
             bottomLight.position.set(0, -3, 0);
             this.scene.add(bottomLight);
+
+            // Studio environment map: metallic PBR materials (robots, chrome) render dull
+            // grey/black under direct lights alone. MToon (most VRoid models) ignores it.
+            try {
+                const envScene = new THREE.Scene();
+                envScene.background = new THREE.Color(0x111118);
+                const panel = (w, h, color, x, y, z) => {
+                    const m = new THREE.Mesh(new THREE.PlaneGeometry(w, h),
+                        new THREE.MeshBasicMaterial({ color, side: THREE.DoubleSide }));
+                    m.position.set(x, y, z); m.lookAt(0, 1, 0); envScene.add(m);
+                };
+                panel(4, 2, 0xffffff, 0, 6, 3);      // key, above front
+                panel(2, 4, 0xbbd0ff, -5, 2, 0);     // cool side
+                panel(2, 4, 0xffd8b0, 5, 2, -1);     // warm side
+                panel(4, 1, 0xffffff, 0, 2, -5);     // rim, behind
+                const pmrem = new THREE.PMREMGenerator(this.renderer);
+                this.scene.environment = pmrem.fromScene(envScene, 0.04).texture;
+                this.scene.environmentIntensity = 0.7;
+                pmrem.dispose();
+                envScene.traverse(o => { o.geometry?.dispose(); o.material?.dispose(); });
+            } catch (e) {
+                console.warn('Environment map unavailable:', e.message);
+            }
 
             // Ground grid
             const gridHelper = new THREE.GridHelper(4, 20, 0x1a2a4a, 0x0d1525);
@@ -856,8 +914,14 @@
 
             // VRM update: mixer, spring bones, look-at, expressions
             if (this.currentVRM) {
-                if (this._mixer) this._mixer.update(delta);
-                this.currentVRM.update(delta);
+                // Slow motion scales the clip, the jump and the spring bones by the same
+                // factor, so the bounce is the real one, just slower. Blink/lip sync keep
+                // real time below.
+                const motionDelta = document.getElementById('vrm-slowmo')?.checked ? delta * 0.25 : delta;
+                if (this._mixer) this._mixer.update(motionDelta);
+                // Root motion before vrm.update(), so the spring bones see this frame's move.
+                this._updateVRMJump(motionDelta);
+                this.currentVRM.update(motionDelta);
                 this._updateVRMIdleAnimation(delta);
 
                 // In VR, make eyes track headset instead of mouse
@@ -2036,6 +2100,8 @@
                     console.warn('Animation load:', e.message);
                     vrm.scene.visible = true;
                 });
+                this._loadAnimationCatalog().catch(() => {});
+                this._showAnimCredit(null);
                 console.log('VRM loaded:', modelInfo.name, '| expressions:', vrm.expressionManager ? 'yes' : 'no', '| lookAt:', vrm.lookAt ? 'yes' : 'no');
 
             } catch (err) {
@@ -2083,7 +2149,29 @@
                 for (const [boneName, info] of Object.entries(vrmaExt.humanoid.humanBones)) {
                     const nodeIdx = info.node;
                     if (nodeIdx < nodes.length) {
-                        nodeNameToBone[nodes[nodeIdx].name] = boneName;
+                        // GLTFLoader names tracks with the SANITIZED node name
+                        // ("mixamorig:Hips" -> "mixamorigHips"), so map both spellings;
+                        // the raw name alone retargeted 0 tracks for every Mixamo export.
+                        const raw = nodes[nodeIdx].name || '';
+                        nodeNameToBone[raw] = boneName;
+                        nodeNameToBone[THREE.PropertyBinding.sanitizeNodeName(raw)] = boneName;
+                    }
+                }
+            }
+
+
+            // VRMA 1.0 face tracks: each expression is a node whose translation.x is its weight
+            // (the store's emote clips smile and laugh this way).
+            const exprByNode = {};
+            {
+                const ex = vrmaExt?.expressions || {};
+                const nodesJ = gltf.parser?.json?.nodes || [];
+                for (const group of [ex.preset || {}, ex.custom || {}]) {
+                    for (const [exName, info] of Object.entries(group)) {
+                        const raw = nodesJ[info?.node]?.name;
+                        if (raw == null) continue;
+                        exprByNode[raw] = exName;
+                        exprByNode[THREE.PropertyBinding.sanitizeNodeName(raw)] = exName;
                     }
                 }
             }
@@ -2098,8 +2186,18 @@
                 const nodeName = track.name.substring(0, dotIdx);
                 const property = track.name.substring(dotIdx);
 
+                const exprName = exprByNode[nodeName];
+                if (exprName) {
+                    const target = vrm.expressionManager?.getExpression?.(exprName);
+                    if (target && (property === '.position' || property === '.translation')) {
+                        const w = [];
+                        for (let i = 0; i < track.values.length; i += 3) w.push(track.values[i]);
+                        retargetedTracks.push(new THREE.NumberKeyframeTrack(`${target.name}.weight`, Array.from(track.times), w));
+                    }
+                    continue;
+                }
                 const vrmBoneName = nodeNameToBone[nodeName];
-                if (!vrmBoneName) continue; // skip non-humanoid tracks (expressions, lookAt, etc.)
+                if (!vrmBoneName) continue; // skip non-humanoid tracks (lookAt, etc.)
 
                 // Get the corresponding bone in our VRM model
                 const bone = this._getBone(vrm, vrmBoneName);
@@ -2176,6 +2274,84 @@
             }
             // Always reveal model
             vrm.scene.visible = true;
+        }
+
+        // --- Animation picker (catalog: /vrm-models/animations/animations.json) ---
+        // Entries: { file, label, group, loop, credit?: { title, author, url, license } }.
+        // A new clip is one .vrma file plus one catalog line; no code change. Clips
+        // load on first Play and are retargeted to the model on screen.
+        async _loadAnimationCatalog() {
+            if (!this._animCatalog) {
+                try {
+                    const r = await fetch('/vrm-models/animations/animations.json', { cache: 'no-cache' });
+                    if (r.ok) this._animCatalog = await r.json();
+                } catch (e) { console.warn('Animation catalog:', e.message); }
+                if (!Array.isArray(this._animCatalog)) this._animCatalog = [];
+                // Clips bought from Bots & Borgs, listed by the store plugin (animations/store.json).
+                try {
+                    const r = await fetch('/vrm-models/animations/store.json', { cache: 'no-cache' });
+                    const bought = r.ok ? await r.json() : [];
+                    if (Array.isArray(bought)) this._animCatalog = this._animCatalog.concat(bought);
+                } catch (e) { /* none bought */ }
+            }
+            const sel = document.getElementById('vrm-anim-select');
+            if (sel && !sel.dataset.filled) {
+                const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+                const groups = {};
+                for (const a of this._animCatalog) (groups[a.group || 'Other'] ||= []).push(a);
+                sel.innerHTML = this._animCatalog.length
+                    ? Object.entries(groups).map(([g, list]) => `<optgroup label="${esc(g)}">` +
+                        list.map(a => `<option value="${esc(a.file)}">${esc(a.label || a.file)}${a.credit ? ' ©' : ''}</option>`).join('') +
+                        '</optgroup>').join('')
+                    : '<option value="">No animations found</option>';
+                sel.onchange = () => {
+                    const a = this._animCatalog.find(x => x.file === sel.value);
+                    const loopBox = document.getElementById('vrm-anim-loop');
+                    if (a && loopBox) loopBox.checked = !!a.loop;
+                };
+                sel.dataset.filled = '1';
+                sel.onchange();
+            }
+            return this._animCatalog;
+        }
+
+        async playCatalogAnimation() {
+            const vrm = this.currentVRM;
+            const sel = document.getElementById('vrm-anim-select');
+            const status = document.getElementById('vrm-anim-status');
+            const entry = (this._animCatalog || []).find(a => a.file === sel?.value);
+            if (!vrm || !this._mixer || !entry) return;
+            const name = 'clip:' + entry.file;
+            let item = this._idleActions?.find(a => a.name === name);
+            if (!item) {
+                if (status) status.textContent = `Loading ${entry.label || entry.file}…`;
+                let clip = null;
+                try { clip = await this.loadVRMA('/vrm-models/animations/' + entry.file.split('/').map(encodeURIComponent).join('/')); }
+                catch (e) { console.warn('Clip load:', e.message); }
+                if (this.currentVRM !== vrm) return;   // model changed while loading
+                if (!clip) { if (status) status.textContent = `Could not load ${entry.file}`; return; }
+                clip.name = name;
+                item = { name, action: this._mixer.clipAction(clip) };
+                (this._idleActions ||= []).push(item);
+            }
+            const loop = document.getElementById('vrm-anim-loop')?.checked;
+            item.action.setLoop(loop ? THREE.LoopRepeat : THREE.LoopOnce);
+            item.action.clampWhenFinished = !loop;
+            this.playAnimation(name);
+            this._showAnimCredit(entry);
+        }
+
+        _showAnimCredit(entry) {
+            const status = document.getElementById('vrm-anim-status');
+            if (!status) return;
+            const c = entry?.credit;
+            if (!c) { status.textContent = entry ? `Playing: ${entry.label || entry.file}` : ''; return; }
+            status.textContent = '';
+            status.append(`Playing: ${entry.label || entry.file}. `);
+            const link = document.createElement('a');
+            link.href = c.url || '#'; link.target = '_blank'; link.rel = 'noopener';
+            link.textContent = `"${c.title || entry.label}" by ${c.author || 'unknown'}`;
+            status.append(link, c.license ? `, ${c.license}` : '');
         }
 
         playAnimation(name) {
@@ -2258,6 +2434,46 @@
                 );
             };
             container.addEventListener('mousemove', this._mouseLookHandler);
+        }
+
+        // --- Jump (tests spring bones: hair, cloth, body jiggle) ---
+        // Crouch, a parabolic hop, then a landing squash and settle. Only the model's
+        // root moves, so it works with or without a loaded animation clip.
+        jumpVRM() {
+            const vrm = this.currentVRM;
+            if (!vrm) return;
+            if (this._jump && this._jump.scene === vrm.scene) return; // already in the air
+            this._jump = { scene: vrm.scene, baseY: vrm.scene.position.y, t: 0 };
+            document.getElementById('vrm-jump-btn')?.classList.add('selected');
+        }
+
+        _updateVRMJump(delta) {
+            const j = this._jump;
+            if (!j) return;
+            if (!this.currentVRM || j.scene !== this.currentVRM.scene) { this._jump = null; return; }
+            j.t += Math.min(delta, 0.05);
+            const CROUCH = 0.18, AIR = 0.55, LAND = 0.35, DIP = 0.06, HEIGHT = 0.35, SQUASH = 0.08;
+            const t = j.t;
+            let y;
+            if (t < CROUCH) {
+                y = -DIP * Math.sin((t / CROUCH) * Math.PI / 2);
+            } else if (t < CROUCH + AIR) {
+                const p = (t - CROUCH) / AIR;              // 0..1 through the air
+                y = -DIP * (1 - p) * (1 - p) + HEIGHT * 4 * p * (1 - p);
+            } else if (t < CROUCH + AIR + LAND) {
+                const p = (t - CROUCH - AIR) / LAND;       // landing squash then settle
+                y = -SQUASH * Math.sin(p * Math.PI) * (1 - 0.3 * p);
+            } else {
+                j.scene.position.y = j.baseY;
+                this._jump = null;
+                if (document.getElementById('vrm-jump-loop')?.checked) {
+                    setTimeout(() => this.jumpVRM(), 400);  // let the springs settle between hops
+                } else {
+                    document.getElementById('vrm-jump-btn')?.classList.remove('selected');
+                }
+                return;
+            }
+            j.scene.position.y = j.baseY + y;
         }
 
         _renderVRMExpressions(vrm) {

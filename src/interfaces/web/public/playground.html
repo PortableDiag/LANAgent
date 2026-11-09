@@ -877,16 +877,47 @@
             if (vrmaExt?.humanoid?.humanBones) {
                 const nodes = gltf.parser?.json?.nodes || [];
                 for (const [boneName, info] of Object.entries(vrmaExt.humanoid.humanBones)) {
-                    if (info.node < nodes.length) nodeNameToBone[nodes[info.node].name] = boneName;
+                    if (info.node < nodes.length) {
+                        // GLTFLoader sanitizes track names ("mixamorig:Hips" -> "mixamorigHips"): map both.
+                        const raw = nodes[info.node].name || '';
+                        nodeNameToBone[raw] = boneName;
+                        nodeNameToBone[THREE.PropertyBinding.sanitizeNodeName(raw)] = boneName;
+                    }
                 }
             }
 
+
+            // VRMA 1.0 face tracks: each expression is a node whose translation.x is its weight
+            // (the store's emote clips smile and laugh this way).
+            const exprByNode = {};
+            {
+                const ex = vrmaExt?.expressions || {};
+                const nodesJ = gltf.parser?.json?.nodes || [];
+                for (const group of [ex.preset || {}, ex.custom || {}]) {
+                    for (const [exName, info] of Object.entries(group)) {
+                        const raw = nodesJ[info?.node]?.name;
+                        if (raw == null) continue;
+                        exprByNode[raw] = exName;
+                        exprByNode[THREE.PropertyBinding.sanitizeNodeName(raw)] = exName;
+                    }
+                }
+            }
             const clip = gltf.animations[0];
             const retargetedTracks = [];
             for (const track of clip.tracks) {
                 const dotIdx = track.name.lastIndexOf('.');
                 const nodeName = track.name.substring(0, dotIdx);
                 const property = track.name.substring(dotIdx);
+                const exprName = exprByNode[nodeName];
+                if (exprName) {
+                    const target = vrm.expressionManager?.getExpression?.(exprName);
+                    if (target && (property === '.position' || property === '.translation')) {
+                        const w = [];
+                        for (let i = 0; i < track.values.length; i += 3) w.push(track.values[i]);
+                        retargetedTracks.push(new THREE.NumberKeyframeTrack(`${target.name}.weight`, Array.from(track.times), w));
+                    }
+                    continue;
+                }
                 const vrmBoneName = nodeNameToBone[nodeName];
                 if (!vrmBoneName) continue;
                 const bone = this._getBone(vrm, vrmBoneName);
@@ -931,6 +962,20 @@
                 { url: '/vrm-models/animations/hipHopDance.vrma', name: 'hip hop', loop: true },
                 { url: '/vrm-models/animations/sambaDancing.vrma', name: 'samba', loop: true },
             ];
+            // Clips bought from Bots & Borgs (animations/store.json): each joins the buttons, its dances join dance
+            // mode, and one made for a moment (wave, bow, cheer, clap, laugh) plays when the agent's reply fits it.
+            this._storeGestures = {};
+            try {
+                const r = await fetch('/vrm-models/animations/store.json', { cache: 'no-cache' });
+                const bought = r.ok ? await r.json() : [];
+                for (const c of Array.isArray(bought) ? bought : []) {
+                    const name = String(c.label || c.file).toLowerCase().replace(/['"\\<>&]/g, '');
+                    if (!name || animFiles.some(a => a.name === name)) continue;
+                    animFiles.push({ url: '/vrm-models/animations/' + String(c.file).split('/').map(encodeURIComponent).join('/'), name, loop: !!c.loop });
+                    if (c.gesture) (this._storeGestures[c.gesture] ||= []).push(name);
+                    if (c.gesture === 'dance' && !this._danceAnimations.includes(name)) this._danceAnimations = [...this._danceAnimations, name];
+                }
+            } catch (e) { /* none bought */ }
             this._idleActions = [];
             const loadWithTimeout = (url, ms = 10000) => {
                 return Promise.race([
@@ -1669,6 +1714,13 @@
 
         // --- Chat ---
 
+        /** A bought clip made for this moment (the owner bought them to be used), or null when none loaded. */
+        _ownedGesture(gestures) {
+            const names = [].concat(gestures || []).flatMap(g => this._storeGestures?.[g] || []).filter(n => this._idleActions?.some(a => a.name === n));
+            if (!names.length) return null;
+            return names[Math.floor(Math.random() * names.length)];
+        }
+
         // Analyze text and trigger appropriate animation + expression
         _reactToMessage(text) {
             if (!this.currentVRM) return;
@@ -1678,13 +1730,13 @@
             const reactions = [
                 // Greetings
                 { test: /\b(hello|hi|hey|greetings|welcome|good morning|good afternoon|good evening)\b/,
-                  anim: 'greeting', expr: 'happy' },
+                  anim: 'greeting', expr: 'happy', gesture: 'wave' },
                 // Farewell
                 { test: /\b(goodbye|bye|see you|farewell|take care|good night)\b/,
-                  anim: 'goodbye', expr: 'relaxed' },
+                  anim: 'goodbye', expr: 'relaxed', gesture: 'wave' },
                 // Excitement / agreement
                 { test: /\b(great|awesome|excellent|perfect|amazing|wonderful|fantastic|brilliant|nice|love it|well done)\b/,
-                  anim: 'clapping', expr: 'happy' },
+                  anim: 'clapping', expr: 'happy', gesture: ['cheer', 'clap'] },
                 // Apology / sadness
                 { test: /\b(sorry|apologize|unfortunately|sadly|regret|can't|cannot|unable|fail|error|wrong)\b/,
                   anim: 'sad', expr: 'sad' },
@@ -1699,13 +1751,13 @@
                   anim: 'thinking', expr: 'neutral' },
                 // Humor / playful
                 { test: /\b(haha|lol|funny|joke|laugh|hilarious|😂|😄)\b/,
-                  anim: 'jump', expr: 'happy' },
+                  anim: 'jump', expr: 'happy', gesture: 'laugh' },
                 // Sleepy / bored
                 { test: /\b(tired|sleepy|bored|boring|yawn|exhausted|meh)\b/,
                   anim: 'sleepy', expr: 'relaxed' },
                 // Shy / embarrassed
                 { test: /\b(blush|embarrass|shy|flatter|thank you|thanks|appreciate)\b/,
-                  anim: 'blush', expr: 'relaxed' },
+                  anim: 'blush', expr: 'relaxed', gesture: 'bow' },
                 // Curious / looking
                 { test: /\b(look|check|search|find|where|show me|scan|detect)\b/,
                   anim: 'look around', expr: 'neutral' },
@@ -1720,7 +1772,7 @@
             let matched = false;
             for (const r of reactions) {
                 if (r.test.test(lower)) {
-                    this.playAnimation(r.anim);
+                    this.playAnimation(this._ownedGesture(r.gesture) || r.anim);
                     this.triggerExpression(r.expr);
                     // Reset expression after animation ends (approx duration)
                     setTimeout(() => this.triggerExpression('neutral'), 4000);

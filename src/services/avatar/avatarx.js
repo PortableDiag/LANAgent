@@ -20,6 +20,62 @@ function fetcherTrusting(ca) {
   };
 }
 
+/** An authorized caller for the sidecar's agent API, or null when AvatarX is not set up here. */
+async function connect({ url = process.env.AVATARX_URL, keyFile = process.env.AVATARX_AGENT_KEY_FILE, caFile = process.env.AVATARX_CA_FILE, fetchFn } = {}) {
+  if (!url || !keyFile) return null;
+  const send = fetchFn || fetcherTrusting(caFile ? await fs.readFile(caFile) : null);
+  const key = (await fs.readFile(keyFile, 'utf8')).trim();
+  const base = String(url).replace(/\/+$/, '');
+  return async (method, route, body, type = 'application/json') => {
+    const res = await send(`${base}${route}`, {
+      method, body, headers: { Authorization: `Bearer ${key}`, ...(body ? { 'Content-Type': type } : {}) }
+    });
+    if (!res.ok) throw new Error(`AvatarX ${method} ${route}: ${res.status}`);
+    return res.json();
+  };
+}
+
+/** AvatarX's name for a clip: its file stem, lower case, [a-z0-9_-] (AvatarX store::clean_name). */
+export function avatarxClipName(file) {
+  const stem = path.basename(String(file || '')).replace(/\.(vrma|fbx)$/i, '');
+  return stem.split('').map(c => /[A-Za-z0-9_-]/.test(c) ? c.toLowerCase() : '_').join('').slice(0, 60);
+}
+
+/**
+ * Give AvatarX the clips this agent owns, so each is a button there and the agent can play it. Clips are keyed by name
+ * and a re-upload replaces, so this is safe to repeat. A name that is one of AvatarX's built-in gestures gets a bnb-
+ * prefix, never shadowing it. clips: [{ file (absolute path), name? }]. Returns the names AvatarX holds, or 'not connected'.
+ */
+export async function pushClipsToAvatarX(clips, opts = {}) {
+  const call = await connect(opts);
+  if (!call) return 'not connected';
+  const state = await call('GET', '/agent/v1/state');
+  const builtIn = new Set(state.gestures || []);
+  const have = new Set(state.animations || []);
+  const names = [];
+  for (const c of clips) {
+    let name = avatarxClipName(c.name || c.file);
+    if (!name) continue;
+    if (builtIn.has(name)) name = `bnb-${name}`.slice(0, 60);
+    if (!have.has(name)) {
+      const up = await call('POST', `/agent/v1/animations?name=${encodeURIComponent(name)}`, await fs.readFile(c.file), 'application/octet-stream');
+      name = up.animation || name;
+      logger.info(`AvatarX: added clip ${name}`);
+    }
+    names.push(name);
+  }
+  return names;
+}
+
+/** Play a gesture or an owned clip on AvatarX now. Returns 'played', or 'not connected'. */
+export async function playOnAvatarX(name, opts = {}) {
+  const call = await connect(opts);
+  if (!call) return 'not connected';
+  await call('POST', '/agent/v1/gesture', JSON.stringify({ name }));
+  logger.info(`AvatarX: played ${name}`);
+  return 'played';
+}
+
 export async function pushModelToAvatarX(modelId, {
   url = process.env.AVATARX_URL,
   keyFile = process.env.AVATARX_AGENT_KEY_FILE,
@@ -27,17 +83,8 @@ export async function pushModelToAvatarX(modelId, {
   vrmDir = path.join(DATA_PATH, 'vrm-models'),
   fetchFn
 } = {}) {
-  if (!url || !keyFile) return 'not connected';
-  const send = fetchFn || fetcherTrusting(caFile ? await fs.readFile(caFile) : null);
-  const key = (await fs.readFile(keyFile, 'utf8')).trim();
-  const base = String(url).replace(/\/+$/, '');
-  const call = async (method, route, body, type = 'application/json') => {
-    const res = await send(`${base}${route}`, {
-      method, body, headers: { Authorization: `Bearer ${key}`, ...(body ? { 'Content-Type': type } : {}) }
-    });
-    if (!res.ok) throw new Error(`AvatarX ${method} ${route}: ${res.status}`);
-    return res.json();
-  };
+  const call = await connect({ url, keyFile, caFile, fetchFn });
+  if (!call) return 'not connected';
   const manifest = JSON.parse(await fs.readFile(path.join(vrmDir, 'manifest.json'), 'utf8'));
   const model = manifest.find(m => m.id === modelId);
   if (!model?.file) throw new Error(`model ${modelId} is not in the gallery`);

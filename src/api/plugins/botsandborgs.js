@@ -6,7 +6,7 @@ import { PluginSettings } from '../../models/PluginSettings.js';
 import { encrypt, decrypt } from '../../utils/encryption.js';
 import fs from 'node:fs/promises';
 import { DATA_PATH } from '../../utils/paths.js';
-import { variantKind, unpack, installVrm, addToManifest, readVrmInfo, safeName, toStickerWebp, moodOf, portraitFromPreview } from '../../services/store/assetLibrary.js';
+import { variantKind, unpack, installVrm, addToManifest, readVrmInfo, readVrmaInfo, clipLabel, clipLoops, clipGesture, writeStoreAnimations, safeName, toStickerWebp, moodOf, portraitFromPreview } from '../../services/store/assetLibrary.js';
 import { moodChoices, chooseSticker, stickerCouldFit, wallpaperFor } from '../../services/store/selfUse.js';
 
 /**
@@ -44,7 +44,7 @@ const DEFAULTS = {
 };
 const AUTO_STICKER_EVERY_MS = Number(process.env.BOTSANDBORGS_STICKER_EVERY_MS) || 20 * 60 * 1000;
 const AUTO_STICKER_ASK_EVERY_MS = 60 * 1000;
-const USES =['avatar', 'send', 'install', 'wear', 'keep'];
+const USES =['avatar', 'send', 'install', 'wear', 'keep', 'play'];
 
 /**
  * "the avatar you just bought", "your new model", "it": words that name no product, only the latest purchase
@@ -63,7 +63,7 @@ function modelPicture(item) {
   const image = (f) => /^image\//.test(f.mime || '') || /\.(png|jpe?g|webp)$/i.test(f.name || '');
   return item.files.find(f => f.kind === 'portrait' && image(f)) || item.files.find(f => f.kind === 'preview' && image(f)) || null;
 }
-const KIND_WORDS = 'avatar, icon, portrait, sticker, emoji, wallpaper, vrm';
+const KIND_WORDS = 'avatar, icon, portrait, sticker, emoji, wallpaper, vrm, animation';
 
 export default class BotsAndBorgsPlugin extends BasePlugin {
   constructor(agent) {
@@ -88,19 +88,19 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
         command: 'buy',
         description: 'Buy one Bots & Borgs variant with the agent wallet and use it. `use` is required: "avatar" (set it as your own avatar) or "send" (send it to `to`, a contact name or number, or "me" for the owner). Respects the weekly budget, wallet floor and approval settings. With no variant the agent picks one itself, never one it owns or that another agent wears; `avoid` lists names the request rules out ("Nexus already has Sentinel" → avoid: "sentinel"); `dryRun: true` picks and quotes without paying',
         usage: 'buy({ variant: "agent-avatar-singles-sentinel", use: "avatar" })',
-        examples: ['buy an avatar you like from botsandborgs and use it', 'buy the sentinel avatar from bots and borgs and set it as your avatar', 'buy a phone wallpaper from botsnborgs and send it to me', 'buy Jo a robot icon from bots and borgs']
+        examples: ['buy the dance pack from bots and borgs', 'buy yourself some animations from bots and borgs', 'buy an avatar you like from botsandborgs and use it', 'buy the sentinel avatar from bots and borgs and set it as your avatar', 'buy a phone wallpaper from botsnborgs and send it to me', 'buy Jo a robot icon from bots and borgs']
       },
       {
         command: 'library',
-        description: 'What this agent owns from Bots & Borgs: stickers, emoji, portraits, wallpapers and VRM models it can use without paying again',
+        description: 'What this agent owns from Bots & Borgs: stickers, emoji, portraits, wallpapers, VRM models and animation clips it can use without paying again',
         usage: 'library({ kind: "sticker", refresh: true })',
         examples: ['what have you got from bots and borgs', 'show your sticker library', 'which vrm models do you own']
       },
       {
         command: 'use',
-        description: 'Use something already bought from Bots & Borgs, at no cost: as "send" (a sticker, emoji, portrait or wallpaper to `to`, "me" for the owner; `mood` picks a sticker), "avatar", "install" (a VRM into the model gallery) or "wear" (make a VRM this agent\'s active 3D model)',
+        description: 'Use something already bought from Bots & Borgs, at no cost: as "send" (a sticker, emoji, portrait or wallpaper to `to`, "me" for the owner; `mood` picks a sticker), "avatar", "install" (a VRM into the model gallery) or "wear" (make a VRM this agent\'s active 3D model), or "play" (an owned animation clip, e.g. a wave or a dance, on its 3D body now)',
         usage: 'use({ item: "vrm-mm-bear-stickers", as: "send", to: "me", mood: "happy" })',
-        examples: ['send me a happy sticker', 'send Sam a sad robot emoji', 'use the bear vrm model as your 3d model', 'wear the bear model', 'install the bear model you bought', 'send me the bear portrait', 'send me a wallpaper from your wallpapers', 'set my wallpaper from my bots and borgs wallpapers']
+        examples: ['send me a happy sticker', 'send Sam a sad robot emoji', 'use the bear vrm model as your 3d model', 'wear the bear model', 'install the bear model you bought', 'send me the bear portrait', 'send me a wallpaper from your wallpapers', 'set my wallpaper from my bots and borgs wallpapers', 'do the rumba you bought', 'play your wave animation', 'dance for me with your new dance pack']
       },
       {
         command: 'orders',
@@ -357,11 +357,11 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     // wears a new model (DELTA 2026-11-07 was refused "my avatar is tied to my 3D model" and never bought one).
     let wantNow = wantKind;
     if (String(data.use || '').toLowerCase() === 'avatar' && !data.variant && s.autoWear && !(await this.avatarChangeAllowed({ allowAvatarChange: null }))
-      && !['portrait', 'icon', 'sticker', 'emoji', 'wallpaper'].includes(wantKind) && s.allowAvatarChange !== false) {
+      && !['portrait', 'icon', 'sticker', 'emoji', 'wallpaper', 'animation'].includes(wantKind) && s.allowAvatarChange !== false) {
       data = { ...data, use: 'wear' };
       wantNow = wantKind === 'bundle' ? 'bundle' : 'vrm';
     }
-    if (!data.use && ['sticker', 'emoji', 'wallpaper'].includes(buying)) data = { ...data, use: 'keep' };
+    if (!data.use && ['sticker', 'emoji', 'wallpaper', 'animation'].includes(buying)) data = { ...data, use: 'keep' };
     if (!data.use && buying && /-portraits$|-bundle$|-pack$|^[a-z-]+-(?:avatars|wallpapers|emoji)$/.test(String(data.variant || ''))) data = { ...data, use: 'keep' };
     const use = String(data.use || '').toLowerCase();
     // The owner's rule: never buy to hold. A purchase names what it is for.
@@ -501,10 +501,11 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     if (!pm?.analyzeImage) return null;
     const cat = await this.api('get', '/api/catalog');
     // One item per pick: singles for an avatar, icons for an icon, a phone wallpaper pair otherwise.
-    const tier = { vrm: (v) => !/-(?:portraits|stickers|bundle)$/.test(v.id), portrait: (v) => /-portraits$/.test(v.id), sticker: (v) => /-stickers$/.test(v.id) };
+    const tier = { vrm: (v) => !/-(?:portraits|stickers|bundle)$/.test(v.id), portrait: (v) => /-portraits$/.test(v.id), sticker: (v) => /-stickers$/.test(v.id), animation: () => true };
     const want = kind === 'icon' ? (p) => /icons?$/.test(p.slug)
       : kind === 'wallpaper' ? (p) => /phone|wallpaper/i.test(`${p.slug} ${p.title}`)
         : kind === 'emoji' ? (p) => /emoji-minis$/.test(p.slug)
+          : kind === 'animation' ? (p) => p.collection === 'animations'
           // A model to become needs a face that can blink and talk; the store's painted robots can't.
           : tier[kind] ? (p) => p.collection === '3d-avatars' && (anyFace || !(kind === 'vrm' && /no expression/i.test(JSON.stringify(p.specs || []))))
             : (p) =>/singles$/.test(p.slug) && /avatar|mech|menagerie/i.test(`${p.slug} ${p.title}`);
@@ -575,6 +576,8 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
   // ── library ───────────────────────────────────────────────────
   kindAsked(words) {
     const w = String(words || '');
+    // Clips first: "the dance pack", "emote animations" are clips, not a model's bundle or a sticker set.
+    if (/\b(animations?|animated clips?|dance (?:pack|moves|clips?)|dances|motions?|vrma|mocap|gesture clips?)\b/i.test(w)) return 'animation';
     // "Get the pack" / "the avatar kit" for a model is its complete bundle; a portrait or sticker pack is not.
     if (/\b(bundle|everything for)\b/i.test(w) || /\b(?<!(?:portrait|sticker|emoji|wallpaper|icon)s? )(?:pack|kit)\b/i.test(w)) return 'bundle';
     if (/\b(vrm|vroid|3d|three.?d)\b/i.test(w)) return 'vrm';
@@ -615,7 +618,7 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     const product = await this.productOf(variant);
     const kind = variantKind(variant, product?.collection);
     const label = (product?.variants || []).find(v => v.id === variant)?.label;
-    const title = product ? (kind === 'vrm' || kind === 'bundle' || !label ? product.title : `${product.title}: ${label}`) : variant;
+    const title = product ? (kind === 'vrm' || kind === 'bundle' || kind === 'animation' || !label ? product.title : `${product.title}: ${label}`) : variant;
     const dir = path.join(this.libraryDir(), safeName(variant));
     await fs.mkdir(dir, { recursive: true });
     const files = [];
@@ -629,6 +632,13 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
         const mood = moodOf(f.name, f.kind);
         if (mood) entry.mood = mood;
         if (f.format) entry.format = f.format;
+        if (f.kind === 'animation') {
+          entry.label = clipLabel(f.name);
+          entry.loop = clipLoops(entry.label);
+          const gesture = clipGesture(entry.label);
+          if (gesture) entry.gesture = gesture;
+          try { Object.assign(entry, { expressions: readVrmaInfo(f.buffer).expressions }); } catch (e) { this.logger.warn(`botsandborgs: ${f.name} is not a VRM animation (${e.message})`); continue; }
+        }
         if (f.kind === 'vrm') {
           const installed = await installVrm(f.buffer, { variant, name: product?.title?.replace(/\s*[—-]\s*VRM Avatar$/i, ''), description: `Bought from Bots & Borgs (${product?.title || variant})` }, this.vrmDir());
           entry.modelId = installed.id;
@@ -640,6 +650,7 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     }
     const item = { variant, title, kind, collection: product?.collection || null, order: order?.id || null, token: order?.token || null, at: new Date().toISOString(), files };
     await this.saveLibraryItem(item);
+    if (files.some(f => f.kind === 'animation')) await this.publishAnimations();
     return item;
   }
 
@@ -675,6 +686,11 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
 
   /** The gallery's manifest can be replaced by a deploy: bought models whose file is still there go back on the list. */
   async repairGallery() {
+    const items = await this.libraryItems();
+    if (items.some(i => i.files.some(f => f.kind === 'animation'))) {
+      const listed = await fs.access(path.join(this.vrmDir(), 'animations', 'store.json')).then(() => true).catch(() => false);
+      if (!listed) await this.publishAnimations().catch(e => this.logger.warn(`botsandborgs: clips not relisted: ${e.message}`));
+    }
     for (const item of await this.libraryItems()) {
       for (const f of item.files) {
         if (!f.gallery) continue;
@@ -731,8 +747,11 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     if (!as && !data.to && /\b(avatars?|equip|apply|re-?apply|put on|profile (?:pic(?:ture)?|photo|image)|pfp|look like)\b/i.test(asked)) {
       as = (await this.pickOwned({ item, kind: 'vrm', kinds: ['vrm'] })) ? 'wear' : 'avatar';
     }
-    if (!as) as = 'send';
     const kind = data.kind && data.kind !== 'avatar' ? data.kind : this.kindAsked(asked);
+    if (as === 'play' || as === 'dance' || kind === 'animation' || (!as && !data.to && /\b(dance|do (?:the|a) |wave|bow|cheer|clap|laugh|dab)\b/i.test(asked) && !/\b(stickers?|emoji|portraits?|wallpapers?|icons?|vrm|model)\b/i.test(asked))) {
+      return this.playClip({ item, clip: data.clip || data.mood, asked });
+    }
+    if (!as) as = 'send';
     if (as === 'install' || as === 'wear') return this.useModel({ item, wear: as === 'wear' });
     if (as === 'avatar' && item && !(await this.pickOwned({ item, kinds: ['portrait', 'icon'] })) && (await this.pickOwned({ item, kind: 'vrm', kinds: ['vrm'] }))) {
       return this.useModel({ item, wear: true });
@@ -788,6 +807,45 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
   }
 
   /** A bought model: into the gallery, and active only when the request says so. */
+  /**
+   * Bought clips go where the agent's body is: the designer and the playground (animations/store.json beside the
+   * model gallery) and AvatarX, when this agent has one. Never anywhere else: the licence allows no sharing.
+   */
+  async publishAnimations() {
+    const listed = await writeStoreAnimations(await this.libraryItems(), this.libraryDir(), this.vrmDir());
+    this.logger.info(`botsandborgs: ${listed.length} bought clips listed for the designer and the playground`);
+    const { pushClipsToAvatarX } = await import('../../services/avatar/avatarx.js');
+    const pushed = await pushClipsToAvatarX(listed.map(c => ({ file: path.join(this.vrmDir(), 'animations', c.file) })))
+      .catch(e => { this.logger.warn(`botsandborgs: AvatarX clips not added: ${e.message}`); return null; });
+    if (Array.isArray(pushed)) this.logger.info(`botsandborgs: AvatarX holds ${pushed.length} bought clips`);
+    return listed;
+  }
+
+  /** Play an owned clip on the agent's 3D body: by name ("rumba"), by what it is for ("wave", "dance"), or any one. */
+  async playClip({ item, clip, asked = '' }) {
+    let pool = (await this.libraryItems()).flatMap(i => i.files.filter(f => f.kind === 'animation').map(f => ({ item: i, file: f })));
+    if (!pool.length) return { success: false, error: "I don't own any animations yet. I can buy a pack from Bots & Borgs if you want." };
+    if (item && !isGenericItem(item)) {
+      const inItem = pool.filter(p => p.item.variant === item || this.matches(p.item, item));
+      if (inItem.length) pool = inItem;
+    }
+    const words = `${clip || ''} ${asked}`.toLowerCase();
+    const named = pool.filter(p => { const l = String(p.file.label || '').toLowerCase(); return l && words.includes(l); });
+    const purpose = clipGesture(clip || asked);
+    const fits = named.length ? named : purpose ? pool.filter(p => p.file.gesture === purpose) : [];
+    const choice = (fits.length ? fits : pool)[Math.floor(Math.random() * (fits.length ? fits : pool).length)];
+    if (!fits.length && (clip || purpose)) return { success: false, error: `I have no ${clip || purpose} clip. Mine: ${[...new Set(pool.map(p => p.file.label))].join(', ')}.` };
+    const { playOnAvatarX, pushClipsToAvatarX } = await import('../../services/avatar/avatarx.js');
+    const file = path.join(this.vrmDir(), 'animations', 'store', safeName(choice.item.variant), choice.file.name);
+    let played = 'not connected';
+    try {
+      const [name] = await pushClipsToAvatarX([{ file }]).then(r => (Array.isArray(r) ? r : []));
+      if (name) played = await playOnAvatarX(name);
+    } catch (e) { this.logger.warn(`botsandborgs: AvatarX did not play ${choice.file.label}: ${e.message}`); played = 'failed'; }
+    const where = played === 'played' ? 'on my 3D body in AvatarX now' : 'in the avatar designer and the 3D playground (it isn\'t showing anywhere right now)';
+    return { success: played !== 'failed', result: played === 'failed' ? `I couldn't play ${choice.file.label} on AvatarX.` : `Playing ${choice.file.label} (${choice.item.title}) ${where}.`, clip: choice.file.label };
+  }
+
   async useModel({ item, wear }) {
     // No model named = the one bought last (the library is newest first). A random pick among owned models put
     // DELTA back in Racer Blue a second after it bought and wore Pilot White (2026-11-07, a plan's "apply it" step).

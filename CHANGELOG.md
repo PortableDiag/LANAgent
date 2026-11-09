@@ -2,6 +2,12 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.775] - 2026-11-08
+
+### Added
+- **Agents buy and use Bots & Borgs animation clips.** The store's `animations` packs (VRM Animation `.vrma`: emotes, dance packs) are recognised as clips, not models. A bought pack's clips are listed for the avatar designer's clip picker and the 3D playground (`data/vrm-models/animations/store.json`, rebuilt from the library), and given to AvatarX when the agent has one. In the playground the agent waves on hello, bows on thanks, cheers or claps on good news and laughs at a joke with its own clips, and its dances join dance mode. "Do the rumba", "play your wave" plays one now (`use` with `as: "play"`). Clips stay on the agent's machine.
+- **Clips move the face too.** VRMA expression tracks (a smile, an open mouth while laughing) now play in the designer and the playground; only the bones did before.
+
 ## [2.25.774] - 2026-11-07
 
 ### Fixed

@@ -18,7 +18,7 @@ export function asksToUseStoreItem(text) {
 const MAX_FILES = 500;
 const MAX_TOTAL_BYTES = 2 * 1024 * 1024 * 1024; // a guard against a bad zip, not a size limit on products
 const MIME = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp', '.gif': 'image/gif',
-  '.vrm': 'model/gltf-binary', '.webm': 'video/webm', '.mp4': 'video/mp4', '.txt': 'text/plain', '.md': 'text/markdown', '.pdf': 'application/pdf' };
+  '.vrm': 'model/gltf-binary', '.vrma': 'model/gltf-binary', '.webm': 'video/webm', '.mp4': 'video/mp4', '.txt': 'text/plain', '.md': 'text/markdown', '.pdf': 'application/pdf' };
 
 /** The name a file may have on disk: its last path part, nothing that can climb out of the folder. */
 export function safeName(name) {
@@ -32,6 +32,8 @@ export function variantKind(variant, collection = '') {
   if (/-bundle$/.test(id)) return 'bundle';
   if (/-stickers$/.test(id)) return 'sticker';
   if (/-portraits$/.test(id)) return 'portrait';
+  // Before the vrm- rule: the store's clip packs are named vrm-dance-pack-1, vrm-emote-animations-1 (2026-11-08).
+  if (collection === 'animations' || /-(?:animations?|dance-pack|emotes?|motions?)(?:-\d+)?$/.test(id)) return 'animation';
   if (collection === '3d-avatars' || /^vrm-/.test(id)) return 'vrm';
   if (collection === 'emoji' || /emoji/.test(id)) return 'emoji';
   if (collection === 'wallpapers' || /wallpaper|-phone-/.test(id)) return 'wallpaper';
@@ -44,9 +46,12 @@ export function fileKind(filename, kind = 'portrait') {
   const n = String(filename || '').toLowerCase().replace(/\\/g, '/');
   const ext = path.extname(n);
   if (ext === '.vrm') return 'vrm';
+  if (ext === '.vrma') return 'animation';
   if (/\.(txt|md|pdf)$/.test(n) || /(^|\/)(readme|licen[cs]e|credits)/.test(n)) return 'document';
   if (!/\.(png|jpe?g|webp|gif|webm|mp4)$/.test(n)) return null;
   if (/preview|thumbnail|contact.?sheet/.test(n)) return 'preview';
+  // An animation pack's pictures and videos only show its clips.
+  if (kind === 'animation') return 'preview';
   // Only a model or a bundle mixes kinds. Elsewhere a pack's name says nothing ("Agent Mode Wallpapers" is fine, a
   // portrait pack called "Sticker Bots" would not be).
   if (kind !== 'vrm' && kind !== 'bundle') return kind;
@@ -172,6 +177,85 @@ export async function addToManifest(entry, vrmDir) {
   const at = list.findIndex(m => m.id === entry.id);
   if (at >= 0) list[at] = entry; else list.push(entry);
   await writeAtomic(file, JSON.stringify(list, null, 2));
+}
+
+/**
+ * What a clip is for, from its name: the playground plays a bought "wave" when the agent says hello, and so on.
+ * The names come from the store's packs (wave, bow, cheer, clap, laugh, dance groove, rumba, dab, …).
+ */
+export function clipGesture(label) {
+  const n = String(label || '').toLowerCase();
+  if (/\bwave|hello|greet/.test(n)) return 'wave';
+  if (/\bbow/.test(n)) return 'bow';
+  if (/\bcheer/.test(n)) return 'cheer';
+  if (/\bclap/.test(n)) return 'clap';
+  if (/\blaugh/.test(n)) return 'laugh';
+  if (/\bdab\b/.test(n)) return 'dab';
+  if (/danc|groove|rumba|belly|can.?can|cabbage|running man|roger|gogo|go.?go|booty|shake|twerk|samba|ballet|hip.?hop/.test(n)) return 'dance';
+  return null;
+}
+
+/** A clip's facts from its own glTF header: the expressions it moves. Throws when the file is not a VRM animation. */
+export function readVrmaInfo(buffer) {
+  if (buffer.length < 20 || buffer.subarray(0, 4).toString('latin1') !== 'glTF') throw new Error('not a glTF binary');
+  const length = buffer.readUInt32LE(12);
+  if (buffer.subarray(16, 20).toString('latin1') !== 'JSON' || 20 + length > buffer.length) throw new Error('no glTF JSON chunk');
+  const gltf = JSON.parse(buffer.subarray(20, 20 + length).toString('utf8'));
+  const ext = gltf.extensions?.VRMC_vrm_animation;
+  if (!ext) throw new Error('a glTF file with no VRM animation data');
+  const ex = ext.expressions || {};
+  return {
+    bones: Object.keys(ext.humanoid?.humanBones || {}).length,
+    expressions: [...Object.keys(ex.preset || {}), ...Object.keys(ex.custom || {})].sort()
+  };
+}
+
+/** A clip's label from its file name: "rumba.vrma" → "Rumba", "dance_groove-120bpm.vrma" → "Dance groove 120bpm". */
+export function clipLabel(name) {
+  const t = path.parse(String(name || '')).name.replace(/[-_]+/g, ' ').replace(/\s+/g, ' ').trim();
+  return t ? t[0].toUpperCase() + t.slice(1) : 'Clip';
+}
+
+/** Loops unless it is a one-shot gesture. The store's README or the item's own list wins when it names them. */
+export function clipLoops(label, loops = null) {
+  const n = String(label || '').toLowerCase();
+  if (Array.isArray(loops) && loops.length) return loops.some(l => n.includes(String(l).toLowerCase()));
+  return !/\b(wave|bow|laugh|dab|hello|goodbye|greet)\b/.test(n);
+}
+
+/**
+ * The bought clips the designer and the playground load: data/vrm-models/animations/store.json, rebuilt whole from the
+ * library every time, so it can't drift from what was bought. Each clip is copied to animations/store/<variant>/. The
+ * repo's animations.json is never touched (it is the agent's own list, and nothing bought goes into it).
+ * A clip is used on this machine only: the store's licence allows no resale or sharing of the files.
+ */
+export async function writeStoreAnimations(items, libraryDir, vrmDir) {
+  const out = [];
+  for (const item of items) {
+    const clips = (item.files || []).filter(f => f.kind === 'animation');
+    if (!clips.length) continue;
+    const variant = safeName(item.variant);
+    const dest = path.join(vrmDir, 'animations', 'store', variant);
+    await fs.mkdir(dest, { recursive: true });
+    for (const f of clips) {
+      const to = path.join(dest, f.name);
+      const there = await fs.stat(to).then(st => st.size === f.size).catch(() => false);
+      if (!there) {
+        const bytes = await fs.readFile(path.join(libraryDir, variant, f.name)).catch(() => null);
+        if (!bytes) continue;
+        await writeAtomic(to, bytes);
+      }
+      const label = f.label || clipLabel(f.name);
+      const entry = { file: `store/${variant}/${f.name}`, label, group: `Bots & Borgs: ${item.title || item.variant}`, loop: f.loop ?? clipLoops(label), source: 'botsandborgs', variant: item.variant };
+      const gesture = f.gesture || clipGesture(label);
+      if (gesture) entry.gesture = gesture;
+      if (f.expressions?.length) entry.expressions = f.expressions;
+      out.push(entry);
+    }
+  }
+  await fs.mkdir(path.join(vrmDir, 'animations'), { recursive: true });
+  await writeAtomic(path.join(vrmDir, 'animations', 'store.json'), JSON.stringify(out, null, 2));
+  return out;
 }
 
 /** A picture as a Telegram sticker: 512 px on its longest side, WebP, transparency kept. */
