@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { DialXRealtime, realtimeChain, REALTIME_ATTEMPTS, supportsRealtime, realtimeInstructions, sessionConfig, isGroupCall, ownerOnLine, askAgentRules, isBackgroundNote, lateTakeover } from '../../src/services/textx/dialxRealtime.js';
+import { DialXRealtime, realtimeChain, REALTIME_ATTEMPTS, supportsRealtime, realtimeInstructions, sessionConfig, isGroupCall, ownerOnLine, askAgentRules, isBackgroundNote, lateTakeover, lightUpload } from '../../src/services/textx/dialxRealtime.js';
 import { DIALX_TOOLS } from '../../src/services/textx/dialx.js';
 
 const quiet = { info() {}, warn() {} };
@@ -852,4 +852,18 @@ test('a lookup answer sent just before a drop is resent to the new session, an o
   rt.started(s, { resumed: true, rt_session_id: 'd' });
   clearTimeout(s.silenceTimer);
   assert.equal(tools.filter(t => t.name === 'dialx.realtime_note').length, 2, 'older than 10 s stays out');
+});
+
+test('a call with several agents uploads G.711 when the phone can (DialX 0.7.127+, 4293 #601-#604)', () => {
+  const on = (v) => ({ device: { appVersion: v } });
+  assert.equal(lightUpload(on('0.7.127'), true), true);
+  assert.equal(lightUpload(on('0.8.0'), true), true);
+  assert.equal(lightUpload(on('1.0.0'), true), true);
+  assert.equal(lightUpload(on('0.7.126'), true), false, 'an older DialX always sends pcm16');
+  assert.equal(lightUpload(on(''), true), false);
+  assert.equal(lightUpload(on('0.7.127'), false), false, 'one agent fits the uplink');
+  assert.deepEqual(sessionConfig({ instructions: 'x', pcmu: true }).session.audio.input.format, { type: 'audio/pcmu' });
+  const plain = sessionConfig({ instructions: 'x' }).session.audio;
+  assert.deepEqual(plain.input.format, { type: 'audio/pcm', rate: 24000 });
+  assert.deepEqual(sessionConfig({ instructions: 'x', pcmu: true }).session.audio.output.format, plain.output.format, 'output untouched');
 });

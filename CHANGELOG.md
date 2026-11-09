@@ -2,6 +2,11 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.783] - 2026-11-09
+
+### Changed
+- **Lighter phone upload on calls with more than one agent.** On a group call each agent's realtime session now asks the phone for G.711 mu-law audio (about 11 KB/s) instead of 16-bit PCM (about 64 KB/s). With two agents on the line, the PCM streams stalled five times in 90 seconds on a mobile connection; one agent alone never did. This applies only when the phone's DialX is 0.7.127 or later, which sends the format the session asks for. Calls with one agent and older phones are unchanged, and so is the agent's voice. The log's `offered realtime` line says `G.711 upload` when it applies.
+
 ## [2.25.782] - 2026-11-09
 
 ### Fixed

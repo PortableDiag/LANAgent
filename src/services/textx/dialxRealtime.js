@@ -257,8 +257,22 @@ export async function realtimeVoiceAudio(text, { voice = REALTIME_VOICE, env = p
 /** The body for POST /v1/realtime/client_secrets: the whole session, fixed before the phone connects. */
 /** DialX 0.7.90+: a dialx.realtime sent after a failure takes the call over from turns. */
 export function lateTakeover(device) {
-  const v = String(device?.appVersion || '').split('.').map(n => parseInt(n, 10) || 0);
-  return (v[0] || 0) > 0 || (v[1] || 0) > 7 || ((v[1] || 0) === 7 && (v[2] || 0) >= 90);
+  return atLeast(device, 0, 7, 90);
+}
+
+/** The phone's DialX is this version or later (from its hello's app_version). */
+function atLeast(device, a, b, c) {
+  const [x = 0, y = 0, z = 0] = String(device?.appVersion || '').split('.').map(n => parseInt(n, 10) || 0);
+  return x !== a ? x > a : y !== b ? y > b : z >= c;
+}
+
+/**
+ * Upload G.711 mu-law instead of pcm16 on a call with more than one agent (4293 #601-#604): two pcm16 sockets (~128 KB/s)
+ * stalled 5 times in 90 s on the owner's mobile uplink; one fits. DialX 0.7.127+ reads the input format from the session
+ * and sends 8 kHz mu-law (~11 KB/s); an older DialX always sends pcm16, which a pcmu session would hear as noise.
+ */
+export function lightUpload(s, group) {
+  return !!group && atLeast(s?.device, 0, 7, 127);
 }
 
 /** A session reconnecting after a drop (DialX 0.7.87): the conversation so far, and no second opening. */
@@ -331,8 +345,9 @@ export function askAgentRules(name, owner) {
 // transcriber stops guessing one per noise. DIALX_TRANSCRIBE_LANGUAGE (ISO-639-1) for an owner who speaks another.
 const TRANSCRIBE_LANGUAGE = process.env.DIALX_TRANSCRIBE_LANGUAGE || 'en';
 
-export function sessionConfig({ instructions, voice = REALTIME_VOICE, model = REALTIME_MODEL, group = false, owner = false }) {
+export function sessionConfig({ instructions, voice = REALTIME_VOICE, model = REALTIME_MODEL, group = false, owner = false, pcmu = false }) {
   const pcm = { type: 'audio/pcm', rate: 24000 }; // what DialX streams and plays (#195)
+  const upload = pcmu ? { type: 'audio/pcmu' } : pcm; // see lightUpload
   return {
     // Handed over while the phone rings (DialX 0.7.39): long enough for a long ring, as Orbit's (4293 #239).
     expires_after: { anchor: 'created_at', seconds: 120 },
@@ -341,7 +356,7 @@ export function sessionConfig({ instructions, voice = REALTIME_VOICE, model = RE
       // gpt-realtime-2.1 reasons by default; low effort brought first audio from 1.19 s to 0.97 s (Orbit, 4293 #262).
       ...(reasons(model) ? { reasoning: { effort: 'low' } } : {}),
       audio: {
-        input: { format: pcm, noise_reduction: { type: 'far_field' }, transcription: { model: 'gpt-4o-mini-transcribe', language: TRANSCRIBE_LANGUAGE }, turn_detection: { type: 'semantic_vad', eagerness: 'low' } },
+        input: { format: upload, noise_reduction: { type: 'far_field' }, transcription: { model: 'gpt-4o-mini-transcribe', language: TRANSCRIBE_LANGUAGE }, turn_detection: { type: 'semantic_vad', eagerness: 'low' } },
         // eagerness low: 8 barge-ins in 10 replies on call 58 at the default; Orbit's calls improved with low (4293 #349).
         output: { format: pcm, voice }
       },
@@ -405,7 +420,7 @@ export class DialXRealtime {
     const res = await this.fetch(`${API}/client_secrets`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${this.env.OPENAI_API_KEY}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify(sessionConfig({ instructions, voice, model, group: (s.rtGroup = isGroupCall(s, name)), owner: s.ownerOnLine }))
+      body: JSON.stringify(sessionConfig({ instructions, voice, model, group: (s.rtGroup = isGroupCall(s, name)), owner: s.ownerOnLine, pcmu: (s.rtPcmu = lightUpload(s, s.rtGroup)) }))
     });
     const body = await res.json().catch(() => ({}));
     const secret = body?.value || body?.client_secret?.value;
@@ -454,7 +469,7 @@ export class DialXRealtime {
         const r = await this.tool(s, 'dialx.realtime', { client_secret: secret, expires_at: expiresAt, model, hold_fillers: true });
         if (!r.ok) throw new Error(`dialx.realtime ${r.error?.code || 'failed'}`);
         s.realtime = 'offered';
-        this.logger.info?.(`DialX: call ${s.id} offered realtime (${model}, ${voice}${n > 1 ? `, backup ${n - 1}` : ''}${fresh === early ? ', secret minted while ringing' : ''}${n > 1 ? `, try ${n}/${this.attempts}` : ''})`);
+        this.logger.info?.(`DialX: call ${s.id} offered realtime (${model}, ${voice}${n > 1 ? `, backup ${n - 1}` : ''}${fresh === early ? ', secret minted while ringing' : ''}${s.rtPcmu ? ', G.711 upload' : ''}${n > 1 ? `, try ${n}/${this.attempts}` : ''})`);
         return;
       } catch (e) {
         last = e;
