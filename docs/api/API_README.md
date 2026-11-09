@@ -9393,6 +9393,14 @@ const socket = io('http://localhost:80', {
 - **execute** - Execute commands in real-time
 - **approve** - Approve system operations
 - **status** - Receive periodic status updates
+- **avatar:join** (client → server, since 2.25.778) - A 3D page (playground, avatar designer) showing the agent's body joins the `avatar` room.
+- **avatar:play** (server → `avatar` room) - The agent plays an owned animation clip on every open 3D page: `{ file, label, loop, prop }` (`file` is relative to `/vrm-models/animations/`; `prop` is e.g. `{ type: "pole", x, z, radius, height }`, fitted to the worn model by the page), or `{ stop: true }` to return to idle. Sent by the `botsandborgs` plugin's `use` action ("do the pole dance", "stop dancing").
+
+### Bots & Borgs plugin actions (via `POST /api/plugin` or natural language)
+- `buy { all: true, kind: "animation" }` - Buy every animation pack the agent doesn't own, one order each, under the weekly budget (2.25.776).
+- `library { update: true, kind? }` - Fetch owned items again for files the store added or fixed; reports new/gone/changed per item (2.25.778).
+- `use { as: "play" | "stop" | "video", clip?, to? }` - Play an owned clip on the agent's 3D body (open pages + AvatarX), stop it, or film the worn model doing it and send the MP4 (Telegram to the owner by default; `wait: true` waits for the render) (2.25.778–781).
+
 
 
 ### Music Library
