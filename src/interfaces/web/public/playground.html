@@ -972,6 +972,7 @@
                     const name = String(c.label || c.file).toLowerCase().replace(/['"\\<>&]/g, '');
                     if (!name || animFiles.some(a => a.name === name)) continue;
                     animFiles.push({ url: '/vrm-models/animations/' + String(c.file).split('/').map(encodeURIComponent).join('/'), name, loop: !!c.loop });
+                    if (c.prop) (this._clipProps ||= {})[name] = c.prop;
                     if (c.gesture) (this._storeGestures[c.gesture] ||= []).push(name);
                     if (c.gesture === 'dance' && !this._danceAnimations.includes(name)) this._danceAnimations = [...this._danceAnimations, name];
                 }
@@ -1007,10 +1008,65 @@
             vrm.scene.visible = true;
         }
 
+        /**
+         * A clip that needs a prop gets it while it plays: the store's pole dance grips a vertical pole 0.40 m to the
+         * avatar's right (X -0.40, Z 0, avatar at the origin facing +Z, ~4.5 cm wide). The pole is a child of the
+         * model, so it stands where the clip expects it. Any other clip takes it away.
+         */
+        /**
+         * Where this model's hands actually meet the pole. The store's spot (X -0.40) fits the body the clip was keyed
+         * on; on Racer Blue (hips 0.81 m) the hands close around X -0.28 (2026-11-08). Samples the clip on the model
+         * on a scratch mixer and picks the floor point the nearer hand stays closest to. Null when it can't tell.
+         */
+        _fitPoleSpot(vrm, clip) {
+            const hand = (side) => vrm.humanoid?.getRawBoneNode?.(side + 'MiddleProximal') || vrm.humanoid?.getRawBoneNode?.(side + 'Hand');
+            const L = hand('left'), R = hand('right');
+            if (!L || !R || !(clip.duration > 0)) return null;
+            const mixer = new THREE.AnimationMixer(vrm.scene);
+            const act = mixer.clipAction(clip); act.play();
+            const pts = [], v = new THREE.Vector3();
+            for (let t = 0; t < clip.duration; t += Math.max(0.25, clip.duration / 160)) {
+                mixer.setTime(t); vrm.update(0); vrm.scene.updateMatrixWorld(true);
+                L.getWorldPosition(v); const lx = v.x, lz = v.z; R.getWorldPosition(v);
+                pts.push([lx, lz, v.x, v.z]);
+            }
+            act.stop(); mixer.uncacheRoot(vrm.scene);
+            const inv = new THREE.Matrix4().copy(vrm.scene.matrixWorld).invert();
+            const o = new THREE.Vector3().setFromMatrixPosition(vrm.scene.matrixWorld);
+            let best = null;
+            for (let x = o.x - 0.8; x <= o.x + 0.8001; x += 0.02) for (let z = o.z - 0.8; z <= o.z + 0.8001; z += 0.02) {
+                let sum = 0;
+                for (const p of pts) sum += Math.min(Math.hypot(p[0] - x, p[1] - z), Math.hypot(p[2] - x, p[3] - z));
+                if (!best || sum < best.sum) best = { x, z, sum };
+            }
+            if (!best || best.sum / pts.length > 0.15) return null;
+            const local = new THREE.Vector3(best.x, 0, best.z).applyMatrix4(inv);
+            return { x: local.x, z: local.z };
+        }
+
+        _setProp(prop, clip) {
+            const vrm = this.currentVRM;
+            if (this._prop && (!prop || this._prop.parent !== vrm?.scene)) {
+                this._prop.parent?.remove(this._prop);
+                this._prop.geometry.dispose(); this._prop.material.dispose();
+                this._prop = null;
+            }
+            if (!prop || prop.type !== 'pole' || !vrm || this._prop) return;
+            const h = prop.height || 3, r = prop.radius || 0.0225;
+            const spot = (clip && this._fitPoleSpot(vrm, clip)) || { x: prop.x ?? -0.40, z: prop.z ?? 0 };
+            const pole = new THREE.Mesh(new THREE.CylinderGeometry(r, r, h, 24),
+                new THREE.MeshStandardMaterial({ color: 0xd8dde3, metalness: 0.9, roughness: 0.25 }));
+            pole.name = 'clip-prop-pole';
+            pole.position.set(spot.x, h / 2, spot.z);
+            vrm.scene.add(pole);
+            this._prop = pole;
+        }
+
         playAnimation(name) {
             if (!this._mixer || !this._idleActions) return;
             const target = this._idleActions.find(a => a.name === name);
             if (!target) return;
+            this._setProp(this._clipProps?.[name], target.action.getClip());
             if (this._currentIdleAction && this._currentIdleAction !== target) {
                 this._currentIdleAction.action.crossFadeTo(target.action.reset().play(), 0.5, false);
             } else {

@@ -33,7 +33,7 @@ export function variantKind(variant, collection = '') {
   if (/-stickers$/.test(id)) return 'sticker';
   if (/-portraits$/.test(id)) return 'portrait';
   // Before the vrm- rule: the store's clip packs are named vrm-dance-pack-1, vrm-emote-animations-1 (2026-11-08).
-  if (collection === 'animations' || /-(?:animations?|dance-pack|emotes?|motions?)(?:-\d+)?$/.test(id)) return 'animation';
+  if (collection === 'animations' || /-(?:animations?|dance-pack|dances?|emotes?|motions?)(?:-\d+)?$/.test(id)) return 'animation';
   if (collection === '3d-avatars' || /^vrm-/.test(id)) return 'vrm';
   if (collection === 'emoji' || /emoji/.test(id)) return 'emoji';
   if (collection === 'wallpapers' || /wallpaper|-phone-/.test(id)) return 'wallpaper';
@@ -195,6 +195,14 @@ export function clipGesture(label) {
   return null;
 }
 
+/**
+ * The prop a clip needs, which the store does not ship: the pole dance grips a vertical pole about 4.5 cm wide,
+ * 0.40 m to the avatar's right (X -0.40, Z 0, avatar at the origin facing +Z; BotsAndBorgs vrm-pole-dance).
+ */
+export function clipProp(words) {
+  return /\bpole\b/i.test(String(words || '').replace(/-/g, ' ')) ? { type: 'pole', x: -0.40, z: 0, radius: 0.0225, height: 3 } : null;
+}
+
 /** A clip's facts from its own glTF header: the expressions it moves. Throws when the file is not a VRM animation. */
 export function readVrmaInfo(buffer) {
   if (buffer.length < 20 || buffer.subarray(0, 4).toString('latin1') !== 'glTF') throw new Error('not a glTF binary');
@@ -249,6 +257,8 @@ export async function writeStoreAnimations(items, libraryDir, vrmDir) {
       const entry = { file: `store/${variant}/${f.name}`, label, group: `Bots & Borgs: ${item.title || item.variant}`, loop: f.loop ?? clipLoops(label), source: 'botsandborgs', variant: item.variant };
       const gesture = f.gesture || clipGesture(label);
       if (gesture) entry.gesture = gesture;
+      const prop = f.prop || clipProp(`${label} ${item.title || ''} ${item.variant}`);
+      if (prop) entry.prop = prop;
       if (f.expressions?.length) entry.expressions = f.expressions;
       out.push(entry);
     }

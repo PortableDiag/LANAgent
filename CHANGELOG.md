@@ -2,6 +2,21 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.777] - 2026-11-08
+
+### Fixed
+- **The pole stands where this model's hands are.** The store's spot (0.40 m to the right) fits the body the routine was keyed on. On a smaller model the hands closed 12 cm nearer. The page now plays the routine once out of sight, finds where the hands meet, and puts the pole there.
+- **Which clips loop comes from the pack's README.** A name guess looped two dances that play once. A refresh of the library (`library({ refresh: true })`) also relists clips already owned.
+
+## [2.25.776] - 2026-11-08
+
+### Added
+- **"Buy all the animations" buys every clip pack the agent doesn't own**, one order each, under the same budget and wallet rules, stopping at the first refusal.
+- **The pole dance gets its pole.** A clip that grips a pole shows a vertical pole 0.40 m to the avatar's right while it plays, in the avatar designer and the 3D playground. Any other clip takes it away.
+
+### Fixed
+- **A store item whose slug reads like a model (`vrm-pole-dance`) is judged by its collection.** It was taken for a 3D model, and buying it would have tried to wear it.
+
 ## [2.25.775] - 2026-11-08
 
 ### Added

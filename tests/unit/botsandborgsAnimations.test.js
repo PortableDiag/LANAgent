@@ -91,6 +91,20 @@ test('a bought pack: clips in the library and in store.json, the repo list untou
   assert.ok(store.library.items[0].files.find(f => f.name === 'wave.vrma').gesture === 'wave');
 });
 
+test("the pack's README decides which clips loop, also for packs already owned", async () => {
+  const z = new JSZip();
+  z.file('GoGo-Modern.vrma', vrma());
+  z.file('Booty-Shake.vrma', vrma());
+  z.file('Dab.vrma', vrma());
+  z.file('README.txt', 'VRM Dance Pack 1\n\n  GoGo-Modern.vrma               23 s loop  modern club go-go\n  Booty-Shake.vrma               10.7 s     a twerk: hip pops, then a rhythmic shake\n  Dab.vrma                       3.6 s      two bars of groove, then the dab\n');
+  const { p, store } = rig(await z.generateAsync({ type: 'nodebuffer' }));
+  p.productOf = async () => ({ title: 'VRM Dance Pack 1', collection: 'animations', variants: [{ id: 'vrm-dance-pack-1', label: 'Dance pack' }] });
+  await p.ingest({ order: { id: 'o2', token: 't' }, downloads: [{ url: 'https://x/dl.zip' }], variant: 'vrm-dance-pack-1' });
+  const loops = Object.fromEntries(JSON.parse(fs.readFileSync(path.join(p.vrmRoot, 'animations', 'store.json'))).map(c => [c.label, c.loop]));
+  assert.deepEqual(loops, { 'GoGo Modern': true, 'Booty Shake': false, Dab: false }, 'the name guess would have looped Booty Shake');
+  assert.equal(store.library.items[0].files.find(f => f.name === 'Booty-Shake.vrma').loop, false, 'saved in the library');
+});
+
 test('the library is the source: rebuilding twice gives the same list, and a clip with no file is left out', async () => {
   const lib = tmp(), vrm = tmp();
   fs.mkdirSync(path.join(lib, 'pack'));
@@ -153,8 +167,39 @@ test('"do the rumba": an owned clip by name, by purpose, or a plain no', async (
   } finally { if (prev !== undefined) process.env.AVATARX_URL = prev; }
 });
 
+test('the pole dance is a clip with its pole, though its slug reads like a model', async () => {
+  assert.equal(variantKind('vrm-pole-dance'), 'animation');
+  const lib = tmp(), vrm = tmp();
+  fs.mkdirSync(path.join(lib, 'vrm-pole-dance'));
+  fs.writeFileSync(path.join(lib, 'vrm-pole-dance', 'PoleDance.vrma'), vrma());
+  const [c] = await writeStoreAnimations([{ variant: 'vrm-pole-dance', title: 'VRM Pole Dance', files: [{ name: 'PoleDance.vrma', kind: 'animation', size: vrma().length, loop: true }] }], lib, vrm);
+  assert.deepEqual(c.prop, { type: 'pole', x: -0.40, z: 0, radius: 0.0225, height: 3 });
+  assert.equal(c.loop, true);
+  assert.equal(c.gesture, 'dance');
+});
+
+test('"buy all the animations": each pack not owned, one order each, stopping at the first refusal', async () => {
+  const store = { settings: { weeklyBudgetUsd: 50 }, ledger: { purchases: [] }, library: { items: [{ variant: 'vrm-emote-animations-1', files: [] }] } };
+  PluginSettings.getCached = async (_p, k) => store[k] ?? null;
+  PluginSettings.setCached = async (_p, k, v) => { store[k] = v; };
+  const p = new BotsAndBorgsPlugin({ config: { name: 'ALICE' }, agentModel: {}, interfaces: new Map(), providerManager: {} });
+  const products = ['vrm-emote-animations-1', 'vrm-dance-pack-1', 'vrm-pole-dance'].map(id => ({ slug: id, title: id, collection: 'animations', variants: [{ id, price_cents: 400 }] }));
+  p.api = async (m, route) => { if (route.startsWith('/api/catalog')) return { products }; throw new Error(route); };
+  const asked = [];
+  const real = p.buy.bind(p);
+  p.buy = async (d) => (d.variant ? (asked.push([d.variant, d.use]), { success: true, result: 'ok' }) : real(d));
+  const r = await p.execute({ action: 'buy', _context: { originalInput: 'buy all the animations from bots and borgs' } });
+  assert.equal(r.success, true, r.error);
+  assert.deepEqual(asked, [['vrm-dance-pack-1', 'keep'], ['vrm-pole-dance', 'keep']], 'the owned pack is skipped');
+  assert.match(r.result, /Bought 2 animation packs \(\$8\.00\)/);
+  p.buy = async (d) => (d.variant ? (d.variant === 'vrm-pole-dance' ? { success: false, error: 'over budget' } : { success: true, result: 'ok' }) : real(d));
+  const stop = await p.execute({ action: 'buy', all: true, kind: 'animation' });
+  assert.match(stop.result, /Bought vrm-dance-pack-1\. Stopped at vrm-pole-dance: over budget/);
+});
+
 test('asking to buy clips reads as clips', () => {
   const p = new BotsAndBorgsPlugin({});
+  assert.equal(p.kindAsked('buy the pole dance'), 'animation');
   assert.equal(p.kindAsked('buy the dance pack'), 'animation');
   assert.equal(p.kindAsked('buy yourself some emote animations'), 'animation');
   assert.equal(p.kindAsked('buy the bear bundle'), 'bundle');

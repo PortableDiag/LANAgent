@@ -338,6 +338,10 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     // A variant id is a slug ("mech-menagerie-icons-octopus-nautilus"); "robot icon" from the router's extractor is a
     // description, so it becomes the search words and the agent picks (live, 2026-10-28).
     if (data.variant && !/^[a-z0-9]+(?:-[a-z0-9]+)+$/.test(String(data.variant))) data = { ...data, query: data.query || data.variant, variant: undefined };
+    // "Buy all the animations": every clip pack on sale that it doesn't own, one order each, every one under the same
+    // budget and wallet rules. Stops at the first refusal and says what was bought before it.
+    if (!data.variant && data.all !== false && (data.all === true || data.all === 'true' || /\b(all|every|each)\b/i.test(asked))
+      && this.kindAsked(`${asked} ${data.kind || ''} ${data.query || ''}`) === 'animation') return this.buyAllAnimations(data);
     if (/\bsend (?:it|them|that)? ?(?:to )?me\b|\bto me\b|\bbuy me\b/i.test(asked) && !data.use) data = { ...data, use: 'send', to: data.to || 'me' };
     // "buy yourself an avatar" / "… and use it as your avatar" is for the agent's avatar; "send it to X" / "buy X a …" is a send.
     if (!data.use && /\b(yourself|your (?:own )?(?:new )?avatar|as your avatar|for you)\b/i.test(asked)) data = { ...data, use: 'avatar' };
@@ -347,7 +351,9 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     // What was asked for: a named variant says it, otherwise the words. A model installs; stickers, emoji and the like
     // are bought to use from the library. A single picture with no stated use still asks.
     const wantKind = this.kindAsked(`${asked} ${data.kind || ''} ${data.query || ''}`);
-    const named = data.variant ? variantKind(data.variant) : null;
+    // The store's collection decides first: "vrm-pole-dance" is a clip, though its slug reads like a model.
+    let named = data.variant ? variantKind(data.variant) : null;
+    if (named === 'vrm') named = variantKind(data.variant, (await this.productOf(String(data.variant)).catch(() => null))?.collection);
     const buying = named || wantKind;
     if (!data.use && /\b(wear|become|as your (?:3d|vrm)|your (?:new )?(?:3d|vrm)(?: model| avatar)?)\b/i.test(asked)) data = { ...data, use: 'wear' };
     // Allowed to wear what it buys: "buy yourself a model" means become it, which also brings its portrait.
@@ -573,11 +579,34 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     return { ...scored[0], seen: scored.length };
   }
 
+  /** Every animation pack on sale that this agent doesn't own yet, bought one by one through buy(). */
+  async buyAllAnimations(data) {
+    const cat = await this.api('get', '/api/catalog?collection=animations');
+    const owned = new Set((await this.libraryItems()).map(i => i.variant));
+    const todo = (cat.products || []).filter(p => p.collection === 'animations')
+      .flatMap(p => (p.variants || []).map(v => ({ id: v.id, title: p.title, usd: v.price_cents / 100 })))
+      .filter(v => !owned.has(v.id));
+    if (!todo.length) return { success: true, result: 'I already own every animation pack on sale.' };
+    const done = [];
+    for (const v of todo) {
+      const r = await this.buy({ ...data, all: false, variant: v.id, use: 'keep' });
+      const asksFirst = r.success && !r.dryRun && /Say yes/.test(r.result || '');
+      if (!r.success || asksFirst) {
+        const before = done.length ? `Bought ${done.map(d => d.title).join(', ')}. ` : '';
+        return { success: done.length > 0, bought: done, result: `${before}Stopped at ${v.title}: ${r.error || r.result}` };
+      }
+      done.push({ ...v, result: r.result });
+    }
+    const usd = done.reduce((t, d) => t + d.usd, 0);
+    const verb = data.dryRun === true || data.dryRun === 'true' ? 'Would buy' : 'Bought';
+    return { success: true, bought: done, result: `${verb} ${done.length} animation pack${done.length === 1 ? '' : 's'} ($${usd.toFixed(2)}): ${done.map(d => d.title).join(', ')}.` };
+  }
+
   // ── library ───────────────────────────────────────────────────
   kindAsked(words) {
     const w = String(words || '');
     // Clips first: "the dance pack", "emote animations" are clips, not a model's bundle or a sticker set.
-    if (/\b(animations?|animated clips?|dance (?:pack|moves|clips?)|dances|motions?|vrma|mocap|gesture clips?)\b/i.test(w)) return 'animation';
+    if (/\b(animations?|animated clips?|dance (?:pack|moves|clips?|routine)|dances?|motions?|vrma|mocap|gesture clips?)\b/i.test(w)) return 'animation';
     // "Get the pack" / "the avatar kit" for a model is its complete bundle; a portrait or sticker pack is not.
     if (/\b(bundle|everything for)\b/i.test(w) || /\b(?<!(?:portrait|sticker|emoji|wallpaper|icon)s? )(?:pack|kit)\b/i.test(w)) return 'bundle';
     if (/\b(vrm|vroid|3d|three.?d)\b/i.test(w)) return 'vrm';
@@ -648,15 +677,18 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
         files.push(entry);
       }
     }
-    const item = { variant, title, kind, collection: product?.collection || null, order: order?.id || null, token: order?.token || null, at: new Date().toISOString(), files };
+    const item ={ variant, title, kind, collection: product?.collection || null, order: order?.id || null, token: order?.token || null, at: new Date().toISOString(), files };
     await this.saveLibraryItem(item);
     if (files.some(f => f.kind === 'animation')) await this.publishAnimations();
     return item;
   }
 
   async library({ kind, query, refresh } = {}) {
-    if (refresh === true || refresh === 'true') await this.refreshLibrary();
+    const refreshing = refresh === true || refresh === 'true';
+    if (refreshing) await this.refreshLibrary();
     await this.repairGallery();
+    // A refresh also relists owned clips, so a fix to how clips are read reaches packs already bought.
+    if (refreshing && (await this.libraryItems()).some(i => i.files.some(f => f.kind === 'animation'))) await this.publishAnimations();
     let items = await this.libraryItems();
     if (kind) items = items.filter(i => i.kind === kind || i.files.some(f => f.kind === kind));
     if (query) items = items.filter(i => this.matches(i, query));
@@ -812,7 +844,23 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
    * model gallery) and AvatarX, when this agent has one. Never anywhere else: the licence allows no sharing.
    */
   async publishAnimations() {
-    const listed = await writeStoreAnimations(await this.libraryItems(), this.libraryDir(), this.vrmDir());
+    // A pack's README lists each clip on one line and says "loop" for the ones that loop (Dance Pack 1: GoGo-Modern,
+    // GoGo-60s, Groove; not the booty shakes, which the name guess looped). It wins over the guess when it names a clip.
+    const items = await this.libraryItems();
+    let changed = false;
+    for (const item of items) {
+      const readme = item.files.find(f => f.kind === 'document' && /readme/i.test(f.name));
+      if (!readme || !item.files.some(f => f.kind === 'animation')) continue;
+      const text = await fs.readFile(path.join(this.libraryDir(), safeName(item.variant), readme.name), 'utf8').catch(() => '');
+      for (const f of item.files.filter(x => x.kind === 'animation')) {
+        const line = text.split('\n').find(l => l.includes(f.name));
+        if (!line) continue;
+        const loop = /\bloops?\b/i.test(line.slice(line.indexOf(f.name) + f.name.length));
+        if (f.loop !== loop) { f.loop = loop; changed = true; }
+      }
+    }
+    if (changed) await PluginSettings.setCached(this.name, 'library', { items });
+    const listed = await writeStoreAnimations(items, this.libraryDir(), this.vrmDir());
     this.logger.info(`botsandborgs: ${listed.length} bought clips listed for the designer and the playground`);
     const { pushClipsToAvatarX } = await import('../../services/avatar/avatarx.js');
     const pushed = await pushClipsToAvatarX(listed.map(c => ({ file: path.join(this.vrmDir(), 'animations', c.file) })))
