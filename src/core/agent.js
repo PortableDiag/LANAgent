@@ -53,6 +53,8 @@ import { BackgroundReview } from '../services/skills/backgroundReview.js';
 import { getUserProfile } from '../services/skills/userProfile.js';
 import { Curator, scheduleCurator } from '../services/skills/curator.js';
 import { looksMultiStep } from './multiStep.js';
+import { parseLightCommand } from '../services/govee/lightCommand.js';
+import { GoveeEnhancements } from '../api/plugins/govee-enhancements.js';
 
 const execAsync = promisify(exec);
 const __filename = fileURLToPath(import.meta.url);
@@ -1276,7 +1278,24 @@ If answering needs information that is not in the conversation above (messages, 
       const t0 = Date.now();
       await context.showThinking?.('Understanding your request…');
 
-      if (this.vectorIntentDetector && this.vectorIntentDetector.enabled) {
+      // A plain light command naming one of the owner's real Govee devices runs at once, with no model in the way
+      // (2026-11-09: "make the Master Toilet light bright white" spent 57 s and 80 s being routed).
+      try {
+        const govee = this.apiManager?.getPlugin?.('govee');
+        if (govee?.deviceCache && govee.config?.apiKey) {
+          if (govee.deviceCache.size === 0) await govee.listDevices();
+          const names = Array.from(govee.deviceCache.values()).map(d => d.deviceName).filter(Boolean);
+          const light = parseLightCommand(input, names, Object.keys(GoveeEnhancements.colorNames || {}));
+          if (light) {
+            logger.info(`Light command read directly: ${light.action} ${JSON.stringify(light.params)}`);
+            intentResult = { detected: true, intent: `govee_${light.action}`, plugin: 'govee', action: light.action, parameters: { ...light.params, fromAI: true }, confidence: 1, source: 'light-command' };
+          }
+        }
+      } catch (err) {
+        logger.warn('Light command check failed:', err.message);
+      }
+
+      if (!intentResult && this.vectorIntentDetector && this.vectorIntentDetector.enabled) {
         try {
           const vectorResult = await this.vectorIntentDetector.detectIntent(input, context);
           if (vectorResult) {

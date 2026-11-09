@@ -216,10 +216,20 @@ export default class GoveePlugin extends BasePlugin {
       };
     }
 
+    const pending = this.pendingRetry && Date.now() - this.pendingRetry.at < 10 * 60 * 1000 ? this.pendingRetry : null;
+    if (pending && ['control', 'power', 'brightness', 'color', 'temperature', 'scene'].includes(action) && !(await this.knownDevice(params.device))) {
+      this.logger.info(`Govee: '${params.device || '(no device)'}' is not a device; repeating the last command for ${pending.name} that failed offline`);
+      return await this.runSteps(pending);
+    }
+
     try {
       switch (action) {
-        case 'list':
-          return await this.listDevices();
+        case 'list': {
+          const r = await this.listDevices();
+          if (!r.success) return r;
+          const names = (r.devices || []).map(d => d.deviceName).filter(Boolean);
+          return { success: true, count: names.length, summary: `${names.length} Govee devices: ${names.join(', ')}`, devices: r.devices, cached: r.cached };
+        }
         case 'status':
           return await this.getDeviceStatus(params);
         case 'control':
@@ -531,88 +541,153 @@ export default class GoveePlugin extends BasePlugin {
       };
     }
 
-    // Resolve device name to ID if this is from AI
+    // Resolve a name to an id on every path (ReAct sends names without fromAI: "Device Master Toilet not found in cache").
     let deviceIds = [params.device];
-    if (params.fromAI) {
+    if (params.fromAI || !(await this.isDeviceId(params.device))) {
       this.logger.info(`Attempting to resolve device name: ${params.device}`);
       const resolved = await this.resolveDeviceName(params.device);
       if (!resolved || (Array.isArray(resolved) && resolved.length === 0)) {
+        const names = Array.from(this.deviceCache.values()).map(d => d.deviceName).filter(Boolean);
         return {
           success: false,
-          error: `Device '${params.device}' not found. Please check the device name or try 'list devices' to see available devices.`,
-          suggestion: 'You can also create an alias for this device for easier access.'
+          error: `No Govee device is called '${params.device}'. The devices are: ${names.join(', ')}.`
         };
       }
       deviceIds = Array.isArray(resolved) ? resolved : [resolved];
     }
 
-    // Handle multiple devices (e.g., when controlling "all")
+    // A colour, white, brightness or scene does nothing to a light that is off: switch it on first.
+    const steps = [];
+    if (params.capability !== 'devices.capabilities.on_off' && params.ensureOn !== false) {
+      steps.push({ capability: 'devices.capabilities.on_off', value: 1 });
+    }
+    steps.push({ capability: params.capability, value: params.value });
+
     const results = [];
     const errors = [];
-    
     for (const deviceId of deviceIds) {
-      // Check if SKU was provided directly
-      let sku = params.sku;
-      
-      // If no SKU provided, try to get from cache
-      if (!sku) {
-        const cachedDevice = this.deviceCache.get(deviceId);
-        if (cachedDevice && cachedDevice.sku) {
-          sku = cachedDevice.sku;
-        } else {
-          this.logger.warn(`Device ${deviceId} not found in cache for control`);
-          // Try to fetch devices to update cache
-          await this.listDevices();
-          const updatedDevice = this.deviceCache.get(deviceId);
-          if (updatedDevice && updatedDevice.sku) {
-            sku = updatedDevice.sku;
-          } else {
-            errors.push(`Device ${deviceId} not found or missing SKU`);
-            continue;
-          }
-        }
+      const device = this.deviceCache.get(deviceId) || {};
+      const job = { deviceId, sku: params.sku || device.sku, name: device.deviceName || deviceId, steps, at: Date.now() };
+      if (!job.sku) {
+        await this.listDevices();
+        job.sku = this.deviceCache.get(deviceId)?.sku;
+        if (!job.sku) { errors.push(`${job.name}: not found or missing SKU`); continue; }
       }
-
-      try {
-        const response = await this.makeRequest(`/device/control`, 'POST', {
-        device: deviceId,
-        sku: sku,
-        capability: {
-          type: params.capability,
-          instance: this.getCapabilityInstance(params.capability),
-          value: params.value
-        }
-      });
-
-        results.push({
-          device: deviceId,
-          success: true,
-          response: response
-        });
-      } catch (error) {
-        errors.push(`${deviceId}: ${error.message}`);
-      }
+      const r = await this.runSteps(job, { background: deviceIds.length === 1 });
+      if (r.success) results.push(r); else { errors.push(r.error); if (deviceIds.length === 1) return r; }
     }
 
-    // Return appropriate response based on results
     if (results.length === 0) {
-      return {
-        success: false,
-        error: errors.join('; ')
-      };
+      return { success: false, error: errors.join('; ') };
     } else if (deviceIds.length === 1) {
-      // Single device - return simple response
       return results[0];
-    } else {
-      // Multiple devices - return summary
-      return {
-        success: errors.length === 0,
-        controlled: results.length,
-        total: deviceIds.length,
-        results: results,
-        errors: errors.length > 0 ? errors : undefined
-      };
     }
+    return {
+      success: errors.length === 0,
+      controlled: results.length,
+      total: deviceIds.length,
+      results,
+      errors: errors.length > 0 ? errors : undefined
+    };
+  }
+
+  /** The id of a device in the list (a MAC like C1:9C:…), as opposed to a name. */
+  async isDeviceId(device) {
+    if (!device) return false;
+    if (this.deviceCache.size === 0) await this.listDevices();
+    return this.deviceCache.has(device);
+  }
+
+  /** A device this request can mean: an id, or a name that resolves. */
+  async knownDevice(device) {
+    if (!device || typeof device !== 'string') return false;
+    if (await this.isDeviceId(device)) return true;
+    const r = await this.resolveDeviceName(device).catch(() => null);
+    return Array.isArray(r) ? r.length > 0 : !!r;
+  }
+
+  /**
+   * One control call, judged by Govee's answer, not the HTTP status: Govee answers HTTP 200 with
+   * {code:400, msg:"Device is offline…"} when the light is off the network (2026-11-09: ALICE logged that as a success).
+   */
+  async sendCommand(deviceId, sku, capability, value) {
+    const response = await this.makeRequest(`/device/control`, 'POST', {
+      device: deviceId,
+      sku,
+      capability: { type: capability, instance: this.getCapabilityInstance(capability), value }
+    });
+    const state = response?.capability?.state;
+    const ok = (response?.code === undefined || response.code === 200) && state?.status !== 'failure';
+    const msg = state?.errorMsg || response?.msg || response?.message || '';
+    return { ok, offline: !ok && /offline/i.test(msg), msg, response };
+  }
+
+  /**
+   * Run a device's steps (power on, then the setting). An offline light (a power cycle takes it off Wi-Fi for 10-30 s)
+   * is tried again for up to 20 s here; if it is still offline, retried every 15 s for 3 minutes in the background,
+   * and the owner is told the moment it works or when it gives up.
+   */
+  async runSteps(job, { background = false } = {}) {
+    const attempt = async () => {
+      let last;
+      for (const s of job.steps) {
+        last = await this.sendCommand(job.deviceId, job.sku, s.capability, s.value);
+        if (!last.ok) return last;
+      }
+      return last;
+    };
+    let r = await attempt();
+    for (const wait of [5000, 15000]) {
+      if (r.ok || !r.offline) break;
+      this.logger.info(`Govee: ${job.name} is offline; trying again in ${wait / 1000} s`);
+      await new Promise(res => setTimeout(res, wait));
+      r = await attempt();
+    }
+    if (r.ok) {
+      if (this.pendingRetry?.deviceId === job.deviceId) this.pendingRetry = null;
+      return { success: true, device: job.deviceId, name: job.name, message: `${job.name}: done (Govee confirmed)`, response: r.response };
+    }
+    if (!r.offline) return { success: false, error: `${job.name}: Govee refused it: ${r.msg || 'no reason given'}` };
+
+    this.pendingRetry = { ...job, at: Date.now() };
+    if (background) this.retryInBackground(job);
+    return {
+      success: false,
+      offline: true,
+      retrying: background,
+      error: `${job.name} is offline (Govee: "${r.msg}"). Nothing was changed.` +
+        (background ? ' I will keep trying every 15 seconds for 3 minutes and message you as soon as it works.' : '')
+    };
+  }
+
+  retryInBackground(job) {
+    clearInterval(this.retryTimer);
+    const until = Date.now() + 3 * 60 * 1000;
+    let busy = false;
+    this.retryTimer = setInterval(async () => {
+      if (busy) return;
+      busy = true;
+      try {
+        let r;
+        for (const s of job.steps) {
+          r = await this.sendCommand(job.deviceId, job.sku, s.capability, s.value);
+          if (!r.ok) break;
+        }
+        if (r?.ok) {
+          clearInterval(this.retryTimer);
+          this.pendingRetry = null;
+          this.logger.info(`Govee: ${job.name} came back online; the command went through`);
+          await this.agent?.notify?.(`💡 ${job.name} is back online and the change went through.`, { urgent: true });
+        } else if (Date.now() > until || (r && !r.offline)) {
+          clearInterval(this.retryTimer);
+          this.logger.warn(`Govee: gave up on ${job.name}: ${r?.msg}`);
+          await this.agent?.notify?.(`⚠️ ${job.name} is still offline after 3 minutes (Govee: "${r?.msg}"). Check its switch or Wi-Fi; say "retry" and I will try again.`, { urgent: true });
+        }
+      } catch (e) {
+        this.logger.warn(`Govee retry for ${job.name} failed: ${e.message}`);
+      } finally { busy = false; }
+    }, 15000);
+    this.retryTimer.unref?.();
   }
 
   getCapabilityInstance(capability) {
@@ -990,12 +1065,10 @@ export default class GoveePlugin extends BasePlugin {
       this.logger.warn('Error checking device aliases:', error.message);
     }
     
-    // Try exact match first (case insensitive)
-    for (const [deviceId, device] of this.deviceCache.entries()) {
-      if (device.deviceName.toLowerCase() === deviceNameLower) {
-        return deviceId;
-      }
-    }
+    // Exact match first (case insensitive). Two devices can share a name (the owner has two "Living Room Left":
+    // an H6076 lamp and an H6008 bulb), and the name means both.
+    const exact = [...this.deviceCache.entries()].filter(([, d]) => d.deviceName?.toLowerCase() === deviceNameLower).map(([id]) => id);
+    if (exact.length) return exact.length === 1 ? exact[0] : exact;
     
     // Try partial match
     for (const [deviceId, device] of this.deviceCache.entries()) {

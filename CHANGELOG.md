@@ -2,6 +2,16 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.784] - 2026-11-09
+
+### Fixed
+- **Lights do what they are told, or say why not.** Govee answers "Device is offline" inside a normal reply, and the agent counted that as done. Now a light only counts as changed when Govee confirms it.
+  - **Offline lights:** the command is tried again for 20 seconds. If the light is still offline, the agent keeps trying every 15 seconds for 3 minutes in the background and messages the owner the moment it works, or when it gives up. "Retry" or "I cycled the power" right after repeats that command.
+  - **Lights that are off:** a colour, white, brightness or scene turns the light on first. Before, setting a colour on a light that was off left the room dark.
+  - **Shared names:** two devices with the same name (the owner has two "Living Room Left") are both changed.
+  - **Named lights:** a light named by its name ("Master Toilet") is found on every path. The reasoning agent's commands used to miss it, and the agent then said the light did not exist. The device list now starts with every device's name, because the reasoning agent saw only the first three.
+- **Plain light commands skip the model.** "Make the Master Toilet light bright white", "turn off the TV bars" and "set the kitchen strip to 30%" are read directly against the owner's real Govee device names and run at once. They used to take about a minute to route. A schedule, a question, two devices or two settings still go to the model.
+
 ## [2.25.783] - 2026-11-09
 
 ### Changed
