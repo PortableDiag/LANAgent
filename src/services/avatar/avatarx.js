@@ -91,12 +91,19 @@ export async function pushModelToAvatarX(modelId, {
   const name = model.name || modelId;
   // An upload always adds an entry and the agent's key can't delete one, so look by name first.
   const state = await call('GET', '/agent/v1/state');
-  let id = (state.avatars || []).find(a => a.name === name)?.id;
+  // Same name AND same size is the same file. A store fix keeps the name and changes the bytes (Racer Blue's hair,
+  // 2026-11-08): then the new file goes up and is shown. The agent's key can't delete, so the old copy stays in
+  // AvatarX's list (Settings) until the owner removes it; the log says which.
+  const bytes = await fs.readFile(path.join(vrmDir, model.file));
+  const same = (state.avatars || []).filter(a => a.name === name);
+  let id = same.find(a => a.size == null || Number(a.size) === bytes.length)?.id;
   if (!id) {
-    const up = await call('POST', `/agent/v1/avatars?name=${encodeURIComponent(name)}`, await fs.readFile(path.join(vrmDir, model.file)), 'application/octet-stream');
+    const up = await call('POST', `/agent/v1/avatars?name=${encodeURIComponent(name)}`, bytes, 'application/octet-stream');
     id = up.avatar?.id;
     if (!id) throw new Error('AvatarX answered an upload with no id');
+    if (same.length) logger.info(`AvatarX: ${name} changed (${bytes.length} bytes); older copies left to remove in AvatarX Settings: ${same.map(a => a.id).join(', ')}`);
   }
+  if (state.active === id) return 'unchanged';
   await call('PATCH', '/agent/v1/state', JSON.stringify({ active: id }));
   logger.info(`AvatarX: now showing ${name} (${id})`);
   return 'updated';

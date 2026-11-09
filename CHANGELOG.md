@@ -2,6 +2,11 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.780] - 2026-11-08
+
+### Fixed
+- **A store fix to the model an agent wears reaches AvatarX.** AvatarX matched models by name, so a re-published file with the same name was never sent. A different size now means a new file: it goes up and is shown. When an update of owned items changes the worn model, AvatarX gets it straight away.
+
 ## [2.25.779] - 2026-11-08
 
 ### Fixed

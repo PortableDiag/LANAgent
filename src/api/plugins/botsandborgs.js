@@ -709,6 +709,13 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
       const removed = [...before.keys()].filter(n => !after.has(n));
       const changed = [...after.keys()].filter(n => before.has(n) && before.get(n) !== after.get(n));
       if (added.length || removed.length || changed.length) report.push({ variant: old.variant, added, removed, changed });
+      // The model it wears changed: AvatarX shows its own copy, so it gets the new file (the designer and playground
+      // read the gallery file, already replaced).
+      const worn = item.files.find(f => f.kind === 'vrm' && f.modelId && f.modelId === this.agent?.agentModel?.activeVRMModel);
+      if (worn && changed.some(n => n === worn.name)) {
+        const { pushModelToAvatarX } = await import('../../services/avatar/avatarx.js');
+        await pushModelToAvatarX(worn.modelId).catch(e => this.logger.warn(`botsandborgs: AvatarX not given the new ${worn.name}: ${e.message}`));
+      }
       this.logger.info(`botsandborgs: updated ${old.variant}: ${added.length} new, ${removed.length} gone, ${changed.length} changed`);
     }
     return report;

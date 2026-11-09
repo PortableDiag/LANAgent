@@ -42,6 +42,17 @@ test('a model already there is reused, because uploads pile up', async () => {
   assert.deepEqual(JSON.parse(calls[1].body), { active: 'old7' });
 });
 
+test('a fixed file under the same name goes up and is shown; the same file shown already changes nothing', async () => {
+  // 'vrm-bytes' is 9 bytes: a 12-byte copy named Racer is an older file (the store re-published it).
+  const changed = rig({ active: 'old7', avatars: [{ id: 'old7', name: 'Racer', size: 12 }] });
+  assert.equal(await pushModelToAvatarX('store-x', changed.opts), 'updated');
+  assert.deepEqual(changed.calls.map(c => c.method), ['GET', 'POST', 'PATCH']);
+  assert.deepEqual(JSON.parse(changed.calls[2].body), { active: 'new1' });
+  const same = rig({ active: 'old7', avatars: [{ id: 'old7', name: 'Racer', size: 9 }] });
+  assert.equal(await pushModelToAvatarX('store-x', same.opts), 'unchanged');
+  assert.deepEqual(same.calls.map(c => c.method), ['GET']);
+});
+
 test('an unknown model and a refusal are reported', async () => {
   const { opts } = rig({ avatars: [] });
   await assert.rejects(() => pushModelToAvatarX('nope', opts), /not in the gallery/);
