@@ -525,6 +525,7 @@
 
     <!-- Three.js + VRM libs (same as avatar designer) -->
     <!-- Three.js r183 (single bundle, fast load) -->
+    <script src="/socket.io/socket.io.js"></script>
     <script src="/lib/three.r183.min.js"></script>
     <script type="importmap">
     { "imports": { "three": "/lib/three.r183.module.js", "three/addons/": "/lib/addons/" } }
@@ -1006,6 +1007,7 @@
                 vrm.update(0.01);
             }
             vrm.scene.visible = true;
+            this._connectAgentEvents();
         }
 
         /**
@@ -1013,6 +1015,39 @@
          * avatar's right (X -0.40, Z 0, avatar at the origin facing +Z, ~4.5 cm wide). The pole is a child of the
          * model, so it stands where the clip expects it. Any other clip takes it away.
          */
+        /** The agent's own commands to this page ("do the pole dance" from any chat): socket.io, signed in. */
+        _connectAgentEvents() {
+            if (this._agentSocket || typeof io === 'undefined') return;
+            const token = localStorage.getItem('lanagent_token');
+            if (!token) return;
+            const s = io({ auth: { token } });
+            this._agentSocket = s;
+            s.on('connect', () => s.emit('avatar:join'));
+            s.on('avatar:play', (c) => this._playFromAgent(c).catch(e => console.warn('Agent clip:', e.message)));
+        }
+
+        async _playFromAgent(c) {
+            if (!this.currentVRM || !this._mixer) return;
+            if (c?.stop) { if (this._danceActive) this._stopDancing?.(); this.playAnimation('idle'); return; }
+            if (!c?.file) return;
+            const vrm = this.currentVRM;
+            const name = 'agent:' + c.file;
+            let item = this._idleActions?.find(a => a.name === name);
+            if (!item) {
+                const clip = await this.loadVRMA('/vrm-models/animations/' + String(c.file).split('/').map(encodeURIComponent).join('/'));
+                if (!clip || this.currentVRM !== vrm) return;
+                clip.name = name;
+                const action = this._mixer.clipAction(clip);
+                action.setLoop(c.loop ? THREE.LoopRepeat : THREE.LoopOnce);
+                action.clampWhenFinished = !c.loop;
+                item = { name, action };
+                (this._idleActions ||= []).push(item);
+            }
+            if (c.prop) (this._clipProps ||= {})[name] = c.prop;
+            if (this._danceActive) this._stopDancing?.();
+            this.playAnimation(name);
+        }
+
         /**
          * Where this model's hands actually meet the pole. The store's spot (X -0.40) fits the body the clip was keyed
          * on; on Racer Blue (hips 0.81 m) the hands close around X -0.28 (2026-11-08). Samples the clip on the model

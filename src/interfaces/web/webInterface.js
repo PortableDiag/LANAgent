@@ -5059,6 +5059,10 @@ export class WebInterface {
       // Send initial status
       this.sendStatus(socket);
 
+      // A 3D page (playground, avatar designer) showing the agent's body: the agent plays clips on it
+      // ("do the pole dance", botsandborgs.use) whether or not AvatarX is running.
+      socket.on('avatar:join', () => socket.join('avatar'));
+
       // Handle commands
       socket.on('execute', async (data, callback) => {
         try {
@@ -5531,6 +5535,14 @@ export class WebInterface {
     if (bytes === 0) return '0 Bytes';
     const i = parseInt(Math.floor(Math.log(bytes) / Math.log(1024)));
     return Math.round(bytes / Math.pow(1024, i), 2) + ' ' + sizes[i];
+  }
+
+  /** Play a clip on every open 3D page of the agent. Returns how many pages got it. */
+  async playOnAvatarPages(clip) {
+    if (!this.io) return 0;
+    const pages = (await this.io.in('avatar').fetchSockets()).length;
+    if (pages) this.io.to('avatar').emit('avatar:play', clip);
+    return pages;
   }
 
   // Notify web clients of events

@@ -44,7 +44,7 @@ const DEFAULTS = {
 };
 const AUTO_STICKER_EVERY_MS = Number(process.env.BOTSANDBORGS_STICKER_EVERY_MS) || 20 * 60 * 1000;
 const AUTO_STICKER_ASK_EVERY_MS = 60 * 1000;
-const USES =['avatar', 'send', 'install', 'wear', 'keep', 'play'];
+const USES =['avatar', 'send', 'install', 'wear', 'keep', 'play', 'stop'];
 
 /**
  * "the avatar you just bought", "your new model", "it": words that name no product, only the latest purchase
@@ -93,8 +93,8 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
       {
         command: 'library',
         description: 'What this agent owns from Bots & Borgs: stickers, emoji, portraits, wallpapers, VRM models and animation clips it can use without paying again',
-        usage: 'library({ kind: "sticker", refresh: true })',
-        examples: ['what have you got from bots and borgs', 'show your sticker library', 'which vrm models do you own']
+        usage: 'library({ kind: "sticker", refresh: true, update: true })  // update: fetch owned items again for new or fixed files',
+        examples: ['what have you got from bots and borgs', 'show your sticker library', 'which vrm models do you own', 'update your bots and borgs stickers', 'get the new stickers for your avatar from bots and borgs']
       },
       {
         command: 'use',
@@ -626,9 +626,12 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     return Array.isArray(saved?.items) ? saved.items : [];
   }
 
-  async saveLibraryItem(item) {
-    const items = (await this.libraryItems()).filter(i => i.variant !== item.variant);
-    items.unshift(item);
+  /** New purchases go first (the newest is what "the one you just bought" means); an update keeps its place. */
+  async saveLibraryItem(item, { keepPlace = false } = {}) {
+    const items = await this.libraryItems();
+    const at = items.findIndex(i => i.variant === item.variant);
+    if (keepPlace && at >= 0) items[at] = item;
+    else { if (at >= 0) items.splice(at, 1); items.unshift(item); }
     await PluginSettings.setCached(this.name, 'library', { items });
   }
 
@@ -643,7 +646,7 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
   }
 
   /** Download everything an order holds, keep each file, and put any model in the gallery. Returns the library item. */
-  async ingest({ order, downloads, variant }) {
+  async ingest({ order, downloads, variant, update = null }) {
     const product = await this.productOf(variant);
     const kind = variantKind(variant, product?.collection);
     const label = (product?.variants || []).find(v => v.id === variant)?.label;
@@ -678,14 +681,43 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
       }
     }
     const item ={ variant, title, kind, collection: product?.collection || null, order: order?.id || null, token: order?.token || null, at: new Date().toISOString(), files };
-    await this.saveLibraryItem(item);
+    if (update) item.at = update.at || item.at;
+    await this.saveLibraryItem(item, { keepPlace: !!update });
     if (files.some(f => f.kind === 'animation')) await this.publishAnimations();
     return item;
   }
 
-  async library({ kind, query, refresh } = {}) {
+  /**
+   * Fetch everything already owned again, so files the store has added or fixed since (new stickers, relabelled
+   * ones, a rebuilt model) reach the library. Each item's order is read with its own token; every file fetched
+   * spends one of that order's 25 downloads. Owned items keep their place and purchase date.
+   * Returns [{ variant, added, removed, changed }] per item that changed.
+   */
+  async updateOwned({ kind } = {}) {
+    const report = [];
+    const key = await this.accountKey().catch(() => null);
+    for (const old of await this.libraryItems()) {
+      if (!old.order || !old.token) continue;
+      if (kind && old.kind !== kind && !old.files.some(f => f.kind === kind)) continue;
+      const full = await this.api('get', `/api/orders/${old.order}?token=${encodeURIComponent(old.token)}`, key ? { key } : {}).catch(e => ({ error: e.message }));
+      const downloads = full?.downloads || full?.order?.downloads || [];
+      if (!downloads.length) { report.push({ variant: old.variant, error: full?.error || 'the store listed no downloads' }); continue; }
+      const before = new Map(old.files.map(f => [f.name, f.size]));
+      const item = await this.ingest({ order: { id: old.order, token: old.token }, downloads, variant: old.variant, update: { at: old.at } });
+      const after = new Map(item.files.map(f => [f.name, f.size]));
+      const added = [...after.keys()].filter(n => !before.has(n));
+      const removed = [...before.keys()].filter(n => !after.has(n));
+      const changed = [...after.keys()].filter(n => before.has(n) && before.get(n) !== after.get(n));
+      if (added.length || removed.length || changed.length) report.push({ variant: old.variant, added, removed, changed });
+      this.logger.info(`botsandborgs: updated ${old.variant}: ${added.length} new, ${removed.length} gone, ${changed.length} changed`);
+    }
+    return report;
+  }
+
+  async library({ kind, query, refresh, update } = {}) {
     const refreshing = refresh === true || refresh === 'true';
     if (refreshing) await this.refreshLibrary();
+    const updated = update === true || update === 'true' ? await this.updateOwned({ kind }) : null;
     await this.repairGallery();
     // A refresh also relists owned clips, so a fix to how clips are read reaches packs already bought.
     if (refreshing && (await this.libraryItems()).some(i => i.files.some(f => f.kind === 'animation'))) await this.publishAnimations();
@@ -693,11 +725,12 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     if (kind) items = items.filter(i => i.kind === kind || i.files.some(f => f.kind === kind));
     if (query) items = items.filter(i => this.matches(i, query));
     if (!items.length) return { success: true, result: 'Nothing from Bots & Borgs in my library yet.' };
-    return { success: true, items: items.map(({ token, ...rest }) => rest), result: `My Bots & Borgs library:\n${items.map(i => {
+    const changes = updated ? `\n\nFetched again from the store: ${updated.length ? updated.map(u => u.error ? `${u.variant}: ${u.error}` : `${u.variant}: ${u.added.length} new, ${u.removed.length} gone, ${u.changed.length} changed`).join('; ') : 'nothing has changed since I bought it'}.` : '';
+    return { success: true, updated, items: items.map(({ token, ...rest }) => rest), result: `My Bots & Borgs library:\n${items.map(i => {
       const count = {};
       for (const f of i.files) if (!['document', 'preview'].includes(f.kind)) count[f.kind] = (count[f.kind] || 0) + 1;
       return `- ${i.title} (${i.variant}): ${Object.entries(count).map(([k, n]) => `${n} ${k}${n === 1 ? '' : 's'}`).join(', ') || 'no usable files'}`;
-    }).join('\n')}` };
+    }).join('\n')}${changes}` };
   }
 
   /** Orders bought before the library existed, or lost from it, come back from the store's order list. */
@@ -780,6 +813,7 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
       as = (await this.pickOwned({ item, kind: 'vrm', kinds: ['vrm'] })) ? 'wear' : 'avatar';
     }
     const kind = data.kind && data.kind !== 'avatar' ? data.kind : this.kindAsked(asked);
+    if (as === 'stop' || (!as && /\bstop (?:dancing|the (?:dance|animation|clip))\b/i.test(asked))) return this.stopClip();
     if (as === 'play' || as === 'dance' || kind === 'animation' || (!as && !data.to && /\b(dance|do (?:the|a) |wave|bow|cheer|clap|laugh|dab)\b/i.test(asked) && !/\b(stickers?|emoji|portraits?|wallpapers?|icons?|vrm|model)\b/i.test(asked))) {
       return this.playClip({ item, clip: data.clip || data.mood, asked });
     }
@@ -878,20 +912,48 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
       if (inItem.length) pool = inItem;
     }
     const words = `${clip || ''} ${asked}`.toLowerCase();
-    const named = pool.filter(p => { const l = String(p.file.label || '').toLowerCase(); return l && words.includes(l); });
+    // The most specific name wins: "do the pole dance" names both "Dance" and "Pole Dance" (live 2026-11-08: it did Dance).
+    // Spaces and hyphens are the same ("can-can", "running man").
+    const flat = (t) => ` ${String(t || '').toLowerCase().replace(/[-_]+/g, ' ').replace(/\s+/g, ' ').trim()} `;
+    const said = flat(words);
+    const hits = pool.filter(p => { const l = flat(p.file.label); return l.trim() && said.includes(l); });
+    const longest = Math.max(0, ...hits.map(p => flat(p.file.label).length));
+    const named = hits.filter(p => flat(p.file.label).length === longest);
     const purpose = clipGesture(clip || asked);
-    const fits = named.length ? named : purpose ? pool.filter(p => p.file.gesture === purpose) : [];
+    // A named dance ("do the can-can") is that dance or a plain no, never some other dance; "dance for me" is any.
+    const specific = /pole|rumba|belly|can.?can|cabbage|running man|roger|go.?go|booty|twerk|samba|ballet|hip.?hop|dab/i.exec(`${clip || ''} ${asked}`);
+    const fits = named.length ? named : specific ? [] : purpose ? pool.filter(p => p.file.gesture === purpose) : [];
     const choice = (fits.length ? fits : pool)[Math.floor(Math.random() * (fits.length ? fits : pool).length)];
-    if (!fits.length && (clip || purpose)) return { success: false, error: `I have no ${clip || purpose} clip. Mine: ${[...new Set(pool.map(p => p.file.label))].join(', ')}.` };
+    if (!fits.length && (clip || purpose || specific)) return { success: false, error: `I have no ${specific ? specific[0] : clip || purpose} clip. Mine: ${[...new Set(pool.map(p => p.file.label))].join(', ')}.` };
+    // Everywhere its body is: every open playground or designer page (no AvatarX needed), and AvatarX when it has one.
+    const rel = `store/${safeName(choice.item.variant)}/${choice.file.name}`;
+    const listed = await fs.readFile(path.join(this.vrmDir(), 'animations', 'store.json'), 'utf8').then(JSON.parse).catch(() => []);
+    const entry = listed.find(c => c.file === rel) || { file: rel, label: choice.file.label, loop: !!choice.file.loop };
+    const pages = await this.playOnPages({ file: entry.file, label: entry.label, loop: !!entry.loop, prop: entry.prop || null });
     const { playOnAvatarX, pushClipsToAvatarX } = await import('../../services/avatar/avatarx.js');
-    const file = path.join(this.vrmDir(), 'animations', 'store', safeName(choice.item.variant), choice.file.name);
-    let played = 'not connected';
+    let avatarx = 'not connected';
     try {
-      const [name] = await pushClipsToAvatarX([{ file }]).then(r => (Array.isArray(r) ? r : []));
-      if (name) played = await playOnAvatarX(name);
-    } catch (e) { this.logger.warn(`botsandborgs: AvatarX did not play ${choice.file.label}: ${e.message}`); played = 'failed'; }
-    const where = played === 'played' ? 'on my 3D body in AvatarX now' : 'in the avatar designer and the 3D playground (it isn\'t showing anywhere right now)';
-    return { success: played !== 'failed', result: played === 'failed' ? `I couldn't play ${choice.file.label} on AvatarX.` : `Playing ${choice.file.label} (${choice.item.title}) ${where}.`, clip: choice.file.label };
+      const [name] = await pushClipsToAvatarX([{ file: path.join(this.vrmDir(), 'animations', rel) }]).then(r => (Array.isArray(r) ? r : []));
+      if (name) avatarx = await playOnAvatarX(name);
+    } catch (e) { this.logger.warn(`botsandborgs: AvatarX did not play ${choice.file.label}: ${e.message}`); avatarx = 'failed'; }
+    const places = [pages ? `in my 3D playground${pages > 1 ? ` (${pages} pages open)` : ''}` : null, avatarx === 'played' ? 'in AvatarX' : null].filter(Boolean);
+    this.logger.info(`botsandborgs: playing ${choice.file.label} on ${pages} page(s), AvatarX ${avatarx}`);
+    if (!places.length && avatarx === 'failed') return { success: false, error: `I couldn't play ${choice.file.label}: AvatarX refused it and no 3D page is open.`, clip: choice.file.label };
+    return { success: true, clip: choice.file.label, pages, avatarx,
+      result: places.length ? `Doing ${choice.file.label} now, ${places.join(' and ')}.` : `${choice.file.label} is ready, but my 3D body isn't open anywhere: open the 3D playground (or AvatarX) and ask again.` };
+  }
+
+  /** Every open 3D page of this agent gets the clip. 0 when the web interface isn't running. */
+  async playOnPages(clip) {
+    const web = this.agent?.interfaces?.get?.('web');
+    if (!web?.playOnAvatarPages) return 0;
+    return web.playOnAvatarPages(clip).catch(e => { this.logger.warn(`botsandborgs: pages not told: ${e.message}`); return 0; });
+  }
+
+  /** "Stop dancing": back to the idle stance on every open page. */
+  async stopClip() {
+    const pages = await this.playOnPages({ stop: true });
+    return { success: true, pages, result: pages ? 'Stopped.' : "I'm not dancing anywhere right now." };
   }
 
   async useModel({ item, wear }) {

@@ -2,6 +2,17 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.779] - 2026-11-08
+
+### Fixed
+- **"Do the pole dance" does the pole dance.** It also matched the plain "Dance" clip and picked between them at random; the most specific name now wins. A named dance the agent doesn't own gets a plain no and the list of what it has, instead of a different dance.
+
+## [2.25.778] - 2026-11-08
+
+### Added
+- **The agent dances in its own 3D playground, with or without AvatarX.** "Do the pole dance", "dance the rumba", "stop dancing" from any chat now play on every open playground and avatar designer page (the dashboard's signed-in socket), pole included, as well as on AvatarX when the agent has one. The answer says where it played, or that no 3D page is open.
+- **Owned store items can be fetched again** (`library({ update: true })`, "update your Bots & Borgs stickers"), so stickers or files the store adds or fixes after a purchase reach the agent. Each item keeps its place and purchase date, and the answer lists what is new, gone or changed.
+
 ## [2.25.777] - 2026-11-08
 
 ### Fixed

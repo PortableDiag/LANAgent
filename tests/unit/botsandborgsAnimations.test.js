@@ -157,7 +157,22 @@ test('"do the rumba": an owned clip by name, by purpose, or a plain no', async (
     const r = await p.execute({ action: 'use', _context: { originalInput: 'do the rumba you bought' } });
     assert.equal(r.success, true, r.error);
     assert.equal(r.clip, 'Rumba');
-    assert.match(r.result, /designer and the 3D playground/);
+    assert.match(r.result, /isn't open anywhere: open the 3D playground/);
+    // With a playground open, no AvatarX: the page gets the clip, with its loop and its prop.
+    const sent = [];
+    p.agent.interfaces.set('web', { playOnAvatarPages: async (c) => { sent.push(c); return c.stop ? 1 : 2; } });
+    fs.mkdirSync(path.join(p.vrmRoot, 'animations'), { recursive: true });
+    fs.writeFileSync(path.join(p.vrmRoot, 'animations', 'store.json'), JSON.stringify([{ file: 'store/pack/rumba.vrma', label: 'Rumba', loop: true, prop: { type: 'pole' } }]));
+    // "pole dance" names both "Dance" and "Pole Dance": the longer, more specific one, every time.
+    store.library.items[0].files.push({ name: 'Dance.vrma', kind: 'animation', label: 'Dance', gesture: 'dance' }, { name: 'Pole-Dance.vrma', kind: 'animation', label: 'Pole Dance', gesture: 'dance' });
+    for (let i = 0; i < 8; i++) assert.equal((await p.execute({ action: 'use', _context: { originalInput: 'do the pole dance' } })).clip, 'Pole Dance');
+    assert.equal((await p.execute({ action: 'use', _context: { originalInput: 'do the can-can' } })).success, false, 'no Can Can owned here');
+    const onPage = await p.execute({ action: 'use', _context: { originalInput: 'do the rumba' } });
+    assert.equal(onPage.result, 'Doing Rumba now, in my 3D playground (2 pages open).');
+    assert.deepEqual(sent.at(-1), { file: 'store/pack/rumba.vrma', label: 'Rumba', loop: true, prop: { type: 'pole' } });
+    const stop = await p.execute({ action: 'use', _context: { originalInput: 'stop dancing' } });
+    assert.equal(stop.result, 'Stopped.');
+    assert.deepEqual(sent.at(-1), { stop: true });
     assert.equal((await p.execute({ action: 'use', as: 'play', clip: 'wave' })).clip, 'Wave');
     const no = await p.execute({ action: 'use', as: 'play', clip: 'bow' });
     assert.equal(no.success, false);
@@ -195,6 +210,27 @@ test('"buy all the animations": each pack not owned, one order each, stopping at
   p.buy = async (d) => (d.variant ? (d.variant === 'vrm-pole-dance' ? { success: false, error: 'over budget' } : { success: true, result: 'ok' }) : real(d));
   const stop = await p.execute({ action: 'buy', all: true, kind: 'animation' });
   assert.match(stop.result, /Bought vrm-dance-pack-1\. Stopped at vrm-pole-dance: over budget/);
+});
+
+test('owned items are fetched again: new and fixed files arrive, the item keeps its place and date', async () => {
+  const z = new JSZip();
+  z.file('Bear sticker 1.png', Buffer.from('new-art-1'));
+  z.file('Bear sticker 13.png', Buffer.from('added'));
+  const { p, store } = rig(await z.generateAsync({ type: 'nodebuffer' }));
+  p.productOf = async () => ({ title: 'Bear', collection: '3d-avatars', variants: [{ id: 'vrm-mm-bear-stickers', label: 'Sticker set (12)' }] });
+  store.library = { items: [
+    { variant: 'newest-thing', kind: 'emoji', files: [] },
+    { variant: 'vrm-mm-bear-stickers', kind: 'sticker', order: 'o9', token: 't9', at: '2026-11-05T00:00:00.000Z', files: [{ name: 'Bear sticker 1.png', kind: 'sticker', size: 3 }, { name: 'Bear sticker 2.png', kind: 'sticker', size: 3 }] }] };
+  const routes = [];
+  p.accountKey = async () => 'k';
+  p.api = async (m, route) => { routes.push(route); return { downloads: [{ url: 'https://x/dl.zip' }] }; };
+  const r = await p.execute({ action: 'library', update: true });
+  assert.equal(r.success, true, r.error);
+  assert.deepEqual(routes, ['/api/orders/o9?token=t9'], 'an item with no order is left alone');
+  assert.deepEqual(r.updated, [{ variant: 'vrm-mm-bear-stickers', added: ['Bear sticker 13.png'], removed: ['Bear sticker 2.png'], changed: ['Bear sticker 1.png'] }]);
+  assert.deepEqual(store.library.items.map(i => i.variant), ['newest-thing', 'vrm-mm-bear-stickers'], 'kept its place');
+  assert.equal(store.library.items[1].at, '2026-11-05T00:00:00.000Z');
+  assert.match(r.result, /vrm-mm-bear-stickers: 1 new, 1 gone, 1 changed/);
 });
 
 test('asking to buy clips reads as clips', () => {
