@@ -13,6 +13,7 @@ All notable changes to LANAgent will be documented in this file.
   - **New moves:** Emote Set Two and the Idle Pack were bought on 2026-11-09. An owned clip plays before AvatarX's built-in head move of the same meaning, so the bought nod and head shake are used.
 
 ### Fixed
+- **A download that saved no file is a failure.** A Telegram post whose video is shown only inside the app ("Please open Telegram to view this post") was answered "Video downloaded successfully" with no file. The paid site charged 10 credits and showed Ready with no link. It now answers 422 with the reason, and the gateway refunds.
 - **Lights: no more asking several times.** On 2026-11-10 one bright-white command took five asks while the light dropped on and off Wi-Fi.
   - **Complaints repeat the last command at once:** "no, it didn't, I'm sitting in the dark, fix the light", "make the damn light bright white already", "try again", "still dark". Before, the first went to plain chat, which answered with a fake action tag, and the second was read as a device called "damn like". A question about it ("why did I have to ask 3 times") is answered as before.
   - **"Done" now means Govee shows the light online.** A command accepted while Govee reports the light offline is retried rather than reported as working.

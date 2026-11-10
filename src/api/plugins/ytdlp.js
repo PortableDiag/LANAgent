@@ -828,6 +828,20 @@ export default class YtDlpPlugin extends BasePlugin {
             }
           }
 
+          // yt-dlp can finish without saving anything: a Telegram post whose video is shown only inside the app
+          // ("Please open Telegram to view this post") came back "Video downloaded successfully" with no file, and
+          // the paid site charged for it and said Ready with no link (2026-11-10). No file is a failure.
+          if (!fileInfo) {
+            const tg = /(^|\/\/)(t\.me|telegram\.me)\//i.test(url);
+            return {
+              success: false,
+              noFile: true,
+              error: tg
+                ? 'Telegram does not show this post\'s video on the web (it says "Please open Telegram to view this post"), so there is no file to download.'
+                : 'The link gave no video or audio file to download.'
+            };
+          }
+
           // The title as yt-dlp gave it (without the [id] the filename carries)
           const title = fileInfo ? media.title : null;
 

@@ -122,10 +122,12 @@ router.post('/download',
       // gateway surfaces as a 502. Genuine processing exceptions still hit the catch
       // below and return 500. The real reason (yt-dlp's message) is passed in `error`.
       if (!result?.success || !result?.file?.path) {
-        return res.status(result?.success ? 200 : 422).json({
-          success: !!result?.success,
+        // No file is never a success: it was answered 200 "Video downloaded successfully", charged, and the site
+        // showed Ready with no link (a Telegram post, 2026-11-10).
+        return res.status(422).json({
+          success: false,
           extractor,
-          error: result?.error || (result?.success ? null : 'No downloadable video found at this URL'),
+          error: result?.error || 'No downloadable video found at this URL',
           result: result?.result || null
         });
       }
