@@ -13,7 +13,7 @@ export const EMOTES = {
   shake_head: 'no, disagreeing, that is not right, sadly not',
   look_around: 'looking for something, puzzled, not sure where',
   wave: 'hello or goodbye, good night',
-  bow: 'thank you, respect, an apology',
+  bow: 'thanked or thanking, "you\'re welcome", respect, an apology',
   cheer: 'celebrating good news or a win',
   clap: 'applauding an achievement, well done',
   laugh: 'laughing at a joke, something funny',
@@ -23,10 +23,10 @@ export const EMOTES = {
   facepalm: 'a silly mistake, oops, exasperation',
   point: 'pointing out the answer, that one',
   'thumbs-up': 'done, it worked, all good, approval',
-  'hands-on-hips': 'mock stern, ready, confident',
+  'hands-on-hips': 'mock stern telling-off, "really?"',
   'arms-crossed': 'unimpressed, firm, waiting',
   beckon: 'come here, follow me, let me show you',
-  'blow-kiss': 'affection, love, sweet goodbye'
+  'blow-kiss': 'affection, a compliment received ("you\'re the best"), sweet goodbye'
 };
 
 /** The AvatarX names among `held` that are conversational moves: [{ name, means }]. Dances and loops never match. */

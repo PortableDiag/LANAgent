@@ -3,6 +3,7 @@ import axios from 'axios';
 import { logger } from '../../utils/logger.js';
 import webSearchService from '../../services/search/webSearchService.js';
 import * as cheerio from 'cheerio';
+import { PluginSettings } from '../../models/PluginSettings.js';
 
 // A paid call must answer inside the gateway's 60 s wait: the direct tiers go first and
 // the last-resort model search gets whatever is left of this budget.
@@ -100,7 +101,7 @@ export default class WebSearchPlugin extends BasePlugin {
           return await this.getCryptoPrice(symbol);
           
         case 'weather':
-          return await this.getWeather(location);
+          return await this.getWeather(location, { external });
           
         case 'news':
           return await this.getNews(query);
@@ -467,19 +468,36 @@ export default class WebSearchPlugin extends BasePlugin {
     }
   }
 
-  async getWeather(location) {
+  /**
+   * A place name, or null when the extractor gave none or wrote a remark instead ("The sentence does not specify a
+   * particular location." was sent to wttr.in as the city, 2026-11-09, and came back a 500).
+   */
+  static placeOf(location) {
+    const l = String(location || '').trim().replace(/[.!?]+$/, '');
+    if (!l || l.split(/\s+/).length > 6) return null;
+    if (/\b(not specif|unspecified|no (particular |specific )?(location|place|city)|unknown|none|n\/a|sentence|user'?s|my location|current location|here)\b/i.test(l)) return null;
+    return l;
+  }
+
+  async getWeather(location, { external = false } = {}) {
+    const said = WebSearchPlugin.placeOf(location);
+    // The remembered place is the owner's: a paid caller never reads or changes it.
+    const saved = external ? null : await PluginSettings.getCached(this.name, 'weather').catch(() => null);
+    location = said || saved?.location || (external ? null : process.env.WEATHER_DEFAULT_LOCATION) || null;
     if (!location) {
-      return { success: false, error: 'Location is required' };
+      return external ? { success: false, error: 'location is required (a city or town name)' }
+        : { success: true, needsInput: true, result: 'Which city or town should I check the weather for? Tell me once and I will remember it.' };
     }
 
     try {
-      logger.info(`Getting weather for: ${location}`);
+      logger.info(`Getting weather for: ${location}${said ? '' : ' (the last place asked about)'}`);
 
-      // wttr.in — free weather API, no key needed
-      const response = await axios.get(`https://wttr.in/${encodeURIComponent(location)}?format=j1`, {
+      // wttr.in — free weather API, no key needed. It answers a 5xx now and then: one retry.
+      const ask = () => axios.get(`https://wttr.in/${encodeURIComponent(location)}?format=j1`, {
         timeout: 10000,
         headers: { 'User-Agent': 'curl/7.68.0' }
       });
+      const response = await ask().catch(e => (e.response?.status >= 500 || !e.response ? new Promise(r => setTimeout(r, 1500)).then(ask) : Promise.reject(e)));
 
       const data = response.data;
       const current = data.current_condition?.[0];
@@ -502,9 +520,23 @@ export default class WebSearchPlugin extends BasePlugin {
       const visibility = current.visibility;
       const uvIndex = current.uvIndex;
 
+      // Today and tomorrow, so "do I need an umbrella tomorrow" has an answer, not just the weather right now.
+      const days = (data.weather || []).slice(0, 2).map((d, i) => {
+        const hours = d.hourly || [];
+        const rain = Math.max(0, ...hours.map(h => Number(h.chanceofrain) || 0));
+        const snow = Math.max(0, ...hours.map(h => Number(h.chanceofsnow) || 0));
+        const midday = hours[Math.floor(hours.length / 2)]?.weatherDesc?.[0]?.value || '';
+        return { day: i === 0 ? 'today' : 'tomorrow', date: d.date, maxC: Number(d.maxtempC), minC: Number(d.mintempC), maxF: Number(d.maxtempF), minF: Number(d.mintempF),
+          chanceOfRain: rain, chanceOfSnow: snow, condition: midday.trim() };
+      });
+      const forecast = days.map(d => `${d.day[0].toUpperCase()}${d.day.slice(1)}: ${d.condition ? `${d.condition}, ` : ''}${d.minC}–${d.maxC}°C / ${d.minF}–${d.maxF}°F, ` +
+        `${d.chanceOfRain}% chance of rain${d.chanceOfSnow ? `, ${d.chanceOfSnow}% snow` : ''}`).join('\n');
+      if (said && !external) await PluginSettings.setCached(this.name, 'weather', { location: said, at: new Date().toISOString() }).catch(() => {});
+
       const result = `Weather for ${areaName}${country ? ', ' + country : ''}:\n` +
         `${desc}, ${tempC}°C / ${tempF}°F (feels like ${feelsLikeC}°C / ${feelsLikeF}°F)\n` +
-        `Humidity: ${humidity}% | Wind: ${windMph} mph ${windDir} | UV: ${uvIndex} | Visibility: ${visibility} km`;
+        `Humidity: ${humidity}% | Wind: ${windMph} mph ${windDir} | UV: ${uvIndex} | Visibility: ${visibility} km` +
+        (forecast ? `\n${forecast}` : '');
 
       return {
         success: true,
@@ -518,7 +550,8 @@ export default class WebSearchPlugin extends BasePlugin {
           humidity: parseInt(humidity),
           wind: { speed: parseInt(windMph), direction: windDir },
           uvIndex: parseInt(uvIndex),
-          visibility: parseInt(visibility)
+          visibility: parseInt(visibility),
+          forecast: days
         },
         source: 'wttr.in'
       };
