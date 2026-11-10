@@ -53,7 +53,7 @@ import { BackgroundReview } from '../services/skills/backgroundReview.js';
 import { getUserProfile } from '../services/skills/userProfile.js';
 import { Curator, scheduleCurator } from '../services/skills/curator.js';
 import { looksMultiStep } from './multiStep.js';
-import { parseLightCommand } from '../services/govee/lightCommand.js';
+import { parseLightCommand, isLightComplaint } from '../services/govee/lightCommand.js';
 import { GoveeEnhancements } from '../api/plugins/govee-enhancements.js';
 
 const execAsync = promisify(exec);
@@ -1178,7 +1178,11 @@ export class Agent extends EventEmitter {
         }
       }
 
-      if (this.providerManager && userBuffer.length >= 2 && !context.resolvedConfirmation) {
+      // A complaint about the light just changed ("no, it didn't, still dark") is a command to redo it, not chat: the
+      // follow-up model below spent 18 s before it reached the light (2026-11-10).
+      const lightComplaint = !!this.apiManager?.getPlugin?.('govee')?.recentCommand?.() && isLightComplaint(input);
+
+      if (this.providerManager && userBuffer.length >= 2 && !context.resolvedConfirmation && !lightComplaint) {
         try {
           const isShort = input.trim().split(/\s+/).length <= 10;
           const hasFollowUpSignals = /\b(that|it|this|those|these|what|why|how|really|huh|wtf|hmm|ok|yes|no|yeah|nah|sure|exactly|right|is it|was it|did it|can you|could you|about|more|else|also|too|again|same)\b/i.test(input);
@@ -1289,6 +1293,10 @@ If answering needs information that is not in the conversation above (messages, 
           if (light) {
             logger.info(`Light command read directly: ${light.action} ${JSON.stringify(light.params)}`);
             intentResult = { detected: true, intent: `govee_${light.action}`, plugin: 'govee', action: light.action, parameters: { ...light.params, fromAI: true }, confidence: 1, source: 'light-command' };
+          } else if (lightComplaint) {
+            // "No, it didn't, I'm sitting in the dark": do the last light command again, now (2026-11-10).
+            logger.info(`Light complaint: repeating the last command for ${govee.recentCommand().name}`);
+            intentResult = { detected: true, intent: 'govee_repeat', plugin: 'govee', action: 'repeat', parameters: { fromAI: true }, confidence: 1, source: 'light-complaint' };
           }
         }
       } catch (err) {

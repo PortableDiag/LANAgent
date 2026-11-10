@@ -34,3 +34,12 @@ test('anything unsure goes to the model', () => {
   assert.equal(read('make the toilet light nice'), null, 'no setting');
   assert.equal(read('make the living room blue'), null, 'two devices match "living"');
 });
+
+// 2026-11-10: three asks for one light. Complaints repeat the last command; questions about it do not.
+import { isLightComplaint } from '../../src/services/govee/lightCommand.js';
+test('a complaint about the light repeats it; a question about it does not', () => {
+  for (const yes of ["No, it didn't im sitting in the dark, fix the light", 'Make the damn like bright whole already', 'try again', 'still dark', 'it didnt work', 'hurry up', 'nothing happened'])
+    assert.equal(isLightComplaint(yes), true, yes);
+  for (const no of ['Why did I have to ask 3 times', 'I asked more than twice', 'Finally', 'Assume if I have to ask more than once, you\'ve failed', 'what lights do I have?'])
+    assert.equal(isLightComplaint(no), false, no);
+});

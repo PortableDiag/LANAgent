@@ -200,7 +200,7 @@ export default class GoveePlugin extends BasePlugin {
       action: {
         required: true,
         type: 'string',
-        enum: ['list', 'status', 'control', 'power', 'brightness', 'color', 
+        enum: ['list', 'repeat', 'status', 'control', 'power', 'brightness', 'color', 
                 'temperature', 'scene', 'scenes', 'subscribe', 'unsubscribe', 'settings',
                 'group', 'theme', 'bulk', 'backup', 'restore', 'toggle', 'segment', 'mode', 'schedules']
       }
@@ -214,6 +214,13 @@ export default class GoveePlugin extends BasePlugin {
         success: false,
         error: 'Rate limit exceeded. Please try again tomorrow.'
       };
+    }
+
+    if (action === 'repeat') {
+      const last = this.recentCommand();
+      if (!last) return { success: false, error: 'There is no recent light command to repeat. Which light, and what should it do?' };
+      this.logger.info(`Govee: repeating the last command for ${last.name}`);
+      return await this.runSteps(last, { background: true });
     }
 
     const pending = this.pendingRetry && Date.now() - this.pendingRetry.at < 10 * 60 * 1000 ? this.pendingRetry : null;
@@ -627,13 +634,35 @@ export default class GoveePlugin extends BasePlugin {
    * is tried again for up to 20 s here; if it is still offline, retried every 15 s for 3 minutes in the background,
    * and the owner is told the moment it works or when it gives up.
    */
+  /** The last light command, for "it didn't work, fix it" within 15 minutes; null when there is none. */
+  recentCommand() {
+    const c = this.lastCommand;
+    return c && Date.now() - c.at < 15 * 60 * 1000 ? c : null;
+  }
+
+  /**
+   * Whether Govee sees the light online after a command it accepted. At 08:03 on 2026-11-10 a retry was accepted while
+   * the light dropped on and off Wi-Fi, ALICE said it went through, and the owner was still in the dark. Unknown
+   * (state not readable) counts as online: the command itself was accepted.
+   */
+  async confirmOnline(job) {
+    try {
+      const r = await this.makeRequest('/device/state', 'POST', { device: job.deviceId, sku: job.sku });
+      const caps = (r?.payload || r)?.capabilities || [];
+      const online = caps.find(c => c.instance === 'online')?.state?.value;
+      return online === false || online === 0 || online === 'false' ? false : true;
+    } catch { return true; }
+  }
+
   async runSteps(job, { background = false } = {}) {
+    this.lastCommand = { ...job, at: Date.now() };
     const attempt = async () => {
       let last;
       for (const s of job.steps) {
         last = await this.sendCommand(job.deviceId, job.sku, s.capability, s.value);
         if (!last.ok) return last;
       }
+      if (last?.ok && !(await this.confirmOnline(job))) return { ok: false, offline: true, msg: 'Govee accepted the command but shows the light offline' };
       return last;
     };
     let r = await attempt();
@@ -673,6 +702,7 @@ export default class GoveePlugin extends BasePlugin {
           r = await this.sendCommand(job.deviceId, job.sku, s.capability, s.value);
           if (!r.ok) break;
         }
+        if (r?.ok && !(await this.confirmOnline(job))) r = { ok: false, offline: true, msg: 'Govee accepted the command but shows the light offline' };
         if (r?.ok) {
           clearInterval(this.retryTimer);
           this.pendingRetry = null;

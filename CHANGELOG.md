@@ -13,6 +13,9 @@ All notable changes to LANAgent will be documented in this file.
   - **New moves:** Emote Set Two and the Idle Pack were bought on 2026-11-09. An owned clip plays before AvatarX's built-in head move of the same meaning, so the bought nod and head shake are used.
 
 ### Fixed
+- **Lights: no more asking several times.** On 2026-11-10 one bright-white command took five asks while the light dropped on and off Wi-Fi.
+  - **Complaints repeat the last command at once:** "no, it didn't, I'm sitting in the dark, fix the light", "make the damn light bright white already", "try again", "still dark". Before, the first went to plain chat, which answered with a fake action tag, and the second was read as a device called "damn like". A question about it ("why did I have to ask 3 times") is answered as before.
+  - **"Done" now means Govee shows the light online.** A command accepted while Govee reports the light offline is retried rather than reported as working.
 - **Weather with no place named.** The location extractor sent a remark as the city ("The sentence does not specify a particular location."), and wttr.in answered 500.
   - Remarks are no longer read as places. The agent uses the last place the owner asked about, or `WEATHER_DEFAULT_LOCATION`. With neither, it asks which city and remembers the answer.
   - A paid caller never reads or changes the remembered place, and gets "location is required" instead.

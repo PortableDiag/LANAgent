@@ -13,7 +13,7 @@ function rig(answers) {
   p.lastDeviceFetch = Date.now();
   p.resolveDeviceName = async (n) => (/toilet/i.test(n) ? ID : null); // the name matching itself needs Mongo (aliases)
   const sent = [];
-  p.makeRequest = async (ep, m, data) => { sent.push(data.capability); return answers.length > 1 ? answers.shift() : answers[0]; };
+  p.makeRequest = async (ep, m, data) => { if (ep === "/device/state") return { payload: { capabilities: [] } }; sent.push(data.capability); return answers.length > 1 ? answers.shift() : answers[0]; };
   return { p, sent, notes };
 }
 const ok = (type) => ({ code: 200, msg: 'success', capability: { type, state: { status: 'success' } } });
@@ -59,3 +59,37 @@ test('"retry" right after an offline light repeats that command', async (t) => {
   assert.equal(sent.length, 1);
 });
 
+
+test('an accepted command on a light Govee shows offline is not "done"; repeat redoes the last command', async () => {
+  const g = new (await import('../../src/api/plugins/govee.js')).default({});
+  g.logger = { info() {}, warn() {}, error() {}, debug() {} };
+  const calls = [];
+  let online = false;
+  g.makeRequest = async (route, method, body) => {
+    calls.push(route);
+    if (route === '/device/state') return { payload: { capabilities: [{ instance: 'online', state: { value: online } }] } };
+    return { code: 200, capability: { state: { status: 'success' } } };
+  };
+  const job = { deviceId: 'AA', sku: 'H1', name: 'Master Toilet', steps: [{ capability: 'devices.capabilities.on_off', value: 1 }] };
+  const orig = global.setTimeout; global.setTimeout = (fn) => orig(fn, 0);
+  try {
+    const r = await g.runSteps(job);
+    assert.equal(r.success, false); assert.equal(r.offline, true);
+    online = true;
+    assert.equal(g.recentCommand().name, 'Master Toilet');
+    const again = await g.runSteps(g.recentCommand());
+    assert.equal(again.success, true);
+  } finally { global.setTimeout = orig; }
+});
+
+test('execute accepts repeat: it redoes the last command, or says there is none', async () => {
+  const g = new (await import('../../src/api/plugins/govee.js')).default({});
+  g.logger = { info() {}, warn() {}, error() {}, debug() {} };
+  g.checkRateLimit = () => true;
+  const none = await g.execute({ action: 'repeat' });
+  assert.equal(none.success, false); assert.match(none.error, /no recent light command/);
+  g.makeRequest = async (route) => route === '/device/state' ? { payload: { capabilities: [] } } : { code: 200, capability: { state: { status: 'success' } } };
+  g.lastCommand = { deviceId: 'AA', sku: 'H1', name: 'Master Toilet', steps: [{ capability: 'devices.capabilities.on_off', value: 1 }], at: Date.now() };
+  const r = await g.execute({ action: 'repeat' });
+  assert.equal(r.success, true, JSON.stringify(r));
+});

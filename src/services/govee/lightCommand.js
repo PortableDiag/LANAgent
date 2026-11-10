@@ -67,3 +67,18 @@ export function parseLightCommand(text, deviceNames, colorNames = []) {
   if (!setting) return null;
   return { device, action: setting.action, params: { device, ...setting.params } };
 }
+
+/**
+ * A complaint or a "do it again" about the light just changed: "no, it didn't, I'm sitting in the dark, fix the light",
+ * "make the damn light bright white already", "try again". It repeats the last light command (2026-11-10: the first
+ * went to plain chat, which replied with a fake action tag; the second became device "damn like").
+ */
+const COMPLAINT = /\b(didn'?t|did not|doesn'?t|does not|isn'?t|is not|wasn'?t|not)\b[^.!?]{0,30}\b(work|working|on|change|changed|happen|happened|come on|turn on)\b|\bstill (dark|off|not|nothing|the same)\b|\bin the dark\b|\bfix (the |my |that |this )?(damn |fucking |stupid )?(light|lights|lamp|it)\b|\b(try|do) (it |that )?again\b|\bretry\b|\balready\b|\bhurry\b|\bnothing happened\b/i;
+
+export function isLightComplaint(text) {
+  const s = String(text || '').trim();
+  if (!s || s.length > 200 || /\?\s*$/.test(s) && !/\bwhy\b/i.test(s) && !COMPLAINT.test(s)) return false;
+  // "Why did I have to ask 3 times" is a question about it, not a request to do it again.
+  if (/^\s*(why|how come|what)\b/i.test(s)) return false;
+  return COMPLAINT.test(s);
+}
