@@ -258,12 +258,11 @@ export async function writeStoreAnimations(items, libraryDir, vrmDir) {
     await fs.mkdir(dest, { recursive: true });
     for (const f of clips) {
       const to = path.join(dest, f.name);
-      const there = await fs.stat(to).then(st => st.size === f.size).catch(() => false);
-      if (!there) {
-        const bytes = await fs.readFile(path.join(libraryDir, variant, f.name)).catch(() => null);
-        if (!bytes) continue;
-        await writeAtomic(to, bytes);
-      }
+      // Same bytes, not same size: a reissued clip often keeps its size (Rumba, react-victory, 2026-11-10).
+      const bytes = await fs.readFile(path.join(libraryDir, variant, f.name)).catch(() => null);
+      if (!bytes) continue;
+      const there = await fs.readFile(to).then(b => b.equals(bytes)).catch(() => false);
+      if (!there) await writeAtomic(to, bytes);
       const label = f.label || clipLabel(f.name);
       const entry = { file: `store/${variant}/${f.name}`, label, group: `Bots & Borgs: ${item.title || item.variant}`, loop: f.loop ?? clipLoops(label), source: 'botsandborgs', variant: item.variant };
       const gesture = f.gesture || clipGesture(label);

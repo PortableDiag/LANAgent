@@ -19,6 +19,7 @@ All notable changes to LANAgent will be documented in this file.
   - wttr.in is retried once after a 5xx.
 - **Weather now covers tomorrow.** It includes today's and tomorrow's high and low and the chance of rain or snow, so "do I need an umbrella tomorrow" has an answer. The forecast is also in `data.forecast`.
 - **A clip the store reissues now reaches AvatarX.** Updating the library already fetched the fixed file, but AvatarX kept its old copy under the same name. Changed or new clips are now uploaded again, so Set One's fixed Wave replaces the old one.
+- **A reissued file of the same size counts as changed.** The store's 2026-11-10 fixes to Rumba, Running Man, react-victory and emote-blow-kiss kept each file's size. They were fetched but not counted as changed, so the old clips kept playing. Library updates and the animation copy now compare file contents.
 - **Recipes without a Spoonacular key:** "give me three quick dinner ideas" got one random dessert. TheMealDB now returns the number asked for ("three", "3", "some"), keeps desserts, starters and sides out of meal ideas, and gives desserts or breakfasts only when asked.
 
 ## [2.25.788] - 2026-11-09

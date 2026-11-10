@@ -705,9 +705,13 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
       const full = await this.api('get', `/api/orders/${old.order}?token=${encodeURIComponent(old.token)}`, key ? { key } : {}).catch(e => ({ error: e.message }));
       const downloads = full?.downloads || full?.order?.downloads || [];
       if (!downloads.length) { report.push({ variant: old.variant, error: full?.error || 'the store listed no downloads' }); continue; }
-      const before = new Map(old.files.map(f => [f.name, f.size]));
+      // By content: a reissued file can keep its size (Rumba, react-victory and blow-kiss did, 2026-11-10).
+      const dir = path.join(this.libraryDir(), safeName(old.variant));
+      const digest = async (files) => new Map(await Promise.all(files.map(async f => [f.name,
+        await fs.readFile(path.join(dir, f.name)).then(b => crypto.createHash('sha256').update(b).digest('hex')).catch(() => `size:${f.size}`)])));
+      const before = await digest(old.files);
       const item = await this.ingest({ order: { id: old.order, token: old.token }, downloads, variant: old.variant, update: { at: old.at } });
-      const after = new Map(item.files.map(f => [f.name, f.size]));
+      const after = await digest(item.files);
       const added = [...after.keys()].filter(n => !before.has(n));
       const removed = [...before.keys()].filter(n => !after.has(n));
       const changed = [...after.keys()].filter(n => before.has(n) && before.get(n) !== after.get(n));
