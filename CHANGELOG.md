@@ -2,6 +2,18 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.789] - 2026-11-09
+
+### Added
+- **Avatar emotes.** While the owner chats with the agent in AvatarX, or in their private Telegram chat, the 3D body moves with each reply and its face changes to match.
+  - **Moves:** a nod, head shake, wave, bow, cheer, clap or laugh, and the moves of Emote Set Two (think, shrug, thumbs-up, facepalm and the rest) once it is bought.
+  - **Never a dance or a loop.** Only moves AvatarX holds are used, so a newly bought emote pack works at once.
+  - **Judgement:** the sticker model picks the move, or none for plain facts. A sad reply never gets a cheerful move or face. A slow or failed model means no emote, never a late one.
+  - **Setting:** on by default, under Settings → Avatar emotes, or say "stop emoting". The setting is `botsandborgs` `settings {autoEmotes}`.
+
+### Fixed
+- **Recipes without a Spoonacular key:** "give me three quick dinner ideas" got one random dessert. TheMealDB now returns the number asked for ("three", "3", "some"), keeps desserts, starters and sides out of meal ideas, and gives desserts or breakfasts only when asked.
+
 ## [2.25.788] - 2026-11-09
 
 ### Added

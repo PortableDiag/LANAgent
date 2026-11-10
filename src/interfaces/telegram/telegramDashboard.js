@@ -52,6 +52,8 @@ export class TelegramDashboard extends TelegramInterface {
     const store = plugin('botsandborgs');
     const memes = plugin('memes');
     const where = { userText, replyText, chatId: ctx.chat.id, threadId: ctx.message?.message_thread_id };
+    // The 3D body on AvatarX moves with the reply too, if the owner has it open; apart from the sticker or meme.
+    store?.autoEmote?.({ userText, replyText }).catch(e => logger.warn(`AvatarX: no emote: ${e.message}`));
     // At most one extra after a reply: a meme when one is due and fits (rarer), else a sticker.
     (async () => {
       const meme = await memes?.autoMeme?.({ ...where, stickerSentAt: store?._stickerSentAt || 0 })

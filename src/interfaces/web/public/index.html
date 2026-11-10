@@ -1347,6 +1347,20 @@
                             </div>
                         </div>
 
+                        <div class="settings-section" id="emotes-section">
+                            <h3><i class="fas fa-person-walking"></i> Avatar emotes</h3>
+                            <p class="setting-description">While you chat with the agent in AvatarX (or in your private Telegram chat with AvatarX open), its 3D body moves with each reply: a nod, a shrug, a wave, a cheer, and a face to match. Only short moves, never a dance, and only moves it has: AvatarX's head moves and the emote clips it owns. A new emote pack works as soon as it is bought.</p>
+                            <div class="setting-item">
+                                <label>
+                                    <input type="checkbox" id="emotes-auto">
+                                    <span>Emote while talking</span>
+                                </label>
+                            </div>
+                            <div class="setting-item">
+                                <button class="btn btn-primary" onclick="dashboard.saveEmoteSettings()"><i class="fas fa-save"></i> Save emote setting</button>
+                            </div>
+                        </div>
+
                         <div class="settings-section" id="textx-section">
                             <h3><i class="fas fa-comment-sms"></i> TextX — texting app</h3>
                             <p class="setting-description">Use this agent as a conversation in the TextX SMS app on your phone (the LANAgent Android app pairs here too). It works from anywhere: the phone reaches this agent through the api.lanagent.net relay, which only ever sees encrypted data. In TextX you choose what the agent may do (send texts, read the conversations you share); every text it sends needs your tap on the phone. <strong>For phone calls, use the DialX section below, not this one.</strong></p>

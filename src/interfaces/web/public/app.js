@@ -770,6 +770,7 @@ class LANAgentDashboard {
                 this.loadReportSettings();
                 this.loadTelegramAgentFeatures();
                 this.loadMemeSettings();
+                this.loadEmoteSettings();
                 this.loadTextX();
                 this.loadDialX();
                 this.loadAutonomousDeploymentSetting();
@@ -6163,6 +6164,28 @@ class LANAgentDashboard {
             });
             this.showNotification(r.success ? r.message : `Not saved: ${r.error}`, r.success ? 'success' : 'error');
             this.loadMemeSettings();
+        } catch (error) {
+            this.showNotification(`Not saved: ${error.message}`, 'error');
+        }
+    }
+
+    async loadEmoteSettings() {
+        try {
+            const r = await this.apiPost('/api/plugin', { plugin: 'botsandborgs', action: 'settings' });
+            const section = document.getElementById('emotes-section');
+            if (!r?.success) { if (section && r?.disabled) section.querySelector('.setting-description').textContent = 'The Bots & Borgs plugin is switched off under Plugins.'; return; }
+            const s = r.settings || r.data?.settings;
+            if (s) document.getElementById('emotes-auto').checked = s.autoEmotes !== false;
+        } catch (error) {
+            console.error('Failed to load emote setting:', error);
+        }
+    }
+
+    async saveEmoteSettings() {
+        try {
+            const r = await this.apiPost('/api/plugin', { plugin: 'botsandborgs', action: 'settings', autoEmotes: document.getElementById('emotes-auto').checked });
+            this.showNotification(r.success ? 'Emote setting saved.' : `Not saved: ${r.error}`, r.success ? 'success' : 'error');
+            this.loadEmoteSettings();
         } catch (error) {
             this.showNotification(`Not saved: ${error.message}`, 'error');
         }

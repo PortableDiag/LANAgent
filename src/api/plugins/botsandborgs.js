@@ -40,7 +40,9 @@ const DEFAULTS = {
   // "i dont want ALICE changing avatars ... it has a VRM model thats associated with its current avatar").
   allowAvatarChange: null,
   autoUse: true,
-  autoWear: true
+  autoWear: true,
+  // Body language on AvatarX after a reply: a nod, shrug, wave or cheer and a matching face (services/avatar/autoEmote.js).
+  autoEmotes: true
 };
 const AUTO_STICKER_EVERY_MS = Number(process.env.BOTSANDBORGS_STICKER_EVERY_MS) || 20 * 60 * 1000;
 const AUTO_STICKER_ASK_EVERY_MS = 60 * 1000;
@@ -110,7 +112,7 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
       },
       {
         command: 'settings',
-        description: 'Read or change the Bots & Borgs rules: weeklyBudgetUsd, maxItemUsd (null = no cap), requireApproval, minWalletUsd (no spending below it), payAsset (USDT, USDC or BNB), autoUse (use owned stickers, emoji and wallpapers unasked), autoWear (wear a bought model and its portrait unasked)',
+        description: 'Read or change the Bots & Borgs rules: weeklyBudgetUsd, maxItemUsd (null = no cap), requireApproval, minWalletUsd (no spending below it), payAsset (USDT, USDC or BNB), autoUse (use owned stickers, emoji and wallpapers unasked), autoEmotes (move the 3D body as it talks: nod, shrug, wave, cheer), autoWear (wear a bought model and its portrait unasked)',
         usage: 'settings({ weeklyBudgetUsd: 10 })',
         examples: ['set your bots and borgs budget to 10 dollars a week', 'show your bots and borgs spending settings']
       }
@@ -206,21 +208,21 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
 
   async settingsCommand(data) {
     const s = await this.settings();
-    const keys = ['weeklyBudgetUsd', 'maxItemUsd', 'requireApproval', 'minWalletUsd', 'payAsset', 'allowAvatarChange', 'autoUse', 'autoWear'];
+    const keys = ['weeklyBudgetUsd', 'maxItemUsd', 'requireApproval', 'minWalletUsd', 'payAsset', 'allowAvatarChange', 'autoUse', 'autoWear', 'autoEmotes'];
     const change = Object.fromEntries(keys.filter(k => data[k] !== undefined).map(k => [k, data[k]]));
     if (Object.keys(change).length) {
       if (change.payAsset && !['USDT', 'USDC', 'BNB'].includes(String(change.payAsset).toUpperCase())) return { success: false, error: 'payAsset must be USDT, USDC or BNB.' };
       if (change.payAsset) change.payAsset = String(change.payAsset).toUpperCase();
       for (const k of ['weeklyBudgetUsd', 'minWalletUsd']) if (change[k] !== undefined) change[k] = Math.max(0, Number(change[k]) || 0);
       if (change.maxItemUsd !== undefined) change.maxItemUsd = change.maxItemUsd === null || change.maxItemUsd === '' ? null : Math.max(0, Number(change.maxItemUsd));
-      for (const k of ['requireApproval', 'autoUse', 'autoWear']) if (change[k] !== undefined) change[k] = change[k] === true || change[k] === 'true';
+      for (const k of ['requireApproval', 'autoUse', 'autoWear', 'autoEmotes']) if (change[k] !== undefined) change[k] = change[k] === true || change[k] === 'true';
       if (change.allowAvatarChange !== undefined) change.allowAvatarChange = change.allowAvatarChange === null || change.allowAvatarChange === 'auto' ? null : (change.allowAvatarChange === true || change.allowAvatarChange === 'true');
       Object.assign(s, change);
       await PluginSettings.setCached(this.name, 'settings', s);
     }
-    return { success: true, result: `Bots & Borgs rules: up to $${s.weeklyBudgetUsd} a week, ${s.maxItemUsd == null ? 'no per-item cap' : `at most $${s.maxItemUsd} an item`}, ` +
+    return { success: true, settings: s, result: `Bots & Borgs rules: up to $${s.weeklyBudgetUsd} a week, ${s.maxItemUsd == null ? 'no per-item cap' : `at most $${s.maxItemUsd} an item`}, ` +
       `${s.requireApproval ? 'asks before each purchase' : 'no approval needed'}, no spending below $${s.minWalletUsd} of ${s.payAsset} in the wallet, every purchase must be used (avatar or sent), ` +
-      `${s.autoUse ? 'owned stickers, emoji and wallpapers get used unasked, ' : ''}${s.autoWear ? 'I wear a model I buy, with its portrait as my avatar, ' : ''}and otherwise my own avatar ${(await this.avatarChangeAllowed(s)) ? 'may' : 'may not'} be changed${s.allowAvatarChange == null ? ' (automatic: locked while I have a VRM model)' : ''}.` };
+      `${s.autoUse ? 'owned stickers, emoji and wallpapers get used unasked, ' : ''}${s.autoWear ? 'I wear a model I buy, with its portrait as my avatar, ' : ''}${s.autoEmotes ? 'my 3D body emotes as I talk, ' : ''}and otherwise my own avatar ${(await this.avatarChangeAllowed(s)) ? 'may' : 'may not'} be changed${s.allowAvatarChange == null ? ' (automatic: locked while I have a VRM model)' : ''}.` };
   }
 
   /** Whether a purchase may become this agent's own avatar: the setting, or (automatic) not while it has a VRM model. */
@@ -1134,6 +1136,31 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     this._stickerSentAt = Date.now();
     this.logger.info(`botsandborgs: sent a ${pick.file.kind} unasked (${choice.mood}, ${pick.item.variant})`);
     return choice.mood;
+  }
+
+  /**
+   * After a reply: body language on AvatarX (a move it holds and a face). Never held up by, and never fails, the reply.
+   * Returns { emote, mood } or null.
+   */
+  async autoEmote({ userText, replyText } = {}) {
+    if (!(await this.settings()).autoEmotes) return null;
+    const { avatarxCaller } = await import('../../services/avatar/avatarx.js');
+    const call = await avatarxCaller();
+    const pm = this.agent?.providerManager;
+    if (!call || !pm?.generateResponse) return null;
+    const { autoEmote } = await import('../../services/avatar/autoEmote.js');
+    return autoEmote({ userText, replyText, call, agentName: process.env.AGENT_NAME || 'The assistant',
+      generate: (prompt) => this.askEmoteModel(pm, prompt) });
+  }
+
+  /** The emote choice: the sticker model on OpenRouter, else the aux model with room for the JSON answer. */
+  async askEmoteModel(pm, prompt) {
+    const provider = await pm.getCurrentProvider?.().catch?.(() => null);
+    if (pm.providerNameOf?.(provider) === 'openrouter') {
+      const model = process.env.BOTSANDBORGS_STICKER_MODEL || 'openai/gpt-5.6-luna';
+      return pm.generateResponse(prompt, { model, maxTokens: 200, temperature: 0 });
+    }
+    return pm.generateAux(prompt, { maxTokens: 60, temperature: 0, auxTask: 'avatar-emote' });
   }
 
   /**

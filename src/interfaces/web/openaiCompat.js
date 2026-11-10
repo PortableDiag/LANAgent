@@ -115,6 +115,14 @@ export function createOpenAICompatRouter(agent) {
     const created = Math.floor(started / 1000);
     logger.info(`OpenAI-compat reply to ${userId} in ${Date.now() - started}ms (${content.length} chars)`);
 
+    // AvatarX's chat: the body moves with the reply (a nod, shrug, wave, a face). Not awaited, never fails the reply.
+    if (/avatarx/i.test(userId)) {
+      const e = agent.apiManager?.apis?.get?.('botsandborgs');
+      const store = e?.enabled === false ? null : (e?.instance || e);
+      store?.autoEmote?.({ userText: input, replyText: content })
+        .catch(err => logger.warn(`AvatarX: no emote: ${err.message}`));
+    }
+
     if (stream) {
       res.setHeader('Content-Type', 'text/event-stream');
       res.setHeader('Cache-Control', 'no-cache');

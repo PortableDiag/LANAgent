@@ -453,13 +453,14 @@ export default class SpoonacularPlugin extends BasePlugin {
   }
 
   async getRandomRecipes(params) {
+    const askedLimit = params.limit;
     this.validateParams(params, {
       limit: { required: false, type: 'number', default: 1 }
     });
     params.limit = params.limit ?? 1;
 
     if (!this.config.apiKey) {
-      return await this.viaMealDB('random', params);
+      return await this.viaMealDB('random', { ...params, limit: askedLimit });
     }
 
     const cacheKey = `random_${params.limit}`;
@@ -526,8 +527,22 @@ export default class SpoonacularPlugin extends BasePlugin {
         if (!m) return { success: false, error: `No recipe with id ${args.id} (without a Spoonacular key, ids are TheMealDB's)` };
         data = full(m);
       } else if (kind === 'random') {
-        const k = Math.max(1, Math.min(Number(args.limit || args.number) || 1, 10));
-        data = { recipes: (await Promise.all(Array.from({ length: k }, () => get('random.php')))).map(r => full(r[0])) };
+        // "Give me three quick dinner ideas" comes with no limit: read the count and the kind of meal from the sentence.
+        // TheMealDB's random is one meal of any kind, so draw extra and keep the ones that fit (a dessert was offered
+        // as a dinner idea, 2026-11-09).
+        const said = String(args.originalInput || args._context?.originalInput || args.query || args.tags || '').toLowerCase();
+        const WORDS = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10, couple: 2, few: 3, some: 3 };
+        const spoken = Number(/\b(\d{1,2})\b/.exec(said)?.[1]) || WORDS[Object.keys(WORDS).find(w => new RegExp(`\\b(a )?${w}\\b`).test(said))];
+        const k = Math.max(1, Math.min(Number(args.limit || args.number) || spoken || (/\brecipes|ideas|meals|dishes\b/.test(said) ? 3 : 1), 10));
+        const want = /dessert|sweet|cake|cookie|pudding/.test(said) ? ['Dessert'] : /breakfast|brunch/.test(said) ? ['Breakfast'] : null;
+        const fits = (m) => (want ? want.includes(m.strCategory) : !['Dessert', 'Starter', 'Side'].includes(m.strCategory));
+        const picked = new Map();
+        for (let round = 0; round < 3 && picked.size < k; round++) {
+          for (const r of await Promise.all(Array.from({ length: (k - picked.size) * 2 }, () => get('random.php')))) {
+            if (r[0] && fits(r[0]) && picked.size < k) picked.set(r[0].idMeal, r[0]);
+          }
+        }
+        data = { recipes: [...picked.values()].map(full) };
       } else {
         return { success: false, error: 'Ingredient details need a Spoonacular API key (set SPOONACULAR_API_KEY)' };
       }

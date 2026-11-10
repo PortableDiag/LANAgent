@@ -35,6 +35,9 @@ async function connect({ url = process.env.AVATARX_URL, keyFile = process.env.AV
   };
 }
 
+/** The agent-API caller, or null when AvatarX is not set up here. */
+export const avatarxCaller = (opts) => connect(opts);
+
 /** AvatarX's name for a clip: its file stem, lower case, [a-z0-9_-] (AvatarX store::clean_name). */
 export function avatarxClipName(file) {
   const stem = path.basename(String(file || '')).replace(/\.(vrma|fbx)$/i, '');
