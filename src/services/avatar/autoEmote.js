@@ -26,6 +26,10 @@ export const EMOTES = {
   'hands-on-hips': 'mock stern telling-off, "really?"',
   'arms-crossed': 'unimpressed, firm, waiting',
   beckon: 'come here, follow me, let me show you',
+  sympathetic: 'sorry to hear it, comfort, sad or hard news',
+  surprised: 'wow, unexpected news, really?!',
+  'happy-bounce': 'excited, delighted, can\'t wait',
+  victory: 'we did it, a win, success after effort',
   'blow-kiss': 'affection, a compliment received ("you\'re the best"), sweet goodbye'
 };
 
@@ -54,7 +58,7 @@ export async function chooseEmote({ generate, emotes, moods = [], userText, repl
     `Owner: ${String(userText || '').slice(0, 500)}\n${agentName}: ${String(replyText).slice(0, 900)}\n\n` +
     `Moves (name: what it means):\n${emotes.map(e => `- ${e.name}: ${e.means}`).join('\n')}\n\n` +
     `Faces: ${moods.join(', ')}\n\n` +
-    'Pick the move that fits what the reply does, or none when nothing clearly fits (plain facts, a long explanation). Never a cheerful move or face for death, grief, illness, pain or worry: there a nod or none, and a sad face. ' +
+    'Pick the move that fits what the reply does, or none when nothing clearly fits (plain facts, a long explanation). Never a cheerful move or face for death, grief, illness, pain or worry: there a sympathetic move, a nod or none, and a sad face. ' +
     'The face matches the feeling of the reply; neutral when there is none.\n' +
     'Answer with JSON only: {"move": "<name or none>", "face": "<face>"}';
   let timer;

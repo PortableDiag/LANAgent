@@ -15,6 +15,11 @@ test('a bought clip wins over the built-in head move, and emote-shake is the hea
   assert.deepEqual(e.map(x => [x.name, x.key]), [['emote-thumbs-up', 'thumbs-up'], ['emote-shake', 'shake_head'], ['emote-nod', 'nod']]);
 });
 
+test('Set Three reactions count; its loops and dance do not', () => {
+  const e = emotesHeld(['react-sympathetic', 'react-surprised', 'react-happy-bounce', 'react-victory', 'talk-loop', 'work-loop', 'listen-loop', 'dance-bounce', 'stretch']);
+  assert.deepEqual(e.map(x => x.name), ['react-sympathetic', 'react-surprised', 'react-happy-bounce', 'react-victory']);
+});
+
 test('the model answer is checked against what is held', async () => {
     const emotes = emotesHeld(HELD);
     const ok = await chooseEmote({ generate: async () => '{"move":"bnb-cheer","face":"happy"}', emotes, moods: ['neutral', 'happy'], userText: 'I got the job!', replyText: 'Congratulations!' });
