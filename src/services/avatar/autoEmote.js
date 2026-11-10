@@ -34,7 +34,8 @@ export function emotesHeld(held = []) {
   const out = [];
   for (const name of held) {
     const base = String(name).replace(/^bnb-/, '').replace(/^emote-/, '');
-    const key = Object.keys(EMOTES).find(k => base === k || base.endsWith(`-${k}`));
+    const alias = base === 'shake' || base.endsWith('-shake') ? 'shake_head' : null;
+    const key = alias || Object.keys(EMOTES).find(k => base === k || base.endsWith(`-${k}`));
     if (key && !out.some(e => e.key === key)) out.push({ name, key, means: EMOTES[key] });
   }
   return out;
@@ -81,7 +82,8 @@ export async function autoEmote({ userText, replyText, generate, call, agentName
   if (now - askedAt < ASK_EVERY_MS) return null;
   askedAt = now;
   const state = await call('GET', '/agent/v1/state');
-  const emotes = emotesHeld([...(state.gestures || []), ...(state.animations || [])]);
+  // An owned clip before AvatarX's built-in head move of the same meaning (Set Two's emote-nod over the coded nod).
+  const emotes = emotesHeld([...(state.animations || []), ...(state.gestures || [])]);
   const moods = state.moods || [];
   const { emote, mood } = await chooseEmote({ generate, emotes, moods, userText, replyText, agentName });
   if (mood && mood !== state.mood) await call('PATCH', '/agent/v1/state', JSON.stringify({ mood }));
