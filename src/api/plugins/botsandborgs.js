@@ -697,6 +697,7 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
    */
   async updateOwned({ kind } = {}) {
     const report = [];
+    const fixedClips = [];
     const key = await this.accountKey().catch(() => null);
     for (const old of await this.libraryItems()) {
       if (!old.order || !old.token) continue;
@@ -711,6 +712,7 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
       const removed = [...before.keys()].filter(n => !after.has(n));
       const changed = [...after.keys()].filter(n => before.has(n) && before.get(n) !== after.get(n));
       if (added.length || removed.length || changed.length) report.push({ variant: old.variant, added, removed, changed });
+      for (const f of item.files) if (f.kind === 'animation' && (changed.includes(f.name) || added.includes(f.name))) fixedClips.push({ variant: old.variant, name: f.name });
       // The model it wears changed: AvatarX shows its own copy, so it gets the new file (the designer and playground
       // read the gallery file, already replaced).
       const worn = item.files.find(f => f.kind === 'vrm' && f.modelId && f.modelId === this.agent?.agentModel?.activeVRMModel);
@@ -719,6 +721,14 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
         await pushModelToAvatarX(worn.modelId).catch(e => this.logger.warn(`botsandborgs: AvatarX not given the new ${worn.name}: ${e.message}`));
       }
       this.logger.info(`botsandborgs: updated ${old.variant}: ${added.length} new, ${removed.length} gone, ${changed.length} changed`);
+    }
+    // A reissued clip: relist it for the designer and playground, and replace AvatarX's copy, which it keeps by name.
+    if (fixedClips.length) {
+      await this.publishAnimations().catch(e => this.logger.warn(`botsandborgs: clips not relisted: ${e.message}`));
+      const { pushClipsToAvatarX } = await import('../../services/avatar/avatarx.js');
+      const files = fixedClips.map(c => ({ file: path.join(this.vrmDir(), 'animations', 'store', safeName(c.variant), c.name), replace: true }));
+      const pushed = await pushClipsToAvatarX(files).catch(e => { this.logger.warn(`botsandborgs: AvatarX not given the fixed clips: ${e.message}`); return null; });
+      if (Array.isArray(pushed)) this.logger.info(`botsandborgs: AvatarX has the fixed clips: ${pushed.join(', ')}`);
     }
     return report;
   }

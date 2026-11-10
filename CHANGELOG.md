@@ -18,6 +18,7 @@ All notable changes to LANAgent will be documented in this file.
   - A paid caller never reads or changes the remembered place, and gets "location is required" instead.
   - wttr.in is retried once after a 5xx.
 - **Weather now covers tomorrow.** It includes today's and tomorrow's high and low and the chance of rain or snow, so "do I need an umbrella tomorrow" has an answer. The forecast is also in `data.forecast`.
+- **A clip the store reissues now reaches AvatarX.** Updating the library already fetched the fixed file, but AvatarX kept its old copy under the same name. Changed or new clips are now uploaded again, so Set One's fixed Wave replaces the old one.
 - **Recipes without a Spoonacular key:** "give me three quick dinner ideas" got one random dessert. TheMealDB now returns the number asked for ("three", "3", "some"), keeps desserts, starters and sides out of meal ideas, and gives desserts or breakfasts only when asked.
 
 ## [2.25.788] - 2026-11-09

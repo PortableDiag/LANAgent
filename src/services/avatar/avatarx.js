@@ -47,7 +47,8 @@ export function avatarxClipName(file) {
 /**
  * Give AvatarX the clips this agent owns, so each is a button there and the agent can play it. Clips are keyed by name
  * and a re-upload replaces, so this is safe to repeat. A name that is one of AvatarX's built-in gestures gets a bnb-
- * prefix, never shadowing it. clips: [{ file (absolute path), name? }]. Returns the names AvatarX holds, or 'not connected'.
+ * prefix, never shadowing it. clips: [{ file (absolute path), name?, replace? }]: `replace` uploads even when AvatarX holds
+ * the name already (the store reissued the file: Set One's Wave, 2026-11-09). Returns the names AvatarX holds, or 'not connected'.
  */
 export async function pushClipsToAvatarX(clips, opts = {}) {
   const call = await connect(opts);
@@ -59,8 +60,9 @@ export async function pushClipsToAvatarX(clips, opts = {}) {
   for (const c of clips) {
     let name = avatarxClipName(c.name || c.file);
     if (!name) continue;
-    if (builtIn.has(name)) name = `bnb-${name}`.slice(0, 60);
-    if (!have.has(name)) {
+    // bnb- once a built-in had the name: keep that name though AvatarX has since dropped the built-in (its wave, 0.3.4).
+    if (builtIn.has(name) || have.has(`bnb-${name}`.slice(0, 60))) name = `bnb-${name}`.slice(0, 60);
+    if (!have.has(name) || c.replace) {
       const up = await call('POST', `/agent/v1/animations?name=${encodeURIComponent(name)}`, await fs.readFile(c.file), 'application/octet-stream');
       name = up.animation || name;
       logger.info(`AvatarX: added clip ${name}`);
