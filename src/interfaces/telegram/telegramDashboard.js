@@ -2,6 +2,7 @@ import { TelegramInterface } from "./telegram.js";
 import { Telegraf, Markup, Scenes, session } from "telegraf";
 import { message } from 'telegraf/filters';
 import { logger } from "../../utils/logger.js";
+import { ownerAnnoyed as memesAnnoyed } from "../../api/plugins/memes.js";
 import { getServerHost } from "../../utils/paths.js";
 import { MultiUserSupport } from './multiUserSupport.js';
 import { chatActionMiddleware } from './chatActionKeepalive.js';
@@ -52,9 +53,12 @@ export class TelegramDashboard extends TelegramInterface {
     const store = plugin('botsandborgs');
     const memes = plugin('memes');
     const where = { userText, replyText, chatId: ctx.chat.id, threadId: ctx.message?.message_thread_id };
+    // The owner is annoyed with ALICE: no meme or sticker on top of the reply (2026-11-10). The body still reacts.
+    const annoyed = memesAnnoyed(userText);
     // The 3D body on AvatarX moves with the reply too, if the owner has it open; apart from the sticker or meme.
     store?.autoEmote?.({ userText, replyText }).catch(e => logger.warn(`AvatarX: no emote: ${e.message}`));
     // At most one extra after a reply: a meme when one is due and fits (rarer), else a sticker.
+    if (annoyed) return;
     (async () => {
       const meme = await memes?.autoMeme?.({ ...where, stickerSentAt: store?._stickerSentAt || 0 })
         .catch(e => { logger.warn(`memes: no meme sent: ${e.message}`); return null; });

@@ -92,3 +92,12 @@ test('settings: switch and interval are kept within bounds', async () => {
     assert.equal(paid.success, false, 'a paid caller cannot change them');
   } finally { [PluginSettings.getCached, PluginSettings.setCached] = orig; }
 });
+
+// 2026-11-10: a Batman meme went out after "I asked more than twice" about a light that took five asks.
+import { ownerAnnoyed } from '../../src/api/plugins/memes.js';
+test('no meme or sticker when the owner is annoyed with the agent', () => {
+  for (const t of ['I asked more than twice', 'Why did I have to ask 3 times', "No, it didn't im sitting in the dark, fix the light", 'Make the damn light bright white already', 'HURRY UP THE LIGHT IS STILL OFF', 'this is ridiculous'])
+    assert.equal(ownerAnnoyed(t), true, t);
+  for (const t of ['lol that is great', 'I got the job!', 'Mondays, right?', 'thanks!', 'what is the capital of Australia?'])
+    assert.equal(ownerAnnoyed(t), false, t);
+});

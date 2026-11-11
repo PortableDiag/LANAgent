@@ -25,6 +25,20 @@ export const DEFAULTS = { autoMemes: true, autoMemeEveryMinutes: 60 };
 const ASK_EVERY_MS = 60 * 1000; // never ask the model more than once a minute
 
 /** Replies a meme would only cheapen: code, long reports, lists. */
+/**
+ * The owner is annoyed with the agent: a complaint about something it did or failed to do, swearing, shouting. No meme
+ * or sticker then (2026-11-10: after "why did I have to ask 3 times" / "I asked more than twice" about a light that
+ * took five asks, an unasked Batman Slapping Robin meme went out).
+ */
+export function ownerAnnoyed(userText) {
+  const t = String(userText || '');
+  if (!t.trim()) return false;
+  const letters = t.replace(/[^A-Za-z]/g, '');
+  if (letters.length >= 12 && letters.replace(/[^A-Z]/g, '').length / letters.length > 0.6) return true; // shouting
+  return /\b(f+u+c+k\w*|shit\w*|damn\w*|dammit|wtf|ffs|stupid|idiot|useless|pissed|annoy\w*|ridiculous)\b/i.test(t) ||
+    /\b(why did i have to|i (already )?asked|asked (you )?(more than|again|twice|\d+ times)|again\?|still (not|doesn'?t|isn'?t|dark|broken)|didn'?t work|doesn'?t work|not working|you failed|you('ve| have) failed|fix (it|this|the)|hurry)\b/i.test(t);
+}
+
 export function memeCouldFit(replyText) {
   const r = String(replyText || '').trim();
   return !!r && r.length <= 800 && !r.includes('```') && (r.match(/\n\s*[-*\d]/g) || []).length < 3;
@@ -224,7 +238,7 @@ ${roles}
   async autoMeme({ userText, replyText, chatId, threadId, stickerSentAt = 0 } = {}) {
     const now = Date.now();
     const s = await this.settings();
-    if (!s.autoMemes || !chatId || !memeCouldFit(replyText)) return null;
+    if (!s.autoMemes || !chatId || !memeCouldFit(replyText) || ownerAnnoyed(userText)) return null;
     if (now - (this._memeSentAt || 0) < s.autoMemeEveryMinutes * 60000) return null;
     if (now - (this._memeAskedAt || 0) < ASK_EVERY_MS) return null;
     if (now - stickerSentAt < 20 * 60000) return null; // a sticker just went: no meme on top of it
@@ -237,7 +251,7 @@ ${roles}
     const agentName = process.env.AGENT_NAME || 'The assistant';
     const prompt = `${agentName} is chatting with its owner and has just replied. Decide whether a meme should follow, the way a funny friend sometimes adds one.
 Send one only for: a joke or banter, a relatable everyday frustration (Mondays, bugs, waiting), good news worth celebrating, playful chat.
-Never for: death, grief, illness, pain, money worries, anything upsetting, plain facts, data, instructions, errors, or a task just done. When unsure, no meme.
+Never for: death, grief, illness, pain, money worries, anything upsetting, plain facts, data, instructions, errors, or a task just done. Never when the owner is annoyed with you or complaining about something you did or failed to do. When unsure, no meme.
 
 Owner: ${String(userText || '').slice(0, 500)}
 ${agentName}: ${String(replyText).slice(0, 600)}

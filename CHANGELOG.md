@@ -12,6 +12,11 @@ All notable changes to LANAgent will be documented in this file.
   - **Owner control:** the owner can take over from the call screen at any time.
   - **Brief from the start:** the errand brief is known from the moment the call is placed, so an early session already has the menu tools. Errand calls always use realtime voice, whatever the realtime setting.
 
+### Fixed
+- **No meme or sticker when the owner is annoyed with the agent.** The first unasked meme went out right after "I asked more than twice", about a light that took five asks. The meme prompt allowed "a relatable everyday frustration".
+  - It is now blocked in code first: complaints about the agent, swearing and shouting send no meme and no sticker. The prompt also says so.
+  - AvatarX body language still plays.
+
 ## [2.25.789] - 2026-11-09
 
 ### Added
