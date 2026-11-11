@@ -288,6 +288,12 @@ export default class DialXPlugin extends BasePlugin {
         examples: ['play a theremin riff while I talk', 'do a spooky theremin on this call', 'play some theremin']
       },
       {
+        command: 'errandCall',
+        description: 'Phone a business or office on the user\'s behalf to get something done: the agent gets through the phone menu (presses keys), waits on hold, talks to the person and reports back. `goal` is what to get done; `facts` are what the agent may tell them ({label: value}, e.g. account email, domain, PIN). It never agrees to a charge, payment, cancellation or account change without the user\'s tap on the phone. DialX 0.7.133+',
+        usage: 'errandCall({ contact: "GoDaddy support" or "+18005551234", goal: "ask why the domain renewal bill went up and get it back to last year\'s price", facts: { "domain": "example.com", "account email": "me@example.com" }, maxMinutes: 45 })',
+        examples: ['call my registrar about the bill', 'call the cable company and get through to billing about the late fee', 'call the dentist office and move my appointment to next week', 'phone the bank and ask why my card was declined, my account email is x', 'sit on hold with the airline and change my flight']
+      },
+      {
         command: 'screened',
         description: 'Calls DialX screened (spam or unknown callers)',
         usage: 'screened()',
@@ -306,6 +312,7 @@ export default class DialXPlugin extends BasePlugin {
     try {
       switch (action) {
         case 'call': return await this.call(data);
+        case 'errandCall': return await this.errandCall(data);
         case 'calls': return await this.listing('dialx.list_scheduled_calls', 'scheduled calls', ['calls', 'scheduled']);
         case 'cancel': return await this.cancel(data);
         case 'contacts': return await this.listing('dialx.list_approved_contacts', 'approved contacts', ['contacts']);
@@ -912,6 +919,78 @@ export default class DialXPlugin extends BasePlugin {
     const wanted = (a) => named.some(n => n.toLowerCase() === a.name.toLowerCase()) ||
       new RegExp(`\\b(?:you and|with|and)\\s+${a.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b|\\b${a.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s+and\\s+you\\b`, 'i').test(req);
     return agents.filter(wanted).map(a => a.name);
+  }
+
+  /**
+   * DialX 0.7.133 errand call (Trellis 4293 #613): the agent phones a business, gets through its menu (press_keys),
+   * waits on hold, talks to the person and reports back. The phone always shows the owner a card with the goal and the
+   * facts the agent will say to a stranger, even for an approved contact.
+   */
+  async errandCall(data = {}) {
+    const request = String(data.originalInput || data._context?.originalInput || '').trim();
+    if (!(await this.device('dialx.errand_call').catch(() => null))) return { success: false, error: 'Errand calls need DialX 0.7.133 or newer on the phone.' };
+    if (request && (!data.contact || !data.goal || data.needsParameterExtraction)) await this.extractErrand(data, request);
+    const who = String(data.contact || data.to || data.name || data.number || '').trim();
+    const goal = String(data.goal || data.purpose || '').trim().slice(0, 600);
+    if (!who) return { success: false, error: 'Who should I call for this errand (a name in your contacts, or their number)?' };
+    if (!goal) return { success: false, error: `What should I get done when I call ${who}?` };
+    const facts = {};
+    for (const [k, v] of Object.entries(data.facts && typeof data.facts === 'object' ? data.facts : {}).slice(0, 20)) {
+      if (String(k).trim() && v != null && String(v).trim()) facts[String(k).trim().slice(0, 60)] = String(v).trim().slice(0, 200);
+    }
+    const max = Math.max(5, Math.min(90, Number(data.maxMinutes || data.max_minutes) || 45));
+    // A number is called by number; a name is an approved contact, else one found in the phone's contacts.
+    let target;
+    const digits = who.replace(/[^\d+]/g, '');
+    if (digits.replace(/\D/g, '').length >= 7 && /^[\d+\s().-]+$/.test(who)) target = { number: digits, name: data.name || who };
+    else {
+      const list = await this.tool('dialx.list_approved_contacts');
+      const approved = list.ok ? listOf(list.result, 'contacts').map(contactOf).filter(c => c.name || c.number) : [];
+      let pick = this.match(approved, who);
+      if (pick.error && !pick.ambiguous) pick = await this.lookup(who);
+      if (pick.error) return { success: false, error: pick.error };
+      target = pick.contact.id != null ? { contact_id: pick.contact.id, name: pick.contact.name } : { number: pick.contact.number, name: pick.contact.name || who };
+    }
+    const name = target.name || who;
+    const r = await this.tool('dialx.errand_call', {
+      ...(target.contact_id != null ? { contact_id: target.contact_id } : { number: target.number }),
+      name, goal, ...(Object.keys(facts).length ? { facts } : {}), max_minutes: max, requested_by_owner: true
+    });
+    if (!r.ok) {
+      this.logger.warn(`dialx errand_call to ${name} refused: ${r.error?.code || 'no code'} ${r.error?.message || ''}`);
+      return errorResult(r);
+    }
+    const status = String(r.result?.status || (r.pending ? 'pending' : ''));
+    if (r.pending || status === 'pending') return { success: true, result: `I've asked DialX to call ${name} for this; approve the card on the phone (it shows the goal and what I may tell them).` };
+    if (status === 'declined') return { success: true, result: `You declined the errand call to ${name}, so I didn't call.` };
+    if (status === 'timeout') return { success: true, result: `The errand call to ${name} wasn't approved on the phone in time. Ask again to retry.` };
+    if (status === 'busy') return { success: false, error: 'A call is already up on the phone, so I can\'t place another right now.' };
+    if (r.result?.call_id) {
+      this.hub?.dialx?.errands?.set(String(r.result.call_id), { goal, facts, maxMinutes: Number(r.result.max_minutes) || max, rules: '', tools: [] });
+      await this.hub?.dialx?.store?.plan?.({ callId: String(r.result.call_id), contact: name, number: target.number || '', purpose: goal, plannedAt: new Date() })
+        ?.catch?.(e => this.logger.warn(`dialx: errand call not recorded: ${e.message}`));
+    }
+    return { success: true, result: `Calling ${name} now about: ${goal}. I'll get through the menu and hold, ask you on the phone before agreeing to anything that costs money or changes the account, and report back when it ends. You can take over from the call screen any time.` };
+  }
+
+  /** The errand from the owner's words: who, what to get done, and what the agent may say. */
+  async extractErrand(data, request) {
+    const pm = this.agent?.providerManager;
+    if (!pm?.generateResponse) return;
+    const owner = process.env.OWNER_NAME || 'the user';
+    try {
+      const res = await pm.generateResponse(
+        `${owner} asked their AI assistant to phone a business or office and get something done. Request: ${request}\n` +
+        'Extract one JSON object {"contact": the business, office or number to call, "goal": what to get done in one or two sentences, ' +
+        '"facts": {label: value} the assistant may tell them (account email, domain, account number, PIN, name on the account), only ones the request gives, ' +
+        '"maxMinutes": a number only if the request says how long}. Leave out what the request does not say. Answer the JSON only.',
+        { maxTokens: 300, temperature: 0.2 });
+      const raw = String(res?.content || '').replace(/^```(?:json)?\s*|\s*```$/g, '');
+      const j = JSON.parse(raw.slice(raw.indexOf('{'), raw.lastIndexOf('}') + 1));
+      for (const k of ['contact', 'goal', 'facts', 'maxMinutes']) if (j[k] != null && (data[k] == null || data[k] === '')) data[k] = j[k];
+    } catch (e) {
+      this.logger.warn(`dialx errand: could not read the request: ${e.message}`);
+    }
   }
 
   /** dialx.call_together: one call now, the other agents joining when the callee answers. */

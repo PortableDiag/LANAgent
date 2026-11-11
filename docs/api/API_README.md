@@ -872,6 +872,7 @@ Pairing management (JWT or API key). The phone's own endpoint is `/textx/v1/*` (
 | PATCH | `/api/textx/devices/:id` | `{notify?: bool, name?}` | `notify` sends the agent's notifications to that phone too. |
 | DELETE | `/api/textx/devices/:id` | | Revoke: deletes the pairing and its key, and closes the phone's connection. |
 | GET | `/api/textx/dialx` | | DialX call settings: `{settings: {voice: "agent"\|"phone", voiceProfile, ttsTimeoutMs, realtimeVoice}, profiles: [saved voice names]}`. `realtimeCalls` (`all` default, `test`, `off`) picks which placed calls use realtime; `realtimeAnswering` (default `true`) does the same for calls answered for the owner; `realtimeVoice` (default `marin`) is the OpenAI voice for realtime calls: marin, coral, shimmer, sage, ballad, alloy, verse, ash, echo, cedar. |
+| | | | **Errand calls (2.25.790, DialX 0.7.133+):** `POST /api/plugin {plugin:'dialx', action:'errandCall', contact or number, goal, facts?:{label:value} (≤20), maxMinutes?:5-90}` places a `dialx.errand_call`. The realtime session gets `press_keys`, `errand_status` and `errand_approve`. |
 | PUT | `/api/textx/dialx` | `{voice?, voiceProfile?, ttsTimeoutMs?}` | Change them. `voice: "agent"` speaks in this agent's voice and falls back to the phone's voice when that voice fails, takes longer than `ttsTimeoutMs` (1000–15000), or can't be played. Unknown keys are a 400. |
 
 ### v2.25.525 — Telegram agent features (bot-to-bot, guest mode, topics)

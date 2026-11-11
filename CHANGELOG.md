@@ -2,6 +2,16 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.790] - 2026-11-10
+
+### Added
+- **Errand calls (DialX 0.7.133).** "Call my registrar about the bill": ALICE phones a business, works its menu, waits on hold, talks to the person and reports back.
+  - **New `dialx` action `errandCall {contact | number, goal, facts?, maxMinutes?}`.** The phone always shows the owner a card with the goal and the facts first, even for an approved contact.
+  - **During the call ALICE has three tools.** `press_keys` works the menu. `errand_status` puts a progress line on the owner's call screen, with an alert when a person comes on. `errand_approve` sends a yes/no card to the owner; it is required before agreeing to any charge, payment, cancellation or account change.
+  - **On hold ALICE stays quiet.** ALICE's own hang-up when the line is silent is off for these calls, and DialX handles hold itself.
+  - **Owner control:** the owner can take over from the call screen at any time.
+  - **Brief from the start:** the errand brief is known from the moment the call is placed, so an early session already has the menu tools. Errand calls always use realtime voice, whatever the realtime setting.
+
 ## [2.25.789] - 2026-11-09
 
 ### Added

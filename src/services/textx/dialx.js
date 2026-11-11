@@ -48,9 +48,11 @@ export const DIALX_TOOLS = ['dialx.say', 'dialx.hangup', 'dialx.list_approved_co
   // DialX 0.7.110 (4293 #522): ring the owner's own phone ("call me"); the owner's "May call me" switch
   'dialx.call_owner',
   // DialX 0.7.48: the disclosure in the agent's own voice
-  'dialx.disclosure_audio'];
+  'dialx.disclosure_audio',
+  // DialX 0.7.133 errand calls (4293 #613): call a business, work its menu, wait on hold, owner taps for anything binding
+  'dialx.errand_call', 'dialx.press_keys', 'dialx.errand_status', 'dialx.errand_approve'];
 /** These wait on the owner's tap on the phone's confirm card, like a send. */
-export const DIALX_CONFIRMED = new Set(['dialx.schedule_call', 'dialx.delete_voicemail', 'dialx.report_spam', 'dialx.mark_not_spam',
+export const DIALX_CONFIRMED = new Set(['dialx.schedule_call', 'dialx.errand_call', 'dialx.errand_approve', 'dialx.delete_voicemail', 'dialx.report_spam', 'dialx.mark_not_spam',
   'dialx.set_expecting', 'dialx.delete_recording', 'dialx.delete_recents', 'dialx.clear_screened', 'dialx.remove_spam', 'dialx.clear_spam',
   'dialx.import_spam_from_history', 'dialx.remove_allowed', 'dialx.block_number', 'dialx.unblock_number']);
 
@@ -631,6 +633,7 @@ export class DialXCalls {
     this.settings = settings;
     this.now = now;
     this.calls = new Map(); // call_id -> session
+    this.errands = new Map(); // call_id -> errand brief, set when ALICE places an errand call (before call.dialing)
     this.limitS = CALL_LIMIT_S;
     this.lostGraceS = 90; // past limitS + this with no call.ended, a call is closed as lost
     this.rt = new DialXRealtime({ calls: this, logger });
@@ -745,6 +748,8 @@ export class DialXCalls {
     }
     // DialX 0.7.110 dialx.call_owner (4293 #522): the agent rang the owner's own phone. Every event of that call says so.
     if (body.owner_call || body.contact?.owner) s.ownerCall = true;
+    // An errand ALICE placed: known from the start, so a session minted at call.dialing already has the brief.
+    if (!s.errand && this.errands.has(String(id))) s.errand = this.errands.get(String(id));
     return s;
   }
 
@@ -754,6 +759,14 @@ export class DialXCalls {
     if (body.contact?.number) s.number = String(body.contact.number); // DialX on Trellis 4293 #401: answered calls too
     if (body.contact?.note) s.contactNote = String(body.contact.note).slice(0, 1000); // DialX 0.7.86 (4293 #434)
     if (body.purpose) s.purpose = String(body.purpose);
+    // DialX 0.7.133 errand call: the goal, the facts the agent may share, the phone's rules and its tools.
+    if (body.errand && typeof body.errand === 'object') {
+      const e = body.errand;
+      // A secret minted at call.dialing before the brief was known has no menu tools or rules: mint again at pickup.
+      if (!s.errand && s.minted && !s.realtime) { s.minted = null; s.realtimeEarly = null; }
+      s.errand = { goal: String(e.goal || s.purpose || '').slice(0, 600), facts: e.facts && typeof e.facts === 'object' ? e.facts : {},
+        maxMinutes: Math.max(5, Math.min(90, Number(e.max_minutes) || 45)), rules: String(e.rules || '').slice(0, 3000), tools: Array.isArray(e.tools) ? e.tools : [] };
+    }
     // DialX 0.7.15: the agent answers for the owner. DialX has already spoken its greeting
     // (body.opening), so it opens the transcript; `rules` are DialX's message-taking rules.
     s.startedAtMs = s.startedAtMs || this.now();
@@ -761,7 +774,7 @@ export class DialXCalls {
     // how it went. Past the call limit plus a margin, close it as lost and say so.
     if (!s.lostTimer) {
       // A call to the owner has no Longest-call limit on the phone (DialX 0.7.110): closing it at 5 min would cut a live talk.
-      const limitS = s.ownerCall ? Math.max(this.limitS, 3600) : this.limitS;
+      const limitS = s.errand ? s.errand.maxMinutes * 60 : s.ownerCall ? Math.max(this.limitS, 3600) : this.limitS;
       const lost = () => {
         if (s.done) return;
         // DialX 0.7.116: time on hold does not count toward the limit (hold() moved startedAtMs on by it).
@@ -855,7 +868,8 @@ export class DialXCalls {
     // Set before any await, so a pickup that lands meanwhile waits on this offer instead of making a second one.
     s.realtimeEarly = (async () => {
       const { realtimeCalls, realtimeAnswering } = await this.settings();
-      const on = s.incoming ? realtimeCalls === 'all' && realtimeAnswering : realtimeCalls === 'all' || (realtimeCalls === 'test' && s.test);
+      // An errand call is realtime only (DialX 0.7.133): it needs the menu and hold tools whatever the setting.
+      const on = s.errand || (s.incoming ? realtimeCalls === 'all' && realtimeAnswering : realtimeCalls === 'all' || (realtimeCalls === 'test' && s.test));
       if (on) await this.rt.begin(s, { ...this.names(), limitS: this.limitS });
     })().catch(() => {});
   }
