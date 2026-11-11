@@ -337,6 +337,28 @@ export class MemoryManager {
   /** When this user last cleared their chat (ms), or 0. */
   clearedAt(userId) { return this._clearedAt?.get(String(userId || 'default')) || 0; }
 
+  /**
+   * The conversation a message belongs to. A Telegram message sent without replying opens a NEW private-chat topic, and
+   * a voice note comes with none, so each looked like a fresh conversation: "Do it now" right after "make the light
+   * bright white" got "what are you referring to?" (2026-11-11). A topic with nothing said in it yet, or no topic,
+   * carries on the user's conversation from the last 30 minutes, wherever it was.
+   */
+  activeThread(userId, threadId) {
+    const uid = String(userId || 'default');
+    const now = Date.now();
+    const fresh = (k) => (this._conversationBuffer?.get(k) || []).filter(m => now - m.ts < 30 * 60 * 1000);
+    if (fresh(conversationKey(uid, threadId)).length) return threadId;
+    let best = null, bestTs = 0;
+    for (const k of this._conversationBuffer?.keys() || []) {
+      if (k !== uid && !k.startsWith(`${uid}#`)) continue;
+      const last = fresh(k).at(-1)?.ts || 0;
+      if (last && last >= bestTs) { bestTs = last; best = k; }
+    }
+    if (!best) return threadId;
+    const t = best.includes('#') ? parseInt(best.split('#')[1], 10) : undefined;
+    return t;
+  }
+
   getRecentTurns(userId, threadId, limit = 6) {
     const buf = this._conversationBuffer?.get(conversationKey(String(userId || 'default'), threadId)) || [];
     return buf.slice(-limit).map(m => ({ role: m.role, content: m.content }));

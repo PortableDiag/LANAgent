@@ -29,6 +29,14 @@ export function nearDuplicate(a, b) {
   return shared / Math.min(x.size, y.size) >= 0.7;
 }
 
+/** Lines in `after` but not `before` (added) and the reverse (removed); blank lines ignored. */
+export function lineDiff(before, after) {
+  const lines = (t) => String(t || '').split('\n').map(l => l.trim()).filter(Boolean);
+  const a = lines(before), b = lines(after);
+  const setA = new Set(a), setB = new Set(b);
+  return { added: b.filter(l => !setA.has(l)), removed: a.filter(l => !setB.has(l)) };
+}
+
 export class UserProfile {
   constructor({ file = PROFILE_FILE } = {}) {
     this.file = file;
@@ -141,6 +149,48 @@ export class UserProfile {
       logger.info(`[profile] Restored the state before history entry ${index} (${entry.at})`);
       return entry.before.trim();
     });
+  }
+
+  /**
+   * Compare two saved states of the profile, line by line (order ignored).
+   * State `i` is the profile as it was BEFORE history entry i (0 = the most recent change,
+   * same order as history()); -1 is the current text. So diff(0, -1) is what the most
+   * recent change did, and diff(3, 0) is everything changes 3..1 did together.
+   * @param {number} indexA - The earlier state.
+   * @param {number} indexB - The later state, or -1 for the current profile text.
+   * @returns {Promise<{added: string[], removed: string[]}>} Lines added and removed from A to B.
+   */
+  async diff(indexA, indexB = -1) {
+    if (!Number.isInteger(indexA) || indexA < 0) {
+      throw new Error(`Invalid indexA: ${indexA}`);
+    }
+    if (!Number.isInteger(indexB) || indexB < -1) {
+      throw new Error(`Invalid indexB: ${indexB}`);
+    }
+    const entries = await this.history({ limit: Infinity });
+    const getState = async (index) => {
+      if (index === -1) return this.text();
+      if (index >= entries.length) {
+        throw new Error(`Invalid history index: ${index}. ${entries.length ? `Available entries: 0-${entries.length - 1}` : 'History is empty'}`);
+      }
+      const entry = entries[index];
+      if (typeof entry.before !== 'string') {
+        throw new Error(`History entry ${index} has no "before" state`);
+      }
+      return entry.before;
+    };
+    return lineDiff(await getState(indexA), await getState(indexB));
+  }
+
+  /**
+   * The most recent changes, each with the lines it added and removed (from the entry's own
+   * before/after), newest first — what the operator reads to see how the profile got here.
+   */
+  async changes({ limit = 5 } = {}) {
+    return (await this.history({ limit })).map(e => ({
+      at: e.at, source: e.source, action: e.action,
+      ...lineDiff(e.before, e.after)
+    }));
   }
 
   /**

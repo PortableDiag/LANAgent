@@ -6,6 +6,9 @@ import { PluginSettings } from '../../models/PluginSettings.js';
 import { decrypt } from '../../utils/encryption.js';
 import { GoveeEnhancements, GroupManagement } from './govee-enhancements.js';
 import { GoveeAdvanced, ScheduleManagement } from './govee-advanced.js';
+import { readTime, readDays, clock } from '../../services/govee/lightSchedule.js';
+
+const LIGHT_SCHEDULE_JOB = 'govee-light-schedule';
 
 export default class GoveePlugin extends BasePlugin {
   constructor(agent) {
@@ -509,9 +512,19 @@ export default class GoveePlugin extends BasePlugin {
       }
       
       const isOn = powerValue === 1;
+      // What the light reports, in words ("PROVE IT", 2026-11-11: the reply was "check the light itself").
+      const val = (inst) => capabilities.find(c => c.instance === inst)?.state?.value;
+      const name = this.deviceCache.get(deviceId)?.deviceName || params.device;
+      const k = Number(val('colorTemperatureK')) || 0;
+      const rgb = Number(val('colorRgb')) || 0;
+      const shade = k ? `white at ${k}K` : rgb ? `colour #${rgb.toString(16).padStart(6, '0')}` : null;
+      const message = !isOnline ? `${name} is offline (Govee can't reach it).`
+        : !isOn ? `Govee reports ${name} is off.`
+        : `Govee reports ${name} on, brightness ${val('brightness') ?? '?'}%${shade ? `, ${shade}` : ''}.`;
 
       return {
         success: true,
+        message,
         status: {
           online: isOnline, // Will be true by default
           properties: [
@@ -618,10 +631,14 @@ export default class GoveePlugin extends BasePlugin {
    * {code:400, msg:"Device is offline…"} when the light is off the network (2026-11-09: ALICE logged that as a success).
    */
   async sendCommand(deviceId, sku, capability, value) {
+    // Govee's colour temperature is type color_setting / instance colorTemperatureK. Sent as the old
+    // "color_temperature_setting" type, Govee answers success and the light never changes (2026-11-11: five asks,
+    // "done" each time, the Master Toilet light stayed blue at 50%).
+    const type = capability === 'devices.capabilities.color_temperature_setting' ? 'devices.capabilities.color_setting' : capability;
     const response = await this.makeRequest(`/device/control`, 'POST', {
       device: deviceId,
       sku,
-      capability: { type: capability, instance: this.getCapabilityInstance(capability), value }
+      capability: { type, instance: this.getCapabilityInstance(capability), value }
     });
     const state = response?.capability?.state;
     const ok = (response?.code === undefined || response.code === 200) && state?.status !== 'failure';
@@ -646,12 +663,30 @@ export default class GoveePlugin extends BasePlugin {
    * (state not readable) counts as online: the command itself was accepted.
    */
   async confirmOnline(job) {
-    try {
-      const r = await this.makeRequest('/device/state', 'POST', { device: job.deviceId, sku: job.sku });
-      const caps = (r?.payload || r)?.capabilities || [];
-      const online = caps.find(c => c.instance === 'online')?.state?.value;
-      return online === false || online === 0 || online === 'false' ? false : true;
-    } catch { return true; }
+    // Online is not enough: the light must also show what was sent (power, brightness, white temperature). Govee can
+    // lag a moment, so a mismatch is read once more before it counts.
+    const want = {};
+    for (const s of job.steps || []) {
+      const inst = this.getCapabilityInstance(s.capability);
+      if (['powerSwitch', 'brightness', 'colorTemperatureK'].includes(inst) && typeof s.value === 'number') want[inst] = s.value;
+    }
+    for (let i = 0; i < 2; i++) {
+      try {
+        const r = await this.makeRequest('/device/state', 'POST', { device: job.deviceId, sku: job.sku });
+        const caps = (r?.payload || r)?.capabilities || [];
+        const val = (inst) => caps.find(c => c.instance === inst)?.state?.value;
+        const online = val('online');
+        if (online === false || online === 0 || online === 'false') return false;
+        const wrong = Object.entries(want).filter(([inst, v]) => val(inst) !== undefined && Number(val(inst)) !== v);
+        if (!wrong.length) return true;
+        if (i === 1) {
+          this.logger.warn(`Govee: ${job.name} accepted the command but shows ${wrong.map(([k]) => `${k}=${val(k)}`).join(', ')}`);
+          return false;
+        }
+      } catch { return true; }
+      await new Promise(res => setTimeout(res, 2000));
+    }
+    return true;
   }
 
   async runSteps(job, { background = false } = {}) {
@@ -662,7 +697,7 @@ export default class GoveePlugin extends BasePlugin {
         last = await this.sendCommand(job.deviceId, job.sku, s.capability, s.value);
         if (!last.ok) return last;
       }
-      if (last?.ok && !(await this.confirmOnline(job))) return { ok: false, offline: true, msg: 'Govee accepted the command but shows the light offline' };
+      if (last?.ok && !(await this.confirmOnline(job))) return { ok: false, offline: true, msg: 'Govee accepted the command but the light is offline or did not change' };
       return last;
     };
     let r = await attempt();
@@ -702,7 +737,7 @@ export default class GoveePlugin extends BasePlugin {
           r = await this.sendCommand(job.deviceId, job.sku, s.capability, s.value);
           if (!r.ok) break;
         }
-        if (r?.ok && !(await this.confirmOnline(job))) r = { ok: false, offline: true, msg: 'Govee accepted the command but shows the light offline' };
+        if (r?.ok && !(await this.confirmOnline(job))) r = { ok: false, offline: true, msg: 'Govee accepted the command but the light is offline or did not change' };
         if (r?.ok) {
           clearInterval(this.retryTimer);
           this.pendingRetry = null;
@@ -1140,7 +1175,9 @@ export default class GoveePlugin extends BasePlugin {
 
     // Try word-overlap matching: check if any significant word from the search
     // term appears in a device name (for cases like "toilet light" → "Master Toilet")
-    const searchWords = deviceNameLower.split(/\s+/).filter(w => w.length >= 3 && !w.match(genericWords));
+    // "Govee" and swearing name no device (2026-11-11: "FUCKING GOVEE MAATWR TOILET" went to the Music Sync Box).
+    const noise = /^(govee|fucking|fuckin|damn|dammit|goddamn|stupid|bloody|the|my|now|please|turn|set|make|second|third|time|ask)$/i;
+    const searchWords = deviceNameLower.split(/[^a-z0-9]+/).filter(w => w.length >= 3 && !w.match(genericWords) && !noise.test(w));
     if (searchWords.length > 0) {
       let bestMatch = null;
       let bestOverlap = 0;
@@ -1149,10 +1186,10 @@ export default class GoveePlugin extends BasePlugin {
         const overlap = searchWords.filter(w => devNameLower.includes(w)).length;
         if (overlap > bestOverlap) {
           bestOverlap = overlap;
-          bestMatch = { deviceId, deviceName: device.deviceName };
-        }
+          bestMatch = { deviceId, deviceName: device.deviceName, tie: false };
+        } else if (overlap && overlap === bestOverlap) bestMatch.tie = true;
       }
-      if (bestMatch && bestOverlap > 0) {
+      if (bestMatch && bestOverlap > 0 && !bestMatch.tie) {
         this.logger.info(`Resolved '${deviceName}' to '${bestMatch.deviceName}' via word-overlap matching (${bestOverlap} words matched)`);
         return bestMatch.deviceId;
       }
@@ -1636,185 +1673,171 @@ export default class GoveePlugin extends BasePlugin {
     }
   }
 
-  async listSchedules(params) {
+  /**
+   * Light schedules run on ALICE's own scheduler (the scheduled_jobs Agenda), as one job type. Until 2026-11-11 they
+   * were saved by a throwaway Agenda into agendaJobs, which nothing processes: no Govee schedule had ever fired.
+   */
+  scheduleAgenda() {
+    const agenda = this.agent?.scheduler?.agenda;
+    if (!agenda) throw new Error('the scheduler is not running yet');
+    return agenda;
+  }
+
+  async defineSchedulerJobs() {
+    const agenda = this.agent?.scheduler?.agenda;
+    if (!agenda) return;
+    agenda.define(LIGHT_SCHEDULE_JOB, async (job) => {
+      const d = job.attrs.data || {};
+      const r = await this.execute({ ...d.params, action: d.action, device: d.deviceId || d.deviceName });
+      this.logger.info(`Govee schedule ${d.label || ''} ${d.deviceName}: ${d.action} -> ${r?.success ? 'done' : (r?.error || 'failed')}`);
+      // Offline is retried and reported by runSteps; anything else the owner hears about now.
+      if (!r?.success && !r?.offline) {
+        await this.agent?.notify?.(`⚠️ The ${clock(d.hour, d.minute)} schedule for ${d.deviceName} did not go through: ${r?.error || 'unknown error'}`, { urgent: true });
+      }
+    });
+    const n = await agenda.jobs({ name: LIGHT_SCHEDULE_JOB }).then(j => j.length).catch(() => 0);
+    this.logger.info(`Govee light schedules ready (${n} saved)`);
+  }
+
+  /** The command a schedule runs: { action, params } as execute() takes them. */
+  scheduleCommand(params) {
+    if (params.lightAction) return { action: params.lightAction, params: { ...(params.lightParams || {}) } };
+    const v = params.value;
+    switch (params.action) {
+      case 'on': case 'off': return { action: 'power', params: { state: params.action } };
+      case 'power': return { action: 'power', params: { state: String(v || 'on').toLowerCase() === 'off' ? 'off' : 'on' } };
+      case 'brightness': return { action: 'brightness', params: { level: parseInt(v, 10) } };
+      case 'temperature': return { action: 'temperature', params: /^\d+$/.test(String(v)) ? { kelvin: parseInt(v, 10) } : { temperature: v } };
+      case 'scene': return { action: 'scene', params: { scene: v } };
+      case 'color': return { action: 'color', params: typeof v === 'object' && v ? v : { color: v } };
+      default: return null;
+    }
+  }
+
+  /** { hour, minute, dow, label } from params.cron or params.time + repeat/days. */
+  scheduleWhen(params) {
+    if (params.cron) {
+      const [m, h, , , dow] = String(params.cron).split(/\s+/);
+      return { hour: parseInt(h, 10), minute: parseInt(m, 10), dow, label: params.label || readDays('').label };
+    }
+    const t = readTime(/^\d{1,2}(:\d{2})?\s*(a\.?m\.?|p\.?m\.?)?$/i.test(String(params.time).trim()) ? `at ${params.time}` : String(params.time || ''));
+    if (!t) return null;
+    const repeat = params.repeat || 'daily';
+    const d = repeat === 'weekdays' ? readDays('weekdays') : repeat === 'weekends' ? readDays('weekends')
+      : Array.isArray(params.days) && params.days.length ? readDays(params.days.join(' ')) : readDays('');
+    return { hour: t.hour, minute: t.minute, dow: d.dow, label: repeat === 'once' ? 'once' : d.label, once: repeat === 'once' };
+  }
+
+  async listSchedules(params = {}) {
     try {
-      const schedules = await ScheduleManagement.listSchedules(params.device);
+      const jobs = await this.scheduleAgenda().jobs({ name: LIGHT_SCHEDULE_JOB });
+      const want = params.device ? String(params.device).toLowerCase() : null;
+      const schedules = jobs.map(j => ({
+        id: j.attrs._id.toString(),
+        deviceName: j.attrs.data?.deviceName,
+        action: j.attrs.data?.action,
+        settings: j.attrs.data?.params,
+        when: `${j.attrs.data?.label} at ${clock(j.attrs.data?.hour, j.attrs.data?.minute)}`,
+        nextRunAt: j.attrs.nextRunAt,
+        lastRunAt: j.attrs.lastRunAt,
+        disabled: !!j.attrs.disabled
+      })).filter(s => !want || s.deviceName?.toLowerCase().includes(want));
       return {
         success: true,
-        schedules: schedules,
-        count: schedules.length
+        schedules,
+        count: schedules.length,
+        message: schedules.length ? schedules.map(s => `${s.deviceName}: ${s.action} ${JSON.stringify(s.settings)} ${s.when}`).join('\n') : 'No light schedules.'
       };
     } catch (error) {
-      return {
-        success: false,
-        error: error.message
-      };
+      return { success: false, error: error.message };
     }
   }
 
   async createSchedule(params) {
-    this.validateParams(params, {
-      device: { required: true, type: 'string' },
-      time: { required: true, type: 'string' },
-      action: { required: true, type: 'string', enum: ['on', 'off', 'brightness', 'color', 'scene'] },
-      repeat: { required: false, type: 'string', enum: ['once', 'daily', 'weekdays', 'weekends', 'custom'] },
-      days: { required: false, type: 'array' },
-      value: { required: false }
-    });
-
     try {
-      // Resolve device name
-      let deviceId = params.device;
-      let deviceName = params.device;
-      
-      // Check if the device param looks like a MAC address (contains colons)
-      const looksLikeMac = params.device && params.device.includes(':');
-      
-      if (params.fromAI || looksLikeMac) {
-        const resolved = await this.resolveDeviceName(params.device);
-        if (!resolved || (Array.isArray(resolved) && resolved.length === 0)) {
-          // If it's a MAC address, check the cache directly
-          if (looksLikeMac && this.deviceCache.has(params.device)) {
-            deviceId = params.device;
-            const device = this.deviceCache.get(deviceId);
-            deviceName = device.deviceName;
-          } else {
-            return {
-              success: false,
-              error: `Device '${params.device}' not found`
-            };
-          }
-        } else {
-          deviceId = Array.isArray(resolved) ? resolved[0] : resolved;
-          
-          // Get device name from cache
-          const device = this.deviceCache.get(deviceId);
-          if (device) {
-            deviceName = device.deviceName;
-          }
-        }
+      if (!params.device) return { success: false, error: 'Which light?' };
+      const cmd = this.scheduleCommand(params);
+      if (!cmd) return { success: false, error: `I can schedule on, off, brightness, colour, white temperature or a scene, not "${params.action}".` };
+      const when = this.scheduleWhen(params);
+      if (!when) return { success: false, error: 'What time should it run?' };
+      if (this.deviceCache.size === 0) await this.listDevices();
+      let deviceId = this.deviceCache.has(params.device) ? params.device : await this.resolveDeviceName(params.device);
+      if (Array.isArray(deviceId)) deviceId = deviceId.length === 1 ? deviceId[0] : null;
+      const device = deviceId && this.deviceCache.get(deviceId);
+      if (!device) return { success: false, error: `I don't have a light called "${params.device}".` };
+      const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+      const data = { deviceId, deviceName: device.deviceName, action: cmd.action, params: cmd.params, hour: when.hour, minute: when.minute, label: when.label, tz };
+      const agenda = this.scheduleAgenda();
+      let job;
+      if (when.once) {
+        const at = new Date(); at.setHours(when.hour, when.minute, 0, 0);
+        if (at <= new Date()) at.setDate(at.getDate() + 1);
+        job = await agenda.schedule(at, LIGHT_SCHEDULE_JOB, data);
+      } else {
+        job = agenda.create(LIGHT_SCHEDULE_JOB, data);
+        job.repeatEvery(`${when.minute} ${when.hour} * * ${when.dow}`, { timezone: tz, skipImmediate: true });
+        await job.save();
       }
-
-      const schedule = await ScheduleManagement.createSchedule({
-        deviceId,
-        deviceName,
-        time: params.time,
-        action: params.action,
-        value: params.value,
-        repeat: params.repeat || 'daily',
-        days: params.days,
-        enabled: params.enabled !== false
-      });
-
-      return {
-        success: true,
-        message: `Schedule created for ${deviceName}`,
-        schedule
-      };
+      const what = cmd.action === 'power' ? `turn ${cmd.params.state}` : cmd.action === 'color' ? `set to ${cmd.params.color || 'that colour'}`
+        : cmd.action === 'brightness' ? `set to ${cmd.params.level}%` : `set to ${Object.values(cmd.params)[0]}`;
+      const msg = `Scheduled: ${device.deviceName} will ${what} ${when.label} at ${clock(when.hour, when.minute)}. First run ${job.attrs.nextRunAt ? new Date(job.attrs.nextRunAt).toLocaleString('en-US', { timeZone: tz, weekday: 'short', hour: 'numeric', minute: '2-digit' }) : 'soon'}.`;
+      this.logger.info(`Govee schedule created: ${msg}`);
+      return { success: true, message: msg, schedule: { id: job.attrs._id.toString(), ...data, nextRunAt: job.attrs.nextRunAt } };
     } catch (error) {
-      return {
-        success: false,
-        error: error.message
-      };
+      return { success: false, error: `Could not save the schedule: ${error.message}` };
     }
   }
 
-  async deleteSchedule(params) {
-    // If no scheduleId but device name is provided, find schedule by device
-    if (!params.scheduleId && params.device) {
-      try {
-        const schedules = await ScheduleManagement.listSchedules();
-        let targetName = params.device;
-        if (params.fromAI) {
-          const resolved = await this.resolveDeviceName(params.device);
-          if (resolved) {
-            const id = Array.isArray(resolved) ? resolved[0] : resolved;
-            const dev = this.deviceCache.get(id);
-            if (dev) targetName = dev.deviceName;
-          }
-        }
-        const match = schedules.find(s =>
-          s.deviceName?.toLowerCase().includes(targetName.toLowerCase())
-        );
-        if (match) {
-          params.scheduleId = match.id;
-          this.logger.info(`Resolved schedule for device '${params.device}' to scheduleId: ${match.id}`);
-        } else {
-          return {
-            success: false,
-            error: `No schedule found for device '${params.device}'. Use 'list schedules' to see existing schedules.`
-          };
-        }
-      } catch (lookupError) {
-        this.logger.error('Schedule lookup by device name failed:', lookupError.message);
-      }
+  async findSchedule(params) {
+    const agenda = this.scheduleAgenda();
+    if (params.scheduleId) {
+      const { ObjectId } = await import('mongodb');
+      return (await agenda.jobs({ name: LIGHT_SCHEDULE_JOB, _id: new ObjectId(String(params.scheduleId)) }))[0] || null;
     }
+    if (!params.device) return null;
+    const jobs = await agenda.jobs({ name: LIGHT_SCHEDULE_JOB });
+    let id = this.deviceCache.has(params.device) ? params.device : await this.resolveDeviceName(params.device).catch(() => null);
+    if (Array.isArray(id)) id = id[0];
+    const want = String(params.device).toLowerCase();
+    const hits = jobs.filter(j => j.attrs.data?.deviceId === id || j.attrs.data?.deviceName?.toLowerCase().includes(want));
+    return hits.length === 1 ? hits[0] : hits.length > 1 ? { many: hits } : null;
+  }
 
-    this.validateParams(params, {
-      scheduleId: { required: true, type: 'string' }
-    });
-
+  async deleteSchedule(params) {
     try {
-      await ScheduleManagement.deleteSchedule(params.scheduleId);
-      return {
-        success: true,
-        message: 'Schedule deleted successfully'
-      };
+      const job = await this.findSchedule(params);
+      if (!job) return { success: false, error: `No light schedule found for ${params.device || params.scheduleId}.` };
+      const jobs = job.many || [job];
+      for (const j of jobs) await j.remove();
+      return { success: true, message: `Deleted ${jobs.length} schedule${jobs.length > 1 ? 's' : ''} for ${jobs[0].attrs.data?.deviceName}.` };
     } catch (error) {
-      return {
-        success: false,
-        error: error.message
-      };
+      return { success: false, error: error.message };
     }
   }
 
   async updateSchedule(params) {
-    // If no scheduleId but device name is provided, find schedule by device
-    if (!params.scheduleId && params.device) {
-      try {
-        const schedules = await ScheduleManagement.listSchedules();
-        let targetName = params.device;
-        if (params.fromAI) {
-          const resolved = await this.resolveDeviceName(params.device);
-          if (resolved) {
-            const id = Array.isArray(resolved) ? resolved[0] : resolved;
-            const dev = this.deviceCache.get(id);
-            if (dev) targetName = dev.deviceName;
-          }
-        }
-        const match = schedules.find(s =>
-          s.deviceName?.toLowerCase().includes(targetName.toLowerCase())
-        );
-        if (match) {
-          params.scheduleId = match.id;
-          this.logger.info(`Resolved schedule for device '${params.device}' to scheduleId: ${match.id}`);
-        } else {
-          return {
-            success: false,
-            error: `No schedule found for device '${params.device}'. Use 'list schedules' to see existing schedules.`
-          };
-        }
-      } catch (lookupError) {
-        this.logger.error('Schedule lookup by device name failed:', lookupError.message);
-      }
-    }
-
-    this.validateParams(params, {
-      scheduleId: { required: true, type: 'string' }
-    });
-
     try {
-      const schedule = await ScheduleManagement.updateSchedule(params.scheduleId, params);
-      return {
-        success: true,
-        message: 'Schedule updated successfully',
-        schedule
+      const job = await this.findSchedule(params);
+      if (!job) return { success: false, error: `No light schedule found for ${params.device || params.scheduleId}.` };
+      if (job.many) return { success: false, error: `${job.many[0].attrs.data?.deviceName} has ${job.many.length} schedules; say which time.` };
+      const d = job.attrs.data;
+      if (params.enabled === false || params.enabled === true) {
+        params.enabled ? job.enable() : job.disable();
+        await job.save();
+        return { success: true, message: `${d.deviceName} schedule ${params.enabled ? 'on' : 'paused'}.` };
+      }
+      const next = {
+        device: d.deviceId,
+        ...(params.action || params.lightAction ? params : { lightAction: d.action, lightParams: d.params }),
+        ...(params.time || params.cron ? {} : { cron: `${d.minute} ${d.hour} * * ${job.attrs.repeatInterval?.split(/\s+/)[4] || '*'}`, label: d.label }),
+        time: params.time, repeat: params.repeat, days: params.days
       };
+      if (!next.time) delete next.time;
+      const made = await this.createSchedule(next);
+      if (made.success) await job.remove();
+      return made.success ? { ...made, message: made.message.replace(/^Scheduled/, 'Updated') } : made;
     } catch (error) {
-      return {
-        success: false,
-        error: error.message
-      };
+      return { success: false, error: error.message };
     }
   }
 

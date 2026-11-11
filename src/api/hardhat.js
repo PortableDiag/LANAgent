@@ -290,6 +290,28 @@ router.get('/templates', async (req, res) => {
 });
 
 /**
+ * Flatten a Solidity contract into a single file (all imports inlined), for manual
+ * source verification on a block explorer. Not cached: the source on disk can change
+ * between calls (contracts are edited in place), and a stale flatten fails verification.
+ */
+router.post('/projects/:name/flatten', async (req, res) => {
+    try {
+        const { name: projectName } = req.params;
+        const { contractName } = req.body || {};
+
+        if (!contractName) {
+            return res.status(400).json({ error: 'Contract name is required' });
+        }
+
+        const flattenedSource = await hardhatService.flattenContract(projectName, contractName);
+        res.json({ success: true, flattenedSource });
+    } catch (error) {
+        logger.error('Flatten contract error:', error);
+        res.status(error.statusCode || 500).json({ error: error.message });
+    }
+});
+
+/**
  * Health check endpoint
  */
 router.get('/health', (req, res) => {

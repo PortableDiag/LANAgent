@@ -2,6 +2,7 @@ import { BasePlugin } from '../core/basePlugin.js';
 import apiKeyService from '../../services/apiKeyService.js';
 import { logger } from '../../utils/logger.js';
 import NodeCache from 'node-cache';
+import ApiKey from '../../models/ApiKey.js';
 
 export default class ApiKeysPlugin extends BasePlugin {
   constructor(agent) {
@@ -51,6 +52,11 @@ export default class ApiKeysPlugin extends BasePlugin {
         command: 'fix',
         description: 'Fix API keys with incorrect expiration dates',
         usage: 'fix({ dryRun: true })'
+      },
+      {
+        command: 'update',
+        description: 'Update an existing API key\'s metadata',
+        usage: 'update({ keyId: "...", name: "...", description: "...", rateLimit: 100, expiresIn: "30d" })'
       }
     ];
   }
@@ -66,9 +72,15 @@ export default class ApiKeysPlugin extends BasePlugin {
       action: { 
         required: true, 
         type: 'string',
-        enum: ['create', 'list', 'revoke', 'suspend', 'reactivate', 'delete', 'stats', 'fix']
+        enum: ['create', 'list', 'revoke', 'suspend', 'reactivate', 'delete', 'stats', 'fix', 'update']
       }
     });
+
+    // listKeys caches for 5 minutes; any action that changes a key must drop that cache,
+    // or a revoked/renamed key keeps showing its old state.
+    if (!['list', 'stats'].includes(action) && !(action === 'fix' && params.dryRun !== false)) {
+      this.cache.flushAll();
+    }
 
     switch (action) {
       case 'create':
@@ -87,6 +99,8 @@ export default class ApiKeysPlugin extends BasePlugin {
         return await this.getStats();
       case 'fix':
         return await this.fixExpiredKeys(params);
+      case 'update':
+        return await this.updateKey(params);
       default:
         throw new Error(`Unknown action: ${action}`);
     }
@@ -361,6 +375,80 @@ export default class ApiKeysPlugin extends BasePlugin {
     } catch (error) {
       logger.error('Failed to fix expired keys:', error);
       throw new Error(`Failed to fix expired keys: ${error.message}`);
+    }
+  }
+
+  /**
+   * Update an existing API key's metadata (name, description, rateLimit, expiresAt).
+   * Only provided fields are updated; others remain unchanged.
+   * @param {Object} params - { keyId, name, description, rateLimit, expiresIn }
+   * @returns {Object} success response with updated key info
+   */
+  async updateKey(params) {
+    const { keyId, name, description, rateLimit, expiresIn } = params;
+    
+    if (!keyId) {
+      throw new Error('Key ID is required');
+    }
+
+    const updates = {};
+    if (name !== undefined) {
+      if (typeof name !== 'string' || !name.trim()) throw new Error('name must be a non-empty string');
+      updates.name = name.trim();
+    }
+    if (description !== undefined) {
+      if (typeof description !== 'string') throw new Error('description must be a string');
+      updates.description = description;
+    }
+    if (rateLimit !== undefined) {
+      const n = Number(rateLimit);
+      if (!Number.isInteger(n) || n < 1) throw new Error('rateLimit must be a positive whole number (requests per minute)');
+      updates.rateLimit = n;
+    }
+    if (expiresIn !== undefined) {
+      // calculateExpiration throws on anything it cannot parse, so a typo can never
+      // clear the expiry (null = never expires). Removing an expiry is not offered here.
+      if (typeof expiresIn !== 'string') throw new Error('expiresIn must be a duration like "30d", "24h" or "60m"');
+      updates.expiresAt = this.calculateExpiration(expiresIn);
+    }
+
+    if (Object.keys(updates).length === 0) {
+      throw new Error('No fields to update provided');
+    }
+
+    try {
+      const updatedKey = await ApiKey.findByIdAndUpdate(
+        keyId,
+        { $set: updates },
+        { new: true, runValidators: true }
+      );
+
+      if (!updatedKey) {
+        return {
+          success: false,
+          error: 'API key not found'
+        };
+      }
+
+      await this._rememberKeyAction(
+        `Updated API key: ${keyId}`,
+        { type: 'api_key_updated', keyId, updates }
+      );
+
+      return {
+        success: true,
+        message: 'API key updated successfully',
+        key: {
+          id: updatedKey.id,
+          name: updatedKey.name,
+          description: updatedKey.description,
+          rateLimit: updatedKey.rateLimit,
+          expiresAt: updatedKey.expiresAt
+        }
+      };
+    } catch (error) {
+      logger.error('Failed to update API key:', error);
+      throw new Error(`Failed to update API key: ${error.message}`);
     }
   }
 

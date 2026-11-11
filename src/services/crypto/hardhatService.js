@@ -1,5 +1,5 @@
 import { logger } from '../../utils/logger.js';
-import { exec } from 'child_process';
+import { exec, execFile } from 'child_process';
 import { promisify } from 'util';
 import fs from 'fs/promises';
 import path from 'path';
@@ -9,6 +9,7 @@ import { PluginSettings } from '../../models/PluginSettings.js';
 import { decrypt } from '../../utils/encryption.js';
 
 const execAsync = promisify(exec);
+const execFileAsync = promisify(execFile);
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
@@ -520,6 +521,33 @@ contract ${name} is ERC721, ERC721URIStorage, Ownable {
             logger.error('Failed to list projects:', error);
             return [];
         }
+    }
+
+    /**
+     * Flatten one contract of a project (`npx hardhat flatten contracts/<name>.sol`).
+     * Both names are restricted to [A-Za-z0-9_-] and the command runs without a shell,
+     * so neither can reach outside the project or inject arguments.
+     * @returns {Promise<string>} the flattened Solidity source
+     */
+    async flattenContract(projectName, contractName) {
+        const SAFE = /^[A-Za-z0-9_-]+$/;
+        const bare = String(contractName || '').replace(/\.sol$/i, '');
+        if (!SAFE.test(String(projectName || '')) || !SAFE.test(bare)) {
+            throw Object.assign(new Error('Project and contract names may only contain letters, digits, - and _'), { statusCode: 400 });
+        }
+        const projectPath = path.join(this.projectsDir, projectName);
+        const contractPath = path.join('contracts', `${bare}.sol`);
+        try {
+            await fs.access(path.join(projectPath, contractPath));
+        } catch {
+            throw Object.assign(new Error(`Contract not found: ${projectName}/${contractPath}`), { statusCode: 404 });
+        }
+        const { stdout, stderr } = await execFileAsync('npx', ['hardhat', 'flatten', contractPath], {
+            cwd: projectPath, timeout: 120000, maxBuffer: 32 * 1024 * 1024
+        });
+        if (stderr) logger.warn(`Hardhat flatten stderr for ${projectName}/${bare}: ${stderr.slice(0, 500)}`);
+        if (!stdout.trim()) throw new Error(`Hardhat flatten produced no output for ${projectName}/${bare}`);
+        return stdout;
     }
 
     /**

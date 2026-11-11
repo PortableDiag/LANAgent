@@ -1414,8 +1414,10 @@ export class TelegramDashboard extends TelegramInterface {
 
         // A private-chat topic is its own conversation (when topics are on for this agent)
         const topicsOn = ctx.message?.is_topic_message && (await getAgentFeatures().catch(() => ({ topics: true }))).topics;
-        const threadId = topicsOn ? ctx.message.message_thread_id : undefined;
-        if (threadId) this.topicTitler.maybeTitle(ctx.message, text).catch(() => {});
+        const topicId = topicsOn ? ctx.message.message_thread_id : undefined;
+        if (topicId) this.topicTitler.maybeTitle(ctx.message, text).catch(() => {});
+        // A new topic (a message sent without replying) carries on the conversation of the last 30 minutes.
+        const threadId = this.agent.memoryManager?.activeThread?.(ctx.from.id.toString(), topicId) ?? topicId;
 
         // Say so in the request, as a captioned file does, so "send it to Wayne" means that file
         // and the router does not go looking for another one.
@@ -1785,6 +1787,8 @@ export class TelegramDashboard extends TelegramInterface {
 
         // Process the transcribed text through the agent
         const response = await this.agent.processNaturalLanguage(transcription, {
+          // A voice note has no topic: it carries on the conversation of the last 30 minutes (2026-11-11).
+          threadId: this.agent.memoryManager?.activeThread?.(ctx.from.id.toString(), undefined),
           userId: ctx.from.id.toString(),
           userName: ctx.from.first_name || ctx.from.username,
           chatId: ctx.chat.id.toString(),

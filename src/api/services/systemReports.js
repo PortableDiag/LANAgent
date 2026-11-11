@@ -193,11 +193,77 @@ router.get('/reports', authenticateToken, async (req, res) => {
   }
 });
 
+const OBJECT_ID = /^[0-9a-f]{24}$/i;
+
+/**
+ * Numeric change for every metric two reports both carry in content.performance and
+ * content.issues. A metric only one report has is left out rather than compared to an
+ * invented 0; percentageChange is null when the first value is 0 (no meaningful base).
+ */
+export function diffReports(report1, report2, sections = ['performance', 'issues']) {
+  const diff = {};
+  for (const section of sections) {
+    const s1 = report1.content?.[section] || {};
+    const s2 = report2.content?.[section] || {};
+    const out = {};
+    for (const key of new Set([...Object.keys(s1), ...Object.keys(s2)])) {
+      const v1 = s1[key];
+      const v2 = s2[key];
+      if (typeof v1 !== 'number' || typeof v2 !== 'number' || !Number.isFinite(v1) || !Number.isFinite(v2)) continue;
+      out[key] = {
+        report1: v1,
+        report2: v2,
+        absoluteChange: v2 - v1,
+        percentageChange: v1 !== 0 ? ((v2 - v1) / v1) * 100 : null
+      };
+    }
+    if (Object.keys(out).length) diff[section] = out;
+  }
+  return diff;
+}
+
+/**
+ * Compare two specific reports by ID and show the change in each numeric metric
+ * GET /api/system/reports/diff?id1=<older>&id2=<newer>
+ */
+router.get('/reports/diff', authenticateToken, async (req, res) => {
+  try {
+    const { id1, id2 } = req.query;
+    if (!id1 || !id2) {
+      return res.status(400).json({ success: false, error: 'Both id1 and id2 query parameters are required' });
+    }
+    if (!OBJECT_ID.test(String(id1)) || !OBJECT_ID.test(String(id2))) {
+      return res.status(400).json({ success: false, error: 'id1 and id2 must be report ids (24 hex characters)' });
+    }
+
+    const [report1, report2] = await Promise.all([
+      SystemReport.findById(id1).lean(),
+      SystemReport.findById(id2).lean()
+    ]);
+    if (!report1) return res.status(404).json({ success: false, error: `Report with id1=${id1} not found` });
+    if (!report2) return res.status(404).json({ success: false, error: `Report with id2=${id2} not found` });
+
+    res.json({
+      success: true,
+      report1: { id: report1._id, title: report1.title, reportType: report1.reportType, createdAt: report1.createdAt },
+      report2: { id: report2._id, title: report2.title, reportType: report2.reportType, createdAt: report2.createdAt },
+      diff: diffReports(report1, report2)
+    });
+  } catch (error) {
+    logger.error('Failed to compute report diff:', error);
+    res.status(500).json({ success: false, error: 'Failed to compute report diff' });
+  }
+});
+
 /**
  * Get specific system report by ID
  * GET /api/system/reports/:id
  */
-router.get('/reports/:id', authenticateToken, async (req, res) => {
+router.get('/reports/:id', authenticateToken, async (req, res, next) => {
+  // Only a report id belongs here. The named routes below (/reports/trends,
+  // /reports/comparison) are registered after this one, so without this pass-through
+  // Express matched them as :id and they answered 500 (CastError) instead of running.
+  if (!OBJECT_ID.test(req.params.id)) return next();
   try {
     const report = await SystemReport.findById(req.params.id).lean();
     

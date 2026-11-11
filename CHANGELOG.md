@@ -2,6 +2,31 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.791] - 2026-11-11
+
+### Added
+- **Light schedules that run.** "Every morning at 7am make the bathroom light bright white" is read without a model and saved on the agent's scheduler, in its own time zone. ALICE replies with the first run time.
+  - Every day, morning or night, weekdays, weekends and named days all work. A missed or failed run is reported to the owner.
+  - Until now, Govee schedules were saved to a job list nothing runs, so none had ever fired.
+- **Light follow-ups.**
+  - "Do it now", "Lies" and "now!" right after a light command repeat it.
+  - "Prove it" and "is it on?" read the light back from Govee and say what it shows.
+  - A light command that names no device ("the bathroom light") means the light just used.
+- **Edit API keys** (`apikeys` action `update`). Rename a key, or change its rate limit or expiry. Edits are validated before anything is written, and the key list cache is cleared on every change.
+- **Pause and resume price watches** (`priceWatch` actions `pause` and `resume`). A paused watch keeps its interval.
+- **Report diff** (`GET /api/system/reports/diff`): metric changes between two system reports.
+- **Profile changes** (`skills` action `profile` with `changes: true`): what was added to and removed from the operator profile in each recent edit.
+- **Contract flatten** (`GET /api/hardhat/flatten/:contractName`). The name is checked and no shell is used.
+- **`/unignorebot`**: stop ignoring a bot without trusting it.
+- **Several admin keys.** `AGENT_ADMIN_KEY` takes comma-separated keys, for rotation without a lockout; each is checked in constant time.
+
+### Fixed
+- **White light never changed the light.** The colour temperature was sent as a capability type Govee accepts but the bulb ignores. "Done" is now said only once the light reports the power, brightness and white that were sent.
+- **Wrong device from filler words.** "Govee", swearing and filler words no longer match a device, and a tie between two devices matches neither.
+- **Telegram forgot the conversation.** A message sent without replying opens a new private-chat topic, and a voice note has no topic, so each started a fresh conversation ("Do it now" got "what are you referring to?"). A new topic or a voice note now carries on the conversation of the last 30 minutes.
+- **The dashboard's Reports page.** No `/api/system/reports` route had ever answered: the router was mounted after the catch-all handlers. `/reports/trends` and `/reports/comparison` were also caught by `/reports/:id`.
+- **Trusting or ignoring the first bot changed the defaults.** Before anything was saved, the agent settings returned the defaults' own lists.
+
 ## [2.25.790] - 2026-11-10
 
 ### Added

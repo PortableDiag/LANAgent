@@ -33,8 +33,10 @@ export function normalizeUsername(name) {
 export async function getAgentFeatures() {
   const saved = await PluginSettings.getCached(PLUGIN, KEY).catch(() => null);
   const s = { ...DEFAULTS, ...(saved && typeof saved === 'object' ? saved : {}) };
-  s.peers = Array.isArray(s.peers) ? s.peers : [];
-  s.ignored = Array.isArray(s.ignored) ? s.ignored : [];
+  // Copies: with nothing saved yet these would be DEFAULTS' own arrays (freeze is shallow),
+  // and trustPeer/ignoreBot push into them.
+  s.peers = Array.isArray(s.peers) ? [...s.peers] : [];
+  s.ignored = Array.isArray(s.ignored) ? [...s.ignored] : [];
   if (!GUEST_MODES.includes(s.guestMode)) s.guestMode = DEFAULTS.guestMode;
   return s;
 }
@@ -85,6 +87,21 @@ export async function ignoreBot(username) {
   const s = await getAgentFeatures();
   if (!s.ignored.some(x => x.toLowerCase() === u.toLowerCase())) s.ignored.push(u);
   return save(s);
+}
+
+/**
+ * Take a bot off the ignored list without trusting it (trustPeer also un-ignores), so its
+ * next message gets the Trust / Ignore prompt again.
+ * @returns {Promise<boolean>} true if it was ignored and now is not
+ */
+export async function unignoreBot(username) {
+  const u = normalizeUsername(username);
+  const s = await getAgentFeatures();
+  const before = s.ignored.length;
+  s.ignored = s.ignored.filter(x => x.toLowerCase() !== u.toLowerCase());
+  if (s.ignored.length === before) return false;
+  await save(s);
+  return true;
 }
 
 /**

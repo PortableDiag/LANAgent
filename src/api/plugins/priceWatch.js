@@ -35,7 +35,13 @@ export default class PriceWatchPlugin extends BasePlugin {
         examples: ['check my price watches now', 'has the monitor price changed'] },
       { command: 'trend', description: 'Show how a watched price has moved over its recent checks: change, low, high and direction',
         usage: 'trend({ name: "Monitor", window: 10 })  // or url / id; window = last N checks, default all kept',
-        examples: ['how has the monitor price moved', 'show the price trend for the laptop', 'is the price of that item going up or down'] }
+        examples: ['how has the monitor price moved', 'show the price trend for the laptop', 'is the price of that item going up or down'] },
+      { command: 'pause', description: 'Pause checking a price watch without deleting it',
+        usage: 'pause({ name: "Monitor" })',
+        examples: ['pause the monitor price watch', 'stop checking the laptop price for now'] },
+      { command: 'resume', description: 'Resume checking a paused price watch',
+        usage: 'resume({ name: "Monitor", interval: 360 })  // interval optional; default keeps the current one',
+        examples: ['resume the monitor price watch', 'start checking the laptop price again every 6 hours'] }
     ];
     this.watcher = getWebWatchService(this);
   }
@@ -55,7 +61,9 @@ export default class PriceWatchPlugin extends BasePlugin {
         case 'list': return await this.list();
         case 'recheck': return await this.recheck(p);
         case 'trend': return await this.trend(p);
-        default: return { success: false, error: `Unknown action '${action}'. Use: check, compare, watch, unwatch, list, recheck, trend` };
+        case 'pause': return await this.pause(p);
+        case 'resume': return await this.resume(p);
+        default: return { success: false, error: `Unknown action '${action}'. Use: check, compare, watch, unwatch, list, recheck, trend, pause, resume` };
       }
     } catch (error) {
       this.logger.warn(`priceWatch ${action} failed: ${error.message}`);
@@ -210,7 +218,7 @@ export default class PriceWatchPlugin extends BasePlugin {
     const all = await WebWatch.find({ kind: 'price' }).sort({ createdAt: 1 });
     const fmt = (n, c) => (n == null ? '—' : `${c ? `${c} ` : ''}${n}`);
     return { success: true, watches: all.map(describe),
-      result: all.length ? all.map(w => `• ${w.name || w.url}: ${fmt(w.lastPrice, w.currency)} (lowest ${fmt(w.lowestPrice, w.currency)}${w.targetPrice != null ? `, target ${fmt(w.targetPrice, w.currency)}` : ''})${w.lastError ? ` — last error: ${w.lastError}` : ''}`).join('\n') : 'No prices are being watched.' };
+      result: all.length ? all.map(w => `• ${w.name || w.url}: ${fmt(w.lastPrice, w.currency)} (lowest ${fmt(w.lowestPrice, w.currency)}${w.targetPrice != null ? `, target ${fmt(w.targetPrice, w.currency)}` : ''})${w.active === false ? ' — paused' : ''}${w.lastError ? ` — last error: ${w.lastError}` : ''}`).join('\n') : 'No prices are being watched.' };
   }
 
   async recheck(p) {
@@ -241,5 +249,29 @@ export default class PriceWatchPlugin extends BasePlugin {
         `${cur}${first.price} → ${cur}${last.price}, ${t.direction}${t.absoluteChange ? ` ${t.absoluteChange > 0 ? '+' : ''}${Number(t.absoluteChange.toFixed(2))}` : ''}${pct}; ` +
         `low ${cur}${t.minimum}, high ${cur}${t.maximum}.`;
     return { success: true, trend: t, result };
+  }
+
+  /**
+   * Pause a price watch without deleting it: the scheduled check only reads active watches
+   * (WebWatchService.checkDue), so active=false stops it while keeping its price history,
+   * target and interval. An explicit recheck of that one watch still works.
+   */
+  async pause(p) {
+    const w = await findWatch('price', p);
+    const label = w.name || w.url;
+    if (w.active === false) return { success: true, watch: describe(w), result: `${label} is already paused.` };
+    w.active = false;
+    await w.save();
+    return { success: true, watch: describe(w), result: `Paused ${label}. It will not be checked again until resumed.` };
+  }
+
+  /** Resume a paused price watch, keeping its interval unless a new one is given. */
+  async resume(p) {
+    const w = await findWatch('price', p);
+    const every = interval(p.interval);
+    if (every !== undefined) w.intervalMin = every;
+    w.active = true;
+    await w.save();
+    return { success: true, watch: describe(w), result: `Resumed ${w.name || w.url}, checking every ${w.intervalMin} min.` };
   }
 }

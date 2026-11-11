@@ -1,11 +1,12 @@
 import { logger } from '../../utils/logger.js';
 import { sendRich } from './richMessage.js';
-import { getAgentFeatures, setAgentFeatures, trustPeer, untrustPeer, ignoreBot, normalizeUsername, GUEST_MODES } from './agentFeatures.js';
+import { getAgentFeatures, setAgentFeatures, trustPeer, untrustPeer, ignoreBot, unignoreBot, normalizeUsername, GUEST_MODES } from './agentFeatures.js';
 
 /**
  * Telegram controls for the agent features (agentFeatures.js), owner only:
  *   /agents                       the switches as a card with buttons
  *   /trustbot @bot  /untrustbot @bot
+ *   /unignorebot @bot             stop ignoring a bot (it gets the Trust / Ignore prompt again)
  *   /askbot @bot <question>       ask another agent
  *   /peerskills @bot              what skills it offers
  *   /getskill @bot <name…>        ask it for skills (they arrive pending your approval)
@@ -78,6 +79,9 @@ export function installAgentCommands(bot, { isMaster, getLink, getBotInfo }) {
   bot.command('untrustbot', withBot(async (ctx, { bot: u }) => {
     await ctx.reply((await untrustPeer(u)) ? `🚫 @${u} is no longer trusted.` : `@${u} was not trusted.`);
   }, '/untrustbot @their_bot'));
+  bot.command('unignorebot', withBot(async (ctx, { bot: u }) => {
+    await ctx.reply((await unignoreBot(u)) ? `👀 @${u} is no longer ignored. Its next message asks you to trust or ignore it.` : `@${u} was not ignored.`);
+  }, '/unignorebot @their_bot'));
   bot.command('askbot', withBot(async (ctx, { bot: u, rest }) => {
     if (!rest) return ctx.reply('Usage: /askbot @their_bot your question');
     await ctx.reply(`⏳ Asking @${u}…`);

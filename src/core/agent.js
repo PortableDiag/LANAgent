@@ -53,7 +53,8 @@ import { BackgroundReview } from '../services/skills/backgroundReview.js';
 import { getUserProfile } from '../services/skills/userProfile.js';
 import { Curator, scheduleCurator } from '../services/skills/curator.js';
 import { looksMultiStep } from './multiStep.js';
-import { parseLightCommand, isLightComplaint } from '../services/govee/lightCommand.js';
+import { parseLightCommand, isLightComplaint, isLightCheck, findDevice } from '../services/govee/lightCommand.js';
+import { parseLightSchedule } from '../services/govee/lightSchedule.js';
 import { GoveeEnhancements } from '../api/plugins/govee-enhancements.js';
 
 const execAsync = promisify(exec);
@@ -1180,7 +1181,10 @@ export class Agent extends EventEmitter {
 
       // A complaint about the light just changed ("no, it didn't, still dark") is a command to redo it, not chat: the
       // follow-up model below spent 18 s before it reached the light (2026-11-10).
-      const lightComplaint = !!this.apiManager?.getPlugin?.('govee')?.recentCommand?.() && isLightComplaint(input);
+      const recentLight = this.apiManager?.getPlugin?.('govee')?.recentCommand?.() || null;
+      const lightComplaint = !!recentLight && (isLightComplaint(input) || isLightCheck(input)
+        // "Toilet now NOW": the light just used, named again with nothing else to do, is a push to redo it.
+        || (input.length < 40 && findDevice(input, [recentLight.name]) === recentLight.name && !/\b(off|on|dim|%|white|red|blue|green)\b/i.test(input)));
 
       if (this.providerManager && userBuffer.length >= 2 && !context.resolvedConfirmation && !lightComplaint) {
         try {
@@ -1289,10 +1293,21 @@ If answering needs information that is not in the conversation above (messages, 
         if (govee?.deviceCache && govee.config?.apiKey) {
           if (govee.deviceCache.size === 0) await govee.listDevices();
           const names = Array.from(govee.deviceCache.values()).map(d => d.deviceName).filter(Boolean);
-          const light = parseLightCommand(input, names, Object.keys(GoveeEnhancements.colorNames || {}));
-          if (light) {
+          const colors = Object.keys(GoveeEnhancements.colorNames || {});
+          // "Every morning at 7am make the Master Toilet light bright white" is a schedule on the real scheduler (2026-11-11).
+          const timed = parseLightSchedule(input, names, colors);
+          const light = timed ? null : parseLightCommand(input, names, colors, { recentDevice: recentLight?.name });
+          if (timed) {
+            logger.info(`Light schedule read directly: ${timed.action} ${JSON.stringify(timed.params)} cron ${timed.cron}`);
+            const { device, ...lightParams } = timed.params;
+            intentResult = { detected: true, intent: 'govee_schedules', plugin: 'govee', action: 'schedules', parameters: { operation: 'create', device, lightAction: timed.action, lightParams, cron: timed.cron, label: timed.label, fromAI: true }, confidence: 1, source: 'light-schedule' };
+          } else if (light) {
             logger.info(`Light command read directly: ${light.action} ${JSON.stringify(light.params)}`);
             intentResult = { detected: true, intent: `govee_${light.action}`, plugin: 'govee', action: light.action, parameters: { ...light.params, fromAI: true }, confidence: 1, source: 'light-command' };
+          } else if (lightComplaint && isLightCheck(input)) {
+            // "Prove it": read the light back from Govee and say what it shows.
+            logger.info(`Light check: reading ${recentLight.name} back`);
+            intentResult = { detected: true, intent: 'govee_status', plugin: 'govee', action: 'status', parameters: { device: recentLight.deviceId, sku: recentLight.sku }, confidence: 1, source: 'light-check' };
           } else if (lightComplaint) {
             // "No, it didn't, I'm sitting in the dark": do the last light command again, now (2026-11-10).
             logger.info(`Light complaint: repeating the last command for ${govee.recentCommand().name}`);

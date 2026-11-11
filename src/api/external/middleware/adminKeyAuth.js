@@ -1,4 +1,5 @@
 import net from 'node:net';
+import { createHash, timingSafeEqual } from 'node:crypto';
 import { logger } from '../../../utils/logger.js';
 
 /**
@@ -161,18 +162,41 @@ function ipMatches(list, clientIP) {
  * behaves internally — failure rates, recovery outcomes, wallet listings —
  * must use this instead, or every paying customer can read it.
  *
+ * Supports multiple admin keys via comma-separated AGENT_ADMIN_KEY to allow
+ * key rotation without downtime. The provided key is accepted if it matches
+ * any of the configured keys (after trimming whitespace).
+ *
  * Fails closed: with no AGENT_ADMIN_KEY configured the route reports 503 rather
  * than falling open.
  */
 export function adminKeyAuth(req, res, next) {
-  const expected = process.env.AGENT_ADMIN_KEY;
-  if (!expected) {
+  const rawKeys = process.env.AGENT_ADMIN_KEY;
+  if (!rawKeys) {
+    return res.status(503).json({ success: false, error: 'AGENT_ADMIN_KEY not configured on this agent' });
+  }
+
+  // Split by comma, trim each part, and discard empty strings (e.g. trailing comma).
+  const validKeys = rawKeys.split(',').map(k => k.trim()).filter(Boolean);
+  if (validKeys.length === 0) {
     return res.status(503).json({ success: false, error: 'AGENT_ADMIN_KEY not configured on this agent' });
   }
 
   const provided = req.headers['x-admin-key'];
-  if (!provided || provided !== expected) {
-    logger.warn('Invalid admin key provided', { hadKey: !!provided, ip: req.ip });
+  if (!provided) {
+    logger.warn('Admin key missing', { ip: req.ip });
+    return res.status(401).json({ success: false, error: 'Invalid admin key' });
+  }
+
+  // Constant-time compare against EVERY configured key (no early exit), on sha256
+  // digests so the lengths are equal and a mismatch leaks neither position nor length.
+  const digest = v => createHash('sha256').update(String(v)).digest();
+  const providedDigest = digest(provided);
+  let matched = false;
+  for (const key of validKeys) {
+    if (timingSafeEqual(providedDigest, digest(key))) matched = true;
+  }
+  if (!matched) {
+    logger.warn('Invalid admin key provided', { hadKey: true, ip: req.ip });
     return res.status(401).json({ success: false, error: 'Invalid admin key' });
   }
 

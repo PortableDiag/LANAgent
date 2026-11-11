@@ -8770,6 +8770,8 @@ LANAgent provides a complete Hardhat development environment API for creating, c
   }
   ```
 - **POST** `/api/hardhat/projects/:name/compile` - Compile project
+- **POST** `/api/hardhat/projects/:name/flatten` - Flatten a contract into one source file for explorer verification
+  - Body: `{ "contractName": "MyToken" }` → `{ success, flattenedSource }`; 400 on an unsafe name, 404 if `contracts/<name>.sol` is missing
 
 #### Contract Deployment
 - **POST** `/api/hardhat/projects/:name/deploy` - Deploy contract

@@ -161,9 +161,9 @@ export default class SkillsPlugin extends BasePlugin {
       },
       {
         command: 'profile',
-        description: 'Show, add to, or replace the profile the agent keeps about its operator (it is part of every prompt)',
-        usage: 'profile()  |  profile({ add: "I prefer short answers" })  |  profile({ set: "- ...\\n- ..." })',
-        examples: ['what do you know about me', 'show my profile', 'remember that I prefer short answers', 'add to my profile']
+        description: 'Show, add to, or replace the profile the agent keeps about its operator (it is part of every prompt), or list its recent changes',
+        usage: 'profile()  |  profile({ add: "I prefer short answers" })  |  profile({ set: "- ...\\n- ..." })  |  profile({ changes: true })',
+        examples: ['what do you know about me', 'show my profile', 'remember that I prefer short answers', 'add to my profile', 'what changed in my profile']
       },
       {
         command: 'reject',
@@ -514,6 +514,13 @@ export default class SkillsPlugin extends BasePlugin {
             await profile.refreshSnapshot();
             return { success: true, added, result: added.length ? `Added to your profile: ${added.join('; ')}` : 'That is already in your profile (or looked like a secret, which is never stored there).' };
           }
+          if (data.changes) {
+            const changes = await profile.changes({ limit: Math.min(20, Math.max(1, Number(data.limit) || 5)) });
+            if (!changes.length) return { success: true, changes, result: 'Your profile has no recorded changes yet.' };
+            const bare = l => l.replace(/^[-*]\s*/, '');
+            const fmt = c => [`${c.at} — ${c.action} (${c.source})`, ...c.added.map(l => `  + ${bare(l)}`), ...c.removed.map(l => `  − ${bare(l)}`)].join('\n');
+            return { success: true, changes, result: `Recent profile changes, newest first:\n${changes.map(fmt).join('\n')}` };
+          }
           const text = await profile.text();
           return { success: true, profile: text, result: text ? `What I keep about you (part of every prompt):\n${text}` : 'Your profile is empty so far.' };
         }
@@ -542,7 +549,7 @@ export default class SkillsPlugin extends BasePlugin {
 {"name": "short-kebab-case-name", "description": "one sentence: what it does and when to use it", "body": "the procedure as markdown numbered steps, in the user's words"}`,
       update: `The user wants to change an existing skill. Produce JSON only: {"name": "kebab-case skill name", "body": "the full new procedure as markdown steps if they gave one, else omit", "description": "new one-line description if they gave one, else omit", "reason": "what they want changed"}`,
       installFromUrl: `Extract the link or owner/repo/path of the skill to install. JSON only: {"url": "..."}`,
-      profile: `The user is talking about the profile the agent keeps about them. JSON only: {"add": "the fact or preference to remember, in one short line"} if they want something remembered; {} if they only want to see it.`,
+      profile: `The user is talking about the profile the agent keeps about them. JSON only: {"add": "the fact or preference to remember, in one short line"} if they want something remembered; {"changes": true} if they ask what changed in it or for its history; {} if they only want to see it.`,
       search: `The user wants to search the saved skills. JSON only, omitting anything they did not say: {"query": "words to look for", "status": "pending|active", "source": "auto|peer|manual|bundled", "taughtBy": "agent name"}`,
       pin: `Extract the skill and whether to pin it. JSON only: {"name": "kebab-case-name", "pinned": true|false}`
     };

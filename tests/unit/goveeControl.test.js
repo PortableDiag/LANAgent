@@ -93,3 +93,24 @@ test('execute accepts repeat: it redoes the last command, or says there is none'
   const r = await g.execute({ action: 'repeat' });
   assert.equal(r.success, true, JSON.stringify(r));
 });
+
+// 2026-11-11: white went out as type color_temperature_setting; Govee said success, the light stayed blue at 50%.
+test('white temperature is sent as color_setting/colorTemperatureK', async () => {
+  const { p, sent } = rig([ok('x')]);
+  await p.execute({ action: 'temperature', device: 'Master Toilet', kelvin: 6500 });
+  const t = sent.find(c => c.instance === 'colorTemperatureK');
+  assert.equal(t.type, 'devices.capabilities.color_setting');
+});
+
+test('accepted but the light shows the old value is not "done"', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'setInterval'] });
+  const { p } = rig([ok('x')]);
+  p.makeRequest = async (ep) => ep === '/device/state'
+    ? { payload: { capabilities: [{ instance: 'online', state: { value: true } }, { instance: 'colorTemperatureK', state: { value: 0 } }] } }
+    : ok('x');
+  const run = p.execute({ action: 'temperature', device: 'Master Toilet', kelvin: 6500 });
+  for (let i = 0; i < 20; i++) { await Promise.resolve(); t.mock.timers.tick(5000); await new Promise(r => setImmediate(r)); }
+  const r = await run;
+  assert.equal(r.success, false);
+  clearInterval(p.retryTimer);
+});

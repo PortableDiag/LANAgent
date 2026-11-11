@@ -29,6 +29,12 @@ export function findDevice(text, names) {
   return hits.length === 1 ? hits[0] : null;
 }
 
+/** Whether the text names a distinctive word of a device other than `except`. */
+function mentionsOther(text, names, except) {
+  const tw = new Set(words(text));
+  return names.some(n => n !== except && words(n).some(w => w.length >= 4 && !GENERIC.has(w) && tw.has(w)));
+}
+
 /** What to do with the light: one action, or null when there is none or more than one. */
 export function findSetting(text, colorNames = []) {
   const t = String(text).toLowerCase();
@@ -56,12 +62,14 @@ export function findSetting(text, colorNames = []) {
 }
 
 /** { device, action, params } for a plain one-light, one-setting command, else null. */
-export function parseLightCommand(text, deviceNames, colorNames = []) {
+export function parseLightCommand(text, deviceNames, colorNames = [], { recentDevice = null } = {}) {
   if (!text || !deviceNames?.length) return null;
   const s = String(text).trim();
   if (s.length > 160 || QUESTION.test(s) || NOT_NOW.test(s)) return null;
   if (/\b(and then|then|also)\b/i.test(s)) return null;
-  const device = findDevice(s, deviceNames);
+  // "Turn the bathroom light on" right after a Master Toilet command: no device is named, so it is that one
+  // (2026-11-11: it became device "second time to turn the fucking bathroom", the thermometer).
+  const device = findDevice(s, deviceNames) || (recentDevice && /\b(light|lights|lamp|bulb|it)\b/i.test(s) && !mentionsOther(s, deviceNames, recentDevice) ? recentDevice : null);
   if (!device) return null;
   const setting = findSetting(s, colorNames);
   if (!setting) return null;
@@ -75,7 +83,16 @@ export function parseLightCommand(text, deviceNames, colorNames = []) {
  */
 const COMPLAINT = /\b(didn'?t|did not|doesn'?t|does not|isn'?t|is not|wasn'?t|not)\b[^.!?]{0,30}\b(work|working|on|change|changed|happen|happened|come on|turn on)\b|\bstill (dark|off|not|nothing|the same)\b|\bin the dark\b|\bfix (the |my |that |this )?(damn |fucking |stupid )?(light|lights|lamp|it)\b|\b(try|do) (it |that )?again\b|\bretry\b|\balready\b|\bhurry\b|\bnothing happened\b/i;
 
+/** "Do it now", "Lies", "now!": short pushes right after a light command mean do it again (2026-11-11). */
+const PUSH = /^\s*(alice[,\s]+)?((just )?do it( now| already)?|now( now)*|right now|lies?|liar|you lied|that'?s a lie|bullshit|wrong|nope|no it'?s not|it'?s (still )?not( on| done| white)?|not done)[\s.!]*$/i;
+
+/** "Prove it", "is it on?", "did it work?": read the light back and say what it shows. */
+export function isLightCheck(text) {
+  return /^\s*(alice[,\s]+)?(prove it|show me|check (it|the light)|is it (on|done|working|white)|did it (work|change|go through)|what (is|does) (it|the light) (show|showing|set to|at))\b[\s?.!]*$/i.test(String(text || ''));
+}
+
 export function isLightComplaint(text) {
+  if (PUSH.test(String(text || ''))) return true;
   const s = String(text || '').trim();
   if (!s || s.length > 200 || /\?\s*$/.test(s) && !/\bwhy\b/i.test(s) && !COMPLAINT.test(s)) return false;
   // "Why did I have to ask 3 times" is a question about it, not a request to do it again.

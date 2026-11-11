@@ -240,8 +240,12 @@ export class WebInterface {
     setupFeatureRequestRoutes(this.app, this.agent);
     
     // Setup system reports routes - dynamic import to avoid circular dependency
+    // Mounted here, at once, and filled in when the import lands: mounted inside .then() it sat behind the plugin
+    // catch-all and the SPA fallback's 404, so no /api/system/reports route had ever answered (2026-11-11).
+    let reportsRouter = null;
+    this.app.use('/api/system', (req, res, next) => (reportsRouter && /^\/reports(\/|$)/.test(req.path) ? reportsRouter(req, res, next) : next()));
     import('../../api/services/systemReports.js').then(module => {
-      this.app.use('/api/system', module.default);
+      reportsRouter = module.default;
     }).catch(error => {
       logger.error('Failed to load system reports routes:', error);
     });

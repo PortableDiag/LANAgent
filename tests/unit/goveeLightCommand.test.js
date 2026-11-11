@@ -43,3 +43,16 @@ test('a complaint about the light repeats it; a question about it does not', () 
   for (const no of ['Why did I have to ask 3 times', 'I asked more than twice', 'Finally', 'Assume if I have to ask more than once, you\'ve failed', 'what lights do I have?'])
     assert.equal(isLightComplaint(no), false, no);
 });
+
+test('2026-11-11 follow-ups: pushes repeat, "prove it" reads back, an unnamed light is the one just used', async () => {
+  const { isLightComplaint, isLightCheck, parseLightCommand } = await import('../../src/services/govee/lightCommand.js');
+  for (const t of ['Do it now', 'Lies', 'NOW NOW', 'do it already!']) assert.equal(isLightComplaint(t), true, t);
+  for (const t of ['PROVE IT', 'is it on?', 'did it work?']) assert.equal(isLightCheck(t), true, t);
+  assert.equal(isLightCheck('prove the theorem'), false);
+  const names = ['Master Toilet', 'TVBars', 'Wifi Thermometer', 'Kitchen Bar 1'];
+  const r = parseLightCommand("I'm asking you for the second time to turn the fucking bathroom light on, Alice.", names, [], { recentDevice: 'Master Toilet' });
+  assert.equal(r.device, 'Master Toilet');
+  assert.equal(r.action, 'power');
+  assert.equal(parseLightCommand('turn the kitchen bar light on', names, [], { recentDevice: 'Master Toilet' }).device, 'Kitchen Bar 1');
+  assert.equal(parseLightCommand('turn the bathroom light on', names, []), null);
+});
