@@ -49,7 +49,7 @@ const THREE = window.THREE; THREE.GLTFLoader = GLTFLoader;
 const d = {
 ${methods}
 };
-window.setup = async ({ width, height, fps, seconds, loop, prop, background }) => {
+window.setup = async ({ width, height, fps, seconds, loop, prop, background, mouth = null }) => {
   const r = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
   r.setPixelRatio(1); r.setSize(width, height); document.body.appendChild(r.domElement);
   const scene = new THREE.Scene();
@@ -98,16 +98,52 @@ window.setup = async ({ width, height, fps, seconds, loop, prop, background }) =
   mixer.setTime(0);
   for (let i = 0; i < 90; i++) vrm.update(1 / 60);
   action.reset().play(); mixer.setTime(0);
+  // A voice-over moves the mouth: "aa" opens with the voice's loudness in each frame (2026-11-11).
+  const em = vrm.expressionManager;
+  const canTalk = !!(mouth && em && em.getExpression && em.getExpression('aa'));
   window.frame = (i) => {
     if (i > 0) mixer.update(1 / fps);
+    if (canTalk) em.setValue('aa', mouth[i] || 0);
     vrm.update(1 / fps);
     r.render(scene, cam);
     return r.domElement.toDataURL('image/jpeg', 0.9);
   };
-  return { duration: clip.duration, tracks: clip.tracks.length, pole: poleX };
+  return { duration: clip.duration, tracks: clip.tracks.length, pole: poleX, talks: canTalk };
 };
 window.ready = true;
 </script></body></html>`;
+}
+
+const VOICE_MAX_S = 60;
+
+/**
+ * The voice's length and, per video frame, how open the mouth is (0..1): the loudness of that frame's slice of the
+ * audio, scaled to the loudest, with quiet slices shut. ffmpeg decodes any format to 16 kHz mono.
+ */
+export async function voiceEnvelope(file, fps) {
+  const pcm = await new Promise((resolve, reject) => {
+    const p = spawn('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-i', file, '-f', 's16le', '-ac', '1', '-ar', '16000', 'pipe:1'], { stdio: ['ignore', 'pipe', 'pipe'] });
+    const out = []; let err = '';
+    p.stdout.on('data', d => out.push(d)); p.stderr.on('data', d => { err += d; });
+    p.on('error', reject);
+    p.on('close', code => (code === 0 ? resolve(Buffer.concat(out)) : reject(new Error(`ffmpeg could not read the voice: ${err.trim() || code}`))));
+  });
+  return envelopeFromPcm(pcm, 16000, fps);
+}
+
+/** envelope of 16-bit mono PCM: { seconds, mouth[] } (exported for tests). */
+export function envelopeFromPcm(pcm, rate, fps) {
+  const samples = Math.floor(pcm.length / 2);
+  const per = Math.max(1, Math.round(rate / fps));
+  const rms = [];
+  for (let i = 0; i < samples; i += per) {
+    let sum = 0; const end = Math.min(samples, i + per);
+    for (let j = i; j < end; j++) { const v = pcm.readInt16LE(j * 2) / 32768; sum += v * v; }
+    rms.push(Math.sqrt(sum / Math.max(1, end - i)));
+  }
+  const peak = Math.max(1e-6, ...rms);
+  const mouth = rms.map(v => { const x = v / peak; return x < 0.12 ? 0 : Math.min(1, +(x * 1.15).toFixed(3)); });
+  return { seconds: samples / rate, mouth };
 }
 
 const MIME = { '.js': 'text/javascript', '.vrm': 'model/gltf-binary', '.vrma': 'model/gltf-binary', '.html': 'text/html' };
@@ -124,7 +160,7 @@ export function renderClipVideo(opts) {
 }
 
 async function render({ modelPath, clipPath, loop = false, prop = null, seconds = null, fps = 24, width = 720, height = 960,
-  background = '#121826', timeoutMs = 8 * 60 * 1000, launch = null } = {}) {
+  background = '#121826', timeoutMs = 8 * 60 * 1000, launch = null, voice = null } = {}) {
   const started = Date.now();
   const html = pageHtml(designerMethods(await fs.readFile(path.join(PUBLIC_DIR, 'avatar.html'), 'utf8')));
   const { default: puppeteer } = await import('puppeteer');
@@ -134,6 +170,13 @@ async function render({ modelPath, clipPath, loop = false, prop = null, seconds 
   });
   const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'clip-video-'));
   const out = path.join(tmp, 'clip.mp4');
+  // A voice-over: the audio as a file for ffmpeg, its length, and how open the mouth is in each frame.
+  let audioFile = null, said = null;
+  if (voice?.audio?.length) {
+    audioFile = path.join(tmp, `voice.${voice.format || 'mp3'}`);
+    await fs.writeFile(audioFile, voice.audio);
+    said = await voiceEnvelope(audioFile, fps);
+  }
   const timer = setTimeout(() => browser.close().catch(() => {}), timeoutMs);
   try {
     const page = await browser.newPage();
@@ -160,11 +203,13 @@ async function render({ modelPath, clipPath, loop = false, prop = null, seconds 
     await page.goto(`${HOST}/render.html`, { waitUntil: 'load', timeout: 60000 });
     await page.waitForFunction('window.ready === true', { timeout: 60000 }).catch(() => { throw new Error(`the render page did not start: ${pageErrors[0] || 'no error given'}`); });
     // The clip's length is known only once it is loaded, so the page is set up with a generous span first.
-    const probe = await page.evaluate((o) => window.setup(o), { width, height, fps, seconds: 40, loop, prop, background });
-    const total = videoSeconds(probe.duration, loop, { seconds });
+    const probe = await page.evaluate((o) => window.setup(o), { width, height, fps, seconds: 40, loop, prop, background, mouth: said?.mouth || null });
+    // With a voice-over the video runs at least as long as the voice (the clip holds its last pose, or loops).
+    const total = said ? Math.min(VOICE_MAX_S, Math.max(videoSeconds(probe.duration, loop, { seconds }), said.seconds + 0.6)) : videoSeconds(probe.duration, loop, { seconds });
     const frames = Math.max(1, Math.round(total * fps));
+    const audioArgs = audioFile ? ['-i', audioFile, '-map', '0:v', '-map', '1:a', '-c:a', 'aac', '-b:a', '128k'] : [];
     const ff = spawn('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-y', '-f', 'image2pipe', '-framerate', String(fps), '-c:v', 'mjpeg', '-i', '-',
-      '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '22', '-pix_fmt', 'yuv420p', '-movflags', '+faststart', '-an', out], { stdio: ['pipe', 'ignore', 'pipe'] });
+      ...audioArgs, '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '22', '-pix_fmt', 'yuv420p', '-movflags', '+faststart', ...(audioFile ? [] : ['-an']), out], { stdio: ['pipe', 'ignore', 'pipe'] });
     let ffErr = '';
     ff.stderr.on('data', (b) => { ffErr += b; });
     const done = new Promise((resolve, reject) => ff.on('close', (code) => (code === 0 ? resolve() : reject(new Error(`ffmpeg: ${ffErr.trim() || `exit ${code}`}`)))));
@@ -175,7 +220,7 @@ async function render({ modelPath, clipPath, loop = false, prop = null, seconds 
     ff.stdin.end();
     await done;
     const video = await fs.readFile(out);
-    const facts = { seconds: +(frames / fps).toFixed(2), frames, fps, width, height, bytes: video.length, pole: probe.pole, ms: Date.now() - started };
+    const facts = { seconds: +(frames / fps).toFixed(2), frames, fps, width, height, bytes: video.length, pole: probe.pole, ms: Date.now() - started, voice: !!said, lipSync: !!probe.talks };
     logger.info(`Clip video: ${path.basename(clipPath)} on ${path.basename(modelPath)}, ${facts.seconds}s, ${frames} frames, ${(video.length / 1048576).toFixed(1)} MB in ${(facts.ms / 1000).toFixed(0)}s`);
     return { video, ...facts };
   } finally {

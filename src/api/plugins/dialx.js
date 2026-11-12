@@ -15,6 +15,15 @@ import { PluginSettings } from '../../models/PluginSettings.js';
  * This plugin asks for the call; the conversation itself runs in the hub (services/textx/dialx.js).
  */
 
+const EXTRACT_MS = Number(process.env.DIALX_EXTRACT_MS) || 20000;
+const EXTRACT_FALLBACK_MODEL = process.env.DIALX_EXTRACT_FALLBACK_MODEL || 'openai/gpt-4.1-mini';
+/** The promise, or a timeout error after `ms` (the model call itself is left to finish on its own). */
+export function withinMs(promise, ms) {
+  let timer;
+  return Promise.race([promise, new Promise((_, rej) => { timer = setTimeout(() => rej(new Error(`no answer in ${Math.round(ms / 1000)} s`)), ms); })])
+    .finally(() => clearTimeout(timer));
+}
+
 const ERROR_TEXT = {
   // TextX 0.4.41 says too_big, DialX 0.7.8 too_large: a reply too big for the relay (the same thing).
   too_big: 'That is too big to come through from the phone.',
@@ -1092,7 +1101,16 @@ export default class DialXPlugin extends BasePlugin {
     // line, so its opening and purpose took the owner's "I" as the speaker (call 123); this prompt's win.
     const ours = data.originalInput ? new Set(['purpose', 'opening']) : new Set();
     try {
-      const res = await pm.generateResponse(
+      // Call 142 (2026-11-11): this request hung 2.5 min on one model, and the call waited on it. A slow model gets
+      // EXTRACT_MS, then a different model gets EXTRACT_MS; past that the call goes with what the router already read.
+      const ask = (prompt, opts) => withinMs(pm.generateResponse(prompt, opts), EXTRACT_MS);
+      const gen = async (prompt, opts) => {
+        try { return await ask(prompt, opts); } catch (e) {
+          this.logger.warn(`dialx call: extraction slow or failed (${e.message}); trying ${EXTRACT_FALLBACK_MODEL}`);
+          return ask(prompt, { ...opts, model: EXTRACT_FALLBACK_MODEL });
+        }
+      };
+      const res = await gen(
         `${owner} asked you, ${name}, to make a phone call. Request: ${request}\n` +
         'Extract one JSON object {"contact": who to call, "at": when, "purpose": why, "opening": first line, "voicemail": message to leave, "voice": a voice effect for your voice on this call, "briefs": what each agent on the call should do}.\n' +
         `- "briefs": only when the request puts other agents on the call AND says who does what ("${name} take notes, Orbit ` +

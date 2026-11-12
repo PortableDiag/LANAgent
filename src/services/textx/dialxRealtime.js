@@ -293,12 +293,14 @@ function atLeast(device, a, b, c) {
 }
 
 /**
- * Upload G.711 mu-law instead of pcm16 on a call with more than one agent (4293 #601-#604): two pcm16 sockets (~128 KB/s)
- * stalled 5 times in 90 s on the owner's mobile uplink; one fits. DialX 0.7.127+ reads the input format from the session
- * and sends 8 kHz mu-law (~11 KB/s); an older DialX always sends pcm16, which a pcmu session would hear as noise.
+ * Upload G.711 mu-law instead of pcm16 (4293 #601-#604, #619). DialX 0.7.127+ reads the input format from the session and
+ * sends 8 kHz mu-law (~11 KB/s, about 6x less than pcm16); an older DialX always sends pcm16, which a pcmu session would
+ * hear as noise. First for group calls (two pcm16 sockets stalled 5 times in 90 s on the owner's mobile uplink); since
+ * 2026-11-11 for every call: one pcm16 socket stalled too (call 141 to Mom: "the upload is 313 KB behind" 14 s after
+ * pickup, then DialX stopped). A phone call is 8 kHz narrowband, so nothing audible is lost.
  */
-export function lightUpload(s, group) {
-  return !!group && atLeast(s?.device, 0, 7, 127);
+export function lightUpload(s) {
+  return atLeast(s?.device, 0, 7, 127);
 }
 
 /** A session reconnecting after a drop (DialX 0.7.87): the conversation so far, and no second opening. */
@@ -371,7 +373,7 @@ export function askAgentRules(name, owner) {
 // transcriber stops guessing one per noise. DIALX_TRANSCRIBE_LANGUAGE (ISO-639-1) for an owner who speaks another.
 const TRANSCRIBE_LANGUAGE = process.env.DIALX_TRANSCRIBE_LANGUAGE || 'en';
 
-export function sessionConfig({ instructions, voice = REALTIME_VOICE, model = REALTIME_MODEL, group = false, owner = false, pcmu = false, errand = false }) {
+export function sessionConfig({ instructions, voice = REALTIME_VOICE, model = REALTIME_MODEL, group = false, owner = false, pcmu = false, errand = false, canText = false }) {
   const pcm = { type: 'audio/pcm', rate: 24000 }; // what DialX streams and plays (#195)
   const upload = pcmu ? { type: 'audio/pcmu' } : pcm; // see lightUpload
   return {
@@ -396,6 +398,9 @@ export function sessionConfig({ instructions, voice = REALTIME_VOICE, model = RE
           parameters: { type: 'object', properties: { status: { type: 'string' }, alert: { type: 'boolean' } }, required: ['status'] } },
         { type: 'function', name: 'errand_approve', description: 'Ask the account holder a yes/no question on their phone and wait for the answer. Required before agreeing to any charge, payment, cancellation or account change. Answers approved, declined or timeout.',
           parameters: { type: 'object', properties: { question: { type: 'string' } }, required: ['question'] } }] : []),
+        // Call 142 (2026-11-11): Mom asked to be shown a mushroom colour and the voice could only describe it.
+        ...(canText ? [{ type: 'function', name: 'text_color', description: 'Text the person you are talking to a picture of a colour (a swatch with its name), when they want to see one. Say you are sending it.',
+          parameters: { type: 'object', properties: { name: { type: 'string', description: 'the colour name, e.g. "Mushroom"' }, hex: { type: 'string', description: 'the colour as #RRGGBB' } }, required: ['name', 'hex'] } }] : []),
         ...(group || errand ? [{ type: 'function', name: 'stay_silent', description: 'Say nothing this turn: it is not for you, or you have nothing new to add.',
           parameters: { type: 'object', properties: {}, required: [] } }] : []),
         // Call 48 (2026-10-26): asked to take notes in Trellis, the call voice said it had no access. The agent has it.
@@ -414,6 +419,28 @@ export function sessionConfig({ instructions, voice = REALTIME_VOICE, model = RE
       tool_choice: 'auto'
     }
   };
+}
+
+/** A one-to-one call with a number to text (not a group, an agent or a test). */
+export function canTextColor(s) {
+  return !!s && !s.group && !s.peerAgent && !s.test && !!(s.number || s.ownerOnLine);
+}
+
+/** "#a1b2c3", "a1b2c3", "#abc" → "#A1B2C3"; anything else → null. */
+export function normalHex(v) {
+  const m = /^#?([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(String(v || '').trim());
+  if (!m) return null;
+  const h = m[1].length === 3 ? m[1].split('').map(c => c + c).join('') : m[1];
+  return `#${h.toUpperCase()}`;
+}
+
+/** A 600x400 PNG: the colour, with its name and hex on a white band underneath. */
+export async function colorSwatch(hex, name) {
+  const { default: sharp } = await import('sharp');
+  const esc = (t) => String(t).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="600" height="400"><rect width="600" height="320" fill="${hex}"/>` +
+    `<rect y="320" width="600" height="80" fill="#ffffff"/><text x="300" y="368" font-family="sans-serif" font-size="30" text-anchor="middle" fill="#222">${esc(name)}  ${hex}</text></svg>`;
+  return sharp(Buffer.from(svg)).png().toBuffer();
 }
 
 export class DialXRealtime {
@@ -453,7 +480,7 @@ export class DialXRealtime {
     const res = await this.fetch(`${API}/client_secrets`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${this.env.OPENAI_API_KEY}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify(sessionConfig({ instructions, voice, model, group: (s.rtGroup = isGroupCall(s, name)), owner: s.ownerOnLine, pcmu: (s.rtPcmu = lightUpload(s, s.rtGroup)), errand: !!s.errand }))
+      body: JSON.stringify(sessionConfig({ instructions, voice, model, group: (s.rtGroup = isGroupCall(s, name)), owner: s.ownerOnLine, pcmu: (s.rtPcmu = lightUpload(s, s.rtGroup)), errand: !!s.errand, canText: canTextColor(s) }))
     });
     const body = await res.json().catch(() => ({}));
     const secret = body?.value || body?.client_secret?.value;
@@ -637,6 +664,7 @@ export class DialXRealtime {
       if (e.name === 'call_status') return this.callStatus(s, fn);
       if (e.name === 'take_note' || e.name === 'read_notes') return this.notesTool(s, fn, e.name, e.arguments);
       if (e.name === 'report_bug') return this.reportBugTool(s, fn, e.arguments);
+      if (e.name === 'text_color') return this.textColorTool(s, fn, e.arguments);
       if (s.errand && ['press_keys', 'errand_status', 'errand_approve'].includes(e.name)) return this.errandTool(s, fn, e.name, e.arguments);
       if (e.name === 'stay_silent') {
         s.silences = (s.silences || 0) + 1;
@@ -837,6 +865,33 @@ export class DialXRealtime {
     }
     this.logger.info?.(`DialX: call ${s.id}: report_bug ${output.error ? `failed: ${output.error}` : 'done'} in ${Date.now() - t0} ms`);
     await this.answerTool(s, fn, gen, output, 'report_bug');
+  }
+
+  /** text_color: a swatch picture with the colour's name, texted to the person on the call (TextX MMS). */
+  async textColorTool(s, fn, args) {
+    const gen = s.rtGen;
+    const t0 = Date.now();
+    let a = {};
+    try { a = JSON.parse(args || '{}') || {}; } catch { /* empty */ }
+    const hex = normalHex(a.hex);
+    const name = String(a.name || '').trim().slice(0, 40) || hex;
+    let output;
+    if (!canTextColor(s)) output = { error: 'There is no number to text on this call.' };
+    else if (!hex) output = { error: 'Give the colour as #RRGGBB.' };
+    else {
+      try {
+        const png = await colorSwatch(hex, name);
+        const tool = this.calls.agent?.apiManager?.apis?.get?.('textx');
+        const plugin = tool?.instance || tool;
+        if (!plugin?.execute) throw new Error('texting is not available');
+        const to = s.ownerOnLine ? 'me' : s.number;
+        const r = await plugin.execute({ action: 'send', to, text: `${name} (${hex})`,
+          _context: { userId: 'web-user', originalInput: `send them a picture of the colour ${name}`, attachedFile: { base64: png.toString('base64'), mimeType: 'image/png', filename: `${name.replace(/[^\w-]+/g, '-')}.png` } } });
+        output = r?.success ? { sent: true, note: String(r.result || '').slice(0, 200) } : { error: r?.error || 'not sent' };
+      } catch (e) { output = { error: e.message }; }
+    }
+    this.logger.info?.(`DialX: call ${s.id}: text_color ${name} ${hex || a.hex} ${output.error ? `failed: ${output.error}` : 'sent'} in ${Date.now() - t0} ms`);
+    await this.answerTool(s, fn, gen, output, 'text_color');
   }
 
   /** take_note / read_notes: straight to the notes plugin, no router, so a note is saved or read back in about a second. */

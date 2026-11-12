@@ -67,6 +67,12 @@ function modelPicture(item) {
 }
 const KIND_WORDS = 'avatar, icon, portrait, sticker, emoji, wallpaper, vrm, animation';
 
+/** Words in quotes in the request ("saying 'hi everyone'"): what a video's voice-over says, verbatim. */
+export function quotedWords(text) {
+  const m = /["“]([^"”]{2,600})["”]|'([^']{2,600})'(?=\s|$|[.,!?])/.exec(String(text || ''));
+  return m ? (m[1] || m[2]).trim() : '';
+}
+
 export default class BotsAndBorgsPlugin extends BasePlugin {
   constructor(agent) {
     super(agent);
@@ -100,9 +106,9 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
       },
       {
         command: 'use',
-        description: 'Use something already bought from Bots & Borgs, at no cost: as "send" (a sticker, emoji, portrait or wallpaper to `to`, "me" for the owner; `mood` picks a sticker), "avatar", "install" (a VRM into the model gallery) or "wear" (make a VRM this agent\'s active 3D model), "play" (an owned animation clip, e.g. a wave or a dance, on its 3D body now), "stop", or "video" (film its 3D body doing a clip and send the video, to the owner on Telegram by default)',
+        description: 'Use something already bought from Bots & Borgs, at no cost: as "send" (a sticker, emoji, portrait or wallpaper to `to`, "me" for the owner; `mood` picks a sticker), "avatar", "install" (a VRM into the model gallery) or "wear" (make a VRM this agent\'s active 3D model), "play" (an owned animation clip, e.g. a wave or a dance, on its 3D body now), "stop", or "video" (film its 3D body doing a clip and send the video, to the owner on Telegram by default; `say` puts the agent\'s own voice over it, mouth moving)',
         usage: 'use({ item: "vrm-mm-bear-stickers", as: "send", to: "me", mood: "happy" })',
-        examples: ['send me a happy sticker', 'send Sam a sad robot emoji', 'use the bear vrm model as your 3d model', 'wear the bear model', 'install the bear model you bought', 'send me the bear portrait', 'send me a wallpaper from your wallpapers', 'set my wallpaper from my bots and borgs wallpapers', 'do the rumba you bought', 'play your wave animation', 'dance for me with your new dance pack', 'send me a video of you doing the pole dance', 'film yourself doing the rumba and send it to me']
+        examples: ['send me a happy sticker', 'send Sam a sad robot emoji', 'use the bear vrm model as your 3d model', 'wear the bear model', 'install the bear model you bought', 'send me the bear portrait', 'send me a wallpaper from your wallpapers', 'set my wallpaper from my bots and borgs wallpapers', 'do the rumba you bought', 'play your wave animation', 'dance for me with your new dance pack', 'send me a video of you doing the pole dance', 'film yourself doing the rumba and send it to me', 'send me a video of you waving and saying "hi everyone, I\'m ALICE"', 'make a video of your cheer animation with your voice over it']
       },
       {
         command: 'orders',
@@ -150,11 +156,12 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
       '"variant" (an exact variant id like agent-avatar-singles-sentinel, only if named), "use" ("avatar" if it is for the agent\'s own avatar, ' +
       '"send" if it is to be given to someone, "wear" if the agent should become that 3D model), "to" (who to send it to; "me" for the person asking), ' +
       `"item" (words naming something already owned), "as" ("send", "avatar", "install" or "wear"), "mood" (the feeling a sticker should show), "kind" (one of: ${KIND_WORDS}), ` +
-      '"avoid" (names the request says are taken or not wanted, comma-separated, e.g. "Sentinel" from "Nexus already picked Sentinel"). Leave out what is not said. JSON only.',
+      '"avoid" (names the request says are taken or not wanted, comma-separated, e.g. "Sentinel" from "Nexus already picked Sentinel"), ' +
+      '"say" (for a video: the words the agent speaks over it. Quoted words exactly; when it asks for a voice-over or for the agent to say or talk about something without exact words, write one to three short spoken sentences, in the first person, that fit). Leave out what is not said. JSON only.',
     { maxTokens: 200, temperature: 0 });
     const raw = String(res?.content || '');
     const j = JSON.parse(raw.slice(raw.indexOf('{'), raw.lastIndexOf('}') + 1) || '{}');
-    return Object.fromEntries(Object.entries(j || {}).filter(([k, v]) => ['query', 'slug', 'variant', 'use', 'to', 'item', 'as', 'mood', 'kind', 'avoid'].includes(k) && v != null && v !== ''));
+    return Object.fromEntries(Object.entries(j || {}).filter(([k, v]) => ['query', 'slug', 'variant', 'use', 'to', 'item', 'as', 'mood', 'kind', 'avoid', 'say'].includes(k) && v != null && v !== ''));
   }
 
   // ── HTTP ────────────────────────────────────────────────────────────────────────────────
@@ -839,7 +846,7 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     if (as === 'stop' || (!as && /\bstop (?:dancing|the (?:dance|animation|clip))\b/i.test(asked))) return this.stopClip();
     // "Send me a video of you doing the pole dance": film it and send it.
     if (as === 'video' || ((kind === 'animation' || /\b(dance|dancing|wave|waving|bow|cheer|clap|laugh|dab|rumba|pole)\b/i.test(asked)) && /\b(video|film|clip of you|record(?:ing)?)\b/i.test(asked))) {
-      return this.sendClipVideo({ item, clip: data.clip || data.mood, asked, to: String(data.to || (/\b(me|to me)\b/i.test(asked) || !/\bsend\s+(?!me\b)\w+/i.test(asked) ? 'me' : /\bsend\s+(\w+)/i.exec(asked)[1])), wait: data.wait });
+      return this.sendClipVideo({ item, clip: data.clip || data.mood, asked, say: data.say || data.voiceover || quotedWords(asked), to: String(data.to || (/\b(me|to me)\b/i.test(asked) || !/\bsend\s+(?!me\b)\w+/i.test(asked) ? 'me' : /\bsend\s+(\w+)/i.exec(asked)[1])), wait: data.wait });
     }
     if (as === 'play' || as === 'dance' || kind === 'animation' || (!as && !data.to && /\b(dance|do (?:the|a) |wave|bow|cheer|clap|laugh|dab)\b/i.test(asked) && !/\b(stickers?|emoji|portraits?|wallpapers?|icons?|vrm|model)\b/i.test(asked))) {
       return this.playClip({ item, clip: data.clip || data.mood, asked });
@@ -983,7 +990,9 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
    * Rendered here (services/avatar/clipVideo.js); a long routine takes a minute or two, so the answer comes at once
    * and the video follows. `wait: true` waits for it (tests, API).
    */
-  async sendClipVideo({ item, clip, asked = '', to = 'me', wait = false }) {
+  async sendClipVideo({ item, clip, asked = '', to = 'me', wait = false, say = '' }) {
+    // A voice-over (the owner, 2026-11-11): the agent's own voice speaking over the clip, with its mouth moving to it.
+    const words = String(say || '').trim().slice(0, 600);
     const picked = await this.chooseClip({ item, clip, asked });
     if (picked.error) return { success: false, error: picked.error };
     const { choice, entry, rel } = picked;
@@ -994,14 +1003,20 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     const label = entry.label || choice.file.label;
     const job = (async () => {
       const { renderClipVideo } = await import('../../services/avatar/clipVideo.js');
+      let voice = null;
+      if (words) {
+        const tts = await this.agent?.ttsService?.generateSpeech?.(words, { source: 'video' });
+        if (!tts?.buffer?.length) throw new Error("I couldn't make the voice-over");
+        voice = { audio: tts.buffer, format: tts.format || 'mp3' };
+      }
       const v = await (this.renderVideo || renderClipVideo)({ modelPath: path.join(this.vrmDir(), model.file), clipPath: path.join(this.vrmDir(), 'animations', rel),
-        loop: !!entry.loop, prop: entry.prop || null });
+        loop: !!entry.loop, prop: entry.prop || null, ...(voice ? { voice } : {}) });
       const filename = `${String(label).toLowerCase().replace(/[^a-z0-9]+/g, '-')}.mp4`;
       if (/^(me|owner|myself)$/i.test(to)) {
         const tg = this.agent?.interfaces?.get?.('telegram');
         if (!tg?.bot?.telegram?.sendVideo || !tg.authorizedUserId) throw new Error("Telegram isn't connected");
         await tg.bot.telegram.sendVideo(tg.authorizedUserId, { source: v.video, filename },
-          { caption: `${label} (${model.name || 'me'})`, supports_streaming: true, width: v.width, height: v.height, duration: Math.round(v.seconds) });
+          { caption: words ? `${label} (${model.name || 'me'}): "${words.slice(0, 900)}"` : `${label} (${model.name || 'me'})`, supports_streaming: true, width: v.width, height: v.height, duration: Math.round(v.seconds) });
       } else {
         const tx = this.agent?.apiManager?.apis?.get?.('textx');
         const textx = tx?.instance || tx;
@@ -1017,14 +1032,14 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     if (wait === true || wait === 'true') {
       const v = await job.catch(e => ({ error: e.message }));
       if (v.error) return { success: false, error: `The video of ${label} failed: ${v.error}` };
-      return { success: true, clip: label, seconds: v.seconds, result: `Sent ${who} a ${Math.round(v.seconds)}-second video of me doing ${label}.` };
+      return { success: true, clip: label, seconds: v.seconds, voice: !!v.voice, result: `Sent ${who} a ${Math.round(v.seconds)}-second video of me doing ${label}${words ? ', saying it in my voice' : ''}.` };
     }
     job.catch(async (e) => {
       this.logger.warn(`botsandborgs: video of ${label} failed: ${e.message}`);
       const tg = this.agent?.interfaces?.get?.('telegram');
       await tg?.sendNotification?.(`The video of ${label} didn't work: ${e.message}`).catch(() => {});
     });
-    return { success: true, clip: label, result: `Filming me doing ${label}; I'll send ${who} the video in a minute or so.` };
+    return { success: true, clip: label, result: `Filming me doing ${label}${words ? ' with my voice over it' : ''}; I'll send ${who} the video in a minute or so.` };
   }
 
   /** Every open 3D page of this agent gets the clip. 0 when the web interface isn't running. */

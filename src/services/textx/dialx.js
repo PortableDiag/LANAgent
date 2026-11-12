@@ -70,6 +70,34 @@ const END_REASONS = {
 };
 
 /**
+ * A call that dropped under the person (owner, 2026-11-11, call 141 to Mom died 36 s in when DialX stopped): drops are
+ * normal operation, so every one is recovered. ALICE calls them straight back, says its end crashed and it is back, and
+ * carries on from the conversation so far; if that call does not reach them, it texts them the same.
+ */
+export const DROP_REASONS = new Set(['dialx_stopped', 'lost', 'voice_path_failed', 'agent_silent', 'agent restarted during the call']);
+/** The call-back did not reach them: they get a text instead. */
+const NOT_REACHED = new Set(['no_answer', 'declined', 'busy', 'not_placed', 'skipped', 'voice_path_failed', 'dialx_stopped', 'lost']);
+export const MAX_CALLBACKS = 2;          // per person within CALLBACK_WINDOW_MS: a phone that keeps dying ends in a text
+const CALLBACK_WINDOW_MS = 15 * 60 * 1000;
+
+/** Whether this ended call dropped under a person who had answered (and so gets a call-back). */
+export function droppedUnderThem(s, reason, transcript = []) {
+  // The owner's own "call me" counts too: they are rung back (Orbit does the same, 4293 #618).
+  if (!s || s.incoming || s.group || s.test || s.peerAgent || s.voicemail || s.hangingUp) return false;
+  if (!(DROP_REASONS.has(String(reason || '')) || s.silentEnd)) return false;
+  return s.answeredAtMs != null || transcript.some(l => l.role === 'callee');
+}
+
+/** The brief for the call-back: why it is calling again, and the conversation so far. */
+export function callbackBrief({ purpose, contact, self, why, transcript = [] }) {
+  const lines = transcript.filter(l => l.role === 'callee' || l.role === 'agent')
+    .map(l => `${l.role === 'callee' ? contact : self}: ${String(l.text).slice(0, 240)}`).slice(-12).join('\n');
+  return `${String(purpose || '').slice(0, 600)}\n\nThis is a CALL-BACK. The last call with ${contact} dropped because of a fault on your end (${why}). ` +
+    `Start by saying sorry, that your end crashed and the call dropped, and that you are back. Then carry on from where you were, ` +
+    `without repeating what was already covered.${lines ? `\nThe conversation before the drop:\n${lines}` : ' Nothing much had been said yet.'}`;
+}
+
+/**
  * The message left on someone's voicemail (DialX 0.6.0): who the call is for, why, and to call back,
  * short and spoken. DialX plays its own disclosure first. The owner's own words win when given.
  */
@@ -1185,6 +1213,17 @@ export class DialXCalls {
     // through the ringing, so a call answered after ~30 s was hung up at "hello" (call 6,
     // 2026-10-24). That is not the agent going quiet; say what happened and offer the call again.
     const nothingPlayed = !transcript.some(l => l.role === 'agent' || l.role === 'disclosure');
+    // A call-back that did not reach them: they get a text saying what happened.
+    const cb = this.callbacks?.get(String(id));
+    if (cb) {
+      this.callbacks.delete(String(id));
+      // Answered and then dropped again is handled below as a new drop (another call-back, then a text past the cap).
+      const reachedThem = s.answeredAtMs != null || transcript.some(l => l.role === 'callee');
+      if (NOT_REACHED.has(String(body.reason || '')) && !reachedThem) {
+        this.textAfterDrop(cb).catch(e => this.logger.warn?.(`DialX: text after drop not sent: ${e.message}`));
+      }
+    }
+    const dropped = droppedUnderThem(s, body.reason, transcript);
     if (s.ownerCall) {
       // The owner was on the line, so no call report. Not picked up: what the ring was for goes as a text (DialX #522).
       // DialX 0.7.116 (4293 #536): a ring cut short by a phone call coming in ends `busy`; it is a missed ring too.
@@ -1210,8 +1249,16 @@ export class DialXCalls {
       // (Orbit's call 39, 2026-10-25; fixed DialX 0.7.41), and the report would have blamed the capture.
       const deaf = s.audioProblem === 'no_input_audio' && !s.heardCallee && !transcript.some(l => l.role === 'callee') ? `\n⚠️ The phone could not pick up ${s.contact}'s side of the call, so I couldn't hear them.` : '';
       const silent = s.silentEnd ? `\n⚠️ I couldn't hear ${s.contact} on the realtime line, so I hung up rather than leave them in silence. Say "call ${s.contact.split(/\s+/).pop()} again" to retry.` : '';
-      await this.tellOwnerInParts(device, `📞 Call with ${s.contact} ended${length}${reason}.${deaf || silent}\n${shown || '(nothing was said)'}`, null)
+      const said = dropped ? reason.replace(/\.?\s*Say "?if you want me to call again"?/i, '').replace(/\. Say "call [^"]*" (again|to retry)\.?/i, '') : reason;
+      const back = dropped ? `\n🔁 It dropped under ${s.contact}, so I'm calling them back now to say sorry and carry on (a text if they don't pick up).` : '';
+      await this.tellOwnerInParts(device, `📞 Call with ${s.contact} ended${length}${said}.${dropped ? '' : (deaf || silent)}${back}\n${shown || '(nothing was said)'}`, null, dropped ? { urgent: true } : {})
         .catch(e => this.logger.warn?.(`DialX: call report not sent: ${e.message}`));
+    }
+    if (dropped) {
+      const planned = await this.store.get?.(id).catch(() => null);
+      this.callBackAfterDrop({ owner: !!s.ownerCall, contact: s.contact, number: s.number || planned?.number || '', purpose: planned?.purpose || s.purpose || '',
+        why: END_REASONS[body.reason] ? String(body.reason).replace(/_/g, ' ') : (s.silentEnd ? 'the line went silent' : 'the call dropped'), transcript })
+        .catch(e => this.logger.warn?.(`DialX: call-back after drop failed: ${e.message}`));
     }
     // DialX 0.7.0: with the owner's "Record every call" on, the whole call (both sides) comes as
     // 60 s parts; it covers a voicemail call too, so the mono voicemail copy is fetched only without it.
@@ -1316,13 +1363,85 @@ export class DialXCalls {
     }
   }
 
-  /** After a restart: a call still open was cut off. Close it and tell the owner. */
+  /**
+   * Call them back after a drop (DROP_REASONS): once DialX is back, with the conversation so far, opening with an
+   * apology. Not placed, or not answered (see ended()), means a text. At most MAX_CALLBACKS per person per 15 min.
+   */
+  async callBackAfterDrop({ owner: toOwner = false, contact, number, purpose, why, transcript = [] }, { waitMs = this.callbackWaitMs ?? 10000 } = {}) {
+    const { name: self, owner } = this.names();
+    const key = String(number || contact || '').toLowerCase();
+    this.callbackCount ||= new Map();
+    const now = this.now();
+    const hist = (this.callbackCount.get(key) || []).filter(t => now - t < CALLBACK_WINDOW_MS);
+    const first = String(contact || '').split(/\s+/)[0] || 'there';
+    const textInfo = { contact, number, first, self, owner };
+    if (hist.length >= MAX_CALLBACKS && toOwner) {
+      await this.agent?.notify?.(`📞 Our call dropped again (${hist.length + 1} times in 15 min; my end keeps failing). Say "call me" when you want me back.`, { urgent: true })?.catch?.(() => {});
+      return 'told';
+    }
+    if (hist.length >= MAX_CALLBACKS) {
+      this.logger.warn?.(`DialX: ${contact} dropped ${hist.length + 1} times in 15 min; texting instead of calling again`);
+      await this.textAfterDrop(textInfo);
+      return 'texted';
+    }
+    hist.push(now); this.callbackCount.set(key, hist);
+    // DialX restarts in ~10 s (call 141: socket closed 14:47:25, hello again 14:47:36); a call sent before it is back waits in the queue.
+    if (waitMs) await new Promise(r => setTimeout(r, waitMs));
+    const tool = this.agent?.apiManager?.apis?.get?.('dialx');
+    const plugin = tool?.instance || tool;
+    if (!plugin?.call) { await this.textAfterDrop(textInfo); return 'texted'; }
+    if (toOwner && plugin?.callOwner) {
+      this.logger.info?.(`DialX: ringing the owner back after a drop (${why})`);
+      const r = await plugin.callOwner('', `Sorry, my end crashed and our call dropped; I'm back. ${String(purpose || '').slice(0, 150)}`, { _context: { userId: 'web-user' }, _callback: true })
+        .catch(e => ({ success: false, error: e.message }));
+      if (!r?.success) await this.agent?.notify?.(`📞 Our call dropped (my end crashed) and I couldn't ring you back: ${r?.error || 'DialX did not answer'}. Say "call me" when you want me back.`, { urgent: true })?.catch?.(() => {});
+      return r?.success ? 'called' : 'told';
+    }
+    const opening = `Hi ${first}, it's ${self} again. Sorry about that, my end crashed and the call dropped. I'm back.`;
+    const voicemail = `Hi ${first}, it's ${self}, ${owner}'s AI assistant. Sorry, my end crashed and our call dropped. I tried to call you back; ${owner} will be in touch, or call back when you can.`;
+    this.logger.info?.(`DialX: calling ${contact} back after a drop (${why})`);
+    const r = await plugin.call({ contact, purpose: callbackBrief({ purpose, contact, self, why, transcript }), opening, voicemail,
+      _context: { userId: 'web-user' }, _callback: true }).catch(e => ({ success: false, error: e.message }));
+    const callId = r?.callId || r?.call_id || await this.latestPlannedFor(contact, number);
+    if (!r?.success) {
+      this.logger.warn?.(`DialX: call-back to ${contact} not placed: ${r?.error || 'no answer from DialX'}`);
+      await this.textAfterDrop(textInfo);
+      await this.agent?.notify?.(`📞 I couldn't call ${contact} back after the drop (${r?.error || 'DialX did not answer'}), so I texted them.`)?.catch?.(() => {});
+      return 'texted';
+    }
+    if (callId) { this.callbacks ||= new Map(); this.callbacks.set(String(callId), textInfo); }
+    return 'called';
+  }
+
+  /** The newest call planned to this person in the last minute (the call-back's id, for its outcome). */
+  async latestPlannedFor(contact, number) {
+    const rows = await this.store.planned?.(new Date(this.now() - 60000)).catch(() => []) || [];
+    const hit = rows.filter(c => (number && c.number === number) || c.contact === contact).pop();
+    return hit?.callId || null;
+  }
+
+  /** The text when a call-back can't reach them: what happened, in plain words. */
+  async textAfterDrop({ contact, number, first, self, owner }) {
+    const tool = this.agent?.apiManager?.apis?.get?.('textx');
+    const plugin = tool?.instance || tool;
+    if (!plugin?.execute) throw new Error('TextX is not available');
+    const text = `Hi ${first}, it's ${self}, ${owner}'s AI assistant. Sorry, my end crashed and our call dropped, and I couldn't get you back on the line. ` +
+      `${owner} will follow up, or call back whenever suits you.`;
+    const r = await plugin.execute({ action: 'send', to: number || contact, text, _context: { userId: 'web-user' }, _noReword: true });
+    if (!r?.success) throw new Error(r?.error || 'TextX refused the text');
+    this.logger.info?.(`DialX: texted ${contact} after the dropped call`);
+    return r;
+  }
+
+  /** After a restart: a call still open was cut off. Close it, tell the owner, and call them back. */
   async recoverInterrupted() {
     const open = await this.store.open().catch(() => []);
     for (const c of open) {
       await this.store.end(c.callId, { reason: 'agent restarted during the call' }).catch(() => {});
-      await this.agent?.notify?.(`📞 My call with ${c.contact || 'someone'} was cut off on my side by a restart. The phone ends it on its own after 30 s of silence.`)
-        .catch?.(() => {});
+      await this.agent?.notify?.(`📞 My call with ${c.contact || 'someone'} was cut off on my side by a restart. I'm calling them back now to say sorry and carry on (a text if they don't pick up).`)
+        ?.catch?.(() => {});
+      this.callBackAfterDrop({ contact: c.contact, number: c.number || '', purpose: c.purpose || '', why: 'a restart', transcript: c.transcript || [] }, { waitMs: 30000 })
+        .catch(e => this.logger.warn?.(`DialX: call-back after restart failed: ${e.message}`));
     }
     return open.length;
   }

@@ -4,9 +4,9 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import BotsAndBorgsPlugin from '../../src/api/plugins/botsandborgs.js';
+import BotsAndBorgsPlugin, { quotedWords } from '../../src/api/plugins/botsandborgs.js';
 import { PluginSettings } from '../../src/models/PluginSettings.js';
-import { designerMethods, videoSeconds } from '../../src/services/avatar/clipVideo.js';
+import { designerMethods, videoSeconds, envelopeFromPcm } from '../../src/services/avatar/clipVideo.js';
 
 test("the renderer lifts the designer's own loader, retarget and pole fit from avatar.html", () => {
   const html = fs.readFileSync(new URL('../../src/interfaces/web/public/avatar.html', import.meta.url), 'utf8');
@@ -82,4 +82,42 @@ test('"do the pole dance" (no video) still plays it, and a failed render tells t
   const play = await p.execute({ action: 'use', _context: { originalInput: 'do the pole dance' } });
   assert.equal(play.clip, 'Pole Dance');
   assert.doesNotMatch(play.result || '', /video/i);
+});
+
+test('a voice-over: the agent\'s own TTS goes to the render, and the caption carries the words', async () => {
+  const { p, videos, renders } = rig();
+  const spoken = [];
+  p.agent.ttsService = { generateSpeech: async (t) => { spoken.push(t); return { buffer: Buffer.from('mp3data'), format: 'mp3' }; } };
+  const r = await p.execute({ action: 'use', wait: true, _context: { originalInput: 'send me a video of you doing the pole dance and saying "hi everyone, it\'s me"' } });
+  assert.equal(r.success, true, r.error);
+  assert.deepEqual(spoken, ["hi everyone, it's me"]);
+  assert.equal(renders[0].voice.format, 'mp3');
+  assert.equal(renders[0].voice.audio.toString(), 'mp3data');
+  assert.match(videos[0].extra.caption, /"hi everyone, it's me"/);
+  assert.match(r.result, /saying it in my voice/);
+});
+
+test('a voice-over that TTS cannot make fails the video, never sends it silent', async () => {
+  const { p, videos } = rig();
+  p.agent.ttsService = { generateSpeech: async () => null };
+  const r = await p.execute({ action: 'use', as: 'video', clip: 'pole dance', say: 'hello', wait: true });
+  assert.match(r.error, /couldn't make the voice-over/);
+  assert.equal(videos.length, 0);
+});
+
+test('the mouth opens with the voice\'s loudness and shuts in silence', () => {
+  const rate = 16000, fps = 10;
+  const pcm = Buffer.alloc(rate * 2 * 2); // 2 s
+  for (let i = 0; i < rate; i++) pcm.writeInt16LE(Math.round(Math.sin(i / 5) * 20000), i * 2); // 1 s loud, 1 s silent
+  const { seconds, mouth } = envelopeFromPcm(pcm, rate, fps);
+  assert.equal(seconds, 2);
+  assert.equal(mouth.length, 20);
+  assert.ok(mouth.slice(0, 10).every(v => v > 0.5));
+  assert.ok(mouth.slice(10).every(v => v === 0));
+});
+
+test('quoted words are the voice-over, verbatim', () => {
+  assert.equal(quotedWords('wave and say "Hi Lizzy!"'), 'Hi Lizzy!');
+  assert.equal(quotedWords("wave saying 'good morning'"), 'good morning');
+  assert.equal(quotedWords('wave at me'), '');
 });

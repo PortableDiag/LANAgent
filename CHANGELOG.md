@@ -2,6 +2,30 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.793] - 2026-11-11
+
+### Added
+- **Videos with the agent's voice.** "Send me a video of you waving and saying 'hi everyone'" films the agent's 3D body doing the clip with its own voice over it. The mouth moves with the voice, and the video runs as long as the line.
+  - Quoted words are spoken exactly. "With your voice over it" without words gets a short line that fits the clip.
+  - The caption carries the words. If the voice can't be made, nothing is sent: never a silent video.
+- **Colour swatches on a call.** When someone on a call asks to see a colour, the call voice texts them a picture of it, with its name and hex code. Before, it could only describe it.
+
+### Fixed
+- **Calls no longer wait minutes on a slow model.** Reading the call request gets 20 s, then a different model gets 20 s. After that, the call goes ahead with what was already understood. One request hung 2.5 minutes before dialing.
+
+## [2.25.792] - 2026-11-11
+
+### Added
+- **Dropped calls recover every time.** When a call to a person drops after they answered, the agent calls them straight back. It says its end crashed and it is back, then carries on from the conversation so far.
+  - Counted as a drop: the dialer stopping or restarting, the phone losing track of the call, the voice path failing, the dialer hanging up on a silent agent, and the agent restarting mid-call.
+  - If the call-back can't be placed or isn't answered, the person gets a text saying what happened.
+  - The owner's own "call me" is rung back the same way.
+  - Two call-backs at most per person in 15 minutes; after that, a text.
+  - The owner is told at once, and the call report no longer says "say if you want me to call again" when the call-back is already on its way.
+
+### Fixed
+- **Calls dropping on mobile data.** Every realtime call now uploads G.711 phone audio (about 11 KB/s) instead of pcm16 (about 48–64 KB/s), when the dialer supports it (DialX 0.7.127+). Before, only group calls did. A single pcm16 upload fell 313 KB behind 14 s into a call and the call dropped. A phone line is narrowband, so nothing audible is lost.
+
 ## [2.25.791] - 2026-11-11
 
 ### Added

@@ -861,7 +861,7 @@ test('a call with several agents uploads G.711 when the phone can (DialX 0.7.127
   assert.equal(lightUpload(on('1.0.0'), true), true);
   assert.equal(lightUpload(on('0.7.126'), true), false, 'an older DialX always sends pcm16');
   assert.equal(lightUpload(on(''), true), false);
-  assert.equal(lightUpload(on('0.7.127'), false), false, 'one agent fits the uplink');
+  assert.equal(lightUpload(on('0.7.127'), false), true, 'one agent too: a single pcm16 upload stalled on call 141');
   assert.deepEqual(sessionConfig({ instructions: 'x', pcmu: true }).session.audio.input.format, { type: 'audio/pcmu' });
   const plain = sessionConfig({ instructions: 'x' }).session.audio;
   assert.deepEqual(plain.input.format, { type: 'audio/pcm', rate: 24000 });
