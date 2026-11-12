@@ -872,6 +872,7 @@ Pairing management (JWT or API key). The phone's own endpoint is `/textx/v1/*` (
 | PATCH | `/api/textx/devices/:id` | `{notify?: bool, name?}` | `notify` sends the agent's notifications to that phone too. |
 | DELETE | `/api/textx/devices/:id` | | Revoke: deletes the pairing and its key, and closes the phone's connection. |
 | GET | `/api/textx/dialx` | | DialX call settings: `{settings: {voice: "agent"\|"phone", voiceProfile, ttsTimeoutMs, realtimeVoice}, profiles: [saved voice names]}`. `realtimeCalls` (`all` default, `test`, `off`) picks which placed calls use realtime; `realtimeAnswering` (default `true`) does the same for calls answered for the owner; `realtimeVoice` (default `marin`) is the OpenAI voice for realtime calls: marin, coral, shimmer, sage, ballad, alloy, verse, ash, echo, cedar. |
+| | | | **Dropped calls (2.25.792):** a call that drops under the person after they answered (`dialx_stopped`, `lost`, `voice_path_failed`, `agent_silent`, or an agent restart) is called back with the conversation so far, else a text (2 call-backs per person per 15 min). Every realtime session uploads G.711 (`audio/pcmu`) on DialX 0.7.127+. Realtime tool `text_color {name, hex}` (2.25.793) texts the person a colour swatch. |
 | | | | **Errand calls (2.25.790, DialX 0.7.133+):** `POST /api/plugin {plugin:'dialx', action:'errandCall', contact or number, goal, facts?:{label:value} (≤20), maxMinutes?:5-90}` places a `dialx.errand_call`. The realtime session gets `press_keys`, `errand_status` and `errand_approve`. |
 | PUT | `/api/textx/dialx` | `{voice?, voiceProfile?, ttsTimeoutMs?}` | Change them. `voice: "agent"` speaks in this agent's voice and falls back to the phone's voice when that voice fails, takes longer than `ttsTimeoutMs` (1000–15000), or can't be played. Unknown keys are a 400. |
 
@@ -9412,6 +9413,7 @@ const socket = io('http://localhost:80', {
 - `buy { all: true, kind: "animation" }` - Buy every animation pack the agent doesn't own, one order each, under the weekly budget (2.25.776).
 - `library { update: true, kind? }` - Fetch owned items again for files the store added or fixed; reports new/gone/changed per item (2.25.778).
 - `use { as: "play" | "stop" | "video", clip?, to? }` - Play an owned clip on the agent's 3D body (open pages + AvatarX), stop it, or film the worn model doing it and send the MP4 (Telegram to the owner by default; `wait: true` waits for the render) (2.25.778–781).
+  - `say` (2.25.793): the agent's own voice over the video (TTS line muxed as AAC, mouth following its loudness, video at least as long as the line). Quoted words in the request are taken verbatim. If the voice cannot be made, nothing is sent.
 
 
 
