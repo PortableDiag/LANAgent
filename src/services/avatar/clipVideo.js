@@ -30,6 +30,28 @@ export function designerMethods(html, names = METHODS) {
   }).join(',\n');
 }
 
+/**
+ * With a voice-over the speech sets the length (the owner, 2026-11-15: "the video length and action needs to match
+ * the audio length"). A looping clip runs while the voice speaks plus a short tail; a one-off move plays through
+ * if it is longer than the speech.
+ */
+export function spokenSeconds(duration, loop, voiceSeconds, max = VOICE_MAX_S) {
+  // A 0.3 s lead-in, the line, a 0.3 s tail, no longer (2119 #477, the same as Orbit's AvatarX 0.3.14): a move longer
+  // than the line is cut, a shorter one holds its last pose (a loop keeps looping).
+  const t = Math.max(1.5, VOICE_LEAD_S + Number(voiceSeconds) + VOICE_TAIL_S);
+  return Math.min(Math.round(t * 100) / 100, max);
+}
+const VOICE_LEAD_S = 0.3;
+const VOICE_TAIL_S = 0.3;
+
+/** The words of a request that ask for a closer shot: 'waist', 'head', or 'full' (head to toe, the default). */
+export function framingAsked(text = '') {
+  const t = String(text);
+  if (/\b(?:head and shoulders|head-and-shoulders|headshot|close[- ]?up|just (?:your|the) (?:face|head)|face only)\b/i.test(t)) return 'head';
+  if (/\b(?:waist[- ]up|from the waist|half[- ]body|upper body|torso)\b/i.test(t)) return 'waist';
+  return 'full';
+}
+
 /** How long the video runs: one pass of a long clip, a few passes of a short loop, never past `max`. */
 export function videoSeconds(duration, loop, { seconds = null, max = 40 } = {}) {
   if (seconds) return Math.min(Number(seconds), max);
@@ -49,7 +71,7 @@ const THREE = window.THREE; THREE.GLTFLoader = GLTFLoader;
 const d = {
 ${methods}
 };
-window.setup = async ({ width, height, fps, seconds, loop, prop, background, backgroundImage = false, mouth = null }) => {
+window.setup = async ({ width, height, fps, seconds, loop, prop, background, backgroundImage = false, mouth = null, framing = 'full' }) => {
   const r = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
   r.setPixelRatio(1); r.setSize(width, height); document.body.appendChild(r.domElement);
   const scene = new THREE.Scene();
@@ -94,14 +116,38 @@ window.setup = async ({ width, height, fps, seconds, loop, prop, background, bac
   }
   box.expandByPoint(new THREE.Vector3(box.min.x, 0, box.min.z));
   box.max.y += 0.18; // the top of the head is above the head bone
+  // Waist up or head and shoulders (2119 #477): frame only that part, over the whole clip.
+  if (framing === 'waist' || framing === 'head') {
+    const part = new THREE.Box3();
+    const keep = framing === 'head' ? ['head', 'neck', 'leftShoulder', 'rightShoulder'] : ['head', 'hips', 'leftShoulder', 'rightShoulder', 'leftUpperArm', 'rightUpperArm', 'leftLowerArm', 'rightLowerArm', 'leftHand', 'rightHand'];
+    for (let i = 0; i <= 24; i++) {
+      mixer.setTime((Math.min(seconds, clip.duration) * i) / 24); vrm.update(0); vrm.scene.updateMatrixWorld(true);
+      for (const b of keep) { const n = vrm.humanoid.getRawBoneNode(b); if (n) part.expandByPoint(n.getWorldPosition(v)); }
+    }
+    const hips = vrm.humanoid.getRawBoneNode('hips')?.getWorldPosition(new THREE.Vector3());
+    if (framing === 'waist' && hips) part.min.y = Math.max(part.min.y, hips.y - 0.08);
+    if (framing === 'head') { const neck = vrm.humanoid.getRawBoneNode('neck')?.getWorldPosition(new THREE.Vector3()); if (neck) part.min.y = neck.y - 0.16; part.min.x -= 0.06; part.max.x += 0.06; }
+    part.max.y += 0.18;
+    box.copy(part);
+  }
   if (poleX !== null) { box.expandByPoint(new THREE.Vector3(poleX, 0, 0)); }
   const c = box.getCenter(new THREE.Vector3()), s = box.getSize(new THREE.Vector3());
   const cam = new THREE.PerspectiveCamera(30, width / height, 0.05, 50);
   const fov = THREE.MathUtils.degToRad(30);
   const fitH = (s.y * 1.04) / 2 / Math.tan(fov / 2);
   const fitW = (s.x * 1.08) / 2 / Math.tan(fov / 2) / cam.aspect;
-  const dist = Math.max(fitH, fitW, 1.2);
-  cam.position.set(c.x, c.y + s.y * 0.04, Math.max(c.z, box.max.z) + dist); cam.lookAt(c.x, c.y, c.z);
+  // Closer framings get closer: the 1.2 m floor kept a head-and-shoulders shot at waist height.
+  const dist = Math.max(fitH, fitW, framing === 'full' ? 1.2 : 0.45);
+  if (backgroundImage && framing === 'full') {
+    // In front of a room the body fills the frame like a giant (the owner, 2026-11-15). A person stands about 58% of
+    // the height of a room shot, feet on the floor near the bottom: frame for that, the camera level with the middle.
+    const room = Math.max((s.y / 0.58) / 2 / Math.tan(fov / 2), fitW * 1.15, 1.2);
+    const view = 2 * room * Math.tan(fov / 2);
+    const eye = view * 0.4; // the floor (y 0) sits 10% up from the bottom of the frame
+    cam.position.set(c.x, eye, Math.max(c.z, box.max.z) + room); cam.lookAt(c.x, eye, c.z);
+  } else {
+    cam.position.set(c.x, c.y + s.y * 0.04, Math.max(c.z, box.max.z) + dist); cam.lookAt(c.x, c.y, c.z);
+  }
   // Settle the hair at the first pose, then play.
   mixer.setTime(0);
   for (let i = 0; i < 90; i++) vrm.update(1 / 60);
@@ -116,7 +162,7 @@ window.setup = async ({ width, height, fps, seconds, loop, prop, background, bac
     r.render(scene, cam);
     return r.domElement.toDataURL('image/jpeg', 0.9);
   };
-  return { duration: clip.duration, tracks: clip.tracks.length, pole: poleX, talks: canTalk };
+  return { duration: clip.duration, tracks: clip.tracks.length, pole: poleX, talks: canTalk, framing };
 };
 window.ready = true;
 </script></body></html>`;
@@ -168,7 +214,7 @@ export function renderClipVideo(opts) {
 }
 
 async function render({ modelPath, clipPath, loop = false, prop = null, seconds = null, fps = 24, width = 720, height = 960,
-  background = '#121826', backgroundPath = null, timeoutMs = 8 * 60 * 1000, launch = null, voice = null } = {}) {
+  background = '#121826', backgroundPath = null, framing = 'full', timeoutMs = 8 * 60 * 1000, launch = null, voice = null } = {}) {
   const started = Date.now();
   const html = pageHtml(designerMethods(await fs.readFile(path.join(PUBLIC_DIR, 'avatar.html'), 'utf8')));
   const { default: puppeteer } = await import('puppeteer');
@@ -212,11 +258,13 @@ async function render({ modelPath, clipPath, loop = false, prop = null, seconds 
     await page.goto(`${HOST}/render.html`, { waitUntil: 'load', timeout: 60000 });
     await page.waitForFunction('window.ready === true', { timeout: 60000 }).catch(() => { throw new Error(`the render page did not start: ${pageErrors[0] || 'no error given'}`); });
     // The clip's length is known only once it is loaded, so the page is set up with a generous span first.
-    const probe = await page.evaluate((o) => window.setup(o), { width, height, fps, seconds: 40, loop, prop, background, backgroundImage: !!backgroundPath, mouth: said?.mouth || null });
+    const probe = await page.evaluate((o) => window.setup(o), { width, height, fps, seconds: 40, loop, prop, background, backgroundImage: !!backgroundPath, framing: ['waist', 'head'].includes(framing) ? framing : 'full',
+      // The voice starts 0.3 s in, so the mouth does too.
+      mouth: said?.mouth ? [...new Array(Math.round(VOICE_LEAD_S * fps)).fill(0), ...said.mouth] : null });
     // With a voice-over the video runs at least as long as the voice (the clip holds its last pose, or loops).
-    const total = said ? Math.min(VOICE_MAX_S, Math.max(videoSeconds(probe.duration, loop, { seconds }), said.seconds + 0.6)) : videoSeconds(probe.duration, loop, { seconds });
+    const total = said ? spokenSeconds(probe.duration, loop, said.seconds) : videoSeconds(probe.duration, loop, { seconds });
     const frames = Math.max(1, Math.round(total * fps));
-    const audioArgs = audioFile ? ['-i', audioFile, '-map', '0:v', '-map', '1:a', '-c:a', 'aac', '-b:a', '128k'] : [];
+    const audioArgs = audioFile ? ['-itsoffset', String(VOICE_LEAD_S), '-i', audioFile, '-map', '0:v', '-map', '1:a', '-c:a', 'aac', '-b:a', '128k'] : [];
     const ff = spawn('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-y', '-f', 'image2pipe', '-framerate', String(fps), '-c:v', 'mjpeg', '-i', '-',
       ...audioArgs, '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '22', '-pix_fmt', 'yuv420p', '-movflags', '+faststart', ...(audioFile ? [] : ['-an']), out], { stdio: ['pipe', 'ignore', 'pipe'] });
     let ffErr = '';

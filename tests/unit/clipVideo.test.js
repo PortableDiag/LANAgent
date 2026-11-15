@@ -121,3 +121,16 @@ test('quoted words are the voice-over, verbatim', () => {
   assert.equal(quotedWords("wave saying 'good morning'"), 'good morning');
   assert.equal(quotedWords('wave at me'), '');
 });
+
+test('with a voice: 0.3 s lead-in, the line, 0.3 s tail, no longer (2119 #477); framing words', async () => {
+  const { spokenSeconds, framingAsked } = await import('../../src/services/avatar/clipVideo.js');
+  assert.equal(spokenSeconds(4, true, 5), 5.6);
+  assert.equal(spokenSeconds(16, true, 8), 8.6);
+  assert.equal(spokenSeconds(3, false, 1), 1.6);
+  assert.equal(spokenSeconds(10, false, 6), 6.6);
+  assert.equal(spokenSeconds(4, true, 0.2), 1.5);
+  assert.equal(spokenSeconds(4, true, 90), 60);
+  assert.equal(framingAsked('send me a video of you waving, waist up'), 'waist');
+  assert.equal(framingAsked('a close-up video of you saying hi'), 'head');
+  assert.equal(framingAsked('send me a video of you dancing'), 'full');
+});

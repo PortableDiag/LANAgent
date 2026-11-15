@@ -223,3 +223,68 @@ test('clips.json (store 0.22) labels clips by meaning; Broad/ versions keep thei
   assert.deepEqual(listed.map(c => c.label).sort(), ['Talk Loop', 'Work Loop']);
   assert.equal(listed.find(c => c.label === 'Talk Loop').whileTalking, true);
 });
+
+test('"send a video of yourself to Wayne explaining that you can move and talk" films a spoken video for Wayne', async () => {
+  const { p, store } = plugin({ agentModel: {} });
+  store.library = { items: [{ variant: 'vrm-agent-animations-3', title: 'Agent Set Three', kind: 'animation', files: [
+    { name: 'talk-loop.vrma', kind: 'animation', label: 'Talk Loop', whileTalking: true, energy: 'calm', tags: ['talk'] },
+    { name: 'Pole-Dance.vrma', kind: 'animation', label: 'Pole Dance', tags: ['dance', 'pole'], energy: 'high' },
+    { name: 'Rumba.vrma', kind: 'animation', label: 'Rumba', tags: ['dance'] }] }] };
+  let call;
+  p.sendClipVideo = async (args) => { call = args; return { success: true }; };
+  p.voiceLine = async (asked, to) => `Hi ${to}, it's ALICE. I can move and talk now!`;
+  const asked = 'send a video of yourself to Wayne explaining that youre now able to move and talk';
+  // The extractor used to have no "video" choice and said "send".
+  await p.useOwned({ as: 'send', to: 'Wayne', _context: { originalInput: asked } });
+  assert.equal(call.to, 'Wayne');
+  assert.equal(call.say, "Hi Wayne, it's ALICE. I can move and talk now!");
+  for (let i = 0; i < 5; i++) assert.equal((await p.chooseClip({ asked, speaking: true })).choice.file.label, 'Talk Loop');
+  await p.useOwned({ _context: { originalInput: 'send a video of yourself to Wayne' } });
+  assert.equal(call.to, 'Wayne');
+  assert.equal(call.say, undefined === call.say ? undefined : call.say);
+});
+
+test('"Send a video message to wayne saying you\'re now able to move and talk": a spoken video of the agent, to Wayne, about the agent', async () => {
+  const { videoRecipient, videoPerspective } = await import('../../src/api/plugins/botsandborgs.js');
+  assert.equal(videoRecipient("Send a video message to wayne saying youre now able to move and talk"), 'wayne');
+  assert.equal(videoRecipient('send a video message to me'), 'me');
+  const rule = videoPerspective('ALICE', 'Pat');
+  assert.match(rule, /"you", "your" and "yourself" mean you, ALICE/);
+  assert.match(rule, /never claim Pat can do/);
+  const { p, store } = plugin({ agentModel: {} });
+  store.library = { items: [] };
+  let call;
+  p.sendClipVideo = async (args) => { call = args; return { success: true }; };
+  let prompted;
+  p.voiceLine = async (asked, to) => { prompted = { asked, to }; return "Hi Wayne, this is ALICE, Pat's AI assistant. I can move and talk now!"; };
+  await p.useOwned({ _context: { originalInput: "Send a video message to wayne saying youre now able to move and talk" } });
+  assert.equal(call.to, 'wayne');
+  assert.match(call.say, /I can move and talk now/);
+  assert.equal(prompted.to, 'wayne');
+});
+
+test('unquoted words are never spoken as copied: the agent writes its own line; quoted words stay exact', async () => {
+  const { p, store } = plugin({ agentModel: {} });
+  store.library = { items: [] };
+  let call;
+  p.sendClipVideo = async (args) => { call = args; return { success: true }; };
+  p.voiceLine = async () => 'I can move and talk now!';
+  await p.useOwned({ say: 'youre now able to move and talk', _extracted: ['say'], _context: { originalInput: 'send me a video message saying youre now able to move and talk' } });
+  assert.equal(call.say, 'I can move and talk now!');
+  await p.useOwned({ say: 'whatever', _context: { originalInput: 'send me a video of yourself saying "hi everyone"' } });
+  assert.equal(call.say, 'hi everyone');
+});
+
+test('a say given directly (API) is spoken as given; asked to speak with no line possible fails, never silent', async () => {
+  const { p, store } = plugin({ agentModel: {} });
+  store.library = { items: [] };
+  let call;
+  p.sendClipVideo = async (args) => { call = args; return { success: true }; };
+  await p.useOwned({ as: 'video', say: 'hello there', _context: { originalInput: '' } });
+  assert.equal(call.say, 'hello there');
+  call = null;
+  p.voiceLine = async () => '';
+  const r = await p.useOwned({ _context: { originalInput: 'send me a video message saying you can dance' } });
+  assert.equal(call, null);
+  assert.match(r.error, /couldn't write what to say/);
+});

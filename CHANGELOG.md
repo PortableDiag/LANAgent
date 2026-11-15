@@ -2,6 +2,36 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.817] - 2026-11-15
+
+### Changed
+- **Spoken videos are timed to the line: a 0.3 s lead-in, the line, a 0.3 s tail.** The voice and the mouth start 0.3 s in, and a longer move is cut at the end of the line.
+- **Framing per video.** "Waist up" and "head and shoulders" / "close-up" frame just that part; the default is head to toe.
+
+### Fixed
+- **A spoken line given directly to the video API is spoken as given**, and a video asked to speak never goes out silent: if no line can be written, it says so.
+
+## [2.25.816] - 2026-11-15
+
+### Fixed
+- **A video's spoken line is the agent's own words.** "Saying you're now able to move and talk" was spoken as copied ("youre now able to move and talk"). Now only quoted words are spoken as written; anything else the agent says in its own words, about itself ("I can move and talk now").
+
+## [2.25.815] - 2026-11-15
+
+### Fixed
+- **In a video sent for the owner, "you" means the agent.** "Send a video message to Wayne saying you're now able to move and talk" has the agent say in the video that IT can move and talk now. The owner is spoken of in the third person by first name, never as "I", the same rule texts follow. "Video message" now counts as a video of the agent, and a lowercase name after "to" is the recipient.
+
+## [2.25.814] - 2026-11-15
+
+### Fixed
+- **The avatar no longer looks like a giant in front of a background scene.** With a scene behind it, the camera frames the body at room scale, about half the frame's height, standing on the floor. Without a scene it fills the frame as before.
+- **A spoken video is as long as the speech.** A looping move (the talk loop) runs while the voice speaks and stops just after it. Before, a short line could run on for many seconds. A one-off move (a wave) still plays through if it is longer than the line.
+
+## [2.25.813] - 2026-11-15
+
+### Fixed
+- **"Send a video of yourself to Wayne explaining that you can move and talk" works.** Three things were wrong. The request could be read as sending a picture: video wasn't one of the choices. The recipient was taken as "a" (from "send a video"). And with no clip named, a random clip was filmed, possibly a dance. Now a video of the agent itself is filmed for the person named. The agent writes the spoken line in its own words, greeting them and saying who it is, and plays its talk loop under it.
+
 ## [2.25.812] - 2026-11-15
 
 ### Added

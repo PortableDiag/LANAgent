@@ -101,6 +101,29 @@ export function livePassList(d) {
   return (Array.isArray(list) ? list : [list]).filter(p => p && typeof p === 'object');
 }
 
+/**
+ * Whose words are whose in a request for a spoken video (the owner, 2026-11-15: "send a video message to Wayne saying
+ * you're now able to move and talk" means the AGENT can move and talk, said by the agent in the video, never the owner).
+ */
+export function videoPerspective(name, owner) {
+  return `In the request, "you", "your" and "yourself" mean you, ${name}, the AI assistant: "saying you're now able to move and talk" ` +
+    `is about you, so in the video you say "I can move and talk now". ${owner}'s own "I", "me" and "my" in the request mean ${owner}: ` +
+    `speak of ${owner} in the third person by first name, never as "I", and never claim ${owner} can do what the request says you can do.`;
+}
+
+/**
+ * Who a video goes to: the extractor's `to`, else "to Wayne" / "send Wayne a video", else the owner. "Send a video…"
+ * once read the recipient as "a".
+ */
+export function videoRecipient(asked = '', to = '') {
+  const generic = /^(a|an|the|it|this|that|me|myself|owner|you|yourself|my|your)$/i;
+  if (to && !generic.test(String(to).trim())) return String(to).trim();
+  if (/^(me|myself|owner)$/i.test(String(to || '').trim()) || /\b(?:send|show|give) me\b|\bto me\b/i.test(asked)) return 'me';
+  const named = /\bto ([A-Z][\w'-]+(?: [A-Z][\w'-]+)?)/.exec(asked) ||
+    /\b(?:video(?: message| greeting| note)?|clip|recording|message) to (?!me\b|myself\b|you\b|yourself\b|the\b|a\b|my\b)([A-Za-z][\w'-]+)/i.exec(asked) || /\b(?:send|text|show|give) (?!me\b|a\b|an\b|the\b|my\b|your\b|yourself\b|it\b|this\b|that\b)([A-Za-z][\w'-]+) (?:a|an|the|my|your) (?:video|clip|recording)\b/i.exec(asked);
+  return named ? named[1] : 'me';
+}
+
 export default class BotsAndBorgsPlugin extends BasePlugin {
   constructor(agent) {
     super(agent);
@@ -162,7 +185,9 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
   async execute(params = {}) {
     const { action, ...data } = params;
     if (data.needsParameterExtraction && this.agent?.providerManager) {
-      Object.assign(data, await this.extractArgs(data._context?.originalInput || data.originalInput || data.query, action).catch(() => ({})));
+      const extracted = await this.extractArgs(data._context?.originalInput || data.originalInput || data.query, action).catch(() => ({}));
+      // Which fields the model filled, so a guessed spoken line is never treated as the owner's words.
+      Object.assign(data, extracted, { _extracted: Object.keys(extracted) });
     }
     try {
       switch (action) {
@@ -186,13 +211,15 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
   async extractArgs(request, action) {
     const pm = this.agent?.providerManager;
     if (!request || !pm?.generateResponse) return {};
+    const agentName = this.agent?.config?.name || process.env.AGENT_NAME || 'the assistant';
+    const ownerName = process.env.OWNER_NAME ? String(process.env.OWNER_NAME).split(/\s+/)[0] : 'the owner';
     const res = await pm.generateResponse(`A request to an online store of digital assets (avatars, icons, wallpapers): "${String(request).slice(0, 500)}"\n` +
       `Action: ${action}. Give only what the request says, as JSON with any of: "query" (words to search for), "slug" (a product id), ` +
       '"variant" (an exact variant id like agent-avatar-singles-sentinel, only if named), "use" ("avatar" if it is for the agent\'s own avatar, ' +
       '"send" if it is to be given to someone, "wear" if the agent should become that 3D model), "to" (who to send it to; "me" for the person asking), ' +
-      `"item" (words naming something already owned), "as" ("send", "avatar", "install" or "wear"), "mood" (the feeling a sticker should show), "kind" (one of: ${KIND_WORDS}), ` +
+      `"item" (words naming something already owned), "as" ("send", "avatar", "install", "wear", or "video" when it asks for a video of the agent itself), "mood" (the feeling a sticker should show), "kind" (one of: ${KIND_WORDS}), ` +
       '"avoid" (names the request says are taken or not wanted, comma-separated, e.g. "Sentinel" from "Nexus already picked Sentinel"), ' +
-      '"say" (for a video: the words the agent speaks over it. Quoted words exactly; when it asks for a voice-over or for the agent to say or talk about something without exact words, write one to three short spoken sentences, in the first person, that fit). Leave out what is not said. JSON only.',
+      '"say" (for a video: the words the agent speaks over it. Quoted words exactly; when it asks for a voice-over or for the agent to say, explain or talk about something without exact words, write one to three short spoken sentences, in the first person, that fit. For a video to someone other than the person asking, greet them by name and say who you are. ' + videoPerspective(agentName, ownerName) + ') Leave out what is not said. JSON only.',
     { maxTokens: 200, temperature: 0 });
     const raw = String(res?.content || '');
     const j = JSON.parse(raw.slice(raw.indexOf('{'), raw.lastIndexOf('}') + 1) || '{}');
@@ -1152,9 +1179,23 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     }
     const kind = data.kind && data.kind !== 'avatar' ? data.kind : this.kindAsked(asked);
     if (as === 'stop' || (!as && /\bstop (?:dancing|the (?:dance|animation|clip))\b/i.test(asked))) return this.stopClip();
-    // "Send me a video of you doing the pole dance": film it and send it.
-    if (as === 'video' || ((kind === 'animation' || /\b(dance|dancing|wave|waving|bow|cheer|clap|laugh|dab|rumba|pole)\b/i.test(asked)) && /\b(video|film|clip of you|record(?:ing)?)\b/i.test(asked))) {
-      return this.sendClipVideo({ item, clip: data.clip || data.mood, asked, say: data.say || data.voiceover || quotedWords(asked), to: String(data.to || (/\b(me|to me)\b/i.test(asked) || !/\bsend\s+(?!me\b)\w+/i.test(asked) ? 'me' : /\bsend\s+(\w+)/i.exec(asked)[1])), wait: data.wait });
+    // "Send me a video of you doing the pole dance": film it and send it. "Send a video of yourself to Wayne explaining
+    // that you can move and talk now" too: a video of the agent itself, whatever the extractor called it (it once had no
+    // "video" choice and said "send", which would have texted Wayne a picture).
+    const ofSelf = /\b(?:video|film|clip|recording) of (?:you|yourself)\b|\bfilm yourself\b|\brecord yourself\b|\bvideo (?:message|greeting|note)\b/i.test(asked);
+    if (as === 'video' || (ofSelf && (!as || as === 'send')) || ((kind === 'animation' || /\b(dance|dancing|wave|waving|bow|cheer|clap|laugh|dab|rumba|pole)\b/i.test(asked)) && /\b(video|film|clip of you|record(?:ing)?)\b/i.test(asked))) {
+      // Quoted words are spoken as written. Anything else is the agent's own line, written from its side: the extractor
+      // copied "youre now able to move and talk" straight into the video (2026-11-15), which is the owner's wording, not
+      // what the agent says about itself.
+      const given = (data.say || data.voiceover) && !(data._extracted || []).some(k => k === 'say' || k === 'voiceover') ? String(data.say || data.voiceover) : '';
+      const wantsSpeech = !!(data.say || data.voiceover) || /\b(explain|explaining|say|saying|tell|telling|talk(?:ing)? about|introduc|announc|letting (?:him|her|them) know)\w*/i.test(asked);
+      let say = quotedWords(asked) || given;
+      if (!say && wantsSpeech) {
+        say = await this.voiceLine(asked, videoRecipient(asked, data.to)).catch(() => '') || '';
+        // Asked to speak and no line could be written: say so, never a silent video.
+        if (!say) return { success: false, error: "I couldn't write what to say in the video, so I didn't make it." };
+      }
+      return this.sendClipVideo({ item, clip: data.clip || data.mood, asked, say, to: videoRecipient(asked, data.to), wait: data.wait });
     }
     if (as === 'play' || as === 'dance' || kind === 'animation' || (!as && !data.to && /\b(dance|do (?:the|a) |wave|bow|cheer|clap|laugh|dab)\b/i.test(asked) && !/\b(stickers?|emoji|portraits?|wallpapers?|icons?|vrm|model)\b/i.test(asked))) {
       return this.playClip({ item, clip: data.clip || data.mood, asked });
@@ -1248,7 +1289,7 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
 
   /** Play an owned clip on the agent's 3D body: by name ("rumba"), by what it is for ("wave", "dance"), or any one. */
   /** Which owned clip a request means: { choice, entry, rel } or { error }. */
-  async chooseClip({ item, clip, asked = '' }) {
+  async chooseClip({ item, clip, asked = '', speaking = false }) {
     let pool = (await this.libraryItems()).flatMap(i => i.files.filter(f => f.kind === 'animation' && f.bodyFit !== 'broad').map(f => ({ item: i, file: f })));
     if (!pool.length) return { error: "I don't own any animations yet. I can buy a pack from Bots & Borgs if you want." };
     if (item && !isGenericItem(item)) {
@@ -1266,7 +1307,10 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     const purpose = clipGesture(clip || asked);
     // A named dance ("do the can-can") is that dance or a plain no, never some other dance; "dance for me" is any.
     const specific = /pole|rumba|belly|can.?can|cabbage|running man|roger|go.?go|booty|twerk|samba|ballet|hip.?hop|dab/i.exec(`${clip || ''} ${asked}`);
-    const fits = named.length ? named : specific ? [] : purpose ? pool.filter(p => p.file.gesture === purpose) : [];
+    // Speaking with no move named: the clip made to play under speech (clips.json while_talking, calm), never a random dance.
+    const underSpeech = speaking ? (pool.filter(p => p.file.whileTalking && (p.file.tags || []).includes('talk')).length
+      ? pool.filter(p => p.file.whileTalking && (p.file.tags || []).includes('talk')) : pool.filter(p => p.file.whileTalking && (p.file.energy || 'calm') === 'calm')) : [];
+    const fits = named.length ? named : specific ? [] : purpose ? pool.filter(p => p.file.gesture === purpose) : underSpeech;
     let choice = (fits.length ? fits : pool)[Math.floor(Math.random() * (fits.length ? fits : pool).length)];
     // A dance with a "Facing Away" version is shown that way: the owner (2026-11-15) on Booty Shake, "otherwise the
     // user can't see it". Facing the camera only when asked to.
@@ -1320,7 +1364,7 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
         }
       }
     }
-    const picked = await this.chooseClip({ item, clip, asked });
+    const picked = await this.chooseClip({ item, clip, asked, speaking: !!words });
     if (picked.error) return { success: false, error: picked.error };
     const { choice, entry, rel } = picked;
     const worn = this.agent?.agentModel?.activeVRMModel;
@@ -1337,9 +1381,11 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
         voice = { audio: tts.buffer, format: tts.format || 'mp3' };
       }
       const scene = await this.backgroundFor(asked);
-      if (scene) this.logger.info(`botsandborgs: filming in front of ${path.basename(scene)}`);
+      const { framingAsked } = await import('../../services/avatar/clipVideo.js');
+      const framing = framingAsked(asked);
+      if (scene) this.logger.info(`botsandborgs: filming in front of ${path.basename(scene)}${framing !== 'full' ? `, ${framing} framing` : ''}`);
       const v = await (this.renderVideo || renderClipVideo)({ modelPath: path.join(this.vrmDir(), model.file), clipPath: path.join(this.vrmDir(), 'animations', rel),
-        loop: !!entry.loop, prop: entry.prop || null, ...(voice ? { voice } : {}), ...(scene ? { backgroundPath: scene } : {}) });
+        loop: !!entry.loop, prop: entry.prop || null, framing, ...(voice ? { voice } : {}), ...(scene ? { backgroundPath: scene } : {}) });
       const filename = `${String(label).toLowerCase().replace(/[^a-z0-9]+/g, '-')}.mp4`;
       if (/^(me|owner|myself)$/i.test(to)) {
         const tg = this.agent?.interfaces?.get?.('telegram');
@@ -1354,7 +1400,7 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
           attachedFile: { filename, mimeType: 'video/mp4', size: v.video.length, base64: v.video.toString('base64') } } });
         if (!r?.success) throw new Error(r?.error || 'the text failed');
       }
-      this.logger.info(`botsandborgs: sent a video of ${label} to ${to} (${v.seconds}s, ${(v.bytes / 1048576).toFixed(1)} MB)`);
+      this.logger.info(`botsandborgs: sent a video of ${label} to ${to} (${v.seconds}s, ${(v.bytes / 1048576).toFixed(1)} MB)${words ? `, saying: "${words.slice(0, 300)}"` : ''}`);
       return v;
     })();
     const who = /^(me|owner|myself)$/i.test(to) ? 'you' : to;
@@ -1420,6 +1466,21 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
   /** The reaction words a motion pack holds, and the asks that mean them. */
   static REACTIONS = { wave: /\b(wav(e|es|ed|ing)|hello|hi|bye|goodbye)\b/i, laugh: /\b(laugh(s|ed|ing)?|lol|giggl)/i, cheer: /\bcheer/i,
     clap: /\bclap/i, bow: /\bbow(s|ed|ing)?\b/i, nod: /\bnod(s|ded|ding)?\b/i, think: /\bthink(s|ing)?\b|\bpondering\b/i };
+
+  /** A short spoken line for a video when the request describes what to say ("explaining that you can move now"). */
+  async voiceLine(asked, to = 'me') {
+    const pm = this.agent?.providerManager;
+    if (!pm?.generateResponse) return '';
+    const name = this.agent?.config?.name || process.env.AGENT_NAME || 'the assistant';
+    const owner = process.env.OWNER_NAME ? String(process.env.OWNER_NAME).split(/\s+/)[0] : 'my owner';
+    const forOwner = /^(me|owner|myself)$/i.test(to);
+    const res = await pm.generateResponse(`You are ${name}, ${owner}'s AI assistant, recording a short video of your 3D avatar speaking. ` +
+      `The request: "${String(asked).slice(0, 400)}". Write what you say in the video: one to three short spoken sentences in the first person, ` +
+      `${forOwner ? `talking to ${owner}` : `talking to ${to}: greet them by name and say you are ${owner}'s AI assistant`}, saying what the request describes in your own words. ` +
+      `${videoPerspective(name, owner)} ` +
+      'Under 40 words, no emoji, links or stage directions. Reply with the words only.', { maxTokens: 120, temperature: 0.5 });
+    return String(res?.content || '').trim().replace(/^(["'])([\s\S]*)\1$/, '$2').slice(0, 400);
+  }
 
   /** The part of a reply that fits in `maxSeconds` of speech (about 2.6 words a second), cut at a sentence. */
   static spokenPart(text, maxSeconds = 20) {
