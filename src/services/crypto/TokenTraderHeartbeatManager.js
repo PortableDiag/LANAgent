@@ -119,7 +119,7 @@ class TokenTraderHeartbeatManager {
       symbol: symbol
     };
 
-    state.timer = setInterval(() => this._tick(key), interval);
+    state.timer = setInterval(() => this._intervalTick(key), interval);
     this.tokens.set(key, state);
 
     logger.info(`TokenHeartbeat: Started ${symbol} — interval ${interval / 1000}s (${regime || 'default'})`);
@@ -150,6 +150,15 @@ class TokenTraderHeartbeatManager {
    */
   getIntervalForRegime(regime) {
     return REGIME_INTERVALS[regime] || DEFAULT_INTERVAL;
+  }
+
+  /**
+   * setInterval entry point. _tick rethrows so triggerTick can see the error;
+   * a timer has no caller, so the rejection must end here (it is already logged
+   * by _executeTick) instead of surfacing as an unhandled rejection.
+   */
+  _intervalTick(address) {
+    this._tick(address).catch(() => {});
   }
 
   /**
@@ -236,12 +245,13 @@ class TokenTraderHeartbeatManager {
 
       // Execute with per-network swap lock (prevents nonce conflicts) and timeout.
       // Never retried: a retry after a broadcast swap would trade twice.
+      let tickTimer;
       const result = await Promise.race([
         this.withSwapLock(network, () => this.cryptoAgent.executeTokenTrader(decision, marketData)),
-        new Promise((_, reject) =>
-          setTimeout(() => reject(new Error(`Token trader tick timeout (${TICK_TIMEOUT / 1000}s)`)), TICK_TIMEOUT)
-        )
-      ]);
+        new Promise((_, reject) => {
+          tickTimer = setTimeout(() => reject(new Error(`Token trader tick timeout (${TICK_TIMEOUT / 1000}s)`)), TICK_TIMEOUT);
+        })
+      ]).finally(() => clearTimeout(tickTimer));
 
       // Record trade if action taken
       if (result?.action && result.action !== 'hold') {
@@ -329,7 +339,7 @@ class TokenTraderHeartbeatManager {
   _reschedule(address, state, newInterval) {
     if (state.timer) clearInterval(state.timer);
     state.currentInterval = newInterval;
-    state.timer = setInterval(() => this._tick(address), newInterval);
+    state.timer = setInterval(() => this._intervalTick(address), newInterval);
   }
 
   /**

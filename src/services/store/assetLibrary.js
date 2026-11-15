@@ -7,18 +7,38 @@
  * the data directory, which is never in git.
  */
 import fs from 'fs/promises';
+import { readFileSync, statSync } from 'fs';
 import path from 'path';
+import { DATA_PATH } from '../../utils/paths.js';
 
 /** "Send me a happy sticker", "wear the bear 3D model": a request for something owned, with no store name in it. */
-export function asksToUseStoreItem(text) {
+export function asksToUseStoreItem(text, modelNames = storeModelNames()) {
   const t = String(text || '');
-  return /\b(send|text|give)\b.{0,60}\b(stickers?|emotes?)\b/i.test(t) || /\b(wear|switch to|become|use|install)\b.{0,40}\b(vrm|3d (?:model|avatar))\b/i.test(t);
+  if (/\b(send|text|give)\b.{0,60}\b(stickers?|emotes?)\b/i.test(t) || /\b(wear|switch to|become|use|install)\b.{0,40}\b(vrm|3d (?:model|avatar))\b/i.test(t)) return true;
+  // "Switch back to Racer Blue" went to the lights as a colour (2026-11-14): a bought model, named, after a word for
+  // putting it on, is the store's.
+  const wearing = '(?:wear|put on|become|turn (?:back )?into|go back to|(?:switch|change)(?: back)? (?:in)?to)';
+  return modelNames.some(n => n.length >= 3 && new RegExp(`\\b${wearing}\\s+(?:(?:the|your|my|own)\\s+){0,2}${n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i').test(t));
+}
+
+let modelNamesCache = { mtimeMs: -1, names: [] };
+/** The names of the store models in the gallery ("Racer Blue", "Core"), re-read only when its manifest changes. */
+export function storeModelNames(vrmDir = path.join(DATA_PATH, 'vrm-models')) {
+  try {
+    const file = path.join(vrmDir, 'manifest.json');
+    const { mtimeMs } = statSync(file);
+    if (mtimeMs !== modelNamesCache.mtimeMs) {
+      const list = JSON.parse(readFileSync(file, 'utf8'));
+      modelNamesCache = { mtimeMs, names: (Array.isArray(list) ? list : []).filter(m => m?.source === 'botsandborgs' && m.name).map(m => String(m.name).trim()) };
+    }
+    return modelNamesCache.names;
+  } catch { return []; }
 }
 
 const MAX_FILES = 500;
 const MAX_TOTAL_BYTES = 2 * 1024 * 1024 * 1024; // a guard against a bad zip, not a size limit on products
 const MIME = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp', '.gif': 'image/gif',
-  '.vrm': 'model/gltf-binary', '.vrma': 'model/gltf-binary', '.webm': 'video/webm', '.mp4': 'video/mp4', '.txt': 'text/plain', '.md': 'text/markdown', '.pdf': 'application/pdf' };
+  '.vrm': 'model/gltf-binary', '.vrma': 'model/gltf-binary', '.webm': 'video/webm', '.mp4': 'video/mp4', '.flac': 'audio/flac', '.mp3': 'audio/mpeg', '.wav': 'audio/wav', '.ogg': 'audio/ogg', '.json': 'application/json', '.txt': 'text/plain', '.md': 'text/markdown', '.pdf': 'application/pdf' };
 
 /** The name a file may have on disk: its last path part, nothing that can climb out of the folder. */
 export function safeName(name) {
@@ -26,10 +46,27 @@ export function safeName(name) {
   return base.slice(0, 120) || 'file';
 }
 
+/**
+ * A live pass ("vrm-aa-core-live30"): the store hosts the model and always serves its newest version to the pass's key.
+ * Returns { slug, days } (slug = the product, whose VRM variant has the same id) or null.
+ */
+export function livePass(variant) {
+  const m = /^(vrm-[a-z0-9-]+?)-live(\d+)$/.exec(String(variant || ''));
+  return m ? { slug: m[1], days: Number(m[2]) } : null;
+}
+
 /** What a variant is, from the store's own naming: a slug suffix, then the product's collection. */
 export function variantKind(variant, collection = '') {
   const id = String(variant || '');
   if (/-bundle$/.test(id)) return 'bundle';
+  // Add-ons on every 3D page since store 0.17 (2026-11-14, Trellis 2119 #449). Before the vrm- rule, or they read as models.
+  if (/-kit$/.test(id)) return 'kit';
+  if (/-voice$/.test(id)) return 'voice';
+  if (/-motion$/.test(id)) return 'motion';
+  if (/^vrm-.+-2d$/.test(id)) return 'portrait';
+  if (collection === 'sounds' || /^call-sounds(?:-|$)/.test(id)) return 'sound';
+  // Store 0.20: empty scenes to stand the avatar in (AvatarX pages, avatar videos), desktop + phone.
+  if (collection === 'backgrounds' || /^bg-/.test(id)) return 'background';
   if (/-stickers$/.test(id)) return 'sticker';
   if (/-portraits$/.test(id)) return 'portrait';
   // Before the vrm- rule: the store's clip packs are named vrm-dance-pack-1, vrm-emote-animations-1 (2026-11-08).
@@ -48,10 +85,17 @@ export function fileKind(filename, kind = 'portrait') {
   if (ext === '.vrm') return 'vrm';
   if (ext === '.vrma') return 'animation';
   if (/\.(txt|md|pdf)$/.test(n) || /(^|\/)(readme|licen[cs]e|credits)/.test(n)) return 'document';
+  // A voice pack: voice.json names the voice, and its reference lines are samples of it. Call sounds are sounds.
+  if (ext === '.json') return kind === 'voice' && /(^|\/)voice\.json$/.test(n) ? 'voice' : null;
+  if (/\.(flac|mp3|wav|ogg|opus|m4a)$/.test(n)) return kind === 'voice' ? 'voice-sample' : 'sound';
   if (!/\.(png|jpe?g|webp|gif|webm|mp4)$/.test(n)) return null;
   if (/preview|thumbnail|contact.?sheet/.test(n)) return 'preview';
+  // A motion pack: Telegram video stickers (VP9 WebM with alpha), and looping reaction clips (WebM with alpha + MP4).
+  if (kind === 'motion') return /telegram|sticker/.test(n) ? 'video-sticker' : /\.(webm|mp4)$/.test(n) ? 'clip' : 'preview';
   // An animation pack's pictures and videos only show its clips.
   if (kind === 'animation') return 'preview';
+  // A profile kit: the avatar in every size, and banners (X 1500x500, YouTube 2560x1440, 4:1 …).
+  if (kind === 'kit') return /banner|header|cover|\b\d{3,4}x\d{3,4}\b|\b4[x:-]1\b|youtube|twitch|discord/.test(n.replace(/(^|\/)(?:avatars?|profile)\//, '$1')) && !/(^|\/)avatars?\//.test(n) ? 'banner' : 'portrait';
   // Only a model or a bundle mixes kinds. Elsewhere a pack's name says nothing ("Agent Mode Wallpapers" is fine, a
   // portrait pack called "Sticker Bots" would not be).
   if (kind !== 'vrm' && kind !== 'bundle') return kind;
@@ -74,8 +118,9 @@ const STICKER_MOODS = ['happy, sparkle', 'love, heart', 'flirty, wink', 'cheerfu
 /** The feeling a sticker or emoji shows, from its name; no model is asked. */
 export function moodOf(name, kind) {
   const base = path.parse(String(name || '')).name;
-  if (kind === 'sticker') {
-    const word = /\s([a-z]+)$/i.exec(base)?.[1]?.toLowerCase();
+  if (kind === 'sticker' || kind === 'video-sticker') {
+    // Store 0.20.1 names video stickers "<Name> <emote> sticker.webm"; older ones were "<Name> <emote>.webm".
+    const word = /\s([a-z]+)$/i.exec(kind === 'video-sticker' ? base.replace(/\s+sticker$/i, '') : base)?.[1]?.toLowerCase();
     if (word && STICKER_WORDS.includes(word)) return word;
     return STICKER_MOODS[Number(/sticker\s*(\d+)/i.exec(base)?.[1]) - 1] || null;
   }
@@ -107,9 +152,13 @@ export async function unpack(buffer, { type = '', kind = 'portrait', filename = 
     const bytes = await f.async('nodebuffer');
     total += bytes.length;
     if (total > MAX_TOTAL_BYTES) throw new Error('The download unpacks to more than 2 GB.');
-    // A wallpaper pack holds the same scene under desktop/ and phone/, so the folder goes in the name.
-    const format = /(^|\/)phone\//i.test(f.name) ? 'phone' : /(^|\/)desktop\//i.test(f.name) ? 'desktop' : null;
-    const wanted = format ? `${format} ${path.basename(f.name)}` : f.name;
+    // A wallpaper pack holds the same scene under desktop/ and phone/, so the folder goes in the name. Background packs
+    // (store 0.20) name the folder "phone 1080x1920/" and the size in the file: "Art Studio 1080x1920.jpg".
+    const dims = /(\d{3,4})x(\d{3,4})(?=\.[a-z]+$)/i.exec(path.basename(f.name));
+    const byFolder = /(^|\/)phone[^/]*\//i.test(f.name) ? 'phone' : /(^|\/)desktop[^/]*\//i.test(f.name) ? 'desktop' : null;
+    const format = byFolder || (['wallpaper', 'background'].includes(k) && dims ? (Number(dims[2]) > Number(dims[1]) ? 'phone' : 'desktop') : null);
+    // A motion pack has "Core think.webm" twice: the reaction clip and the video sticker.
+    const wanted = k === 'video-sticker' && !/\ssticker\.[a-z0-9]+$/i.test(f.name) ? `sticker ${path.basename(f.name)}` : format && byFolder ? `${format} ${path.basename(f.name)}` : f.name;
     let name = safeName(wanted);
     for (let i = 2; seen.has(name.toLowerCase()); i++) name = safeName(`${path.parse(wanted).name} ${i}${path.extname(wanted)}`);
     seen.add(name.toLowerCase());
@@ -196,7 +245,8 @@ export async function addToManifest(entry, vrmDir) {
  */
 export function clipGesture(label) {
   const n = String(label || '').toLowerCase();
-  if (/\bwave|hello|greet/.test(n)) return 'wave';
+  // "Waving" drops the e: it matched nothing and a random clip was filmed (Booty Shake, 2026-11-15).
+  if (/\bwav(?:e|es|ed|ing)\b|hello|greet/.test(n)) return 'wave';
   if (/\bbow/.test(n)) return 'bow';
   if (/\bcheer/.test(n)) return 'cheer';
   if (/\bclap/.test(n)) return 'clap';

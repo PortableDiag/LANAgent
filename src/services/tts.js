@@ -1,6 +1,7 @@
 import { logger } from '../utils/logger.js';
 import OpenAI from 'openai';
 import { InferenceClient } from '@huggingface/inference';
+import { kokoroSpeech, kokoroAvailable, isKokoroVoice } from './kokoroTts.js';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -35,6 +36,14 @@ export class TTSService {
           'hexgrad/Kokoro-82M': { name: 'Kokoro-82M', description: 'High-quality multilingual TTS model' },
           'ResembleAI/chatterbox': { name: 'Chatterbox', description: 'Fast and natural TTS model' }
         }
+      },
+      // Kokoro-82M run on this machine: free, private, no key. The voices Bots & Borgs voice packs name.
+      kokoro: {
+        name: 'Kokoro (local)',
+        description: 'Kokoro-82M on this machine: free, nothing leaves the host; Bots & Borgs voice packs use it',
+        requiresKey: null,
+        local: true,
+        models: { 'kokoro-82m': { name: 'Kokoro-82M', description: 'Apache-2.0, CPU' } }
       },
       openrouter: {
         name: 'OpenRouter',
@@ -165,7 +174,9 @@ export class TTSService {
 
     // Route to appropriate provider
     let result;
-    if (provider === 'huggingface') {
+    if (provider === 'kokoro') {
+      result = await kokoroSpeech(text, { voice: options.voice || voiceSettings.voice, speed: options.speed ?? voiceSettings.speed ?? 1, lang: options.lang || voiceSettings.lang });
+    } else if (provider === 'huggingface') {
       result = await this.generateSpeechHuggingFace(text, options);
     } else if (provider === 'openrouter') {
       result = await this.generateSpeechOpenRouter(text, options);
@@ -457,7 +468,11 @@ export class TTSService {
       const provider = settings.provider || this.agent.agentModel.voice?.provider || 'openai';
       const looksLikeHubId = (id) => typeof id === 'string' && /^[\w.-]+\/[\w.:-]+$/.test(id);
 
-      if (provider === 'openai') {
+      if (provider === 'kokoro') {
+        if (!kokoroAvailable()) throw new Error('Kokoro is not installed on this host');
+        if (settings.voice && !isKokoroVoice(settings.voice)) throw new Error('Invalid Kokoro voice (expected an id like af_nicole)');
+        if (settings.model && settings.model !== 'kokoro-82m') throw new Error('The Kokoro provider has one model: kokoro-82m');
+      } else if (provider === 'openai') {
         if (settings.voice && !this.availableVoices.openai?.[settings.voice]) {
           throw new Error('Invalid voice selection for openai provider');
         }
@@ -561,6 +576,7 @@ export class TTSService {
       speed: fields.speed ?? current.speed ?? 1,
       format: fields.format || current.format || 'mp3'
     };
+    if ((fields.provider || current.provider) === 'kokoro') profile.lang = fields.lang || current.lang || '';
     if (!this.providers[profile.provider]) throw new Error(`Unknown provider: ${profile.provider}`);
     const profiles = this.getVoiceProfiles().filter(p => p.name.toLowerCase() !== clean.toLowerCase());
     profiles.push(profile);

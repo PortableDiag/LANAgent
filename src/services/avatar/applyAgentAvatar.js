@@ -156,6 +156,44 @@ export async function applyAgentAvatar(agent, buffer, { source = 'a new picture'
 }
 
 /**
+ * The profile banner (X header, MindSwarm banner), from a Bots & Borgs profile kit for the model the agent wears.
+ * Kept in data/agent/banner.png, which MindSwarm's own avatar sync also reads; the one before goes to banner-history.
+ * @returns {Promise<{ path: string, services: Record<string, string> }>}
+ */
+export async function applyAgentBanner(agent, buffer, { source = 'a new banner' } = {}) {
+  const dir = path.join(DATA_PATH, 'agent');
+  await fs.mkdir(dir, { recursive: true });
+  const file = path.join(dir, 'banner.png');
+  const current = await fs.readFile(file).catch(() => null);
+  if (current?.equals(buffer)) return { path: file, services: { all: 'unchanged' } };
+  if (current) {
+    await fs.mkdir(path.join(dir, 'banner-history'), { recursive: true });
+    await fs.writeFile(path.join(dir, 'banner-history', `banner-${new Date().toISOString().replace(/[:.]/g, '-')}.png`), current).catch(() => {});
+  }
+  await fs.writeFile(file, buffer);
+  const services = {};
+  const attempt = async (name, run) => {
+    try { services[name] = (await run()) || 'updated'; } catch (e) { services[name] = `not updated: ${String(e?.message || e).slice(0, 160)}`; }
+  };
+  await attempt('twitter', async () => {
+    const tw = pluginOf(agent, 'twitter');
+    if (!tw?.updateBanner) return 'not connected';
+    const r = await tw.updateBanner({ imagePath: file });
+    if (!r?.success) throw new Error(r?.error || 'refused');
+    return 'updated';
+  });
+  await attempt('mindswarm', async () => {
+    const ms = pluginOf(agent, 'mindswarm');
+    if (!ms?._uploadBanner) return 'not connected';
+    if (!ms.accessToken) return 'not logged in';
+    await ms._uploadBanner({ filePath: file });
+    return 'updated';
+  });
+  logger.info(`Banner applied from ${source}: ${Object.entries(services).map(([k, v]) => `${k} ${v}`).join(', ')}`);
+  return { path: file, services };
+}
+
+/**
  * "Sync my avatar" / "change your Telegram avatar to your new one": push the agent's picture everywhere again.
  * When the agent wears a Bots & Borgs model whose picture was never applied (DELTA 2026-11-06: it wore Sentinel, a
  * model with no portrait, and every sync re-sent the old picture and said "updated"), the model's picture goes out

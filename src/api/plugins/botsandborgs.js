@@ -6,7 +6,7 @@ import { PluginSettings } from '../../models/PluginSettings.js';
 import { encrypt, decrypt } from '../../utils/encryption.js';
 import fs from 'node:fs/promises';
 import { DATA_PATH } from '../../utils/paths.js';
-import { variantKind, unpack, installVrm, addToManifest, readVrmInfo, readVrmaInfo, clipLabel, clipLoops, clipGesture, writeStoreAnimations, safeName, toStickerWebp, moodOf, portraitFromPreview } from '../../services/store/assetLibrary.js';
+import { variantKind, livePass, unpack, installVrm, addToManifest, readVrmInfo, readVrmaInfo, clipLabel, clipLoops, clipGesture, writeStoreAnimations, safeName, toStickerWebp, moodOf, portraitFromPreview } from '../../services/store/assetLibrary.js';
 import { moodChoices, chooseSticker, stickerCouldFit, wallpaperFor } from '../../services/store/selfUse.js';
 
 /**
@@ -42,8 +42,16 @@ const DEFAULTS = {
   autoUse: true,
   autoWear: true,
   // Body language on AvatarX after a reply: a nod, shrug, wave or cheer and a matching face (services/avatar/autoEmote.js).
-  autoEmotes: true
+  autoEmotes: true,
+  // Renew the live pass of the model it wears before it runs out (3 days ahead, or in the grace week), under the
+  // same budget and wallet rules as any purchase. Other passes are left to run out.
+  autoRenewLive: true
 };
+const LIVE_RENEW_AHEAD_MS = 3 * 24 * 3600 * 1000;
+// Live passes: the store serves the newest version of a model to the pass's key; an unchanged one is a free 304,
+// and a key gets 40 full downloads a day (botsandborgs.com/llms.txt, "Live avatars").
+const LIVE_SYNC_MS = Number(process.env.BOTSANDBORGS_LIVE_SYNC_MS) || 6 * 3600 * 1000;
+const LIVE_FIRST_SYNC_MS = 3 * 60 * 1000;
 const AUTO_STICKER_EVERY_MS = Number(process.env.BOTSANDBORGS_STICKER_EVERY_MS) || 20 * 60 * 1000;
 const AUTO_STICKER_ASK_EVERY_MS = 60 * 1000;
 const USES =['avatar', 'send', 'install', 'wear', 'keep', 'play', 'stop', 'video'];
@@ -71,6 +79,26 @@ const KIND_WORDS = 'avatar, icon, portrait, sticker, emoji, wallpaper, vrm, anim
 export function quotedWords(text) {
   const m = /["“]([^"”]{2,600})["”]|'([^']{2,600})'(?=\s|$|[.,!?])/.exec(String(text || ''));
   return m ? (m[1] || m[2]).trim() : '';
+}
+
+/** A live VRM URL without its query: the store puts the pass key in `vrm_url`, and the key is sent as a header instead. */
+export function liveUrl(url, slug) {
+  const u = String(url || '').split(/[?#]/)[0];
+  return /^https:\/\//.test(u) ? u : `${BASE}/api/live/${slug}/vrm`;
+}
+
+/** The store's `expires` is Unix seconds (1797270951); an ISO date, or null. */
+export function liveExpiry(v) {
+  if (v == null || v === '') return null;
+  const n = Number(v);
+  const t = Number.isFinite(n) ? (n < 1e12 ? n * 1000 : n) : Date.parse(v);
+  return Number.isFinite(t) ? new Date(t).toISOString() : null;
+}
+
+/** The passes in a GET /api/live answer, whatever it wraps them in. */
+export function livePassList(d) {
+  const list = Array.isArray(d) ? d : d?.live ?? d?.passes ?? d?.items ?? [];
+  return (Array.isArray(list) ? list : [list]).filter(p => p && typeof p === 'object');
 }
 
 export default class BotsAndBorgsPlugin extends BasePlugin {
@@ -111,6 +139,12 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
         examples: ['send me a happy sticker', 'send Sam a sad robot emoji', 'use the bear vrm model as your 3d model', 'wear the bear model', 'install the bear model you bought', 'send me the bear portrait', 'send me a wallpaper from your wallpapers', 'set my wallpaper from my bots and borgs wallpapers', 'do the rumba you bought', 'play your wave animation', 'dance for me with your new dance pack', 'send me a video of you doing the pole dance', 'film yourself doing the rumba and send it to me', 'send me a video of you waving and saying "hi everyone, I\'m ALICE"', 'make a video of your cheer animation with your voice over it']
       },
       {
+        command: 'live',
+        description: 'Live avatar passes from Bots & Borgs: models the store hosts and keeps at their newest version. Lists each pass (model, state, expiry) and checks the store for a newer version now; a new version replaces the installed model, and the worn one everywhere it shows. Buy one with buy({ variant: "<model>-live30" }) (30, 90 or 365 days)',
+        usage: 'live({ check: true })  // renew: true (the worn model) or a model slug renews its pass now',
+        examples: ['check your live avatars for updates', 'which live avatar passes do you have', 'when does your live avatar pass expire', 'is there a new version of your live avatar']
+      },
+      {
         command: 'orders',
         description: 'The agent\'s Bots & Borgs orders and what this week\'s budget has left',
         usage: 'orders({})',
@@ -137,6 +171,7 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
         case 'buy': return await this.buy(data);
         case 'library': return await this.library(data);
         case 'use': return await this.useOwned(data);
+        case 'live': return await this.liveCommand(data);
         case 'orders': return await this.orders();
         case 'settings': return await this.settingsCommand(data);
         default: return { success: false, error: `Unknown action ${action}` };
@@ -215,14 +250,14 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
 
   async settingsCommand(data) {
     const s = await this.settings();
-    const keys = ['weeklyBudgetUsd', 'maxItemUsd', 'requireApproval', 'minWalletUsd', 'payAsset', 'allowAvatarChange', 'autoUse', 'autoWear', 'autoEmotes'];
+    const keys = ['weeklyBudgetUsd', 'maxItemUsd', 'requireApproval', 'minWalletUsd', 'payAsset', 'allowAvatarChange', 'autoUse', 'autoWear', 'autoEmotes', 'autoRenewLive'];
     const change = Object.fromEntries(keys.filter(k => data[k] !== undefined).map(k => [k, data[k]]));
     if (Object.keys(change).length) {
       if (change.payAsset && !['USDT', 'USDC', 'BNB'].includes(String(change.payAsset).toUpperCase())) return { success: false, error: 'payAsset must be USDT, USDC or BNB.' };
       if (change.payAsset) change.payAsset = String(change.payAsset).toUpperCase();
       for (const k of ['weeklyBudgetUsd', 'minWalletUsd']) if (change[k] !== undefined) change[k] = Math.max(0, Number(change[k]) || 0);
       if (change.maxItemUsd !== undefined) change.maxItemUsd = change.maxItemUsd === null || change.maxItemUsd === '' ? null : Math.max(0, Number(change.maxItemUsd));
-      for (const k of ['requireApproval', 'autoUse', 'autoWear', 'autoEmotes']) if (change[k] !== undefined) change[k] = change[k] === true || change[k] === 'true';
+      for (const k of ['requireApproval', 'autoUse', 'autoWear', 'autoEmotes', 'autoRenewLive']) if (change[k] !== undefined) change[k] = change[k] === true || change[k] === 'true';
       if (change.allowAvatarChange !== undefined) change.allowAvatarChange = change.allowAvatarChange === null || change.allowAvatarChange === 'auto' ? null : (change.allowAvatarChange === true || change.allowAvatarChange === 'true');
       Object.assign(s, change);
       await PluginSettings.setCached(this.name, 'settings', s);
@@ -294,6 +329,162 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     const erc20 = new ethers.Contract(asset.token_address, ['function balanceOf(address) view returns (uint256)'], signer);
     const amount = Number(ethers.formatUnits(await erc20.balanceOf(signer.address), asset.decimals || 18));
     return { amount, usd: asset.stable ? amount : null, address: signer.address };
+  }
+
+  // ── live passes ──────────────────────────────────────────────────────────────────────
+  async initialize() {
+    const tick = () => this.liveTick().catch(e => this.logger.warn(`botsandborgs: live check failed: ${e.message}`));
+    this._liveFirst = setTimeout(tick, LIVE_FIRST_SYNC_MS);
+    this._liveTimer = setInterval(tick, LIVE_SYNC_MS);
+    this._liveFirst.unref?.(); this._liveTimer.unref?.();
+  }
+
+  async cleanup() {
+    clearTimeout(this._liveFirst); clearInterval(this._liveTimer);
+  }
+
+  /** Saved passes: [{ slug, variant, key (encrypted), state, expires, vrmUrl, etag, checkedAt, updatedAt }]. */
+  async livePasses() {
+    const saved = await PluginSettings.getCached(this.name, 'live').catch(() => null);
+    return Array.isArray(saved?.passes) ? saved.passes : [];
+  }
+
+  async saveLivePasses(passes) { await PluginSettings.setCached(this.name, 'live', { passes }); }
+
+  /** The store's list of this account's passes (GET /api/live), merged into the saved ones, which keep their ETag. */
+  async refreshLivePasses() {
+    const d = await this.api('get', '/api/live', { key: await this.accountKey() });
+    const listed = livePassList(d);
+    const saved = await this.livePasses();
+    for (const p of listed) {
+      const slug = p.slug || p.product || livePass(p.variant)?.slug || (String(p.vrm_url || '').match(/\/api\/live\/([^/?]+)\/vrm/) || [])[1];
+      if (!slug || !p.key) continue;
+      const old = saved.find(x => x.slug === slug);
+      const bought = (await this.libraryItems()).find(i => i.variant === slug)?.livePass;
+      const pass = { ...(old || {}), slug, variant: p.variant || old?.variant || bought || null, key: encrypt(p.key), state: p.state || 'active',
+        expires: liveExpiry(p.expires), vrmUrl: liveUrl(p.vrm_url, slug) };
+      if (old) Object.assign(old, pass); else saved.push(pass);
+    }
+    await this.saveLivePasses(saved);
+    return saved;
+  }
+
+  /** The timer's run: nothing to do (and no store call) until a pass exists. Then the worn model's pass is renewed if due. */
+  async liveTick() {
+    if (!(await this.livePasses()).length && !(await this.libraryItems()).some(i => i.livePass)) return;
+    await this.syncLive();
+    if (!(await this.settings()).autoRenewLive) return;
+    const worn = this.wornBase();
+    const pass = (await this.livePasses()).find(p => p.slug === worn);
+    if (pass && this.renewDue(pass)) {
+      const r = await this.renewLive(pass.slug).catch(e => ({ success: false, error: e.message }));
+      this.logger[r.success ? 'info' : 'warn'](`botsandborgs: live pass for ${pass.slug} ${r.success ? 'renewed' : `not renewed: ${r.error}`}`);
+    }
+  }
+
+  /** Due: in the grace week, run out, or ending within 3 days. Not twice in a day. */
+  renewDue(pass, now = Date.now()) {
+    if (pass.renewTriedAt && now - Date.parse(pass.renewTriedAt) < 24 * 3600 * 1000) return false;
+    const ends = Date.parse(pass.expires || '');
+    return ['grace', 'expired'].includes(pass.state) || (Number.isFinite(ends) && ends - now < LIVE_RENEW_AHEAD_MS);
+  }
+
+  /**
+   * Buy the same length of pass again for a model (the store extends the same key), under the usual purchase rules.
+   * Returns the purchase's answer, with `expires` before and after.
+   */
+  async renewLive(slug) {
+    const passes = await this.livePasses();
+    const pass = passes.find(p => p.slug === slug);
+    if (!pass) return { success: false, error: `I have no live pass for ${slug}.` };
+    pass.renewTriedAt = new Date().toISOString();
+    await this.saveLivePasses(passes);
+    const days = livePass(pass.variant)?.days || 30;
+    const before = pass.expires;
+    const r = await this.buy({ variant: `${slug}-live${days}`, use: 'install', _context: { originalInput: `renew the ${days}-day live pass for ${slug}` } });
+    if (!r.success) return r;
+    const after = (await this.refreshLivePasses()).find(p => p.slug === slug)?.expires;
+    return { ...r, expiresBefore: before, expires: after, result: `${r.result} The pass now runs until ${String(after || '?').slice(0, 10)} (was ${String(before || '?').slice(0, 10)}).` };
+  }
+
+  /**
+   * Ask the store for each pass's model with its last ETag. 304 = unchanged (free). 200 = a new version: it replaces
+   * the library file and the gallery model, and the worn model reaches AvatarX. 402 = the pass ran out.
+   * Returns [{ slug, status: 'unchanged'|'updated'|'same'|'expired'|'error', ... }].
+   */
+  async syncLive() {
+    let passes = await this.livePasses();
+    // A pass bought before its key was saved, or whose key came back once only: the store's list has them all.
+    if (!passes.length || (await this.libraryItems()).some(i => i.livePass && !passes.some(p => p.slug === this.productBase(i.variant)))) {
+      passes = await this.refreshLivePasses().catch(e => { this.logger.warn(`botsandborgs: live passes not listed: ${e.message}`); return passes; });
+    }
+    const report = [];
+    for (const pass of passes) {
+      // Saved before 2.25.796 with the key in the URL's query, and the expiry in seconds.
+      pass.vrmUrl = liveUrl(pass.vrmUrl, pass.slug);
+      pass.expires = liveExpiry(pass.expires);
+      let key;
+      try { key = decrypt(pass.key); } catch { report.push({ slug: pass.slug, status: 'error', error: 'its key could not be read' }); continue; }
+      const item = (await this.libraryItems()).find(i => i.variant === pass.slug) || (await this.libraryItems()).find(i => i.livePass && this.productBase(i.variant) === pass.slug && i.files.some(f => f.kind === 'vrm'));
+      const file = item?.files.find(f => f.kind === 'vrm');
+      const headers = { 'User-Agent': this.userAgent(), 'X-Live-Key': key };
+      // No local copy = no point in a 304.
+      if (pass.etag && file) headers['If-None-Match'] = pass.etag;
+      const r = await this.fetchLive(pass.vrmUrl, headers);
+      pass.checkedAt = new Date().toISOString();
+      const state = r.headers?.['x-live-state'];
+      if (state) pass.state = state;
+      if (r.status === 304) { report.push({ slug: pass.slug, status: 'unchanged', state: pass.state }); continue; }
+      if (r.status === 402) {
+        pass.state = 'expired';
+        report.push({ slug: pass.slug, status: 'expired' });
+        this.logger.warn(`botsandborgs: live pass for ${pass.slug} has expired; the installed model stays as it is`);
+        continue;
+      }
+      if (r.status !== 200) { report.push({ slug: pass.slug, status: 'error', error: r.error || `HTTP ${r.status}` }); continue; }
+      const buffer = Buffer.from(r.data);
+      try { readVrmInfo(buffer); } catch (e) { report.push({ slug: pass.slug, status: 'error', error: `not a VRM (${e.message})` }); continue; }
+      pass.etag = r.headers?.etag || null;
+      const product = await this.productOf(pass.slug).catch(() => null);
+      const target = item || { variant: pass.slug, title: product?.title || pass.slug, kind: 'vrm', collection: product?.collection || null, order: null, token: null,
+        at: new Date().toISOString(), files: [], livePass: pass.variant };
+      const done = await this.replaceModel(target, buffer);
+      if (!done.changed) { report.push({ slug: pass.slug, status: 'same', state: pass.state }); continue; }
+      pass.updatedAt = new Date().toISOString();
+      this.logger.info(`botsandborgs: live ${pass.slug} updated ${target.variant} (${done.gallery.sizeMB} MB, ETag ${pass.etag || 'none'})${done.worn ? ', worn: AvatarX given it' : ''}`);
+      report.push({ slug: pass.slug, status: 'updated', worn: done.worn, sizeMB: done.gallery.sizeMB, model: done.gallery.id });
+    }
+    // Saved last, and by slug, so a pass the store listed meanwhile is not lost.
+    const latest = await this.livePasses();
+    for (const p of passes) { const at = latest.findIndex(x => x.slug === p.slug); if (at >= 0) latest[at] = p; else latest.push(p); }
+    await this.saveLivePasses(latest);
+    const changed = report.filter(x => x.status === 'updated').length;
+    this.logger.info(`botsandborgs: live check: ${report.length} pass${report.length === 1 ? '' : 'es'}, ${changed} updated${report.length ? ` (${report.map(x => `${x.slug} ${x.status}`).join(', ')})` : ''}`);
+    return report;
+  }
+
+  /** One live download: { status, headers, data } (never throws; status 0 = no answer). */
+  async fetchLive(url, headers) {
+    return axios.get(url, { headers, responseType: 'arraybuffer', timeout: 180000, validateStatus: () => true })
+      .catch(e => ({ status: 0, error: e.message, headers: {} }));
+  }
+
+  async liveCommand({ check, renew } = {}) {
+    if (renew) {
+      const slug = renew === true || renew === 'true' ? this.wornBase() : this.productBase(String(renew));
+      if (!slug) return { success: false, error: 'Which model\'s pass should I renew?' };
+      return this.renewLive(slug);
+    }
+    const report = check === false || check === 'false' ? null : await this.syncLive();
+    const passes = await this.livePasses();
+    if (!passes.length) return { success: true, passes: [], result: 'I have no live avatar passes from Bots & Borgs. A live pass keeps a model at its newest version; most 3D avatars sell one (30, 90 or 365 days).' };
+    const line = (p) => {
+      const r = report?.find(x => x.slug === p.slug);
+      const what = !r ? '' : r.status === 'updated' ? ', a new version just arrived and is installed' : r.status === 'expired' ? ', the pass has run out (the installed model stays)'
+        : r.status === 'error' ? `, the check failed: ${r.error}` : ', up to date';
+      return `- ${p.slug}: ${p.state || 'active'}, until ${String(liveExpiry(p.expires) || '?').slice(0, 10)}${what}`;
+    };
+    return { success: true, report, passes: passes.map(({ key, vrmUrl, ...rest }) => ({ ...rest, vrmUrl: liveUrl(vrmUrl, rest.slug), expires: liveExpiry(rest.expires) })), result: `My live avatar passes:\n${passes.map(line).join('\n')}` };
   }
 
   // ── commands ───────────────────────────────────────────────────────────────────────────
@@ -376,7 +567,7 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
       data = { ...data, use: 'wear' };
       wantNow = wantKind === 'bundle' ? 'bundle' : 'vrm';
     }
-    if (!data.use && ['sticker', 'emoji', 'wallpaper', 'animation'].includes(buying)) data = { ...data, use: 'keep' };
+    if (!data.use && ['sticker', 'emoji', 'wallpaper', 'animation', 'kit', 'voice', 'sound', 'motion', 'background'].includes(buying)) data = { ...data, use: 'keep' };
     if (!data.use && buying && /-portraits$|-bundle$|-pack$|^[a-z-]+-(?:avatars|wallpapers|emoji)$/.test(String(data.variant || ''))) data = { ...data, use: 'keep' };
     const use = String(data.use || '').toLowerCase();
     // The owner's rule: never buy to hold. A purchase names what it is for.
@@ -406,11 +597,25 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
       pickedWhy += `I looked at ${pick.seen} ${kind}s and picked ${pick.label}: ${pick.why} `;
     }
 
+    // "Buy a live pass for it": the model's live variant, which the store keeps at its newest version.
+    if (/\blive\b/i.test(`${asked} ${data.query || ''}`) && !livePass(data.variant) && variantKind(data.variant) === 'vrm') {
+      const days = /\b(year|365|annual)\b/i.test(asked) ? 365 : /\b90\b|three months|3 months/i.test(asked) ? 90 : 30;
+      const base = String(data.variant).replace(/-(?:portraits|stickers|bundle)$/, '');
+      const product = await this.productOf(base).catch(() => null);
+      if (!(product?.variants || []).some(v => v.id === `${base}-live${days}`)) return { success: false, error: `${product?.title || base} has no ${days}-day live pass on sale.` };
+      data = { ...data, variant: `${base}-live${days}` };
+    }
+    const live = livePass(data.variant);
     // The store nests its answers: { quote: {...} }, { order: {...}, crypto: {...}, token } (live, 2026-10-28).
-    const quoted = await this.api('post', '/api/quotes', { body: { items: [{ variant: String(data.variant), qty: 1 }] } });
+    // A live pass is quoted with the account key: a download it already paid for comes off the first pass.
+    const quoted = await this.api('post', '/api/quotes', { body: { items: [{ variant: String(data.variant), qty: 1 }] }, key: live ? await this.accountKey() : undefined });
     const quote = quoted.quote || quoted;
     const usd = Number(quote.total_cents ?? 0) / 100;
-    if (!(usd > 0)) throw new Error('The store returned a quote with no price.');
+    // A first live pass on a model already paid for can cost nothing: the store takes the download off it
+    // (`upgrade_credit_cents`; Racer Blue's $15 bundle made its 30-day pass $0, 2026-11-14). A free order is placed
+    // on the balance; any other $0 quote is still a store fault.
+    const credited = Number(quote.upgrade_credit_cents ?? quote.credit_cents ?? 0) > 0 || (quote.lines || quote.items || []).some(l => Number(l?.upgrade_credit_cents) > 0);
+    if (!(usd > 0) && !(usd === 0 && credited)) throw new Error(`The store returned a quote with no price (${JSON.stringify(quote).slice(0, 400)}).`);
     const ledger = await this.ledger();
     const spent = this.spentThisWeek(ledger);
     if (spent + usd > s.weeklyBudgetUsd + 1e-9) return { success: false, error: `That costs $${usd.toFixed(2)} and I have $${Math.max(0, s.weeklyBudgetUsd - spent).toFixed(2)} of this week's $${s.weeklyBudgetUsd} left, so I didn't buy it.` };
@@ -438,6 +643,12 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     if (!downloads.length) return { success: true, result: `Paid (${label}); the store is still confirming order ${order.id}. I'll use it once its download is ready.` };
     const used = await this.use({ order, downloads, use, to: data.to, usd, hash, label, variant: String(data.variant) });
     if (used.success && pickedWhy) used.result = `${pickedWhy}${used.result}`;
+    if (live && used.success) {
+      const passes = await this.refreshLivePasses().catch(e => { this.logger.warn(`botsandborgs: live pass not read back: ${e.message}`); return []; });
+      const mine = passes.find(p => p.slug === live.slug);
+      used.result += mine ? ` The store keeps it at its newest version until ${String(mine.expires || '').slice(0, 10) || 'the pass ends'}, and I check it every ${Math.round(LIVE_SYNC_MS / 3600000)} hours.`
+        : ' The store has not listed the live pass yet; I will pick it up on the next check.';
+    }
     return used;
   }
 
@@ -616,6 +827,10 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     const w = String(words || '');
     // Clips first: "the dance pack", "emote animations" are clips, not a model's bundle or a sticker set.
     if (/\b(animations?|animated clips?|dance (?:pack|moves|clips?|routine)|dances?|motions?|vrma|mocap|gesture clips?)\b/i.test(w)) return 'animation';
+    // Add-ons (store 0.17): a profile kit (banners), a voice pack, the call sounds.
+    if (/\bprofile kit\b|\bbanners?\b/i.test(w)) return 'kit';
+    if (/\bvoice(?: pack)?\b/i.test(w)) return 'voice';
+    if (/\b(call sounds?|hold music|ringback|chimes?)\b/i.test(w)) return 'sound';
     // "Get the pack" / "the avatar kit" for a model is its complete bundle; a portrait or sticker pack is not.
     if (/\b(bundle|everything for)\b/i.test(w) || /\b(?<!(?:portrait|sticker|emoji|wallpaper|icon)s? )(?:pack|kit)\b/i.test(w)) return 'bundle';
     if (/\b(vrm|vroid|3d|three.?d)\b/i.test(w)) return 'vrm';
@@ -655,10 +870,19 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
   }
 
   /** Download everything an order holds, keep each file, and put any model in the gallery. Returns the library item. */
-  async ingest({ order, downloads, variant, update = null }) {
-    const product = await this.productOf(variant);
-    const kind = variantKind(variant, product?.collection);
-    const label = (product?.variants || []).find(v => v.id === variant)?.label;
+  async ingest({ order, downloads, variant: bought, update = null }) {
+    const product = await this.productOf(bought);
+    const kind = variantKind(bought, product?.collection);
+    // A live pass (vrm-x-live30) is the model vrm-x: one library item and one gallery model, whichever pass or
+    // renewal brought it, so a renewal never adds a second copy and a live update finds it.
+    const live = livePass(bought);
+    // A model already owned another way (ALICE wears vrm-racer-blue-bundle's copy): the pass keeps THAT one current.
+    if (live && !update) {
+      const owner = (await this.libraryItems()).find(i => i.variant !== live.slug && this.productBase(i.variant) === live.slug && i.files.some(f => f.kind === 'vrm'));
+      if (owner) return this.ingestLiveInto(owner, { downloads, bought });
+    }
+    const variant = live?.slug || bought;
+    const label = (product?.variants || []).find(v => v.id === bought)?.label;
     const title = product ? (kind === 'vrm' || kind === 'bundle' || kind === 'animation' || !label ? product.title : `${product.title}: ${label}`) : variant;
     const dir = path.join(this.libraryDir(), safeName(variant));
     await fs.mkdir(dir, { recursive: true });
@@ -689,11 +913,55 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
         files.push(entry);
       }
     }
-    const item ={ variant, title, kind, collection: product?.collection || null, order: order?.id || null, token: order?.token || null, at: new Date().toISOString(), files };
+    const item = { variant, title, kind, collection: product?.collection || null, order: order?.id || null, token: order?.token || null, at: new Date().toISOString(), files };
+    if (livePass(bought)) item.livePass = bought;
     if (update) item.at = update.at || item.at;
     await this.saveLibraryItem(item, { keepPlace: !!update });
     if (files.some(f => f.kind === 'animation')) await this.publishAnimations();
     return item;
+  }
+
+  /** A live pass's download for a model already owned: its VRM replaces that item's model, the rest is left alone. */
+  async ingestLiveInto(item, { downloads, bought }) {
+    let buffer = null;
+    for (const d of downloads) {
+      const url = typeof d === 'string' ? d : d?.url;
+      if (!url) continue;
+      const got = await this.fetchBytes(url);
+      const vrm = (await unpack(got.buffer, { type: got.type, kind: 'vrm', filename: typeof d === 'string' ? '' : (d.filename || d.name || '') })).find(f => f.kind === 'vrm');
+      if (vrm) { buffer = vrm.buffer; break; }
+    }
+    const next = { ...item, livePass: bought };
+    if (buffer) await this.replaceModel(next, buffer);
+    else await this.saveLibraryItem(next, { keepPlace: true });
+    this.logger.info(`botsandborgs: live pass ${bought} keeps ${item.variant} current${buffer ? '' : ' (its download held no model)'}`);
+    return (await this.libraryItems()).find(i => i.variant === item.variant) || next;
+  }
+
+  /**
+   * Put new model bytes in an owned item: its library file, its gallery model (same id), and AvatarX when worn.
+   * Identical bytes change nothing. Returns { changed, worn, gallery }.
+   */
+  async replaceModel(item, buffer) {
+    readVrmInfo(buffer);
+    const file = item.files.find(f => f.kind === 'vrm');
+    const dir = path.join(this.libraryDir(), safeName(item.variant));
+    const name = file?.name || `${item.variant}.vrm`;
+    const sha = (b) => crypto.createHash('sha256').update(b).digest('hex');
+    const before = await fs.readFile(path.join(dir, name)).then(sha).catch(() => null);
+    if (before === sha(buffer)) { await this.saveLibraryItem(item, { keepPlace: true }); return { changed: false, worn: false, gallery: file?.gallery || null }; }
+    await fs.mkdir(dir, { recursive: true });
+    await fs.writeFile(path.join(dir, name), buffer);
+    const gallery = await installVrm(buffer, { variant: item.variant, name: file?.gallery?.name, description: file?.gallery?.description || `Bought from Bots & Borgs (${item.title || item.variant})` }, this.vrmDir());
+    const entry = { ...(file || { name, kind: 'vrm', mime: 'model/gltf-binary' }), size: buffer.length, modelId: gallery.id, gallery };
+    const next = { ...item, files: file ? item.files.map(f => f === file ? entry : f) : [...item.files, entry] };
+    await this.saveLibraryItem(next, { keepPlace: true });
+    const worn = gallery.id === this.agent?.agentModel?.activeVRMModel;
+    if (worn) {
+      const { pushModelToAvatarX } = await import('../../services/avatar/avatarx.js');
+      await pushModelToAvatarX(gallery.id).catch(e => this.logger.warn(`botsandborgs: AvatarX not given the new ${item.variant}: ${e.message}`));
+    }
+    return { changed: true, worn, gallery };
   }
 
   /**
@@ -836,10 +1104,20 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
   async useOwned(data = {}) {
     const asked = String(data._context?.originalInput || data.originalInput || '');
     const item = data.item || data.variant || data.query;
+    // An owned voice pack or profile kit, named: "use your Racer Blue voice pack", "put up your Racer Blue banner".
+    const addOn = /\bvoice\b/i.test(`${asked} ${item || ''} ${data.as || ''}`) ? 'voice' : /\b(banner|profile kit|kit)\b/i.test(`${asked} ${item || ''} ${data.as || ''}`) ? 'kit' : null;
+    if (addOn && item) {
+      const owned = (await this.libraryItems()).find(i => i.kind === addOn && (i.variant === item || this.matches(i, String(item).replace(/\b(voice|pack|banner|profile|kit)\b/gi, ' '))));
+      if (owned?.kind === 'voice') {
+        const v = await this.installVoicePack(owned);
+        return { success: true, result: `"${v.name}" is a saved voice preset (${v.profile.provider === 'openrouter' ? 'Kokoro on OpenRouter' : 'Kokoro'}, ${v.profile.voice}).${v.available ? ` Say "switch to the ${v.name}" to speak with it.` : ' Kokoro is not installed on this machine, and there is no OpenRouter to speak it with.'}` };
+      }
+      if (owned?.kind === 'kit') return { success: true, result: await this.kitBannerUse(owned) };
+    }
     let as = String(data.as || data.use || (/\b(wear|become)\b|as your (?:3d|vrm)/i.test(asked) ? 'wear' : /\binstall\b/i.test(asked) ? 'install' : /\bas your avatar\b/i.test(asked) ? 'avatar' : '')).toLowerCase();
     // "Re-apply/equip the Sentinel avatar", "update your profile picture": becoming it, never a send that asks "Who
     // should I send it to?" (DELTA 2026-11-06, twice). A model is worn, which brings its picture; a picture is applied.
-    if (!as && !data.to && /\b(avatars?|equip|apply|re-?apply|put on|profile (?:pic(?:ture)?|photo|image)|pfp|look like)\b/i.test(asked)) {
+    if (!as && !data.to && /\b(avatars?|equip|apply|re-?apply|put on|profile (?:pic(?:ture)?|photo|image)|pfp|look like|go back to|turn (?:back )?into|(?:switch|change)(?: back)? (?:in)?to)\b/i.test(asked)) {
       as = (await this.pickOwned({ item, kind: 'vrm', kinds: ['vrm'] })) ? 'wear' : 'avatar';
     }
     const kind = data.kind && data.kind !== 'avatar' ? data.kind : this.kindAsked(asked);
@@ -887,10 +1165,11 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     if (/^(me|owner|myself)$/i.test(to)) {
       const tg = this.agent?.interfaces?.get?.('telegram');
       if (!tg?.sendNotification) return { success: false, error: "Telegram isn't connected, so it wasn't sent." };
-      const send = tg.bot?.telegram?.sendSticker && tg.authorizedUserId && ['sticker', 'emoji'].includes(file.kind);
+      const send = tg.bot?.telegram?.sendSticker && tg.authorizedUserId && ['sticker', 'emoji', 'video-sticker'].includes(file.kind);
       if (send) {
         try {
-          await tg.bot.telegram.sendSticker(tg.authorizedUserId, { source: await toStickerWebp(buffer), filename: 'sticker.webp' });
+          // A video sticker goes as it is: Telegram takes a VP9 WebM sticker directly.
+          await tg.bot.telegram.sendSticker(tg.authorizedUserId, file.kind === 'video-sticker' ? { source: buffer, filename: 'sticker.webm' } : { source: await toStickerWebp(buffer), filename: 'sticker.webp' });
           return { success: true, result: `Sent you ${item.title}${file.mood ? ` (${file.mood})` : ''}.` };
         } catch (e) { this.logger.warn(`botsandborgs: sendSticker failed, sending a picture: ${e.message}`); }
       }
@@ -958,7 +1237,13 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     // A named dance ("do the can-can") is that dance or a plain no, never some other dance; "dance for me" is any.
     const specific = /pole|rumba|belly|can.?can|cabbage|running man|roger|go.?go|booty|twerk|samba|ballet|hip.?hop|dab/i.exec(`${clip || ''} ${asked}`);
     const fits = named.length ? named : specific ? [] : purpose ? pool.filter(p => p.file.gesture === purpose) : [];
-    const choice = (fits.length ? fits : pool)[Math.floor(Math.random() * (fits.length ? fits : pool).length)];
+    let choice = (fits.length ? fits : pool)[Math.floor(Math.random() * (fits.length ? fits : pool).length)];
+    // A dance with a "Facing Away" version is shown that way: the owner (2026-11-15) on Booty Shake, "otherwise the
+    // user can't see it". Facing the camera only when asked to.
+    if (choice && !/facing away/i.test(choice.file.label || '') && !/\b(fac(?:e|es|ing) (?:me|forward|the camera|front)|from the front)\b/i.test(`${clip || ''} ${asked}`)) {
+      const away = pool.find(p => flat(p.file.label) === flat(`${choice.file.label} Facing Away`));
+      if (away) choice = away;
+    }
     if (!fits.length && (clip || purpose || specific)) return { error: `I have no ${specific ? specific[0] : clip || purpose} clip. Mine: ${[...new Set(pool.map(p => p.file.label))].join(', ')}.` };
     const rel = `store/${safeName(choice.item.variant)}/${choice.file.name}`;
     const listed = await fs.readFile(path.join(this.vrmDir(), 'animations', 'store.json'), 'utf8').then(JSON.parse).catch(() => []);
@@ -993,6 +1278,18 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
   async sendClipVideo({ item, clip, asked = '', to = 'me', wait = false, say = '' }) {
     // A voice-over (the owner, 2026-11-11): the agent's own voice speaking over the clip, with its mouth moving to it.
     const words = String(say || '').trim().slice(0, 600);
+    // A motion pack for the model it wears has this reaction ready-made: sent at once, no render (store 0.20).
+    if (!words && /^(me|owner|myself)$/i.test(to)) {
+      const ready = await this.readyClip(`${clip || ''} ${item || ''} ${asked}`);
+      if (ready) {
+        const tg = this.agent?.interfaces?.get?.('telegram');
+        if (tg?.bot?.telegram?.sendAnimation && tg.authorizedUserId) {
+          await tg.bot.telegram.sendAnimation(tg.authorizedUserId, { source: await this.readOwned(ready), filename: ready.file.name.replace(/\s+/g, '-') }, { caption: `${ready.word} (${ready.item.title.replace(/\s*[—-]\s*.*$/, '')})` });
+          this.logger.info(`botsandborgs: sent the ready-made ${ready.word} clip from ${ready.item.variant}`);
+          return { success: true, result: `Sent you my ${ready.word} clip on Telegram.` };
+        }
+      }
+    }
     const picked = await this.chooseClip({ item, clip, asked });
     if (picked.error) return { success: false, error: picked.error };
     const { choice, entry, rel } = picked;
@@ -1009,8 +1306,10 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
         if (!tts?.buffer?.length) throw new Error("I couldn't make the voice-over");
         voice = { audio: tts.buffer, format: tts.format || 'mp3' };
       }
+      const scene = await this.backgroundFor(asked);
+      if (scene) this.logger.info(`botsandborgs: filming in front of ${path.basename(scene)}`);
       const v = await (this.renderVideo || renderClipVideo)({ modelPath: path.join(this.vrmDir(), model.file), clipPath: path.join(this.vrmDir(), 'animations', rel),
-        loop: !!entry.loop, prop: entry.prop || null, ...(voice ? { voice } : {}) });
+        loop: !!entry.loop, prop: entry.prop || null, ...(voice ? { voice } : {}), ...(scene ? { backgroundPath: scene } : {}) });
       const filename = `${String(label).toLowerCase().replace(/[^a-z0-9]+/g, '-')}.mp4`;
       if (/^(me|owner|myself)$/i.test(to)) {
         const tg = this.agent?.interfaces?.get?.('telegram');
@@ -1077,13 +1376,98 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     // The picture follows the model, so the two never disagree. Wearing only happens when asked or allowed unasked
     // (autoWear), so the picture comes with it either way. A model sold alone has no portrait, only the store's
     // preview of it: that is its picture (DELTA 2026-11-06 wore Sentinel and kept its old picture everywhere).
+    // Its profile kit, when owned, brings the matching banner (X header, MindSwarm).
+    const kitNote = await this.bannerForModel(pick.item.variant).catch(e => { this.logger.warn(`botsandborgs: banner not applied: ${e.message}`); return ''; });
     const picture = modelPicture(pick.item);
     if (picture) {
       const { applyAgentAvatar, describeAvatarServices } = await import('../../services/avatar/applyAgentAvatar.js');
       const applied = await applyAgentAvatar(this.agent, await this.pictureBytes(pick.item, picture), { source: `Bots & Borgs, ${pick.item.variant}`, variant: pick.item.variant });
-      return { success: true, result: `${entry.name} is my 3D model now, and its picture is my avatar. ${describeAvatarServices(applied.services)}`.trim() };
+      return { success: true, result: `${entry.name} is my 3D model now, and its picture is my avatar. ${describeAvatarServices(applied.services)}${kitNote ? ` ${kitNote}` : ''}`.trim() };
     }
     return { success: true, result: `${entry.name} is my 3D model now. It came with no picture, so my avatar picture didn't change.` };
+  }
+
+  /** The reaction words a motion pack holds, and the asks that mean them. */
+  static REACTIONS = { wave: /\b(wav(e|es|ed|ing)|hello|hi|bye|goodbye)\b/i, laugh: /\b(laugh(s|ed|ing)?|lol|giggl)/i, cheer: /\bcheer/i,
+    clap: /\bclap/i, bow: /\bbow(s|ed|ing)?\b/i, nod: /\bnod(s|ded|ding)?\b/i, think: /\bthink(s|ing)?\b|\bpondering\b/i };
+
+  /** The worn model's ready-made reaction clip (MP4) for a request, or null. */
+  async readyClip(words) {
+    const worn = this.wornBase();
+    if (!worn) return null;
+    const word = Object.entries(BotsAndBorgsPlugin.REACTIONS).find(([, re]) => re.test(String(words || '')))?.[0];
+    if (!word) return null;
+    for (const item of await this.libraryItems()) {
+      if (item.kind !== 'motion' || this.productBase(item.variant) !== worn) continue;
+      const file = item.files.find(f => f.kind === 'clip' && /\.mp4$/i.test(f.name) && new RegExp(`\\s${word}\\.mp4$`, 'i').test(f.name));
+      if (file) return { item, file, word };
+    }
+    return null;
+  }
+
+  /** An owned background scene for a portrait video: the one named in the request, else today's. Path or null. */
+  async backgroundFor(asked = '') {
+    const items = (await this.libraryItems()).filter(i => i.files.some(f => f.kind === 'background'));
+    const phone = items.flatMap(item => item.files.filter(f => f.kind === 'background' && f.format !== 'desktop').map(file => ({ item, file })));
+    if (!phone.length) return null;
+    const scene = (f) => f.name.replace(/\s*\d{3,4}x\d{3,4}\.[a-z]+$/i, '').replace(/^phone\s+/i, '').toLowerCase();
+    const named = phone.find(p => { const n = scene(p.file); return n.length >= 3 && String(asked).toLowerCase().includes(n); });
+    const pick = named || phone[Math.floor(Date.now() / 86400000) % phone.length];
+    return path.join(this.libraryDir(), safeName(pick.item.variant), pick.file.name);
+  }
+
+  /** A model's store product, whatever variant brought it: vrm-racer-blue-bundle / -live30 / -kit → vrm-racer-blue. */
+  productBase(variant) { return String(variant || '').replace(/^store-/, '').replace(/-(?:bundle|portraits|stickers|kit|voice|motion|2d|live\d+)$/, ''); }
+
+  /** The store product of the model this agent wears, or null. */
+  wornBase() {
+    const id = this.agent?.agentModel?.activeVRMModel;
+    return /^store-vrm-/.test(String(id || '')) ? this.productBase(id) : null;
+  }
+
+  /** A voice pack's voice.json → a saved voice preset on the local Kokoro engine. Never switches the current voice. */
+  async installVoicePack(item) {
+    const file = item.files.find(f => f.kind === 'voice');
+    if (!file) throw new Error('The voice pack holds no voice.json.');
+    const spec = JSON.parse(String(await this.readOwned({ item, file })));
+    if (!/kokoro/i.test(String(spec.engine || ''))) throw new Error(`The voice pack is for ${spec.engine || 'an unknown engine'}, which I can't run.`);
+    const { kokoroLang, kokoroAvailable } = await import('../../services/kokoroTts.js');
+    const tts = this.agent?.ttsService;
+    if (!tts?.saveVoiceProfile) throw new Error('I have no voice settings to add it to.');
+    const character = String(spec.character || item.title || '').replace(/\s*[—-]\s*.*$/, '').trim() || this.productBase(item.variant);
+    const name = `${character} voice`.slice(0, 40);
+    const lang = /^[a-z]{2,3}(-[a-z]{2,4})?$/i.test(String(spec.lang || '')) ? String(spec.lang).toLowerCase() : kokoroLang(spec.lang_code, spec.voice);
+    // No Kokoro on this machine: the pack's hosted alternative (store 0.18.4: "OpenRouter hexgrad/kokoro-82m") speaks
+    // the same voice, when this agent has OpenRouter.
+    const hosted = /openrouter\s+([\w.-]+\/[\w.:-]+)/i.exec(String(spec.alternatives?.hosted || ''))?.[1];
+    const local = kokoroAvailable();
+    const viaOpenRouter = !local && hosted && this.agent?.providerManager?.providers?.get?.('openrouter');
+    const fields = viaOpenRouter
+      ? { provider: 'openrouter', model: hosted, voice: String(spec.voice), speed: Number(spec.speed) || 1, format: 'mp3' }
+      : { provider: 'kokoro', model: 'kokoro-82m', voice: String(spec.voice), speed: Number(spec.speed) || 1, format: 'mp3', lang };
+    const profile = await tts.saveVoiceProfile(name, fields);
+    this.logger.info(`botsandborgs: voice pack ${item.variant} saved as the "${name}" preset (${viaOpenRouter ? `OpenRouter ${hosted}` : 'Kokoro'} ${profile.voice})`);
+    return { name, profile, available: local || !!viaOpenRouter };
+  }
+
+  /** A bought profile kit: its banner goes up now when the kit is for the model this agent wears. */
+  async kitBannerUse(item) {
+    const base = this.productBase(item.variant);
+    if (base !== this.wornBase()) return `It is in my library; its banner goes up when I wear ${item.title.replace(/\s*[—-]\s*.*$/, '') || 'that model'}.`;
+    return (await this.bannerForModel(base)) || 'It holds no banner I can use.';
+  }
+
+  /** The owned kit's banner for a model, applied to X and MindSwarm. Returns a sentence, or '' with no kit. */
+  async bannerForModel(variant) {
+    const base = this.productBase(variant);
+    const kit = (await this.libraryItems()).find(i => i.kind === 'kit' && this.productBase(i.variant) === base);
+    const banners = kit?.files.filter(f => f.kind === 'banner') || [];
+    const file = banners.find(f => /x-header|1500x500/i.test(f.name)) || banners[0];
+    if (!file) return '';
+    const { applyAgentBanner } = await import('../../services/avatar/applyAgentAvatar.js');
+    const r = await applyAgentBanner(this.agent, await this.readOwned({ item: kit, file }), { source: `Bots & Borgs, ${kit.variant}` });
+    const up = Object.entries(r.services).filter(([, v]) => v === 'updated').map(([k]) => k === 'twitter' ? 'X' : k === 'mindswarm' ? 'MindSwarm' : k);
+    return r.services.all === 'unchanged' ? 'Its banner was already up.' : up.length ? `Its banner is up on ${up.join(' and ')}.` : `Its banner couldn't go up (${Object.entries(r.services).map(([k, v]) => `${k} ${v}`).join(', ')}).`;
   }
 
   /**
@@ -1149,7 +1533,13 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     if (!stickerCouldFit(replyText)) return null;
     const s = await this.settings();
     if (!s.autoUse) return null;
-    const choices = moodChoices(await this.libraryItems());
+    // A video sticker shows a model's face, so only the model it wears; where it has one for a mood, it wins.
+    const worn = this.wornBase();
+    const choices = moodChoices(await this.libraryItems()).map(c => {
+      const picks = c.picks.filter(p => p.file.kind !== 'video-sticker' || this.productBase(p.item.variant) === worn);
+      const moving = picks.filter(p => p.file.kind === 'video-sticker');
+      return { ...c, picks: moving.length ? moving : picks };
+    }).filter(c => c.picks.length);
     const pm = this.agent?.providerManager;
     const tg = this.agent?.interfaces?.get?.('telegram')?.bot?.telegram;
     if (!choices.length || !pm?.generateAux || !tg?.sendSticker || !chatId) return null;
@@ -1160,8 +1550,8 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     });
     if (!choice) { this.logger.info('botsandborgs: no sticker suits this reply'); return null; }
     const pick = choice.picks[Math.floor(Math.random() * choice.picks.length)];
-    const webp = await toStickerWebp(await this.readOwned(pick));
-    await tg.sendSticker(chatId, { source: webp, filename: 'sticker.webp' }, threadId ? { message_thread_id: threadId } : {});
+    const sticker = pick.file.kind === 'video-sticker' ? { source: await this.readOwned(pick), filename: 'sticker.webm' } : { source: await toStickerWebp(await this.readOwned(pick)), filename: 'sticker.webp' };
+    await tg.sendSticker(chatId, sticker, threadId ? { message_thread_id: threadId } : {});
     this._stickerSentAt = Date.now();
     this.logger.info(`botsandborgs: sent a ${pick.file.kind} unasked (${choice.mood}, ${pick.item.variant})`);
     return choice.mood;
@@ -1209,7 +1599,7 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
   /** The wallpaper behind the dashboard today: { path, mime }, or null when none is owned or it is switched off. */
   async backdrop() {
     if (!(await this.settings()).autoUse) return null;
-    const pick = wallpaperFor(await this.libraryItems(), { format: 'desktop' });
+    const pick = wallpaperFor(await this.libraryItems(), { format: 'desktop', kinds: ['wallpaper', 'background'] });
     if (!pick) return null;
     return { path: path.join(this.libraryDir(), safeName(pick.item.variant), pick.file.name), mime: pick.file.mime };
   }
@@ -1249,8 +1639,13 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
       if (!sent.success) return { success: false, error: `Bought ${variant} (order ${order.id}), but ${sent.error}` };
       done = /^(me|owner|myself)$/i.test(who) ? 'I sent it to you on Telegram.' : `I texted it to ${who}.`;
       if (pictures.length > 1) done += ` The other ${pictures.length - 1} are in my library.`;
+    } else if (item.kind === 'voice') {
+      const v = await this.installVoicePack(item);
+      done = `"${v.name}" is saved as a voice preset (${v.profile.provider === 'openrouter' ? 'Kokoro on OpenRouter' : 'Kokoro'}, ${v.profile.voice}).${v.available ? ` Say "switch to the ${v.name}" to speak with it.` : ' Kokoro is not installed on this machine, and there is no OpenRouter to speak it with.'}`;
+    } else if (item.kind === 'kit') {
+      done = await this.kitBannerUse(item);
     } else if (use === 'wear' && model) {
-      const r = await this.useModel({ item: variant, wear: true });
+      const r = await this.useModel({ item: livePass(variant)?.slug || variant, wear: true });
       if (!r.success) return { success: false, error: `${paid} ${r.error}` };
       done = r.result;
     } else if (model) {

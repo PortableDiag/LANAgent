@@ -14,7 +14,7 @@ export function moodChoices(items = []) {
   const byMood = new Map();
   for (const item of items) {
     for (const file of item.files || []) {
-      if (!['sticker', 'emoji'].includes(file.kind) || !file.mood || NOT_UNASKED.test(file.mood)) continue;
+      if (!['sticker', 'emoji', 'video-sticker'].includes(file.kind) || !file.mood || NOT_UNASKED.test(file.mood)) continue;
       if (!byMood.has(file.mood)) byMood.set(file.mood, []);
       byMood.get(file.mood).push({ item, file });
     }
@@ -48,9 +48,9 @@ export async function chooseSticker({ generate, choices, userText, replyText, ag
 }
 
 /** One wallpaper of a format, changing daily. Files with no stated format count for either. */
-export function wallpaperFor(items = [], { format = 'desktop', now = new Date() } = {}) {
+export function wallpaperFor(items = [], { format = 'desktop', now = new Date(), kinds = ['wallpaper'] } = {}) {
   const pool = items.flatMap(item => (item.files || [])
-    .filter(f => f.kind === 'wallpaper' && (!f.format || f.format === format))
+    .filter(f => kinds.includes(f.kind) && (!f.format || f.format === format))
     .map(file => ({ item, file })));
   if (!pool.length) return null;
   return pool[Math.floor(now.getTime() / 86400000) % pool.length];

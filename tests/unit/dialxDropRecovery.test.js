@@ -117,3 +117,11 @@ test('the owner\'s own call that drops rings the owner back', async () => {
   assert.match(r.calls[0].purpose, /my end crashed and our call dropped/);
   assert.equal(r.texts.length, 0);
 });
+
+test('a drop text left waiting on the owner\'s tap tells the owner to switch on Text without asking', async () => {
+  const r = rig();
+  r.dx.agent.apiManager.apis.set('textx', { instance: { execute: async (d) => { r.texts.push(d); return { success: true, result: "It's on your phone (Oneplus15) for you to confirm. Tap Send there; I'll tell you when it's done." }; } } });
+  await r.dx.textAfterDrop({ contact: 'Mom Smith', number: '+15550001', first: 'Mom', self: 'ALICE', owner: 'Pat' });
+  assert.equal(r.texts.length, 1);
+  assert.ok(r.told.some(t => /waiting for your tap/.test(t) && /Text without asking me/.test(t)));
+});

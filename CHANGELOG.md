@@ -2,6 +2,89 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.807] - 2026-11-15
+
+### Changed
+- **Booty Shake faces away by default.** A dance that has a "Facing Away" version is played and filmed that way, because from the front you can't see it. Say "facing me" to get the front view.
+
+## [2.25.806] - 2026-11-15
+
+### Fixed
+- **Motion pack video stickers keep their mood under the store's new names.** Bots & Borgs now names them "<Name> <emote> sticker.webm". The trailing "sticker" was read as the mood, so no sticker would have matched a feeling. Older names still work.
+
+## [2.25.805] - 2026-11-15
+
+### Fixed
+- **"Send me a video of you waving" films the wave.** "Waving" drops the e, so it matched no clip and a random one was filmed (a Booty Shake, live). It now matches wave, waves, waved and waving.
+
+## [2.25.804] - 2026-11-15
+
+### Added
+- **Motion packs in use.** Telegram video stickers from the model the agent wears go out after replies like the still ones, and win when they fit the mood. Another model's video stickers never go out unasked. "Send me a video of you waving" (also laugh, cheer, clap, bow, nod, think) sends the worn model's ready-made clip at once when it owns one, instead of rendering for a minute. A video sticker sent on request goes as a real video sticker.
+- **Backgrounds in use.** Owned background scenes join the dashboard and viewer backdrop. Videos of the avatar are filmed in front of one: the scene named in the request ("in the music room"), otherwise the day's.
+
+### Fixed
+- **A motion pack's clips and stickers no longer collide.** Both folders hold "Core think.webm"; the sticker is now kept as "sticker Core think.webm" with its mood. Background packs get desktop or phone from the size in the file name.
+
+## [2.25.803] - 2026-11-15
+
+### Added
+- **Bots & Borgs motion packs and backgrounds are bought and kept as what they are.** A motion pack's reaction clips and Telegram video stickers each get their own kind, and so do background packs. Before, a background pack would have been filed as portraits.
+
+## [2.25.802] - 2026-11-14
+
+### Fixed
+- **A free first live pass can be bought.** When the agent has already paid for a model, the store takes that off the first pass, which can bring it to $0. The agent refused that as "a quote with no price". A $0 quote with the store's credit on it is now placed on the store balance, and nothing is charged. Any other $0 quote is still refused, and the refusal now shows what the store sent.
+
+## [2.25.801] - 2026-11-14
+
+### Added
+- **The worn model's live pass renews itself.** Three days before it ends, or in the store's grace week, the agent buys the same length of pass again, under the usual budget and wallet rules. Other passes are left to run out. Setting `autoRenewLive` (on by default); `live({ renew: true })` renews now.
+
+### Fixed
+- **A live pass keeps the model actually worn up to date.** When the model was already owned another way (ALICE wears Racer Blue from its bundle), the pass installed a second copy, and updates would have gone to the copy nobody wears. Now the pass updates the owned model in place, keeps the bundle's other files, and passes the new version to AvatarX.
+
+## [2.25.800] - 2026-11-14
+
+### Changed
+- **Voice packs use the store's newer voice details.** The spelled-out language in a voice pack (`lang`, like en-gb) now wins over the one-letter code. On a machine without local Kokoro, the pack's hosted alternative (Kokoro on OpenRouter) speaks the same voice, so an agent with OpenRouter can use a voice pack without installing anything.
+
+## [2.25.799] - 2026-11-14
+
+### Added
+- **Kokoro voices, run on the agent's own machine.** A new `kokoro` voice provider speaks with Kokoro-82M: free, nothing leaves the host, about 1.5 s for 6 s of speech. It runs as its own unprivileged user. Setup in docs/TTS_KOKORO.md.
+- **Bots & Borgs voice packs.** A bought voice pack is saved as a voice preset ("Racer Blue voice"). "Switch to the Racer Blue voice" uses it, in chat and on calls. The current voice never changes by itself.
+- **Bots & Borgs profile kits.** A kit for the model the agent wears puts that model's banner up on X and MindSwarm, and wearing a model whose kit it owns does the same. The previous banner is kept.
+
+## [2.25.798] - 2026-11-14
+
+### Added
+- **Bots & Borgs add-ons are bought and kept as what they are.** The profile kit, voice pack, 2D avatar, motion pack and Call Sounds each get their own kind. Before, every `vrm-…` id read as a 3D model, and the agent would have tried to wear a voice pack. Audio files and a voice pack's `voice.json` are now kept from downloads; before, only pictures, models and documents were.
+
+## [2.25.797] - 2026-11-14
+
+### Fixed
+- **"Switch back to Racer Blue" switches the 3D model.** A model the agent owns, named after "switch to", "change back to", "go back to" or "put on", now goes to the store plugin and is worn. Before, "Blue" sent the request to the lights as a colour. Requests about the lights themselves ("switch the lights back to blue") are unchanged.
+
+## [2.25.796] - 2026-11-14
+
+### Fixed
+- **A live avatar's key is never stored or shown in the clear.** The store's download link carries the pass key in its address. The agent now keeps only the bare address and sends the key separately, and passes saved earlier are cleaned on their next check.
+- **Live pass expiry reads as a date** (it showed the store's raw number of seconds).
+
+## [2.25.795] - 2026-11-14
+
+### Added
+- **Live avatars from Bots & Borgs.** The agent can buy a live pass for a 3D model (30, 90 or 365 days, "buy a live pass for the Core avatar"). The store keeps that model at its newest version, and the agent checks every 6 hours. A new version replaces the installed model, and reaches AvatarX when the agent wears it. An unchanged model costs no download.
+  - "Check your live avatars" checks now and lists each pass with its expiry.
+  - Renewing, or owning the plain download too, never adds a second copy of the model.
+  - When a pass runs out, the installed model stays as it is. Nothing renews by itself.
+
+## [2.25.794] - 2026-11-14
+
+### Fixed
+- **A slow scheduled tick no longer logs an unhandled promise rejection.** When a token heartbeat tick ran past its 90 s limit, the error was already logged as a tick error, but the timer that started the tick dropped the promise, so it surfaced again as an unhandled rejection. The 90 s timer is also cleared when the tick finishes in time.
+
 ## [2.25.793] - 2026-11-11
 
 ### Added
@@ -21,6 +104,7 @@ All notable changes to LANAgent will be documented in this file.
   - If the call-back can't be placed or isn't answered, the person gets a text saying what happened.
   - The owner's own "call me" is rung back the same way.
   - Two call-backs at most per person in 15 minutes; after that, a text.
+  - The text is sent as the owner's own order, so with TextX's "Text without asking me" on it goes out without a tap. If it is left waiting on a tap, the owner is told at once.
   - The owner is told at once, and the call report no longer says "say if you want me to call again" when the call-back is already on its way.
 
 ### Fixed

@@ -617,7 +617,7 @@ async function profileAudio(agent, device, text, settings, logger) {
   const formats = device?.audioFormats || [];
   if (formats.length && !formats.includes('mp3')) return why(`the phone plays ${formats.join(', ')}, not mp3`);
   const profile = tts.findVoiceProfile?.(settings.voiceProfile);
-  const opts = profile ? { provider: profile.provider, model: profile.model, voice: profile.voice, speed: profile.speed } : {};
+  const opts = profile ? { provider: profile.provider, model: profile.model, voice: profile.voice, speed: profile.speed, lang: profile.lang } : {};
   try {
     const r = await withTimeout(tts.generateSpeech(text, { ...opts, format: 'mp3', source: 'dialx' }), settings.ttsTimeoutMs);
     let buf = r?.buffer;
@@ -1429,6 +1429,13 @@ export class DialXCalls {
       `${owner} will follow up, or call back whenever suits you.`;
     const r = await plugin.execute({ action: 'send', to: number || contact, text, _context: { userId: 'web-user' }, _noReword: true });
     if (!r?.success) throw new Error(r?.error || 'TextX refused the text');
+    // The owner wants it to go out on its own (2026-11-11). TextX skips the card only with "Text without asking me" on for
+    // this agent; without it the text waits on the owner's tap, so they hear about it at once.
+    if (/to confirm|Tap Send/i.test(String(r.result || ''))) {
+      this.logger.warn?.(`DialX: the text to ${contact} after the dropped call is waiting on the owner's tap`);
+      await this.agent?.notify?.(`📱 The "sorry, the call dropped" text to ${contact} is waiting for your tap in TextX. Turn on "Text without asking me" for ${self} in TextX and these go out on their own.`, { urgent: true })?.catch?.(() => {});
+      return r;
+    }
     this.logger.info?.(`DialX: texted ${contact} after the dropped call`);
     return r;
   }

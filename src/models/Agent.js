@@ -295,8 +295,10 @@ const agentSchema = new mongoose.Schema({
     provider: {
       type: String,
       default: 'openai',
-      enum: ['openai', 'huggingface', 'openrouter']
+      enum: ['openai', 'huggingface', 'openrouter', 'kokoro']
     },
+    // Kokoro's language ("en-us"; voice.json's lang_code), used only by the kokoro provider.
+    lang: { type: String, default: '' },
     model: {
       type: String,
       default: 'gpt-4o-mini-tts'
@@ -321,7 +323,8 @@ const agentSchema = new mongoose.Schema({
       type: [{
         _id: false,
         name: { type: String, required: true },
-        provider: { type: String, enum: ['openai', 'huggingface', 'openrouter'] },
+        provider: { type: String, enum: ['openai', 'huggingface', 'openrouter', 'kokoro'] },
+        lang: String,
         model: String,
         voice: String,
         speed: Number,

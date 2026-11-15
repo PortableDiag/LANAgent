@@ -49,11 +49,19 @@ const THREE = window.THREE; THREE.GLTFLoader = GLTFLoader;
 const d = {
 ${methods}
 };
-window.setup = async ({ width, height, fps, seconds, loop, prop, background, mouth = null }) => {
+window.setup = async ({ width, height, fps, seconds, loop, prop, background, backgroundImage = false, mouth = null }) => {
   const r = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
   r.setPixelRatio(1); r.setSize(width, height); document.body.appendChild(r.domElement);
   const scene = new THREE.Scene();
   scene.background = new THREE.Color(background);
+  // A background scene (Bots & Borgs backgrounds): cover the frame, cropped to its shape, never stretched.
+  if (backgroundImage) {
+    const tex = await new THREE.TextureLoader().loadAsync('/background.jpg');
+    tex.colorSpace = THREE.SRGBColorSpace;
+    const ia = tex.image.width / tex.image.height, va = width / height;
+    if (ia > va) { tex.repeat.set(va / ia, 1); tex.offset.set((1 - va / ia) / 2, 0); } else { tex.repeat.set(1, ia / va); tex.offset.set(0, (1 - ia / va) / 2); }
+    scene.background = tex;
+  }
   scene.add(new THREE.HemisphereLight(0xffffff, 0x3a4050, 2.2));
   const key = new THREE.DirectionalLight(0xffffff, 2.2); key.position.set(1.2, 2.5, 2.5); scene.add(key);
   const rim = new THREE.DirectionalLight(0x9fc4ff, 1.2); rim.position.set(-2, 2, -2); scene.add(rim);
@@ -146,7 +154,7 @@ export function envelopeFromPcm(pcm, rate, fps) {
   return { seconds: samples / rate, mouth };
 }
 
-const MIME = { '.js': 'text/javascript', '.vrm': 'model/gltf-binary', '.vrma': 'model/gltf-binary', '.html': 'text/html' };
+const MIME = { '.js': 'text/javascript', '.vrm': 'model/gltf-binary', '.vrma': 'model/gltf-binary', '.html': 'text/html', '.jpg': 'image/jpeg' };
 let busy = Promise.resolve();
 
 /**
@@ -160,7 +168,7 @@ export function renderClipVideo(opts) {
 }
 
 async function render({ modelPath, clipPath, loop = false, prop = null, seconds = null, fps = 24, width = 720, height = 960,
-  background = '#121826', timeoutMs = 8 * 60 * 1000, launch = null, voice = null } = {}) {
+  background = '#121826', backgroundPath = null, timeoutMs = 8 * 60 * 1000, launch = null, voice = null } = {}) {
   const started = Date.now();
   const html = pageHtml(designerMethods(await fs.readFile(path.join(PUBLIC_DIR, 'avatar.html'), 'utf8')));
   const { default: puppeteer } = await import('puppeteer');
@@ -190,6 +198,7 @@ async function render({ modelPath, clipPath, loop = false, prop = null, seconds 
         if (u.pathname === '/render.html') body = Buffer.from(html);
         else if (u.pathname === '/model.vrm') body = await fs.readFile(modelPath);
         else if (u.pathname === '/clip.vrma') body = await fs.readFile(clipPath);
+        else if (u.pathname === '/background.jpg' && backgroundPath) body = await fs.readFile(backgroundPath);
         else if (u.pathname.startsWith('/lib/')) {
           const file = path.join(PUBLIC_DIR, path.normalize(u.pathname).replace(/^(\.\.[/\\])+/, ''));
           if (!file.startsWith(path.join(PUBLIC_DIR, 'lib'))) return req.respond({ status: 404, body: '' });
@@ -203,7 +212,7 @@ async function render({ modelPath, clipPath, loop = false, prop = null, seconds 
     await page.goto(`${HOST}/render.html`, { waitUntil: 'load', timeout: 60000 });
     await page.waitForFunction('window.ready === true', { timeout: 60000 }).catch(() => { throw new Error(`the render page did not start: ${pageErrors[0] || 'no error given'}`); });
     // The clip's length is known only once it is loaded, so the page is set up with a generous span first.
-    const probe = await page.evaluate((o) => window.setup(o), { width, height, fps, seconds: 40, loop, prop, background, mouth: said?.mouth || null });
+    const probe = await page.evaluate((o) => window.setup(o), { width, height, fps, seconds: 40, loop, prop, background, backgroundImage: !!backgroundPath, mouth: said?.mouth || null });
     // With a voice-over the video runs at least as long as the voice (the clip holds its last pose, or loops).
     const total = said ? Math.min(VOICE_MAX_S, Math.max(videoSeconds(probe.duration, loop, { seconds }), said.seconds + 0.6)) : videoSeconds(probe.duration, loop, { seconds });
     const frames = Math.max(1, Math.round(total * fps));
