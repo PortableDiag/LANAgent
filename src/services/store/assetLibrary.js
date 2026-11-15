@@ -86,7 +86,8 @@ export function fileKind(filename, kind = 'portrait') {
   if (ext === '.vrma') return 'animation';
   if (/\.(txt|md|pdf)$/.test(n) || /(^|\/)(readme|licen[cs]e|credits)/.test(n)) return 'document';
   // A voice pack: voice.json names the voice, and its reference lines are samples of it. Call sounds are sounds.
-  if (ext === '.json') return kind === 'voice' && /(^|\/)voice\.json$/.test(n) ? 'voice' : null;
+  // clips.json (store 0.22): every clip's tags, facing, energy and fit, in an animation pack.
+  if (ext === '.json') return kind === 'voice' && /(^|\/)voice\.json$/.test(n) ? 'voice' : /(^|\/)clips\.json$/.test(n) ? 'clip-manifest' : null;
   if (/\.(flac|mp3|wav|ogg|opus|m4a)$/.test(n)) return kind === 'voice' ? 'voice-sample' : 'sound';
   if (!/\.(png|jpe?g|webp|gif|webm|mp4)$/.test(n)) return null;
   if (/preview|thumbnail|contact.?sheet/.test(n)) return 'preview';
@@ -158,7 +159,9 @@ export async function unpack(buffer, { type = '', kind = 'portrait', filename = 
     const byFolder = /(^|\/)phone[^/]*\//i.test(f.name) ? 'phone' : /(^|\/)desktop[^/]*\//i.test(f.name) ? 'desktop' : null;
     const format = byFolder || (['wallpaper', 'background'].includes(k) && dims ? (Number(dims[2]) > Number(dims[1]) ? 'phone' : 'desktop') : null);
     // A motion pack has "Core think.webm" twice: the reaction clip and the video sticker.
-    const wanted = k === 'video-sticker' && !/\ssticker\.[a-z0-9]+$/i.test(f.name) ? `sticker ${path.basename(f.name)}` : format && byFolder ? `${format} ${path.basename(f.name)}` : f.name;
+    // Animation packs (store 0.22) carry Broad/<clip> versions for broad-shouldered bodies under the same file names.
+    const broad = k === 'animation' && /(^|\/)broad\//i.test(f.name);
+    const wanted = broad ? `broad ${path.basename(f.name)}` : k === 'video-sticker' && !/\ssticker\.[a-z0-9]+$/i.test(f.name) ? `sticker ${path.basename(f.name)}` : format && byFolder ? `${format} ${path.basename(f.name)}` : f.name;
     let name = safeName(wanted);
     for (let i = 2; seen.has(name.toLowerCase()); i++) name = safeName(`${path.parse(wanted).name} ${i}${path.extname(wanted)}`);
     seen.add(name.toLowerCase());
@@ -298,10 +301,48 @@ export function clipLoops(label, loops = null) {
  * repo's animations.json is never touched (it is the agent's own list, and nothing bought goes into it).
  * A clip is used on this machine only: the store's licence allows no resale or sharing of the files.
  */
+/** A clip's meaning from its clips.json tags, in the gesture words the players use. */
+export function tagGesture(tags = []) {
+  const t = new Set((tags || []).map(x => String(x).toLowerCase()));
+  if (['greet', 'wave', 'hello', 'goodbye'].some(x => t.has(x))) return 'wave';
+  if (t.has('bow')) return 'bow';
+  if (t.has('clap')) return 'clap';
+  if (t.has('laugh')) return 'laugh';
+  if (t.has('dab')) return 'dab';
+  if (t.has('dance')) return 'dance';
+  if (['cheer', 'celebrate', 'victory'].some(x => t.has(x))) return 'cheer';
+  return null;
+}
+
+/**
+ * clips.json (store 0.22, "bots-and-borgs clips 1") onto a pack's animation files: name, loop, seconds, tags, faces,
+ * energy, while_talking, bodies and body_fit. "Broad/x.vrma" is the file kept as "broad x.vrma". Returns the files.
+ */
+export function applyClipManifest(files, manifest) {
+  const clips = Array.isArray(manifest?.clips) ? manifest.clips : [];
+  for (const c of clips) {
+    if (!c?.file) continue;
+    const want = /(^|\/)broad\//i.test(c.file) ? `broad ${path.basename(c.file)}` : path.basename(c.file);
+    const f = files.find(x => x.kind === 'animation' && x.name.toLowerCase() === want.toLowerCase());
+    if (!f) continue;
+    if (c.name) f.label = String(c.name);
+    if (typeof c.loop === 'boolean') f.loop = c.loop;
+    if (Number(c.seconds) > 0) f.seconds = Number(c.seconds);
+    if (Array.isArray(c.tags)) f.tags = c.tags.map(String);
+    for (const [from, to] of [['faces', 'faces'], ['energy', 'energy'], ['bodies', 'bodies'], ['body_fit', 'bodyFit']]) if (c[from]) f[to] = String(c[from]);
+    if (typeof c.while_talking === 'boolean') f.whileTalking = c.while_talking;
+    if (c.prop) f.propNote = String(c.prop);
+    const g = tagGesture(f.tags) || clipGesture(f.label || f.name);
+    if (g) f.gesture = g; else delete f.gesture;
+  }
+  return files;
+}
+
 export async function writeStoreAnimations(items, libraryDir, vrmDir) {
   const out = [];
   for (const item of items) {
-    const clips = (item.files || []).filter(f => f.kind === 'animation');
+    // Broad-shouldered versions stay off the list: the store's own models are standard bodies.
+    const clips = (item.files || []).filter(f => f.kind === 'animation' && f.bodyFit !== 'broad');
     if (!clips.length) continue;
     const variant = safeName(item.variant);
     const dest = path.join(vrmDir, 'animations', 'store', variant);
@@ -320,6 +361,7 @@ export async function writeStoreAnimations(items, libraryDir, vrmDir) {
       const prop = f.prop || clipProp(`${label} ${item.title || ''} ${item.variant}`);
       if (prop) entry.prop = prop;
       if (f.expressions?.length) entry.expressions = f.expressions;
+      for (const k of ['tags', 'faces', 'energy', 'whileTalking', 'seconds', 'bodies']) if (f[k] != null) entry[k] = f[k];
       out.push(entry);
     }
   }

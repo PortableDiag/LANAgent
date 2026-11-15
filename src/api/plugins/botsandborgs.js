@@ -6,7 +6,7 @@ import { PluginSettings } from '../../models/PluginSettings.js';
 import { encrypt, decrypt } from '../../utils/encryption.js';
 import fs from 'node:fs/promises';
 import { DATA_PATH } from '../../utils/paths.js';
-import { variantKind, livePass, unpack, installVrm, addToManifest, readVrmInfo, readVrmaInfo, clipLabel, clipLoops, clipGesture, writeStoreAnimations, safeName, toStickerWebp, moodOf, portraitFromPreview } from '../../services/store/assetLibrary.js';
+import { variantKind, livePass, applyClipManifest, unpack, installVrm, addToManifest, readVrmInfo, readVrmaInfo, clipLabel, clipLoops, clipGesture, writeStoreAnimations, safeName, toStickerWebp, moodOf, portraitFromPreview } from '../../services/store/assetLibrary.js';
 import { moodChoices, chooseSticker, stickerCouldFit, wallpaperFor } from '../../services/store/selfUse.js';
 
 /**
@@ -458,9 +458,33 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     const latest = await this.livePasses();
     for (const p of passes) { const at = latest.findIndex(x => x.slug === p.slug); if (at >= 0) latest[at] = p; else latest.push(p); }
     await this.saveLivePasses(latest);
+    await this.syncLiveClips(latest).catch(e => this.logger.warn(`botsandborgs: live clip check failed: ${e.message}`));
     const changed = report.filter(x => x.status === 'updated').length;
     this.logger.info(`botsandborgs: live check: ${report.length} pass${report.length === 1 ? '' : 'es'}, ${changed} updated${report.length ? ` (${report.map(x => `${x.slug} ${x.status}`).join(', ')})` : ''}`);
     return report;
+  }
+
+  /**
+   * The live clip library (store 0.22): GET /api/live/<slug>/clips lists the animation packs a pass keeps current,
+   * each with an ETag. When the set of ETags changes, the owned packs are fetched again through their orders
+   * (updateOwned), which relists the clips and replaces AvatarX's copies. Returns 'unchanged' | 'first' | 'updated' | null.
+   */
+  async syncLiveClips(passes) {
+    const pass = passes.find(p => p.state !== 'expired' && p.key);
+    if (!pass) return null;
+    let key; try { key = decrypt(pass.key); } catch { return null; }
+    const r = await this.fetchLive(`${BASE}/api/live/${pass.slug}/clips`, { 'User-Agent': this.userAgent(), 'X-Live-Key': key, Accept: 'application/json' });
+    if (r.status !== 200) { if (r.status !== 404) this.logger.info(`botsandborgs: live clips answered ${r.status || r.error}`); return null; }
+    let d; try { d = JSON.parse(Buffer.from(r.data).toString('utf8')); } catch { return null; }
+    const list = Array.isArray(d) ? d : d.packs || d.clips || d.items || [];
+    const tag = list.map(x => `${x.variant || x.slug || x.pack || x.name || '?'}=${x.etag || x.ETag || ''}`).sort().join('|');
+    const saved = await PluginSettings.getCached(this.name, 'liveClips').catch(() => null);
+    await PluginSettings.setCached(this.name, 'liveClips', { tag, checkedAt: new Date().toISOString(), packs: list.length });
+    if (!saved?.tag) { this.logger.info(`botsandborgs: live clips: ${list.length} packs listed (fields: ${Object.keys(list[0] || {}).join(', ')})`); return 'first'; }
+    if (saved.tag === tag) return 'unchanged';
+    const report = await this.updateOwned({ kind: 'animation' });
+    this.logger.info(`botsandborgs: live clips changed; packs fetched again: ${report.map(x => x.variant).join(', ') || 'none differed'}`);
+    return 'updated';
   }
 
   /** One live download: { status, headers, data } (never throws; status 0 = no answer). */
@@ -913,6 +937,12 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
         files.push(entry);
       }
     }
+    // clips.json (store 0.22): tags, facing, energy and fit for each clip, read once the files are in.
+    const manifest = files.find(f => f.kind === 'clip-manifest');
+    if (manifest) {
+      try { applyClipManifest(files, JSON.parse(await fs.readFile(path.join(dir, manifest.name), 'utf8'))); }
+      catch (e) { this.logger.warn(`botsandborgs: ${variant} clips.json unreadable: ${e.message}`); }
+    }
     const item = { variant, title, kind, collection: product?.collection || null, order: order?.id || null, token: order?.token || null, at: new Date().toISOString(), files };
     if (livePass(bought)) item.livePass = bought;
     if (update) item.at = update.at || item.at;
@@ -1199,7 +1229,7 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
       const readme = item.files.find(f => f.kind === 'document' && /readme/i.test(f.name));
       if (!readme || !item.files.some(f => f.kind === 'animation')) continue;
       const text = await fs.readFile(path.join(this.libraryDir(), safeName(item.variant), readme.name), 'utf8').catch(() => '');
-      for (const f of item.files.filter(x => x.kind === 'animation')) {
+      for (const f of item.files.filter(x => x.kind === 'animation' && !x.tags)) {
         const line = text.split('\n').find(l => l.includes(f.name));
         if (!line) continue;
         const loop = /\bloops?\b/i.test(line.slice(line.indexOf(f.name) + f.name.length));
@@ -1219,7 +1249,7 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
   /** Play an owned clip on the agent's 3D body: by name ("rumba"), by what it is for ("wave", "dance"), or any one. */
   /** Which owned clip a request means: { choice, entry, rel } or { error }. */
   async chooseClip({ item, clip, asked = '' }) {
-    let pool = (await this.libraryItems()).flatMap(i => i.files.filter(f => f.kind === 'animation').map(f => ({ item: i, file: f })));
+    let pool = (await this.libraryItems()).flatMap(i => i.files.filter(f => f.kind === 'animation' && f.bodyFit !== 'broad').map(f => ({ item: i, file: f })));
     if (!pool.length) return { error: "I don't own any animations yet. I can buy a pack from Bots & Borgs if you want." };
     if (item && !isGenericItem(item)) {
       const inItem = pool.filter(p => p.item.variant === item || this.matches(p.item, item));
@@ -1390,6 +1420,43 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
   /** The reaction words a motion pack holds, and the asks that mean them. */
   static REACTIONS = { wave: /\b(wav(e|es|ed|ing)|hello|hi|bye|goodbye)\b/i, laugh: /\b(laugh(s|ed|ing)?|lol|giggl)/i, cheer: /\bcheer/i,
     clap: /\bclap/i, bow: /\bbow(s|ed|ing)?\b/i, nod: /\bnod(s|ded|ding)?\b/i, think: /\bthink(s|ing)?\b|\bpondering\b/i };
+
+  /** The part of a reply that fits in `maxSeconds` of speech (about 2.6 words a second), cut at a sentence. */
+  static spokenPart(text, maxSeconds = 20) {
+    const clean = String(text || '').replace(/https?:\/\/\S+/g, '').replace(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/gu, '').replace(/\s+/g, ' ').trim();
+    const limit = Math.max(8, Math.floor(maxSeconds * 2.6));
+    const words = clean.split(' ');
+    if (words.length <= limit) return { spoken: clean, cut: false };
+    const head = words.slice(0, limit).join(' ');
+    const end = Math.max(head.lastIndexOf('. '), head.lastIndexOf('! '), head.lastIndexOf('? '));
+    return { spoken: end > head.length / 3 ? head.slice(0, end + 1) : `${head}…`, cut: true };
+  }
+
+  /**
+   * A video of the worn 3D model speaking `text` in the agent's own voice, mouth moving, in front of an owned
+   * background scene (TextX 0.4.93 video replies). Throws when there is no model, clip or voice.
+   * Returns { video, seconds, cut } (cut: only the first part was spoken).
+   */
+  async talkingVideo(text, { maxSeconds = 20, width = 480, height = 640 } = {}) {
+    const { spoken, cut } = BotsAndBorgsPlugin.spokenPart(text, maxSeconds);
+    if (!spoken) throw new Error('nothing to say');
+    const manifest = await fs.readFile(path.join(this.vrmDir(), 'manifest.json'), 'utf8').then(JSON.parse).catch(() => []);
+    const model = manifest.find(m => m.id === this.agent?.agentModel?.activeVRMModel);
+    if (!model?.file) throw new Error("I'm not wearing a 3D model");
+    const listed = await fs.readFile(path.join(this.vrmDir(), 'animations', 'store.json'), 'utf8').then(JSON.parse).catch(() => []);
+    // clips.json marks the clips made to play under speech (while_talking, calm): the talk loop first (store 0.22).
+    const talking = listed.filter(c => c.whileTalking && (c.energy || 'calm') === 'calm');
+    const clip = talking.find(c => (c.tags || []).includes('talk')) || talking[0] || listed.find(c => /^talk/i.test(c.label || ''))
+      || listed.find(c => /^idle/i.test(c.label || '')) || listed.find(c => /^wave$/i.test(c.label || ''));
+    if (!clip) throw new Error('no talking clip owned');
+    const tts = await this.agent?.ttsService?.generateSpeech?.(spoken, { source: 'video' });
+    if (!tts?.buffer?.length) throw new Error("the voice couldn't be made");
+    const scene = await this.backgroundFor('');
+    const { renderClipVideo } = await import('../../services/avatar/clipVideo.js');
+    const v = await (this.renderVideo || renderClipVideo)({ modelPath: path.join(this.vrmDir(), model.file), clipPath: path.join(this.vrmDir(), 'animations', clip.file),
+      loop: true, width, height, voice: { audio: tts.buffer, format: tts.format || 'mp3' }, ...(scene ? { backgroundPath: scene } : {}) });
+    return { video: v.video, seconds: v.seconds, cut };
+  }
 
   /** The worn model's ready-made reaction clip (MP4) for a request, or null. */
   async readyClip(words) {

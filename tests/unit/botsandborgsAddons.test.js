@@ -196,3 +196,30 @@ test('Booty Shake is shown facing away unless asked to face the camera (owner 20
   assert.equal((await p.chooseClip({ asked: 'do the booty shake facing me' })).choice.file.label, 'Booty Shake');
   assert.equal((await p.chooseClip({ asked: 'do the rumba' })).choice.file.label, 'Rumba');
 });
+
+test('clips.json (store 0.22) labels clips by meaning; Broad/ versions keep their own names and stay off the list', async () => {
+  const { unpack, applyClipManifest, writeStoreAnimations, tagGesture } = await import('../../src/services/store/assetLibrary.js');
+  const JSZip = (await import('jszip')).default;
+  const glb = (n) => { const body = Buffer.from(JSON.stringify({ extensions: { VRMC_vrm_animation: { specVersion: '1.0', expressions: {} } }, asset: { version: '2.0' } }));
+    const h = Buffer.alloc(20); h.write('glTF', 0, 'latin1'); h.writeUInt32LE(2, 4); h.writeUInt32LE(20 + body.length, 8); h.writeUInt32LE(body.length, 12); h.write('JSON', 16, 'latin1'); return Buffer.concat([h, body]); };
+  const z = new JSZip();
+  z.file('pack/talk-loop.vrma', glb()); z.file('pack/work-loop.vrma', glb()); z.file('pack/Broad/work-loop.vrma', glb());
+  const manifest = { format: 'bots-and-borgs clips 1', clips: [
+    { name: 'Talk Loop', file: 'talk-loop.vrma', seconds: 4, loop: true, tags: ['talk'], faces: 'front', energy: 'calm', while_talking: true, bodies: 'any', body_fit: 'standard' },
+    { name: 'Work Loop', file: 'work-loop.vrma', loop: true, tags: ['work', 'typing'], energy: 'calm', while_talking: false, body_fit: 'standard' },
+    { name: 'Work Loop', file: 'Broad/work-loop.vrma', loop: true, tags: ['work'], body_fit: 'broad' }] };
+  z.file('pack/clips.json', JSON.stringify(manifest));
+  const files = await unpack(await z.generateAsync({ type: 'nodebuffer' }), { kind: 'animation' });
+  assert.deepEqual(files.map(f => [f.name, f.kind]).sort(), [['broad work-loop.vrma', 'animation'], ['clips.json', 'clip-manifest'], ['talk-loop.vrma', 'animation'], ['work-loop.vrma', 'animation']]);
+  applyClipManifest(files, manifest);
+  const talk = files.find(f => f.name === 'talk-loop.vrma');
+  assert.equal(talk.label, 'Talk Loop'); assert.equal(talk.whileTalking, true); assert.equal(talk.energy, 'calm'); assert.deepEqual(talk.tags, ['talk']);
+  assert.equal(files.find(f => f.name === 'broad work-loop.vrma').bodyFit, 'broad');
+  assert.equal(tagGesture(['greet']), 'wave'); assert.equal(tagGesture(['celebrate', 'win']), 'cheer'); assert.equal(tagGesture(['work']), null);
+  const lib = tmp(), vrm = tmp();
+  fs.mkdirSync(path.join(lib, 'pack-x'), { recursive: true });
+  for (const f of files) fs.writeFileSync(path.join(lib, 'pack-x', f.name), f.buffer);
+  const listed = await writeStoreAnimations([{ variant: 'pack-x', title: 'X', files: files.map(({ buffer, ...f }) => f) }], lib, vrm);
+  assert.deepEqual(listed.map(c => c.label).sort(), ['Talk Loop', 'Work Loop']);
+  assert.equal(listed.find(c => c.label === 'Talk Loop').whileTalking, true);
+});

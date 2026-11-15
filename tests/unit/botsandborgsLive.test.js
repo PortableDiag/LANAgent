@@ -28,6 +28,8 @@ function plugin() {
   fs.writeFileSync(path.join(p.vrmRoot, 'manifest.json'), '[]');
   p.productOf = async () => ({ title: 'Core — VRM Avatar', collection: '3d-avatars', variants: [{ id: 'vrm-aa-core' }, { id: 'vrm-aa-core-live30' }] });
   p.accountKey = async () => 'bnba_test';
+  // The clip library check has its own test; the model tests count only model downloads.
+  p.syncLiveClips = async () => null;
   return { p, store };
 }
 
@@ -211,4 +213,20 @@ test('renewal is due in the grace week or 3 days ahead, never twice a day, and b
   assert.equal(bought[0].use, 'install');
   assert.equal(r.expires, '2027-01-13T00:00:00.000Z');
   assert.match(r.result, /until 2027-01-13 \(was 2026-12-14\)/);
+});
+
+test('the live clip library: first listing is remembered, an ETag change fetches the packs again', async () => {
+  const { p, store } = plugin();
+  delete p.syncLiveClips;
+  let listing = { packs: [{ variant: 'vrm-emote-animations-1', etag: '"a"' }, { variant: 'vrm-idle-pack', etag: '"b"' }] };
+  p.fetchLive = async () => ({ status: 200, headers: {}, data: Buffer.from(JSON.stringify(listing)) });
+  let updated = 0;
+  p.updateOwned = async ({ kind }) => { assert.equal(kind, 'animation'); updated++; return [{ variant: 'vrm-idle-pack' }]; };
+  const passes = [{ slug: 'vrm-racer-blue', key: encrypt('bnbl_r'), state: 'active' }];
+  assert.equal(await p.syncLiveClips(passes), 'first');
+  assert.equal(await p.syncLiveClips(passes), 'unchanged');
+  listing = { packs: [{ variant: 'vrm-emote-animations-1', etag: '"a"' }, { variant: 'vrm-idle-pack', etag: '"c"' }] };
+  assert.equal(await p.syncLiveClips(passes), 'updated');
+  assert.equal(updated, 1);
+  assert.equal(await p.syncLiveClips([{ slug: 'x', key: encrypt('k'), state: 'expired' }]), null);
 });

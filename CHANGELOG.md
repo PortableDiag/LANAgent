@@ -2,6 +2,28 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.811] - 2026-11-15
+
+### Added
+- **Clips picked by meaning (Bots & Borgs clips.json).** Animation packs now describe every clip: tags, facing, energy, whether it plays while talking, body fit. The agent reads that instead of guessing from file names. Video replies use the clip made to play under speech (the talk loop, calm). The "Broad" versions for broad-shouldered bodies are kept but never played on a standard model.
+- **Live clip library.** The live check also watches the clips a pass keeps current; when the store reissues a pack, the agent fetches it again, relists it and updates AvatarX's copy.
+
+## [2.25.810] - 2026-11-15
+
+### Added
+- **Video replies in texts (TextX 0.4.93).** In a conversation set to Video, the agent answers with a short video: its 3D avatar speaking the reply in its own voice, mouth moving, in front of one of its background scenes. Up to the phone's time limit (20 s) is spoken; a longer reply also goes as text. If the video can't be made, it answers by voice, then by text.
+- **"Reply with video in my conversation with Sam"** sets how the agent answers there (text, voice, both or video). A conversation the agent only sees through All conversations has to be picked for it in TextX first, and it says so.
+
+## [2.25.809] - 2026-11-15
+
+### Fixed
+- **The translate tool reaches the phone.** It was missing from the agent's list of TextX tools, so the agent refused it before sending, and TextX greyed out its switch.
+
+## [2.25.808] - 2026-11-15
+
+### Added
+- **Translate a text on the phone (TextX 0.4.92).** "Translate the last text from Maria" translates that person's latest message on the phone itself, so nothing goes to the cloud. Given text works too ("translate 'see you at six' into Spanish"). Languages by name or code; English by default. TextX keeps it off until the owner turns on Translate for the agent, and the agent says so when it's off. The tool is now on the agent's list of TextX tools, so the Translate switch can be turned on in TextX.
+
 ## [2.25.807] - 2026-11-15
 
 ### Changed

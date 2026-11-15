@@ -2,7 +2,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import { BasePlugin } from '../core/basePlugin.js';
 import { nowInZone, resolveRequestTime } from '../../utils/wallClock.js';
 import { getTextX } from '../../services/textx/index.js';
-import { textxRequest, untrusted, formatMessage, encodeGif, encodeM4a } from '../../services/textx/textxHub.js';
+import { textxRequest, untrusted, formatMessage, encodeGif, encodeM4a, REPLY_MODES } from '../../services/textx/textxHub.js';
 
 /**
  * Texting through the user's phone, via the TextX SMS app (docs/TEXTX.md).
@@ -108,8 +108,22 @@ const FIRST_TOOL = {
   // TextX 0.4.32
   thread: 'list_threads', customize: 'list_threads', pinMessage: 'list_threads', draft: 'list_threads',
   tabs: 'manage_tabs', templates: 'templates', gif: 'gif_search', edit: 'list_threads', forward: 'list_threads',
-  deleteThread: 'list_threads', reportSpam: 'report_spam', blockRules: 'block_rules', settings: 'app_settings', pendingMms: 'pending_mms', backup: 'backup'
+  deleteThread: 'list_threads', reportSpam: 'report_spam', blockRules: 'block_rules', settings: 'app_settings', pendingMms: 'pending_mms', backup: 'backup',
+  // TextX 0.4.92
+  translate: 'translate_text'
 };
+
+const LANGS = { english: 'en', spanish: 'es', french: 'fr', german: 'de', italian: 'it', portuguese: 'pt', dutch: 'nl', russian: 'ru',
+  ukrainian: 'uk', polish: 'pl', chinese: 'zh', mandarin: 'zh', japanese: 'ja', korean: 'ko', arabic: 'ar', hindi: 'hi', turkish: 'tr',
+  vietnamese: 'vi', thai: 'th', greek: 'el', hebrew: 'he', swedish: 'sv', norwegian: 'no', danish: 'da', finnish: 'fi', czech: 'cs',
+  romanian: 'ro', hungarian: 'hu', indonesian: 'id', malay: 'ms', tagalog: 'tl', filipino: 'tl', persian: 'fa', farsi: 'fa', urdu: 'ur' };
+/** A language as TextX's translate_text wants it (ISO 639-1): "Spanish" → "es", "es-MX" → "es". Unknown → null. */
+export function langCode(v) {
+  const t = String(v || '').trim().toLowerCase();
+  if (!t) return null;
+  if (/^[a-z]{2}(?:[-_][a-z]{2,4})?$/.test(t)) return t.slice(0, 2);
+  return LANGS[t.replace(/^(?:into|to|in)\s+/, '')] || null;
+}
 // Actions a "text/tell/ask <someone> …" request can really mean; any other match becomes a send.
 const SEND_LIKE = new Set(['send', 'schedule', 'manageScheduled', 'edit', 'forward', 'draft']);
 // Set while a request runs in the background for a phone with no socket (see execute()).
@@ -299,6 +313,12 @@ export default class TextXPlugin extends BasePlugin {
         examples: ['find the text where Sam sent the address', 'search my texts for the gate code']
       },
       {
+        command: 'translate',
+        description: 'Translate a text message on the phone itself (TextX translate_text, on-device, nothing goes to the cloud): the latest text from a conversation, or given text. `to` is the language wanted (default English)',
+        usage: 'translate({ thread: "Maria", to: "en" })  or  translate({ text: "¿Dónde estás?", to: "English" })',
+        examples: ['translate the last text from Maria', 'what does Maria\'s last text say in English', 'translate my last text from Luis into English', 'translate "see you at six" into Spanish on my phone']
+      },
+      {
         command: 'contact',
         description: "Look up a contact's phone numbers on the user's phone",
         usage: 'contact({ query: "Sam" })  (query "all" lists the contacts saved from the phone)',
@@ -319,9 +339,9 @@ export default class TextXPlugin extends BasePlugin {
       // TextX 0.4.32: the rest of the app. Each tool is off until the owner turns its group on.
       {
         command: 'thread',
-        description: 'Change a shared conversation on the phone: pin or unpin, archive, mute (until a time, or "off"), snooze until a time, set a reminder, mark unread, or rename a group',
-        usage: 'thread({ thread: "Family", pinned: true, archived: false, muted: true, mutedUntil: "2026-10-24T08:00", snoozedUntil: "…", remindAt: "…", unread: true, name: "New group name" })',
-        examples: ['pin my conversation with Sam', 'mute the family chat until tomorrow morning', 'archive the texts with the plumber', 'remind me about Wayne\'s text at 6pm', 'rename the group chat to Poker night', 'snooze the landlord thread until Monday', 'mark the Sam conversation unread']
+        description: 'Change a shared conversation on the phone: pin or unpin, archive, mute (until a time, or "off"), snooze until a time, set a reminder, mark unread, rename a group, or set how this agent replies there (replyMode text, voice, both or video: a video of its avatar speaking)',
+        usage: 'thread({ thread: "Family", pinned: true, archived: false, muted: true, mutedUntil: "2026-10-24T08:00", snoozedUntil: "…", remindAt: "…", unread: true, name: "New group name", replyMode: "video" })',
+        examples: ['reply with video in my conversation with Sam', 'answer Jo by voice from now on', 'go back to text replies with Sam', 'pin my conversation with Sam', 'mute the family chat until tomorrow morning', 'archive the texts with the plumber', 'remind me about Wayne\'s text at 6pm', 'rename the group chat to Poker night', 'snooze the landlord thread until Monday', 'mark the Sam conversation unread']
       },
       {
         command: 'customize',
@@ -528,6 +548,7 @@ export default class TextXPlugin extends BasePlugin {
         case 'threads': return await this.threads(data);
         case 'read': return await this.read(data);
         case 'search': return await this.search(data);
+        case 'translate': return await this.translate(data);
         case 'contact': return await this.contact(data);
         case 'watch': return await this.watch(data);
         case 'unwatch': return await this.unwatch(data);
@@ -931,6 +952,44 @@ export default class TextXPlugin extends BasePlugin {
     if (!r.ok) return errorResult(r);
     const msgs = (r.result || []).map(m => formatMessage(m, this.names())).join('\n');
     return { success: true, result: msgs ? `Matches for "${query}":\n${untrusted('SMS', msgs)}` : `Nothing in the shared conversations matches "${query}".` };
+  }
+
+  /**
+   * TextX 0.4.92 translates on the phone (ML Kit; a language downloads once). The latest text FROM the other side of a
+   * conversation by thread_id + message_id, or plain text. Off until the owner allows the Translate group in TextX.
+   */
+  async translate(data) {
+    const toWord = data.to || data.language || data.target || 'en';
+    const to = langCode(toWord);
+    if (!to) return { success: false, error: `I don't know the language "${toWord}". Say it by name (Spanish) or code (es).` };
+    const from = data.from ? langCode(data.from) : null;
+    let args, label;
+    const thread = data.thread || data.contact;
+    if (data.text && !thread) {
+      args = { text: String(data.text).slice(0, 4000) };
+      label = 'Translation';
+    } else {
+      if (!thread && !data.query) return { success: false, error: 'Which conversation, or what text, should I translate?' };
+      const f = await this.findThread(thread || data.query);
+      if (f.error) return { success: false, error: f.error };
+      const r = await this.call('read_thread', { thread_id: f.thread.thread_id, limit: 20 });
+      if (!r.ok) return errorResult(r);
+      const theirs = (r.result || []).filter(m => m.text && !(m.from === 'me' || m.direction === 'out' || ['owner', 'assistant'].includes(m.author?.role)));
+      const m = theirs[theirs.length - 1];
+      if (!m) return { success: true, result: `There's no text from ${f.thread.title} to translate.` };
+      const id = m.message_id ?? m.id;
+      args = id != null ? { thread_id: f.thread.thread_id, message_id: id } : { text: m.text };
+      label = `${f.thread.title}'s last text${m.date ? ` (${m.date})` : ''}`;
+    }
+    args.to = to;
+    if (from) args.from = from;
+    const t = await this.call('translate_text', args);
+    if (!t.ok) {
+      if (t.error?.code === 'not_allowed') return { success: false, error: 'Translating on the phone is off for this agent in TextX. Turn on Translate in TextX: Settings › Assistants › this agent.' };
+      return errorResult(t);
+    }
+    const out = t.result || {};
+    return { success: true, translation: out.text, from: out.from, to: out.to, result: `${label}, ${out.from || '?'} → ${out.to || to}:\n${untrusted('SMS', String(out.text || ''))}` };
   }
 
   async contact(data) {
@@ -1344,10 +1403,19 @@ export default class TextXPlugin extends BasePlugin {
     if (data.snoozedUntil != null) args.snoozed_until = this.timeArg(data.snoozedUntil, request);
     if (data.remindAt != null) args.remind_at = this.timeArg(data.remindAt, request);
     if (data.name) args.name = String(data.name);
+    // TextX 0.4.93: this agent's own reply form in a picked conversation, when the owner says so ("reply with video here").
+    const form = String(data.replyMode || data.reply_mode || '').toLowerCase()
+      || (/\b(?:reply|answer|respond)\b.{0,30}\bwith (?:a )?video\b|\bvideo repl/i.test(request) ? 'video' : '');
+    if (form) {
+      if (!REPLY_MODES.includes(form)) return { success: false, error: `Replies can be ${REPLY_MODES.join(', ')}.` };
+      args.reply_mode = form;
+    }
     for (const k of Object.keys(args)) if (args[k] === undefined) delete args[k];
-    if (Object.keys(args).length === 1) return { success: false, error: 'What should change: pin, archive, mute, snooze, reminder, unread or name?' };
+    if (Object.keys(args).length === 1) return { success: false, error: 'What should change: pin, archive, mute, snooze, reminder, unread, name or how I reply?' };
     const r = await this.call('update_thread', args);
+    if (!r.ok && r.error?.code === 'not_picked') return { success: false, error: `I only see "${f.thread.title}" through All conversations. Pick it for me in TextX first, then I can change how I reply there.` };
     if (!r.ok) return errorResult(r);
+    if (form) return { success: true, result: `I'll reply in "${f.thread.title}" ${form === 'video' ? 'with a video of me speaking' : form === 'both' ? 'with text and voice' : `by ${form}`}.` };
     return { success: true, result: `"${f.thread.title}": ${this.describeThreadState(r.result)}.` };
   }
 

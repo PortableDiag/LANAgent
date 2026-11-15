@@ -43,7 +43,9 @@ export const TOOLS = ['send_sms', 'schedule_message', 'list_threads', 'read_thre
   'update_thread', 'customize_thread', 'pin_message', 'set_draft', 'manage_tabs', 'templates', 'gif_search',
   'edit_message', 'forward_message', 'delete_thread', 'block_rules', 'app_settings', 'pending_mms', 'backup',
   // TextX 0.4.81 (4293 #521): forward the last incoming text to 7726, then block the number and delete the conversation
-  'report_spam'];
+  'report_spam',
+  // TextX 0.4.92 (2119 #458): translate a message on the phone (ML Kit, no cloud), group Translate, off by default
+  'translate_text'];
 // The † tools of §5: they wait on the user's tap on the phone (§6.5), so their results can come
 // back long after the request that asked for them.
 export const CONFIRMED_TOOLS = new Set(['send_sms', 'schedule_message', 'update_scheduled', 'send_scheduled_now',
@@ -64,7 +66,8 @@ const MAX_SPEAK_CHARS = 4000;
 
 // How the phone wants this agent's replies in other people's conversations (TextX 0.3.21, §5):
 // in hello and on every incoming/mention event. Replies to the owner here stay text.
-export const REPLY_MODES = ['text', 'voice', 'both'];
+// TextX 0.4.93 (2119 #465): "video" = a video of the agent's 3D avatar speaking the reply in its own voice.
+export const REPLY_MODES = ['text', 'voice', 'both', 'video'];
 // TextX re-encodes for the carrier MMS cap: keep a spoken reply under ~45 s, mono AAC.
 const MAX_VOICE_SECONDS = 45;
 
@@ -982,7 +985,7 @@ export class TextXHub {
 
     // Auto-reply only where the phone says that thread's toggle is on; the phone enforces it too.
     if (shared && body.auto_reply === true) {
-      const replied = await this.autoReply(device, { threadId, title, recent, m, mode: this.replyMode(device, body), notes: threadNotes(body), person, about, group: (body.thread?.participants || []).length > 1 });
+      const replied = await this.autoReply(device, { threadId, title, recent, m, mode: this.replyMode(device, body), maxSeconds: Number(body.max_seconds) || null, notes: threadNotes(body), person, about, group: (body.thread?.participants || []).length > 1 });
       if (replied) return;
     }
 
@@ -1035,7 +1038,7 @@ export class TextXHub {
     const from = m.from?.name || m.from?.number || title;
     let declined = false;
     if (auto) {
-      const replied = await this.autoReply(device, { threadId, title, recent, m, mode: this.replyMode(device, body), notes: threadNotes(body), invite: { mode, inv } });
+      const replied = await this.autoReply(device, { threadId, title, recent, m, mode: this.replyMode(device, body), maxSeconds: Number(body.max_seconds) || null, notes: threadNotes(body), invite: { mode, inv } });
       declined = replied === 'sent' && mode === 'decline';
     }
     const id = invites.remember({ ...inv, from, title, threadId, deviceId: device.id });
@@ -1061,9 +1064,26 @@ export class TextXHub {
    * voice = the reply spoken, no text; both = text and audio in one send (one against the
    * phone's 6/hour cap). Audio that cannot be made goes as text, and `voiceError` says why.
    */
-  async replyArgs(device, threadId, text, mode, extra = {}) {
+  async replyArgs(device, threadId, text, mode, extra = {}, { maxSeconds = null } = {}) {
     const asText = { thread_id: threadId, text, ...extra };
     if (mode === 'text') return { args: asText, mode };
+    // Video (TextX 0.4.93): the worn 3D model speaking the reply. If it can't be made: voice, then text, in the same send.
+    if (mode === 'video') {
+      try {
+        const store = this.agent?.apiManager?.apis?.get?.('botsandborgs');
+        const plugin = store?.instance || store;
+        if (!plugin?.talkingVideo) throw new Error('this agent has no 3D avatar video');
+        const v = await plugin.talkingVideo(text, { maxSeconds: maxSeconds || 20 });
+        // The full text goes too when only part of it was spoken; TextX sends it as SMS before the MMS.
+        const attachments = [{ name: 'reply.mp4', mime: 'video/mp4', data_b64: v.video.toString('base64') }];
+        this.logger.info?.(`TextX: video reply ${v.seconds.toFixed(1)} s, ${Math.round(v.video.length / 1024)} KB${v.cut ? ' (spoken part only; full text sent too)' : ''}`);
+        return { args: { thread_id: threadId, text: v.cut ? text : '', attachments, ...extra }, mode };
+      } catch (e) {
+        this.logger.warn?.(`TextX: video reply could not be made, trying voice: ${e.message}`);
+        const voice = await this.replyArgs(device, threadId, text, 'voice', extra);
+        return { ...voice, videoError: e.message };
+      }
+    }
     try {
       if (!this.agent.ttsService) throw new Error('this agent has no voice set up');
       // source 'voice' keeps it off the server's own speaker.
@@ -1084,8 +1104,10 @@ export class TextXHub {
 
   /** "by voice" / "(voice failed: …, sent as text)" for the report to the owner. */
   static howSent(reply) {
+    if (reply.videoError && reply.voiceError) return ` (as text: the video and the voice reply failed: ${reply.videoError})`;
+    if (reply.videoError) return ` by voice (the video failed: ${reply.videoError})`;
     if (reply.voiceError) return ` (as text: the voice reply failed: ${reply.voiceError})`;
-    return reply.mode === 'voice' ? ' by voice' : reply.mode === 'both' ? ' (text and voice)' : '';
+    return reply.mode === 'voice' ? ' by voice' : reply.mode === 'both' ? ' (text and voice)' : reply.mode === 'video' ? ' by video' : '';
   }
 
   /**
@@ -1169,7 +1191,7 @@ export class TextXHub {
       await this.deliver(device, 'message', { text: `You mentioned me in "${title}", but I couldn't write a reply just now.` });
       return;
     }
-    const reply = await this.replyArgs(device, threadId, text, mode);
+    const reply = await this.replyArgs(device, threadId, text, mode, {}, { maxSeconds: Number(body.max_seconds) || null });
     const how = TextXHub.howSent(reply);
     const report = (r) => quietRefusal(r) ? this.logger.info?.(`TextX: reply in "${title}" not sent: ${r.error.code}`) : this.deliver(device, 'message', {
       text: r?.ok && r.result?.status === 'sent' ? `Replied in "${title}"${how}: "${text}"`
@@ -1283,7 +1305,7 @@ export class TextXHub {
     try { return await run; } finally { if (this.autoReplying.get(key) === run) this.autoReplying.delete(key); }
   }
 
-  async autoReplyOnce(device, { threadId, title, recent, m, mode = 'text', notes = '', invite = null, person = null, about = '', group = false }) {
+  async autoReplyOnce(device, { threadId, title, recent, m, mode = 'text', maxSeconds = null, notes = '', invite = null, person = null, about = '', group = false }) {
     // No caps of the agent's own: where the owner turned auto-reply on, the owner decides limits, and
     // TextX enforces any (operator, TextX 0.4.47, Trellis 4293 #153).
     if (!threadId) return false;
@@ -1385,7 +1407,7 @@ export class TextXHub {
     if (forOwner && !invite) await this.tellOwner(device, forOwner, title, { urgent: true }); // someone asks for the owner
     // The conversation's reply mode, as the owner set it. Both agents may answer in one conversation
     // (the owner's call, DialX 4293 #142); TextX 0.4.45 caps the sends and keeps one card per person.
-    const reply = await this.replyArgs(device, threadId, text, mode, { auto: true });
+    const reply = await this.replyArgs(device, threadId, text, mode, { auto: true }, { maxSeconds });
     const how = TextXHub.howSent(reply);
     const report = (r) => quietRefusal(r) ? this.logger.info?.(`TextX: auto-reply in "${title}" not sent: ${r.error.code}`) : this.deliver(device, 'message', {
       text: r?.ok && (r.result?.status === 'sent') ? `Replied to "${title}"${how}: "${text}"`
