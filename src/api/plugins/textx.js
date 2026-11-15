@@ -2,7 +2,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import { BasePlugin } from '../core/basePlugin.js';
 import { nowInZone, resolveRequestTime } from '../../utils/wallClock.js';
 import { getTextX } from '../../services/textx/index.js';
-import { textxRequest, untrusted, formatMessage, encodeGif, encodeM4a, REPLY_MODES } from '../../services/textx/textxHub.js';
+import { textxRequest, untrusted, formatMessage, encodeGif, encodeM4a, REPLY_MODES, REPLY_FORMS } from '../../services/textx/textxHub.js';
 
 /**
  * Texting through the user's phone, via the TextX SMS app (docs/TEXTX.md).
@@ -1403,20 +1403,43 @@ export default class TextXPlugin extends BasePlugin {
     if (data.snoozedUntil != null) args.snoozed_until = this.timeArg(data.snoozedUntil, request);
     if (data.remindAt != null) args.remind_at = this.timeArg(data.remindAt, request);
     if (data.name) args.name = String(data.name);
-    // TextX 0.4.93: this agent's own reply form in a picked conversation, when the owner says so ("reply with video here").
-    const form = String(data.replyMode || data.reply_mode || '').toLowerCase()
-      || (/\b(?:reply|answer|respond)\b.{0,30}\bwith (?:a )?video\b|\bvideo repl/i.test(request) ? 'video' : '');
-    if (form) {
-      if (!REPLY_MODES.includes(form)) return { success: false, error: `Replies can be ${REPLY_MODES.join(', ')}.` };
-      args.reply_mode = form;
-    }
+    // TextX 0.4.93/0.4.94: this agent's own reply forms in a picked conversation, when the owner says so ("reply with
+    // video here", "answer Sam with text and voice", "all three"). Any mix of text, voice and video.
+    const forms = this.replyFormsAsked(data, request);
+    if (forms?.error) return { success: false, error: forms.error };
+    if (forms) args.reply_forms = forms;
     for (const k of Object.keys(args)) if (args[k] === undefined) delete args[k];
     if (Object.keys(args).length === 1) return { success: false, error: 'What should change: pin, archive, mute, snooze, reminder, unread, name or how I reply?' };
     const r = await this.call('update_thread', args);
     if (!r.ok && r.error?.code === 'not_picked') return { success: false, error: `I only see "${f.thread.title}" through All conversations. Pick it for me in TextX first, then I can change how I reply there.` };
     if (!r.ok) return errorResult(r);
-    if (form) return { success: true, result: `I'll reply in "${f.thread.title}" ${form === 'video' ? 'with a video of me speaking' : form === 'both' ? 'with text and voice' : `by ${form}`}.` };
+    if (forms) {
+      const say = { text: 'text', voice: 'a voice note', video: 'a video of me speaking' };
+      const list = forms.map(x => say[x]);
+      return { success: true, result: `I'll reply in "${f.thread.title}" with ${list.length > 1 ? `${list.slice(0, -1).join(', ')} and ${list[list.length - 1]}` : list[0]}.` };
+    }
     return { success: true, result: `"${f.thread.title}": ${this.describeThreadState(r.result)}.` };
+  }
+
+  /** The reply forms a request sets, ['text','voice','video'] in order; null when it sets none; { error } when unknown. */
+  replyFormsAsked(data, request = '') {
+    let given = data.replyForms || data.reply_forms;
+    const mode = String(data.replyMode || data.reply_mode || '').toLowerCase();
+    if (!given && mode) {
+      given = { text: ['text'], voice: ['voice'], both: ['text', 'voice'], video: ['video'], all: REPLY_FORMS }[mode];
+      if (!given) return { error: `Replies can be ${REPLY_FORMS.join(', ')}, or any mix of them.` };
+    }
+    if (!given && /\b(?:reply|answer|respond|replies)\b/i.test(request)) {
+      if (/\ball (?:three|3)\b|\bevery form\b/i.test(request)) given = REPLY_FORMS;
+      else {
+        const named = REPLY_FORMS.filter(x => new RegExp(`\\b${x === 'voice' ? '(?:voice|audio)' : x}\\b`, 'i').test(request.replace(/\btext(?:s|ing)? (?:from|with|to)\b/gi, ' ')));
+        if (named.length && /\b(?:with|by|in|as|using)\b/i.test(request)) given = named;
+      }
+    }
+    if (!given) return null;
+    const list = (Array.isArray(given) ? given : String(given).split(/[\s,+&]+|and/)).map(x => String(x).trim().toLowerCase()).filter(Boolean);
+    const forms = REPLY_FORMS.filter(x => list.includes(x));
+    return forms.length ? forms : { error: `Replies can be ${REPLY_FORMS.join(', ')}, or any mix of them.` };
   }
 
   async customize(data) {

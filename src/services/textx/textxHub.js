@@ -68,6 +68,20 @@ const MAX_SPEAK_CHARS = 4000;
 // in hello and on every incoming/mention event. Replies to the owner here stay text.
 // TextX 0.4.93 (2119 #465): "video" = a video of the agent's 3D avatar speaking the reply in its own voice.
 export const REPLY_MODES = ['text', 'voice', 'both', 'video'];
+// TextX 0.4.94 (2119 #473): the forms are checkboxes, any mix, always in this order.
+export const REPLY_FORMS = ['text', 'voice', 'video'];
+/** The legacy reply_mode a set of forms reads as (prompts and reports still speak in modes). */
+export function modeOfForms(forms = []) {
+  if (forms.includes('video')) return 'video';
+  if (forms.includes('voice')) return forms.includes('text') ? 'both' : 'voice';
+  return 'text';
+}
+/** reply_forms from an event or hello, else from the legacy reply_mode. */
+export function formsOf(forms, mode) {
+  const f = Array.isArray(forms) ? REPLY_FORMS.filter(x => forms.includes(x)) : [];
+  if (f.length) return f;
+  return { voice: ['voice'], both: ['text', 'voice'], video: ['video'] }[mode] || ['text'];
+}
 // TextX re-encodes for the carrier MMS cap: keep a spoken reply under ~45 s, mono AAC.
 const MAX_VOICE_SECONDS = 45;
 
@@ -489,6 +503,8 @@ export class TextXHub {
     const capabilities = (Array.isArray(b.capabilities) ? b.capabilities : []).filter(t => TOOLS.includes(t) || DIALX_TOOLS.includes(t) || NOTIFX_TOOLS.includes(t));
     const patch = { capabilities, appVersion: String(b.app_version || '').slice(0, 40), client: String(b.app || '').slice(0, 40),
       replyMode: REPLY_MODES.includes(b.reply_mode) ? b.reply_mode : 'text',
+      // Only a phone that sends reply_forms (TextX 0.4.94+) gets answers by forms; older ones keep reply_mode.
+      replyForms: Array.isArray(b.reply_forms) ? formsOf(b.reply_forms) : null,
       // The LANAgent app says which of the agent's notes it shows as phone notifications.
       ...(NOTIFY_LEVELS.includes(b.notify) ? { notifyLevel: b.notify } : {}),
       maxAttachmentBytes: Number.isFinite(b.max_attachment_bytes) && b.max_attachment_bytes > 0 ? b.max_attachment_bytes : null, lastSeenAt: new Date(this.now()),
@@ -516,7 +532,7 @@ export class TextXHub {
     // than queueing another.
     if (device.deviceId) await this.store.outboxAckType(device.id, 'welcome');
     Object.assign(device, await this.store.updateDevice(device.id, patch));
-    this.logger.info?.(`TextX: ${device.name} hello (app ${patch.appVersion}, replies: ${patch.replyMode}, tools: ${capabilities.join(', ') || 'none'})`);
+    this.logger.info?.(`TextX: ${device.name} hello (app ${patch.appVersion}, replies: ${patch.replyForms ? patch.replyForms.join('+') : patch.replyMode}, tools: ${capabilities.join(', ') || 'none'})`);
     if (isDialX(device)) this.dialxPaired = true;
     if (isDialX(device) && b.call_state) this.dialx?.notePhoneState?.(String(b.call_state));
     await this.deliver(device, 'welcome', this.welcomeBody(device));
@@ -985,7 +1001,7 @@ export class TextXHub {
 
     // Auto-reply only where the phone says that thread's toggle is on; the phone enforces it too.
     if (shared && body.auto_reply === true) {
-      const replied = await this.autoReply(device, { threadId, title, recent, m, mode: this.replyMode(device, body), maxSeconds: Number(body.max_seconds) || null, notes: threadNotes(body), person, about, group: (body.thread?.participants || []).length > 1 });
+      const replied = await this.autoReply(device, { threadId, title, recent, m, mode: this.replyMode(device, body), forms: this.replyForms(device, body), maxSeconds: Number(body.max_seconds) || null, notes: threadNotes(body), person, about, group: (body.thread?.participants || []).length > 1 });
       if (replied) return;
     }
 
@@ -1038,7 +1054,7 @@ export class TextXHub {
     const from = m.from?.name || m.from?.number || title;
     let declined = false;
     if (auto) {
-      const replied = await this.autoReply(device, { threadId, title, recent, m, mode: this.replyMode(device, body), maxSeconds: Number(body.max_seconds) || null, notes: threadNotes(body), invite: { mode, inv } });
+      const replied = await this.autoReply(device, { threadId, title, recent, m, mode: this.replyMode(device, body), forms: this.replyForms(device, body), maxSeconds: Number(body.max_seconds) || null, notes: threadNotes(body), invite: { mode, inv } });
       declined = replied === 'sent' && mode === 'decline';
     }
     const id = invites.remember({ ...inv, from, title, threadId, deviceId: device.id });
@@ -1055,8 +1071,17 @@ export class TextXHub {
 
   /** The event's reply_mode, else the last hello's; anything unknown is text. */
   replyMode(device, body) {
+    const forms = this.replyForms(device, body);
+    if (forms) return modeOfForms(forms);
     const m = body?.reply_mode ?? device.replyMode;
     return REPLY_MODES.includes(m) ? m : 'text';
+  }
+
+  /** The forms to answer with: the event's reply_forms (TextX 0.4.94), else the hello's. null = an older phone: reply_mode. */
+  replyForms(device, body) {
+    if (Array.isArray(body?.reply_forms)) return formsOf(body.reply_forms);
+    if (body?.reply_mode) return null;
+    return Array.isArray(device?.replyForms) ? formsOf(device.replyForms) : null;
   }
 
   /**
@@ -1064,8 +1089,9 @@ export class TextXHub {
    * voice = the reply spoken, no text; both = text and audio in one send (one against the
    * phone's 6/hour cap). Audio that cannot be made goes as text, and `voiceError` says why.
    */
-  async replyArgs(device, threadId, text, mode, extra = {}, { maxSeconds = null } = {}) {
+  async replyArgs(device, threadId, text, mode, extra = {}, { maxSeconds = null, forms = null } = {}) {
     const asText = { thread_id: threadId, text, ...extra };
+    if (Array.isArray(forms)) return this.replyWithForms(device, threadId, text, forms, extra, { maxSeconds });
     if (mode === 'text') return { args: asText, mode };
     // Video (TextX 0.4.93): the worn 3D model speaking the reply. If it can't be made: voice, then text, in the same send.
     if (mode === 'video') {
@@ -1102,8 +1128,53 @@ export class TextXHub {
     }
   }
 
+  /**
+   * TextX 0.4.94: every ticked form in ONE send_sms (text, reply.m4a, reply.mp4; TextX sends them as separate messages).
+   * A video that can't be made becomes a voice note; anything that fails leaves at least the text.
+   */
+  async replyWithForms(device, threadId, text, forms, extra = {}, { maxSeconds = null } = {}) {
+    const want = formsOf(forms);
+    const attachments = [];
+    const sent = [];
+    let videoError = null, voiceError = null, cut = false;
+    if (want.includes('video')) {
+      try {
+        const store = this.agent?.apiManager?.apis?.get?.('botsandborgs');
+        const plugin = store?.instance || store;
+        if (!plugin?.talkingVideo) throw new Error('this agent has no 3D avatar video');
+        const v = await plugin.talkingVideo(text, { maxSeconds: maxSeconds || 20 });
+        cut = !!v.cut;
+        attachments.push({ name: 'reply.mp4', mime: 'video/mp4', data_b64: v.video.toString('base64') });
+        sent.push('video');
+        this.logger.info?.(`TextX: video reply ${v.seconds.toFixed(1)} s, ${Math.round(v.video.length / 1024)} KB${cut ? ' (spoken part only)' : ''}`);
+      } catch (e) { videoError = e.message; this.logger.warn?.(`TextX: video reply could not be made: ${e.message}`); }
+    }
+    if (want.includes('voice') || (videoError && !want.includes('voice'))) {
+      try {
+        if (!this.agent.ttsService) throw new Error('this agent has no voice set up');
+        const speech = await this.agent.ttsService.generateSpeech(text, { source: 'voice', format: 'mp3' });
+        if (!speech?.buffer?.length) throw new Error('the voice service returned no audio');
+        const cap = device.maxAttachmentBytes;
+        let audio = await this.encodeVoice(speech.buffer);
+        if (cap && audio.length > cap) audio = await this.encodeVoice(speech.buffer, { kbps: 16 });
+        if (cap && audio.length > cap) throw new Error(`the audio (${audio.length} bytes) is over the phone's ${cap}-byte MMS limit`);
+        // The voice note goes before the video: TextX keeps the attachment order.
+        attachments.unshift({ name: 'reply.m4a', mime: 'audio/mp4', data_b64: audio.toString('base64') });
+        sent.unshift('voice');
+      } catch (e) { voiceError = e.message; this.logger.warn?.(`TextX: voice reply could not be made: ${e.message}`); }
+    }
+    const withText = want.includes('text') || cut || !attachments.length;
+    if (withText) sent.unshift('text');
+    return { args: { thread_id: threadId, text: withText ? text : '', ...(attachments.length ? { attachments } : {}), ...extra }, mode: modeOfForms(sent), forms: sent, wanted: want, videoError, voiceError };
+  }
+
   /** "by voice" / "(voice failed: …, sent as text)" for the report to the owner. */
   static howSent(reply) {
+    if (Array.isArray(reply.forms)) {
+      const failed = [reply.videoError && `the video failed: ${reply.videoError}`, reply.voiceError && `the voice failed: ${reply.voiceError}`].filter(Boolean);
+      const forms = reply.forms.join(' + ');
+      return reply.forms.length === 1 && reply.forms[0] === 'text' && !failed.length ? '' : ` (${forms}${failed.length ? `; ${failed.join('; ')}` : ''})`;
+    }
     if (reply.videoError && reply.voiceError) return ` (as text: the video and the voice reply failed: ${reply.videoError})`;
     if (reply.videoError) return ` by voice (the video failed: ${reply.videoError})`;
     if (reply.voiceError) return ` (as text: the voice reply failed: ${reply.voiceError})`;
@@ -1140,6 +1211,7 @@ export class TextXHub {
     if (key) this.seenEvents.set(key, this.now());
     const title = String(body.thread?.title || 'a conversation').slice(0, 80);
     const mode = this.replyMode(device, body);
+    const forms = this.replyForms(device, body);
     const spoken = mode === 'text' ? '' : ' It will be spoken aloud as a voice message: under 60 words, no emoji, links or symbols.';
 
     const read = await this.callTool('read_thread', { thread_id: threadId, limit: 20 }, { deviceId: device.id, onlyDevice: device.id });
@@ -1191,7 +1263,7 @@ export class TextXHub {
       await this.deliver(device, 'message', { text: `You mentioned me in "${title}", but I couldn't write a reply just now.` });
       return;
     }
-    const reply = await this.replyArgs(device, threadId, text, mode, {}, { maxSeconds: Number(body.max_seconds) || null });
+    const reply = await this.replyArgs(device, threadId, text, mode, {}, { maxSeconds: Number(body.max_seconds) || null, forms });
     const how = TextXHub.howSent(reply);
     const report = (r) => quietRefusal(r) ? this.logger.info?.(`TextX: reply in "${title}" not sent: ${r.error.code}`) : this.deliver(device, 'message', {
       text: r?.ok && r.result?.status === 'sent' ? `Replied in "${title}"${how}: "${text}"`
@@ -1305,7 +1377,7 @@ export class TextXHub {
     try { return await run; } finally { if (this.autoReplying.get(key) === run) this.autoReplying.delete(key); }
   }
 
-  async autoReplyOnce(device, { threadId, title, recent, m, mode = 'text', maxSeconds = null, notes = '', invite = null, person = null, about = '', group = false }) {
+  async autoReplyOnce(device, { threadId, title, recent, m, mode = 'text', forms = null, maxSeconds = null, notes = '', invite = null, person = null, about = '', group = false }) {
     // No caps of the agent's own: where the owner turned auto-reply on, the owner decides limits, and
     // TextX enforces any (operator, TextX 0.4.47, Trellis 4293 #153).
     if (!threadId) return false;
@@ -1407,7 +1479,7 @@ export class TextXHub {
     if (forOwner && !invite) await this.tellOwner(device, forOwner, title, { urgent: true }); // someone asks for the owner
     // The conversation's reply mode, as the owner set it. Both agents may answer in one conversation
     // (the owner's call, DialX 4293 #142); TextX 0.4.45 caps the sends and keeps one card per person.
-    const reply = await this.replyArgs(device, threadId, text, mode, { auto: true }, { maxSeconds });
+    const reply = await this.replyArgs(device, threadId, text, mode, { auto: true }, { maxSeconds, forms });
     const how = TextXHub.howSent(reply);
     const report = (r) => quietRefusal(r) ? this.logger.info?.(`TextX: auto-reply in "${title}" not sent: ${r.error.code}`) : this.deliver(device, 'message', {
       text: r?.ok && (r.result?.status === 'sent') ? `Replied to "${title}"${how}: "${text}"`

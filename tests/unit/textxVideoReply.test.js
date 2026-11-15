@@ -58,8 +58,49 @@ test('"reply with video here" sets this agent\'s reply mode in the conversation'
   p.findThread = async () => ({ thread: { thread_id: 't3', title: 'Sam' } });
   p.call = async (tool, args) => { calls.push({ tool, args }); return { ok: true, result: {} }; };
   const r = await p.updateThread({ thread: 'Sam', _context: { originalInput: 'reply with video in my conversation with Sam' } });
-  assert.deepEqual(calls[0], { tool: 'update_thread', args: { thread_id: 't3', reply_mode: 'video' } });
+  assert.deepEqual(calls[0], { tool: 'update_thread', args: { thread_id: 't3', reply_forms: ['video'] } });
   assert.match(r.result, /with a video of me speaking/);
   p.call = async () => ({ ok: false, error: { code: 'not_picked' } });
   assert.match((await p.updateThread({ thread: 'Sam', replyMode: 'voice' })).error, /Pick it for me in TextX/);
+});
+
+test('TextX 0.4.94 reply_forms: every ticked form in one send, voice before video, text kept when anything fails', async () => {
+  const { formsOf, modeOfForms } = await import('../../src/services/textx/textxHub.js');
+  assert.deepEqual(formsOf(['video', 'text', 'voice']), ['text', 'voice', 'video']);
+  assert.deepEqual(formsOf(null, 'both'), ['text', 'voice']);
+  assert.equal(modeOfForms(['text', 'voice']), 'both');
+  const h = hub(async () => ({ video: Buffer.from('mp4'), seconds: 5, cut: false }));
+  const all = await h.replyArgs({ id: 'd1' }, 't1', 'See you!', 'video', {}, { forms: ['text', 'voice', 'video'] });
+  assert.equal(all.args.text, 'See you!');
+  assert.deepEqual(all.args.attachments.map(a => a.name), ['reply.m4a', 'reply.mp4']);
+  assert.deepEqual(all.forms, ['text', 'voice', 'video']);
+  assert.equal(TextXHub.howSent(all), ' (text + voice + video)');
+  const voiceOnly = await h.replyArgs({ id: 'd1' }, 't1', 'Hi', 'voice', {}, { forms: ['voice'] });
+  assert.equal(voiceOnly.args.text, '');
+  assert.deepEqual(voiceOnly.args.attachments.map(a => a.name), ['reply.m4a']);
+  const broken = hub(async () => { throw new Error('no model'); });
+  broken.agent.ttsService = null;
+  const r = await broken.replyArgs({ id: 'd1' }, 't1', 'Hi', 'video', {}, { forms: ['video'] });
+  assert.equal(r.args.text, 'Hi');
+  assert.equal(r.args.attachments, undefined);
+  assert.match(TextXHub.howSent(r), /the video failed: no model; the voice failed/);
+  const event = new TextXHub({ store: memoryStore(), agent: { config: { name: 'A' } }, logger: quiet });
+  assert.deepEqual(event.replyForms({ replyForms: ['text'] }, { reply_forms: ['voice', 'video'] }), ['voice', 'video']);
+  assert.equal(event.replyForms({ replyForms: null, replyMode: 'voice' }, { reply_mode: 'voice' }), null);
+  assert.equal(event.replyMode({ replyForms: ['text'] }, { reply_forms: ['text', 'voice'] }), 'both');
+});
+
+test('the owner sets any mix of forms for a conversation', async () => {
+  const p = Object.create(TextXPlugin.prototype);
+  const calls = [];
+  p.findThread = async () => ({ thread: { thread_id: 't3', title: 'Sam' } });
+  p.call = async (tool, args) => { calls.push(args); return { ok: true, result: {} }; };
+  let r = await p.updateThread({ thread: 'Sam', _context: { originalInput: 'answer Sam with text and voice' } });
+  assert.deepEqual(calls.pop().reply_forms, ['text', 'voice']);
+  assert.match(r.result, /with text and a voice note/);
+  await p.updateThread({ thread: 'Sam', _context: { originalInput: 'reply to Sam with all three' } });
+  assert.deepEqual(calls.pop().reply_forms, ['text', 'voice', 'video']);
+  await p.updateThread({ thread: 'Sam', replyForms: ['video', 'voice'] });
+  assert.deepEqual(calls.pop().reply_forms, ['voice', 'video']);
+  assert.match((await p.updateThread({ thread: 'Sam', replyMode: 'carrier pigeon' })).error, /any mix/);
 });

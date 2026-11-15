@@ -2,6 +2,11 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.812] - 2026-11-15
+
+### Added
+- **Any mix of text, voice and video replies (TextX 0.4.94).** When the phone ticks several reply forms for a conversation, the agent answers with each in one send: the text, a voice note and a video of its avatar speaking. If the video can't be made, a voice note goes instead; anything that fails still leaves the text. "Answer Sam with text and voice", "reply to Sam with all three" set the forms. Phones before 0.4.94 keep the single reply mode.
+
 ## [2.25.811] - 2026-11-15
 
 ### Added
