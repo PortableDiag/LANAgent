@@ -466,6 +466,40 @@ export class DialXRealtime {
     return this.calls.hub.callTool(name, { call_id: s.id, ...args }, { deviceId: s.device.id, onlyDevice: s.device.id });
   }
 
+  /**
+   * A Bots & Borgs Call Sound into the call (DialX 0.7.137 dialx.play): the 8 kHz mu-law WAV from the owned pack, as it
+   * is. Only when the phone offers dialx.play, the agent owns the pack and the callSounds setting is on. Returns the clip
+   * id, or null. Never throws: a sound is a nicety, never a reason for a call to go wrong.
+   */
+  async playSound(s, name, { loop = true, gain = 0.6, stopOn = ['callee_speaks'] } = {}) {
+    try {
+      if (s.done || !(s.device?.capabilities || []).includes('dialx.play')) return null;
+      const { getDialXSettings } = await import('./dialx.js');
+      if (!(await getDialXSettings()).callSounds) return null;
+      const store = this.calls.agent?.apiManager?.apis?.get?.('botsandborgs');
+      const plugin = store?.instance || store;
+      const item = (await plugin?.libraryItems?.() || []).find(i => i.kind === 'sound');
+      const file = item?.files.find(f => f.name.toLowerCase() === `${name}.wav`);
+      if (!file) return null;
+      const bytes = await plugin.readOwned({ item, file });
+      const id = `${name}-${Date.now().toString(36)}`;
+      const r = await this.tool(s, 'dialx.play', { id, audio_b64: bytes.toString('base64'), format: 'wav', loop, gain, stop_on: stopOn });
+      if (!r?.ok) { this.logger.info?.(`DialX: call ${s.id}: ${name} not played: ${r?.error?.code || r?.error?.message || 'refused'}`); return null; }
+      this.logger.info?.(`DialX: call ${s.id}: playing ${name}${loop ? ' (loop)' : ''}`);
+      s.sounds = [...(s.sounds || []), id];
+      return id;
+    } catch (e) {
+      this.logger.warn?.(`DialX: call ${s.id}: ${name} not played: ${e.message}`);
+      return null;
+    }
+  }
+
+  async stopSound(s, id) {
+    if (!id || s.done) return;
+    s.sounds = (s.sounds || []).filter(x => x !== id);
+    await this.tool(s, 'dialx.stop', { id }).catch(() => null);
+  }
+
   /** Mint the client secret and hand it to the phone. Any failure leaves the call in turn mode. */
   /** POST /v1/realtime/client_secrets for this call: { secret, expiresAt, voice, at }. */
   async mint(s, { name, owner, limitS }, attempt = 1) {
@@ -697,7 +731,9 @@ export class DialXRealtime {
     } else {
       const question = String(a.question || '').slice(0, 400);
       this.logger.info?.(`DialX: call ${s.id}: errand asks the owner: ${question}`);
-      r = await this.tool(s, 'dialx.errand_approve', { question });
+      // The person on the line waits while the owner decides: hold music, not silence, until the answer is back.
+      const hold = await this.playSound(s, 'hold-circuit-lounge', { loop: true, gain: 0.5, stopOn: ['never'] });
+      try { r = await this.tool(s, 'dialx.errand_approve', { question }); } finally { await this.stopSound(s, hold); }
     }
     const output = r?.ok ? (r.result ?? { ok: true }) : { error: r?.error?.code || r?.error?.message || 'failed' };
     if (name === 'errand_approve') this.logger.info?.(`DialX: call ${s.id}: the owner answered ${JSON.stringify(output).slice(0, 80)}`);
@@ -757,7 +793,9 @@ export class DialXRealtime {
           if (!first) {
             this.logger.info?.(`DialX: call ${s.id}: the agent is still working after ${Math.round((Date.now() - began) / 1000)} s; the call carries on`);
             await this.answerTool(s, fn, gen, { status: 'working', note: 'The agent is still on it. Say so once in a few words and carry on; the answer comes to you as a line when it is ready.' }, 'ask_agent');
-            return this.deliverLate(s, request, work, began);
+            // A soft thinking loop while the agent works, stopped when the answer comes in or the owner talks.
+            const thinking = await this.playSound(s, 'thinking-loop', { loop: true, gain: 0.4, stopOn: ['callee_speaks'] });
+            return this.deliverLate(s, request, work.finally(() => this.stopSound(s, thinking)), began);
           }
           output = first;
         }

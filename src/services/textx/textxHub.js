@@ -1168,6 +1168,22 @@ export class TextXHub {
     return { args: { thread_id: threadId, text: withText ? text : '', ...(attachments.length ? { attachments } : {}), ...extra }, mode: modeOfForms(sent), forms: sent, wanted: want, videoError, voiceError };
   }
 
+  /**
+   * Send a built reply. A reply with a voice note or video that the relay or phone refuses as too big goes again as its
+   * text alone, so the person still gets an answer (2119 #481-#483: a refused video must not swallow the text).
+   */
+  async sendReply(device, reply, onLate) {
+    const opts = { deviceId: device.id, onlyDevice: device.id, onLate };
+    const r = await this.callTool('send_sms', reply.args, opts);
+    if (r?.ok || !['too_big', 'too_large'].includes(r?.error?.code) || !reply.args.attachments?.length || !String(reply.args.text || '').trim()) return r;
+    this.logger.warn?.(`TextX: reply with ${reply.args.attachments.map(a => a.name).join(' + ')} was too big; sending the text alone`);
+    const { attachments, ...textOnly } = reply.args;
+    reply.forms = ['text'];
+    reply.videoError = reply.videoError || (attachments.some(a => /\.mp4$/.test(a.name)) ? 'too big to send' : null);
+    reply.voiceError = reply.voiceError || (attachments.some(a => /\.m4a$/.test(a.name)) ? 'too big to send' : null);
+    return this.callTool('send_sms', textOnly, opts);
+  }
+
   /** "by voice" / "(voice failed: …, sent as text)" for the report to the owner. */
   static howSent(reply) {
     if (Array.isArray(reply.forms)) {
@@ -1270,8 +1286,7 @@ export class TextXHub {
         : r?.ok && r.pending ? `Drafted a reply in "${title}"${how} for you to confirm: "${text}"`
         : `Wanted to reply in "${title}"${how} ("${text}") but the phone didn't send it${r?.error?.message ? `: ${r.error.message}` : ''}.`
     });
-    const r = await this.callTool('send_sms', reply.args,
-      { deviceId: device.id, onlyDevice: device.id, onLate: (late) => report(late).catch(() => {}) });
+    const r = await this.sendReply(device, reply, (late) => report(late).catch(() => {}));
     await report(r);
   }
 
@@ -1486,8 +1501,7 @@ export class TextXHub {
         : r?.ok && r.pending ? `Drafted a reply to "${title}"${how} for you to confirm: "${text}"`
         : `Wanted to reply to "${title}"${how} ("${text}") but the phone didn't send it${r?.error?.message ? `: ${r.error.message}` : ''}.`
     });
-    const r = await this.callTool('send_sms', reply.args,
-      { deviceId: device.id, onlyDevice: device.id, onLate: (late) => report(late).catch(() => {}) });
+    const r = await this.sendReply(device, reply, (late) => report(late).catch(() => {}));
     await report(r);
     if (r?.ok && r.result?.status === 'sent' && person) await this.rememberSms(person, 'assistant', text);
     return r?.ok && r.result?.status === 'sent' ? 'sent' : true;

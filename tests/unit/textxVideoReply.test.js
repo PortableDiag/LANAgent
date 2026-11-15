@@ -104,3 +104,30 @@ test('the owner sets any mix of forms for a conversation', async () => {
   assert.deepEqual(calls.pop().reply_forms, ['voice', 'video']);
   assert.match((await p.updateThread({ thread: 'Sam', replyMode: 'carrier pigeon' })).error, /any mix/);
 });
+
+test('the INCOMING (auto-reply) path answers with all three forms, not just mentions (2119 #481)', async () => {
+  const h = hub(async () => ({ video: Buffer.from('mp4'), seconds: 4, cut: false }));
+  let sent;
+  h.replyArgs = (orig => async (...a) => { const r = await orig.apply(h, a); sent = r; return r; })(h.replyArgs);
+  const device = { id: 'd1', name: 'P', replyForms: null };
+  const forms = h.replyForms(device, { reply_forms: ['text', 'voice', 'video'], reply_mode: 'video' });
+  assert.deepEqual(forms, ['text', 'voice', 'video']);
+  const r = await h.replyArgs(device, 't4', 'Hi there!', h.replyMode(device, { reply_forms: ['text', 'voice', 'video'], reply_mode: 'video' }), { auto: true }, { maxSeconds: 20, forms });
+  assert.equal(r.args.text, 'Hi there!');
+  assert.deepEqual(r.args.attachments.map(a => a.name), ['reply.m4a', 'reply.mp4']);
+  assert.equal(r.args.auto, true);
+  assert.equal(r.args.requested_by_owner, undefined);
+});
+
+test('a reply refused as too big goes again as its text alone', async () => {
+  const h = hub(async () => ({ video: Buffer.from('mp4'), seconds: 4, cut: false }));
+  const sends = [];
+  h.callTool = async (tool, args) => { sends.push(args); return sends.length === 1 ? { ok: false, error: { code: 'too_big' } } : { ok: true, result: { status: 'sent' } }; };
+  const reply = await h.replyArgs({ id: 'd1' }, 't4', 'Hi!', 'video', { auto: true }, { forms: ['text', 'voice', 'video'] });
+  const r = await h.sendReply({ id: 'd1' }, reply, () => {});
+  assert.equal(r.ok, true);
+  assert.equal(sends.length, 2);
+  assert.equal(sends[1].attachments, undefined);
+  assert.equal(sends[1].text, 'Hi!');
+  assert.match(TextXHub.howSent(reply), /the video failed: too big to send/);
+});

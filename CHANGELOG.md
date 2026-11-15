@@ -2,6 +2,16 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.819] - 2026-11-15
+
+### Added
+- **Call sounds on phone calls (DialX 0.7.137).** With the Bots & Borgs Call Sounds pack owned, a call is never dead air while the agent is busy. On a call with the owner, a soft thinking loop plays while the agent works on a request that takes more than a few seconds; it stops when the answer comes in or the owner speaks. On an errand call, the business hears hold music while the agent asks the owner for a yes or no. Off with the DialX setting `callSounds: false`.
+
+## [2.25.818] - 2026-11-15
+
+### Fixed
+- **A text reply whose voice note or video is too big still gets its text through.** If the phone or relay refuses the reply as too big, the agent sends the text alone and tells the owner the video or voice was too big.
+
 ## [2.25.817] - 2026-11-15
 
 ### Changed

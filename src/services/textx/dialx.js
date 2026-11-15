@@ -25,6 +25,8 @@ export const DIALX_TOOLS = ['dialx.say', 'dialx.hangup', 'dialx.list_approved_co
   'dialx.list_voicemails', 'dialx.mark_voicemail_read', 'dialx.delete_voicemail', 'dialx.get_voicemail_audio',
   // DialX 0.6.2: the copy of a voicemail ALICE left, as the other phone heard it
   'dialx.get_call_audio',
+  // DialX 0.7.137 (4293 #642): a sound clip into the call (Bots & Borgs Call Sounds: thinking loop, hold music), and its stop
+  'dialx.play', 'dialx.stop',
   // DialX 0.7.6 "Voice effects" (owner's switch, needs root): the owner's voice on their own live call;
   // 0.7.17 voice_preview renders an effect on the agent's audio with no call placed
   'dialx.voice_status', 'dialx.set_voice', 'dialx.theremin', 'dialx.voice_preview',
@@ -391,7 +393,7 @@ export const REALTIME_VOICES = ['marin', 'coral', 'shimmer', 'sage', 'ballad', '
 export const REALTIME_CALLS = ['test', 'all', 'off'];
 // realtimeAnswering: realtime on calls the agent answers for the owner. Paused after Orbit's call 42 (2026-10-25, 4293 #247:
 // 14 s of dead air, then a session that started after the greeting); DialX 0.7.47-0.7.48 fixed it (#250).
-export const SETTINGS_DEFAULTS = Object.freeze({ voice: 'agent', voiceProfile: 'Ara', ttsTimeoutMs: 5000, realtimeVoice: 'marin', realtimeCalls: 'all', realtimeAnswering: true });
+export const SETTINGS_DEFAULTS = Object.freeze({ voice: 'agent', voiceProfile: 'Ara', ttsTimeoutMs: 5000, realtimeVoice: 'marin', realtimeCalls: 'all', realtimeAnswering: true, callSounds: true });
 
 export async function getDialXSettings() {
   const saved = await PluginSettings.getCached('dialx', 'settings').catch(() => null);
@@ -401,6 +403,7 @@ export async function getDialXSettings() {
   if (!REALTIME_VOICES.includes(s.realtimeVoice)) s.realtimeVoice = SETTINGS_DEFAULTS.realtimeVoice;
   if (!REALTIME_CALLS.includes(s.realtimeCalls)) s.realtimeCalls = SETTINGS_DEFAULTS.realtimeCalls;
   if (typeof s.realtimeAnswering !== 'boolean') s.realtimeAnswering = SETTINGS_DEFAULTS.realtimeAnswering;
+  if (typeof s.callSounds !== 'boolean') s.callSounds = SETTINGS_DEFAULTS.callSounds;
   return s;
 }
 
@@ -425,11 +428,14 @@ export async function setDialXSettings(patch = {}) {
     } else if (k === 'realtimeAnswering') {
       if (typeof v !== 'boolean') throw new Error('realtimeAnswering must be true or false.');
       s.realtimeAnswering = v;
+    } else if (k === 'callSounds') {
+      if (typeof v !== 'boolean') throw new Error('callSounds must be true or false.');
+      s.callSounds = v;
     } else if (k === 'realtimeCalls') {
       if (!REALTIME_CALLS.includes(v)) throw new Error(`realtimeCalls must be one of ${REALTIME_CALLS.join(', ')}.`);
       s.realtimeCalls = v;
     } else {
-      throw new Error(`Unknown setting "${k}". Settings: voice, voiceProfile, ttsTimeoutMs, realtimeVoice, realtimeCalls, realtimeAnswering.`);
+      throw new Error(`Unknown setting "${k}". Settings: voice, voiceProfile, ttsTimeoutMs, realtimeVoice, realtimeCalls, realtimeAnswering, callSounds.`);
     }
   }
   await PluginSettings.setCached('dialx', 'settings', s);
