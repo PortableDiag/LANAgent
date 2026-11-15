@@ -132,3 +132,15 @@ test('plan dates: the store sends Unix seconds; shown as a day', () => {
   assert.equal(p.planDay('2026-12-15T00:00:00Z'), '2026-12-15');
   assert.equal(p.planDay(null), '');
 });
+
+test('a seat on another account\'s plan never tops up, and says it is a seat', async () => {
+  const seat = rig({ plan: { status: 'active', role: 'seat', renews_on: 1797377021, renewal_cents: 1200, warning: 'balance will not cover the renewal' }, settings: { hasPlan: true } });
+  await seat.p.planTick();
+  assert.equal(seat.sent.length + seat.told.length, 0);
+  assert.equal(seat.calls.filter(c => c.route === '/api/account/deposit').length, 0);
+  const r = await seat.p.execute({ action: 'plan' });
+  assert.match(r.result, /as a seat on another account's plan \(it pays and renews\), renews 2026-12-15/);
+  const owner = rig({ plan: { status: 'active', role: 'owner', renews_on: 1797377021, renewal_cents: 1200, warning: 'short' }, balance: 0, settings: { hasPlan: true } });
+  await owner.p.planTick();
+  assert.equal(owner.sent.length, 1, 'the holder still tops up');
+});

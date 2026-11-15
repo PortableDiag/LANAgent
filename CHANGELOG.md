@@ -2,6 +2,11 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.834] - 2026-11-15
+
+### Fixed
+- **A seat on someone else's All-Access plan never pays for it.** An agent added to another account's plan (`role: "seat"`) used to run the renewal check too. On a renewal warning it would have refilled its own store balance from its wallet, which does not pay the plan. Only the plan's holder refills now, and a seat's `plan` status says it is a seat.
+
 ## [2.25.833] - 2026-11-15
 
 ### Fixed

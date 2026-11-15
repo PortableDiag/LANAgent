@@ -793,6 +793,9 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
       return { success: true, plan: null, account, balanceUsd, result: `No All-Access plan.${account ? ` My store account is ${account}.` : ''}` };
     }
     const left = plan.downloads_left ?? plan.downloads?.left;
+    if (plan.role && plan.role !== 'owner') {
+      return { success: true, plan, account, balanceUsd, result: `All-Access: ${plan.status}, as a seat on another account's plan (it pays and renews)${plan.renews_on ? `, renews ${this.planDay(plan.renews_on)}` : ''}${left != null ? `; ${left} downloads left this period` : ''}${account ? `; my account ${account}` : ''}.` };
+    }
     const text = [`All-Access: ${plan.status}${plan.renews_on ? `, renews ${this.planDay(plan.renews_on)}` : plan.period_end ? `, period ends ${this.planDay(plan.period_end)}` : ''}`
       + (plan.renewal_cents != null ? ` for $${(Number(plan.renewal_cents) / 100).toFixed(2)}` : ''),
       left != null ? `${left} downloads left this period` : null,
@@ -839,6 +842,9 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     const key = await this.accountKey().catch(() => null);
     if (!key) return;
     const plan = await this.plan(key);
+    // A seat (DELTA on ALICE's plan) pays nothing: the plan's holder renews it. Topping up a seat's own balance
+    // would not pay the plan, it would only spend that agent's wallet.
+    if (plan?.role && plan.role !== 'owner') return;
     if (!plan?.warning || plan.status === 'canceled') return;
     const s = await this.settings();
     const period = this.planDay(plan.renews_on || plan.period_end);
