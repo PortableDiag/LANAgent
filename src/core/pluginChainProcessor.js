@@ -54,6 +54,20 @@ export function isOneStorePurchase(input) {
     !/\b(then|after that|afterwards|and also)\b.*\b(call|email|text|schedule|post|tweet)\b/i.test(t);
 }
 
+/**
+ * "Send me a video of you doing X", "film yourself doing the rumba and send it to Jo": the agent films its OWN 3D body
+ * (botsandborgs use, as video), one step that also sends it. The planner read "film … and send" as a web search plus a
+ * download and fetched YouTube instead (2026-11-15, "film yourself doing the phone call loop and send it to me").
+ * Not when a link or a site is named, or a later email/post is asked for.
+ */
+export function isOneAvatarVideo(input) {
+  const t = stripAgentAddress(input);
+  if (/https?:\/\/|\byoutube\b|\byt\b|\btiktok\b|\bdownload\b/i.test(t)) return false;
+  const ofSelf = /\b(video|clip|recording|film|movie)\s+of\s+you(?:rself)?\b/i.test(t) || /\b(film|record|video)\s+yourself\b/i.test(t)
+    || /\byourself\s+(doing|dancing|waving|saying|on the phone|drinking|sitting|typing)\b/i.test(t);
+  return ofSelf && !/\b(then|after that|afterwards|and also)\b.*\b(email|post|tweet|schedule|call)\b/i.test(t);
+}
+
 /** Actions a plugin's execute() dispatches that are not in its command list. */
 const UNLISTED_ACTIONS = { email: ['sendWithAI'] };
 
@@ -142,6 +156,7 @@ export class PluginChainProcessor {
       if (isOnePhoneCall(input)) return { isMultiStep: false, singleIntent: 'phone_call' };
       if (isOneVoiceText(input)) return { isMultiStep: false, singleIntent: 'voice_note_text' };
       if (isOneStorePurchase(input)) return { isMultiStep: false, singleIntent: 'store_purchase' };
+      if (isOneAvatarVideo(input)) return { isMultiStep: false, singleIntent: 'avatar_video' };
       logger.info(`Analyzing complex task: "${input}"`);
 
       // Get recent conversation context if available

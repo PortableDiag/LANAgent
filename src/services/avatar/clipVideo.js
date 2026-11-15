@@ -67,11 +67,12 @@ function pageHtml(methods) {
 <script type="module">
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import * as V from '/lib/three-vrm.module.js';
+import { attachProps } from '/lib/vrm-props.js';
 const THREE = window.THREE; THREE.GLTFLoader = GLTFLoader;
 const d = {
 ${methods}
 };
-window.setup = async ({ width, height, fps, seconds, loop, prop, background, backgroundImage = false, mouth = null, framing = 'full' }) => {
+window.setup = async ({ width, height, fps, seconds, loop, prop, props = [], background, backgroundImage = false, mouth = null, framing = 'full' }) => {
   const r = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
   r.setPixelRatio(1); r.setSize(width, height); document.body.appendChild(r.domElement);
   const scene = new THREE.Scene();
@@ -107,6 +108,8 @@ window.setup = async ({ width, height, fps, seconds, loop, prop, background, bac
     const pole = new THREE.Mesh(new THREE.CylinderGeometry(rad, rad, h, 24), new THREE.MeshStandardMaterial({ color: 0xd8dde3, metalness: 0.9, roughness: 0.25 }));
     pole.position.set(spot.x, h / 2, spot.z); vrm.scene.add(pole); poleX = spot.x;
   }
+  // Bought .glb props this clip uses (a phone in the hand, a chair): any that fail are left out, the clip still renders.
+  const placed = await attachProps({ GLTFLoader, vrm, props, warn: (m) => console.warn(m) });
   // Frame the whole routine: where the body goes over the clip, not just where it starts.
   const box = new THREE.Box3(); const v = new THREE.Vector3();
   const bones = ['head', 'leftHand', 'rightHand', 'leftFoot', 'rightFoot', 'hips', 'leftUpperArm', 'rightUpperArm'];
@@ -131,6 +134,9 @@ window.setup = async ({ width, height, fps, seconds, loop, prop, background, bac
     box.copy(part);
   }
   if (poleX !== null) { box.expandByPoint(new THREE.Vector3(poleX, 0, 0)); }
+  // A floor prop (a desk in front, a chair under) is part of the scene: a full-length shot frames it too, or a desk
+  // between the camera and the body fills the frame. Hand props move with the hand and are already near the body.
+  if (framing === 'full') for (const o of placed) if (o.userData?.floor) box.union(new THREE.Box3().setFromObject(o));
   const c = box.getCenter(new THREE.Vector3()), s = box.getSize(new THREE.Vector3());
   const cam = new THREE.PerspectiveCamera(30, width / height, 0.05, 50);
   const fov = THREE.MathUtils.degToRad(30);
@@ -138,15 +144,31 @@ window.setup = async ({ width, height, fps, seconds, loop, prop, background, bac
   const fitW = (s.x * 1.08) / 2 / Math.tan(fov / 2) / cam.aspect;
   // Closer framings get closer: the 1.2 m floor kept a head-and-shoulders shot at waist height.
   const dist = Math.max(fitH, fitW, framing === 'full' ? 1.2 : 0.45);
+  const lookAt = new THREE.Vector3();
   if (backgroundImage && framing === 'full') {
     // In front of a room the body fills the frame like a giant (the owner, 2026-11-15). A person stands about 58% of
     // the height of a room shot, feet on the floor near the bottom: frame for that, the camera level with the middle.
     const room = Math.max((s.y / 0.58) / 2 / Math.tan(fov / 2), fitW * 1.15, 1.2);
     const view = 2 * room * Math.tan(fov / 2);
     const eye = view * 0.4; // the floor (y 0) sits 10% up from the bottom of the frame
-    cam.position.set(c.x, eye, Math.max(c.z, box.max.z) + room); cam.lookAt(c.x, eye, c.z);
+    cam.position.set(c.x, eye, Math.max(c.z, box.max.z) + room); lookAt.set(c.x, eye, c.z);
   } else {
-    cam.position.set(c.x, c.y + s.y * 0.04, Math.max(c.z, box.max.z) + dist); cam.lookAt(c.x, c.y, c.z);
+    cam.position.set(c.x, c.y + s.y * 0.04, Math.max(c.z, box.max.z) + dist); lookAt.set(c.x, c.y, c.z);
+  }
+  cam.lookAt(lookAt);
+  // A floor prop standing between a front camera and the body (a standing desk) hides it from the chest down: look from
+  // a 3/4 front-side angle instead (Bots & Borgs' default for its own previews, 2119 #504). Other shots stay front-on.
+  const hipsAt = vrm.humanoid.getNormalizedBoneNode('hips')?.getWorldPosition(new THREE.Vector3());
+  const blocking = hipsAt && placed.some(o => {
+    if (!o.userData?.floor) return false;
+    const b = new THREE.Box3().setFromObject(o);
+    return b.min.z > hipsAt.z + 0.05 && b.min.x < hipsAt.x && b.max.x > hipsAt.x && b.max.y > hipsAt.y * 0.6;
+  });
+  if (blocking) {
+    const off = cam.position.clone().sub(lookAt).applyAxisAngle(new THREE.Vector3(0, 1, 0), THREE.MathUtils.degToRad(35)).multiplyScalar(1.1);
+    // and from a little above, looking down over the desk top at the hands and face.
+    off.y += s.y * 0.45;
+    cam.position.copy(lookAt).add(off); cam.lookAt(lookAt);
   }
   // Settle the hair at the first pose, then play.
   mixer.setTime(0);
@@ -162,7 +184,7 @@ window.setup = async ({ width, height, fps, seconds, loop, prop, background, bac
     r.render(scene, cam);
     return r.domElement.toDataURL('image/jpeg', 0.9);
   };
-  return { duration: clip.duration, tracks: clip.tracks.length, pole: poleX, talks: canTalk, framing };
+  return { duration: clip.duration, tracks: clip.tracks.length, pole: poleX, talks: canTalk, framing, props: placed.map(o => o.name) };
 };
 window.ready = true;
 </script></body></html>`;
@@ -200,7 +222,7 @@ export function envelopeFromPcm(pcm, rate, fps) {
   return { seconds: samples / rate, mouth };
 }
 
-const MIME = { '.js': 'text/javascript', '.vrm': 'model/gltf-binary', '.vrma': 'model/gltf-binary', '.html': 'text/html', '.jpg': 'image/jpeg' };
+const MIME = { '.js': 'text/javascript', '.vrm': 'model/gltf-binary', '.vrma': 'model/gltf-binary', '.glb': 'model/gltf-binary', '.html': 'text/html', '.jpg': 'image/jpeg' };
 let busy = Promise.resolve();
 
 /**
@@ -213,7 +235,7 @@ export function renderClipVideo(opts) {
   return run;
 }
 
-async function render({ modelPath, clipPath, loop = false, prop = null, seconds = null, fps = 24, width = 720, height = 960,
+async function render({ modelPath, clipPath, loop = false, prop = null, props = null, seconds = null, fps = 24, width = 720, height = 960,
   background = '#121826', backgroundPath = null, framing = 'full', timeoutMs = 8 * 60 * 1000, launch = null, voice = null } = {}) {
   const started = Date.now();
   const html = pageHtml(designerMethods(await fs.readFile(path.join(PUBLIC_DIR, 'avatar.html'), 'utf8')));
@@ -222,6 +244,10 @@ async function render({ modelPath, clipPath, loop = false, prop = null, seconds 
     headless: 'new',
     args: ['--no-sandbox', '--disable-dev-shm-usage', '--use-gl=angle', '--use-angle=swiftshader-webgl', '--enable-unsafe-swiftshader', '--ignore-gpu-blocklist', `--window-size=${width},${height}`]
   });
+  // Props by absolute path ({ ..., path }): the page asks for /prop/<n>.glb, never a path of its own choosing.
+  const propList = (Array.isArray(props) ? props : []).filter(p => p && typeof p.path === 'string');
+  const propFiles = propList.map(p => p.path);
+  const pageProps = propList.map((p, i) => ({ prop: p.prop, bone: p.bone, position: p.position, rotation: p.rotation, scale: p.scale, scale_with: p.scale_with, ref_hips: p.ref_hips, url: `/prop/${i}.glb` }));
   const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'clip-video-'));
   const out = path.join(tmp, 'clip.mp4');
   // A voice-over: the audio as a file for ffmpeg, its length, and how open the mouth is in each frame.
@@ -245,6 +271,7 @@ async function render({ modelPath, clipPath, loop = false, prop = null, seconds 
         else if (u.pathname === '/model.vrm') body = await fs.readFile(modelPath);
         else if (u.pathname === '/clip.vrma') body = await fs.readFile(clipPath);
         else if (u.pathname === '/background.jpg' && backgroundPath) body = await fs.readFile(backgroundPath);
+        else if (/^\/prop\/\d+\.glb$/.test(u.pathname) && propFiles[Number(u.pathname.slice(6, -4))]) body = await fs.readFile(propFiles[Number(u.pathname.slice(6, -4))]);
         else if (u.pathname.startsWith('/lib/')) {
           const file = path.join(PUBLIC_DIR, path.normalize(u.pathname).replace(/^(\.\.[/\\])+/, ''));
           if (!file.startsWith(path.join(PUBLIC_DIR, 'lib'))) return req.respond({ status: 404, body: '' });
@@ -258,7 +285,7 @@ async function render({ modelPath, clipPath, loop = false, prop = null, seconds 
     await page.goto(`${HOST}/render.html`, { waitUntil: 'load', timeout: 60000 });
     await page.waitForFunction('window.ready === true', { timeout: 60000 }).catch(() => { throw new Error(`the render page did not start: ${pageErrors[0] || 'no error given'}`); });
     // The clip's length is known only once it is loaded, so the page is set up with a generous span first.
-    const probe = await page.evaluate((o) => window.setup(o), { width, height, fps, seconds: 40, loop, prop, background, backgroundImage: !!backgroundPath, framing: ['waist', 'head'].includes(framing) ? framing : 'full',
+    const probe = await page.evaluate((o) => window.setup(o), { width, height, fps, seconds: 40, loop, prop, props: pageProps, background, backgroundImage: !!backgroundPath, framing: ['waist', 'head'].includes(framing) ? framing : 'full',
       // The voice starts 0.3 s in, so the mouth does too.
       mouth: said?.mouth ? [...new Array(Math.round(VOICE_LEAD_S * fps)).fill(0), ...said.mouth] : null });
     // With a voice-over the video runs at least as long as the voice (the clip holds its last pose, or loops).
@@ -277,8 +304,9 @@ async function render({ modelPath, clipPath, loop = false, prop = null, seconds 
     ff.stdin.end();
     await done;
     const video = await fs.readFile(out);
-    const facts = { seconds: +(frames / fps).toFixed(2), frames, fps, width, height, bytes: video.length, pole: probe.pole, ms: Date.now() - started, voice: !!said, lipSync: !!probe.talks };
-    logger.info(`Clip video: ${path.basename(clipPath)} on ${path.basename(modelPath)}, ${facts.seconds}s, ${frames} frames, ${(video.length / 1048576).toFixed(1)} MB in ${(facts.ms / 1000).toFixed(0)}s`);
+    const facts = { seconds: +(frames / fps).toFixed(2), frames, fps, width, height, bytes: video.length, pole: probe.pole, props: probe.props || [], ms: Date.now() - started, voice: !!said, lipSync: !!probe.talks };
+    if (pageProps.length && facts.props.length < pageProps.length) logger.warn(`Clip video: ${facts.props.length} of ${pageProps.length} props shown on ${path.basename(clipPath)}`);
+    logger.info(`Clip video: ${path.basename(clipPath)} on ${path.basename(modelPath)}${facts.props.length ? ` with ${facts.props.join(', ')}` : ''}, ${facts.seconds}s, ${frames} frames, ${(video.length / 1048576).toFixed(1)} MB in ${(facts.ms / 1000).toFixed(0)}s`);
     return { video, ...facts };
   } finally {
     clearTimeout(timer);

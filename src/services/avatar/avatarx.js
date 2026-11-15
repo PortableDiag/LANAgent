@@ -72,6 +72,55 @@ export async function pushClipsToAvatarX(clips, opts = {}) {
   return names;
 }
 
+/**
+ * Give AvatarX (0.3.16+, POST /agent/v1/props) the props this agent owns: each .glb and an attach.json naming the
+ * AvatarX clips it goes with. listed = store.json entries ({ file, props: [{prop, file, bone, position, rotation}] }),
+ * vrmDir = where their files are. The .glb goes up only when AvatarX lacks it or holds another size; the attach when
+ * its placements differ. One prop failing is logged and the rest go on. Returns the prop names AvatarX holds, or
+ * 'not connected'. An AvatarX older than props answers 404 and gets nothing: 'unsupported'.
+ */
+export async function pushPropsToAvatarX(listed, vrmDir, opts = {}) {
+  const byProp = new Map();
+  for (const c of Array.isArray(listed) ? listed : []) {
+    // AvatarX shows a prop whenever its clip plays, with no request to ask: on-request props (the mic) stay off it.
+    for (const p of (c.props || []).filter(x => !x.onRequest)) {
+      const name = avatarxClipName(p.prop || p.file);
+      if (!name) continue;
+      if (!byProp.has(name)) byProp.set(name, { file: path.join(vrmDir, p.file), clips: {} });
+      const at = { bone: p.bone, position: p.position, rotation: p.rotation };
+      for (const k of ['scale', 'scale_with', 'ref_hips']) if (p[k] != null) at[k] = p[k];
+      byProp.get(name).clips[avatarxClipName(c.file)] = at;
+    }
+  }
+  if (!byProp.size) return [];
+  const call = await connect(opts);
+  if (!call) return 'not connected';
+  const state = await call('GET', '/agent/v1/state');
+  if (!Array.isArray(state.props)) return 'unsupported';
+  const held = new Map(state.props.map(p => [p.name, p]));
+  const same = (a, b) => ['bone', 'position', 'rotation', 'scale_with', 'ref_hips'].every(k => JSON.stringify(a?.[k]) === JSON.stringify(b?.[k]))
+    && (a?.scale ?? 1) === (b?.scale ?? 1);
+  const done = [];
+  for (const [name, want] of byProp) {
+    try {
+      const glb = await fs.readFile(want.file);
+      const there = held.get(name);
+      if (!there || !String(there.rev || '').startsWith(`${glb.length}-`)) {
+        await call('POST', `/agent/v1/props?name=${encodeURIComponent(name)}`, glb, 'application/octet-stream');
+        logger.info(`AvatarX: added prop ${name}`);
+      }
+      const clipsThere = there?.clips || {};
+      const changed = Object.keys(want.clips).length !== Object.keys(clipsThere).length
+        || Object.entries(want.clips).some(([k, v]) => !same(v, clipsThere[k]));
+      if (!there || changed) await call('POST', `/agent/v1/props?name=${encodeURIComponent(name)}`, JSON.stringify({ clips: want.clips }));
+      done.push(name);
+    } catch (e) {
+      logger.warn(`AvatarX: prop ${name} not given: ${e.message}`);
+    }
+  }
+  return done;
+}
+
 /** Play a gesture or an owned clip on AvatarX now. Returns 'played', or 'not connected'. */
 export async function playOnAvatarX(name, opts = {}) {
   const call = await connect(opts);

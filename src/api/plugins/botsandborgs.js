@@ -6,7 +6,7 @@ import { PluginSettings } from '../../models/PluginSettings.js';
 import { encrypt, decrypt } from '../../utils/encryption.js';
 import fs from 'node:fs/promises';
 import { DATA_PATH } from '../../utils/paths.js';
-import { variantKind, livePass, applyClipManifest, unpack, installVrm, addToManifest, readVrmInfo, readVrmaInfo, clipLabel, clipLoops, clipGesture, writeStoreAnimations, safeName, toStickerWebp, moodOf, portraitFromPreview } from '../../services/store/assetLibrary.js';
+import { propsFor, variantKind, livePass, applyClipManifest, unpack, installVrm, addToManifest, readVrmInfo, readVrmaInfo, clipLabel, clipLoops, clipGesture, writeStoreAnimations, safeName, toStickerWebp, moodOf, portraitFromPreview } from '../../services/store/assetLibrary.js';
 import { moodChoices, chooseSticker, stickerCouldFit, wallpaperFor } from '../../services/store/selfUse.js';
 
 /**
@@ -162,10 +162,22 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
         examples: ['send me a happy sticker', 'send Sam a sad robot emoji', 'use the bear vrm model as your 3d model', 'wear the bear model', 'install the bear model you bought', 'send me the bear portrait', 'send me a wallpaper from your wallpapers', 'set my wallpaper from my bots and borgs wallpapers', 'do the rumba you bought', 'play your wave animation', 'dance for me with your new dance pack', 'send me a video of you doing the pole dance', 'film yourself doing the rumba and send it to me', 'send me a video of you waving and saying "hi everyone, I\'m ALICE"', 'make a video of your cheer animation with your voice over it']
       },
       {
+        command: 'findclip',
+        description: 'Find a Bots & Borgs animation clip by what it means (wave, heart, shrug, typing, dance...): says whether this agent already owns it and, if not, the 50c single or pack that has it. Buys nothing',
+        usage: 'findclip({ clip: "heart hands" })',
+        examples: ['is there a heart hands animation on bots and borgs', 'find a typing animation you could buy', 'which bots and borgs clip would let you facepalm', 'can you buy a yawn animation']
+      },
+      {
         command: 'live',
         description: 'Live avatar passes from Bots & Borgs: models the store hosts and keeps at their newest version. Lists each pass (model, state, expiry) and checks the store for a newer version now; a new version replaces the installed model, and the worn one everywhere it shows. Buy one with buy({ variant: "<model>-live30" }) (30, 90 or 365 days)',
         usage: 'live({ check: true })  // renew: true (the worn model) or a model slug renews its pass now',
         examples: ['check your live avatars for updates', 'which live avatar passes do you have', 'when does your live avatar pass expire', 'is there a new version of your live avatar']
+      },
+      {
+        command: 'plan',
+        description: 'The Bots & Borgs All-Access subscription: with no arguments its status (renewal date and price, downloads left this period, members, any warning) and this agent\'s store account id; subscribe: "month" or "year" subscribes, paid from the store balance (topped up from the wallet); member: "acct_…" adds another agent\'s account to the plan; cancel: true stops it at the period end',
+        usage: 'plan({})  // plan({ subscribe: "month" }), plan({ member: "acct_…" }), plan({ cancel: true })',
+        examples: ['what is your bots and borgs subscription status', 'subscribe to bots and borgs all access monthly', 'add delta to the bots and borgs plan', 'how many bots and borgs downloads are left this month', 'what is your bots and borgs account id']
       },
       {
         command: 'orders',
@@ -196,7 +208,9 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
         case 'buy': return await this.buy(data);
         case 'library': return await this.library(data);
         case 'use': return await this.useOwned(data);
+        case 'findclip': return await this.findClipCommand(data);
         case 'live': return await this.liveCommand(data);
+        case 'plan': return await this.planCommand(data);
         case 'orders': return await this.orders();
         case 'settings': return await this.settingsCommand(data);
         default: return { success: false, error: `Unknown action ${action}` };
@@ -275,6 +289,12 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     return { ...DEFAULTS, ...(saved || {}) };
   }
 
+  /** Merge internal state (not owner rules) into the saved settings, e.g. which plan period was topped up. */
+  async saveSettings(change) {
+    const s = await this.settings();
+    await PluginSettings.setCached(this.name, 'settings', { ...s, ...change });
+  }
+
   async settingsCommand(data) {
     const s = await this.settings();
     const keys = ['weeklyBudgetUsd', 'maxItemUsd', 'requireApproval', 'minWalletUsd', 'payAsset', 'allowAvatarChange', 'autoUse', 'autoWear', 'autoEmotes', 'autoRenewLive'];
@@ -327,7 +347,7 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     const answers = await this.answerChallenge(ch.questions || []);
     const r = await this.api('post', '/api/account/register', { body: { challenge_id: ch.challenge_id, answers, label: `${this.agent?.config?.name || 'agent'}-lanagent` } });
     if (!r?.key) throw new Error('The store did not return an account key.');
-    await PluginSettings.setCached(this.name, 'account', { key: encrypt(r.key), registeredAt: new Date().toISOString() });
+    await PluginSettings.setCached(this.name, 'account', { key: encrypt(r.key), ...(r.account ? { account: String(r.account) } : {}), registeredAt: new Date().toISOString() });
     this.logger.info('botsandborgs: registered a store account for this agent');
     return r.key;
   }
@@ -398,6 +418,7 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
 
   /** The timer's run: nothing to do (and no store call) until a pass exists. Then the worn model's pass is renewed if due. */
   async liveTick() {
+    await this.planTick().catch(e => this.logger.warn(`botsandborgs: plan check failed: ${e.message}`));
     if (!(await this.livePasses()).length && !(await this.libraryItems()).some(i => i.livePass)) return;
     await this.syncLive();
     if (!(await this.settings()).autoRenewLive) return;
@@ -618,7 +639,7 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
       data = { ...data, use: 'wear' };
       wantNow = wantKind === 'bundle' ? 'bundle' : 'vrm';
     }
-    if (!data.use && ['sticker', 'emoji', 'wallpaper', 'animation', 'kit', 'voice', 'sound', 'motion', 'background'].includes(buying)) data = { ...data, use: 'keep' };
+    if (!data.use && ['sticker', 'emoji', 'wallpaper', 'animation', 'prop', 'kit', 'voice', 'sound', 'motion', 'background'].includes(buying)) data = { ...data, use: 'keep' };
     if (!data.use && buying && /-portraits$|-bundle$|-pack$|^[a-z-]+-(?:avatars|wallpapers|emoji)$/.test(String(data.variant || ''))) data = { ...data, use: 'keep' };
     const use = String(data.use || '').toLowerCase();
     // The owner's rule: never buy to hold. A purchase names what it is for.
@@ -659,17 +680,24 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     const live = livePass(data.variant);
     // The store nests its answers: { quote: {...} }, { order: {...}, crypto: {...}, token } (live, 2026-10-28).
     // A live pass is quoted with the account key: a download it already paid for comes off the first pass.
-    const quoted = await this.api('post', '/api/quotes', { body: { items: [{ variant: String(data.variant), qty: 1 }] }, key: live ? await this.accountKey() : undefined });
+    // Quoted with the account key: a live pass's download credit, and under All-Access every included item at $0
+    // (`covered: "subscription"`, 2119 #513). A store that can't register the key still quotes without it.
+    const quoteKey = await this.accountKey().catch(e => { if (live) throw e; return undefined; });
+    const quoted = await this.api('post', '/api/quotes', { body: { items: [{ variant: String(data.variant), qty: 1 }] }, key: quoteKey });
     const quote = quoted.quote || quoted;
     const usd = Number(quote.total_cents ?? 0) / 100;
     // A first live pass on a model already paid for can cost nothing: the store takes the download off it
     // (`upgrade_credit_cents`; Racer Blue's $15 bundle made its 30-day pass $0, 2026-11-14). A free order is placed
     // on the balance; any other $0 quote is still a store fault.
     const credited = Number(quote.upgrade_credit_cents ?? quote.credit_cents ?? 0) > 0 || (quote.lines || quote.items || []).some(l => Number(l?.upgrade_credit_cents) > 0);
-    if (!(usd > 0) && !(usd === 0 && credited)) throw new Error(`The store returned a quote with no price (${JSON.stringify(quote).slice(0, 400)}).`);
+    const lines = quote.lines || quote.items || [];
+    const covered = lines.some(l => l?.covered === 'subscription');
+    const listUsd = covered ? lines.reduce((t, l) => t + Number(l?.list_cents || 0), 0) / 100 : null;
+    if (!(usd > 0) && !(usd === 0 && (credited || covered))) throw new Error(`The store returned a quote with no price (${JSON.stringify(quote).slice(0, 400)}).`);
     const ledger = await this.ledger();
     const spent = this.spentThisWeek(ledger);
-    if (spent + usd > s.weeklyBudgetUsd + 1e-9) return { success: false, error: `That costs $${usd.toFixed(2)} and I have $${Math.max(0, s.weeklyBudgetUsd - spent).toFixed(2)} of this week's $${s.weeklyBudgetUsd} left, so I didn't buy it.` };
+    // Nothing to pay (a covered or credited $0 item) spends no budget, even in a week already over it.
+    if (usd > 0 && spent + usd > s.weeklyBudgetUsd + 1e-9) return { success: false, error: `That costs $${usd.toFixed(2)} and I have $${Math.max(0, s.weeklyBudgetUsd - spent).toFixed(2)} of this week's $${s.weeklyBudgetUsd} left, so I didn't buy it.` };
     if (s.maxItemUsd != null && usd > s.maxItemUsd) return { success: false, error: `That costs $${usd.toFixed(2)}, over my $${s.maxItemUsd} per-item limit.` };
     if (data.dryRun === true || data.dryRun === 'true') return { success: true, dryRun: true, variant: String(data.variant), usd, result: `${pickedWhy}Would buy ${data.variant} for $${usd.toFixed(2)} (${use}); nothing was paid.` };
     if (s.requireApproval && data.confirm !== true) return { success: true, result: `It costs $${usd.toFixed(2)} (${data.variant}, for ${use === 'avatar' ? 'my avatar' : `sending to ${data.to}`}). Say yes and I'll buy it.` };
@@ -681,7 +709,7 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     if (wallet.usd != null && wallet.usd - usd < s.minWalletUsd) return { success: false, error: `My wallet has $${wallet.usd.toFixed(2)} of ${s.payAsset}; buying would take it under the $${s.minWalletUsd} floor, so I didn't.` };
 
     const key = await this.accountKey();
-    const entry = { at: new Date().toISOString(), variant: String(data.variant), usd, use, to: data.to || null, used: false };
+    const entry = { at: new Date().toISOString(), variant: String(data.variant), usd, use, to: data.to || null, used: false, ...(covered ? { covered: 'subscription', listUsd } : {}) };
     // The store's smallest on-chain payment is $0.25; anything less is paid from a prepaid balance.
     const paying = usd < MIN_ONCHAIN_USD
       ? await this.payFromBalance({ quote, key, usd, s, asset, wallet, entry })
@@ -726,6 +754,119 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
   }
 
   pause(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+  // ── All-Access subscription (store 0.26, 2119 #513) ──────────────────────────────────────
+  /** A plan date as YYYY-MM-DD: the store sends Unix seconds (renews_on 1797377021), or an ISO string. */
+  planDay(v) {
+    if (v == null || v === '') return '';
+    const n = Number(v);
+    const d = Number.isFinite(n) && n > 1e9 ? new Date(n < 1e12 ? n * 1000 : n) : new Date(String(v));
+    return Number.isNaN(d.getTime()) ? String(v).slice(0, 10) : d.toISOString().slice(0, 10);
+  }
+
+  /** The plan, or null when this account has none. */
+  async plan(key) {
+    try { const r = await this.api('get', '/api/account/plan', { key }); return r?.plan || r || null; }
+    catch (e) { if (e.status === 404) return null; throw e; }
+  }
+
+  async planCommand(data = {}) {
+    const key = await this.accountKey();
+    if (data.subscribe) return this.subscribe(String(data.subscribe), key);
+    if (data.member) {
+      const account = String(data.member).trim();
+      if (!/^acct_[A-Za-z0-9_-]+$/.test(account)) return { success: false, error: 'A member is a store account id (acct_…).' };
+      await this.api('post', '/api/account/plan/members', { key, body: { account } });
+      this.logger.info(`botsandborgs: added ${account} to the All-Access plan`);
+      return { success: true, result: `Added ${account} to my All-Access plan.` };
+    }
+    if (data.cancel === true || data.cancel === 'true') {
+      await this.api('delete', '/api/account/plan', { key });
+      return { success: true, result: 'All-Access is cancelled at the end of this period; what I downloaded stays mine.' };
+    }
+    const [plan, bal] = await Promise.all([this.plan(key), this.api('get', '/api/account/balance', { key }).catch(() => null)]);
+    const saved = await PluginSettings.getCached(this.name, 'account').catch(() => null);
+    const account = bal?.account || bal?.account_id || plan?.account || saved?.account || null;
+    const balanceUsd = bal?.balance_cents != null ? Number(bal.balance_cents) / 100 : null;
+    if ((await this.settings()).hasPlan !== !!(plan?.status && plan.status !== 'none')) await this.saveSettings({ hasPlan: !!(plan?.status && plan.status !== 'none') });
+    if (!plan || !plan.status || plan.status === 'none') {
+      return { success: true, plan: null, account, balanceUsd, result: `No All-Access plan.${account ? ` My store account is ${account}.` : ''}` };
+    }
+    const left = plan.downloads_left ?? plan.downloads?.left;
+    const text = [`All-Access: ${plan.status}${plan.renews_on ? `, renews ${this.planDay(plan.renews_on)}` : plan.period_end ? `, period ends ${this.planDay(plan.period_end)}` : ''}`
+      + (plan.renewal_cents != null ? ` for $${(Number(plan.renewal_cents) / 100).toFixed(2)}` : ''),
+      left != null ? `${left} downloads left this period` : null,
+      balanceUsd != null ? `store balance $${balanceUsd.toFixed(2)}` : null,
+      account ? `my account ${account}` : null,
+      plan.warning ? `WARNING: ${plan.warning}` : null].filter(Boolean).join('; ');
+    return { success: true, plan, account, balanceUsd, result: `${text}.` };
+  }
+
+  /**
+   * Subscribe to All-Access, paid from the store balance (the store renews it from there each period). The owner
+   * decides to subscribe; the weekly item budget is for single purchases and does not apply. The wallet floor does.
+   */
+  async subscribe(period, key) {
+    const variant = /year/i.test(period) ? 'bnb-all-access-year' : 'bnb-all-access-month';
+    const s = await this.settings();
+    const existing = await this.plan(key);
+    if (existing && ['active', 'trialing', 'past_due'].includes(existing.status)) return { success: true, result: `I already have All-Access (${existing.status}).`, plan: existing };
+    const quoted = await this.api('post', '/api/quotes', { key, body: { items: [{ variant, qty: 1 }] } });
+    const quote = quoted.quote || quoted;
+    const usd = Number(quote.total_cents ?? 0) / 100;
+    if (!(usd > 0)) throw new Error(`The store quoted All-Access at no price (${JSON.stringify(quote).slice(0, 300)}).`);
+    const rail = await this.api('get', '/api/crypto');
+    const asset = (rail.assets || []).find(a => a.symbol === s.payAsset);
+    if (!asset) return { success: false, error: `The store doesn't take ${s.payAsset} right now.` };
+    const wallet = await this.walletUsd(asset);
+    const entry = { at: new Date().toISOString(), variant, usd, use: 'plan', used: true };
+    const paid = await this.payFromBalance({ quote, key, usd, s, asset, wallet, entry });
+    if (paid.refused) return { success: false, error: paid.refused };
+    const plan = await this.plan(key).catch(() => null);
+    await this.saveSettings({ hasPlan: true });
+    this.logger.info(`botsandborgs: subscribed to ${variant} for $${usd.toFixed(2)} (${plan?.status || 'status unknown'})`);
+    return { success: true, plan, result: `Subscribed to Bots & Borgs All-Access (${/year/.test(variant) ? 'yearly' : 'monthly'}, $${usd.toFixed(2)}), ${paid.label}.${plan?.renews_on ? ` It renews ${this.planDay(plan.renews_on)} from my store balance.` : ''} Included items now cost nothing.` };
+  }
+
+  /**
+   * Keep the plan paid: when the store warns that the balance won't cover the next renewal, top it up from the wallet
+   * once per period (wallet floor applies) and tell the owner; when the warning is anything else, or the top-up is
+   * refused, tell the owner urgently. Quiet when there is no plan.
+   */
+  async planTick() {
+    // Only an agent known to hold a plan asks; one with none makes no store call (the live timer's rule).
+    if (!(await this.settings()).hasPlan) return;
+    const key = await this.accountKey().catch(() => null);
+    if (!key) return;
+    const plan = await this.plan(key);
+    if (!plan?.warning || plan.status === 'canceled') return;
+    const s = await this.settings();
+    const period = this.planDay(plan.renews_on || plan.period_end);
+    if (s.planToppedFor === period) return;
+    const bal = await this.api('get', '/api/account/balance', { key }).catch(() => null);
+    const need = Math.max(0, Number(plan.renewal_cents || 0) - Number(bal?.balance_cents || 0));
+    const notify = (text, urgent) => this.agent?.notify?.(text, { urgent });
+    if (!(need > 0) || plan.status === 'past_due') { await notify(`Bots & Borgs All-Access: ${plan.warning}`, true); await this.saveSettings({ planToppedFor: period }); return; }
+    const rail = await this.api('get', '/api/crypto');
+    const asset = (rail.assets || []).find(a => a.symbol === s.payAsset);
+    const wallet = asset ? await this.walletUsd(asset) : null;
+    const cents = Math.max(MIN_DEPOSIT_CENTS, need);
+    if (!asset || (wallet?.usd != null && wallet.usd - cents / 100 < s.minWalletUsd)) {
+      await notify(`Bots & Borgs All-Access renews ${period} for $${(Number(plan.renewal_cents) / 100).toFixed(2)} and my store balance is short by $${(need / 100).toFixed(2)}; topping it up would take my wallet under its floor, so I didn't.`, true);
+      await this.saveSettings({ planToppedFor: period });
+      return;
+    }
+    const dep = await this.api('post', '/api/account/deposit', { key, idem: `lanagent-plan-${period}`, body: { amount_cents: cents, pay_asset: s.payAsset } });
+    const order = { ...(dep.order || dep), token: dep.token || dep.order?.token };
+    const pay = dep.crypto || order.crypto || {};
+    if (!pay.address || !pay.amount) throw new Error('The store\'s deposit came back without payment instructions.');
+    const { hash, confirm } = await this.sendAndConfirm({ order, pay, key, asset, s });
+    await this.record({ at: new Date().toISOString(), variant: 'store balance (All-Access renewal)', usd: cents / 100, use: 'deposit', used: true, order: order.id, token: order.token, asset: s.payAsset, tx: hash });
+    await this.saveSettings({ planToppedFor: period });
+    const ok = await confirm();
+    this.logger.info(`botsandborgs: topped up the store balance $${(cents / 100).toFixed(2)} for the All-Access renewal on ${period} (tx ${hash}${ok ? '' : ', still confirming'})`);
+    await notify(`Topped up my Bots & Borgs balance $${(cents / 100).toFixed(2)} so All-Access renews on ${period} (tx ${hash}).`, false);
+  }
 
   async payOnChain({ quote, key, usd, s, asset, wallet, entry }) {
     const placed = await this.api('post', '/api/orders', { key, idem: `lanagent-${crypto.randomUUID()}`, body: { quote: quote.id, channel: 'agent', pay: 'crypto', pay_asset: s.payAsset } });
@@ -974,7 +1115,7 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     if (livePass(bought)) item.livePass = bought;
     if (update) item.at = update.at || item.at;
     await this.saveLibraryItem(item, { keepPlace: !!update });
-    if (files.some(f => f.kind === 'animation')) await this.publishAnimations();
+    if (files.some(f => f.kind === 'animation' || f.kind === 'prop')) await this.publishAnimations();
     return item;
   }
 
@@ -1075,7 +1216,7 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     const updated = update === true || update === 'true' ? await this.updateOwned({ kind }) : null;
     await this.repairGallery();
     // A refresh also relists owned clips, so a fix to how clips are read reaches packs already bought.
-    if (refreshing && (await this.libraryItems()).some(i => i.files.some(f => f.kind === 'animation'))) await this.publishAnimations();
+    if (refreshing && (await this.libraryItems()).some(i => i.files.some(f => f.kind === 'animation' || f.kind === 'prop'))) await this.publishAnimations();
     let items = await this.libraryItems();
     if (kind) items = items.filter(i => i.kind === kind || i.files.some(f => f.kind === kind));
     if (query) items = items.filter(i => this.matches(i, query));
@@ -1107,7 +1248,7 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
   /** The gallery's manifest can be replaced by a deploy: bought models whose file is still there go back on the list. */
   async repairGallery() {
     const items = await this.libraryItems();
-    if (items.some(i => i.files.some(f => f.kind === 'animation'))) {
+    if (items.some(i => i.files.some(f => f.kind === 'animation' || f.kind === 'prop'))) {
       const listed = await fs.access(path.join(this.vrmDir(), 'animations', 'store.json')).then(() => true).catch(() => false);
       if (!listed) await this.publishAnimations().catch(e => this.logger.warn(`botsandborgs: clips not relisted: ${e.message}`));
     }
@@ -1278,12 +1419,20 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
       }
     }
     if (changed) await PluginSettings.setCached(this.name, 'library', { items });
-    const listed = await writeStoreAnimations(items, this.libraryDir(), this.vrmDir());
-    this.logger.info(`botsandborgs: ${listed.length} bought clips listed for the designer and the playground`);
+    const listed = await writeStoreAnimations(items, this.libraryDir(), this.vrmDir(), { warn: (m) => this.logger.warn(`botsandborgs: ${m}`) });
+    const withProps = listed.filter(c => c.props?.length).length;
+    this.logger.info(`botsandborgs: ${listed.length} bought clips listed for the designer and the playground${withProps ? `, ${withProps} with props` : ''}`);
     const { pushClipsToAvatarX } = await import('../../services/avatar/avatarx.js');
     const pushed = await pushClipsToAvatarX(listed.map(c => ({ file: path.join(this.vrmDir(), 'animations', c.file) })))
       .catch(e => { this.logger.warn(`botsandborgs: AvatarX clips not added: ${e.message}`); return null; });
     if (Array.isArray(pushed)) this.logger.info(`botsandborgs: AvatarX holds ${pushed.length} bought clips`);
+    if (withProps) {
+      const { pushPropsToAvatarX } = await import('../../services/avatar/avatarx.js');
+      const props = await pushPropsToAvatarX(listed, this.vrmDir())
+        .catch(e => { this.logger.warn(`botsandborgs: AvatarX props not added: ${e.message}`); return null; });
+      if (Array.isArray(props)) this.logger.info(`botsandborgs: AvatarX holds ${props.length} props`);
+      else if (props === 'unsupported') this.logger.warn('botsandborgs: this AvatarX is older than props (0.3.16); the 3D pages and videos still show them');
+    }
     return listed;
   }
 
@@ -1318,11 +1467,59 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
       const away = pool.find(p => flat(p.file.label) === flat(`${choice.file.label} Facing Away`));
       if (away) choice = away;
     }
-    if (!fits.length && (clip || purpose || specific)) return { error: `I have no ${specific ? specific[0] : clip || purpose} clip. Mine: ${[...new Set(pool.map(p => p.file.label))].join(', ')}.` };
+    if (!fits.length && (clip || purpose || specific)) {
+      const wanted = specific ? specific[0] : clip || purpose;
+      const offer = await this.storeOffer(wanted).catch(() => '');
+      return { error: `I have no ${wanted} clip. Mine: ${[...new Set(pool.map(p => p.file.label))].join(', ')}.${offer ? ` ${offer}` : ''}` };
+    }
     const rel = `store/${safeName(choice.item.variant)}/${choice.file.name}`;
     const listed = await fs.readFile(path.join(this.vrmDir(), 'animations', 'store.json'), 'utf8').then(JSON.parse).catch(() => []);
     const entry = listed.find(c => c.file === rel) || { file: rel, label: choice.file.label, loop: !!choice.file.loop };
     return { choice, entry, rel };
+  }
+
+  /**
+   * The store's clip search (GET /api/animations, store 0.23, botsandborgs.com/llms.txt "Animation lookup API"): clips
+   * by meaning, each with the single (50c) or pack that sells it. Standard fit only: this agent's renderers skip broad
+   * versions. Each result says whether it is already owned (by its pack or its single). Buys nothing.
+   */
+  async findClips(words, { limit = 5 } = {}) {
+    const q = String(words || '').replace(/[^\p{L}\p{N} '-]+/gu, ' ').replace(/\s+/g, ' ').trim().slice(0, 60);
+    if (!q) return [];
+    const r = await this.api('GET', `/api/animations?q=${encodeURIComponent(q)}&fit=standard&limit=${Math.min(20, Math.max(1, limit))}`);
+    const owned = new Set((await this.libraryItems().catch(() => [])).map(i => i.variant));
+    return (r?.clips || []).map(c => ({ name: c.name, tags: c.tags || [], pack: c.pack, packTitle: c.pack_title,
+      packUsd: Number(c.pack_price_cents) / 100, single: c.single || null, singleUsd: c.single ? Number(c.single_price_cents) / 100 : null,
+      variant: c.buy?.variant || c.single || c.pack, owned: owned.has(c.pack) || (!!c.single && owned.has(c.single)) }));
+  }
+
+  /** One line offering the store's clip for a move this agent has no clip for, or '' (none, or no answer in 5 s). */
+  async storeOffer(wanted) {
+    const found = (await Promise.race([this.findClips(wanted, { limit: 3 }), new Promise(res => setTimeout(() => res([]), 5000))])).filter(c => !c.owned);
+    const c = found[0];
+    if (!c) return '';
+    this.logger.info(`botsandborgs: no ${wanted} clip owned; the store sells ${c.variant}`);
+    return `Bots & Borgs sells "${c.name}": ${this.clipPrice(c)}. Say the word and I'll buy it.`;
+  }
+
+  clipPrice(c) {
+    return c.single ? `$${c.singleUsd.toFixed(2)} on its own (${c.single}) or $${c.packUsd.toFixed(2)} for ${c.packTitle}`
+      : `$${c.packUsd.toFixed(2)} in ${c.packTitle} (${c.pack})`;
+  }
+
+  async findClipCommand(data = {}) {
+    const words = String(data.clip || data.query || data.tag || data._context?.originalInput || data.originalInput || '').slice(0, 60);
+    const found = await this.findClips(words, { limit: 5 });
+    if (!found.length) return { success: true, clips: [], result: `Bots & Borgs has no clip for "${words}".` };
+    const lines = found.map(c => `- ${c.name}: ${c.owned ? 'I own it' : this.clipPrice(c)}`);
+    return { success: true, clips: found, result: `Bots & Borgs clips for "${words}":\n${lines.join('\n')}` };
+  }
+
+  /** A clip's props for the video render: absolute paths under the model folder, nothing outside it. */
+  propPaths(props) {
+    const root = path.join(this.vrmDir(), 'props') + path.sep;
+    return (Array.isArray(props) ? props : []).map(p => ({ ...p, path: path.join(this.vrmDir(), String(p.file || '')) }))
+      .filter(p => p.path.startsWith(root) && p.path.endsWith('.glb'));
   }
 
   async playClip({ item, clip, asked = '' }) {
@@ -1330,7 +1527,8 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     if (picked.error) return { success: false, error: picked.error };
     const { choice, entry, rel } = picked;
     // Everywhere its body is: every open playground or designer page (no AvatarX needed), and AvatarX when it has one.
-    const pages = await this.playOnPages({ file: entry.file, label: entry.label, loop: !!entry.loop, prop: entry.prop || null });
+    const shown = propsFor(entry.props, { asked: `${clip || ''} ${asked}` });
+    const pages = await this.playOnPages({ file: entry.file, label: entry.label, loop: !!entry.loop, prop: entry.prop || null, ...(shown.length ? { props: shown } : {}) });
     const { playOnAvatarX, pushClipsToAvatarX } = await import('../../services/avatar/avatarx.js');
     let avatarx = 'not connected';
     try {
@@ -1385,7 +1583,7 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
       const framing = framingAsked(asked);
       if (scene) this.logger.info(`botsandborgs: filming in front of ${path.basename(scene)}${framing !== 'full' ? `, ${framing} framing` : ''}`);
       const v = await (this.renderVideo || renderClipVideo)({ modelPath: path.join(this.vrmDir(), model.file), clipPath: path.join(this.vrmDir(), 'animations', rel),
-        loop: !!entry.loop, prop: entry.prop || null, framing, ...(voice ? { voice } : {}), ...(scene ? { backgroundPath: scene } : {}) });
+        loop: !!entry.loop, prop: entry.prop || null, props: this.propPaths(propsFor(entry.props, { asked, scene })), framing, ...(voice ? { voice } : {}), ...(scene ? { backgroundPath: scene } : {}) });
       const filename = `${String(label).toLowerCase().replace(/[^a-z0-9]+/g, '-')}.mp4`;
       if (/^(me|owner|myself)$/i.test(to)) {
         const tg = this.agent?.interfaces?.get?.('telegram');

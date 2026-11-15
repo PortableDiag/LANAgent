@@ -2,6 +2,82 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.833] - 2026-11-15
+
+### Fixed
+- **A covered $0 item is taken even in a week over budget.** The budget check added $0 to a week already past the limit and refused the item ("costs $0.00 and I have $0.00 left"). An item with nothing to pay now skips the weekly budget.
+
+## [2.25.832] - 2026-11-15
+
+### Fixed
+- **All-Access dates read as days.** The store sends plan dates as Unix seconds, so the agent said "renews 1797377021". Plan status, the subscribe reply and the renewal check now show the day (2026-12-15). Registering a store account now also keeps the account id the store returns, so `plan` can name it for adding to an owner's plan.
+
+## [2.25.831] - 2026-11-15
+
+### Added
+- **Bots & Borgs All-Access subscription.** New `botsandborgs` action `plan`:
+  - With no arguments it reports the plan's status, renewal date and price, downloads left, store balance and this agent's store account id.
+  - `subscribe: "month"|"year"` subscribes, paid from the store balance, which is refilled on-chain from the wallet when short. The weekly item budget does not apply (the owner decides to subscribe); the wallet floor does.
+  - `member: "acct_…"` adds another agent's account to the plan, and `cancel: true` stops it at the period end.
+- Every purchase is now quoted with the agent's account key, so while subscribed an included item quotes at $0 (`covered: "subscription"`). It is placed from the balance at $0, costs the weekly budget nothing, and is recorded with its list price.
+- Every 6 hours an agent with a plan checks it. When the store warns that the balance won't cover the next renewal, the agent tops the balance up once per period (wallet floor applies) and tells the owner quietly. A past-due plan, or a top-up the floor forbids, is told urgently. An agent with no plan makes no call.
+
+## [2.25.830] - 2026-11-15
+
+### Fixed
+- **"Film yourself doing X and send it to me" makes the video again.** The multi-step planner read "film … and send" as a web video search plus a download, so the agent fetched YouTube results instead of filming its own 3D body. A request for a video of the agent itself now skips the planner and goes straight to the store plugin's `use` (as video), which films the clip and sends it. A link, a named site, "download", or a later email or post still goes to the planner.
+
+## [2.25.829] - 2026-11-15
+
+### Fixed
+- **A doorbell snapshot that arrives late now reaches the owner.** Since Ring 3.116, the ding is posted without a picture, and the snapshot follows as an `updated` event with the same title, text and time (NotifX 0.3.30). The agent took that update for a duplicate of the first event and dropped it, so the picture never arrived. An event that brings a picture the earlier one lacked is now new. The same picture from a second phone, or an update that adds nothing, is still dropped.
+
+## [2.25.828] - 2026-11-15
+
+### Changed
+- **The mic shows only when asked.** The store hangs a mic stand on the talk loops, which the agent plays under every spoken line. A mic now shows only when a request names one (or a podcast, stage or broadcast) or the video's scene is a studio. The owner chose this on 2026-11-15. The phone, mug, desk and chair still show whenever their clip plays. AvatarX never gets the mic, since it shows a prop every time its clip plays. On the 3D pages, a prop asked for applies to that one play only.
+
+## [2.25.827] - 2026-11-15
+
+### Changed
+- **A desk in an avatar video is filmed from a 3/4 angle.** When a floor prop stands between a front camera and the body (a standing desk), a full-length video now looks from a front-side angle, a little above, over the desk at the hands and face. Before, the desk hid everything from the chest down. Other shots stay front-on.
+
+## [2.25.826] - 2026-11-15
+
+### Fixed
+- **A desk in an avatar video is framed whole.** A full-length video now frames floor props (a desk, a chair) along with the body. Before, a desk standing between the camera and the avatar filled the frame and was cut off at both sides. Hand props and closer framings (waist, head) are framed as before.
+
+## [2.25.825] - 2026-11-15
+
+### Added
+- **Props that scale with the avatar.** A prop placement may say `scale_with: "body"` with `ref_hips` (the standing hip height of the body it was built on), as AvatarX 0.3.17 reads it. On another avatar its position and size scale by that avatar's own standing hip height, so a chair still meets a sitting clip on a shorter or taller body. The height comes from the rest pose, not from the clip being played. An optional `scale` sizes a prop. Placements without these fields stay at real size, as before.
+
+## [2.25.824] - 2026-11-15
+
+### Added
+- **Props reach AvatarX.** With AvatarX 0.3.16 or newer, the agent uploads each owned prop and the clips it goes with (POST /agent/v1/props), so AvatarX shows the prop in the hand too. A prop goes up again only when its file or placements change. An older AvatarX is left alone, and the 3D pages and videos show props either way.
+
+## [2.25.823] - 2026-11-15
+
+### Fixed
+- **Props on VRM 0.x bodies.** The store's prop placements are for VRM 1.0 (+Z forward). A 0.x body faces the other way, so its bone frame is turned 180° about Y and a prop would have landed mirrored. Props on a 0.x body now go in a holder turned back.
+
+## [2.25.822] - 2026-11-15
+
+### Added
+- **Props for avatar clips.** A Bots & Borgs props pack (format "bots-and-borgs props 1": .glb files plus attach.json) puts a prop in the avatar's hand or on the floor while a clip that uses it plays: a phone during the phone-call loop, a chair under the seated idle. It works in the 3D playground, the avatar designer and avatar videos, and the prop follows the hand. A props pack is bought to keep (never installed as a model), its files are served under /vrm-models/props/, and each clip in animations/store.json lists its props. The prop goes away when the clip ends.
+- Without props nothing changes. A clip with no prop, an agent that owns no props pack, an attach.json that can't be read, a missing .glb or a bone the model lacks all leave the clip playing as before; a broken prop is skipped with a warning.
+
+## [2.25.821] - 2026-11-15
+
+### Added
+- **Find an animation to buy by what it means.** Asked for a move it has no clip for ("do a facepalm"), the agent now says which Bots & Borgs clip would do it and what it costs: the 50c single or its pack. New `botsandborgs` action `findclip` ("is there a heart hands animation on bots and borgs") lists matching clips and marks the ones already owned. It searches the store's animation lookup API, standard-fit clips only, and never buys on its own: buying still waits for a request.
+
+## [2.25.820] - 2026-11-15
+
+### Changed
+- **NotifX watch log says what arrived.** Each matched watch now logs which phone sent it and whether the event carried a picture, a dropped picture, an unreadable one or none, and whether it was an update. A missing picture can now be traced to the phone or the agent from the log alone. Notification content is still never logged.
+
 ## [2.25.819] - 2026-11-15
 
 ### Added

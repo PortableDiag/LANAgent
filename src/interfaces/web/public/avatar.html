@@ -542,6 +542,7 @@
       import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
       import { XRControllerModelFactory } from 'three/addons/webxr/XRControllerModelFactory.js';
       import * as THREE_VRM from '/lib/three-vrm.module.js';
+      import { attachProps, detachProps } from '/lib/vrm-props.js';
 
       THREE.OrbitControls = OrbitControls;
       THREE.GLTFLoader = GLTFLoader;
@@ -2334,6 +2335,7 @@
                 if (!clip) { if (status) status.textContent = `Could not load ${entry.file}`; return; }
                 clip.name = name;
                 if (entry.prop) (this._clipProps ||= {})[name] = entry.prop;
+                if (entry.props?.length) (this._clipGlbProps ||= {})[name] = entry.props.filter(p => !p.onRequest);
                 item = { name, action: this._mixer.clipAction(clip) };
                 (this._idleActions ||= []).push(item);
             }
@@ -2391,6 +2393,8 @@
                 (this._idleActions ||= []).push(item);
             }
             if (c.prop) (this._clipProps ||= {})[name] = c.prop;
+            // Props for THIS play only (an asked-for mic must not stick to the clip's later plays under speech).
+            this._nextGlbProps = { name, props: Array.isArray(c.props) ? c.props : [] };
             if (this._danceActive) this._stopDancing?.();
             this.playAnimation(name);
         }
@@ -2426,6 +2430,18 @@
             return { x: local.x, z: local.z };
         }
 
+        // Bought .glb props (a phone in the hand, a chair) shown only while a clip that uses them plays. None owned,
+        // none for this clip, or one that fails to load: the clip plays exactly as before.
+        _setGlbProps(props) {
+            const gen = (this._glbPropGen = (this._glbPropGen || 0) + 1);
+            detachProps(this._glbProps); this._glbProps = [];
+            const vrm = this.currentVRM;
+            if (!props?.length || !vrm) return;
+            attachProps({ GLTFLoader, vrm, props, isCurrent: () => gen === this._glbPropGen && this.currentVRM === vrm })
+                .then(placed => { if (gen === this._glbPropGen) this._glbProps = placed; else detachProps(placed); })
+                .catch(e => console.warn('Props:', e.message));
+        }
+
         _setProp(prop, clip) {
             const vrm = this.currentVRM;
             if (this._prop && (!prop || this._prop.parent !== vrm?.scene)) {
@@ -2449,6 +2465,9 @@
             const target = this._idleActions.find(a => a.name === name);
             if (!target) return;
             this._setProp(this._clipProps?.[name], target.action.getClip());
+            const once = this._nextGlbProps?.name === name ? this._nextGlbProps.props : null;
+            this._nextGlbProps = null;
+            this._setGlbProps(once ?? this._clipGlbProps?.[name]);
 
             if (this._currentIdleAction && this._currentIdleAction !== target) {
                 this._currentIdleAction.action.crossFadeTo(target.action.reset().play(), 0.5, false);
@@ -2468,6 +2487,7 @@
                     this._oneShotFinishedHandler = (e) => {
                         if (e.action === target.action) {
                             target.action.crossFadeTo(idle.action.reset().play(), 0.5, false);
+                            this._setGlbProps(null);
                             this._currentIdleAction = idle;
                             this._mixer.removeEventListener('finished', this._oneShotFinishedHandler);
                             this._oneShotFinishedHandler = null;

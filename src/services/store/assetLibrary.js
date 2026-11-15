@@ -38,7 +38,7 @@ export function storeModelNames(vrmDir = path.join(DATA_PATH, 'vrm-models')) {
 const MAX_FILES = 500;
 const MAX_TOTAL_BYTES = 2 * 1024 * 1024 * 1024; // a guard against a bad zip, not a size limit on products
 const MIME = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp', '.gif': 'image/gif',
-  '.vrm': 'model/gltf-binary', '.vrma': 'model/gltf-binary', '.webm': 'video/webm', '.mp4': 'video/mp4', '.flac': 'audio/flac', '.mp3': 'audio/mpeg', '.wav': 'audio/wav', '.ogg': 'audio/ogg', '.json': 'application/json', '.txt': 'text/plain', '.md': 'text/markdown', '.pdf': 'application/pdf' };
+  '.vrm': 'model/gltf-binary', '.vrma': 'model/gltf-binary', '.glb': 'model/gltf-binary', '.webm': 'video/webm', '.mp4': 'video/mp4', '.flac': 'audio/flac', '.mp3': 'audio/mpeg', '.wav': 'audio/wav', '.ogg': 'audio/ogg', '.json': 'application/json', '.txt': 'text/plain', '.md': 'text/markdown', '.pdf': 'application/pdf' };
 
 /** The name a file may have on disk: its last path part, nothing that can climb out of the folder. */
 export function safeName(name) {
@@ -67,6 +67,9 @@ export function variantKind(variant, collection = '') {
   if (collection === 'sounds' || /^call-sounds(?:-|$)/.test(id)) return 'sound';
   // Store 0.20: empty scenes to stand the avatar in (AvatarX pages, avatar videos), desktop + phone.
   if (collection === 'backgrounds' || /^bg-/.test(id)) return 'background';
+  // Props (VRM Props Pack 1, 2119 #494): .glb objects for clips that mime one. Before the vrm- rule, or a props pack
+  // would install as a model.
+  if (collection === 'props' || /^vrm-props?(?:-|$)/.test(id) || /-props?(?:-pack)?(?:-\d+)?$/.test(id)) return 'prop';
   if (/-stickers$/.test(id)) return 'sticker';
   if (/-portraits$/.test(id)) return 'portrait';
   // Before the vrm- rule: the store's clip packs are named vrm-dance-pack-1, vrm-emote-animations-1 (2026-11-08).
@@ -84,6 +87,9 @@ export function fileKind(filename, kind = 'portrait') {
   const ext = path.extname(n);
   if (ext === '.vrm') return 'vrm';
   if (ext === '.vrma') return 'animation';
+  // A prop's model; only a props pack holds them (a stray .glb elsewhere is not a prop).
+  if (ext === '.glb') return kind === 'prop' ? 'prop' : null;
+  if (/(^|\/)attach\.json$/.test(n)) return kind === 'prop' ? 'prop-manifest' : null;
   if (/\.(txt|md|pdf)$/.test(n) || /(^|\/)(readme|licen[cs]e|credits)/.test(n)) return 'document';
   // A voice pack: voice.json names the voice, and its reference lines are samples of it. Call sounds are sounds.
   // clips.json (store 0.22): every clip's tags, facing, energy and fit, in an animation pack.
@@ -133,7 +139,7 @@ export function moodOf(name, kind) {
 export async function unpack(buffer, { type = '', kind = 'portrait', filename = '' } = {}) {
   const isZip = /zip/i.test(type) || buffer.subarray(0, 2).toString('latin1') === 'PK';
   if (!isZip) {
-    const ext = path.extname(filename) || (/png/i.test(type) ? '.png' : /jpe?g/i.test(type) ? '.jpg' : /webp/i.test(type) ? '.webp' : buffer.subarray(0, 4).toString('latin1') === 'glTF' ? '.vrm' : '');
+    const ext = path.extname(filename) || (/png/i.test(type) ? '.png' : /jpe?g/i.test(type) ? '.jpg' : /webp/i.test(type) ? '.webp' : buffer.subarray(0, 4).toString('latin1') === 'glTF' ? (kind === 'prop' ? '.glb' : '.vrm') : '');
     const name = safeName(filename || `file${ext}`);
     const k = fileKind(name.endsWith(ext) ? name : `${name}${ext}`, kind);
     return k ? [{ name: name.endsWith(ext) ? name : `${name}${ext}`, kind: k, mime: MIME[ext] || 'application/octet-stream', buffer }] : [];
@@ -338,8 +344,90 @@ export function applyClipManifest(files, manifest) {
   return files;
 }
 
-export async function writeStoreAnimations(items, libraryDir, vrmDir) {
+const triple = (a) => Array.isArray(a) && a.length === 3 && a.every(n => typeof n === 'number' && Number.isFinite(n));
+const clipKey = (s) => String(s || '').toLowerCase().replace(/\.vrma$/, '').replace(/^broad[ /]/, '').replace(/[\s_]+/g, '-');
+
+/**
+ * attach.json ("bots-and-borgs props 1", 2119 #494) as clip key -> [attachment]. Each attachment is
+ * { prop, file, kind, bone, position, rotation }, for the body fit asked (standard, else the one given). Entries without
+ * a bone, three positions and three rotations are left out, never guessed.
+ */
+export function propAttachments(manifest, { fit = 'standard', fileFor = (f) => f } = {}) {
+  const byClip = new Map();
+  for (const p of Array.isArray(manifest?.props) ? manifest.props : []) {
+    if (!p?.file || !p.clips || typeof p.clips !== 'object') continue;
+    for (const [clip, fits] of Object.entries(p.clips)) {
+      const a = fits?.[fit] || fits?.standard || (fits?.bone ? fits : null);
+      if (!a || typeof a.bone !== 'string' || !triple(a.position) || !triple(a.rotation)) continue;
+      const key = clipKey(clip);
+      if (!byClip.has(key)) byClip.set(key, []);
+      const one = { prop: String(p.prop || path.basename(p.file, '.glb')), file: fileFor(p.file), kind: p.kind || null, bone: a.bone, position: a.position, rotation: a.rotation };
+      // Optional: a size factor, and scaling with the body (AvatarX 0.3.17, 2951 #206): scale_with "body" + ref_hips =
+      // the standing hip height (m) of the body it was built on. The placement's own value wins over the prop's.
+      const scale = Number(a.scale ?? p.scale);
+      if (Number.isFinite(scale) && scale > 0 && scale !== 1) one.scale = scale;
+      const refHips = Number(a.ref_hips ?? p.ref_hips);
+      if ((a.scale_with ?? p.scale_with) === 'body' && Number.isFinite(refHips) && refHips > 0.1) Object.assign(one, { scale_with: 'body', ref_hips: refHips });
+      byClip.get(key).push(one);
+    }
+  }
+  return byClip;
+}
+
+/**
+ * Every owned props pack: its .glb files copied to <vrmDir>/props/<variant>/ (served at /vrm-models/props/…) and its
+ * attach.json read into clip key -> [attachment], file paths relative to vrmDir. A broken pack is skipped.
+ */
+async function storeProps(items, libraryDir, vrmDir, warn = () => {}) {
+  const all = new Map();
+  for (const item of items) {
+    const manifestFile = (item.files || []).find(f => f.kind === 'prop-manifest');
+    if (!manifestFile) continue;
+    const variant = safeName(item.variant);
+    let manifest;
+    try { manifest = JSON.parse(await fs.readFile(path.join(libraryDir, variant, manifestFile.name), 'utf8')); }
+    catch (e) { warn(`${item.variant} attach.json unreadable: ${e.message}`); continue; }
+    const dest = path.join(vrmDir, 'props', variant);
+    const have = new Map((item.files || []).filter(f => f.kind === 'prop').map(f => [path.basename(f.name).toLowerCase(), f.name]));
+    const copied = new Set();
+    for (const [key, list] of propAttachments(manifest, { fileFor: (f) => path.basename(String(f)) })) {
+      for (const a of list) {
+        const name = have.get(a.file.toLowerCase());
+        if (!name) { warn(`${item.variant}: attach.json names ${a.file}, not in the pack`); continue; }
+        if (!copied.has(name)) {
+          const bytes = await fs.readFile(path.join(libraryDir, variant, name)).catch(() => null);
+          if (!bytes) { warn(`${item.variant}: ${name} missing from the library`); continue; }
+          await fs.mkdir(dest, { recursive: true });
+          const to = path.join(dest, name);
+          if (!(await fs.readFile(to).then(b => b.equals(bytes)).catch(() => false))) await writeAtomic(to, bytes);
+          copied.add(name);
+        }
+        if (!all.has(key)) all.set(key, []);
+        all.get(key).push({ ...a, file: `props/${variant}/${name}`, variant: item.variant });
+      }
+    }
+  }
+  return all;
+}
+
+// Props shown only when asked (the owner, 2026-11-15): the store hangs a mic stand on the talk loops, which this agent
+// plays under every spoken line; a mic in front of it every time was not wanted. These props show only when a request
+// names them (or a podcast/stage), or the scene is a studio. Others show whenever their clip plays.
+export const PROPS_ON_REQUEST = ['mic'];
+const ON_REQUEST_WORDS = { mic: /\b(mic|mike|microphone|podcast|on air|stage|sing|singing|karaoke|studio|booth|broadcast)\b/i };
+
+/** A clip's props for one request: on-request props only when the request or the scene asks for them. */
+export function propsFor(props, { asked = '', scene = '' } = {}) {
+  return (Array.isArray(props) ? props : []).filter(p => {
+    if (!p.onRequest) return true;
+    const words = ON_REQUEST_WORDS[p.prop] || new RegExp(`\\b${String(p.prop).replace(/[^a-z0-9]/gi, '')}\\b`, 'i');
+    return words.test(String(asked)) || words.test(path.basename(String(scene || '')));
+  });
+}
+
+export async function writeStoreAnimations(items, libraryDir, vrmDir, { warn, onRequest = PROPS_ON_REQUEST } = {}) {
   const out = [];
+  const props = await storeProps(items, libraryDir, vrmDir, warn).catch(() => new Map());
   for (const item of items) {
     // Broad-shouldered versions stay off the list: the store's own models are standard bodies.
     const clips = (item.files || []).filter(f => f.kind === 'animation' && f.bodyFit !== 'broad');
@@ -360,6 +448,9 @@ export async function writeStoreAnimations(items, libraryDir, vrmDir) {
       if (gesture) entry.gesture = gesture;
       const prop = f.prop || clipProp(`${label} ${item.title || ''} ${item.variant}`);
       if (prop) entry.prop = prop;
+      // Owned props for this clip (a props pack's attach.json keys clips by file name: "phone-call-loop").
+      const held = props.get(clipKey(f.name)) || props.get(clipKey(label));
+      if (held?.length) entry.props = held.map(p => (onRequest.includes(p.prop) ? { ...p, onRequest: true } : p));
       if (f.expressions?.length) entry.expressions = f.expressions;
       for (const k of ['tags', 'faces', 'energy', 'whileTalking', 'seconds', 'bodies']) if (f[k] != null) entry[k] = f[k];
       out.push(entry);

@@ -79,10 +79,14 @@ export class NotifXWatches {
     return String(body?.phone?.name || device.phoneName || device.name || '').trim();
   }
 
-  /** True when this notification was already told from another phone a moment ago. */
-  duplicate(device, n, now = Date.now()) {
+  /**
+   * True when this notification was already told a moment ago (from another phone, or an update that adds nothing).
+   * A picture counts: Ring 3.116 posts the ding with no picture and adds the snapshot later as an `updated` event with
+   * the same title, text and time (NotifX 0.3.30, 3051 #210). That update is news, not a duplicate.
+   */
+  duplicate(device, n, now = Date.now(), { picture = false } = {}) {
     for (const [k, t] of this.recent) if (now - t > DUPLICATE_MS) this.recent.delete(k);
-    const key = [n.package, n.title, n.text, n.posted_at].map(v => String(v ?? '')).join('\u0000');
+    const key = [n.package, n.title, n.text, n.posted_at, picture ? 'picture' : ''].map(v => String(v ?? '')).join('\u0000');
     const seen = this.recent.get(key);
     if (seen != null && now - seen <= DUPLICATE_MS) return true;
     this.recent.set(key, now);
@@ -114,18 +118,20 @@ export class NotifXWatches {
     if (body.kind !== 'notification.posted' || !body.notification) return;
     const n = body.notification;
     const meta = this.meta(device, body.watch_id);
-    if (this.duplicate(device, n)) {
+    const photo = pictureOf(body.picture);
+    if (this.duplicate(device, n, Date.now(), { picture: !!photo })) {
       this.logger.info?.(`NotifX: watch ${meta?.name ? `"${meta.name}"` : body.watch_id || '?'} on ${this.phoneName(device, body)} matched a notification another phone already reported`);
       return;
     }
     const several = (await this.notifxPhones()).length > 1;
-    const photo = pictureOf(body.picture);
     // NotifX 0.3.2: a picture too big for the relay is dropped and the event says so.
     const droppedPicture = !photo && body.picture_dropped ? '\n(The phone could not send the picture: too big.)' : '';
     const text = alertText(n, { name: meta?.name, dropped: body.dropped, updated: body.updated, phone: several ? this.phoneName(device, body) : null }) + droppedPicture;
     // Content never goes in the log, only which watch fired.
     this.logger.info?.(`NotifX: watch ${meta?.name ? `"${meta.name}"` : body.watch_id || '?'} matched (${n.package || 'unknown app'})` +
-      `${photo ? `, picture ${Math.round(photo.length / 1024)} KB` : ''}${body.dropped ? `, ${body.dropped} dropped` : ''}`);
+      ` on ${this.phoneName(device, body) || 'unnamed phone'}` +
+      `${photo ? `, picture ${Math.round(photo.length / 1024)} KB` : body.picture_dropped ? ', picture dropped (too big)' : body.picture ? ', picture unreadable' : ', no picture'}` +
+      `${body.updated ? ', updated' : ''}${body.dropped ? `, ${body.dropped} dropped` : ''}`);
     const urgent = !meta?.silent;
     const tg = this.agent?.interfaces?.get?.('telegram');
     if (tg?.sendNotification) {
