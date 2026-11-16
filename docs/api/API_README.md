@@ -575,6 +575,33 @@ Live in-memory snapshot of download-token usage (tokens within their TTL window)
 
 ---
 
+## Recent Updates (November 16, 2026)
+
+### v2.25.837–839 — The agent's own live avatar (`/api/avatar-live`)
+
+The live avatar page (`/avatar-live/`, embed: `/avatar-live/?embed=1&lift=<0..0.45>&zoom=<0.5..3>&bg=1`) and its API. It is AvatarX's page and agent API, served by the agent. Every route needs the dashboard login (JWT or `X-API-Key`), except `GET /status`.
+
+| Route | What it does |
+|---|---|
+| `GET /api/avatar-live/status` | `{ agent, logged_in, voice }`; `voice` = talk is available (an OpenAI key) |
+| `GET /api/avatar-live/state` | `{ active, background, zoom, look_at_you, mood, speak_replies, idle, voice, voices, avatars, backgrounds, custom_backgrounds, moods, gestures, animations, props }` |
+| `PATCH /api/avatar-live/state` | any of `active, background, zoom (0.5–3), look_at_you, mood, speak_replies, idle`; the voice is always the agent's own, so a different `voice` is a 400 |
+| `POST /api/avatar-live/gesture` `{name}` | plays a move on every open body; the name resolves like AvatarX's (`wave` → `bnb-wave`/`…-wave`, the facing-away version when there is one) |
+| `POST /api/avatar-live/expression` `{name, seconds}` | a face (`neutral, happy, angry, sad, relaxed, surprised`) for 0.5–30 s |
+| `GET /api/avatar-live/events` | server-sent events: `{type:'state'}`, `{type:'gesture',name}`, `{type:'expression',name,seconds}` |
+| `POST /api/avatar-live/avatars?name=X` (`&replace=ID`) | a `.vrm` (raw body) into the gallery, or a new file for a body; `DELETE /avatars/:id` removes an uploaded one |
+| `POST /api/avatar-live/animations?name=X` | a `.vrma` or `.fbx` (Mixamo, fitted on the page); `DELETE /animations/:name` removes an uploaded one |
+| `POST /api/avatar-live/backgrounds?name=X` | a JPEG or PNG scene; `DELETE /backgrounds/:name` |
+| `POST /api/avatar-live/props?name=X` | a prop's `.glb` or its `attach.json` (`{bone, position, rotation, scale, scale_with, ref_hips, clips:{…}, fits:{…}}`), either order; `DELETE /props/:name` |
+| `GET /api/avatar-live/{avatars,animations,props,backgrounds}/:name/file` | the file, for the page |
+| `GET/DELETE /api/avatar-live/chat`, `POST /chat {text}` | the page's conversation; `POST` answers as an OpenAI-style event stream |
+| `POST /api/avatar-live/ask {text}` | one answer `{text}` (talk's `ask_agent` tool) |
+| `POST /api/avatar-live/tts {text}` | the text in the agent's own voice (audio) |
+| `POST /api/avatar-live/voice/session` | `{ value, model, voice }`: a short-lived OpenAI Realtime secret (WebRTC), in the agent's set realtime voice |
+| `POST /api/avatar-live/video {name, framing?, background?, audio_b64?}` | an mp4 of one move on the worn body |
+
+In embed mode the page exposes `window.lanagentAvatar.level(x)`, `.thinking(bool)`, `.texting(ms)`, `.gesture(name)`, `.mood(name, seconds)` and `.ready()`.
+
 ## Recent Updates (November 1, 2026)
 
 ### v2.25.724 — Flat list of paid actions
