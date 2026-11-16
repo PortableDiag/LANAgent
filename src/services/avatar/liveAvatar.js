@@ -144,6 +144,42 @@ export async function props(d = dirs()) {
   return out.sort((a, b) => a.name.localeCompare(b.name));
 }
 
+/**
+ * Placements the store solved on THIS body (store 0.28, GET /api/live/<slug>/props: fitted, fitted_for_sha256,
+ * fit_current) replace the pack's for the clips they cover, but only when the body showing is the one they were
+ * solved on (`sha256` of its .vrm). Everything else keeps the pack placements.
+ */
+export function applyFits(propList, liveProps, sha256) {
+  if (!sha256 || !Array.isArray(liveProps) || !liveProps.length) return propList;
+  return propList.map(p => {
+    const lp = liveProps.find(x => avatarxClipName(x.prop) === p.name && x.fitted && x.fitted_for_sha256 === sha256);
+    if (!lp) return p;
+    const clipsOut = { ...p.clips };
+    let n = 0;
+    for (const c of Array.isArray(lp.clips) ? lp.clips : []) {
+      const at = c?.placements?.standard || c?.placements?.fitted || c?.placement;
+      const key = avatarxClipName(c?.clip || '');
+      if (!at?.bone || !key || !(key in clipsOut)) continue;
+      clipsOut[key] = { ...clipsOut[key], ...at };
+      n++;
+    }
+    return n ? { ...p, clips: clipsOut, rev: `${p.rev}-fit${n}` } : p;
+  });
+}
+
+const shaCache = new Map();
+/** The sha256 of a file, cached by path, size and time. */
+export async function fileSha256(file) {
+  const st = await fs.stat(file).catch(() => null);
+  if (!st) return null;
+  const k = `${file}:${st.size}:${st.mtimeMs}`;
+  if (shaCache.has(k)) return shaCache.get(k);
+  const { createHash } = await import('crypto');
+  const h = createHash('sha256').update(await fs.readFile(file)).digest('hex');
+  shaCache.set(k, h);
+  return h;
+}
+
 /** Uploaded scenes and the store's: { name → file }. */
 export async function customBackgrounds(d = dirs(), storeScenes = []) {
   const map = new Map();

@@ -203,6 +203,12 @@ pluginSettingsSchema.statics.getCached = async function(pluginName, settingsKey,
  * @param {any} settingsValue - Settings value
  * @returns {Promise<any>} Updated document
  */
+/**
+ * Past values kept per setting. Unbounded, the history outgrew MongoDB's 16 MB document limit: the store library
+ * (265 versions, 16.7 MB) failed every save on 2026-11-16, and MindSwarm's tokens had 19,550 versions (12.5 MB).
+ */
+export const HISTORY_KEEP = 20;
+
 pluginSettingsSchema.statics.setCached = async function(pluginName, settingsKey, settingsValue) {
   const doc = await this.findOne({ pluginName, settingsKey });
 
@@ -214,6 +220,7 @@ pluginSettingsSchema.statics.setCached = async function(pluginName, settingsKey,
       updatedAt: doc.updatedAt
     };
     doc.history.push(historyEntry);
+    if (doc.history.length > HISTORY_KEEP) doc.history = doc.history.slice(-HISTORY_KEEP);
 
     // Update document
     doc.settingsValue = settingsValue;
@@ -303,7 +310,7 @@ pluginSettingsSchema.statics.updateIfVersion = async function(
                   [historyEntry]
                 ]
               },
-              -1000
+              -HISTORY_KEEP
             ]
           },
           { $ifNull: ['$history', []] }

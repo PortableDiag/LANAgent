@@ -2,6 +2,20 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.842] - 2026-11-16
+
+### Fixed
+- **Plugin settings no longer outgrow the database.** Each saved setting kept every past value forever. The store library reached MongoDB's 16 MB document limit (265 versions), so every library save failed. MindSwarm's tokens were at 19,550 versions. Each setting now keeps its last 20 versions.
+
+## [2.25.841] - 2026-11-16
+
+### Added
+- **The Bots & Borgs props API (store 0.28).**
+  - A prop placement's `when` (the mic: `performance`) now decides when it shows: a stand-up bit, a song or a show brings it, ordinary talking never does. This replaces the agent's own hard-coded list for packs that carry it.
+  - A prop's `use` line ("drinking coffee: mug-sip-idle") helps choose the clip for a request.
+  - `hide` (worn props) is carried through.
+  - The live pass's props (`/api/live/<slug>/props`) are checked with the pass. Placements the store fitted to the worn body replace the pack's on the live avatar, only for the body they were solved on (matched by the model file's sha256).
+
 ## [2.25.840] - 2026-11-16
 
 ### Fixed

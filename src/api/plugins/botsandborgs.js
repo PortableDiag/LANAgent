@@ -128,11 +128,13 @@ export function videoRecipient(asked = '', to = '') {
 /** Tags that say nothing about what a clip shows. */
 const VAGUE_TAGS = new Set(['idle', 'loop', 'talk', 'talking', 'break', 'calm', 'standard', 'broad', 'front', 'emote', 'pose', 'move', 'motion']);
 /** The clips whose tags the request names most (each tag as a word or a word's start), or [] when none is named. */
-export function clipsByTags(pool, words) {
+export function clipsByTags(pool, words, usesOf = () => []) {
   const said = ` ${String(words || '').toLowerCase().replace(/[^a-z0-9 ]+/g, ' ').replace(/\s+/g, ' ')} `;
   let best = 0;
   const scored = pool.map(p => {
-    const tags = (p.file?.tags || []).map(t => String(t).toLowerCase().trim()).filter(t => t.length >= 3 && !VAGUE_TAGS.has(t));
+    // A prop's `use` line ("drinking coffee: mug-sip-idle", store 0.28) counts like tags: its words before the colon.
+    const useWords = usesOf(p).flatMap(u => String(u).split(':')[0].toLowerCase().split(/[^a-z0-9]+/)).filter(w => w.length >= 4);
+    const tags = [...new Set([...(p.file?.tags || []), ...useWords])].map(t => String(t).toLowerCase().trim()).filter(t => t.length >= 3 && !VAGUE_TAGS.has(t));
     const score = tags.filter(t => said.includes(` ${t}`)).length;
     if (score > best) best = score;
     return { p, score };
@@ -537,6 +539,7 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     const pass = passes.find(p => p.state !== 'expired' && p.key);
     if (!pass) return null;
     let key; try { key = decrypt(pass.key); } catch { return null; }
+    await this.syncLiveProps(pass, key).catch(e => this.logger.warn(`botsandborgs: live props check failed: ${e.message}`));
     const r = await this.fetchLive(`${BASE}/api/live/${pass.slug}/clips`, { 'User-Agent': this.userAgent(), 'X-Live-Key': key, Accept: 'application/json' });
     if (r.status !== 200) { if (r.status !== 404) this.logger.info(`botsandborgs: live clips answered ${r.status || r.error}`); return null; }
     let d; try { d = JSON.parse(Buffer.from(r.data).toString('utf8')); } catch { return null; }
@@ -550,6 +553,25 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     this.logger.info(`botsandborgs: live clips changed; packs fetched again: ${report.map(x => x.variant).join(', ') || 'none differed'}`);
     return 'updated';
   }
+
+  /**
+   * The pass's props (store 0.28, GET /api/live/<slug>/props): each prop with its clips' placements, solved on this
+   * avatar's own body where the store has fitted it (fitted, fitted_for_sha256, fit_current). Kept in settings; the live
+   * avatar uses a fitted placement for the body it was solved on (services/avatar/liveAvatar.js applyFits).
+   */
+  async syncLiveProps(pass, key) {
+    const r = await this.fetchLive(`${BASE}/api/live/${pass.slug}/props`, { 'User-Agent': this.userAgent(), 'X-Live-Key': key, Accept: 'application/json' });
+    if (r.status !== 200) { if (r.status !== 404) this.logger.info(`botsandborgs: live props answered ${r.status || r.error}`); return null; }
+    let d; try { d = JSON.parse(Buffer.from(r.data).toString('utf8')); } catch { return null; }
+    const props = (Array.isArray(d) ? d : d.props || []).filter(p => p && p.prop);
+    await PluginSettings.setCached(this.name, 'liveProps', { slug: pass.slug, checkedAt: new Date().toISOString(), props });
+    const fitted = props.filter(p => p.fitted).length;
+    this.logger.info(`botsandborgs: live props: ${props.length} listed (${props.map(p => p.prop).join(', ') || 'none'}), ${fitted} fitted to this avatar`);
+    return props;
+  }
+
+  /** The pass's props as last fetched ({ slug, checkedAt, props }), or null. */
+  async liveProps() { return PluginSettings.getCached(this.name, 'liveProps').catch(() => null); }
 
   /** One live download: { status, headers, data } (never throws; status 0 = no answer). */
   async fetchLive(url, headers) {
@@ -1484,7 +1506,9 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     // What the clip is about, by its tags: "a video of you drinking coffee and saying good morning" is Mug Sip Idle (tags
     // mug, coffee, drink, sip), not a talking clip with no cup (the owner, 2026-11-16, twice). A tag counts as a word or a
     // word's start ("drink" in "drinking"); words that say nothing about the move don't count.
-    const tagged = clipsByTags(pool, words);
+    const listedEarly = await fs.readFile(path.join(this.vrmDir(), 'animations', 'store.json'), 'utf8').then(JSON.parse).catch(() => []);
+    const usesByFile = new Map(listedEarly.filter(c => c?.uses?.length).map(c => [c.file, c.uses]));
+    const tagged = clipsByTags(pool, words, (p) => usesByFile.get(`store/${safeName(p.item.variant)}/${p.file.name}`) || []);
     const fits = named.length ? named : specific ? [] : tagged.length ? tagged : purpose ? pool.filter(p => p.file.gesture === purpose) : underSpeech;
     let choice = (fits.length ? fits : pool)[Math.floor(Math.random() * (fits.length ? fits : pool).length)];
     // A dance with a "Facing Away" version is shown that way: the owner (2026-11-15) on Booty Shake, "otherwise the

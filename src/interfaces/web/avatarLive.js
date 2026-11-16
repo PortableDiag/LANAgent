@@ -64,7 +64,14 @@ export function createLiveAvatar(agent, { d = L.dirs() } = {}) {
     const [settings, active, avatarList, clipMap, propList, bgMap] = await Promise.all([
       L.readSettings(d), activeId(), L.avatars(d), L.clips(d), L.props(d), storeScenes().then(s => L.customBackgrounds(d, s))
     ]);
-    return { settings, active, avatarList, clipMap, propList, bgMap, clipNames: [...clipMap.keys()].sort(), backgroundNames: [...bgMap.keys()] };
+    // Props the store fitted to the body showing (store 0.28) take the pack placements' place for it.
+    let fitted = propList;
+    try {
+      const live = await store()?.liveProps?.();
+      const body = avatarList.find(a => a.id === active);
+      if (live?.props?.some(p => p.fitted) && body) fitted = L.applyFits(propList, live.props, await L.fileSha256(body.file));
+    } catch {}
+    return { settings, active, avatarList, clipMap, propList: fitted, bgMap, clipNames: [...clipMap.keys()].sort(), backgroundNames: [...bgMap.keys()] };
   }
 
   /** The agent's own voice, for the page to show (it is never changed there): its speech voice, and its realtime one. */

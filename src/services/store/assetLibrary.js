@@ -378,6 +378,11 @@ export function propAttachments(manifest, { fit = 'standard', fileFor = (f) => f
       const key = clipKey(clip);
       if (!byClip.has(key)) byClip.set(key, []);
       const one = { prop: String(p.prop || path.basename(p.file, '.glb')), file: fileFor(p.file), kind: p.kind || null, bone: a.bone, position: a.position, rotation: a.rotation };
+      // Store 0.28 (2119 #521): `when` = show only for that kind of video (the mic: "performance"); `use` = what it is for.
+      const when = a.when ?? p.when;
+      if (typeof when === 'string' && when) one.when = when;
+      if (typeof p.use === 'string' && p.use) one.use = p.use.slice(0, 200);
+      if (Array.isArray(p.hide)) one.hide = p.hide.filter(b => typeof b === 'string').slice(0, 30);
       // Optional: a size factor, and scaling with the body (AvatarX 0.3.17, 2951 #206): scale_with "body" + ref_hips =
       // the standing hip height (m) of the body it was built on. The placement's own value wins over the prop's.
       const scale = Number(a.scale ?? p.scale);
@@ -429,15 +434,19 @@ async function storeProps(items, libraryDir, vrmDir, warn = () => {}) {
 // Props shown only when asked (the owner, 2026-11-15): the store hangs a mic stand on the talk loops, which this agent
 // plays under every spoken line; a mic in front of it every time was not wanted. These props show only when a request
 // names them (or a podcast/stage), or the scene is a studio. Others show whenever their clip plays.
+// Since store 0.28 a placement says so itself (`when`, e.g. "performance"); this list covers packs from before it.
 export const PROPS_ON_REQUEST = ['mic'];
 const ON_REQUEST_WORDS = { mic: /\b(mic|mike|microphone|podcast|on air|stage|sing|singing|karaoke|studio|booth|broadcast)\b/i };
+// A `when: "performance"` prop: a stand-up bit, a song, hosting a show (the owner's rule: never for ordinary talking).
+const WHEN_WORDS = { performance: /\b(perform\w*|stand[- ]?up|comedy|sing|singing|song|karaoke|host\w*|stage|concert|podcast|on air|broadcast|mic|mike|microphone|studio|booth)\b/i };
 
 /** A clip's props for one request: on-request props only when the request or the scene asks for them. */
 export function propsFor(props, { asked = '', scene = '' } = {}) {
   return (Array.isArray(props) ? props : []).filter(p => {
     if (!p.onRequest) return true;
-    const words = ON_REQUEST_WORDS[p.prop] || new RegExp(`\\b${String(p.prop).replace(/[^a-z0-9]/gi, '')}\\b`, 'i');
-    return words.test(String(asked)) || words.test(path.basename(String(scene || '')));
+    const own = ON_REQUEST_WORDS[p.prop] || new RegExp(`\\b${String(p.prop).replace(/[^a-z0-9]/gi, '')}\\b`, 'i');
+    const tests = [own, ...(p.when && WHEN_WORDS[p.when] ? [WHEN_WORDS[p.when]] : [])];
+    return tests.some(w => w.test(String(asked)) || w.test(path.basename(String(scene || ''))));
   });
 }
 
@@ -466,7 +475,12 @@ export async function writeStoreAnimations(items, libraryDir, vrmDir, { warn, on
       if (prop) entry.prop = prop;
       // Owned props for this clip (a props pack's attach.json keys clips by file name: "phone-call-loop").
       const held = props.get(clipKey(f.name)) || props.get(clipKey(label));
-      if (held?.length) entry.props = held.map(p => (onRequest.includes(p.prop) ? { ...p, onRequest: true } : p));
+      if (held?.length) {
+        entry.props = held.map(p => (onRequest.includes(p.prop) || p.when ? { ...p, onRequest: true } : p));
+        // What the clip is for, from its props' `use` lines ("drinking coffee: mug-sip-idle"): clip choice reads them.
+        const uses = [...new Set(held.map(p => p.use).filter(Boolean))];
+        if (uses.length) entry.uses = uses;
+      }
       if (f.expressions?.length) entry.expressions = f.expressions;
       for (const k of ['tags', 'faces', 'energy', 'whileTalking', 'seconds', 'bodies']) if (f[k] != null) entry[k] = f[k];
       out.push(entry);
