@@ -21,6 +21,22 @@ export function asksToUseStoreItem(text, modelNames = storeModelNames()) {
   return modelNames.some(n => n.length >= 3 && new RegExp(`\\b${wearing}\\s+(?:(?:the|your|my|own)\\s+){0,2}${n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i').test(t));
 }
 
+/**
+ * A question ABOUT the store items, not an ask to use one. "The owner is asking specifically about animation 3D model
+ * props they bought from Bots & Borgs. Can I use those props, and what can I do with them?" (AvatarX sidecar,
+ * 2026-11-15) matched botsandborgs.use at 0.65 and played Swim Backstroke on AvatarX. A polite ask ("can you do the
+ * pole dance?", "could you send me a video of you waving?") and an order ("do the pole dance") still act.
+ */
+export function asksAboutStoreItem(text) {
+  const t = String(text || '').trim();
+  if (!t) return false;
+  if (/\b(send|show|give|text|play)\s+(me|him|her|them|us)\b/i.test(t)) return false;
+  const lead = String.raw`^(?:(?:hey|hi|hello|ok|okay|so|um|yo)\b[,!. ]*)?(?:\w+,\s*)?`;
+  const question = new RegExp(lead + String.raw`(?:what|which|who|where|when|how|why|is|are|was|were|does|did|have|has|any|(?:can|could|may|should|do) (?:i|we)|do you (?:have|own|know)|are you able)\b`, 'i');
+  const reported = /\b(?:is|was|are|were|keeps?|just)\s+(?:asking|wondering|curious)\b|\b(?:asks?|asked)\s+(?:\w+\s+){0,3}(?:about|whether|if)\b|\bplease answer\b/i;
+  return question.test(t) || reported.test(t);
+}
+
 let modelNamesCache = { mtimeMs: -1, names: [] };
 /** The names of the store models in the gallery ("Racer Blue", "Core"), re-read only when its manifest changes. */
 export function storeModelNames(vrmDir = path.join(DATA_PATH, 'vrm-models')) {

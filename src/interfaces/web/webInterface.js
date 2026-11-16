@@ -14,6 +14,7 @@ import { Memory } from '../../models/Memory.js';
 import apiKeyService from '../../services/apiKeyService.js';
 import { safeJsonParse, safeJsonStringify } from '../../utils/jsonUtils.js';
 import { DATA_PATH } from '../../utils/paths.js';
+import { avatarLiveRouter, createLiveAvatar } from './avatarLive.js';
 import vpnRoutes from './vpn.js';
 import firewallRoutes from './firewall.js';
 import sshRoutes from './ssh.js';
@@ -2424,6 +2425,23 @@ export class WebInterface {
         res.status(500).json({ success: false, error: error.message });
       }
     });
+
+    // The live avatar (avatar-live.html and the Android app's avatar): AvatarX's page and API, served by the agent.
+    this.liveAvatar = createLiveAvatar(this.agent);
+    this.app.use('/api/avatar-live', avatarLiveRouter(this.agent, this.liveAvatar));
+    // The designer and the playground get the live avatar's moves and faces too (their socket room), so the agent's body
+    // language shows on every 3D page. A clip the store plugin already sent them (fromPages) is not sent twice.
+    import('../../services/avatar/liveAvatar.js').then(({ bus, clips }) => bus.on('event', async (e) => {
+      if (!this.io || e.fromPages) return;
+      try {
+        if (e.type === 'expression') this.io.to('avatar').emit('avatar:expression', { name: e.name, seconds: e.seconds });
+        if (e.type === 'gesture') {
+          const file = (await clips()).get(e.name);
+          const animDir = path.join(DATA_PATH, 'vrm-models', 'animations') + path.sep;
+          if (file?.startsWith(animDir)) this.io.to('avatar').emit('avatar:play', { file: file.slice(animDir.length).split(path.sep).join('/'), label: e.name, loop: false });
+        }
+      } catch (err) { logger.debug(`Live avatar bridge: ${err.message}`); }
+    }));
 
     // The wallpaper behind the dashboard, from what the agent owns. Signed in only: the store's licence is personal.
     this.app.get('/api/agent/backdrop', authenticateToken, async (req, res) => {

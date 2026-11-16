@@ -31,10 +31,11 @@ export const TALK_TOOLS = [
 ];
 
 /** The session's standing instructions. `recent` is the live chat (memoryManager.getRecentTurns), oldest first. */
-export function talkInstructions({ name, owner, recent = [] }) {
+export function talkInstructions({ name, owner, recent = [], surface = 'app' }) {
   const said = recent.filter(t => t?.content).slice(-6)
     .map(t => `${t.role === 'user' ? owner : name}: ${String(t.content).replace(/\s+/g, ' ').slice(0, 400)}`).join('\n');
-  return `You are ${name}, ${owner}'s personal AI agent. ${owner} is talking with you by voice in the LANAgent app on their phone.\n` +
+  const where = surface === 'avatar' ? `on your 3D avatar's page, where they see your body` : 'in the LANAgent app on their phone';
+  return `You are ${name}, ${owner}'s personal AI agent. ${owner} is talking with you by voice ${where}.\n` +
     'Speak naturally and briefly: one or two short sentences a reply, no lists, no markdown, never read out a URL or an id. ' +
     // Call 86 (2026-10-28): quoted as what not to say, these phrases got said. The rule quotes none.
     'Every word you say is heard, so say only words meant for them: never comment on your own reply, your wording or your plan. ' +
@@ -65,7 +66,7 @@ export function talkSessionConfig({ instructions, voice }) {
  * Mint a talk session: { client_secret, expires_at, model, voice }. Throws with a reason the app shows.
  * The voice is DialX's realtimeVoice setting, so calls and talk sound alike.
  */
-export async function mintTalkSession(agent, { userId = 'default', env = process.env, fetch: f = globalThis.fetch } = {}) {
+export async function mintTalkSession(agent, { userId = 'default', voice: voiceAsked = null, surface = 'app', env = process.env, fetch: f = globalThis.fetch } = {}) {
   if (!env.OPENAI_API_KEY) throw Object.assign(new Error('Talk mode needs an OpenAI API key on the agent.'), { code: 'unavailable' });
   if (env.TALK_REALTIME === 'off') throw Object.assign(new Error('Talk mode is turned off on the agent.'), { code: 'unavailable' });
   const name = agent?.config?.name || env.AGENT_NAME || 'the assistant';
@@ -73,11 +74,12 @@ export async function mintTalkSession(agent, { userId = 'default', env = process
   const recent = agent?.memoryManager?.getRecentTurns?.(userId, undefined, 6) || [];
   // A slow database must not hold up the talk: past 1.5 s the default voice is used.
   const settings = await Promise.race([getDialXSettings().catch(() => null), new Promise(r => setTimeout(r, 1500, null).unref?.())]);
-  const voice = settings?.realtimeVoice || REALTIME_VOICE;
+  // The live avatar page asks for its body's own voice (AvatarX parity: each avatar keeps its own).
+  const voice = voiceAsked || settings?.realtimeVoice || REALTIME_VOICE;
   const res = await f(`${API}/client_secrets`, {
     method: 'POST',
     headers: { Authorization: `Bearer ${env.OPENAI_API_KEY}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify(talkSessionConfig({ instructions: talkInstructions({ name, owner, recent }), voice }))
+    body: JSON.stringify(talkSessionConfig({ instructions: talkInstructions({ name, owner, recent, surface }), voice }))
   });
   const body = await res.json().catch(() => ({}));
   const secret = body?.value || body?.client_secret?.value;

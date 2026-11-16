@@ -1026,6 +1026,13 @@
             this._agentSocket = s;
             s.on('connect', () => s.emit('avatar:join'));
             s.on('avatar:play', (c) => this._playFromAgent(c).catch(e => console.warn('Agent clip:', e.message)));
+            // The agent's face after a reply (the live avatar's expression, the same as AvatarX's), then back to neutral.
+            s.on('avatar:expression', (e) => {
+                if (!e?.name) return;
+                this.triggerExpression(e.name);
+                clearTimeout(this._agentFaceTimer);
+                this._agentFaceTimer = setTimeout(() => this.triggerExpression('neutral'), Math.min(30, Number(e.seconds) || 4) * 1000);
+            });
         }
 
         async _playFromAgent(c) {
@@ -2282,5 +2289,6 @@
     }
     }); // end three-ready
     </script>
+    <a href="/avatar-live/" title="The agent's live avatar: chat, talk, every move and setting (AvatarX's page)" style="position:fixed;right:14px;bottom:14px;z-index:50;padding:8px 14px;border-radius:8px;background:#22D3EE;color:#05070D;font:600 14px system-ui,sans-serif;text-decoration:none;">Live view</a>
 </body>
 </html>

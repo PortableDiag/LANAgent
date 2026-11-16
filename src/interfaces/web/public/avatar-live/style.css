@@ -1,0 +1,89 @@
+/* Nebula, from ProjectForge's house palettes (pf palette show Nebula --as css). */
+[data-palette="nebula"] {
+  --pf-background: #05070D; --pf-bars: #0A0F1A; --pf-surface: #101726; --pf-border: #1E2942;
+  --pf-pressed: #0A2831; --pf-text: #E6EDF7; --pf-text-secondary: #8796B0;
+  --pf-accent-secondary: #A78BFA; --pf-highlight: #F472B6; --pf-raised: #0B1324;
+  --pf-accent: #22D3EE; --pf-on-accent: #05070D;
+}
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+html, body { margin: 0; height: 100%; background: var(--pf-background); color: var(--pf-text);
+  font: 15px/1.45 system-ui, sans-serif; overflow: hidden; }
+#stage { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
+button, select, input, textarea { font: inherit; color: inherit; }
+button { background: var(--pf-surface); border: 1px solid var(--pf-border); border-radius: 8px; padding: 7px 13px; cursor: pointer; min-height: 38px; }
+button:hover { border-color: var(--pf-accent); }
+button:disabled { opacity: .5; cursor: default; }
+button[type=submit], #talk { background: var(--pf-accent); color: var(--pf-on-accent); border-color: var(--pf-accent); font-weight: 600; }
+#talk.on { background: var(--pf-highlight); border-color: var(--pf-highlight); }
+input, select, textarea { background: var(--pf-raised); border: 1px solid var(--pf-border); border-radius: 8px; padding: 8px 10px; width: 100%; }
+:focus-visible { outline: 2px solid var(--pf-accent); outline-offset: 1px; }
+h1, h2, h3 { margin: 0; }
+h2 { font-size: 18px; }
+h3 { font-size: 13px; color: var(--pf-text-secondary); text-transform: uppercase; letter-spacing: .06em; margin: 20px 0 8px; }
+label { display: block; margin: 8px 0 4px; color: var(--pf-text-secondary); font-size: 13px; }
+.err { color: var(--pf-highlight); min-height: 1.4em; margin: 10px 0 0; }
+.note { color: var(--pf-text-secondary); font-size: 13px; min-height: 1.2em; margin: 6px 0; overflow-wrap: anywhere; }
+.grow { flex: 1; }
+.note a { color: var(--pf-accent); }
+.row { display: flex; align-items: center; gap: 8px; }
+
+#gate { position: fixed; inset: 0; display: grid; place-items: center; padding: 16px; }
+#gate-form { width: min(360px, 100%); background: var(--pf-surface); border: 1px solid var(--pf-border); border-radius: 14px; padding: 24px; }
+#gate-form h1 { font-size: 22px; }
+#gate-help { color: var(--pf-text-secondary); margin: 6px 0 14px; }
+#gate-form button { width: 100%; margin-top: 14px; }
+
+#app { position: fixed; inset: 0; pointer-events: none; }
+#app > *, #app header > * { pointer-events: auto; }
+header { position: absolute; top: 0; left: 0; right: 0; display: flex; align-items: center; gap: 8px; padding: 10px 14px; pointer-events: none !important; }
+#name { font-weight: 600; font-size: 17px; text-shadow: 0 1px 6px #000; }
+#link { width: 9px; height: 9px; border-radius: 50%; background: var(--pf-text-secondary); }
+#link.up { background: #34D399; }
+#link.down { background: var(--pf-highlight); }
+#empty, #load-note { position: absolute; top: 40%; left: 16px; right: 16px; text-align: center; color: var(--pf-text-secondary); margin: 0; }
+
+#chat { position: absolute; right: 14px; bottom: 14px; top: 62px; width: min(400px, calc(100% - 28px)); display: flex; flex-direction: column; gap: 8px; pointer-events: none !important; }
+#log { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; padding: 4px 2px; pointer-events: none !important;
+  mask-image: linear-gradient(to bottom, transparent, #000 40px); }
+#log > :first-child { margin-top: auto; }
+/* The empty part of the chat lets a drag through to the stage; the messages still take touches. */
+#log > * { pointer-events: auto; }
+.msg { padding: 8px 12px; border-radius: 12px; max-width: 88%; white-space: pre-wrap; overflow-wrap: anywhere; background: color-mix(in srgb, var(--pf-surface) 88%, transparent); border: 1px solid var(--pf-border); }
+.msg.user { align-self: flex-end; background: color-mix(in srgb, var(--pf-pressed) 90%, transparent); }
+.msg.error { border-color: var(--pf-highlight); color: var(--pf-highlight); }
+.msg.you-said { align-self: flex-end; font-style: italic; }
+#busy { color: var(--pf-text-secondary); font-size: 13px; text-shadow: 0 1px 4px #000; }
+#say { display: flex; gap: 8px; align-items: flex-end; pointer-events: auto; }
+#text { resize: none; max-height: 130px; background: color-mix(in srgb, var(--pf-raised) 92%, transparent); }
+
+#settings { position: absolute; top: 0; right: 0; bottom: 0; width: min(380px, 100%); overflow-y: auto; background: var(--pf-bars); border-left: 1px solid var(--pf-border); padding: 14px 16px 40px; z-index: 2; }
+#settings ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+#settings li { display: flex; align-items: center; gap: 8px; padding: 6px 8px; background: var(--pf-surface); border: 1px solid var(--pf-border); border-radius: 8px; min-width: 0; }
+#settings li.active { border-color: var(--pf-accent); }
+#settings li .what { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+#settings li small { display: block; color: var(--pf-text-secondary); }
+#settings li button { min-height: 32px; padding: 3px 9px; flex: none; }
+#settings > button, #pw-form button { margin: 6px 6px 0 0; }
+.file { display: block; text-align: center; margin-top: 8px; padding: 9px; border: 1px dashed var(--pf-border); border-radius: 8px; cursor: pointer; color: var(--pf-text); }
+.file:hover { border-color: var(--pf-accent); }
+.file input { display: none; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.chips button { min-height: 32px; padding: 3px 10px; }
+.check { display: flex; gap: 8px; align-items: center; color: var(--pf-text); font-size: 15px; margin-top: 12px; }
+.check input { width: auto; }
+@media (max-width: 640px) {
+  #chat { top: 45%; }
+  #log { font-size: 14px; }
+}
+
+/* Render mode: the stage alone. */
+body.render #app, body.render #gate { display: none !important; }
+
+/* LANAgent: a link styled like the header's buttons. */
+.btnlink { display: inline-flex; align-items: center; min-height: 38px; padding: 7px 13px; border: 1px solid var(--pf-border); border-radius: 8px; background: var(--pf-surface); color: var(--pf-text); text-decoration: none; }
+.btnlink:hover { border-color: var(--pf-accent); }
+/* LANAgent embed (the Android app): the stage alone, see-through unless ?bg=1. */
+body.embed, body.embed html { background: transparent; }
+html:has(body.embed) { background: transparent; }
+body.embed #app, body.embed #gate { display: none !important; }

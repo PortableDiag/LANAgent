@@ -1,3 +1,4 @@
+import { nowInZone } from '../utils/wallClock.js';
 import { EventEmitter } from "events";
 import { connectDatabase } from "../utils/database.js";
 import { isConversationOnly, conversationOnlyReply } from './guestGuard.js';
@@ -5139,6 +5140,8 @@ Return ONLY a valid JSON object with the extracted parameters, nothing else.`;
     systemPrompt += `- Name: ${this.config.name} (AI-powered personal assistant)\n`;
     systemPrompt += `- System: LANAgent v${packageVersion}\n`;
     systemPrompt += `- Language model: ${this.currentModelLabel()}\n`;
+    // The model has no clock: asked the day on a Monday it said Wednesday (2026-11-16, the app's chat).
+    systemPrompt += `- Now: ${nowInZone()} local time. Answer every date, day and time question from this.\n`;
     systemPrompt += agentEmail
       ? `- Your Email: ${agentEmail} (YOU send emails as yourself, not on behalf of users)\n`
       : `- Your Email: none — email is not configured on this instance. Never state or invent an email address for yourself.\n`;

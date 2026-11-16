@@ -1,4 +1,4 @@
-import { asksToUseStoreItem } from '../services/store/assetLibrary.js';
+import { asksToUseStoreItem, asksAboutStoreItem } from '../services/store/assetLibrary.js';
 import { logger } from '../utils/logger.js';
 import { embeddingService } from '../services/embeddingService.js';
 import { vectorStore } from '../services/vectorStore.js';
@@ -175,6 +175,12 @@ export class VectorIntentDetector {
       if (metadata.plugin === 'botsandborgs' && metadata.action !== 'buy' && /\b(buy|purchase|order|get (?:yourself|me|him|her|them))\b/i.test(String(input))) {
         logger.info(`A Bots & Borgs buy matched ${metadata.action}; using buy`);
         metadata = { ...metadata, action: 'buy', name: 'buy' };
+      }
+      // A question about the store items is answered, never acted on: a question about owned props matched use at 0.65
+      // and played a swim clip on AvatarX (2026-11-15).
+      if (metadata.plugin === 'botsandborgs' && /^(use|play|wear)$/.test(metadata.action || '') && asksAboutStoreItem(String(input))) {
+        logger.info(`A question about store items matched botsandborgs.${metadata.action}; falling back to AI`);
+        return null;
       }
       // "Text Sam and tell him to check telegram" matched textx.watch at 0.62 (dry run, 2026-11-04): an order to text is a send.
       if (metadata.plugin === 'textx' && metadata.action === 'watch' && /^\s*(?:\w+[,:]?\s+)?(?:text|sms|message)\s+\S+\s+(?:and\s+)?(?:tell|ask|say|let)\b/i.test(String(input))) {

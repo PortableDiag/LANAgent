@@ -2,6 +2,41 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.839] - 2026-11-16
+
+### Added
+- **The owner gets a copy of every video the agent sends someone.** Video replies, auto-replies and "send Sam a video of you…" all arrive on the owner's Telegram (silently) once the phone has sent them, with who it went to and the words sent beside it. A send that waits on a tap is copied when it goes; one that doesn't go is never copied.
+
+## [2.25.838] - 2026-11-16
+
+### Added
+- **A Live tab in the avatar designer.** It holds the live avatar's settings, saved: showing, zoom, background, mood, look-at, spoken replies and standing loop. It plays every move and face on every open body, takes uploads (motions including Mixamo `.fbx` and `.zip`, backgrounds, props, a `.vrm` into the gallery), and opens the full live view (chat, talk, VR). The playground links to the live view too.
+- **The agent's body language reaches the designer and the playground.** Moves and faces sent to the live avatar (auto emotes, the API) play there as well.
+
+### Fixed
+- **Asked the day, the agent guessed.** On a Monday it answered "Wednesday": the general answer had no date. The local date, weekday and time are now part of every answer's context.
+- **"A video of you drinking coffee" shows the coffee.** The clip choice matched only a clip's exact name, so with a spoken line it fell back to a plain talking clip with no cup, twice. Clips are now also matched by their tags (mug, coffee, drink, sip…).
+- **The live avatar speaks only in the agent's own voice.** AvatarX's per-avatar voice choice is not offered. Typed replies, videos and voice notes use the agent's set voice, and talk uses its set realtime voice, which the realtime fallback chain alone may change.
+
+## [2.25.837] - 2026-11-16
+
+### Added
+- **The agent's own live avatar page (`/avatar-live/`).** Everything AvatarX's page does, served by the agent itself, so AvatarX is optional:
+  - **Movement:** the full motion set (breathing, weight shift, small unprompted moves, blinking, looking at you, a held thinking pose, head and hands moving with the voice), the head moves, every owned clip as a button, and a choice of standing loop.
+  - **Your own motions:** upload a `.vrma`, a Mixamo `.fbx` (fitted to whichever body is showing) or a `.zip` of them.
+  - **Props and VR:** props held on a bone or stood on the floor, the pole fitted to the body, and VR through WebXR.
+  - **Chat and voice:** chat with typed replies spoken sentence by sentence, and Talk (OpenAI Realtime over WebRTC) in each body's own voice.
+  - **Settings:** zoom, background (colours, the store's scenes, uploads), mood and look-at, all saved; upload a `.vrm`.
+  - The page is AvatarX's own code (MIT), built from `src/interfaces/web/avatar-live/src` with `scripts/deployment/build-avatar-live.sh`, and signs in with the dashboard's login.
+- **The avatar agent API at `/api/avatar-live`, matching AvatarX's.** It covers state (GET/PATCH), expression, gesture, uploads of bodies (`?replace=` for a new version), motions, backgrounds and props (`.glb` plus `attach.json`), live events, and `POST /video` for an mp4 of any move. Body language after a reply (auto emotes) now reaches the agent's own avatar as well as AvatarX. A clip the agent plays reaches the live page too.
+- **Embed mode (`/avatar-live/?embed=1`)** shows only the see-through stage, for apps. `window.lanagentAvatar` takes the voice's loudness (`level`), the thinking pose, a move and a face.
+
+## [2.25.836] - 2026-11-16
+
+### Fixed
+- **A question about store items no longer plays one.** "What can I do with the props I bought?" matched the store's use action and played a move on the avatar. A question about owned items (or a message reporting one, such as "the owner is asking about…") now goes to the library or is answered, in both intent detectors. Asks and orders ("can you do the pole dance?", "send me a video of you waving") still act.
+- **The weekly report skips media servers that are not set up.** An instance with no Radarr or Sonarr URL and key logged an error on every weekly report and still showed the media section with zeroes.
+
 ## [2.25.835] - 2026-11-15
 
 ### Changed

@@ -30,6 +30,12 @@ import { NOTIFX_TOOLS, NOTIFX_CONFIRMED, isNotifX, NotifXWatches } from './notif
 export const PROTOCOL = 1;
 /** hello.notify from the LANAgent app: everything the agent notifies, only messages for the owner, or none. */
 export const NOTIFY_LEVELS = ['all', 'owner', 'off'];
+/** The video attachments in a send (TextX send_sms / schedule_message args), with their bytes. */
+export function videosIn(args) {
+  return (Array.isArray(args?.attachments) ? args.attachments : [])
+    .filter(a => a?.data_b64 && (/^video\//i.test(a.mime || '') || /\.(mp4|mov|webm|m4v)$/i.test(a.name || '')));
+}
+
 export const TOOLS = ['send_sms', 'schedule_message', 'list_threads', 'read_thread', 'search_messages',
   'contacts_lookup', 'get_attachment', 'watch', 'unwatch',
   // TextX 0.2.19
@@ -844,6 +850,39 @@ export class TextXHub {
    * operator heard "TextX has not allowed that" with the phone set up right (2026-10-20).
    */
   async callTool(name, args = {}, opts = {}) {
+    // Every video the agent sends someone also goes to the owner on Telegram, to review (the owner, 2026-11-16).
+    // Copied once the phone says it was sent, also when that comes later (a tap on the phone's confirm card).
+    if (['send_sms', 'schedule_message'].includes(name) && videosIn(args).length) {
+      const late = opts.onLate;
+      opts = { ...opts, onLate: (r) => { this.copyVideosToOwner(name, args, r).catch(() => {}); return late?.(r); } };
+      const r = await this.callToolRetrying(name, args, opts);
+      this.copyVideosToOwner(name, args, r).catch(() => {});
+      return r;
+    }
+    return this.callToolRetrying(name, args, opts);
+  }
+
+  /** The owner's review copy of the videos in a send that went out (or was scheduled). Silent; once per send. */
+  async copyVideosToOwner(name, args, r) {
+    const done = r?.ok && (r.result?.status === 'sent' || (name === 'schedule_message' && !r.pending && r.result));
+    if (!done) return;
+    this._videoCopies ||= new WeakSet();
+    if (this._videoCopies.has(args)) return;
+    this._videoCopies.add(args);
+    const tg = this.agent?.interfaces?.get?.('telegram');
+    if (!tg?.bot?.telegram?.sendVideo || !tg.authorizedUserId) { this.logger.warn?.('TextX: no Telegram for the owner\'s copy of a sent video'); return; }
+    const to = Array.isArray(args.to) ? args.to.join(', ') : args.to || args.number || (args.thread_id ? `conversation ${args.thread_id}` : 'someone');
+    const when = name === 'schedule_message' ? `Scheduled for ${to}${args.at ? ` at ${args.at}` : ''}` : `Sent to ${to}`;
+    const words = String(args.text || '').trim();
+    for (const v of videosIn(args)) {
+      const caption = `${when}${args.auto ? ' (auto-reply)' : ''}${words ? `: "${words.slice(0, 900)}"` : ''}`;
+      await tg.bot.telegram.sendVideo(tg.authorizedUserId, { source: Buffer.from(v.data_b64, 'base64'), filename: v.name || 'video.mp4' },
+        { caption, supports_streaming: true, disable_notification: true });
+      this.logger.info?.(`TextX: the owner got a copy of the video ${name === 'schedule_message' ? 'scheduled' : 'sent'} to ${to}`);
+    }
+  }
+
+  async callToolRetrying(name, args = {}, opts = {}) {
     const tried = [];
     for (;;) {
       const r = await this.callToolOnce(name, args, { ...opts, exclude: tried });

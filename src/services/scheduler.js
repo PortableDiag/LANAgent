@@ -4456,13 +4456,21 @@ ${ttUrEmoji} Unrealized: $${cryptoStats.tokenTraderUnrealizedPnL.toFixed(2)}
     }
   }
 
+  // An *arr plugin only when it has a URL and key: an unset one (DELTA has none) used to log an
+  // error on every weekly report and still mark the media section available with zeroes.
+  configuredArrPlugin(name) {
+    const plugin = this.apiManager?.getPlugin(name);
+    if (!plugin || plugin.needsConfiguration || !plugin.config?.url || !plugin.config?.apiKey) return null;
+    return plugin;
+  }
+
   // Get Sonarr/Radarr media stats
   async getMediaStats() {
     const result = { available: false };
     try {
       // Sonarr stats
       try {
-        const sonarrPlugin = this.apiManager?.getPlugin('sonarr');
+        const sonarrPlugin = this.configuredArrPlugin('sonarr');
         if (sonarrPlugin) {
           const [historyResult, calendarResult] = await Promise.all([
             sonarrPlugin.execute({ action: 'get_history', params: { pageSize: 50 } }).catch(() => null),
@@ -4492,7 +4500,7 @@ ${ttUrEmoji} Unrealized: $${cryptoStats.tokenTraderUnrealizedPnL.toFixed(2)}
 
       // Radarr stats
       try {
-        const radarrPlugin = this.apiManager?.getPlugin('radarr');
+        const radarrPlugin = this.configuredArrPlugin('radarr');
         if (radarrPlugin) {
           const [historyResult, calendarResult] = await Promise.all([
             radarrPlugin.execute({ action: 'get_history', params: { pageSize: 50 } }).catch(() => null),

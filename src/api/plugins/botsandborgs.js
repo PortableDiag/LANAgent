@@ -124,6 +124,22 @@ export function videoRecipient(asked = '', to = '') {
   return named ? named[1] : 'me';
 }
 
+
+/** Tags that say nothing about what a clip shows. */
+const VAGUE_TAGS = new Set(['idle', 'loop', 'talk', 'talking', 'break', 'calm', 'standard', 'broad', 'front', 'emote', 'pose', 'move', 'motion']);
+/** The clips whose tags the request names most (each tag as a word or a word's start), or [] when none is named. */
+export function clipsByTags(pool, words) {
+  const said = ` ${String(words || '').toLowerCase().replace(/[^a-z0-9 ]+/g, ' ').replace(/\s+/g, ' ')} `;
+  let best = 0;
+  const scored = pool.map(p => {
+    const tags = (p.file?.tags || []).map(t => String(t).toLowerCase().trim()).filter(t => t.length >= 3 && !VAGUE_TAGS.has(t));
+    const score = tags.filter(t => said.includes(` ${t}`)).length;
+    if (score > best) best = score;
+    return { p, score };
+  });
+  return best ? scored.filter(x => x.score === best).map(x => x.p) : [];
+}
+
 export default class BotsAndBorgsPlugin extends BasePlugin {
   constructor(agent) {
     super(agent);
@@ -1465,7 +1481,11 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     // Speaking with no move named: the clip made to play under speech (clips.json while_talking, calm), never a random dance.
     const underSpeech = speaking ? (pool.filter(p => p.file.whileTalking && (p.file.tags || []).includes('talk')).length
       ? pool.filter(p => p.file.whileTalking && (p.file.tags || []).includes('talk')) : pool.filter(p => p.file.whileTalking && (p.file.energy || 'calm') === 'calm')) : [];
-    const fits = named.length ? named : specific ? [] : purpose ? pool.filter(p => p.file.gesture === purpose) : underSpeech;
+    // What the clip is about, by its tags: "a video of you drinking coffee and saying good morning" is Mug Sip Idle (tags
+    // mug, coffee, drink, sip), not a talking clip with no cup (the owner, 2026-11-16, twice). A tag counts as a word or a
+    // word's start ("drink" in "drinking"); words that say nothing about the move don't count.
+    const tagged = clipsByTags(pool, words);
+    const fits = named.length ? named : specific ? [] : tagged.length ? tagged : purpose ? pool.filter(p => p.file.gesture === purpose) : underSpeech;
     let choice = (fits.length ? fits : pool)[Math.floor(Math.random() * (fits.length ? fits : pool).length)];
     // A dance with a "Facing Away" version is shown that way: the owner (2026-11-15) on Booty Shake, "otherwise the
     // user can't see it". Facing the camera only when asked to.
@@ -1623,9 +1643,41 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
 
   /** Every open 3D page of this agent gets the clip. 0 when the web interface isn't running. */
   async playOnPages(clip) {
+    // The live avatar pages (avatar-live.html, the app's avatar) play it by its AvatarX-style name.
+    if (clip?.file && !clip.stop) {
+      import('../../services/avatar/liveAvatar.js').then(async ({ broadcast, clips }) => {
+        const { avatarxClipName } = await import('../../services/avatar/avatarx.js');
+        let name = avatarxClipName(clip.file);
+        if (!(await clips()).has(name) && (await clips()).has(`bnb-${name}`)) name = `bnb-${name}`;
+        broadcast({ type: 'gesture', name, fromPages: true });
+      }).catch(e => this.logger.warn(`botsandborgs: live pages not told: ${e.message}`));
+    }
     const web = this.agent?.interfaces?.get?.('web');
     if (!web?.playOnAvatarPages) return 0;
     return web.playOnAvatarPages(clip).catch(e => { this.logger.warn(`botsandborgs: pages not told: ${e.message}`); return 0; });
+  }
+
+  /**
+   * A video of one move on the worn body, returned not sent (AvatarX's POST /agent/v1/video, the live avatar's
+   * /api/avatar-live/video): { name, framing?: full|waist|head, backgroundPath?, audio_b64? } → { video, seconds }.
+   */
+  async renderMoveVideo({ name, framing = 'full', backgroundPath = null, audio_b64 = null } = {}) {
+    if (!name) throw Object.assign(new Error('name the move'), { status: 400 });
+    const picked = await this.chooseClip({ clip: String(name).replace(/[_-]+/g, ' '), asked: String(name), speaking: !!audio_b64 });
+    if (picked.error) throw Object.assign(new Error(picked.error), { status: 400 });
+    const { entry, rel } = picked;
+    const worn = this.agent?.agentModel?.activeVRMModel;
+    const manifest = await fs.readFile(path.join(this.vrmDir(), 'manifest.json'), 'utf8').then(JSON.parse).catch(() => []);
+    const model = manifest.find(m => m.id === worn);
+    if (!model?.file) throw Object.assign(new Error('no 3D model is worn'), { status: 409 });
+    const { renderClipVideo } = await import('../../services/avatar/clipVideo.js');
+    const voice = audio_b64 ? { audio: Buffer.from(String(audio_b64), 'base64'), format: 'mp3' } : null;
+    const how = ['full', 'waist', 'head'].includes(framing) ? framing : 'full';
+    const v = await (this.renderVideo || renderClipVideo)({ modelPath: path.join(this.vrmDir(), model.file), clipPath: path.join(this.vrmDir(), 'animations', rel),
+      loop: !!entry.loop, prop: entry.prop || null, props: this.propPaths(propsFor(entry.props, { asked: String(name) })), framing: how,
+      ...(voice ? { voice } : {}), ...(backgroundPath ? { backgroundPath } : {}) });
+    this.logger.info(`botsandborgs: rendered a video of ${entry.label || name} (${v.seconds}s) for the avatar API`);
+    return v;
   }
 
   /** "Stop dancing": back to the idle stance on every open page. */
@@ -1896,7 +1948,16 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
   async autoEmote({ userText, replyText } = {}) {
     if (!(await this.settings()).autoEmotes) return null;
     const { avatarxCaller } = await import('../../services/avatar/avatarx.js');
-    const call = await avatarxCaller();
+    const avatarx = await avatarxCaller().catch(() => null);
+    // The agent's own live avatar always gets the body language; AvatarX too when it is set up (the owner may use either).
+    const web = this.agent?.interfaces?.get?.('web');
+    const own = web?.liveAvatar ? (await import('../../services/avatar/liveAvatar.js')).liveCaller(web.liveAvatar) : null;
+    const call = own && avatarx ? async (method, route, body, type) => {
+      if (method === 'GET') return avatarx(method, route, body, type).catch(() => own(method, route, body));
+      const [mine, theirs] = await Promise.allSettled([own(method, route, body), avatarx(method, route, body, type)]);
+      if (mine.status === 'rejected' && theirs.status === 'rejected') throw theirs.reason;
+      return mine.value ?? theirs.value;
+    } : (own || avatarx);
     const pm = this.agent?.providerManager;
     if (!call || !pm?.generateResponse) return null;
     const { autoEmote } = await import('../../services/avatar/autoEmote.js');

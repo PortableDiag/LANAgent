@@ -190,7 +190,13 @@
             .viewer-panel { height: 50vh; border-right: none; border-bottom: 1px solid var(--border); }
             .side-panel { width: 100%; height: 50vh; }
         }
-    </style>
+            .live-label { display:block; font-size:12px; color:var(--text-secondary); margin:10px 0 4px; }
+        .live-input { width:100%; }
+        .live-head { font-size:12px; text-transform:uppercase; letter-spacing:.05em; color:var(--text-secondary); margin:16px 0 6px; font-weight:600; }
+        .live-file { display:block; margin-top:6px; cursor:pointer; text-align:left; }
+        #live-moves button, #live-faces button { padding:4px 9px; font-size:12px; }
+        #live-mine li { display:flex; justify-content:space-between; align-items:center; padding:4px 0; border-bottom:1px solid var(--border-color, #333); }
+</style>
 </head>
 <body>
     <div class="top-bar">
@@ -252,6 +258,9 @@
                 </button>
                 <button class="panel-tab" data-tab="actions" onclick="avatarDesigner.switchTab('actions')">
                     <i class="fas fa-cog"></i> Actions
+                </button>
+                <button class="panel-tab" data-tab="live" onclick="avatarDesigner.switchTab('live'); liveAvatarTab.open()">
+                    <i class="fas fa-play-circle"></i> Live
                 </button>
             </div>
             <div class="panel-content">
@@ -504,6 +513,34 @@
                 </div>
 
                 <!-- Actions Tab -->
+                <!-- Live Tab: the agent's live avatar (the same settings, moves and uploads as AvatarX), /api/avatar-live -->
+                <div class="panel-section" id="tab-live">
+                    <div style="font-size:12px;color:var(--text-secondary);margin-bottom:10px;">
+                        <i class="fas fa-info-circle"></i> The body the agent shows in chat, talk, the app and VR. Everything AvatarX does, served by the agent itself.
+                    </div>
+                    <a class="btn btn-primary" href="/avatar-live/" target="_blank" rel="noopener" style="display:block;text-align:center;margin-bottom:12px;"><i class="fas fa-external-link-alt"></i> Open the live view (chat, talk, VR)</a>
+                    <div id="live-note" style="font-size:12px;color:var(--text-secondary);min-height:1.2em;margin-bottom:8px;"></div>
+                    <label class="live-label">Showing</label><select id="live-active" class="live-input"></select>
+                    <label class="live-label">Voice (the agent's own, for every body)</label><select id="live-voice" class="live-input"></select>
+                    <label class="live-label">Zoom <span id="live-zoom-v"></span></label><input id="live-zoom" type="range" min="0.5" max="3" step="0.05" class="live-input">
+                    <label class="live-label">Background</label><select id="live-background" class="live-input"></select>
+                    <label class="live-label">Mood</label><select id="live-mood" class="live-input"></select>
+                    <label class="live-label">Standing</label><select id="live-idle" class="live-input"></select>
+                    <label style="display:flex;gap:8px;align-items:center;margin-top:8px;font-size:13px;"><input id="live-look" type="checkbox"> Look at the viewer</label>
+                    <label style="display:flex;gap:8px;align-items:center;margin-top:4px;font-size:13px;"><input id="live-speak" type="checkbox"> Speak typed replies</label>
+                    <div class="live-head">Moves <span style="font-weight:400">(play on every open body)</span></div>
+                    <div id="live-moves" style="display:flex;flex-wrap:wrap;gap:6px;max-height:180px;overflow-y:auto;"></div>
+                    <div class="live-head">Faces</div>
+                    <div id="live-faces" style="display:flex;flex-wrap:wrap;gap:6px;"></div>
+                    <div class="live-head">Add</div>
+                    <label class="btn btn-secondary live-file"><i class="fas fa-running"></i> Motions: .vrma, Mixamo .fbx, or a .zip<input id="live-up-clip" type="file" accept=".vrma,.fbx,.zip" multiple hidden></label>
+                    <label class="btn btn-secondary live-file"><i class="fas fa-image"></i> Background: .jpg or .png<input id="live-up-bg" type="file" accept=".jpg,.jpeg,.png" hidden></label>
+                    <label class="btn btn-secondary live-file"><i class="fas fa-mug-hot"></i> Prop: its .glb and its attach.json<input id="live-up-prop" type="file" accept=".glb,.json" multiple hidden></label>
+                    <label class="btn btn-secondary live-file"><i class="fas fa-user-plus"></i> A body (.vrm) into the gallery<input id="live-up-vrm" type="file" accept=".vrm" hidden></label>
+                    <div class="live-head">Yours <span style="font-weight:400">(uploads can be deleted)</span></div>
+                    <ul id="live-mine" style="list-style:none;padding:0;margin:0;font-size:13px;"></ul>
+                </div>
+
                 <div class="panel-section" id="tab-actions">
                     <div id="actions-empty" style="text-align:center; padding:30px; color:var(--text-secondary);">
                         Select an avatar first
@@ -2373,6 +2410,15 @@
             this._agentSocket = s;
             s.on('connect', () => s.emit('avatar:join'));
             s.on('avatar:play', (c) => this._playFromAgent(c).catch(e => console.warn('Agent clip:', e.message)));
+            // The agent's face after a reply (the live avatar's expression), held for its seconds.
+            s.on('avatar:expression', (e) => {
+                const em = this.currentVRM?.expressionManager;
+                if (!em || !e?.name || e.name === 'neutral') return;
+                for (const m of ['happy', 'angry', 'sad', 'relaxed', 'surprised']) em.setValue(m, 0);
+                em.setValue(e.name, 0.8);
+                clearTimeout(this._agentFaceTimer);
+                this._agentFaceTimer = setTimeout(() => em.setValue(e.name, 0), Math.min(30, Number(e.seconds) || 4) * 1000);
+            });
         }
 
         async _playFromAgent(c) {
@@ -4114,6 +4160,110 @@
         document.addEventListener('DOMContentLoaded', () => avatarDesigner.init());
         if (document.readyState !== 'loading') avatarDesigner.init();
     });
+    </script>
+    <script>
+    /** The designer's Live tab: the live avatar's settings and controls (/api/avatar-live, the same API as AvatarX's agent API). */
+    const liveAvatarTab = {
+        state: null,
+        async api(method, route, body, raw) {
+            const headers = { Authorization: 'Bearer ' + (localStorage.getItem('lanagent_token') || '') };
+            if (body !== undefined && !raw) headers['Content-Type'] = 'application/json';
+            const r = await fetch('/api/avatar-live' + route, { method, headers, body: raw ? body : body === undefined ? undefined : JSON.stringify(body) });
+            const v = await r.json().catch(() => ({}));
+            if (!r.ok) throw new Error(v.error || ('the agent answered ' + r.status));
+            return v;
+        },
+        note(t) { document.getElementById('live-note').textContent = t || ''; },
+        async open() {
+            if (!this.wired) this.wire();
+            try { this.state = await this.api('GET', '/state'); this.render(); this.note(''); } catch (e) { this.note('Live avatar: ' + e.message); }
+        },
+        fill(id, items, value, label = (x) => x) {
+            const sel = document.getElementById(id);
+            sel.replaceChildren(...items.map((x) => { const o = document.createElement('option'); o.value = typeof x === 'object' ? x.value : x; o.textContent = typeof x === 'object' ? x.label : label(x); return o; }));
+            sel.value = value ?? '';
+        },
+        render() {
+            const s = this.state;
+            this.fill('live-active', s.avatars.map((a) => ({ value: a.id, label: a.name })), s.active);
+            // The agent's own set voice, shown, never picked per body (owner, 2026-11-16).
+            this.fill('live-voice', s.voices.map((v) => ({ value: v.name, label: v.sounds })), s.voice);
+            document.getElementById('live-voice').disabled = true;
+            document.getElementById('live-zoom').value = s.zoom; document.getElementById('live-zoom-v').textContent = s.zoom.toFixed(2);
+            this.fill('live-background', s.backgrounds, s.background, (b) => b.replace(/^store-/, 'store: ').replace(/_/g, ' '));
+            this.fill('live-mood', s.moods, s.mood);
+            this.fill('live-idle', [{ value: '', label: 'Casual standing (built in)' }, ...s.animations.map((a) => ({ value: a, label: a.replace(/[_-]/g, ' ') }))], s.idle);
+            document.getElementById('live-look').checked = s.look_at_you;
+            document.getElementById('live-speak').checked = s.speak_replies;
+            const btn = (label, fn) => { const b = document.createElement('button'); b.className = 'btn btn-secondary'; b.type = 'button'; b.textContent = label; b.onclick = fn; return b; };
+            document.getElementById('live-moves').replaceChildren(...[...s.gestures, ...s.animations].map((n) => btn(n.replace(/[_-]/g, ' '), () => this.api('POST', '/gesture', { name: n }).then((r) => this.note('Playing ' + r.name)).catch((e) => this.note(e.message)))));
+            document.getElementById('live-faces').replaceChildren(...s.moods.map((m) => btn(m, () => this.api('POST', '/expression', { name: m, seconds: 4 }).catch((e) => this.note(e.message)))));
+            this.renderMine();
+        },
+        async renderMine() {
+            const ul = document.getElementById('live-mine');
+            const s = this.state;
+            const rows = [
+                ...s.avatars.filter((a) => a.id.startsWith('upload-')).map((a) => ['Body', a.name, () => this.api('DELETE', '/avatars/' + encodeURIComponent(a.id))]),
+                ...s.custom_backgrounds.filter((b) => !b.startsWith('store-')).map((b) => ['Background', b, () => this.api('DELETE', '/backgrounds/' + encodeURIComponent(b))]),
+            ];
+            ul.replaceChildren(...rows.map(([kind, name, del]) => {
+                const li = document.createElement('li');
+                const span = document.createElement('span'); span.textContent = kind + ': ' + name;
+                const b = document.createElement('button'); b.className = 'btn btn-secondary'; b.textContent = 'Delete'; b.style.padding = '2px 8px';
+                b.onclick = () => del().then(() => this.open()).catch((e) => this.note(e.message));
+                li.append(span, b); return li;
+            }));
+            if (!rows.length) { const li = document.createElement('li'); li.style.color = 'var(--text-secondary)'; li.textContent = 'Nothing uploaded yet'; ul.append(li); }
+        },
+        patch(p) { return this.api('PATCH', '/state', p).then((s) => { this.state = s; this.render(); }).catch((e) => this.note(e.message)); },
+        async upload(route, file, name) {
+            return this.api('POST', route + '?name=' + encodeURIComponent(name || file.name), file, true);
+        },
+        wire() {
+            this.wired = true;
+            const on = (id, ev, fn) => document.getElementById(id).addEventListener(ev, fn);
+            on('live-active', 'change', (e) => this.patch({ active: e.target.value }));
+            on('live-zoom', 'input', (e) => { document.getElementById('live-zoom-v').textContent = (+e.target.value).toFixed(2); });
+            on('live-zoom', 'change', (e) => this.patch({ zoom: +e.target.value }));
+            on('live-background', 'change', (e) => this.patch({ background: e.target.value }));
+            on('live-mood', 'change', (e) => this.patch({ mood: e.target.value }));
+            on('live-idle', 'change', (e) => this.patch({ idle: e.target.value }));
+            on('live-look', 'change', (e) => this.patch({ look_at_you: e.target.checked }));
+            on('live-speak', 'change', (e) => this.patch({ speak_replies: e.target.checked }));
+            on('live-up-clip', 'change', async (e) => {
+                const files = [...e.target.files]; e.target.value = '';
+                const added = [];
+                try {
+                    for (const f of files) {
+                        if (/\.zip$/i.test(f.name)) {
+                            // A zip is opened here, so the agent only ever gets the clips themselves (as AvatarX does).
+                            const { unzipSync } = await import('/lib/addons/libs/fflate.module.js');
+                            const parts = unzipSync(new Uint8Array(await f.arrayBuffer()), { filter: (x) => /\.(vrma|fbx)$/i.test(x.name) && !/(^|\/)__MACOSX\//.test(x.name) });
+                            for (const [n, data] of Object.entries(parts)) added.push((await this.upload('/animations', new Blob([data]), n.split('/').pop())).animation);
+                        } else added.push((await this.upload('/animations', f)).animation);
+                    }
+                    this.note(added.length ? 'Added: ' + added.join(', ') : 'No .vrma or .fbx found');
+                    this.open();
+                } catch (err) { this.note(err.message); }
+            });
+            on('live-up-bg', 'change', async (e) => {
+                const f = e.target.files[0]; e.target.value = ''; if (!f) return;
+                try { const r = await this.upload('/backgrounds', f); await this.patch({ background: r.background }); this.note('Background ' + r.background + ' added and shown'); } catch (err) { this.note(err.message); }
+            });
+            on('live-up-prop', 'change', async (e) => {
+                const files = [...e.target.files]; e.target.value = '';
+                const glb = files.find((f) => /\.glb$/i.test(f.name));
+                const name = (glb || files[0])?.name.replace(/\.(glb|json)$/i, '').replace(/[-_.]?attach$/i, '');
+                try { for (const f of files) await this.upload('/props', f, name); this.note('Prop ' + name + ': ' + files.length + ' part(s) added; it shows once both are there'); this.open(); } catch (err) { this.note(err.message); }
+            });
+            on('live-up-vrm', 'change', async (e) => {
+                const f = e.target.files[0]; e.target.value = ''; if (!f) return;
+                this.note('Uploading ' + f.name + '…');
+                try { const r = await this.upload('/avatars', f); this.note(r.avatar.name + ' is in the gallery'); this.open(); } catch (err) { this.note(err.message); }
+            });
+        },
+    };
     </script>
 </body>
 </html>

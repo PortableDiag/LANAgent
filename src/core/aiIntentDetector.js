@@ -1,4 +1,4 @@
-import { asksToUseStoreItem } from '../services/store/assetLibrary.js';
+import { asksToUseStoreItem, asksAboutStoreItem } from '../services/store/assetLibrary.js';
 import { logger } from '../utils/logger.js';
 import { StructuredOutputParser, JSONOutputParser } from '../services/outputParser.js';
 import { nowInZone, resolveRequestTime } from '../utils/wallClock.js';
@@ -1816,7 +1816,7 @@ export class AIIntentDetector {
     const isBuy = /\b(buy|purchase|get (?:yourself|me|him|her|them)|pick (?:yourself|out)|order)\b/i.test(text);
     if ((storeNamed || (asksToUseStoreItem(text) && !isBuy)) && this.agent?.apiManager?.apis?.get?.('botsandborgs')?.enabled) {
       const want = isBuy ? 'buy'
-        : /\b(what|which)\b.{0,30}\b(have you got|do you (?:have|own)|you own|you bought)\b|\blibrary\b/i.test(text) ? 'library'
+        : /\b(what|which)\b.{0,30}\b(have you got|do you (?:have|own)|you own|you bought)\b|\blibrary\b/i.test(text) || asksAboutStoreItem(text) ? 'library'
           : asksToUseStoreItem(text) || /\b(send|wear|install)\b/i.test(text) ? 'use' : 'browse';
       for (const [id, intent] of Object.entries(this.getDynamicIntents())) {
         if (intent.plugin === 'botsandborgs' && intent.action === want) return parseInt(id);
@@ -3555,7 +3555,8 @@ Respond in JSON format:
       
       // Get the selected intent
       const intent = this.getAllIntents()[intentId];
-      if (intent && questionPickedAsChange(text, intent)) {
+      if (intent && (questionPickedAsChange(text, intent)
+        || (intent.plugin === 'botsandborgs' && /^(use|play|wear)$/.test(intent.action || '') && asksAboutStoreItem(text)))) {
         logger.info(`AI picked ${intent.plugin || 'core'}.${intent.action || intent.name} for a question that asks for no change; answering it instead`);
         return { detected: false, intent: 'general', original: text };
       }

@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en" data-palette="nebula">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Live avatar</title>
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<canvas id="stage" aria-label="The agent's avatar"></canvas>
+
+<section id="gate" hidden>
+  <form id="gate-form" autocomplete="on">
+    <h1 id="gate-title">LANAgent</h1>
+    <p id="gate-help"></p>
+    <input id="gate-user" name="username" autocomplete="username" value="owner" hidden>
+    <label for="gate-pw">Password</label>
+    <input id="gate-pw" type="password" name="password" required autofocus>
+    <button id="gate-go" type="submit">Log in</button>
+    <p id="gate-err" class="err" role="alert"></p>
+  </form>
+</section>
+
+<main id="app" hidden>
+  <header>
+    <span id="name"></span>
+    <span id="link" title="Connection to the server"></span>
+    <span class="grow"></span>
+    <button id="vr" type="button" hidden>VR</button>
+    <button id="talk" type="button">Talk</button>
+    <a id="to-designer" class="btnlink" href="/avatar.html" title="The avatar designer">Designer</a>
+    <button id="open-settings" type="button" aria-label="Settings">Settings</button>
+  </header>
+  <p id="empty" hidden>No avatar yet. Open <b>Settings</b> and upload a <b>.vrm</b> file.</p>
+  <p id="load-note" hidden></p>
+  <section id="chat" aria-label="Chat">
+    <div id="log" role="log" aria-live="polite"></div>
+    <div id="busy" hidden></div>
+    <form id="say">
+      <textarea id="text" rows="1" placeholder="Say something" aria-label="Message"></textarea>
+      <button type="submit" id="send">Send</button>
+    </form>
+  </section>
+  <aside id="settings" hidden aria-label="Settings">
+    <div class="row"><h2>Settings</h2><span class="grow"></span><button id="close-settings" type="button">Close</button></div>
+    <h3>Avatar</h3>
+    <ul id="avatars"></ul>
+    <label class="file">Upload a .vrm<input id="upload" type="file" accept=".vrm"></label>
+    <p id="upload-note" class="note"></p>
+    <h3>View</h3>
+    <label for="voice-pick">Voice of this avatar</label><select id="voice-pick"></select>
+    <p id="voice-note" class="note"></p>
+    <label for="zoom">Zoom</label><input id="zoom" type="range" min="0.4" max="2.5" step="0.05">
+    <label for="background">Background</label><select id="background"></select>
+    <label for="mood">Mood</label><select id="mood"></select>
+    <label class="check"><input id="look" type="checkbox"> Look at me</label>
+    <label class="check"><input id="speak" type="checkbox"> Speak typed replies</label>
+    <label for="idle-pick">Standing</label><select id="idle-pick"></select>
+    <h3>Gestures</h3>
+    <div id="gestures" class="chips"></div>
+    <h3>Motion clips</h3>
+    <ul id="clips"></ul>
+    <label class="file">Add your own: .fbx, .vrma or a .zip of them<input id="upload-clip" type="file" accept=".vrma,.fbx,.zip" multiple></label>
+    <p id="vroid-links" class="note"></p>
+    <p id="clip-note" class="note"></p>
+    <h3>Chat</h3>
+    <button id="new-chat" type="button">Start a new conversation</button>
+    <h3>Sign in</h3>
+    <p class="note">This page uses the dashboard's login. Bodies from the store and the gallery are managed in the <a href="/avatar.html">designer</a>; uploads made here can be deleted here.</p>
+    <button id="logout" type="button">Sign out</button>
+  </aside>
+</main>
+<audio id="voice" autoplay></audio>
+<audio id="speech"></audio>
+<script type="module" src="app.js"></script>
+</body>
+</html>
