@@ -1163,9 +1163,12 @@ export class TextXHub {
         sent.unshift('voice');
       } catch (e) { voiceError = e.message; this.logger.warn?.(`TextX: voice reply could not be made: ${e.message}`); }
     }
-    const withText = want.includes('text') || cut || !attachments.length;
+    // No Text form, no words (TextX 0.4.98, 2119 #517): with a voice note or video to send, the text stays out, even when
+    // only part of it was spoken. Text goes only when Text is a form, or as the fallback when nothing could be made.
+    const withText = want.includes('text') || !attachments.length;
     if (withText) sent.unshift('text');
-    return { args: { thread_id: threadId, text: withText ? text : '', ...(attachments.length ? { attachments } : {}), ...extra }, mode: modeOfForms(sent), forms: sent, wanted: want, videoError, voiceError };
+    // The words are kept for a fallback: a file refused as too big is resent as text, so the person still gets an answer.
+    return { args: { thread_id: threadId, text: withText ? text : '', ...(attachments.length ? { attachments } : {}), ...extra }, mode: modeOfForms(sent), forms: sent, wanted: want, videoError, voiceError, fullText: text };
   }
 
   /**
@@ -1175,9 +1178,11 @@ export class TextXHub {
   async sendReply(device, reply, onLate) {
     const opts = { deviceId: device.id, onlyDevice: device.id, onLate };
     const r = await this.callTool('send_sms', reply.args, opts);
-    if (r?.ok || !['too_big', 'too_large'].includes(r?.error?.code) || !reply.args.attachments?.length || !String(reply.args.text || '').trim()) return r;
+    const words = String(reply.args.text || '').trim() || String(reply.fullText || '').trim();
+    if (r?.ok || !['too_big', 'too_large'].includes(r?.error?.code) || !reply.args.attachments?.length || !words) return r;
     this.logger.warn?.(`TextX: reply with ${reply.args.attachments.map(a => a.name).join(' + ')} was too big; sending the text alone`);
-    const { attachments, ...textOnly } = reply.args;
+    const { attachments, ...rest } = reply.args;
+    const textOnly = { ...rest, text: words };
     reply.forms = ['text'];
     reply.videoError = reply.videoError || (attachments.some(a => /\.mp4$/.test(a.name)) ? 'too big to send' : null);
     reply.voiceError = reply.voiceError || (attachments.some(a => /\.m4a$/.test(a.name)) ? 'too big to send' : null);

@@ -2,6 +2,11 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.835] - 2026-11-15
+
+### Changed
+- **No Text form, no words (TextX 0.4.98).** When a conversation's reply forms leave out Text (video only, voice only, or voice and video), the agent sends the file(s) with no text, even when the video spoke only part of the reply. Text goes along only when Text is one of the forms, or alone as the fallback when nothing could be made. A file refused as too big is still resent as text, so the person always gets an answer.
+
 ## [2.25.834] - 2026-11-15
 
 ### Fixed

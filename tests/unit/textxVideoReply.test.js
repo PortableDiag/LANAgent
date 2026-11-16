@@ -131,3 +131,23 @@ test('a reply refused as too big goes again as its text alone', async () => {
   assert.equal(sends[1].text, 'Hi!');
   assert.match(TextXHub.howSent(reply), /the video failed: too big to send/);
 });
+
+test('TextX 0.4.98: no Text form, no words, even when the video spoke only part; too big still falls back to text', async () => {
+  const cut = hub(async () => ({ video: Buffer.from('mp4'), seconds: 20, cut: true }));
+  const v = await cut.replyArgs({ id: 'd1' }, 't1', 'A long answer. With more.', 'video', {}, { forms: ['video'] });
+  assert.equal(v.args.text, '');
+  assert.deepEqual(v.forms, ['video']);
+  const both = await cut.replyArgs({ id: 'd1' }, 't1', 'Hi there.', 'video', {}, { forms: ['voice', 'video'] });
+  assert.equal(both.args.text, '');
+  assert.deepEqual(both.args.attachments.map(a => a.name), ['reply.m4a', 'reply.mp4']);
+  const withText = await cut.replyArgs({ id: 'd1' }, 't1', 'Hi there.', 'video', {}, { forms: ['text', 'video'] });
+  assert.equal(withText.args.text, 'Hi there.');
+  // The video is refused as too big: the words still reach the person, as text alone.
+  const sends = [];
+  cut.callTool = async (tool, args) => { sends.push(args); return sends.length === 1 ? { ok: false, error: { code: 'too_big' } } : { ok: true, result: { status: 'sent' } }; };
+  const r = await cut.sendReply({ id: 'd1' }, v, () => {});
+  assert.equal(r.ok, true);
+  assert.equal(sends.length, 2);
+  assert.equal(sends[1].text, 'A long answer. With more.');
+  assert.equal(sends[1].attachments, undefined);
+});
