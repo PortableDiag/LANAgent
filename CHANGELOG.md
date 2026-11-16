@@ -2,6 +2,11 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.840] - 2026-11-16
+
+### Fixed
+- **The hourly self-update stopped on the live avatar page's sources.** It import-checks every changed `.js` in Node, and the page's browser sources (`src/interfaces/web/avatar-live/src`) can't load there, so the 10:00 run rolled back and notified the owner. They are now syntax-checked only, like the rest of the web page code.
+
 ## [2.25.839] - 2026-11-16
 
 ### Added

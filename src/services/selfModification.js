@@ -5533,7 +5533,10 @@ ${newCapsBlock}${reviewFlagsBlock}
           // not in Node: importing them always fails ("window is not defined"),
           // so every UI change aborted the whole deploy (2026-09-27, app.js:18910).
           // For them the syntax check is the whole test.
-          if (rel.startsWith('src/interfaces/web/public/')) continue;
+          // The live avatar page's sources (avatar-live/src, bundled into public/avatar-live/app.js) are browser code too:
+          // importing them failed ("Cannot find package 'three'", "window is not defined") and rolled back the 10:00 run
+          // on 2026-11-16.
+          if (rel.startsWith('src/interfaces/web/public/') || rel.startsWith('src/interfaces/web/avatar-live/')) continue;
           // Exit as soon as the import settles, and kill the whole process group on
           // timeout: the old bare `await import` never exited on a module with timers,
           // and the SIGTERM timeout was caught, so every such check left an orphan
