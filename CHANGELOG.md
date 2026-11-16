@@ -2,6 +2,16 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.843] - 2026-11-16
+
+### Added
+- **The Bots & Borgs account library (store 0.29) keeps everything owned current.** Every 6 hours, with the live pass check, one poll lists what changed since the last one (the store's own cursor).
+  - **Fetching:** an item whose ETag moved is downloaded once (304 is free), checked against its sha256 and unpacked like a purchase, keeping its place and date.
+  - **New items:** items not in the library yet (an All-Access take, a live pass's starter packs) arrive by themselves.
+  - **What changed:** the store's notes (fix, art, new clip, new prop…) are logged.
+  - **Scope:** models stay with their live pass. "Update your library" uses the same path and fetches each order again only on a store without the library.
+  - This ends the 25-downloads-per-order limit on re-syncs.
+
 ## [2.25.842] - 2026-11-16
 
 ### Fixed

@@ -524,6 +524,8 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     const latest = await this.livePasses();
     for (const p of passes) { const at = latest.findIndex(x => x.slug === p.slug); if (at >= 0) latest[at] = p; else latest.push(p); }
     await this.saveLivePasses(latest);
+    // Store 0.29: the account library is the one sync path for clip and props packs (and every other product).
+    await this.syncLibrary().catch(e => this.logger.warn(`botsandborgs: library sync failed: ${e.message}`));
     await this.syncLiveClips(latest).catch(e => this.logger.warn(`botsandborgs: live clip check failed: ${e.message}`));
     const changed = report.filter(x => x.status === 'updated').length;
     this.logger.info(`botsandborgs: live check: ${report.length} pass${report.length === 1 ? '' : 'es'}, ${changed} updated${report.length ? ` (${report.map(x => `${x.slug} ${x.status}`).join(', ')})` : ''}`);
@@ -549,6 +551,8 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     await PluginSettings.setCached(this.name, 'liveClips', { tag, checkedAt: new Date().toISOString(), packs: list.length });
     if (!saved?.tag) { this.logger.info(`botsandborgs: live clips: ${list.length} packs listed (fields: ${Object.keys(list[0] || {}).join(', ')})`); return 'first'; }
     if (saved.tag === tag) return 'unchanged';
+    // The account library (store 0.29) keeps the packs current now; the old order re-fetch only when it is unavailable.
+    if (this._libraryOk) return 'library';
     const report = await this.updateOwned({ kind: 'animation' });
     this.logger.info(`botsandborgs: live clips changed; packs fetched again: ${report.map(x => x.variant).join(', ') || 'none differed'}`);
     return 'updated';
@@ -1125,8 +1129,9 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     const files = [];
     for (const d of downloads) {
       const url = typeof d === 'string' ? d : d?.url;
-      if (!url) continue;
-      const got = await this.fetchBytes(url);
+      // A download already fetched and checked (the account library, store 0.29) comes as { buffer, type, filename }.
+      if (!url && !d?.buffer) continue;
+      const got = d?.buffer ? { buffer: d.buffer, type: d.type || '' } : await this.fetchBytes(url);
       for (const f of await unpack(got.buffer, { type: got.type, kind, filename: typeof d === 'string' ? '' : (d.filename || d.name || '') })) {
         await fs.writeFile(path.join(dir, f.name), f.buffer);
         const entry = { name: f.name, kind: f.kind, mime: f.mime, size: f.buffer.length };
@@ -1212,6 +1217,80 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
    * spends one of that order's 25 downloads. Owned items keep their place and purchase date.
    * Returns [{ variant, added, removed, changed }] per item that changed.
    */
+  /**
+   * The account library (store 0.29, GET /api/library): everything this account has, kept current. One poll with the
+   * store's own cursor (`next_since`); an item whose ETag moved is fetched once (If-None-Match, 304 free), checked
+   * against its sha256 and unpacked through ingest like a purchase, keeping its place and order. Items the store gives
+   * that are not in the library yet (an All-Access take, a live pass's starter packs) come in too. Models stay with their
+   * live pass (the VRM and its fits). Returns [{ variant, added, removed, changed, notes }] for the items that changed.
+   */
+  async syncLibrary({ full = false } = {}) {
+    const key = await this.accountKey().catch(() => null);
+    if (!key) return [];
+    const cursor = full ? null : await PluginSettings.getCached(this.name, 'libraryCursor').catch(() => null);
+    const q = cursor?.since ? `?since=${encodeURIComponent(cursor.since)}` : '';
+    let d;
+    try { d = await this.api('get', `/api/library${q}`, { key }); }
+    catch (e) { this._libraryOk = false; if (e.status === 404) return []; throw e; }
+    this._libraryOk = true;
+    const listed = Array.isArray(d) ? d : d.items || d.library || [];
+    const etags = (await PluginSettings.getCached(this.name, 'libraryEtags').catch(() => null))?.etags || {};
+    const first = !Object.keys(etags).length;
+    const report = [];
+    const fixedClips = [];
+    for (const it of listed) {
+      if (!it?.variant || !it.etag || etags[it.variant] === it.etag) continue;
+      const kind = variantKind(it.variant, it.collection);
+      const old = (await this.libraryItems()).find(i => i.variant === it.variant);
+      // The first sync takes what is already here as current: no 300-download burst of packs that did not change.
+      if ((first && old) || ['vrm', 'bundle'].includes(kind) || livePass(it.variant)) { etags[it.variant] = it.etag; continue; }
+      try {
+        const r = await this.fetchLibraryItem(it.url, key, etags[it.variant]);
+        if (r.status === 304) { etags[it.variant] = it.etag; continue; }
+        if (r.status !== 200) throw new Error(`the store answered ${r.status}`);
+        const buffer = Buffer.from(r.data);
+        if (it.sha256 && crypto.createHash('sha256').update(buffer).digest('hex') !== it.sha256) throw new Error('the download does not match its sha256');
+        const dir = path.join(this.libraryDir(), safeName(it.variant));
+        const digest = async (files) => new Map(await Promise.all((files || []).map(async f => [f.name,
+          await fs.readFile(path.join(dir, f.name)).then(b => crypto.createHash('sha256').update(b).digest('hex')).catch(() => `size:${f.size}`)])));
+        const before = await digest(old?.files);
+        const item = await this.ingest({ order: old?.order ? { id: old.order, token: old.token } : null, variant: it.variant,
+          downloads: [{ buffer, type: String(r.headers['content-type'] || ''), filename: `${it.variant}.zip` }], update: old ? { at: old.at } : null });
+        const after = await digest(item.files);
+        const added = [...after.keys()].filter(n => !before.has(n));
+        const removed = [...before.keys()].filter(n => !after.has(n));
+        const changed = [...after.keys()].filter(n => before.has(n) && before.get(n) !== after.get(n));
+        for (const f of item.files) if (f.kind === 'animation' && (changed.includes(f.name) || added.includes(f.name))) fixedClips.push({ variant: it.variant, name: f.name });
+        const notes = (it.notes || []).slice(0, 3).map(n => `${n.kind || 'update'}: ${n.text}`);
+        report.push({ variant: it.variant, added, removed, changed, notes, source: it.source || null });
+        etags[it.variant] = it.etag;
+        this.logger.info(`botsandborgs: library ${old ? 'updated' : 'added'} ${it.variant}: ${added.length} new, ${removed.length} gone, ${changed.length} changed${notes.length ? ` (${notes.join('; ')})` : ''}`);
+      } catch (e) {
+        this.logger.warn(`botsandborgs: library item ${it.variant} not synced: ${e.message}`);
+      }
+    }
+    await PluginSettings.setCached(this.name, 'libraryEtags', { etags });
+    if (d.next_since != null) await PluginSettings.setCached(this.name, 'libraryCursor', { since: d.next_since, at: new Date().toISOString() });
+    if (fixedClips.length) await this.afterClipFixes(fixedClips);
+    this.logger.info(`botsandborgs: library sync: ${listed.length} listed${q ? ' since the last check' : ''}, ${report.length} changed${first ? ' (first sync: what is here was taken as current)' : ''}`);
+    return report;
+  }
+
+  /** One library download: { status, headers, data } (304 when `etag` is current). */
+  async fetchLibraryItem(url, key, etag) {
+    return axios.get(url, { responseType: 'arraybuffer', timeout: 300000, validateStatus: () => true,
+      headers: { 'User-Agent': this.userAgent(), Authorization: `Bearer ${key}`, ...(etag ? { 'If-None-Match': etag } : {}) } });
+  }
+
+  /** A reissued clip: relist it for the designer and playground, and replace AvatarX's copy, which it keeps by name. */
+  async afterClipFixes(fixedClips) {
+    await this.publishAnimations().catch(e => this.logger.warn(`botsandborgs: clips not relisted: ${e.message}`));
+    const { pushClipsToAvatarX } = await import('../../services/avatar/avatarx.js');
+    const files = fixedClips.map(c => ({ file: path.join(this.vrmDir(), 'animations', 'store', safeName(c.variant), c.name), replace: true }));
+    const pushed = await pushClipsToAvatarX(files).catch(e => { this.logger.warn(`botsandborgs: AvatarX not given the fixed clips: ${e.message}`); return null; });
+    if (Array.isArray(pushed)) this.logger.info(`botsandborgs: AvatarX has the fixed clips: ${pushed.join(', ')}`);
+  }
+
   async updateOwned({ kind } = {}) {
     const report = [];
     const fixedClips = [];
@@ -1243,21 +1322,19 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
       }
       this.logger.info(`botsandborgs: updated ${old.variant}: ${added.length} new, ${removed.length} gone, ${changed.length} changed`);
     }
-    // A reissued clip: relist it for the designer and playground, and replace AvatarX's copy, which it keeps by name.
-    if (fixedClips.length) {
-      await this.publishAnimations().catch(e => this.logger.warn(`botsandborgs: clips not relisted: ${e.message}`));
-      const { pushClipsToAvatarX } = await import('../../services/avatar/avatarx.js');
-      const files = fixedClips.map(c => ({ file: path.join(this.vrmDir(), 'animations', 'store', safeName(c.variant), c.name), replace: true }));
-      const pushed = await pushClipsToAvatarX(files).catch(e => { this.logger.warn(`botsandborgs: AvatarX not given the fixed clips: ${e.message}`); return null; });
-      if (Array.isArray(pushed)) this.logger.info(`botsandborgs: AvatarX has the fixed clips: ${pushed.join(', ')}`);
-    }
+    if (fixedClips.length) await this.afterClipFixes(fixedClips);
     return report;
   }
 
   async library({ kind, query, refresh, update } = {}) {
     const refreshing = refresh === true || refresh === 'true';
     if (refreshing) await this.refreshLibrary();
-    const updated = update === true || update === 'true' ? await this.updateOwned({ kind }) : null;
+    // "Update": the account library (store 0.29); fetching each order again only when the store has no library.
+    let updated = null;
+    if (update === true || update === 'true') {
+      updated = await this.syncLibrary({ full: true }).catch(e => { this.logger.warn(`botsandborgs: library sync failed: ${e.message}`); return null; });
+      if (!this._libraryOk) updated = await this.updateOwned({ kind });
+    }
     await this.repairGallery();
     // A refresh also relists owned clips, so a fix to how clips are read reaches packs already bought.
     if (refreshing && (await this.libraryItems()).some(i => i.files.some(f => f.kind === 'animation' || f.kind === 'prop'))) await this.publishAnimations();
