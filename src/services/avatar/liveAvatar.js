@@ -89,7 +89,8 @@ export async function clips(d = dirs()) {
   const animDir = path.join(d.vrm, 'animations');
   for (const list of ['animations.json', 'store.json']) {
     for (const c of await readJson(path.join(animDir, list), [])) {
-      if (!c?.file || /(^|\/)broad\//i.test(c.file)) continue;
+      // Broad-shouldered versions are not for these bodies; a loop's -in/-out/-once companions are not moves of their own.
+      if (!c?.file || /(^|\/)broad\//i.test(c.file) || c.role) continue;
       const file = path.join(animDir, c.file);
       if (!file.startsWith(animDir + path.sep)) continue;
       let name = avatarxClipName(c.file);

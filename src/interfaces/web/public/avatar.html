@@ -2331,7 +2331,8 @@
                 try {
                     const r = await fetch('/vrm-models/animations/store.json', { cache: 'no-cache' });
                     const bought = r.ok ? await r.json() : [];
-                    if (Array.isArray(bought)) this._animCatalog = this._animCatalog.concat(bought);
+                    // A loop's -in/-out/-once companions (store 0.30.2) belong to their loop, not the list.
+                    if (Array.isArray(bought)) this._animCatalog = this._animCatalog.concat(bought.filter(c => !c.role));
                 } catch (e) { /* none bought */ }
             }
             const sel = document.getElementById('vrm-anim-select');

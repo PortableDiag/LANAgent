@@ -1627,7 +1627,8 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
   /** Play an owned clip on the agent's 3D body: by name ("rumba"), by what it is for ("wave", "dance"), or any one. */
   /** Which owned clip a request means: { choice, entry, rel } or { error }. */
   async chooseClip({ item, clip, asked = '', speaking = false }) {
-    let pool = (await this.libraryItems()).flatMap(i => i.files.filter(f => f.kind === 'animation' && f.bodyFit !== 'broad').map(f => ({ item: i, file: f })));
+    // A loop's companions (-in / -out / -once, store 0.30.2) are part of their loop, never a move of their own.
+    let pool = (await this.libraryItems()).flatMap(i => i.files.filter(f => f.kind === 'animation' && f.bodyFit !== 'broad' && !f.role).map(f => ({ item: i, file: f })));
     if (!pool.length) return { error: "I don't own any animations yet. I can buy a pack from Bots & Borgs if you want." };
     if (item && !isGenericItem(item)) {
       const inItem = pool.filter(p => p.item.variant === item || this.matches(p.item, item));

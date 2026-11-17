@@ -2,6 +2,11 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.846] - 2026-11-16
+
+### Added
+- **Clip entries and exits (Bots & Borgs 0.30.2).** A loop's `entry`, `exit` and `once`, and its companions' `role` (in, out, once) and `of`, are kept from the store's clips.json. The `-in`, `-out` and `-once` companions are part of their loop, never a move of their own: they stay out of clip choice and out of the designer's, the playground's and the live avatar's move lists. Clips without the fields still blend in as before.
+
 ## [2.25.845] - 2026-11-16
 
 ### Fixed

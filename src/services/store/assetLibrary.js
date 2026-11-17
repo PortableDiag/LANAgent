@@ -354,6 +354,10 @@ export function applyClipManifest(files, manifest) {
     for (const [from, to] of [['faces', 'faces'], ['energy', 'energy'], ['bodies', 'bodies'], ['body_fit', 'bodyFit']]) if (c[from]) f[to] = String(c[from]);
     if (typeof c.while_talking === 'boolean') f.whileTalking = c.while_talking;
     if (c.prop) f.propNote = String(c.prop);
+    // Store 0.30.2 (2119 #537): a loop names its way in and out (`entry`/`exit`: "idle" or a companion clip id) and a
+    // baked play-once version (`once`); companions say what they are (`role`: in | out | once) and whose (`of`).
+    for (const k of ['entry', 'exit', 'once', 'of']) if (typeof c[k] === 'string' && c[k]) f[k] = c[k];
+    if (['in', 'out', 'once'].includes(c.role)) f.role = c.role;
     const g = tagGesture(f.tags) || clipGesture(f.label || f.name);
     if (g) f.gesture = g; else delete f.gesture;
   }
@@ -482,7 +486,7 @@ export async function writeStoreAnimations(items, libraryDir, vrmDir, { warn, on
         if (uses.length) entry.uses = uses;
       }
       if (f.expressions?.length) entry.expressions = f.expressions;
-      for (const k of ['tags', 'faces', 'energy', 'whileTalking', 'seconds', 'bodies']) if (f[k] != null) entry[k] = f[k];
+      for (const k of ['tags', 'faces', 'energy', 'whileTalking', 'seconds', 'bodies', 'entry', 'exit', 'once', 'role', 'of']) if (f[k] != null) entry[k] = f[k];
       out.push(entry);
     }
   }

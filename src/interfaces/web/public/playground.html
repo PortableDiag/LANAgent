@@ -971,6 +971,7 @@
                 const r = await fetch('/vrm-models/animations/store.json', { cache: 'no-cache' });
                 const bought = r.ok ? await r.json() : [];
                 for (const c of Array.isArray(bought) ? bought : []) {
+                    if (c.role) continue; // a loop's -in/-out/-once companion (store 0.30.2), not a move of its own
                     const name = String(c.label || c.file).toLowerCase().replace(/['"\\<>&]/g, '');
                     if (!name || animFiles.some(a => a.name === name)) continue;
                     animFiles.push({ url: '/vrm-models/animations/' + String(c.file).split('/').map(encodeURIComponent).join('/'), name, loop: !!c.loop });
