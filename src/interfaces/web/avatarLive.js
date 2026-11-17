@@ -70,6 +70,9 @@ export function createLiveAvatar(agent, { d = L.dirs() } = {}) {
       const live = await store()?.liveProps?.();
       const body = avatarList.find(a => a.id === active);
       if (live?.props?.some(p => p.fitted) && body) fitted = L.applyFits(propList, live.props, await L.fileSha256(body.file));
+      // Store 0.30: a prop that cannot fit this body is not attached to it (unless the store allows a self-fit: the pole).
+      const off = await store()?.unsupportedProps?.();
+      if (off?.size) fitted = fitted.filter(p => !off.has(p.name));
     } catch {}
     return { settings, active, avatarList, clipMap, propList: fitted, bgMap, clipNames: [...clipMap.keys()].sort(), backgroundNames: [...bgMap.keys()] };
   }

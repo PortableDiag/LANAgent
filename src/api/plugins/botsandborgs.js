@@ -125,6 +125,13 @@ export function videoRecipient(asked = '', to = '') {
 }
 
 
+/** The store's per-prop or per-pack fit entries as a list, whether it sends an array or a map keyed by name. */
+export function fitEntries(v, nameKey) {
+  if (Array.isArray(v)) return v.filter(x => x && typeof x === 'object').map(x => ({ ...x, [nameKey]: x[nameKey] || x.name || x.id }));
+  if (v && typeof v === 'object') return Object.entries(v).map(([k, x]) => ({ ...(typeof x === 'object' ? x : { state: x }), [nameKey]: k }));
+  return [];
+}
+
 /** Tags that say nothing about what a clip shows. */
 const VAGUE_TAGS = new Set(['idle', 'loop', 'talk', 'talking', 'break', 'calm', 'standard', 'broad', 'front', 'emote', 'pose', 'move', 'motion']);
 /** The clips whose tags the request names most (each tag as a word or a word's start), or [] when none is named. */
@@ -188,8 +195,8 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
       {
         command: 'live',
         description: 'Live avatar passes from Bots & Borgs: models the store hosts and keeps at their newest version. Lists each pass (model, state, expiry) and checks the store for a newer version now; a new version replaces the installed model, and the worn one everywhere it shows. Buy one with buy({ variant: "<model>-live30" }) (30, 90 or 365 days)',
-        usage: 'live({ check: true })  // renew: true (the worn model) or a model slug renews its pass now',
-        examples: ['check your live avatars for updates', 'which live avatar passes do you have', 'when does your live avatar pass expire', 'is there a new version of your live avatar']
+        usage: 'live({ check: true })  // renew: true (the worn model) or a model slug renews its pass now; fit: true = how the store\'s props fit my body and why one is left off',
+        examples: ['check your live avatars for updates', 'which live avatar passes do you have', 'when does your live avatar pass expire', 'is there a new version of your live avatar', 'are the props fitted to your avatar', "why can't your avatar hold the mug"]
       },
       {
         command: 'plan',
@@ -571,7 +578,47 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     await PluginSettings.setCached(this.name, 'liveProps', { slug: pass.slug, checkedAt: new Date().toISOString(), props });
     const fitted = props.filter(p => p.fitted).length;
     this.logger.info(`botsandborgs: live props: ${props.length} listed (${props.map(p => p.prop).join(', ') || 'none'}), ${fitted} fitted to this avatar`);
+    await this.syncLiveFit(pass, key).catch(e => this.logger.warn(`botsandborgs: fit status not read: ${e.message}`));
     return props;
+  }
+
+  /**
+   * The store's fit status for the pass's body (store 0.30, GET /api/live/<slug>/fit): vrm_sha256, body_class, the job,
+   * and per pack and prop a state (fitted | pending | unsupported | standard) with a `line` for the owner. Kept in
+   * settings; an unsupported prop is never attached to that body unless `self_fit` (see unsupportedProps).
+   */
+  async syncLiveFit(pass, key) {
+    const r = await this.fetchLive(`${BASE}/api/live/${pass.slug}/fit`, { 'User-Agent': this.userAgent(), 'X-Live-Key': key, Accept: 'application/json' });
+    if (r.status !== 200) { if (r.status !== 404) this.logger.info(`botsandborgs: fit status answered ${r.status || r.error}`); return null; }
+    let d; try { d = JSON.parse(Buffer.from(r.data).toString('utf8')); } catch { return null; }
+    const fit = { slug: pass.slug, checkedAt: new Date().toISOString(), vrm_sha256: d.vrm_sha256 || null, body_class: d.body_class || null,
+      job: d.job || null, props: fitEntries(d.props, 'prop'), packs: fitEntries(d.packs, 'pack') };
+    await PluginSettings.setCached(this.name, 'liveFit', fit);
+    const count = (s) => fit.props.filter(p => p.state === s).length;
+    this.logger.info(`botsandborgs: fit status (${fit.body_class || 'body ?'}): props ${fit.props.length} — ${['fitted', 'pending', 'unsupported', 'standard'].map(s => `${count(s)} ${s}`).join(', ')}${fit.job ? `; job ${fit.job.state || ''} position ${fit.job.position ?? '?'}` : ''}${fit.props[0] ? ` (fields: ${Object.keys(fit.props[0]).join(', ')})` : ''}`);
+    return fit;
+  }
+
+  /**
+   * Props the store says do not fit the body worn now and may not be placed by hand: never attached to it (store 0.30:
+   * "a prop that does not fit looks worse than none"). Only when the status is about that very body (its sha256).
+   * Returns a Map name -> owner line.
+   */
+  async unsupportedProps() {
+    const fit = await PluginSettings.getCached(this.name, 'liveFit').catch(() => null);
+    if (!fit?.vrm_sha256 || !fit.props?.length) return new Map();
+    const manifest = await fs.readFile(path.join(this.vrmDir(), 'manifest.json'), 'utf8').then(JSON.parse).catch(() => []);
+    const worn = manifest.find(m => m.id === this.agent?.agentModel?.activeVRMModel);
+    if (!worn?.file) return new Map();
+    const { fileSha256 } = await import('../../services/avatar/liveAvatar.js');
+    if ((await fileSha256(path.join(this.vrmDir(), path.basename(worn.file)))) !== fit.vrm_sha256) return new Map();
+    return new Map(fit.props.filter(p => p.state === 'unsupported' && p.self_fit !== true).map(p => [String(p.prop).toLowerCase(), p.line || p.reason || 'it does not fit this body']));
+  }
+
+  /** A clip's props for this body: the store's unsupported ones taken out. */
+  async propsForBody(props, opts) {
+    const off = await this.unsupportedProps().catch(() => new Map());
+    return propsFor(props, opts).filter(p => !off.has(String(p.prop).toLowerCase()));
   }
 
   /** The pass's props as last fetched ({ slug, checkedAt, props }), or null. */
@@ -583,7 +630,16 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
       .catch(e => ({ status: 0, error: e.message, headers: {} }));
   }
 
-  async liveCommand({ check, renew } = {}) {
+  async liveCommand({ check, renew, fit } = {}) {
+    // "Is my avatar fitted / why can't you hold the mug": the store's fit status for the worn body, in its own words.
+    if (fit === true || fit === 'true') {
+      const f = await PluginSettings.getCached(this.name, 'liveFit').catch(() => null);
+      if (!f) return { success: true, result: "I have no fit status from Bots & Borgs yet; it comes with my live pass's next check." };
+      const off = await this.unsupportedProps();
+      const lines = f.props.map(p => `- ${p.prop}: ${p.line || p.state}${p.state === 'unsupported' && p.fix ? ` (would work with: ${p.fix})` : ''}`);
+      const job = f.job ? ` The store is fitting it now${f.job.eta_seconds ? `, about ${Math.max(1, Math.round(f.job.eta_seconds / 60))} min` : ''}${f.job.position != null ? ` (position ${f.job.position})` : ''}.` : '';
+      return { success: true, fit: f, result: `How the store's props fit my body${f.body_class ? ` (${f.body_class})` : ''}:\n${lines.join('\n') || '- nothing listed yet'}${off.size ? `\nI won't use ${[...off.keys()].join(', ')} on this body.` : ''}${job}` };
+    }
     if (renew) {
       const slug = renew === true || renew === 'true' ? this.wornBase() : this.productBase(String(renew));
       if (!slug) return { success: false, error: 'Which model\'s pass should I renew?' };
@@ -1654,7 +1710,7 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     if (picked.error) return { success: false, error: picked.error };
     const { choice, entry, rel } = picked;
     // Everywhere its body is: every open playground or designer page (no AvatarX needed), and AvatarX when it has one.
-    const shown = propsFor(entry.props, { asked: `${clip || ''} ${asked}` });
+    const shown = await this.propsForBody(entry.props, { asked: `${clip || ''} ${asked}` });
     const pages = await this.playOnPages({ file: entry.file, label: entry.label, loop: !!entry.loop, prop: entry.prop || null, ...(shown.length ? { props: shown } : {}) });
     const { playOnAvatarX, pushClipsToAvatarX } = await import('../../services/avatar/avatarx.js');
     let avatarx = 'not connected';
@@ -1710,7 +1766,7 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
       const framing = framingAsked(asked);
       if (scene) this.logger.info(`botsandborgs: filming in front of ${path.basename(scene)}${framing !== 'full' ? `, ${framing} framing` : ''}`);
       const v = await (this.renderVideo || renderClipVideo)({ modelPath: path.join(this.vrmDir(), model.file), clipPath: path.join(this.vrmDir(), 'animations', rel),
-        loop: !!entry.loop, prop: entry.prop || null, props: this.propPaths(propsFor(entry.props, { asked, scene })), framing, ...(voice ? { voice } : {}), ...(scene ? { backgroundPath: scene } : {}) });
+        loop: !!entry.loop, prop: entry.prop || null, props: this.propPaths(await this.propsForBody(entry.props, { asked, scene })), framing, ...(voice ? { voice } : {}), ...(scene ? { backgroundPath: scene } : {}) });
       const filename = `${String(label).toLowerCase().replace(/[^a-z0-9]+/g, '-')}.mp4`;
       if (/^(me|owner|myself)$/i.test(to)) {
         const tg = this.agent?.interfaces?.get?.('telegram');
@@ -1775,7 +1831,7 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     const voice = audio_b64 ? { audio: Buffer.from(String(audio_b64), 'base64'), format: 'mp3' } : null;
     const how = ['full', 'waist', 'head'].includes(framing) ? framing : 'full';
     const v = await (this.renderVideo || renderClipVideo)({ modelPath: path.join(this.vrmDir(), model.file), clipPath: path.join(this.vrmDir(), 'animations', rel),
-      loop: !!entry.loop, prop: entry.prop || null, props: this.propPaths(propsFor(entry.props, { asked: String(name) })), framing: how,
+      loop: !!entry.loop, prop: entry.prop || null, props: this.propPaths(await this.propsForBody(entry.props, { asked: String(name) })), framing: how,
       ...(voice ? { voice } : {}), ...(backgroundPath ? { backgroundPath } : {}) });
     this.logger.info(`botsandborgs: rendered a video of ${entry.label || name} (${v.seconds}s) for the avatar API`);
     return v;

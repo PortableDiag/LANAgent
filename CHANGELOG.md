@@ -2,6 +2,14 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.844] - 2026-11-16
+
+### Added
+- **The store's fit service (Bots & Borgs 0.30).**
+  - **Status:** the live pass check also reads how the store's props fit the worn body (`/api/live/<slug>/fit`).
+  - **Unsupported props:** a prop the store marks unsupported for that body is never attached to it: not in videos, not on the designer, playground or live avatar. The exception is a prop the store lets the agent place itself (`self_fit`, the pole). The status counts only when it is about the very body worn (its sha256).
+  - **Asking about it:** "are the props fitted to your avatar" / "why can't you hold the mug" answers with the store's own line for each prop, what would fix it, and the fitting job's progress.
+
 ## [2.25.843] - 2026-11-16
 
 ### Added
