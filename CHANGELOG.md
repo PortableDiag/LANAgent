@@ -2,6 +2,13 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.847] - 2026-11-17
+
+### Fixed
+- **Memes are written in English.** An unasked meme after "Se me a video of you dancing" came with Spanish captions: the typo read as Spanish, and nothing said which language to write in. Every caption the agent writes itself is now in the owner's language, English unless `OWNER_LANGUAGE` says otherwise, whatever language a message looks like.
+- **"A video of you dancing" is a dance.** The clip choice by tags (2.25.838) counted the word "you" (a pointing clip's tag) and missed "dancing" (the tag is "dance"), so it sent a pointing gesture. Pronouns and words like "video" no longer count as tags, and a tag matches its word forms (dancing, sitting, sipping).
+- **No unasked meme after a request.** Asking for something to be done (send, make, show, remind, play…) is a task, not banter, and gets no meme on top of the answer. Jokes and chat still can.
+
 ## [2.25.846] - 2026-11-16
 
 ### Added

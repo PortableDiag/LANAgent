@@ -133,16 +133,25 @@ export function fitEntries(v, nameKey) {
 }
 
 /** Tags that say nothing about what a clip shows. */
-const VAGUE_TAGS = new Set(['idle', 'loop', 'talk', 'talking', 'break', 'calm', 'standard', 'broad', 'front', 'emote', 'pose', 'move', 'motion']);
+const VAGUE_TAGS = new Set(['idle', 'loop', 'talk', 'talking', 'break', 'calm', 'standard', 'broad', 'front', 'emote', 'pose', 'move', 'motion',
+  // Words every request has: "a video of YOU dancing" matched emote-point's tag "you" (2026-11-17).
+  'you', 'your', 'yours', 'me', 'my', 'him', 'her', 'them', 'this', 'that', 'the', 'and', 'with', 'for', 'video', 'clip']);
+/** A tag matches a word of the request or its forms: "dance" matches dancing / danced / dances, "sit" sitting, "sip" sipping. */
+function tagNamed(tag, words, said) {
+  if (tag.includes(' ')) return said.includes(` ${tag} `) || said.includes(` ${tag}`);
+  const stem = tag.length > 4 ? tag.replace(/e$/, '') : tag;
+  return words.some(w => w === tag || (w.startsWith(stem) && /^(?:e|es|s|ed|d|ing|er|ers|([a-z])(?:ing|ed|er|ers))?$/.test(w.slice(stem.length))));
+}
 /** The clips whose tags the request names most (each tag as a word or a word's start), or [] when none is named. */
 export function clipsByTags(pool, words, usesOf = () => []) {
   const said = ` ${String(words || '').toLowerCase().replace(/[^a-z0-9 ]+/g, ' ').replace(/\s+/g, ' ')} `;
+  words = said.trim().split(' ');
   let best = 0;
   const scored = pool.map(p => {
     // A prop's `use` line ("drinking coffee: mug-sip-idle", store 0.28) counts like tags: its words before the colon.
     const useWords = usesOf(p).flatMap(u => String(u).split(':')[0].toLowerCase().split(/[^a-z0-9]+/)).filter(w => w.length >= 4);
     const tags = [...new Set([...(p.file?.tags || []), ...useWords])].map(t => String(t).toLowerCase().trim()).filter(t => t.length >= 3 && !VAGUE_TAGS.has(t));
-    const score = tags.filter(t => said.includes(` ${t}`)).length;
+    const score = tags.filter(t => tagNamed(t, words, said)).length;
     if (score > best) best = score;
     return { p, score };
   });

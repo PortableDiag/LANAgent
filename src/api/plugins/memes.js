@@ -62,6 +62,18 @@ export function placements(params, template) {
   return texts.map((text, i) => ({ text, box: boxes[i], align: boxes[i].align, style: boxes[i].style, valign: boxes[i].valign }));
 }
 
+/**
+ * The language the owner reads, for any text the agent writes into a picture. The owner only speaks English; a typo
+ * ("Se me a video") read as Spanish and the meme came in Spanish (2026-11-17). OWNER_LANGUAGE overrides.
+ */
+export function ownerLanguage(env = process.env) { return String(env.OWNER_LANGUAGE || 'English').trim() || 'English'; }
+
+/** The owner asked for something to be done (send, make, show, remind…): a reply to that is a task, not banter. */
+export function askedForSomething(text) {
+  const t = String(text || '').trim().toLowerCase().replace(/^(?:hey |hi |ok |okay |so |please |pls |alice,? )+/, '');
+  return /^(?:can you |could you |would you |will you |please )?(?:se(?:nd)?|make|show|do|play|set|remind|call|text|message|email|find|search|look up|buy|order|get|check|turn|switch|start|stop|open|close|create|add|delete|remove|schedule|book|pay|record|film|draw|generate|write)\b/.test(t);
+}
+
 export default class MemesPlugin extends BasePlugin {
   constructor(agent) {
     super(agent);
@@ -148,6 +160,7 @@ Return {"template": "<a template's plain name, no id or prefix>", "texts": ["box
 ${roles}
   Example: "distracted boyfriend: me, a new side project, my unfinished projects" -> ["a new side project", "me", "my unfinished projects"].
 - Use the user's words when given (split on "/", "|" or commas); otherwise write short, funny texts, one per box.
+- Texts you write yourself are in ${ownerLanguage()}, whatever language the request looks like.
 - Other templates: top text then bottom text.`;
     const r = await this.agent.providerManager.generateResponse(prompt, { temperature: 0.6, maxTokens: 300 });
     return safeJsonParse(r?.content, {}) || {};
@@ -238,7 +251,8 @@ ${roles}
   async autoMeme({ userText, replyText, chatId, threadId, stickerSentAt = 0 } = {}) {
     const now = Date.now();
     const s = await this.settings();
-    if (!s.autoMemes || !chatId || !memeCouldFit(replyText) || ownerAnnoyed(userText)) return null;
+    // Not after a request to do something: "Se me a video of you dancing" got a meme on top of the video (2026-11-17).
+    if (!s.autoMemes || !chatId || !memeCouldFit(replyText) || ownerAnnoyed(userText) || askedForSomething(userText)) return null;
     if (now - (this._memeSentAt || 0) < s.autoMemeEveryMinutes * 60000) return null;
     if (now - (this._memeAskedAt || 0) < ASK_EVERY_MS) return null;
     if (now - stickerSentAt < 20 * 60000) return null; // a sticker just went: no meme on top of it
@@ -260,7 +274,7 @@ Templates: ${names}
 Box order of these (by imgflip id):
 ${roles}
 
-Answer JSON only: {"meme": false} or {"meme": true, "template": "<template name>", "texts": ["box 1", "box 2"]}. Texts short, about this exchange, never mean to the owner.`;
+Answer JSON only: {"meme": false} or {"meme": true, "template": "<template name>", "texts": ["box 1", "box 2"]}. Texts short, about this exchange, never mean to the owner, and always in ${ownerLanguage()}, whatever language the messages look like (a typo is not another language).`;
     let r;
     try {
       r = await Promise.race([this.askModel(pm, prompt), new Promise((_, rej) => setTimeout(() => rej(new Error('timed out')), 15000))]);
