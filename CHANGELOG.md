@@ -2,6 +2,11 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.848] - 2026-11-17
+
+### Added
+- **New clip and props packs arrive by themselves under All-Access.** On every 6-hour store check, with an active All-Access plan, the agent takes each animation and props pack in the store it doesn't own yet. It takes whole packs only, at no cost, and keeps 3 of the period's downloads for the owner's own asks. The library sync then keeps them current. A pack the plan doesn't cover is never bought. The owner gets a silent Telegram note listing what was taken.
+
 ## [2.25.847] - 2026-11-17
 
 ### Fixed

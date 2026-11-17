@@ -540,6 +540,9 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     const latest = await this.livePasses();
     for (const p of passes) { const at = latest.findIndex(x => x.slug === p.slug); if (at >= 0) latest[at] = p; else latest.push(p); }
     await this.saveLivePasses(latest);
+    // Under All-Access, every new clip and props pack the store adds is taken by itself (the owner, 2026-11-17: "it
+    // should sync automatically without me or you having to do it"); then the library brings it and its updates.
+    await this.takeNewPacks().catch(e => this.logger.warn(`botsandborgs: new packs not taken: ${e.message}`));
     // Store 0.29: the account library is the one sync path for clip and props packs (and every other product).
     await this.syncLibrary().catch(e => this.logger.warn(`botsandborgs: library sync failed: ${e.message}`));
     await this.syncLiveClips(latest).catch(e => this.logger.warn(`botsandborgs: live clip check failed: ${e.message}`));
@@ -814,6 +817,8 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     if (!(usd > 0) && !(usd === 0 && (credited || covered))) throw new Error(`The store returned a quote with no price (${JSON.stringify(quote).slice(0, 400)}).`);
     const ledger = await this.ledger();
     const spent = this.spentThisWeek(ledger);
+    // An automatic take (takeNewPacks) never spends money: only a covered or credited $0 item goes through.
+    if (data.autoTake && usd > 0) return { success: false, error: `${data.variant} costs $${usd.toFixed(2)}; All-Access does not cover it, so it was not taken` };
     // Nothing to pay (a covered or credited $0 item) spends no budget, even in a week already over it.
     if (usd > 0 && spent + usd > s.weeklyBudgetUsd + 1e-9) return { success: false, error: `That costs $${usd.toFixed(2)} and I have $${Math.max(0, s.weeklyBudgetUsd - spent).toFixed(2)} of this week's $${s.weeklyBudgetUsd} left, so I didn't buy it.` };
     if (s.maxItemUsd != null && usd > s.maxItemUsd) return { success: false, error: `That costs $${usd.toFixed(2)}, over my $${s.maxItemUsd} per-item limit.` };
@@ -1350,6 +1355,40 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     if (fixedClips.length) await this.afterClipFixes(fixedClips);
     this.logger.info(`botsandborgs: library sync: ${listed.length} listed${q ? ' since the last check' : ''}, ${report.length} changed${first ? ' (first sync: what is here was taken as current)' : ''}`);
     return report;
+  }
+
+  /**
+   * Every animation and props pack in the store that this agent does not own, taken at no cost under an active
+   * All-Access plan (its own or a seat on another). Whole packs only, never a single clip a pack holds; up to the
+   * plan's downloads left this period, keeping 3 for the owner's own asks. Never spends money: a pack the plan does
+   * not cover (any price above $0) is left alone. Returns the variants taken.
+   */
+  async takeNewPacks({ collections = ['animations', 'props'], keep = 3 } = {}) {
+    const key = await this.accountKey().catch(() => null);
+    if (!key) return [];
+    const plan = await this.plan(key);
+    if (!plan || !['active', 'trialing'].includes(plan.status)) return [];
+    let left = Number(plan.downloads_left ?? plan.downloads?.left ?? 0) - keep;
+    if (!(left > 0)) return [];
+    const catalog = await this.api('get', '/api/catalog').catch(() => null);
+    const owned = new Set((await this.libraryItems()).map(i => i.variant));
+    const want = (catalog?.products || []).filter(p => collections.includes(p.collection))
+      // The pack itself: the variant named like the product, else its first (singles carry a clip suffix).
+      .map(p => (p.variants || []).find(v => v.id === p.id || v.id === p.slug)?.id || (p.variants || [])[0]?.id)
+      .filter(v => v && !owned.has(v));
+    const taken = [];
+    for (const variant of want) {
+      if (left <= 0) break;
+      // confirm: a covered pack costs nothing, and autoTake refuses anything that would (see buy).
+      const r = await this.buy({ variant, use: 'keep', autoTake: true, confirm: true }).catch(e => ({ success: false, error: e.message }));
+      if (r?.success) { taken.push(variant); left--; this.logger.info(`botsandborgs: took ${variant} under All-Access`); }
+      else this.logger.info(`botsandborgs: ${variant} not taken: ${r?.error || r?.result || 'no answer'}`);
+    }
+    if (taken.length) {
+      const tg = this.agent?.interfaces?.get?.('telegram');
+      await tg?.sendNotification?.(`New from Bots & Borgs, taken under All-Access: ${taken.join(', ')}.`)?.catch?.(() => {});
+    }
+    return taken;
   }
 
   /** One library download: { status, headers, data } (304 when `etag` is current). */
