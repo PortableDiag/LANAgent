@@ -545,7 +545,9 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
    * (updateOwned), which relists the clips and replaces AvatarX's copies. Returns 'unchanged' | 'first' | 'updated' | null.
    */
   async syncLiveClips(passes) {
-    const pass = passes.find(p => p.state !== 'expired' && p.key);
+    // The pass of the body it WEARS: its props, fit status and fitted clips belong to that body. Taking the first pass
+    // read Core's status while ALICE wore Racer Blue (2119 #533), so Core's fits would have gone on Racer Blue.
+    const pass = this.wornPass(passes);
     if (!pass) return null;
     let key; try { key = decrypt(pass.key); } catch { return null; }
     await this.syncLiveProps(pass, key).catch(e => this.logger.warn(`botsandborgs: live props check failed: ${e.message}`));
@@ -591,7 +593,8 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     const r = await this.fetchLive(`${BASE}/api/live/${pass.slug}/fit`, { 'User-Agent': this.userAgent(), 'X-Live-Key': key, Accept: 'application/json' });
     if (r.status !== 200) { if (r.status !== 404) this.logger.info(`botsandborgs: fit status answered ${r.status || r.error}`); return null; }
     let d; try { d = JSON.parse(Buffer.from(r.data).toString('utf8')); } catch { return null; }
-    const fit = { slug: pass.slug, checkedAt: new Date().toISOString(), vrm_sha256: d.vrm_sha256 || null, body_class: d.body_class || null,
+    if (d.product && this.productBase(d.product) !== this.productBase(pass.slug)) { this.logger.warn(`botsandborgs: fit status for ${d.product}, not ${pass.slug}; ignored`); return null; }
+    const fit = { slug: pass.slug, product: d.product || null, checkedAt: new Date().toISOString(), vrm_sha256: d.vrm_sha256 || null, body_class: d.body_class || null,
       job: d.job || null, props: fitEntries(d.props, 'prop'), packs: fitEntries(d.packs, 'pack') };
     await PluginSettings.setCached(this.name, 'liveFit', fit);
     const count = (s) => fit.props.filter(p => p.state === s).length;
@@ -607,6 +610,7 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
   async unsupportedProps() {
     const fit = await PluginSettings.getCached(this.name, 'liveFit').catch(() => null);
     if (!fit?.vrm_sha256 || !fit.props?.length) return new Map();
+    if (this.productBase(fit.slug) !== this.wornBase()) return new Map();
     const manifest = await fs.readFile(path.join(this.vrmDir(), 'manifest.json'), 'utf8').then(JSON.parse).catch(() => []);
     const worn = manifest.find(m => m.id === this.agent?.agentModel?.activeVRMModel);
     if (!worn?.file) return new Map();
@@ -619,6 +623,13 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
   async propsForBody(props, opts) {
     const off = await this.unsupportedProps().catch(() => new Map());
     return propsFor(props, opts).filter(p => !off.has(String(p.prop).toLowerCase()));
+  }
+
+  /** The live pass of the model worn now (by product), or null when it wears no store model with a pass. */
+  wornPass(passes) {
+    const worn = this.wornBase();
+    if (!worn) return null;
+    return passes.find(p => p.state !== 'expired' && p.key && this.productBase(p.slug) === worn) || null;
   }
 
   /** The pass's props as last fetched ({ slug, checkedAt, props }), or null. */

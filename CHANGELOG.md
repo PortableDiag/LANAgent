@@ -2,6 +2,11 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.845] - 2026-11-16
+
+### Fixed
+- **Props, fit status and fitted clips come from the worn body's live pass.** With two passes, the check used whichever came first (Core) while the agent wore Racer Blue, so Core's fits would have gone on Racer Blue. The worn model's own pass is used now, a status for another product is ignored, and a body the store does not host gets no fit status at all.
+
 ## [2.25.844] - 2026-11-16
 
 ### Added
