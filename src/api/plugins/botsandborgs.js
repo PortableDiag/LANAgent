@@ -282,7 +282,17 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     if (body) headers['Content-Type'] = 'application/json';
     if (key) headers.Authorization = `Bearer ${key}`;
     if (idem) headers['Idempotency-Key'] = idem;
-    const r = await axios({ method, url: `${BASE}${route}`, data: body, headers, timeout: 30000, validateStatus: () => true });
+    const http = this.http || axios; // tests swap the transport
+    let r = await http({ method, url: `${BASE}${route}`, data: body, headers, timeout: 30000, validateStatus: () => true });
+    // The store's rate limit is a wait, not a failure: DELTA's reply to the owner was "too many requests; retry in 12s
+    // (rate_limited)" (2026-11-17). Up to two waits of at most 30 s; an order carries its Idempotency-Key, so a retry
+    // never buys twice.
+    for (let tries = 0; r.status === 429 && tries < 2; tries++) {
+      const wait = Math.min(30, Number(r.data?.retry_after ?? r.headers?.['retry-after']) || 12);
+      this.logger.info(`botsandborgs: the store asked to wait ${wait}s (rate limit); retrying ${method.toUpperCase()} ${route.split('?')[0]}`);
+      await new Promise(res => setTimeout(res, wait * 1000));
+      r = await http({ method, url: `${BASE}${route}`, data: body, headers, timeout: 30000, validateStatus: () => true });
+    }
     if (r.status >= 400) {
       const err = new Error(`${r.data?.error || `HTTP ${r.status}`}${r.data?.code ? ` (${r.data.code})` : ''}`);
       err.status = r.status; err.code = r.data?.code;
@@ -739,9 +749,15 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     // A variant id is a slug ("mech-menagerie-icons-octopus-nautilus"); "robot icon" from the router's extractor is a
     // description, so it becomes the search words and the agent picks (live, 2026-10-28).
     if (data.variant && !/^[a-z0-9]+(?:-[a-z0-9]+)+$/.test(String(data.variant))) data = { ...data, query: data.query || data.variant, variant: undefined };
+    // A store id written in the request ("…in VRM Dance Pack 2 (vrm-dance-pack-2)…") is the thing to buy.
+    if (!data.variant) {
+      const slug = /\(((?:vrm|bg|mech|agent|bot|call)-[a-z0-9]+(?:-[a-z0-9]+)+)\)/i.exec(asked) || /\b((?:vrm|bg)-[a-z0-9]+(?:-[a-z0-9]+){1,6})\b/.exec(asked);
+      if (slug) data = { ...data, variant: slug[1].toLowerCase() };
+    }
     // "Buy all the animations": every clip pack on sale that it doesn't own, one order each, every one under the same
-    // budget and wallet rules. Stops at the first refusal and says what was bought before it.
-    if (!data.variant && data.all !== false && (data.all === true || data.all === 'true' || /\b(all|every|each)\b/i.test(asked))
+    // budget and wallet rules. Stops at the first refusal and says what was bought before it. "All-Access" is the plan's
+    // name, not "all": "…using the active All-Access pass" bought 15 items in 9 s on DELTA (2026-11-17).
+    if (!data.variant && data.all !== false && (data.all === true || data.all === 'true' || /\b(all|every|each)\b/i.test(asked.replace(/\ball[- ]access\b/gi, '')))
       && this.kindAsked(`${asked} ${data.kind || ''} ${data.query || ''}`) === 'animation') return this.buyAllAnimations(data);
     if (/\bsend (?:it|them|that)? ?(?:to )?me\b|\bto me\b|\bbuy me\b/i.test(asked) && !data.use) data = { ...data, use: 'send', to: data.to || 'me' };
     // "buy yourself an avatar" / "… and use it as your avatar" is for the agent's avatar; "send it to X" / "buy X a …" is a send.
@@ -1132,9 +1148,10 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
   async buyAllAnimations(data) {
     const cat = await this.api('get', '/api/catalog?collection=animations');
     const owned = new Set((await this.libraryItems()).map(i => i.variant));
+    // Whole packs only: a pack's single-clip variants are inside it already (DELTA bought 13 singles beside their packs).
     const todo = (cat.products || []).filter(p => p.collection === 'animations')
-      .flatMap(p => (p.variants || []).map(v => ({ id: v.id, title: p.title, usd: v.price_cents / 100 })))
-      .filter(v => !owned.has(v.id));
+      .map(p => { const v = (p.variants || []).find(x => x.id === p.id || x.id === p.slug) || (p.variants || [])[0]; return v && { id: v.id, title: p.title, usd: v.price_cents / 100 }; })
+      .filter(v => v && !owned.has(v.id));
     if (!todo.length) return { success: true, result: 'I already own every animation pack on sale.' };
     const done = [];
     for (const v of todo) {

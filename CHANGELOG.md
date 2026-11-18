@@ -2,6 +2,13 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.852] - 2026-11-17
+
+### Fixed
+- **"All-Access" no longer means "buy all".** A go-ahead to "buy the Cabbage Patch … using the active All-Access pass" matched the buy-everything path, and the agent bought 15 items in 9 seconds. All were $0 under the plan, but they were single clips its own packs already held. The plan's name no longer counts as "all", and a store id written in the request (vrm-dance-pack-2) is what gets bought.
+- **Buying everything takes whole packs only**, never their single clips.
+- **The store's rate limit is waited out, not reported.** A 429 is retried up to twice after the store's own wait (at most 30 s each); orders keep their idempotency key, so a retry never buys twice. The owner had been sent "too many requests; retry in 12s (rate_limited)" as the reply.
+
 ## [2.25.851] - 2026-11-17
 
 ### Fixed
