@@ -450,10 +450,18 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     return saved;
   }
 
-  /** The timer's run: nothing to do (and no store call) until a pass exists. Then the worn model's pass is renewed if due. */
+  /**
+   * The timer's run. Owned items and new packs are kept current for any agent with a store account, live pass or not:
+   * DELTA (a seat on ALICE's plan, no pass) never synced at all before (2026-11-17). Passes, when there are any, after.
+   */
   async liveTick() {
     await this.planTick().catch(e => this.logger.warn(`botsandborgs: plan check failed: ${e.message}`));
-    if (!(await this.livePasses()).length && !(await this.libraryItems()).some(i => i.livePass)) return;
+    if (!(await this.livePasses()).length && !(await this.libraryItems()).some(i => i.livePass)) {
+      if (!(await this.accountKey().catch(() => null))) return;
+      await this.takeNewPacks().catch(e => this.logger.warn(`botsandborgs: new packs not taken: ${e.message}`));
+      await this.syncLibrary().catch(e => this.logger.warn(`botsandborgs: library sync failed: ${e.message}`));
+      return;
+    }
     await this.syncLive();
     if (!(await this.settings()).autoRenewLive) return;
     const worn = this.wornBase();
@@ -1681,6 +1689,19 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     // A loop's companions (-in / -out / -once, store 0.30.2) are part of their loop, never a move of their own.
     let pool = (await this.libraryItems()).flatMap(i => i.files.filter(f => f.kind === 'animation' && f.bodyFit !== 'broad' && !f.role).map(f => ({ item: i, file: f })));
     if (!pool.length) return { error: "I don't own any animations yet. I can buy a pack from Bots & Borgs if you want." };
+    // Clips made for female bodies (clips.json `bodies: female`: the pole dance, the booty shakes) only on a female body.
+    // The body is the one worn NOW, so a changed avatar changes what plays (DELTA wears the Frog; owner, 2026-11-17).
+    const body = await this.wornBody().catch(() => null);
+    if (body !== 'female') {
+      const fits = pool.filter(p => p.file.bodies !== 'female');
+      const said = ` ${`${clip || ''} ${asked}`.toLowerCase().replace(/[-_]+/g, ' ')} `;
+      const onlyFemale = pool.find(p => p.file.bodies === 'female' && p.file.label && said.includes(` ${String(p.file.label).toLowerCase().replace(/[-_]+/g, ' ')} `));
+      if (onlyFemale && !fits.some(p => said.includes(` ${String(p.file.label || '').toLowerCase().replace(/[-_]+/g, ' ')} `))) {
+        return { error: `${onlyFemale.file.label} is made for female bodies, and the body I'm wearing ${body ? `is ${body === 'male' ? 'male' : 'not human'}` : "isn't known to be one"}.` };
+      }
+      pool = fits;
+      if (!pool.length) return { error: 'None of my clips suits the body I am wearing.' };
+    }
     if (item && !isGenericItem(item)) {
       const inItem = pool.filter(p => p.item.variant === item || this.matches(p.item, item));
       if (inItem.length) pool = inItem;
@@ -2027,6 +2048,43 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
   wornBase() {
     const id = this.agent?.agentModel?.activeVRMModel;
     return /^store-vrm-/.test(String(id || '')) ? this.productBase(id) : null;
+  }
+
+  /**
+   * The body worn now: 'female' | 'male' | 'other' (an animal, a robot, a creature), or null when it can't be told. The
+   * store says nothing about a model's body, so its portrait is looked at once with the vision model and the answer kept
+   * per model file (id + size: a new version is looked at again). Avatars change often (owner, 2026-11-17), so this is
+   * read at every clip choice, never set by hand.
+   */
+  async wornBody() {
+    const id = this.agent?.agentModel?.activeVRMModel;
+    if (!id) return null;
+    const manifest = await fs.readFile(path.join(this.vrmDir(), 'manifest.json'), 'utf8').then(JSON.parse).catch(() => []);
+    const m = manifest.find(x => x.id === id);
+    const key = `${id}:${m?.sizeMB ?? '?'}`;
+    const s = await this.settings();
+    if (s.bodies?.[key]) return s.bodies[key];
+    const picture = await this.bodyPicture(id);
+    const pm = this.agent?.providerManager;
+    if (!picture || !pm?.analyzeImage) return null;
+    const r = await pm.analyzeImage(picture, 'This is a picture of a 3D avatar. Is its body female, male, or not human (an animal, a robot, a creature)? Answer with one word: female, male or other.', { maxTokens: 10 }).catch(() => null);
+    const said = String(r?.analysis ?? r?.content ?? r ?? '').toLowerCase();
+    const body = /\bfemale\b/.test(said) ? 'female' : /\bmale\b/.test(said) ? 'male' : /\bother\b|not human|animal|robot|creature/.test(said) ? 'other' : null;
+    if (!body) return null;
+    await this.saveSettings({ bodies: { ...(s.bodies || {}), [key]: body } });
+    this.logger.info(`botsandborgs: the body of ${id} is ${body}`);
+    return body;
+  }
+
+  /** A picture of a gallery model: its store portrait when it has one, else the agent's own avatar picture (the worn one). */
+  async bodyPicture(id) {
+    const base = this.productBase(id);
+    for (const item of await this.libraryItems()) {
+      if (this.productBase(item.variant) !== base) continue;
+      const f = item.files.find(x => x.kind === 'portrait');
+      if (f) { const b = await fs.readFile(path.join(this.libraryDir(), safeName(item.variant), f.name)).catch(() => null); if (b) return b; }
+    }
+    return fs.readFile(path.join(DATA_PATH, 'agent', 'avatar.png')).catch(() => null);
   }
 
   /** A voice pack's voice.json → a saved voice preset on the local Kokoro engine. Never switches the current voice. */

@@ -2,6 +2,14 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.850] - 2026-11-17
+
+### Added
+- **Clips follow the body worn now.** Clips the store made for female bodies (`bodies: female`: the pole dance, the booty shakes) play only on a female body. The body comes from looking at the worn model's portrait once with the vision model, and the answer is kept per model file, so a new avatar is looked at again. "Do the pole dance" on another body answers why not. A dance request picks a dance that fits.
+
+### Fixed
+- **An agent with no live pass keeps its store items current too.** The store check only ran for an agent with a live pass, so a seat on another account's All-Access plan (DELTA) never took new packs or got updates. Any agent with a store account now runs it every 6 hours.
+
 ## [2.25.849] - 2026-11-17
 
 ### Fixed
