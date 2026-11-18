@@ -2,6 +2,11 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.851] - 2026-11-17
+
+### Fixed
+- **Govee stays off quietly where there is no key.** It now declares its API key, so on an instance without one (DELTA) the loader keeps it off, as for every other keyless plugin. It used to load anyway, with an ERROR on every restart. An instance with a stored or `.env` key is unaffected.
+
 ## [2.25.850] - 2026-11-17
 
 ### Added
