@@ -579,7 +579,7 @@
       import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
       import { XRControllerModelFactory } from 'three/addons/webxr/XRControllerModelFactory.js';
       import * as THREE_VRM from '/lib/three-vrm.module.js';
-      import { attachProps, detachProps } from '/lib/vrm-props.js';
+      import { attachProps, detachProps, updateProps } from '/lib/vrm-props.js';
 
       THREE.OrbitControls = OrbitControls;
       THREE.GLTFLoader = GLTFLoader;
@@ -958,6 +958,7 @@
                 // real time below.
                 const motionDelta = document.getElementById('vrm-slowmo')?.checked ? delta * 0.25 : delta;
                 if (this._mixer) this._mixer.update(motionDelta);
+                if (this._glbProps?.length) updateProps(this._glbProps, this._glbPropsAction?.time ?? 0, motionDelta);
                 // Root motion before vrm.update(), so the spring bones see this frame's move.
                 this._updateVRMJump(motionDelta);
                 this.currentVRM.update(motionDelta);
@@ -2484,7 +2485,7 @@
             detachProps(this._glbProps); this._glbProps = [];
             const vrm = this.currentVRM;
             if (!props?.length || !vrm) return;
-            attachProps({ GLTFLoader, vrm, props, isCurrent: () => gen === this._glbPropGen && this.currentVRM === vrm })
+            attachProps({ GLTFLoader, vrm, props, isCurrent: () => gen === this._glbPropGen && this.currentVRM === vrm, AnimationMixer: THREE.AnimationMixer, LoopOnce: THREE.LoopOnce })
                 .then(placed => { if (gen === this._glbPropGen) this._glbProps = placed; else detachProps(placed); })
                 .catch(e => console.warn('Props:', e.message));
         }
@@ -2514,6 +2515,7 @@
             this._setProp(this._clipProps?.[name], target.action.getClip());
             const once = this._nextGlbProps?.name === name ? this._nextGlbProps.props : null;
             this._nextGlbProps = null;
+            this._glbPropsAction = target.action; // props follow this clip's time (store `show` windows)
             this._setGlbProps(once ?? this._clipGlbProps?.[name]);
 
             if (this._currentIdleAction && this._currentIdleAction !== target) {

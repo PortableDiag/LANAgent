@@ -113,7 +113,8 @@ export function createLiveAvatar(agent, { d = L.dirs() } = {}) {
     },
     activeId,
     setActive,
-    storeScenes
+    storeScenes,
+    store
   };
   return live;
 }
@@ -136,9 +137,12 @@ async function askAgent(agent, text) {
   return String(r?.content ?? r?.text ?? r ?? '').trim();
 }
 
-export function avatarLiveRouter(agent, live = createLiveAvatar(agent)) {
+export function avatarLiveRouter(agent, live = createLiveAvatar(agent), { auth = authenticateToken } = {}) {
   const r = express.Router();
   const { d } = live;
+  // The store plugin, for the routes below (chat's body language, videos). It lives in createLiveAvatar; the /video
+  // route answered "store is not defined" until this was here (2026-11-17).
+  const store = () => live.store?.() || null;
 
   // Public: whether this browser is signed in (the page shows its login otherwise). Never a secret.
   r.get('/status', (req, res) => {
@@ -149,7 +153,7 @@ export function avatarLiveRouter(agent, live = createLiveAvatar(agent)) {
     res.json({ agent: process.env.AGENT_NAME || 'LANAgent', logged_in: logged, voice: !!process.env.OPENAI_API_KEY, has_password: true, can_setup: false });
   });
 
-  r.use(authenticateToken);
+  r.use(auth);
 
   r.get('/state', async (req, res) => { try { res.json(await live.getState()); } catch (e) { fail(res, e); } });
   r.patch('/state', express.json(), async (req, res) => { try { res.json(await live.patch(req.body)); } catch (e) { fail(res, e); } });

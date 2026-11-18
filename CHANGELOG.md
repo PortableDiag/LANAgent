@@ -2,6 +2,14 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.854] - 2026-11-17
+
+### Fixed
+- **The live avatar's video route and chat body language work.** Both called the store plugin through a helper that was out of their reach, so `POST /api/avatar-live/video` answered "store is not defined", and the live page's chat could not send body language after a reply.
+
+### Added
+- **Props shown only while held, and props that move (Bots & Borgs, 2119 #539).** A placement's `show: [t_on, t_off]` limits a prop to that part of its clip: an -in clip's prop appears when the hand closes on it, and an -out clip's prop goes when the hand opens. `prop_loop` (looped while shown) and `prop_anim` (once) play the prop's own glTF animation, such as the thundercloud's rain or a book's pages. This works in all of the agent's players (the designer, the playground, videos and the live avatar), and the fields are passed on to AvatarX. Props without the fields show for the whole clip, as before.
+
 ## [2.25.853] - 2026-11-17
 
 ### Changed

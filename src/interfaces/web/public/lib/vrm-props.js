@@ -55,18 +55,30 @@ function frameHolder(vrm) {
 
 async function loadProp(GLTFLoader, url) {
   if (!cache.has(url)) {
-    const loading = new GLTFLoader().loadAsync(url).then(g => g.scene);
+    const loading = new GLTFLoader().loadAsync(url).then(g => ({ scene: g.scene, animations: g.animations || [] }));
     loading.catch(() => cache.delete(url)); // a failed load is tried again next time
     cache.set(url, loading);
   }
-  return (await cache.get(url)).clone(true);
+  const { scene, animations } = await cache.get(url);
+  const obj = scene.clone(true);
+  obj.userData.animations = animations;
+  return obj;
 }
+
+/** A placement's `show: [t_on, t_off]` (seconds into the clip, store 2119 #539), or null when it shows all along. */
+export function showWindow(p) {
+  const w = p?.show;
+  return Array.isArray(w) && w.length === 2 && w.every(n => typeof n === 'number' && Number.isFinite(n)) && w[1] > w[0] ? [w[0], w[1]] : null;
+}
+
+/** Is a prop with this window visible at `t` seconds into its clip? */
+export function visibleAt(window, t) { return !window || (t >= window[0] && t <= window[1]); }
 
 /**
  * Attach every prop in `props` to `vrm`. Returns the placed objects (pass them to detachProps). `isCurrent()` is asked
  * after each load: false (the clip changed meanwhile) drops what was loaded instead of showing it on the wrong clip.
  */
-export async function attachProps({ GLTFLoader, vrm, props, base = '/vrm-models/', isCurrent = () => true, warn = (m) => console.warn(m) }) {
+export async function attachProps({ GLTFLoader, vrm, props, base = '/vrm-models/', isCurrent = () => true, warn = (m) => console.warn(m), AnimationMixer = null, LoopOnce = 2200 }) {
   const placed = [];
   if (!Array.isArray(props) || !props.length || !vrm) return placed;
   for (const p of props) {
@@ -88,10 +100,35 @@ export async function attachProps({ GLTFLoader, vrm, props, base = '/vrm-models/
     holder.name = `clip-prop-${p.prop || 'glb'}`;
     holder.userData.floor = p.bone === 'floor';
     holder.add(obj);
+    // Store 2119 #539: `show` keeps the prop to the part of the clip where the hand holds it (an -in clip's open hand
+    // has none yet); `prop_loop` / `prop_anim` are the prop's own glTF animation (the thundercloud's rain, the book's
+    // pages), looped for as long as it shows or played once. No such fields: the prop shows the whole clip, as before.
+    holder.userData.show = showWindow(p);
+    const animName = p.prop_loop?.name || p.prop_loop || p.prop_anim?.name || p.prop_anim;
+    const anim = typeof animName === 'string' ? (obj.userData.animations || []).find(a => a.name === animName) : null;
+    if (anim && AnimationMixer) {
+      const mixer = new AnimationMixer(obj);
+      const action = mixer.clipAction(anim);
+      if (!p.prop_loop) { action.setLoop(LoopOnce, 1); action.clampWhenFinished = true; }
+      action.play();
+      holder.userData.mixer = mixer;
+    } else if (typeof animName === 'string' && !anim) warn(`Prop ${p.prop || p.file}: no animation called ${animName}`);
+    if (holder.userData.show) holder.visible = visibleAt(holder.userData.show, 0);
     parent.add(holder);
     placed.push(holder);
   }
   return placed;
+}
+
+/**
+ * Each frame: show each prop only inside its `show` window (`clipTime`: seconds into the clip it belongs to) and run
+ * its own animation by `dt`. Props without either are left as they are.
+ */
+export function updateProps(placed, clipTime, dt) {
+  for (const o of placed || []) {
+    if (o?.userData?.show) o.visible = visibleAt(o.userData.show, clipTime);
+    if (o?.userData?.mixer && o.visible !== false && dt > 0) o.userData.mixer.update(dt);
+  }
 }
 
 /** Remove placed props. The loaded files stay cached (clones share them), so nothing is disposed here. */

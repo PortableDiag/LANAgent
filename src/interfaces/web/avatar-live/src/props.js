@@ -18,6 +18,7 @@ function loadModel(name, rev) {
       const root = g.scene || g.scenes?.[0];
       if (!root) throw new Error('no scene in the model');
       root.traverse((o) => { o.frustumCulled = false; });
+      root.userData.lanagentAnimations = g.animations || []; // LANAgent: the prop's own animations (prop_loop / prop_anim)
       return root;
     }).catch((err) => { cache.delete(key); throw err; }));
   }
@@ -91,6 +92,7 @@ export class Props {
       const model = await loadModel(p.name, p.rev);
       if (this.held.get(p.name) !== slot) return;
       const obj = model.clone(true);
+      slot.animations = model.userData.lanagentAnimations || []; // LANAgent: clone() would JSON-copy them, so kept here
       // frame: the bone's (or the floor's) space turned to VRM 1.0's; holder: the placement in it.
       const frame = new THREE.Group();
       frame.name = `avatarx-prop-${p.name}`;
@@ -141,7 +143,7 @@ export class Props {
   }
 
   // active: the clips driving the body now, the one that shows most first ([{name, weight}]).
-  update(active) {
+  update(active, dt = 0) {
     for (const p of this.list) {
       const h = this.held.get(p.name);
       if (!h?.frame) continue;
@@ -150,7 +152,10 @@ export class Props {
         if (isTalk(a.name) && !this.performance) continue;
         // Shown from a quarter in and kept to a tenth out, so a weight hovering near one line never flickers.
         if (a.weight < (h.frame.visible ? 0.1 : 0.25)) continue;
-        at = this.placementFor(p, a.name);
+        const found = this.placementFor(p, a.name);
+        // LANAgent: `show: [t_on, t_off]` (store 2119 #539): only while the hand holds it in this clip.
+        if (found && Array.isArray(found.show) && found.show.length === 2 && typeof a.t === 'number' && (a.t < found.show[0] || a.t > found.show[1])) continue;
+        at = found;
         if (at) break;
       }
       if (!at) { h.frame.visible = false; continue; }
@@ -171,6 +176,15 @@ export class Props {
         h.at = at;
       }
       h.frame.visible = true;
+      // LANAgent: the prop's own glTF animation, looped while it shows (prop_loop) or played once (prop_anim).
+      const want = at.prop_loop?.name || at.prop_loop || at.prop_anim?.name || at.prop_anim;
+      if (typeof want === 'string' && h.animName !== want) {
+        const clip = (h.animations || []).find(c => c.name === want);
+        h.mixer = clip ? new THREE.AnimationMixer(h.obj) : null;
+        if (clip) { const act = h.mixer.clipAction(clip); if (!at.prop_loop) { act.setLoop(THREE.LoopOnce, 1); act.clampWhenFinished = true; } act.play(); }
+        h.animName = want;
+      }
+      if (h.mixer && dt > 0) h.mixer.update(dt);
     }
   }
 

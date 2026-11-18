@@ -534,7 +534,7 @@
       import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
       import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
       import * as THREE_VRM from '/lib/three-vrm.module.js';
-      import { attachProps, detachProps } from '/lib/vrm-props.js';
+      import { attachProps, detachProps, updateProps } from '/lib/vrm-props.js';
 
       THREE.OrbitControls = OrbitControls;
       THREE.GLTFLoader = GLTFLoader;
@@ -687,6 +687,7 @@
                 }
 
                 if (this._mixer && !this._mirrorActive) this._mixer.update(delta);
+                if (this._glbProps?.length) updateProps(this._glbProps, this._glbPropsAction?.time ?? 0, delta);
                 this.currentVRM.update(delta);
                 if (!this._mirrorActive) this._updateIdleEffects(delta);
 
@@ -1098,7 +1099,7 @@
             detachProps(this._glbProps); this._glbProps = [];
             const vrm = this.currentVRM;
             if (!props?.length || !vrm) return;
-            attachProps({ GLTFLoader, vrm, props, isCurrent: () => gen === this._glbPropGen && this.currentVRM === vrm })
+            attachProps({ GLTFLoader, vrm, props, isCurrent: () => gen === this._glbPropGen && this.currentVRM === vrm, AnimationMixer: THREE.AnimationMixer, LoopOnce: THREE.LoopOnce })
                 .then(placed => { if (gen === this._glbPropGen) this._glbProps = placed; else detachProps(placed); })
                 .catch(e => console.warn('Props:', e.message));
         }
@@ -1128,6 +1129,7 @@
             this._setProp(this._clipProps?.[name], target.action.getClip());
             const once = this._nextGlbProps?.name === name ? this._nextGlbProps.props : null;
             this._nextGlbProps = null;
+            this._glbPropsAction = target.action; // props follow this clip's time (store `show` windows)
             this._setGlbProps(once ?? this._clipGlbProps?.[name]);
             if (this._currentIdleAction && this._currentIdleAction !== target) {
                 this._currentIdleAction.action.crossFadeTo(target.action.reset().play(), 0.5, false);

@@ -543,10 +543,12 @@ export class Motion {
     // A video (propsClipOnly) shows a prop only with its own move: a loop fading in at the end of a
     // spoken line made the mic pop in for a moment (owner, 2026-11-15).
     const active = [];
-    if (this.clip) active.push({ name: this.clip.name, weight: clipWeight });
-    if (!this.propsClipOnly && this.talkName && this.talkSample) active.push({ name: this.talkName, weight: this.talkW });
-    if (!this.propsClipOnly && this.idleOn && this.idleName) active.push({ name: this.idleName, weight: 1 - clipWeight - this.talkW });
-    try { this.props.update(active); } catch (err) { /* a prop never stops the body */ }
+    // LANAgent: each clip's own time goes along, for the store's `show` windows (2119 #539), and the frame's dt for a
+    // prop's own animation.
+    if (this.clip) active.push({ name: this.clip.name, weight: clipWeight, t: this.clip.t });
+    if (!this.propsClipOnly && this.talkName && this.talkSample) active.push({ name: this.talkName, weight: this.talkW, t: this.talkT });
+    if (!this.propsClipOnly && this.idleOn && this.idleName) active.push({ name: this.idleName, weight: 1 - clipWeight - this.talkW, t: this.idleT });
+    try { this.props.update(active, dt); } catch (err) { /* a prop never stops the body */ }
     this.pole.visible = !!this.clip?.pole && !this.props.replacesPole(this.clip.name);
     // A standing clip plays as it was made: nothing in code moves the body over it.
     const life = (1 - clipWeight) * (this.idleOn ? 0 : 1) * (1 - this.talkW);

@@ -122,7 +122,7 @@ export async function props(d = dirs()) {
       if (!name || !glb.startsWith(path.join(d.vrm, 'props') + path.sep)) continue;
       if (!byProp.has(name)) byProp.set(name, { name, glb, clips: {}, fits: null });
       const at = { bone: p.bone, position: p.position, rotation: p.rotation };
-      for (const k of ['scale', 'scale_with', 'ref_hips']) if (p[k] != null) at[k] = p[k];
+      for (const k of ['scale', 'scale_with', 'ref_hips', 'show', 'prop_loop', 'prop_anim']) if (p[k] != null) at[k] = p[k];
       byProp.get(name).clips[avatarxClipName(c.file)] = at;
     }
   }

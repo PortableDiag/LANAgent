@@ -88,7 +88,7 @@ export async function pushPropsToAvatarX(listed, vrmDir, opts = {}) {
       if (!name) continue;
       if (!byProp.has(name)) byProp.set(name, { file: path.join(vrmDir, p.file), clips: {} });
       const at = { bone: p.bone, position: p.position, rotation: p.rotation };
-      for (const k of ['scale', 'scale_with', 'ref_hips']) if (p[k] != null) at[k] = p[k];
+      for (const k of ['scale', 'scale_with', 'ref_hips', 'show', 'prop_loop', 'prop_anim']) if (p[k] != null) at[k] = p[k];
       byProp.get(name).clips[avatarxClipName(c.file)] = at;
     }
   }
@@ -98,7 +98,7 @@ export async function pushPropsToAvatarX(listed, vrmDir, opts = {}) {
   const state = await call('GET', '/agent/v1/state');
   if (!Array.isArray(state.props)) return 'unsupported';
   const held = new Map(state.props.map(p => [p.name, p]));
-  const same = (a, b) => ['bone', 'position', 'rotation', 'scale_with', 'ref_hips'].every(k => JSON.stringify(a?.[k]) === JSON.stringify(b?.[k]))
+  const same = (a, b) => ['bone', 'position', 'rotation', 'scale_with', 'ref_hips', 'show', 'prop_loop', 'prop_anim'].every(k => JSON.stringify(a?.[k]) === JSON.stringify(b?.[k]))
     && (a?.scale ?? 1) === (b?.scale ?? 1);
   const done = [];
   for (const [name, want] of byProp) {

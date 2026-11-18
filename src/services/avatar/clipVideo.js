@@ -67,7 +67,7 @@ function pageHtml(methods) {
 <script type="module">
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import * as V from '/lib/three-vrm.module.js';
-import { attachProps } from '/lib/vrm-props.js';
+import { attachProps, updateProps } from '/lib/vrm-props.js';
 const THREE = window.THREE; THREE.GLTFLoader = GLTFLoader;
 const d = {
 ${methods}
@@ -109,7 +109,7 @@ window.setup = async ({ width, height, fps, seconds, loop, prop, props = [], bac
     pole.position.set(spot.x, h / 2, spot.z); vrm.scene.add(pole); poleX = spot.x;
   }
   // Bought .glb props this clip uses (a phone in the hand, a chair): any that fail are left out, the clip still renders.
-  const placed = await attachProps({ GLTFLoader, vrm, props, warn: (m) => console.warn(m) });
+  const placed = await attachProps({ GLTFLoader, vrm, props, warn: (m) => console.warn(m), AnimationMixer: THREE.AnimationMixer, LoopOnce: THREE.LoopOnce });
   // Frame the whole routine: where the body goes over the clip, not just where it starts.
   const box = new THREE.Box3(); const v = new THREE.Vector3();
   const bones = ['head', 'leftHand', 'rightHand', 'leftFoot', 'rightFoot', 'hips', 'leftUpperArm', 'rightUpperArm'];
@@ -179,6 +179,7 @@ window.setup = async ({ width, height, fps, seconds, loop, prop, props = [], bac
   const canTalk = !!(mouth && em && em.getExpression && em.getExpression('aa'));
   window.frame = (i) => {
     if (i > 0) mixer.update(1 / fps);
+    updateProps(placed, action.time, i > 0 ? 1 / fps : 0); // the store's show windows and the props' own animations
     if (canTalk) em.setValue('aa', mouth[i] || 0);
     vrm.update(1 / fps);
     r.render(scene, cam);
