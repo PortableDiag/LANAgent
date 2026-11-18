@@ -1549,6 +1549,9 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
       if (owned?.kind === 'kit') return { success: true, result: await this.kitBannerUse(owned) };
     }
     let as = String(data.as || data.use || (/\b(wear|become)\b|as your (?:3d|vrm)/i.test(asked) ? 'wear' : /\binstall\b/i.test(asked) ? 'install' : /\bas your avatar\b/i.test(asked) ? 'avatar' : '')).toLowerCase();
+    // The extractor names a video its own way: "Film yourself doing the cabbage patch…" came as as:"film" and was
+    // answered "Use it how?" (2026-11-17). Every word for a video is a video.
+    if (/^(film|filming|record|recording|movie|clip|vid|videos?)$/.test(as)) as = 'video';
     // "Re-apply/equip the Sentinel avatar", "update your profile picture": becoming it, never a send that asks "Who
     // should I send it to?" (DELTA 2026-11-06, twice). A model is worn, which brings its picture; a picture is applied.
     if (!as && !data.to && /\b(avatars?|equip|apply|re-?apply|put on|profile (?:pic(?:ture)?|photo|image)|pfp|look like|go back to|turn (?:back )?into|(?:switch|change)(?: back)? (?:in)?to)\b/i.test(asked)) {

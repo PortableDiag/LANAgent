@@ -2,6 +2,11 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.849] - 2026-11-17
+
+### Fixed
+- **"Film yourself doing…" makes the video.** The extractor called the request's mode "film", which the store action didn't know, so it answered "Use it how?". Every word for a video (film, record, recording, clip, movie) now makes a video, sent to the owner who asked.
+
 ## [2.25.848] - 2026-11-17
 
 ### Added
