@@ -2,6 +2,11 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.853] - 2026-11-17
+
+### Changed
+- **The GitHub discovery notice names what it found.** It lists each new feature with the project it came from, and marks the ones that were skipped rather than queued for self-improvement. Ten are listed, then "…and N more". It used to say only how many it found.
+
 ## [2.25.852] - 2026-11-17
 
 ### Fixed

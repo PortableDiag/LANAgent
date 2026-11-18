@@ -21,6 +21,21 @@ const WG_MAX_BOUNCES_PER_OUTAGE = 2;
 
 const execAsync = promisify(exec);
 
+/**
+ * The Telegram notice for a GitHub discovery run: which features, from which project, and whether each is queued
+ * for self-improvement or was skipped. Plain text: Markdown characters in a title (_ * ` [ ]) are taken out, since an
+ * unpaired one makes Telegram refuse the whole message.
+ */
+export function githubDiscoveryNotice(found, { max = 10 } = {}) {
+  const clean = (t, n) => String(t || '').replace(/_/g, ' ').replace(/[*`[\]]/g, '').replace(/\s+/g, ' ').trim().slice(0, n);
+  const queued = found.filter(f => !f.skipped).length;
+  const head = `🌟 GitHub Discovery: ${found.length} new feature${found.length === 1 ? '' : 's'} from similar AI agent projects` +
+    ` (${queued} queued for self-improvement${found.length - queued ? `, ${found.length - queued} skipped` : ''}):`;
+  const lines = found.slice(0, max).map(f => `• ${clean(f.title, 110)}${f.source ? ` (${clean(f.source, 40)})` : ''}${f.skipped ? ' — skipped' : ''}`);
+  const more = found.length > max ? [`…and ${found.length - max} more.`] : [];
+  return [head, ...lines, ...more].join('\n');
+}
+
 class TaskScheduler {
   constructor() {
     this.agenda = null;
@@ -2229,6 +2244,7 @@ Respond with ONLY the rephrased message, no explanation:`;
         let newFeaturesCount = 0;
         let classifiedCount = 0;
         let skipCount = 0;
+        const found = []; // what the notice names (owner, 2026-11-17: "it should mention which features it discovered")
         for (const feature of features) {
           try {
             // Create feature data
@@ -2267,6 +2283,7 @@ Respond with ONLY the rephrased message, no explanation:`;
             try {
               createdDoc = await DiscoveredFeature.create(featureData);
               newFeaturesCount++;
+              found.push({ title: featureData.title, source: feature.source, skipped: false });
             } catch (err) {
               if (err.code === 11000) {
                 logger.debug(`Feature already exists: ${feature.description}`);
@@ -2289,6 +2306,7 @@ Respond with ONLY the rephrased message, no explanation:`;
                 update.status = 'rejected';
                 update.rejectionReason = verdict.rationale;
                 skipCount++;
+                if (found.length) found[found.length - 1].skipped = true;
               } else {
                 classifiedCount++;
               }
@@ -2303,7 +2321,7 @@ Respond with ONLY the rephrased message, no explanation:`;
         logger.info(`[github-discovery] classification: ${classifiedCount} actionable, ${skipCount} skipped`);
         
         if (newFeaturesCount > 0) {
-          await this.agent.notify(`🌟 GitHub Discovery: Found ${newFeaturesCount} new features from analyzing similar AI agent projects!`);
+          await this.agent.notify(githubDiscoveryNotice(found));
         }
         
         logger.info(`GitHub discovery completed: ${newFeaturesCount} new features stored`);
