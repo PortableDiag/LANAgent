@@ -2,6 +2,11 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.867] - 2026-11-20
+
+### Added
+- **New moves on request, made on the agent's own body.** "Make yourself an animation of waving with both hands" now writes a `bnb-motion/1` script (what the hands, head, gaze and face do at each moment) and has the Bots & Borgs Animation API solve and check it on the avatar the agent wears (its live pass, else the store model). A passing clip is installed with the other clips, tagged with the request's words so "do the big wave" finds it later, sent to AvatarX and played; the owner is told when it lands (usually a minute or two). A move the body cannot do comes back with the store's own numbers ("body clearance 22.8 mm, limit 3 mm"). Scripts are checked before sending (format, name, landmarks, hand shapes, 64 keys, 30 s), and a script the store refuses is rewritten once from its error. A solved clip plays only on the body it was solved for. Solves a restart interrupts are picked up again on the 30-minute store check. New command `animate({ motion, name?, loop?, play? })`; solves are free and limited to 60 a day by the store.
+
 ## [2.25.866] - 2026-11-20
 
 ### Fixed

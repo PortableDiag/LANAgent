@@ -9,6 +9,7 @@ import fs from 'node:fs/promises';
 import { DATA_PATH } from '../../utils/paths.js';
 import { propsFor, variantKind, livePass, applyClipManifest, unpack, installVrm, addToManifest, readVrmInfo, readVrmaInfo, clipLabel, clipLoops, clipGesture, writeStoreAnimations, safeName, toStickerWebp, moodOf, portraitFromPreview } from '../../services/store/assetLibrary.js';
 import { moodChoices, chooseSticker, stickerCouldFit, wallpaperFor } from '../../services/store/selfUse.js';
+import { motionPrompt, parseMotionScript, readJob, reportFailures, motionTags, motionName } from '../../services/store/animSolve.js';
 
 /**
  * Bots & Borgs (botsandborgs.com): a store of digital assets (avatars, icons, wallpapers, emoji, VRM models,
@@ -229,6 +230,12 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
         examples: ['ask bots and borgs to make you a moonwalk animation', 'get a custom prop made for your avatar: a guitar', 'order a custom clip of you juggling', 'what custom requests do you have at bots and borgs', 'cancel the custom animation request', 'pay the custom request']
       },
       {
+        command: 'animate',
+        description: 'Make a NEW animation clip for this agent\'s own 3D body from a description, with the Bots & Borgs Animation API: the agent writes what the body does, the store solves and checks it on the worn avatar (free, about a minute or two), then it is installed with the other clips, added to AvatarX and played. For a move it does not already own; to play an owned clip use use({ as: "play" }). A move the body cannot do comes back with the store\'s reasons. play: false only installs it',
+        usage: 'animate({ motion: "wave with both hands over your head", name: "big-wave", loop: false, play: true })',
+        examples: ['make yourself an animation of waving with both hands', 'create a new move where you point at the camera and wink', 'animate yourself doing a salute with your left hand', 'make a clip of you shrugging and tilting your head', 'build an animation of you clapping', 'teach your avatar to do a thumbs up with both hands', 'use the bots and borgs animation api to make a bow']
+      },
+      {
         command: 'orders',
         description: 'The agent\'s Bots & Borgs orders and what this week\'s budget has left',
         usage: 'orders({})',
@@ -264,6 +271,7 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
         case 'settings': return await this.settingsCommand(data);
         case 'roles': return await this.rolesCommand(data);
         case 'custom': return await this.customCommand(data);
+        case 'animate': return await this.animate(data);
         default: return { success: false, error: `Unknown action ${action}` };
       }
     } catch (e) {
@@ -284,11 +292,12 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
       '"send" if it is to be given to someone, "wear" if the agent should become that 3D model), "to" (who to send it to; "me" for the person asking), ' +
       `"item" (words naming something already owned), "as" ("send", "avatar", "install", "wear", or "video" when it asks for a video of the agent itself), "mood" (the feeling a sticker should show), "kind" (one of: ${KIND_WORDS}), ` +
       '"avoid" (names the request says are taken or not wanted, comma-separated, e.g. "Sentinel" from "Nexus already picked Sentinel"), ' +
+      '"motion" (for a new animation: what the body should do, in the request\'s words), ' +
       '"say" (for a video: the words the agent speaks over it. Quoted words exactly; when it asks for a voice-over or for the agent to say, explain or talk about something without exact words, write one to three short spoken sentences, in the first person, that fit. For a video to someone other than the person asking, greet them by name and say who you are. ' + videoPerspective(agentName, ownerName) + ') Leave out what is not said. JSON only.',
     { maxTokens: 200, temperature: 0 });
     const raw = String(res?.content || '');
     const j = JSON.parse(raw.slice(raw.indexOf('{'), raw.lastIndexOf('}') + 1) || '{}');
-    return Object.fromEntries(Object.entries(j || {}).filter(([k, v]) => ['query', 'slug', 'variant', 'use', 'to', 'item', 'as', 'mood', 'kind', 'avoid', 'say'].includes(k) && v != null && v !== ''));
+    return Object.fromEntries(Object.entries(j || {}).filter(([k, v]) => ['query', 'slug', 'variant', 'use', 'to', 'item', 'as', 'mood', 'kind', 'avoid', 'say', 'motion'].includes(k) && v != null && v !== ''));
   }
 
   // ── HTTP ────────────────────────────────────────────────────────────────────────────────
@@ -464,6 +473,8 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     if (!key) return { entries: 0, ran: [] };
     // Custom requests (store 0.36) move on the store's side; followed on the same 30-minute beat.
     await this.customTick().catch(e => this.logger.warn(`botsandborgs: custom requests not checked: ${e.message}`));
+    // Animation API solves left open by a restart are picked up again on the same beat.
+    await this.animTick().catch(e => this.logger.warn(`botsandborgs: animation solves not checked: ${e.message}`));
     const cursor = await PluginSettings.getCached(this.name, 'feedCursor').catch(() => null);
     const entries = [];
     let since = cursor?.since ?? null;
@@ -1068,6 +1079,151 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     const item = await this.ingest({ order: null, variant, downloads: [{ buffer: Buffer.from(res.data), type: String(res.headers?.['content-type'] || ''), filename: name }] });
     const clips = (item?.files || []).filter(f => f.kind === 'animation').map(f => f.label || f.name);
     return clips.length ? `New: ${clips.join(', ')}.` : '';
+  }
+
+  // ── Animation API (store 0.38+) ───────────────────────────────────────────────────────────
+  async animJobs() {
+    const saved = await PluginSettings.getCached(this.name, 'animJobs').catch(() => null);
+    return Array.isArray(saved?.jobs) ? saved.jobs : [];
+  }
+
+  async saveAnimJob(job) {
+    const jobs = (await this.animJobs()).filter(j => j.id !== job.id);
+    jobs.unshift(job);
+    await PluginSettings.setCached(this.name, 'animJobs', { jobs: jobs.slice(0, 50) });
+  }
+
+  /** The avatar to solve on: the worn model's live pass ({ live }), else the store product it is ({ product }). */
+  animAvatar() {
+    const pass = this.wornPass(this._passesCache || []);
+    if (pass) return { live: pass.slug };
+    const base = this.wornBase();
+    return base ? { product: base } : null;
+  }
+
+  /** A script for the request from the model, checked before it is sent; one more try with the reason when it isn't valid. */
+  async writeMotion(request, { name, loop, props, error = null, previous = null } = {}) {
+    const pm = this.agent?.providerManager;
+    if (!pm?.generateResponse) throw new Error('no model to write the animation with');
+    let why = error; let last = previous;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const res = await pm.generateResponse(motionPrompt(request, { props, error: why, previous: last }), { maxTokens: 2500, temperature: 0.2 });
+      const got = parseMotionScript(res?.content, { name });
+      if (got.script) {
+        if (loop != null) got.script.loop = loop === true || loop === 'true';
+        return got.script;
+      }
+      why = got.error; last = String(res?.content || '').slice(0, 3000);
+      this.logger.info(`botsandborgs: animation script not valid (${why}); asking again`);
+    }
+    throw new Error(`I couldn't write a valid animation script: ${why}`);
+  }
+
+  /**
+   * Make a new clip with the Animation API: write the script, solve it on the worn avatar, then install, push to
+   * AvatarX and play it. Answers at once; the clip follows when the store has solved it (`wait: true` waits).
+   */
+  async animate({ motion, name, loop, play = true, wait = false, _context, originalInput } = {}) {
+    const request = String(motion || _context?.originalInput || originalInput || '').trim();
+    if (!request) return { success: false, error: 'What should the move be? Say what my body does, e.g. "wave with both hands".' };
+    const key = await this.accountKey();
+    this._passesCache = await this.livePasses().catch(() => []);
+    const avatar = this.animAvatar();
+    if (!avatar) return { success: false, error: "I'm not wearing a Bots & Borgs model, so the store has no body of mine to solve the move on." };
+    const props = [...new Set((await this.libraryItems()).flatMap(i => i.files.filter(f => f.kind === 'prop').map(f => path.basename(f.name, '.glb').toLowerCase())))];
+    let script = await this.writeMotion(request, { name: name ? motionName(name) : null, loop, props });
+    let d;
+    for (let attempt = 0; ; attempt++) {
+      try { d = await this.api('post', '/api/anim/solve', { key, body: { avatar, script } }); break; }
+      catch (e) {
+        // A 400 names the field it refused: the model fixes exactly that, once.
+        if (e.status !== 400 || attempt > 0) throw new Error(`the store refused the animation: ${e.message}`);
+        this.logger.info(`botsandborgs: Animation API refused the script (${e.message}); rewriting it`);
+        script = await this.writeMotion(request, { name: script.name, loop, props, error: e.message, previous: script });
+      }
+    }
+    const job = readJob(d);
+    if (!job.id) throw new Error(`the store answered without a job (${JSON.stringify(d).slice(0, 200)})`);
+    this.logger.info(`botsandborgs: Animation API job ${job.id} (${job.status}${d?.cached ? ', cached' : ''}) for ${script.name} on ${JSON.stringify(avatar)}: ${request.slice(0, 120)} | reply fields ${Object.keys(d || {}).join(', ')}`);
+    const rec = { id: job.id, name: script.name, request: request.slice(0, 300), loop: script.loop, play: play !== false && play !== 'false', avatar, modelId: this.agent?.agentModel?.activeVRMModel || null, status: job.status, at: new Date().toISOString() };
+    await this.saveAnimJob(rec);
+    const waiting = wait === true || wait === 'true';
+    rec.quiet = waiting; // the answer itself says how it went
+    this._animFollowing ||= new Set();
+    this._animFollowing.add(rec.id);
+    const follow = this.followAnim(rec, key, d).finally(() => this._animFollowing.delete(rec.id));
+    if (waiting) {
+      const done = await follow;
+      return done.ok ? { success: true, clip: done.label, result: done.text } : { success: false, error: done.text };
+    }
+    follow.catch(e => this.logger.warn(`botsandborgs: animation ${rec.name} not followed: ${e.message}`));
+    return { success: true, job: job.id, result: `Writing it as "${script.name}" (${script.keys.length} keys, ${script.duration} s${script.loop ? ', looping' : ''}); the store is solving it on my body now. I'll ${rec.play ? 'do it' : 'have it'} as soon as it passes the store's checks, usually within a couple of minutes.` };
+  }
+
+  /** Poll one solve to its end, then install (passed) or report (failed). Returns { ok, text, label }. */
+  async followAnim(rec, key, first = null, { pollMs = 10000, maxMs = 8 * 60000 } = {}) {
+    const started = Date.now();
+    let job = first ? readJob(first) : { status: rec.status };
+    while (!['passed', 'failed'].includes(job.status)) {
+      if (Date.now() - started > maxMs) return { ok: false, text: `The store is still solving "${rec.name}"; I'll pick it up on the next check.` };
+      await new Promise(r => setTimeout(r, pollMs));
+      try { job = readJob(await this.api('get', `/api/anim/jobs/${encodeURIComponent(rec.id)}`, { key })); }
+      catch (e) { this.logger.warn(`botsandborgs: Animation API job ${rec.id} not read: ${e.message}`); }
+    }
+    // The guide names the clip's route (…/clip.vrma) when a reply carries no link.
+    if (job.status === 'passed' && !job.vrma) job.vrma = `/api/anim/jobs/${encodeURIComponent(rec.id)}/clip.vrma`;
+    return this.finishAnim(rec, key, job);
+  }
+
+  async finishAnim(rec, key, job) {
+    const notify = (text, urgent = false) => (rec.quiet ? null : this.agent?.notify?.(text, { urgent }));
+    if (job.status === 'failed') {
+      const why = reportFailures(job.report) || job.reason || 'no reason given';
+      rec.status = 'failed'; rec.reason = why.slice(0, 400); await this.saveAnimJob(rec);
+      this.logger.info(`botsandborgs: Animation API job ${rec.id} (${rec.name}) failed: ${why} | report ${JSON.stringify(job.report || {}).slice(0, 600)}`);
+      const text = `My body can't do "${rec.request}" the way I wrote it: the store's checks failed (${why}). Ask again in other words and I'll write it differently.`;
+      await notify(text);
+      return { ok: false, text };
+    }
+    const abs = (u) => (/^https?:/.test(u) ? u : `${BASE}${u.startsWith('/') ? '' : '/'}${u}`);
+    const get = async (u) => {
+      const r = await (this.http || axios)({ method: 'get', url: abs(u), responseType: 'arraybuffer', timeout: 120000, headers: { 'User-Agent': this.userAgent(), Authorization: `Bearer ${key}` }, validateStatus: () => true });
+      if (r.status !== 200) throw new Error(`the store answered ${r.status} for ${abs(u).split('?')[0]}`);
+      return Buffer.from(r.data);
+    };
+    const downloads = [{ buffer: await get(job.vrma), type: 'application/octet-stream', filename: `${rec.name}.vrma` }];
+    if (job.preview) await get(job.preview).then(b => downloads.push({ buffer: b, type: 'video/mp4', filename: `${rec.name}.mp4` })).catch(() => {});
+    const variant = `solved-${rec.name}-animations`;
+    const item = await this.ingest({ order: null, variant, downloads });
+    const clip = item?.files?.find(f => f.kind === 'animation');
+    if (!clip) throw new Error(`the solved clip for ${rec.name} is not a VRM animation`);
+    // What it is for, so "do the big wave" finds it later, and the body it was solved on (it plays only there).
+    clip.tags = [...new Set([...(clip.tags || []), ...motionTags(rec.request)])];
+    clip.loop = rec.loop === true;
+    Object.assign(item, { title: `My move: ${clip.label}`, solvedFor: rec.modelId, solved: { job: rec.id, request: rec.request, at: new Date().toISOString() } });
+    await this.saveLibraryItem(item, { keepPlace: true });
+    await this.publishAnimations();
+    rec.status = 'installed'; await this.saveAnimJob(rec);
+    this.logger.info(`botsandborgs: Animation API job ${rec.id} passed; ${clip.label} installed (${clip.size} bytes)`);
+    let played = null;
+    if (rec.play) played = await this.playClip({ item: variant, clip: clip.label }).catch(e => ({ success: false, error: e.message }));
+    const text = `New move made on the Bots & Borgs Animation API: "${clip.label}" (${rec.request}). It passed the store's checks on my body${played?.success ? `. ${played.result}` : played ? `, but it didn't play: ${played.error}` : ' and is installed.'}`;
+    await notify(text);
+    return { ok: true, text, label: clip.label };
+  }
+
+  /** Solves a restart left open: followed again (each one once at a time). */
+  async animTick() {
+    const open = (await this.animJobs()).filter(j => ['queued', 'claimed', 'passed'].includes(j.status) && Date.now() - Date.parse(j.at) < 24 * 3600000);
+    if (!open.length) return [];
+    const key = await this.accountKey();
+    this._animFollowing ||= new Set();
+    const out = [];
+    for (const j of open.filter(x => !this._animFollowing.has(x.id))) {
+      this._animFollowing.add(j.id);
+      out.push(await this.followAnim(j, key, null, { maxMs: 60000 }).catch(e => ({ ok: false, text: e.message })).finally(() => this._animFollowing.delete(j.id)));
+    }
+    return out;
   }
 
   wornPass(passes) {
@@ -2183,6 +2339,9 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
   async chooseClip({ item, clip, asked = '', speaking = false, modelId = null }) {
     // A loop's companions (-in / -out / -once, store 0.30.2) are part of their loop, never a move of their own.
     let pool = (await this.libraryItems()).flatMap(i => i.files.filter(f => f.kind === 'animation' && f.bodyFit !== 'broad' && !f.role).map(f => ({ item: i, file: f })));
+    // A clip the Animation API solved for one body (item.solvedFor) is fitted to that body only.
+    const forBody = modelId || this.agent?.agentModel?.activeVRMModel || null;
+    pool = pool.filter(p => !p.item.solvedFor || !forBody || p.item.solvedFor === forBody);
     if (!pool.length) return { error: "I don't own any animations yet. I can buy a pack from Bots & Borgs if you want." };
     // Clips made for female bodies (clips.json `bodies: female`: the pole dance, the booty shakes) only on a female body.
     // The body is the one worn NOW, so a changed avatar changes what plays (DELTA wears the Frog; owner, 2026-11-17).
