@@ -178,6 +178,9 @@ export default class GoveePlugin extends BasePlugin {
     this.requestCount = 0;
     this.requestResetTime = Date.now() + 24 * 60 * 60 * 1000;
     this.maxRequests = 10000;
+    // Declared, so the loader keeps Govee off where there is no key (plugins without keys are OFF): DELTA logged an
+    // ERROR on every restart and still loaded it (2026-11-17). Stored in the credentials record (encrypted) or the env.
+    this.requiredCredentials = [{ key: 'apiKey', envVar: 'GOVEE_API_KEY', required: true }];
   }
 
   async initialize() {
@@ -188,8 +191,8 @@ export default class GoveePlugin extends BasePlugin {
     await this.loadStoredCredentials();
 
     if (!this.config.apiKey) {
-      this.logger.error('Govee API key not configured. Please set GOVEE_API_KEY in your .env file or configure via settings');
-      this.logger.info('Get your API key from: https://developer.govee.com/');
+      // Not an error: an instance without Govee lights simply has no key (the loader turns the plugin off).
+      this.logger.info('Govee: no API key (GOVEE_API_KEY or settings), so the plugin stays off. Keys: https://developer.govee.com/');
       return false;
     }
 
@@ -582,6 +585,8 @@ export default class GoveePlugin extends BasePlugin {
       steps.push({ capability: 'devices.capabilities.on_off', value: 1 });
     }
     steps.push({ capability: params.capability, value: params.value });
+    // "Bright white" is a white AND full brightness (2026-11-20: it set 6500 K and left the light at 50%).
+    if (Number.isFinite(params.alsoBrightness)) steps.push({ capability: 'devices.capabilities.range', value: Math.max(1, Math.min(100, params.alsoBrightness)) });
 
     const results = [];
     const errors = [];
@@ -864,7 +869,9 @@ export default class GoveePlugin extends BasePlugin {
         return await this.setTemperature({
           device: params.device,
           kelvin: temperature,
-          fromAI: params.fromAI
+          fromAI: params.fromAI,
+          // "bright white", "bright daylight": the word asks for full brightness too.
+          ...(/\bbright\b/i.test(params.color) ? { alsoBrightness: 100 } : {})
         });
       }
       
@@ -917,7 +924,8 @@ export default class GoveePlugin extends BasePlugin {
       device: params.device,
       capability: 'devices.capabilities.color_temperature_setting',
       value: kelvin,
-      fromAI: params.fromAI
+      fromAI: params.fromAI,
+      ...(Number.isFinite(params.alsoBrightness) ? { alsoBrightness: params.alsoBrightness } : {})
     });
   }
 

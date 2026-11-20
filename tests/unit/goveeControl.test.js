@@ -114,3 +114,14 @@ test('accepted but the light shows the old value is not "done"', async (t) => {
   assert.equal(r.success, false);
   clearInterval(p.retryTimer);
 });
+
+test('"bright white" is the white AND full brightness; a plain white keeps the brightness (2026-11-20)', async () => {
+  let t = rig([ok('x')]);
+  let r = await t.p.execute({ action: 'color', device: 'Master Toilet', color: 'bright white', fromAI: true });
+  assert.equal(r.success, true, r.error);
+  assert.deepEqual(t.sent.map(c => [c.instance, c.value]), [['powerSwitch', 1], ['colorTemperatureK', 6500], ['brightness', 100]]);
+  t = rig([ok('x')]);
+  r = await t.p.execute({ action: 'color', device: 'Master Toilet', color: 'warm white', fromAI: true });
+  assert.equal(r.success, true, r.error);
+  assert.equal(t.sent.some(c => c.instance === 'brightness'), false);
+});

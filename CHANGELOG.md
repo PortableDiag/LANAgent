@@ -2,6 +2,11 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.870] - 2026-11-20
+
+### Fixed
+- **"Bright white" is bright.** A white asked for as "bright" (bright white, bright daylight) now also sets the light to full brightness; before, it set 6500 K and left the brightness where it was (50% on the Master Toilet light). The brightness is part of the same command, so an offline light's background retry sends it too, and the read-back after the command checks it. Other whites keep the current brightness.
+
 ## [2.25.869] - 2026-11-20
 
 ### Fixed
