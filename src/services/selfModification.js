@@ -4853,7 +4853,10 @@ Provide only the corrected code line(s).`;
 
     // Browser code (src/interfaces/web/public) touches window/document at load, so Node can
     // only check its syntax: three.r183.module.js failed here on `window is not defined`.
-    if (rel.split(path.sep).join('/').startsWith('src/interfaces/web/public/')) {
+    // The live avatar page's sources (avatar-live/src, bundled into public/avatar-live/app.js) too:
+    // an upgrade to avatar-live/src/lanagent.js was refused on `window is not defined` (2026-11-20 03:29).
+    const posix = rel.split(path.sep).join('/');
+    if (posix.startsWith('src/interfaces/web/public/') || posix.startsWith('src/interfaces/web/avatar-live/')) {
       return { ok: true, fatal: false, message: '' };
     }
 

@@ -2,6 +2,11 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.866] - 2026-11-20
+
+### Fixed
+- **Self-improvement no longer rejects changes to the live avatar page.** The pre-PR load check imported the live avatar page's browser sources (`src/interfaces/web/avatar-live/src`) in Node, where `window` does not exist, so every upgrade touching them failed as broken. Those files now get the syntax check only, the same as the rest of the web UI's browser code.
+
 ## [2.25.865] - 2026-11-19
 
 ### Added
