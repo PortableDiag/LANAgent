@@ -39,7 +39,7 @@ export function motionPrompt(request, { props = [], error = null, previous = nul
     '  "expression": {"happy"|"angry"|"sad"|"relaxed"|"surprised"|"blink"|"aa"|"ih"|"ou"|"ee"|"oh": 0..1}}.',
     `Landmarks: ${LANDMARKS.join(', ')}, or leftThigh@0.5 / rightThigh@0.5 (0.0 hip .. 1.0 knee).`,
     props.length ? `Top level "prop": {"name":"<one of: ${props.slice(0, 20).join(', ')}>","hand":"left|right"} only when the request is about holding it.` : 'No "prop".',
-    'A one-shot starts and ends with both hands {"rest":"hang"} so it begins and ends at idle. Use 3 to 12 keys, at most 64. Keep hands clear of the face and body (offsets of 0.08 m or more forward of a landmark). No other fields: unknown fields are refused.',
+    'A one-shot starts and ends with both hands {"rest":"hang"} so it begins and ends at idle. Use 3 to 12 keys, at most 64. Keep hands clear of the face and body (offsets of 0.08 m or more forward of a landmark). Two hands never get the same target: when they meet or are together, keep their x at least 0.08 m apart on each side (left +0.08, right -0.08), or they pass through each other\'s arms. No other fields: unknown fields are refused.',
     'Example: {"format":"bnb-motion/1","name":"wave","duration":3,"loop":false,"keys":[{"t":0,"hands":{"right":{"rest":"hang"}}},{"t":0.6,"hands":{"right":{"at":{"landmark":"rightEar","offset":[-0.17,0.02,0.1]},"point":[-0.15,1,0.1],"palm":"forward","shape":"open","elbow":"out"}},"gaze":{"camera":true},"expression":{"happy":0.9}},{"t":1.1,"hands":{"right":{"at":{"landmark":"rightEar","offset":[-0.25,0.02,0.1]},"point":[-0.35,1,0.1],"palm":"forward","shape":"open","elbow":"out"}}},{"t":1.6,"hands":{"right":{"at":{"landmark":"rightEar","offset":[-0.17,0.02,0.1]},"point":[-0.15,1,0.1],"palm":"forward","shape":"open","elbow":"out"}}},{"t":3,"hands":{"right":{"rest":"hang"}}}]}',
     error ? `Your last script was refused: ${String(error).slice(0, 400)}\nThe script was: ${JSON.stringify(previous).slice(0, 3000)}\nFix exactly that.` : '',
     'Answer with the JSON only.'
@@ -97,17 +97,28 @@ export function readJob(d) {
   return { id, status, report: j.report || d?.report || null, vrma: link(j.vrma || d?.vrma), preview: link(j.preview || d?.preview), reason: j.reason || j.error || null };
 }
 
-/** The checks a report says failed, in a line the owner can read ("wrist bend 52° (limit 40)"); '' when none is named. */
+/**
+ * The checks a report says failed, in a line the owner can read ("through 5.5 mm (limit 3 mm) at 1.9 s, right->arm");
+ * '' when none is named. The store's report (3910 #1929): { status, checks: { through: { pass, worst_mm, at_t, where,
+ * limit_mm? }, ... }, nudges, rounds }. A list of checks and a flat report are read too.
+ */
 export function reportFailures(report, limit = 4) {
   if (!report) return '';
+  const named = (o) => Object.entries(o).filter(([, v]) => v && typeof v === 'object' && !Array.isArray(v)).map(([k, v]) => ({ name: k, ...v }));
   const checks = Array.isArray(report) ? report : Array.isArray(report.checks) ? report.checks
-    : Object.entries(report).filter(([, v]) => v && typeof v === 'object').map(([k, v]) => ({ name: k, ...v }));
+    : report.checks && typeof report.checks === 'object' ? named(report.checks) : named(report);
   const bad = checks.filter(c => c && (c.pass === false || c.ok === false || c.passed === false || /fail/i.test(String(c.status || c.result || ''))));
   return bad.slice(0, limit).map(c => {
     const name = String(c.name || c.check || c.id || 'check').replace(/_/g, ' ');
-    const val = c.value ?? c.measured ?? c.got;
-    const lim = c.limit ?? c.max ?? c.min;
-    return `${name}${val != null ? ` ${val}${c.unit || ''}` : ''}${lim != null ? ` (limit ${lim}${c.unit || ''})` : ''}${c.line ? `: ${c.line}` : ''}`;
+    // A measure named with its unit (worst_mm, peak_deg) carries it: "5.5 mm".
+    const measure = Object.keys(c).find(k => /^(worst|peak|max|value|measured|got)(_[a-z]+)?$/.test(k) && typeof c[k] === 'number');
+    const unit = c.unit || (measure?.match(/_(mm|deg|cm|m|s|pct)$/)?.[1] ? ` ${measure.match(/_(mm|deg|cm|m|s|pct)$/)[1].replace('deg', '°').replace('pct', '%')}` : '');
+    const limKey = Object.keys(c).find(k => /^(limit|max_allowed|threshold)(_[a-z]+)?$/.test(k));
+    const val = measure ? c[measure] : null;
+    const lim = limKey ? c[limKey] : null;
+    const at = Number.isFinite(c.at_t) ? ` at ${c.at_t} s` : '';
+    const where = c.where ? `, ${c.where}` : '';
+    return `${name}${val != null ? ` ${val}${unit}` : ''}${lim != null ? ` (limit ${lim}${unit})` : ''}${at}${where}${c.line ? `: ${c.line}` : ''}`;
   }).join('; ');
 }
 
