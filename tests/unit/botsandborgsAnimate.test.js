@@ -42,8 +42,18 @@ test('names, tags, job replies and failed checks', () => {
   assert.equal(reportFailures({ checks: [{ name: 'wrist_bend', pass: false, value: 52, limit: 40, unit: '°' }, { name: 'seam', pass: true }] }), 'wrist bend 52° (limit 40°)');
   assert.equal(reportFailures(null), '');
   // The store's own shape (3910 #1929).
-  assert.equal(reportFailures({ status: 'failed', checks: { through: { pass: false, worst_mm: 5.5, limit_mm: 3, at_t: 1.9, where: 'right->arm' }, wrist: { pass: true, peak_deg: 12 } }, nudges: 3, rounds: 6 }),
+  assert.equal(reportFailures({ status: 'failed', checks: { through: { pass: false, worst_mm: 5.5, at_t: 1.9, where: 'right->arm' }, wrist: { pass: true, max_deg: { left: 12, right: 9 } } }, limits: { through_mm: 3, wrist_max: 40 }, nudges: 3, rounds: 6 }),
     'through 5.5 mm (limit 3 mm) at 1.9 s, right->arm');
+  // Solver v6 fields (3910 #1931): a wrist map, the tuck's built-in 10 mm, a seam pair, the face as a fraction, own limit_deg, a note.
+  const all = reportFailures({ checks: {
+    wrist: { pass: false, max_deg: { left: 22, right: 52.4 } },
+    arm_tuck: { pass: false, elbow_inside_mm: 104, at_t: 2.1, side: 'left' },
+    seam: { pass: false, value: [1.25, 0.3] },
+    face_cover: { pass: false, max: 0.18, at_t: 0.9 },
+    pose_fidelity: { pass: false, worst_deg: 31, limit_deg: 25, body_class: 'broad' },
+    grip: { pass: false, note: 'no grip rule for this prop' }
+  }, limits: { wrist_max: 40, face_cover_max: 0.1 } }, 6);
+  assert.equal(all, 'wrist 52.4° (right) (limit 40°); arm tuck 104 mm (limit 10 mm) at 2.1 s, left; seam 1.3° (limit 0.5°); face cover 18% of the face (limit 10%) at 0.9 s; pose fidelity 31° (limit 25°); grip: no grip rule for this prop');
   assert.match(motionPrompt('wave', { props: ['mug'] }), /"prop".*mug/);
   assert.match(motionPrompt('wave', { error: 'unknown field foo', previous: { a: 1 } }), /refused: unknown field foo/);
 });

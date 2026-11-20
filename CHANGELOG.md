@@ -2,6 +2,11 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.869] - 2026-11-20
+
+### Fixed
+- **Every Animation API check is read with its own number and limit.** Following the store's description of its solver report: limits come from the report's `limits` (wrist 40°, through 3 mm, face cover 10%, prop target 25 mm), pose fidelity carries its own, the arm tuck's 10 mm is built in. The wrist's per-side map gives its worst side, a loop seam its pose jump, the face cover reads as a share of the face, and a check with only a note gives the note. A refused move now reads like "wrist 52.4° (right) (limit 40°)" or "arm tuck 104 mm (limit 10 mm) at 2.1 s, left".
+
 ## [2.25.868] - 2026-11-20
 
 ### Fixed

@@ -98,27 +98,70 @@ export function readJob(d) {
 }
 
 /**
+ * How each check gives its number, from the store's solver (v6, 3910 #1931): the field, its unit, and where its limit
+ * lives (most limits are at the report's top level, `limits`; pose_fidelity carries its own limit_deg; arm_tuck's 10 mm
+ * is built in). wrist.max_deg is a map { left, right }; seam.value is [pose deg, velocity deg/frame], gated on the first.
+ */
+const CHECKS = {
+  through: { field: 'worst_mm', unit: ' mm', limit: 'through_mm' },
+  wrist: { field: 'max_deg', unit: '°', limit: 'wrist_max' },
+  arm_tuck: { field: 'elbow_inside_mm', unit: ' mm', fixed: 10 },
+  seam: { field: 'value', unit: '°', fixed: 0.5 },
+  face_cover: { field: 'max', unit: ' of the face', limit: 'face_cover_max', pct: true },
+  prop_target: { field: 'worst_mm', unit: ' mm', limit: 'prop_target_mm' },
+  pose_fidelity: { field: 'worst_deg', unit: '°', own: 'limit_deg' }
+};
+
+const round = (n) => Math.round(n * 10) / 10;
+
+/** A check's number: a map ({ left, right }) gives its largest and the side; a list gives its first. */
+function measureOf(c, spec) {
+  const v = c[spec.field];
+  if (typeof v === 'number') return { value: v };
+  if (Array.isArray(v) && typeof v[0] === 'number') return { value: v[0] };
+  if (v && typeof v === 'object') {
+    const [side, n] = Object.entries(v).filter(([, x]) => typeof x === 'number').sort((a, b) => b[1] - a[1])[0] || [];
+    if (side != null) return { value: n, side };
+  }
+  return null;
+}
+
+/**
  * The checks a report says failed, in a line the owner can read ("through 5.5 mm (limit 3 mm) at 1.9 s, right->arm");
- * '' when none is named. The store's report (3910 #1929): { status, checks: { through: { pass, worst_mm, at_t, where,
- * limit_mm? }, ... }, nudges, rounds }. A list of checks and a flat report are read too.
+ * '' when none is named. The store's report: { status, checks: { <name>: { pass, ... } }, limits, nudges, rounds }.
+ * A check with only { pass, note } has no number; its note is the reason.
  */
 export function reportFailures(report, limit = 4) {
   if (!report) return '';
   const named = (o) => Object.entries(o).filter(([, v]) => v && typeof v === 'object' && !Array.isArray(v)).map(([k, v]) => ({ name: k, ...v }));
   const checks = Array.isArray(report) ? report : Array.isArray(report.checks) ? report.checks
     : report.checks && typeof report.checks === 'object' ? named(report.checks) : named(report);
+  const limits = report && typeof report.limits === 'object' ? report.limits : {};
   const bad = checks.filter(c => c && (c.pass === false || c.ok === false || c.passed === false || /fail/i.test(String(c.status || c.result || ''))));
   return bad.slice(0, limit).map(c => {
-    const name = String(c.name || c.check || c.id || 'check').replace(/_/g, ' ');
-    // A measure named with its unit (worst_mm, peak_deg) carries it: "5.5 mm".
-    const measure = Object.keys(c).find(k => /^(worst|peak|max|value|measured|got)(_[a-z]+)?$/.test(k) && typeof c[k] === 'number');
-    const unit = c.unit || (measure?.match(/_(mm|deg|cm|m|s|pct)$/)?.[1] ? ` ${measure.match(/_(mm|deg|cm|m|s|pct)$/)[1].replace('deg', '°').replace('pct', '%')}` : '');
-    const limKey = Object.keys(c).find(k => /^(limit|max_allowed|threshold)(_[a-z]+)?$/.test(k));
-    const val = measure ? c[measure] : null;
-    const lim = limKey ? c[limKey] : null;
+    const key = String(c.name || c.check || c.id || 'check');
+    const name = key.replace(/_/g, ' ');
+    const spec = CHECKS[key];
+    let num = ''; let lim = '';
+    if (spec) {
+      const m = measureOf(c, spec);
+      const l = spec.own ? c[spec.own] : spec.limit ? limits[spec.limit] : spec.fixed;
+      const fmt = (n) => (spec.pct ? `${Math.round(n * 100)}%` : `${round(n)}`);
+      if (m) num = ` ${fmt(m.value)}${spec.pct ? '' : spec.unit}${m.side ? ` (${m.side})` : ''}`;
+      if (typeof l === 'number') lim = ` (limit ${fmt(l)}${spec.pct ? '' : spec.unit})`;
+      if (spec.pct && num) num += spec.unit;
+    } else {
+      // A check this list doesn't know yet: its first measure-looking number, if any.
+      const k = Object.keys(c).find(x => /^(worst|peak|max|value)(_[a-z]+)?$/.test(x) && typeof c[x] === 'number');
+      const unit = c.unit || (/_mm$/.test(k || '') ? ' mm' : /_deg$/.test(k || '') ? '°' : '');
+      if (k) num = ` ${round(c[k])}${unit}`;
+      const own = [c.limit, c.limit_mm, c.limit_deg, limits[`${key}_mm`], limits[`${key}_max`]].find(x => typeof x === 'number');
+      if (own != null) lim = ` (limit ${round(own)}${unit})`;
+    }
     const at = Number.isFinite(c.at_t) ? ` at ${c.at_t} s` : '';
-    const where = c.where ? `, ${c.where}` : '';
-    return `${name}${val != null ? ` ${val}${unit}` : ''}${lim != null ? ` (limit ${lim}${unit})` : ''}${at}${where}${c.line ? `: ${c.line}` : ''}`;
+    const where = c.where ? `, ${c.where}` : c.side ? `, ${c.side}` : '';
+    const note = !num && c.note ? `: ${c.note}` : c.line ? `: ${c.line}` : '';
+    return `${name}${num}${lim}${at}${where}${note}`;
   }).join('; ');
 }
 
