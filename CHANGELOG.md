@@ -2,6 +2,11 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.868] - 2026-11-20
+
+### Fixed
+- **New moves: the store's reasons read right, and a failed move gets a second try.** The Animation API reports its checks by name (`checks.through: { pass, worst_mm, at_t, where }`); the agent now reads that shape, so a refusal says "through 5.5 mm (limit 3 mm) at 1.9 s, right->arm" instead of "no reason given". A failed solve is written again once from those numbers and re-solved; a failed job's best attempt is never played. The script instructions now keep the two hands apart when they meet (one shared target made them pass through each other's arms on the first real solve). A solve still waiting after 8 minutes is logged before the 30-minute check takes it over.
+
 ## [2.25.867] - 2026-11-20
 
 ### Added

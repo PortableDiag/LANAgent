@@ -1145,7 +1145,7 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     const job = readJob(d);
     if (!job.id) throw new Error(`the store answered without a job (${JSON.stringify(d).slice(0, 200)})`);
     this.logger.info(`botsandborgs: Animation API job ${job.id} (${job.status}${d?.cached ? ', cached' : ''}) for ${script.name} on ${JSON.stringify(avatar)}: ${request.slice(0, 120)} | reply fields ${Object.keys(d || {}).join(', ')}`);
-    const rec = { id: job.id, name: script.name, request: request.slice(0, 300), loop: script.loop, play: play !== false && play !== 'false', avatar, modelId: this.agent?.agentModel?.activeVRMModel || null, status: job.status, at: new Date().toISOString() };
+    const rec = { id: job.id, name: script.name, request: request.slice(0, 300), loop: script.loop, play: play !== false && play !== 'false', avatar, modelId: this.agent?.agentModel?.activeVRMModel || null, status: job.status, at: new Date().toISOString(), script, props };
     await this.saveAnimJob(rec);
     const waiting = wait === true || wait === 'true';
     rec.quiet = waiting; // the answer itself says how it went
@@ -1165,7 +1165,10 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     const started = Date.now();
     let job = first ? readJob(first) : { status: rec.status };
     while (!['passed', 'failed'].includes(job.status)) {
-      if (Date.now() - started > maxMs) return { ok: false, text: `The store is still solving "${rec.name}"; I'll pick it up on the next check.` };
+      if (Date.now() - started > maxMs) {
+        this.logger.info(`botsandborgs: Animation API job ${rec.id} (${rec.name}) still ${job.status} after ${Math.round(maxMs / 60000)} min; the store check picks it up again`);
+        return { ok: false, text: `The store is still solving "${rec.name}"; I'll pick it up on the next check.` };
+      }
       await new Promise(r => setTimeout(r, pollMs));
       try { job = readJob(await this.api('get', `/api/anim/jobs/${encodeURIComponent(rec.id)}`, { key })); }
       catch (e) { this.logger.warn(`botsandborgs: Animation API job ${rec.id} not read: ${e.message}`); }
@@ -1181,6 +1184,12 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
       const why = reportFailures(job.report) || job.reason || 'no reason given';
       rec.status = 'failed'; rec.reason = why.slice(0, 400); await this.saveAnimJob(rec);
       this.logger.info(`botsandborgs: Animation API job ${rec.id} (${rec.name}) failed: ${why} | report ${JSON.stringify(job.report || {}).slice(0, 600)}`);
+      // The store's numbers say what to change (3910 #1929: two hands on one target went through each other's arm):
+      // the model rewrites the script from them once. A failed job's best attempt is never played.
+      if (!rec.retryOf && rec.script) {
+        const retried = await this.resolveAgain(rec, key, why).catch(e => { this.logger.warn(`botsandborgs: ${rec.name} not rewritten: ${e.message}`); return null; });
+        if (retried) return retried;
+      }
       const text = `My body can't do "${rec.request}" the way I wrote it: the store's checks failed (${why}). Ask again in other words and I'll write it differently.`;
       await notify(text);
       return { ok: false, text };
@@ -1210,6 +1219,21 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     const text = `New move made on the Bots & Borgs Animation API: "${clip.label}" (${rec.request}). It passed the store's checks on my body${played?.success ? `. ${played.result}` : played ? `, but it didn't play: ${played.error}` : ' and is installed.'}`;
     await notify(text);
     return { ok: true, text, label: clip.label };
+  }
+
+  /** A failed solve written again from the store's report and sent once more; followed like the first. */
+  async resolveAgain(rec, key, why) {
+    const script = await this.writeMotion(rec.request, { name: rec.name, loop: rec.loop, props: rec.props || [],
+      error: `the store solved it on the avatar and these checks failed: ${why}. Change the keys so those checks pass; keep the move the same.`, previous: rec.script });
+    const d = await this.api('post', '/api/anim/solve', { key, body: { avatar: rec.avatar, script } });
+    const job = readJob(d);
+    if (!job.id) throw new Error('the store answered without a job');
+    const next = { ...rec, id: job.id, script, status: job.status, retryOf: rec.id, at: new Date().toISOString(), reason: undefined };
+    await this.saveAnimJob(next);
+    this.logger.info(`botsandborgs: Animation API job ${job.id} (${job.status}) rewrites ${rec.id} (${rec.name}) after: ${why}`);
+    this._animFollowing ||= new Set();
+    this._animFollowing.add(next.id);
+    return this.followAnim(next, key, d).finally(() => this._animFollowing.delete(next.id));
   }
 
   /** Solves a restart left open: followed again (each one once at a time). */

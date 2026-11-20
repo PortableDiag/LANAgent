@@ -41,6 +41,9 @@ test('names, tags, job replies and failed checks', () => {
   assert.equal(readJob({ id: 'aj_3', status: 'failed', report: [] }).status, 'failed');
   assert.equal(reportFailures({ checks: [{ name: 'wrist_bend', pass: false, value: 52, limit: 40, unit: '°' }, { name: 'seam', pass: true }] }), 'wrist bend 52° (limit 40°)');
   assert.equal(reportFailures(null), '');
+  // The store's own shape (3910 #1929).
+  assert.equal(reportFailures({ status: 'failed', checks: { through: { pass: false, worst_mm: 5.5, limit_mm: 3, at_t: 1.9, where: 'right->arm' }, wrist: { pass: true, peak_deg: 12 } }, nudges: 3, rounds: 6 }),
+    'through 5.5 mm (limit 3 mm) at 1.9 s, right->arm');
   assert.match(motionPrompt('wave', { props: ['mug'] }), /"prop".*mug/);
   assert.match(motionPrompt('wave', { error: 'unknown field foo', previous: { a: 1 } }), /refused: unknown field foo/);
 });
@@ -110,10 +113,36 @@ test('a 400 is fed back to the model once; a failed solve says why in the store\
   const r = await t.p.animate({ motion: 'touch your toes', wait: true });
   assert.equal(r.success, false);
   assert.match(r.error, /body clearance 22\.8 mm \(limit 3 mm\)/);
-  assert.equal(t.calls.filter(c => c.route === '/api/anim/solve').length, 2);
+  // A 400 rewrite, then the failed solve rewritten from its numbers once (it fails again here): three solves, no more.
+  assert.equal(t.calls.filter(c => c.route === '/api/anim/solve').length, 3);
+  assert.match(t.prompts[2], /checks failed: body clearance 22\.8 mm/);
+  assert.equal(t.store.animJobs.jobs[0].retryOf, 'aj_5');
   assert.match(t.prompts[1], /refused: .*keys\[1\]\.lean\.tilt/);
   // Not wearing a store pass: the store product it is.
   assert.deepEqual(t.calls[0].body.avatar, { product: 'vrm-racer-blue' });
+});
+
+test('a failed solve rewritten from the store\'s numbers can pass and is played', async () => {
+  let n = 0;
+  const t = plugin({
+    routes: {
+      'post /api/anim/solve': () => ({ job: n++ === 0 ? 'aj_a' : 'aj_b' }),
+      'get /api/anim/jobs/aj_a': { id: 'aj_a', status: 'failed', report: { checks: { through: { pass: false, worst_mm: 5.5, at_t: 1.9, where: 'right->arm' } } } },
+      'get /api/anim/jobs/aj_b': { id: 'aj_b', status: 'passed', vrma: '/api/anim/jobs/aj_b/clip.vrma' }
+    }
+  });
+  t.p.http = async () => ({ status: 200, data: Buffer.from('x') });
+  t.p.ingest = async (a) => ({ variant: a.variant, files: [{ kind: 'animation', name: 'big-wave.vrma', label: 'Big Wave', size: 1 }] });
+  t.p.saveLibraryItem = async () => {};
+  t.p.publishAnimations = async () => [];
+  t.p.playClip = async () => ({ success: true, result: 'Doing Big Wave now.' });
+  const orig = t.p.followAnim.bind(t.p);
+  t.p.followAnim = (rec, key, first) => orig(rec, key, first, { pollMs: 1 });
+  const r = await t.p.animate({ motion: 'wave with both hands', wait: true });
+  assert.equal(r.success, true, r.error);
+  assert.match(t.prompts[1], /through 5\.5 mm at 1\.9 s, right->arm/);
+  assert.equal(t.store.animJobs.jobs[0].id, 'aj_b');
+  assert.equal(t.store.animJobs.jobs[0].status, 'installed');
 });
 
 test('no store body, no request: a plain answer, nothing sent', async () => {
