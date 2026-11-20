@@ -84,9 +84,14 @@ export async function pushPropsToAvatarX(listed, vrmDir, opts = {}) {
   for (const c of Array.isArray(listed) ? listed : []) {
     // AvatarX shows a prop whenever its clip plays, with no request to ask: on-request props (the mic) stay off it.
     for (const p of (c.props || []).filter(x => !x.onRequest)) {
-      const name = avatarxClipName(p.prop || p.file);
-      if (!name) continue;
-      if (!byProp.has(name)) byProp.set(name, { file: path.join(vrmDir, p.file), clips: {} });
+      const base = avatarxClipName(p.prop || p.file);
+      if (!base) continue;
+      // One AvatarX prop per build (2119 #559: a placement can name its own .glb).
+      const file = path.join(vrmDir, p.file);
+      let name = base;
+      for (const [k, v] of byProp) if (v.prop === base && v.file === file) name = k;
+      if (byProp.has(base) && byProp.get(base).file !== file && name === base) name = `${base}-${path.basename(file, '.glb')}`.slice(0, 60);
+      if (!byProp.has(name)) byProp.set(name, { prop: base, file, clips: {} });
       const at = { bone: p.bone, position: p.position, rotation: p.rotation };
       for (const k of ['scale', 'scale_with', 'ref_hips', 'show', 'prop_loop', 'prop_anim']) if (p[k] != null) at[k] = p[k];
       byProp.get(name).clips[avatarxClipName(c.file)] = at;

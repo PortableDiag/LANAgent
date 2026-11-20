@@ -2,6 +2,74 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.865] - 2026-11-19
+
+### Added
+- **Props with one build per body.** A prop placement from Bots & Borgs may now name its own model file (the Winter pack's Santa hat ships one build per hair family). The agent loads that file for that placement, on its own 3D pages and in AvatarX, in the pack's placements and in the per-body fits. Each build is its own prop entry (`santa-hat`, `santa-hat-santa_hat_sb`), still matched to its prop for fits and for "does not fit this body". Placements without a file work as before.
+
+## [2.25.864] - 2026-11-19
+
+### Fixed
+- **No more holding air.** A clip made around a prop (the mug sip, the book read, the mallet bonk, the mask peek, the foam-finger cheer, the gloomy sigh's rain cloud) is no longer played when the store has refused that prop for the body the agent wears. Asked for it, the agent says why in the store's words ("the mug goes 3 mm into the body") instead of sipping from an empty hand or playing some other move. The need comes from each pack's clips.json (`props[].need: "required"`, a loop taking it from its in/out/once companions); clips whose prop is optional (talking with a mic, the phone call, sitting) still play without it.
+
+## [2.25.863] - 2026-11-19
+
+### Fixed
+- **A reissued clip reaches AvatarX even when its pack also reissues a broad-body version.** Broad-shouldered clips are never listed, so their file was missing and the push of the fixed clips stopped with an error. Only listed clips are pushed now.
+
+## [2.25.862] - 2026-11-19
+
+### Fixed
+- **A live avatar update now reaches the model the agent wears.** When the agent owned the same model twice (on its own and inside a bundle), a new version from the live pass went to the first copy only, so the worn bundle copy kept the old model. Every owned copy now takes the new version, the worn one first (and AvatarX gets it). A 304 is trusted only when every copy already holds the last version fetched, so copies left behind catch up on the next check.
+
+## [2.25.861] - 2026-11-18
+
+### Added
+- **Custom moves and props from Bots & Borgs (store 0.36).** "Ask Bots & Borgs to make you a moonwalk animation" sends a request for the agent's own avatars (every model its roles use): a clip for $8, a prop for $12, or both for $15. Nothing is charged unless the store takes it.
+  - **Paying:** once the store accepts, the agent pays under the usual rules (weekly budget, per-item cap, wallet floor, approval setting), topping up the store balance from the wallet when it is short.
+  - **Over budget:** the owner is asked once, and "pay the custom request" pays it.
+  - **Delivery:** the result installs into the library like a purchase and the owner is told, and declines and refunds are reported too.
+  - **Checks:** requests are followed with the 30-minute feed poll. `custom({ list | cancel | pay })`.
+
+## [2.25.860] - 2026-11-18
+
+### Added
+- **Role-based avatars.** The agent can use a different owned 3D model for each role.
+  - **Public:** its picture goes to every profile people see (Telegram, X, MindSwarm, Gravatar, the Trellis card and the on-chain identity), and its profile kit's banner goes up.
+  - **Assistant:** videos and talking replies sent to other people for the owner (TextX reply forms, "send Mom a video of you…") are filmed on it.
+  - **Personal:** the model it wears, everything only the owner sees (the 3D pages, AvatarX, videos to the owner). The owner's apps (TextX, DialX, NotifX) show its picture, kept apart from the public one.
+  - **Fallbacks:** an empty assistant slot uses the public model, and an empty public slot uses the worn one. With nothing set, nothing changes.
+  - **How to set them:** in the avatar designer ("Use as Public", "Use as Assistant"), by asking ("use Racer Blue as your public avatar", "which avatar do you use for what"), or with `PUT /api/agent/vrm/roles`. `roles({ auto: true })` fills empty slots from the roles the store says each model suits.
+  - **Body and passes follow the role:** each video is filmed with that model's own body for clip choice and its own store fits, and every model in a role keeps its live pass renewed (budget rules apply). The role map is mirrored to the store's account roles.
+
+## [2.25.859] - 2026-11-18
+
+### Fixed
+- **"Go back a version" while the avatar is already held at one goes back from that version.** It used to go back from the newest version, which can be the version already held.
+
+## [2.25.858] - 2026-11-18
+
+### Added
+- **Live avatar versions, pinning and rollback (Bots & Borgs store 0.32).** "Go back to the previous version of your avatar" holds the live model at the version before the newest, and the agent installs it at once. "Follow the newest version again" undoes that, and "which versions of your avatar are there" lists the five the store keeps (`live({ versions | pin | unpin })`). A store-wide `rollback` feed entry fetches the model again, the same as a new version.
+
+## [2.25.857] - 2026-11-18
+
+### Added
+- **Bots & Borgs update feed (store 0.31).** Every 30 minutes the agent reads the store's account feed from its last position (`BOTSANDBORGS_FEED_MS`). A new model version re-checks the live passes, and a fit entry re-reads the worn avatar's fits and props. A new clip, new prop, fix or any other kind runs the library sync. Each sync runs at most once per read, and every entry's line is logged. The first read only records the position. The 6-hour checks stay as they are.
+
+## [2.25.856] - 2026-11-18
+
+### Fixed
+- **No "What this means" under an answer the plugin already wrote.** "Doing Book Read Flip now, in AvatarX." came with an explanation that read the field `pages: 0` (no 3D page open) as "the flip shows no page numbers". A plugin's own short written answer is now sent as it is; system, Docker and other technical output is still explained.
+
+## [2.25.855] - 2026-11-18
+
+### Fixed
+- **"Send Mom a video message of you sipping coffee" makes the video.** A word between "video" and "of you" (message, note, greeting) let the planner split the request into a voice clip plus an image, so no video was made. It is now one step: the agent films its own 3D body and sends it.
+- **"Show the book flipping animation" plays it on the avatar.** Asking to show, play or do an animation, emote, dance or move is one step on the agent's own body. The planner had read it as a YouTube search plus a download.
+- **A chain step no longer passes "from step 1" as a value.** The planner sometimes writes a pointer to an earlier step instead of the value ("from step 1", "{{step1.url}}"). The chain now fills it from that step (a link for url-like fields), or drops it when that step has nothing to give, so yt-dlp is never told to download the words "from step 1".
+- **MindSwarm image generation works again.** MindSwarm renamed `/api/ai/image` to `/api/ai/generate-image` (it takes `size`, not width and height); the old route answered 404.
+
 ## [2.25.854] - 2026-11-17
 
 ### Fixed

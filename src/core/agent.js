@@ -7745,6 +7745,13 @@ Respond naturally as if you're telling someone about your recent improvements. D
       return true;
     }
     
+    // A plugin that wrote its own short answer has already said what it means. Interpreting the fields beside it
+    // read "pages: 0" (no 3D page open) as "the flip has no page numbers" under the store's "Doing Book Read Flip
+    // now" (2026-11-18).
+    if (typeof result?.result === 'string' && result.result.trim() && result.result.length < 400) {
+      return false;
+    }
+
     // Interpret complex data structures
     if (typeof result === 'object' && result !== null) {
       // Check if it has arrays or multiple properties

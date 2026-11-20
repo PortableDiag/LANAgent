@@ -63,9 +63,78 @@ export function isOneStorePurchase(input) {
 export function isOneAvatarVideo(input) {
   const t = stripAgentAddress(input);
   if (/https?:\/\/|\byoutube\b|\byt\b|\btiktok\b|\bdownload\b/i.test(t)) return false;
-  const ofSelf = /\b(video|clip|recording|film|movie)\s+of\s+you(?:rself)?\b/i.test(t) || /\b(film|record|video)\s+yourself\b/i.test(t)
-    || /\byourself\s+(doing|dancing|waving|saying|on the phone|drinking|sitting|typing)\b/i.test(t);
+  // "a video message of you sipping coffee": a word between "video" and "of you" (message, note, greeting) is still
+  // the agent's own body. Without it the planner split it into voice.speak + a MindSwarm image (2026-11-18).
+  const ofSelf = /\b(video|clip|recording|film|movie)(?:\s+(?:message|note|greeting|selfie|reply|card))?\s+of\s+you(?:rself)?\b/i.test(t)
+    || /\b(film|record|video)\s+yourself\b/i.test(t)
+    || /\byourself\s+(doing|dancing|waving|saying|on the phone|drinking|sipping|sitting|typing|reading|\w+ing)\b/i.test(t);
   return ofSelf && !/\b(then|after that|afterwards|and also)\b.*\b(email|post|tweet|schedule|call)\b/i.test(t);
+}
+
+/**
+ * "Show the book flipping animation on my device", "play the cheer emote": one clip on the agent's own 3D body
+ * (botsandborgs use, play). The planner read it as a YouTube search plus a download (2026-11-18). Not when a site,
+ * a link or a download is named, or another action is chained after it.
+ */
+export function isOneAvatarClip(input) {
+  const t = stripAgentAddress(input).replace(/^(please|pls|can you|could you|now)\s+/i, '');
+  if (/https?:\/\/|\byoutube\b|\byt\b|\btiktok\b|\bdownload\b|\bsearch\b|\bvideo\b|\bgif\b/i.test(t)) return false;
+  return /^(show|play|do|run|perform|start)\b/i.test(t) && /\b(animation|emote|dance|move|gesture|clip)\b/i.test(t) &&
+    !/\b(then|after that|afterwards|and also)\b/i.test(t);
+}
+
+/**
+ * A step param that points at an earlier step instead of holding a value ("from step 1", "{{step1.url}}",
+ * "<url from previous step>"). The planner writes these; passed through, yt-dlp was told to download the words
+ * "from step 1" (2026-11-18). Returns the step number referenced (0 = the previous one), or null.
+ */
+export function stepReference(value) {
+  if (typeof value !== 'string') return null;
+  const v = value.trim();
+  if (v.length > 120) return null;
+  let m = v.match(/\{\{\s*(?:steps?[._\s]*(\d+)|previous|prev|last)[^}]*\}\}/i);
+  if (m) return m[1] ? Number(m[1]) : 0;
+  m = v.match(/^<?[^<>]{0,60}\b(?:from|of|in|by)\s+(?:the\s+)?(?:step\s*#?(\d+)|(?:previous|prior|last|first)\s+(?:step|result|search))\b[^<>]{0,40}>?$/i);
+  if (m) return m[1] ? Number(m[1]) : 0;
+  return null;
+}
+
+/** The first http(s) link in a step's result (a search's top hit). */
+function firstUrlIn(result) {
+  let text;
+  try { text = typeof result === 'string' ? result : JSON.stringify(result); } catch { text = String(result); }
+  const m = String(text || '').match(/https?:\/\/[^\s"'<>\\]+/);
+  return m ? m[0] : null;
+}
+
+/**
+ * Replace each step-reference param with the value it points at: a link for url-like params, else the step's own
+ * text result. A reference nothing can fill is removed, so the plugin sees a missing value (and can fall back, e.g.
+ * yt-dlp searches by query) instead of a nonsense one.
+ */
+export function resolveStepReferences(params, results = []) {
+  for (const [key, value] of Object.entries(params || {})) {
+    if (key.startsWith('_')) continue;
+    const ref = stepReference(value);
+    if (ref === null) continue;
+    const done = results.filter(r => r && r.success);
+    const src = ref ? results.find(r => r && r.stepNumber === ref) : done[done.length - 1];
+    let filled = null;
+    if (src?.success) {
+      const res = src.result ?? src;
+      if (/url|link|uri|href|source|video|media/i.test(key)) filled = firstUrlIn(res);
+      else if (typeof res === 'string' && res.trim()) filled = res.trim();
+      else filled = firstUrlIn(res);
+    }
+    if (filled) {
+      logger.info(`Chain: param ${key} "${value}" filled from step ${src.stepNumber}`);
+      params[key] = filled;
+    } else {
+      logger.warn(`Chain: param ${key} "${value}" points at a step with nothing to give; dropped`);
+      delete params[key];
+    }
+  }
+  return params;
 }
 
 /** Actions a plugin's execute() dispatches that are not in its command list. */
@@ -157,6 +226,7 @@ export class PluginChainProcessor {
       if (isOneVoiceText(input)) return { isMultiStep: false, singleIntent: 'voice_note_text' };
       if (isOneStorePurchase(input)) return { isMultiStep: false, singleIntent: 'store_purchase' };
       if (isOneAvatarVideo(input)) return { isMultiStep: false, singleIntent: 'avatar_video' };
+      if (isOneAvatarClip(input)) return { isMultiStep: false, singleIntent: 'avatar_clip' };
       logger.info(`Analyzing complex task: "${input}"`);
 
       // Get recent conversation context if available
@@ -425,7 +495,7 @@ Analyze the request:`;
         inheritTrellisTarget(steps, i, results);
 
         // Set timeout for this step
-        const stepPromise = this.executeStep(step, sharedData, context);
+        const stepPromise = this.executeStep(step, sharedData, context, results);
         const timeoutPromise = new Promise((_, reject) => 
           setTimeout(() => reject(new Error(`Step ${stepNumber} timeout`)), this.stepTimeoutFor(step))
         );
@@ -511,7 +581,7 @@ Analyze the request:`;
    * @param {Object} context - Execution context
    * @returns {Object} Step execution result
    */
-  async executeStep(step, sharedData, context) {
+  async executeStep(step, sharedData, context, priorResults = []) {
     const startTime = Date.now();
     let releaseLock = null;
 
@@ -572,6 +642,8 @@ Analyze the request:`;
           params.subject = `Information from ${this.agent.config.name}`;
         }
       }
+
+      resolveStepReferences(params, priorResults);
 
       // Mark as AI-originated so plugins can resolve device names, aliases, etc.
       params.fromAI = true;

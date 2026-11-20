@@ -117,10 +117,12 @@ export async function props(d = dirs()) {
   const byProp = new Map();
   for (const c of await readJson(path.join(d.vrm, 'animations', 'store.json'), [])) {
     for (const p of (c?.props || []).filter(x => !x.onRequest)) {
-      const name = avatarxClipName(p.prop || p.file);
+      const base = avatarxClipName(p.prop || p.file);
       const glb = path.join(d.vrm, String(p.file || ''));
-      if (!name || !glb.startsWith(path.join(d.vrm, 'props') + path.sep)) continue;
-      if (!byProp.has(name)) byProp.set(name, { name, glb, clips: {}, fits: null });
+      if (!base || !glb.startsWith(path.join(d.vrm, 'props') + path.sep)) continue;
+      // One entry per build: a prop whose placements name different .glb files (2119 #559) is several props on the page.
+      const name = buildName(byProp, base, glb);
+      if (!byProp.has(name)) byProp.set(name, { name, prop: base, glb, clips: {}, fits: null });
       const at = { bone: p.bone, position: p.position, rotation: p.rotation };
       for (const k of ['scale', 'scale_with', 'ref_hips', 'show', 'prop_loop', 'prop_anim']) if (p[k] != null) at[k] = p[k];
       byProp.get(name).clips[avatarxClipName(c.file)] = at;
@@ -140,7 +142,7 @@ export async function props(d = dirs()) {
     // Defaults on the prop fill each clip's own placement (AvatarX parse_attach).
     const base = p.defaults ? Object.fromEntries(['bone', 'position', 'rotation', 'scale', 'scale_with', 'ref_hips'].filter(k => p.defaults[k] != null).map(k => [k, p.defaults[k]])) : {};
     const clipsOut = Object.fromEntries(Object.entries(p.clips).map(([k, v]) => [k, { ...base, ...(v?.standard || v || {}) }]));
-    out.push({ name: p.name, rev: `${stamp(st)}-${Object.keys(clipsOut).length}`, clips: clipsOut, fits: p.fits, glb: p.glb });
+    out.push({ name: p.name, prop: p.prop || p.name, rev: `${stamp(st)}-${Object.keys(clipsOut).length}`, clips: clipsOut, fits: p.fits, glb: p.glb });
   }
   return out.sort((a, b) => a.name.localeCompare(b.name));
 }
@@ -153,7 +155,7 @@ export async function props(d = dirs()) {
 export function applyFits(propList, liveProps, sha256) {
   if (!sha256 || !Array.isArray(liveProps) || !liveProps.length) return propList;
   return propList.map(p => {
-    const lp = liveProps.find(x => avatarxClipName(x.prop) === p.name && x.fitted && x.fitted_for_sha256 === sha256);
+    const lp = liveProps.find(x => avatarxClipName(x.prop) === (p.prop || p.name) && x.fitted && x.fitted_for_sha256 === sha256);
     if (!lp) return p;
     const clipsOut = { ...p.clips };
     let n = 0;
@@ -165,7 +167,31 @@ export function applyFits(propList, liveProps, sha256) {
       n++;
     }
     return n ? { ...p, clips: clipsOut, rev: `${p.rev}-fit${n}` } : p;
-  });
+  }).flatMap(splitByPlacementFile);
+}
+
+/**
+ * The entry name for a prop build: the prop's own name for its first .glb, `<prop>-<file stem>` for any other
+ * (the Santa hat ships one build per hair family, 2119 #559).
+ */
+export function buildName(byName, base, glb) {
+  for (const [k, v] of byName) if ((v.prop || v.name) === base && v.glb === glb) return k;
+  const first = byName.get(base);
+  return !first || first.glb === glb ? base : `${base}-${path.basename(glb, '.glb')}`.slice(0, 60);
+}
+
+/** A prop whose clips' placements carry a `file` (a fitted build) split into one entry per .glb, beside its pack file. */
+export function splitByPlacementFile(p) {
+  const groups = new Map();
+  for (const [clip, at] of Object.entries(p.clips || {})) {
+    const own = typeof at?.file === 'string' && /^[\w.-]+\.glb$/i.test(path.basename(at.file)) ? path.join(path.dirname(p.glb), path.basename(at.file)) : p.glb;
+    const { file, ...rest } = at || {};
+    if (!groups.has(own)) groups.set(own, {});
+    groups.get(own)[clip] = rest;
+  }
+  if (groups.size <= 1 && (!groups.size || groups.has(p.glb))) return [groups.size ? { ...p, clips: groups.get(p.glb) } : p];
+  return [...groups].map(([glb, clips]) => ({ ...p, prop: p.prop || p.name, glb, clips,
+    name: glb === p.glb ? p.name : `${p.prop || p.name}-${path.basename(glb, '.glb')}`.slice(0, 60), rev: `${p.rev}-${path.basename(glb, '.glb')}` }));
 }
 
 const shaCache = new Map();

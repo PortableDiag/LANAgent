@@ -1,4 +1,5 @@
 import path from 'path';
+import { existsSync } from 'fs';
 import QRCode from 'qrcode';
 import { WebSocketServer } from 'ws';
 import { TextXHub } from './textxHub.js';
@@ -44,7 +45,13 @@ export function getTextX(agent) {
   const hub = new TextXHub({ store, agent, logger, callStore: mongoCallStore() });
   const transport = createTransport(hub, {
     filesDir: path.join(DATA_PATH, 'textx', 'files'),
-    avatarFile: () => (agent?.agentModel?.avatarPath ? path.join(DEPLOY_PATH, agent.agentModel.avatarPath) : null),
+    // Role-based avatars: the apps are the owner's, so they show the personal picture when one is kept apart from the
+    // public one (data/agent/avatar-personal.png); otherwise the one avatar (TextX, 2119 #543).
+    avatarFile: () => {
+      const personal = path.join(DATA_PATH, 'agent', 'avatar-personal.png');
+      if (existsSync(personal)) return personal;
+      return agent?.agentModel?.avatarPath ? path.join(DEPLOY_PATH, agent.agentModel.avatarPath) : null;
+    },
     logger
   });
   const relayEnabled = String(process.env.TEXTX_RELAY || 'on').toLowerCase() !== 'off';

@@ -381,7 +381,10 @@ export function propAttachments(manifest, { fit = 'standard', fileFor = (f) => f
       if (!a || typeof a.bone !== 'string' || !triple(a.position) || !triple(a.rotation)) continue;
       const key = clipKey(clip);
       if (!byClip.has(key)) byClip.set(key, []);
-      const one = { prop: String(p.prop || path.basename(p.file, '.glb')), file: fileFor(p.file), kind: p.kind || null, bone: a.bone, position: a.position, rotation: a.rotation };
+      // Store 2119 #559 (Winter pack, 12-01): a placement may name its own build ("file": "santa_hat_sb.glb", one per
+      // hair family); load THAT glb from the pack instead of the prop's default.
+      const own = typeof a.file === 'string' && /^[\w.-]+\.glb$/i.test(path.basename(a.file)) ? a.file : null;
+      const one = { prop: String(p.prop || path.basename(p.file, '.glb')), file: fileFor(own || p.file), kind: p.kind || null, bone: a.bone, position: a.position, rotation: a.rotation };
       // Store 0.28 (2119 #521): `when` = show only for that kind of video (the mic: "performance"); `use` = what it is for.
       const when = a.when ?? p.when;
       if (typeof when === 'string' && when) one.when = when;

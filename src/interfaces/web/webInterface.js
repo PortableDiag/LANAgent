@@ -2538,6 +2538,31 @@ export class WebInterface {
       }
     });
 
+    // Role-based avatars: which gallery model each role uses (public / assistant; personal = the active model).
+    const storePlugin = () => { const e = this.agent?.apiManager?.apis?.get?.('botsandborgs'); return e?.instance || e || null; };
+    this.app.get('/api/agent/vrm/roles', authenticateToken, async (req, res) => {
+      try {
+        const p = storePlugin();
+        if (!p?.rolesCommand) return res.status(503).json({ success: false, error: 'the store plugin is not loaded' });
+        const r = await p.rolesCommand({});
+        res.json({ success: true, roles: r.roles, text: r.result });
+      } catch (error) { res.status(500).json({ success: false, error: error.message }); }
+    });
+    this.app.put('/api/agent/vrm/roles', authenticateToken, async (req, res) => {
+      try {
+        const p = storePlugin();
+        if (!p?.rolesCommand) return res.status(503).json({ success: false, error: 'the store plugin is not loaded' });
+        const { role, modelId, clear } = req.body || {};
+        if (clear) {
+          const r = await p.rolesCommand({ clear: String(clear) });
+          return res.status(r.success ? 200 : 400).json(r);
+        }
+        if (!role || !modelId || typeof modelId !== 'string') return res.status(400).json({ success: false, error: 'role and modelId are required' });
+        const r = await p.rolesCommand({ role: String(role), modelId });
+        res.status(r.success ? 200 : 400).json(r);
+      } catch (error) { res.status(500).json({ success: false, error: error.message }); }
+    });
+
     // Get active VRM model
     this.app.get('/api/agent/vrm', async (req, res) => {
       try {

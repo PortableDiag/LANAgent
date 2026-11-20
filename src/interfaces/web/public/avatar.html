@@ -288,6 +288,15 @@
                         <div style="font-size:10px;color:var(--text-secondary);margin-top:3px;padding:0 2px;">
                             Renders a bust portrait and updates profile image, email signature, and Gravatar
                         </div>
+                        <div style="display:flex;gap:6px;margin-top:6px;">
+                            <button class="btn btn-secondary" onclick="avatarDesigner.setVRMRole('public')" style="flex:1;font-size:11px;" title="Profile pictures everyone sees: Telegram, X, MindSwarm, Gravatar, Trellis, on-chain">
+                                <i class="fas fa-bullhorn"></i> Use as Public
+                            </button>
+                            <button class="btn btn-secondary" onclick="avatarDesigner.setVRMRole('assistant')" style="flex:1;font-size:11px;" title="Videos and talking replies sent to other people for you">
+                                <i class="fas fa-user-tie"></i> Use as Assistant
+                            </button>
+                        </div>
+                        <div id="vrm-roles-status" style="font-size:10px;color:var(--text-secondary);margin-top:4px;white-space:pre-line;"></div>
                         <div id="vrm-active-status" style="font-size:11px;color:var(--success);margin-top:4px;display:none;">
                             <i class="fas fa-check"></i> This is your active avatar
                         </div>
@@ -647,6 +656,7 @@
                 this._savedActiveVRM ? Promise.resolve() : this._detectExistingAvatars(),
                 this.loadGallery(),
                 this.loadVRMManifest(),
+                this.loadVRMRoles(),
                 this.loadGLBManifest()
             ]);
         }
@@ -1789,6 +1799,33 @@
                     <div style="font-size:10px;color:var(--text-secondary);margin-top:2px;">${m.description}</div>
                 </div>
             `).join('');
+        }
+
+        /** Role-based avatars: show which model each role uses. */
+        async loadVRMRoles() {
+            const el = document.getElementById('vrm-roles-status');
+            if (!el) return;
+            try {
+                const r = await fetch('/api/agent/vrm/roles', { headers: { 'Authorization': `Bearer ${this.token}` } }).then(x => x.json());
+                el.textContent = r.success ? r.text : '';
+            } catch (e) { el.textContent = ''; }
+        }
+
+        async setVRMRole(role) {
+            if (!this._currentVRMId) return;
+            if (!confirm(role === 'public'
+                ? 'Use this model as the public avatar? Its picture goes to Telegram, X, MindSwarm, Gravatar, Trellis and the on-chain identity.'
+                : 'Use this model for videos and talking replies sent to other people?')) return;
+            const el = document.getElementById('vrm-roles-status');
+            try {
+                const r = await fetch('/api/agent/vrm/roles', {
+                    method: 'PUT',
+                    headers: { 'Authorization': `Bearer ${this.token}`, 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ role, modelId: this._currentVRMId })
+                }).then(x => x.json());
+                if (el) el.textContent = r.success ? r.result : (r.error || 'Not changed');
+            } catch (e) { if (el) el.textContent = 'Not changed: ' + e.message; }
+            setTimeout(() => this.loadVRMRoles(), 1500);
         }
 
         async setActiveVRM() {

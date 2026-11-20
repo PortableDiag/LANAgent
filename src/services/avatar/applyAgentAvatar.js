@@ -61,7 +61,9 @@ function pluginOf(agent, name) {
  * @param {object} [opts]   { source: 'where it came from, for the log', only: ['telegram', …] to limit the services }
  * @returns {Promise<{ path: string, services: Record<string, string> }>} what each service did
  */
-export async function applyAgentAvatar(agent, buffer, { source = 'a new picture', only = null, variant = null } = {}) {
+export async function applyAgentAvatar(agent, buffer, { source = 'a new picture', only = null, variant = null, personal = false } = {}) {
+  // personal (role-based avatars): the owner's own picture for the apps, kept apart from the public avatar.png.
+  if (personal) return applyPersonalAvatar(agent, buffer, { source });
   const dir = path.join(DATA_PATH, 'agent');
   await fs.mkdir(dir, { recursive: true });
   const file = path.join(dir, 'avatar.png');
@@ -233,4 +235,38 @@ export function describeAvatarServices(services) {
   const done = Object.entries(services).filter(([, v]) => v === 'updated').map(([k]) => names[k] || k);
   const other = Object.entries(services).filter(([, v]) => !['updated', 'not connected', 'unchanged'].includes(v)).map(([k, v]) => `${names[k] || k} ${v}`);
   return [done.length ? `Updated on ${done.join(', ')}.` : '', other.join('; ')].filter(Boolean).join(' ');
+}
+
+/** The personal picture file the owner's apps show when it differs from the public avatar (role-based avatars). */
+export const PERSONAL_AVATAR = 'avatar-personal.png';
+
+async function tellApps() {
+  const { textxIfStarted } = await import('../textx/index.js');
+  const hub = textxIfStarted()?.hub;
+  if (!hub?.avatarChanged) return 'not connected';
+  const told = await hub.avatarChanged();
+  return told ? 'updated' : 'not connected';
+}
+
+/** Write the personal picture and tell the apps. Public profiles are not touched. */
+export async function applyPersonalAvatar(agent, buffer, { source = 'a personal picture' } = {}) {
+  const dir = path.join(DATA_PATH, 'agent');
+  await fs.mkdir(dir, { recursive: true });
+  const file = path.join(dir, PERSONAL_AVATAR);
+  const current = await fs.readFile(file).catch(() => null);
+  const { default: sharp } = await import('sharp');
+  let png = await sharp(buffer).rotate().resize(1024, 1024, { fit: 'cover' }).png({ compressionLevel: 9 }).toBuffer();
+  if (png.length > MAX_AVATAR_BYTES) png = await sharp(png).png({ palette: true, compressionLevel: 9 }).toBuffer();
+  if (current?.equals(png)) return { services: { apps: 'unchanged' } };
+  await fs.writeFile(file, png);
+  logger.info(`Avatar: personal picture for the apps from ${source}`);
+  return { services: { apps: await tellApps().catch(e => `not updated: ${e.message}`) } };
+}
+
+/** No separate personal picture any more: the apps show the one avatar again. */
+export async function clearPersonalAvatar() {
+  const file = path.join(DATA_PATH, 'agent', PERSONAL_AVATAR);
+  const had = await fs.unlink(file).then(() => true).catch(() => false);
+  if (had) await tellApps().catch(() => {});
+  return had;
 }

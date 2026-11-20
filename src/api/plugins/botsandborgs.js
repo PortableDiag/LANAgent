@@ -4,6 +4,7 @@ import crypto from 'node:crypto';
 import path from 'path';
 import { PluginSettings } from '../../models/PluginSettings.js';
 import { encrypt, decrypt } from '../../utils/encryption.js';
+import { ROLES, normalizeRole, roleForRecipient, resolveRoleModel, modelsInUse, autoFillRoles } from '../../services/avatar/avatarRoles.js';
 import fs from 'node:fs/promises';
 import { DATA_PATH } from '../../utils/paths.js';
 import { propsFor, variantKind, livePass, applyClipManifest, unpack, installVrm, addToManifest, readVrmInfo, readVrmaInfo, clipLabel, clipLoops, clipGesture, writeStoreAnimations, safeName, toStickerWebp, moodOf, portraitFromPreview } from '../../services/store/assetLibrary.js';
@@ -51,6 +52,8 @@ const LIVE_RENEW_AHEAD_MS = 3 * 24 * 3600 * 1000;
 // Live passes: the store serves the newest version of a model to the pass's key; an unchanged one is a free 304,
 // and a key gets 40 full downloads a day (botsandborgs.com/llms.txt, "Live avatars").
 const LIVE_SYNC_MS = Number(process.env.BOTSANDBORGS_LIVE_SYNC_MS) || 6 * 3600 * 1000;
+// Store 0.31 update feed (GET /api/account/feed): a cheap cursor poll between the 6 h checks, acting on what changed.
+const FEED_POLL_MS = Number(process.env.BOTSANDBORGS_FEED_MS) || 30 * 60 * 1000;
 const LIVE_FIRST_SYNC_MS = 3 * 60 * 1000;
 const AUTO_STICKER_EVERY_MS = Number(process.env.BOTSANDBORGS_STICKER_EVERY_MS) || 20 * 60 * 1000;
 const AUTO_STICKER_ASK_EVERY_MS = 60 * 1000;
@@ -204,14 +207,26 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
       {
         command: 'live',
         description: 'Live avatar passes from Bots & Borgs: models the store hosts and keeps at their newest version. Lists each pass (model, state, expiry) and checks the store for a newer version now; a new version replaces the installed model, and the worn one everywhere it shows. Buy one with buy({ variant: "<model>-live30" }) (30, 90 or 365 days)',
-        usage: 'live({ check: true })  // renew: true (the worn model) or a model slug renews its pass now; fit: true = how the store\'s props fit my body and why one is left off',
-        examples: ['check your live avatars for updates', 'which live avatar passes do you have', 'when does your live avatar pass expire', 'is there a new version of your live avatar', 'are the props fitted to your avatar', "why can't your avatar hold the mug"]
+        usage: 'live({ check: true })  // renew: true (the worn model) or a model slug renews its pass now; fit: true = how the store\'s props fit my body and why one is left off; versions: true lists the kept model versions; pin: "previous" or a version holds the model there; unpin: true follows the newest again',
+        examples: ['check your live avatars for updates', 'go back to the previous version of your avatar', 'roll your avatar back to the last version', 'follow the newest version of your avatar again', 'which versions of your avatar are there', 'which live avatar passes do you have', 'when does your live avatar pass expire', 'is there a new version of your live avatar', 'are the props fitted to your avatar', "why can't your avatar hold the mug"]
       },
       {
         command: 'plan',
         description: 'The Bots & Borgs All-Access subscription: with no arguments its status (renewal date and price, downloads left this period, members, any warning) and this agent\'s store account id; subscribe: "month" or "year" subscribes, paid from the store balance (topped up from the wallet); member: "acct_…" adds another agent\'s account to the plan; cancel: true stops it at the period end',
         usage: 'plan({})  // plan({ subscribe: "month" }), plan({ member: "acct_…" }), plan({ cancel: true })',
         examples: ['what is your bots and borgs subscription status', 'subscribe to bots and borgs all access monthly', 'add delta to the bots and borgs plan', 'how many bots and borgs downloads are left this month', 'what is your bots and borgs account id']
+      },
+      {
+        command: 'roles',
+        description: 'Role-based avatars: a different owned 3D model per role. public = the profile pictures everyone sees (Telegram, X, MindSwarm, Gravatar, Trellis, on-chain); assistant = videos and talking replies sent to other people for the owner; personal = what only the owner sees (the 3D pages, AvatarX, the apps, videos to the owner; the worn model). With no arguments lists them; role + item sets one; clear: role empties it (it falls back: assistant to public, public to the worn model); auto: true fills empty slots from what the store says each model suits',
+        usage: 'roles({})  // roles({ role: "public", item: "racer blue" }), roles({ clear: "assistant" }), roles({ auto: true })',
+        examples: ['which avatar do you use for what', 'use racer blue as your public avatar', 'use pilot white when you send videos to people', 'wear the frog for me privately', 'stop using a separate assistant avatar', 'set up your avatar roles yourself']
+      },
+      {
+        command: 'custom',
+        description: 'Ask Bots & Borgs to make a custom animation clip ($8), prop ($12) or both ($15) for this agent\'s own 3D avatar, from a description. The store decides whether to take it; once accepted it is paid under the usual budget rules, built, checked on the avatar and installed by itself; a refund if it cannot pass. list: true shows the requests; cancel: id withdraws one before it is paid',
+        usage: 'custom({ prompt: "wave while holding a coffee", wants: "animation" })  // wants: animation | prop | both; custom({ list: true }); custom({ cancel: "req_…" }); custom({ pay: true }) pays an accepted one the owner approved',
+        examples: ['ask bots and borgs to make you a moonwalk animation', 'get a custom prop made for your avatar: a guitar', 'order a custom clip of you juggling', 'what custom requests do you have at bots and borgs', 'cancel the custom animation request', 'pay the custom request']
       },
       {
         command: 'orders',
@@ -247,6 +262,8 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
         case 'plan': return await this.planCommand(data);
         case 'orders': return await this.orders();
         case 'settings': return await this.settingsCommand(data);
+        case 'roles': return await this.rolesCommand(data);
+        case 'custom': return await this.customCommand(data);
         default: return { success: false, error: `Unknown action ${action}` };
       }
     } catch (e) {
@@ -427,11 +444,65 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     const tick = () => this.liveTick().catch(e => this.logger.warn(`botsandborgs: live check failed: ${e.message}`));
     this._liveFirst = setTimeout(tick, LIVE_FIRST_SYNC_MS);
     this._liveTimer = setInterval(tick, LIVE_SYNC_MS);
-    this._liveFirst.unref?.(); this._liveTimer.unref?.();
+    this._feedTimer = setInterval(() => this.feedTick().catch(e => this.logger.warn(`botsandborgs: update feed failed: ${e.message}`)), FEED_POLL_MS);
+    this._liveFirst.unref?.(); this._liveTimer.unref?.(); this._feedTimer.unref?.();
   }
 
   async cleanup() {
-    clearTimeout(this._liveFirst); clearInterval(this._liveTimer);
+    clearTimeout(this._liveFirst); clearInterval(this._liveTimer); clearInterval(this._feedTimer);
+  }
+
+  /**
+   * The store's update feed (0.31, 2119 #545): entries oldest first after our cursor (`next_since`, the store's id).
+   * A model entry re-checks the live passes (the new VRM), a fit entry re-reads the worn pass's fit and props, a library
+   * kind (new clip or prop, fix, placement...) runs the library sync. Each sync runs once per poll however many entries
+   * asked for it. The first read only sets the cursor: the 6 h checks already brought what came before.
+   * Returns { entries, ran: [...] }.
+   */
+  async feedTick({ maxPages = 5 } = {}) {
+    const key = await this.accountKey().catch(() => null);
+    if (!key) return { entries: 0, ran: [] };
+    // Custom requests (store 0.36) move on the store's side; followed on the same 30-minute beat.
+    await this.customTick().catch(e => this.logger.warn(`botsandborgs: custom requests not checked: ${e.message}`));
+    const cursor = await PluginSettings.getCached(this.name, 'feedCursor').catch(() => null);
+    const entries = [];
+    let since = cursor?.since ?? null;
+    for (let page = 0; page < maxPages; page++) {
+      let d;
+      try { d = await this.api('get', `/api/account/feed${since != null ? `?since=${encodeURIComponent(since)}` : ''}`, { key }); }
+      catch (e) { if (e.status === 404) return { entries: 0, ran: [] }; throw e; }
+      const list = Array.isArray(d) ? d : d?.entries || d?.feed || d?.items || [];
+      if (page === 0 && cursor?.since == null) this.logger.info(`botsandborgs: update feed answered with ${Array.isArray(d) ? 'a list' : `fields ${Object.keys(d || {}).join(', ')}`}`);
+      entries.push(...list.filter(Boolean));
+      if (d?.next_since != null) since = d.next_since;
+      if (!d?.more) break;
+    }
+    if (since != null) await PluginSettings.setCached(this.name, 'feedCursor', { since, at: new Date().toISOString() });
+    if (cursor?.since == null) {
+      this.logger.info(`botsandborgs: update feed: first read, ${entries.length} past entr${entries.length === 1 ? 'y' : 'ies'} taken as seen`);
+      return { entries: 0, ran: [], first: true };
+    }
+    if (!entries.length) return { entries: 0, ran: [] };
+    for (const e of entries) this.logger.info(`botsandborgs: feed ${e.kind || '?'} ${e.product || ''}: ${String(e.text || e.title || '').slice(0, 200)}`);
+    const kinds = new Set(entries.map(e => String(e.kind || 'update')));
+    const ran = [];
+    // A rollback (store 0.32) serves an older model to everyone: fetch it like a new version.
+    if (kinds.has('model') || kinds.has('rollback')) { ran.push('live'); await this.syncLive().catch(e => this.logger.warn(`botsandborgs: live check failed: ${e.message}`)); }
+    // Library kinds (fix, art, new_clip, new_prop, placement, update) and any kind the store adds later ("new kinds may
+    // appear") run the library sync. syncLive above already runs it.
+    else if ([...kinds].some(k => !['fit', 'fit_failed'].includes(k))) {
+      ran.push('library'); await this.syncLibrary().catch(e => this.logger.warn(`botsandborgs: library sync failed: ${e.message}`));
+    }
+    if (kinds.has('fit') || kinds.has('fit_failed')) {
+      const pass = this.wornPass(await this.livePasses());
+      if (pass) {
+        ran.push('fit');
+        let k; try { k = decrypt(pass.key); } catch { k = null; }
+        if (k) await this.syncLiveProps(pass, k).catch(e => this.logger.warn(`botsandborgs: live props not read: ${e.message}`));
+      }
+    }
+    this.logger.info(`botsandborgs: update feed: ${entries.length} new entr${entries.length === 1 ? 'y' : 'ies'} (${[...kinds].join(', ')}); ran ${ran.join(', ') || 'nothing'}`);
+    return { entries: entries.length, ran };
   }
 
   /** Saved passes: [{ slug, variant, key (encrypted), state, expires, vrmUrl, etag, checkedAt, updatedAt }]. */
@@ -474,9 +545,9 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     }
     await this.syncLive();
     if (!(await this.settings()).autoRenewLive) return;
-    const worn = this.wornBase();
-    const pass = (await this.livePasses()).find(p => p.slug === worn);
-    if (pass && this.renewDue(pass)) {
+    // Every model a role uses keeps its pass (role-based avatars), not only the worn one. Budget rules apply to each.
+    for (const pass of await this.rolePasses(await this.livePasses())) {
+      if (!this.renewDue(pass)) continue;
       const r = await this.renewLive(pass.slug).catch(e => ({ success: false, error: e.message }));
       this.logger[r.success ? 'info' : 'warn'](`botsandborgs: live pass for ${pass.slug} ${r.success ? 'renewed' : `not renewed: ${r.error}`}`);
     }
@@ -525,11 +596,21 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
       pass.expires = liveExpiry(pass.expires);
       let key;
       try { key = decrypt(pass.key); } catch { report.push({ slug: pass.slug, status: 'error', error: 'its key could not be read' }); continue; }
-      const item = (await this.libraryItems()).find(i => i.variant === pass.slug) || (await this.libraryItems()).find(i => i.livePass && this.productBase(i.variant) === pass.slug && i.files.some(f => f.kind === 'vrm'));
-      const file = item?.files.find(f => f.kind === 'vrm');
+      // Every owned copy of this model takes the new version: the plain model AND a bundle that carries it (ALICE
+      // wears the bundle's copy; on 2026-11-19 the update went to the plain one only and the worn model stayed old).
+      const items = (await this.libraryItems()).filter(i => i.files.some(f => f.kind === 'vrm')
+        && (i.variant === pass.slug || this.productBase(i.variant) === pass.slug));
+      const worn = this.agent?.agentModel?.activeVRMModel;
+      items.sort((a, b) => (b.files.some(f => f.modelId === worn) ? 1 : 0) - (a.files.some(f => f.modelId === worn) ? 1 : 0));
+      const item = items[0];
       const headers = { 'User-Agent': this.userAgent(), 'X-Live-Key': key };
-      // No local copy = no point in a 304.
-      if (pass.etag && file) headers['If-None-Match'] = pass.etag;
+      // A 304 is trusted only when every copy holds the version last fetched; otherwise fetch it again to bring them level.
+      const sha = (b) => crypto.createHash('sha256').update(b).digest('hex');
+      const shas = await Promise.all(items.map(i => {
+        const f = i.files.find(x => x.kind === 'vrm');
+        return fs.readFile(path.join(this.libraryDir(), safeName(i.variant), f.name)).then(sha).catch(() => null);
+      }));
+      if (pass.etag && items.length && pass.sha && shas.every(x => x === pass.sha)) headers['If-None-Match'] = pass.etag;
       const r = await this.fetchLive(pass.vrmUrl, headers);
       pass.checkedAt = new Date().toISOString();
       const state = r.headers?.['x-live-state'];
@@ -548,7 +629,12 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
       const product = await this.productOf(pass.slug).catch(() => null);
       const target = item || { variant: pass.slug, title: product?.title || pass.slug, kind: 'vrm', collection: product?.collection || null, order: null, token: null,
         at: new Date().toISOString(), files: [], livePass: pass.variant };
-      const done = await this.replaceModel(target, buffer);
+      pass.sha = sha(buffer);
+      let done = await this.replaceModel(target, buffer);
+      for (const other of items.slice(1)) {
+        const d = await this.replaceModel(other, buffer).catch(e => { this.logger.warn(`botsandborgs: live ${pass.slug} not copied to ${other.variant}: ${e.message}`); return null; });
+        if (d?.changed) { this.logger.info(`botsandborgs: live ${pass.slug} also updated ${other.variant}${d.worn ? ', worn' : ''}`); if (!done.changed || d.worn) done = { ...d, worn: d.worn || done.worn }; }
+      }
       if (!done.changed) { report.push({ slug: pass.slug, status: 'same', state: pass.state }); continue; }
       pass.updatedAt = new Date().toISOString();
       this.logger.info(`botsandborgs: live ${pass.slug} updated ${target.variant} (${done.gallery.sizeMB} MB, ETag ${pass.etag || 'none'})${done.worn ? ', worn: AvatarX given it' : ''}`);
@@ -577,6 +663,12 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
   async syncLiveClips(passes) {
     // The pass of the body it WEARS: its props, fit status and fitted clips belong to that body. Taking the first pass
     // read Core's status while ALICE wore Racer Blue (2119 #533), so Core's fits would have gone on Racer Blue.
+    // Role-based avatars: the other roles' models get their fits too, so a video for a contact uses that body's fits.
+    for (const other of await this.rolePasses(passes)) {
+      if (other.slug === this.wornPass(passes)?.slug) continue;
+      let k; try { k = decrypt(other.key); } catch { continue; }
+      await this.syncLiveProps(other, k).catch(e => this.logger.warn(`botsandborgs: live props for ${other.slug} failed: ${e.message}`));
+    }
     const pass = this.wornPass(passes);
     if (!pass) return null;
     let key; try { key = decrypt(pass.key); } catch { return null; }
@@ -626,7 +718,9 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     if (d.product && this.productBase(d.product) !== this.productBase(pass.slug)) { this.logger.warn(`botsandborgs: fit status for ${d.product}, not ${pass.slug}; ignored`); return null; }
     const fit = { slug: pass.slug, product: d.product || null, checkedAt: new Date().toISOString(), vrm_sha256: d.vrm_sha256 || null, body_class: d.body_class || null,
       job: d.job || null, props: fitEntries(d.props, 'prop'), packs: fitEntries(d.packs, 'pack') };
-    await PluginSettings.setCached(this.name, 'liveFit', fit);
+    const all = (await PluginSettings.getCached(this.name, 'liveFits').catch(() => null))?.bySlug || {};
+    await PluginSettings.setCached(this.name, 'liveFits', { bySlug: { ...all, [this.productBase(pass.slug)]: fit } });
+    if (this.productBase(pass.slug) === this.wornBase()) await PluginSettings.setCached(this.name, 'liveFit', fit);
     const count = (s) => fit.props.filter(p => p.state === s).length;
     this.logger.info(`botsandborgs: fit status (${fit.body_class || 'body ?'}): props ${fit.props.length} — ${['fitted', 'pending', 'unsupported', 'standard'].map(s => `${count(s)} ${s}`).join(', ')}${fit.job ? `; job ${fit.job.state || ''} position ${fit.job.position ?? '?'}` : ''}${fit.props[0] ? ` (fields: ${Object.keys(fit.props[0]).join(', ')})` : ''}`);
     return fit;
@@ -637,25 +731,345 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
    * "a prop that does not fit looks worse than none"). Only when the status is about that very body (its sha256).
    * Returns a Map name -> owner line.
    */
-  async unsupportedProps() {
-    const fit = await PluginSettings.getCached(this.name, 'liveFit').catch(() => null);
+  async unsupportedProps(modelId = null) {
+    const id = modelId || this.agent?.agentModel?.activeVRMModel;
+    const slug = this.productBase(id);
+    // Fits are kept per model (role-based avatars film several); liveFit is the worn one's, kept for older saves.
+    const fits = (await PluginSettings.getCached(this.name, 'liveFits').catch(() => null))?.bySlug || {};
+    const fit = fits[slug] || await PluginSettings.getCached(this.name, 'liveFit').catch(() => null);
     if (!fit?.vrm_sha256 || !fit.props?.length) return new Map();
-    if (this.productBase(fit.slug) !== this.wornBase()) return new Map();
+    if (this.productBase(fit.slug) !== slug) return new Map();
     const manifest = await fs.readFile(path.join(this.vrmDir(), 'manifest.json'), 'utf8').then(JSON.parse).catch(() => []);
-    const worn = manifest.find(m => m.id === this.agent?.agentModel?.activeVRMModel);
+    const worn = manifest.find(m => m.id === id);
     if (!worn?.file) return new Map();
     const { fileSha256 } = await import('../../services/avatar/liveAvatar.js');
     if ((await fileSha256(path.join(this.vrmDir(), path.basename(worn.file)))) !== fit.vrm_sha256) return new Map();
     return new Map(fit.props.filter(p => p.state === 'unsupported' && p.self_fit !== true).map(p => [String(p.prop).toLowerCase(), p.line || p.reason || 'it does not fit this body']));
   }
 
+  /** A pack's clips that need a prop to make sense: Map(lowercased clip file name -> [prop]) from its clips.json
+   *  (props[].need "required"; store 0.23+). A Broad/ clip is keyed as the library names it ("broad x.vrma"). */
+  async requiredProps(variant) {
+    const out = new Map();
+    const m = await fs.readFile(path.join(this.libraryDir(), safeName(variant), 'clips.json'), 'utf8').then(JSON.parse).catch(() => null);
+    for (const c of Array.isArray(m?.clips) ? m.clips : []) {
+      const req = (Array.isArray(c.props) ? c.props : []).filter(p => p?.need === 'required' && p.prop).map(p => String(p.prop).toLowerCase());
+      if (!req.length || !c.file) continue;
+      const name = /(^|\/)broad\//i.test(c.file) ? `broad ${path.basename(c.file)}` : path.basename(c.file);
+      out.set(name.toLowerCase(), req);
+    }
+    // A loop whose own entry says nothing takes its companions' need (Pack 1: mug-sip-idle has only `prop`, its
+    // -in/-out/-once say required). `prop` alone is not a need: talk-loop's mic and the phone call play fine without.
+    for (const c of Array.isArray(m?.clips) ? m.clips : []) {
+      if (!c.file || c.role) continue;
+      const name = (/(^|\/)broad\//i.test(c.file) ? `broad ${path.basename(c.file)}` : path.basename(c.file)).toLowerCase();
+      if (out.has(name)) continue;
+      const stem = name.replace(/\.vrma$/, '');
+      const comp = ['-in', '-out', '-once'].map(x => out.get(`${stem}${x}.vrma`)).find(Boolean);
+      if (comp) out.set(name, comp);
+    }
+    return out;
+  }
+
   /** A clip's props for this body: the store's unsupported ones taken out. */
   async propsForBody(props, opts) {
-    const off = await this.unsupportedProps().catch(() => new Map());
+    const off = await this.unsupportedProps(opts?.modelId).catch(() => new Map());
     return propsFor(props, opts).filter(p => !off.has(String(p.prop).toLowerCase()));
   }
 
   /** The live pass of the model worn now (by product), or null when it wears no store model with a pass. */
+  /** The live passes of the models the roles use (the worn one first), each once. */
+  async rolePasses(passes) {
+    const bases = (await this.roleModelIds()).map(id => this.productBase(id)).filter(b => /^vrm-/.test(b));
+    return bases.map(b => passes.find(p => p.state !== 'expired' && p.key && this.productBase(p.slug) === b)).filter(Boolean)
+      .filter((p, i, a) => a.indexOf(p) === i);
+  }
+
+  /** The saved role slots { public, assistant } (gallery model ids). Personal is the worn model. */
+  async avatarRoles() {
+    const r = (await this.settings()).avatarRoles || {};
+    return { public: r.public || null, assistant: r.assistant || null };
+  }
+
+  /** Every model id a role uses now, the worn one first. */
+  async roleModelIds() {
+    const worn = this.agent?.agentModel?.activeVRMModel || null;
+    return modelsInUse(await this.avatarRoles(), worn).sort((a, b) => (b === worn) - (a === worn));
+  }
+
+  /** The gallery entry a role films with: { id, file, name, role } or null. */
+  async modelFor(role) {
+    const id = resolveRoleModel(await this.avatarRoles(), role, this.agent?.agentModel?.activeVRMModel || null);
+    if (!id) return null;
+    const manifest = await fs.readFile(path.join(this.vrmDir(), 'manifest.json'), 'utf8').then(JSON.parse).catch(() => []);
+    const m = manifest.find(x => x.id === id);
+    return m?.file ? { ...m, role: normalizeRole(role) || 'personal' } : null;
+  }
+
+  /** The store product of the public model (its profile kit's banner, its picture). */
+  async publicBase() {
+    const id = resolveRoleModel(await this.avatarRoles(), 'public', this.agent?.agentModel?.activeVRMModel || null);
+    return /^store-vrm-/.test(String(id || '')) ? this.productBase(id) : null;
+  }
+
+  /** "use racer blue as your public avatar": owned model → gallery entry ({ entry, pick }), installing it if needed. */
+  async ownedModelEntry(item) {
+    const pick = item && !isGenericItem(item) ? await this.pickOwned({ item, kind: 'vrm', kinds: ['vrm'] }) : null;
+    if (!pick) return null;
+    const buffer = await this.readOwned(pick);
+    readVrmInfo(buffer);
+    const entry = await installVrm(buffer, { variant: pick.item.variant, name: pick.file.gallery?.name, description: pick.file.gallery?.description }, this.vrmDir());
+    return { entry, pick };
+  }
+
+  /** Name of a gallery model for the owner. */
+  async modelName(id) {
+    if (!id) return null;
+    const manifest = await fs.readFile(path.join(this.vrmDir(), 'manifest.json'), 'utf8').then(JSON.parse).catch(() => []);
+    return manifest.find(m => m.id === id)?.name || id;
+  }
+
+  /** The worn (personal) model's picture to the owner's apps only, kept apart from the public picture. */
+  async applyPersonalPicture(id) {
+    const base = this.productBase(id);
+    const item = (await this.libraryItems()).find(i => this.productBase(i.variant) === base && modelPicture(i));
+    if (!item) return null;
+    const { applyAgentAvatar } = await import('../../services/avatar/applyAgentAvatar.js');
+    return applyAgentAvatar(this.agent, await this.pictureBytes(item, modelPicture(item)), { source: `Bots & Borgs, ${item.variant} (personal)`, personal: true });
+  }
+
+  /** The public model's picture to every public profile (never the owner's apps, which show the personal one). */
+  async applyPublicPicture(id) {
+    const base = this.productBase(id);
+    const item = (await this.libraryItems()).find(i => this.productBase(i.variant) === base && modelPicture(i));
+    if (!item) return 'It has no picture, so the public profiles keep theirs.';
+    const { applyAgentAvatar, describeAvatarServices } = await import('../../services/avatar/applyAgentAvatar.js');
+    const applied = await applyAgentAvatar(this.agent, await this.pictureBytes(item, modelPicture(item)),
+      { source: `Bots & Borgs, ${item.variant} (public)`, variant: item.variant, only: ['telegram', 'mindswarm', 'twitter', 'gravatar', 'trellis', 'identity'] });
+    const kit = await this.bannerForModel(item.variant).catch(() => '');
+    return `${describeAvatarServices(applied.services)}${kit ? ` ${kit}` : ''}`.trim();
+  }
+
+  /** The role map, mirrored to the store (2119 #542, optional there; ours is the source of truth). Best effort. */
+  async pushRolesToStore() {
+    const key = await this.accountKey().catch(() => null);
+    if (!key) return;
+    const worn = this.agent?.agentModel?.activeVRMModel || null;
+    const roles = await this.avatarRoles();
+    const slug = (id) => (/^store-vrm-/.test(String(id || '')) ? this.productBase(id) : null);
+    const body = { roles: Object.fromEntries(ROLES.map(r => [r, slug(resolveRoleModel(roles, r, worn))])) };
+    await this.api('put', '/api/account/roles', { key, body }).catch(e => this.logger.info(`botsandborgs: role map not mirrored to the store: ${e.message}`));
+  }
+
+  async rolesCommand({ role, item, modelId, clear, auto } = {}) {
+    const worn = this.agent?.agentModel?.activeVRMModel || null;
+    const roles = await this.avatarRoles();
+    const save = async (next) => { await this.saveSettings({ avatarRoles: next }); await this.pushRolesToStore(); };
+    if (clear) {
+      const r = normalizeRole(clear);
+      if (!r || r === 'personal') return { success: false, error: 'Clear which role: public or assistant? (Personal is the model I wear.)' };
+      const next = { ...roles, [r]: null };
+      await save(next);
+      if (r === 'public') await (await import('../../services/avatar/applyAgentAvatar.js')).clearPersonalAvatar();
+      const note = r === 'public' && worn ? ` ${await this.applyPublicPicture(worn)}` : '';
+      return { success: true, result: `My ${r} avatar is the ${r === 'assistant' ? (next.public ? 'public' : 'worn') : 'worn'} model again (${await this.modelName(resolveRoleModel(next, r, worn))}).${note}`.trim() };
+    }
+    if (auto === true || auto === 'true') {
+      const owned = [];
+      for (const i of (await this.libraryItems()).filter(x => x.files.some(f => f.kind === 'vrm'))) {
+        const product = await this.productOf(i.variant).catch(() => null);
+        const suits = product?.suits || product?.variants?.find(v => v.id === i.variant)?.suits || [];
+        if (suits.length) owned.push({ modelId: `store-${String(i.variant).toLowerCase().replace(/[^a-z0-9-]+/g, '-')}`, suits, item: i });
+      }
+      const filled = autoFillRoles(roles, owned);
+      if (!Object.keys(filled).length) return { success: true, result: owned.length ? 'Every role that one of my models suits is already set.' : "The store doesn't say yet which roles my models suit, so I left the roles as they are." };
+      for (const [r, id] of Object.entries(filled)) {
+        const o = owned.find(x => x.modelId === id);
+        const got = await this.ownedModelEntry(o.item.variant).catch(() => null);
+        if (got) filled[r] = got.entry.id; else delete filled[r];
+      }
+      await save({ ...roles, ...filled });
+      if (filled.public) await this.applyPublicPicture(filled.public).catch(() => '');
+      return { success: true, result: `Filled from what the store says each model suits: ${(await Promise.all(Object.entries(filled).map(async ([r, id]) => `${r} = ${await this.modelName(id)}`))).join(', ')}.` };
+    }
+    const r = normalizeRole(role);
+    if (r && (item || modelId)) {
+      if (r === 'personal' && item) return this.useModel({ item, wear: true });
+      let got;
+      if (modelId) {
+        // Any gallery model (an uploaded VRM too), from the designer.
+        const manifest = await fs.readFile(path.join(this.vrmDir(), 'manifest.json'), 'utf8').then(JSON.parse).catch(() => []);
+        const entry = manifest.find(m => m.id === modelId);
+        if (!entry?.file) return { success: false, error: `${modelId} is not in my model gallery.` };
+        if (r === 'personal') return { success: false, error: 'Personal is the model I wear: use "Set as Active Avatar".' };
+        got = { entry };
+      } else got = await this.ownedModelEntry(item);
+      if (!got) return { success: false, error: "I don't own a model like that. I can buy it first if you want." };
+      await save({ ...roles, [r]: got.entry.id });
+      this.logger.info(`botsandborgs: ${r} avatar set to ${got.entry.id}`);
+      if (r === 'public' && worn && worn !== got.entry.id) await this.applyPersonalPicture(worn).catch(e => this.logger.warn(`botsandborgs: personal picture not kept: ${e.message}`));
+      if (r === 'public' && worn === got.entry.id) await (await import('../../services/avatar/applyAgentAvatar.js')).clearPersonalAvatar();
+      const note = r === 'public' ? ` ${await this.applyPublicPicture(got.entry.id)}` : ' Videos and talking replies I send to other people use it now.';
+      return { success: true, result: `${got.entry.name} is my ${r} avatar.${note}`.trim() };
+    }
+    if (role && !r) return { success: false, error: 'The roles are public, assistant and personal.' };
+    const line = async (x) => {
+      const id = resolveRoleModel(roles, x, worn);
+      const own = x === 'personal' ? worn : roles[x];
+      return `- ${x}: ${(await this.modelName(id)) || 'none'}${own || x === 'personal' ? '' : ` (falls back to ${x === 'assistant' && roles.public ? 'public' : 'the worn model'})`}`;
+    };
+    return { success: true, roles: { ...roles, personal: worn }, result: `My avatars by role:\n${(await Promise.all(ROLES.map(line))).join('\n')}` };
+  }
+
+  /** "animation" | "prop" | "both" (or the words of a request) → the store's `wants`. */
+  static customWants(wants, prompt = '') {
+    const w = String(wants || '').toLowerCase();
+    if (w === 'both' || /animation.*prop|prop.*animation/.test(w)) return ['animation', 'prop'];
+    if (w === 'prop' || w === 'props') return ['prop'];
+    if (w === 'animation' || w === 'clip' || w === 'move') return ['animation'];
+    const t = String(prompt).toLowerCase();
+    const prop = /\bprops?\b/.test(t);
+    const move = /\b(animation|clip|move|dance|gesture|emote)\b/.test(t);
+    return prop && move ? ['animation', 'prop'] : prop ? ['prop'] : ['animation'];
+  }
+
+  static CUSTOM_PRICES = { animation: 8, prop: 12, both: 15 };
+
+  async customRequests() {
+    const saved = await PluginSettings.getCached(this.name, 'customRequests').catch(() => null);
+    return Array.isArray(saved?.requests) ? saved.requests : [];
+  }
+
+  async saveCustomRequests(list) { await PluginSettings.setCached(this.name, 'customRequests', { requests: list }); }
+
+  async customCommand({ prompt, wants, list, cancel, pay } = {}) {
+    const key = await this.accountKey();
+    if (pay) {
+      const mine = await this.customRequests();
+      const r = mine.find(x => x.id === String(pay)) || mine.find(x => x.status === 'accepted');
+      if (!r) return { success: false, error: 'None of my custom requests is waiting to be paid.' };
+      const paid = await this.payCustom(r, key, { confirm: true });
+      if (!paid.paid) return { success: false, error: `I didn't pay: ${paid.refused}` };
+      r.status = 'paid'; await this.saveCustomRequests(mine);
+      return { success: true, result: `Paid $${r.quoteUsd.toFixed(2)} for "${r.prompt}". It installs by itself when Bots & Borgs delivers it.` };
+    }
+    if (cancel) {
+      const id = String(cancel);
+      const mine = await this.customRequests();
+      const r = mine.find(x => x.id === id) || (cancel === true || cancel === 'true' ? mine.find(x => ['new', 'accepted'].includes(x.status)) : null);
+      if (!r) return { success: false, error: 'Which request? I have no open one by that id.' };
+      await this.api('post', `/api/requests/${encodeURIComponent(r.id)}/cancel`, { key });
+      r.status = 'cancelled'; await this.saveCustomRequests(mine);
+      return { success: true, result: `Withdrew the custom request "${r.prompt}".` };
+    }
+    if (list === true || list === 'true' || !prompt) {
+      await this.customTick().catch(() => {});
+      const mine = await this.customRequests();
+      if (!mine.length) return { success: true, result: 'I have no custom requests at Bots & Borgs.' };
+      return { success: true, requests: mine, result: `My custom requests at Bots & Borgs:\n${mine.map(r => `- "${r.prompt}" (${r.wants.join(' + ')}): ${r.status}${r.quoteUsd != null ? `, $${r.quoteUsd.toFixed(2)}` : ''}${r.note ? `, ${r.note}` : ''}`).join('\n')}` };
+    }
+    const w = BotsAndBorgsPlugin.customWants(wants, prompt);
+    const price = BotsAndBorgsPlugin.CUSTOM_PRICES[w.length > 1 ? 'both' : w[0]];
+    const avatars = [...new Set((await this.roleModelIds()).map(id => this.productBase(id)).filter(b => /^vrm-/.test(b)))].slice(0, 5);
+    if (!avatars.length) return { success: false, error: "I'm not wearing a Bots & Borgs model, so there's no avatar to make it for." };
+    // Asked by the owner in words only: nothing is sent that someone else owns (the store refuses real people and brands).
+    const r = await this.api('post', '/api/requests', { key, idem: `lanagent-${crypto.randomUUID()}`, body: { prompt: String(prompt).slice(0, 2000), wants: w, avatars, rights_attested: true } });
+    const req = r.request || r;
+    if (!req?.id) throw new Error(`The store did not return a request id (${JSON.stringify(r).slice(0, 200)}).`);
+    const mine = await this.customRequests();
+    mine.unshift({ id: req.id, prompt: String(prompt).slice(0, 200), wants: w, avatars, status: req.status || 'new', at: new Date().toISOString(), quoteUsd: null });
+    await this.saveCustomRequests(mine.slice(0, 50));
+    this.logger.info(`botsandborgs: custom request ${req.id} (${w.join('+')}) for ${avatars.join(', ')}: ${String(prompt).slice(0, 120)}`);
+    const s = await this.settings();
+    const left = Math.max(0, s.weeklyBudgetUsd - this.spentThisWeek(await this.ledger()));
+    const budget = price > left ? ` It lists at $${price}, more than the $${left.toFixed(2)} left of this week's budget, so when it's accepted I'll ask you before paying.` : ` It lists at $${price}; once the store accepts it I'll pay and install it.`;
+    return { success: true, request: req.id, result: `Asked Bots & Borgs to make it (${w.join(' + ')}, for ${avatars.join(', ')}). Nothing is charged unless they take it.${budget}` };
+  }
+
+  /**
+   * Follow every open custom request: accepted → paid under the budget rules (or the owner asked); delivered →
+   * installed like a purchase; declined or refunded → the owner told. Runs with the feed poll.
+   */
+  async customTick() {
+    const mine = await this.customRequests();
+    const open = mine.filter(r => !['delivered', 'declined', 'cancelled', 'refunded', 'installed'].includes(r.status));
+    if (!open.length) return [];
+    const key = await this.accountKey();
+    const notify = (text, urgent = false) => this.agent?.notify?.(text, { urgent });
+    const done = [];
+    for (const r of open) {
+      let d; try { d = await this.api('get', `/api/requests/${encodeURIComponent(r.id)}`, { key }); } catch (e) { this.logger.warn(`botsandborgs: custom request ${r.id} not read: ${e.message}`); continue; }
+      const st = (d.request || d).status || r.status;
+      const q = (d.request || d).quote_cents;
+      const note = (d.request || d).note || '';
+      if (q != null) r.quoteUsd = Number(q) / 100;
+      if (note) r.note = String(note).slice(0, 200);
+      const was = r.status; r.status = st;
+      if (st === 'accepted' && !r.payAsked) {
+        const paid = await this.payCustom(r, key).catch(e => ({ refused: e.message }));
+        if (paid.paid) { r.status = 'paid'; await notify(`Bots & Borgs took my custom request "${r.prompt}" and I paid $${r.quoteUsd.toFixed(2)}. It installs by itself when they deliver it.`); }
+        else { r.payAsked = true; await notify(`Bots & Borgs accepted my custom request "${r.prompt}" for $${(r.quoteUsd ?? 0).toFixed(2)}, but I didn't pay: ${paid.refused} Say "pay the custom request" if you want it.`, true); }
+      } else if (st === 'delivered') {
+        const ok = await this.installCustom(r, key).catch(e => { this.logger.warn(`botsandborgs: custom ${r.id} not installed: ${e.message}`); return null; });
+        if (ok) { r.status = 'installed'; await notify(`My custom ${r.wants.join(' + ')} from Bots & Borgs arrived and is installed: "${r.prompt}". ${ok}`); }
+      } else if (st !== was && ['declined', 'refunded'].includes(st)) {
+        await notify(`Bots & Borgs ${st === 'declined' ? 'declined' : 'refunded'} my custom request "${r.prompt}"${note ? `: ${note}` : ''}.`);
+      }
+      done.push({ id: r.id, status: r.status });
+    }
+    await this.saveCustomRequests(mine);
+    return done;
+  }
+
+  /** Pay an accepted custom request from the store balance, under the weekly budget, item cap and wallet floor. */
+  async payCustom(r, key, { confirm = false } = {}) {
+    const s = await this.settings();
+    const usd = Number(r.quoteUsd);
+    if (!(usd > 0)) return { refused: 'the store gave no price.' };
+    const spent = this.spentThisWeek(await this.ledger());
+    if (spent + usd > s.weeklyBudgetUsd + 1e-9) return { refused: `it costs $${usd.toFixed(2)} and $${Math.max(0, s.weeklyBudgetUsd - spent).toFixed(2)} of this week's $${s.weeklyBudgetUsd} is left.` };
+    if (s.maxItemUsd != null && usd > s.maxItemUsd) return { refused: `it is over my $${s.maxItemUsd} per-item limit.` };
+    if (s.requireApproval && !confirm) return { refused: 'my rules say to ask you first.' };
+    const pay = () => this.api('post', `/api/requests/${encodeURIComponent(r.id)}/pay`, { key, idem: `lanagent-custom-${r.id}` });
+    const entry = { at: new Date().toISOString(), variant: `custom request ${r.id}`, usd, use: 'custom', used: false };
+    try { await pay(); }
+    catch (e) {
+      if (e.status !== 402) throw e;
+      // Balance short: top it up from the wallet (the deposit is what counts against the budget), then pay.
+      const rail = await this.api('get', '/api/crypto');
+      const asset = (rail.assets || []).find(a => a.symbol === s.payAsset);
+      if (!asset) return { refused: `the store doesn't take ${s.payAsset} right now.` };
+      const wallet = await this.walletUsd(asset);
+      const cents = Math.max(MIN_DEPOSIT_CENTS, Math.ceil(usd * 100));
+      if (wallet.usd != null && wallet.usd - cents / 100 < s.minWalletUsd) return { refused: `topping up the store balance would take my wallet under the $${s.minWalletUsd} floor.` };
+      const dep = await this.api('post', '/api/account/deposit', { key, idem: `lanagent-custom-dep-${r.id}`, body: { amount_cents: cents, pay_asset: s.payAsset } });
+      const order = { ...(dep.order || dep), token: dep.token || dep.order?.token };
+      const p = dep.crypto || order.crypto || {};
+      if (!p.address || !p.amount) throw new Error("the store's deposit came back without payment instructions.");
+      const { hash, confirm: confirmed } = await this.sendAndConfirm({ order, pay: p, key, asset, s });
+      await this.record({ at: entry.at, variant: 'store balance', usd: cents / 100, use: 'deposit', used: true, order: order.id, token: order.token, asset: s.payAsset, tx: hash });
+      if (!await confirmed()) return { refused: `the top-up (tx ${hash}) is still confirming; I'll pay on the next check.` };
+      await pay();
+      await this.record({ ...entry, usd: 0, priceUsd: usd, asset: 'balance' });
+      return { paid: true };
+    }
+    // Paid from a balance an earlier deposit filled: that deposit already counted, so this does not count twice.
+    await this.record({ ...entry, usd: 0, priceUsd: usd, asset: 'balance' });
+    return { paid: true };
+  }
+
+  /** A delivered custom request → the library, like a purchase (clips into the animation list, props beside them). */
+  async installCustom(r, key) {
+    const res = await (this.http || axios)({ method: 'get', url: `${BASE}/api/requests/${encodeURIComponent(r.id)}/file`, responseType: 'arraybuffer', timeout: 180000,
+      headers: { 'User-Agent': this.userAgent(), Authorization: `Bearer ${key}` }, validateStatus: () => true });
+    if (res.status !== 200) throw new Error(`the store answered ${res.status} for the file`);
+    const variant = `custom-${safeName(r.id).toLowerCase()}-${r.wants.includes('animation') ? 'animations' : 'props'}`;
+    const name = String(res.headers?.['content-disposition'] || '').match(/filename="?([^";]+)/)?.[1] || `${variant}.zip`;
+    const item = await this.ingest({ order: null, variant, downloads: [{ buffer: Buffer.from(res.data), type: String(res.headers?.['content-type'] || ''), filename: name }] });
+    const clips = (item?.files || []).filter(f => f.kind === 'animation').map(f => f.label || f.name);
+    return clips.length ? `New: ${clips.join(', ')}.` : '';
+  }
+
   wornPass(passes) {
     const worn = this.wornBase();
     if (!worn) return null;
@@ -671,7 +1085,65 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
       .catch(e => ({ status: 0, error: e.message, headers: {} }));
   }
 
-  async liveCommand({ check, renew, fit } = {}) {
+  /** The pass a version request is about: a named model, else the worn one. Returns { pass, key } or { error }. */
+  async passFor(model) {
+    const slug = model && model !== true && model !== 'true' ? this.productBase(String(model)) : this.wornBase();
+    const pass = (await this.livePasses()).find(p => this.productBase(p.slug) === slug);
+    if (!pass) return { error: `I have no live pass for ${slug || 'the model I wear'}.` };
+    try { return { pass, key: decrypt(pass.key) }; } catch { return { error: 'its key could not be read' }; }
+  }
+
+  /** Store 0.32: a live model's kept versions (last 5, newest first). */
+  async liveVersions(pass, key) {
+    const r = await this.fetchLive(`${BASE}/api/live/${pass.slug}/versions`, { 'User-Agent': this.userAgent(), 'X-Live-Key': key, Accept: 'application/json' });
+    if (r.status !== 200) throw new Error(`the store answered ${r.status || r.error} for the versions`);
+    const d = JSON.parse(Buffer.from(r.data).toString('utf8'));
+    return (Array.isArray(d) ? d : d.versions || []).map(v => (typeof v === 'object' ? v : { version: v }));
+  }
+
+  /**
+   * Hold a live model at one version (store 0.32 pin) or follow the newest again (unpin). `pin` is a version, or
+   * true / "previous" for the one before the newest. Then the model is fetched again, so the change shows at once.
+   */
+  async pinLive({ model, pin, unpin }) {
+    const got = await this.passFor(model);
+    if (got.error) return { success: false, error: got.error };
+    const { pass, key } = got;
+    let version = null;
+    if (!unpin) {
+      const versions = await this.liveVersions(pass, key);
+      const named = String(pin);
+      // "Previous" is the one before the version served now: the pinned one when pinned (2119 #550), else the newest.
+      const pinnedAt = pass.pinned ? versions.findIndex(v => String(v.version) === String(pass.pinned)) : -1;
+      const at = pinnedAt >= 0 ? pinnedAt : 0;
+      version = pin === true || /^(true|previous|prev|last|back|older)$/i.test(named) ? versions[at + 1]?.version
+        : versions.find(v => String(v.version) === named)?.version ?? named;
+      if (!version) return { success: false, error: `${pass.slug} has no earlier version to go back to.` };
+    }
+    const url = `${BASE}/api/live/${pass.slug}/pin`;
+    const headers = { 'User-Agent': this.userAgent(), 'X-Live-Key': key, Accept: 'application/json' };
+    const r = await (this.http || axios)({ method: unpin ? 'delete' : 'post', url, data: unpin ? undefined : { version }, headers: unpin ? headers : { ...headers, 'Content-Type': 'application/json' },
+      timeout: 30000, validateStatus: () => true }).catch(e => ({ status: 0, data: { error: e.message } }));
+    if (r.status >= 400 || !r.status) return { success: false, error: `The store refused: ${r.data?.error || `HTTP ${r.status}`}` };
+    // Fetch the model the store now serves for this pass.
+    const passes = await this.livePasses();
+    const saved = passes.find(p => p.slug === pass.slug);
+    if (saved) { saved.etag = null; saved.pinned = unpin ? null : String(version); await this.saveLivePasses(passes); }
+    const report = await this.syncLive().catch(() => []);
+    const st = report.find(x => x.slug === pass.slug)?.status;
+    this.logger.info(`botsandborgs: ${pass.slug} ${unpin ? 'unpinned' : `pinned to ${version}`}; model ${st || 'not checked'}`);
+    return { success: true, version, result: unpin ? `${pass.slug} follows its newest version again${st === 'updated' ? ', and it is installed' : ''}.`
+      : `${pass.slug} is held at version ${version}${st === 'updated' ? ', and that version is installed' : ''}. Say "follow the newest version" to undo.` };
+  }
+
+  async liveCommand({ check, renew, fit, versions, pin, unpin, model } = {}) {
+    if (pin || unpin === true || unpin === 'true') return this.pinLive({ model, pin, unpin: !!unpin && !pin });
+    if (versions === true || versions === 'true') {
+      const got = await this.passFor(model);
+      if (got.error) return { success: false, error: got.error };
+      const list = await this.liveVersions(got.pass, got.key);
+      return { success: true, versions: list, result: `Versions of ${got.pass.slug} the store keeps (newest first):\n${list.map(v => `- ${v.version}${v.at ? `, ${String(typeof v.at === 'number' ? new Date(v.at * 1000).toISOString() : v.at).slice(0, 10)}` : ''}${v.current ? ' (current)' : ''}`).join('\n') || '- none listed'}${got.pass.pinned ? `\nI'm held at ${got.pass.pinned}.` : ''}` };
+    }
     // "Is my avatar fitted / why can't you hold the mug": the store's fit status for the worn body, in its own words.
     if (fit === true || fit === 'true') {
       const f = await PluginSettings.getCached(this.name, 'liveFit').catch(() => null);
@@ -1424,9 +1896,15 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
 
   /** A reissued clip: relist it for the designer and playground, and replace AvatarX's copy, which it keeps by name. */
   async afterClipFixes(fixedClips) {
-    await this.publishAnimations().catch(e => this.logger.warn(`botsandborgs: clips not relisted: ${e.message}`));
+    const listed = await this.publishAnimations().catch(e => { this.logger.warn(`botsandborgs: clips not relisted: ${e.message}`); return null; });
     const { pushClipsToAvatarX } = await import('../../services/avatar/avatarx.js');
-    const files = fixedClips.map(c => ({ file: path.join(this.vrmDir(), 'animations', 'store', safeName(c.variant), c.name), replace: true }));
+    // Only clips that are listed: a Broad/ version is never published, and one missing file used to abort the whole
+    // push (the 2026-11-19 salute fix: "AvatarX not given the fixed clips: ENOENT … broad emote-salute.vrma").
+    const published = listed ? new Set(listed.map(c => c.file)) : null;
+    const files = fixedClips
+      .filter(c => !published || published.has(`store/${safeName(c.variant)}/${c.name}`))
+      .map(c => ({ file: path.join(this.vrmDir(), 'animations', 'store', safeName(c.variant), c.name), replace: true }));
+    if (!files.length) return;
     const pushed = await pushClipsToAvatarX(files).catch(e => { this.logger.warn(`botsandborgs: AvatarX not given the fixed clips: ${e.message}`); return null; });
     if (Array.isArray(pushed)) this.logger.info(`botsandborgs: AvatarX has the fixed clips: ${pushed.join(', ')}`);
   }
@@ -1702,13 +2180,14 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
 
   /** Play an owned clip on the agent's 3D body: by name ("rumba"), by what it is for ("wave", "dance"), or any one. */
   /** Which owned clip a request means: { choice, entry, rel } or { error }. */
-  async chooseClip({ item, clip, asked = '', speaking = false }) {
+  async chooseClip({ item, clip, asked = '', speaking = false, modelId = null }) {
     // A loop's companions (-in / -out / -once, store 0.30.2) are part of their loop, never a move of their own.
     let pool = (await this.libraryItems()).flatMap(i => i.files.filter(f => f.kind === 'animation' && f.bodyFit !== 'broad' && !f.role).map(f => ({ item: i, file: f })));
     if (!pool.length) return { error: "I don't own any animations yet. I can buy a pack from Bots & Borgs if you want." };
     // Clips made for female bodies (clips.json `bodies: female`: the pole dance, the booty shakes) only on a female body.
     // The body is the one worn NOW, so a changed avatar changes what plays (DELTA wears the Frog; owner, 2026-11-17).
-    const body = await this.wornBody().catch(() => null);
+    // A role's model (role-based avatars) is filmed on its own body.
+    const body = await (modelId ? this.bodyOf(modelId) : this.wornBody()).catch(() => null);
     if (body !== 'female') {
       const fits = pool.filter(p => p.file.bodies !== 'female');
       const said = ` ${`${clip || ''} ${asked}`.toLowerCase().replace(/[-_]+/g, ' ')} `;
@@ -1718,6 +2197,31 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
       }
       pool = fits;
       if (!pool.length) return { error: 'None of my clips suits the body I am wearing.' };
+    }
+    // A clip made around a prop (clips.json props[].need "required": the mug sip, the book read) whose prop the store
+    // refused for this body would hold air (the store, llms.txt). Left out; asked for by name or purpose, the answer is
+    // the store's reason (Racer Blue 2026-11-19: mug "goes 3 mm into the body").
+    const off = await this.unsupportedProps(modelId).catch(() => new Map());
+    if (off.size) {
+      const need = new Map();
+      const needsOff = async (p) => {
+        if (!need.has(p.item.variant)) need.set(p.item.variant, await this.requiredProps(p.item.variant));
+        return (need.get(p.item.variant).get(p.file.name.toLowerCase()) || []).find(n => off.has(n)) || null;
+      };
+      const marks = await Promise.all(pool.map(needsOff));
+      const blocked = pool.filter((_, i) => marks[i]);
+      if (blocked.length) {
+        pool = pool.filter((_, i) => !marks[i]);
+        const asks = `${clip || ''} ${asked}`.toLowerCase();
+        const w = ` ${asks.replace(/[-_]+/g, ' ')} `;
+        const byName = (p) => p.file.label && w.includes(` ${String(p.file.label).toLowerCase().replace(/[-_]+/g, ' ')} `);
+        const meant = blocked.find(p => byName(p) || clipsByTags([p], asks, () => []).length);
+        if (meant && !pool.some(p => byName(p) || clipsByTags([p], asks, () => []).length)) {
+          const prop = await needsOff(meant);
+          return { error: `I can't do ${meant.file.label} on the body I'm wearing: ${off.get(prop)}.` };
+        }
+        if (!pool.length) return { error: 'None of my clips suits the body I am wearing.' };
+      }
     }
     if (item && !isGenericItem(item)) {
       const inItem = pool.filter(p => p.item.variant === item || this.matches(p.item, item));
@@ -1846,13 +2350,13 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
         }
       }
     }
-    const picked = await this.chooseClip({ item, clip, asked, speaking: !!words });
+    // Role-based avatars: the owner sees the personal (worn) model, anyone else the assistant one.
+    const model = await this.modelFor(roleForRecipient(to));
+    if (!model?.file) return { success: false, error: "I'm not wearing a 3D model, so there's nothing to film." };
+    if (model.id !== this.agent?.agentModel?.activeVRMModel) this.logger.info(`botsandborgs: filming as ${model.role}: ${model.name || model.id} (to ${to})`);
+    const picked = await this.chooseClip({ item, clip, asked, speaking: !!words, modelId: model.id });
     if (picked.error) return { success: false, error: picked.error };
     const { choice, entry, rel } = picked;
-    const worn = this.agent?.agentModel?.activeVRMModel;
-    const manifest = await fs.readFile(path.join(this.vrmDir(), 'manifest.json'), 'utf8').then(JSON.parse).catch(() => []);
-    const model = manifest.find(m => m.id === worn);
-    if (!model?.file) return { success: false, error: "I'm not wearing a 3D model, so there's nothing to film." };
     const label = entry.label || choice.file.label;
     const job = (async () => {
       const { renderClipVideo } = await import('../../services/avatar/clipVideo.js');
@@ -1867,7 +2371,7 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
       const framing = framingAsked(asked);
       if (scene) this.logger.info(`botsandborgs: filming in front of ${path.basename(scene)}${framing !== 'full' ? `, ${framing} framing` : ''}`);
       const v = await (this.renderVideo || renderClipVideo)({ modelPath: path.join(this.vrmDir(), model.file), clipPath: path.join(this.vrmDir(), 'animations', rel),
-        loop: !!entry.loop, prop: entry.prop || null, props: this.propPaths(await this.propsForBody(entry.props, { asked, scene })), framing, ...(voice ? { voice } : {}), ...(scene ? { backgroundPath: scene } : {}) });
+        loop: !!entry.loop, prop: entry.prop || null, props: this.propPaths(await this.propsForBody(entry.props, { asked, scene, modelId: model.id })), framing, ...(voice ? { voice } : {}), ...(scene ? { backgroundPath: scene } : {}) });
       const filename = `${String(label).toLowerCase().replace(/[^a-z0-9]+/g, '-')}.mp4`;
       if (/^(me|owner|myself)$/i.test(to)) {
         const tg = this.agent?.interfaces?.get?.('telegram');
@@ -1967,6 +2471,18 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     // (autoWear), so the picture comes with it either way. A model sold alone has no portrait, only the store's
     // preview of it: that is its picture (DELTA 2026-11-06 wore Sentinel and kept its old picture everywhere).
     // Its profile kit, when owned, brings the matching banner (X header, MindSwarm).
+    // Role-based avatars: with a public model set, the worn one is personal: its picture goes only to the owner's apps
+    // (TextX/DialX/NotifX, 2119 #543), and the public profiles keep the public model's.
+    const roles = await this.avatarRoles();
+    if (roles.public && roles.public !== entry.id) {
+      const picture = modelPicture(pick.item);
+      if (!picture) return { success: true, result: `${entry.name} is my 3D model now (personal). My public picture stays as it is.` };
+      const { applyAgentAvatar, describeAvatarServices } = await import('../../services/avatar/applyAgentAvatar.js');
+      const applied = await applyAgentAvatar(this.agent, await this.pictureBytes(pick.item, picture), { source: `Bots & Borgs, ${pick.item.variant}`, personal: true });
+      return { success: true, result: `${entry.name} is my 3D model now (personal), and its picture is in your apps. My public picture stays as it is. ${describeAvatarServices(applied.services)}`.trim() };
+    }
+    // One model for both: the apps show the one avatar again.
+    await (await import('../../services/avatar/applyAgentAvatar.js')).clearPersonalAvatar().catch(() => {});
     const kitNote = await this.bannerForModel(pick.item.variant).catch(e => { this.logger.warn(`botsandborgs: banner not applied: ${e.message}`); return ''; });
     const picture = modelPicture(pick.item);
     if (picture) {
@@ -2012,11 +2528,11 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
    * background scene (TextX 0.4.93 video replies). Throws when there is no model, clip or voice.
    * Returns { video, seconds, cut } (cut: only the first part was spoken).
    */
-  async talkingVideo(text, { maxSeconds = 20, width = 480, height = 640 } = {}) {
+  async talkingVideo(text, { maxSeconds = 20, width = 480, height = 640, role = 'assistant' } = {}) {
     const { spoken, cut } = BotsAndBorgsPlugin.spokenPart(text, maxSeconds);
     if (!spoken) throw new Error('nothing to say');
-    const manifest = await fs.readFile(path.join(this.vrmDir(), 'manifest.json'), 'utf8').then(JSON.parse).catch(() => []);
-    const model = manifest.find(m => m.id === this.agent?.agentModel?.activeVRMModel);
+    // A talking reply goes to a contact (TextX reply forms), so it is the assistant model (TextX, 2119 #543).
+    const model = await this.modelFor(role);
     if (!model?.file) throw new Error("I'm not wearing a 3D model");
     const listed = await fs.readFile(path.join(this.vrmDir(), 'animations', 'store.json'), 'utf8').then(JSON.parse).catch(() => []);
     // clips.json marks the clips made to play under speech (while_talking, calm): the talk loop first (store 0.22).
@@ -2073,8 +2589,10 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
    * per model file (id + size: a new version is looked at again). Avatars change often (owner, 2026-11-17), so this is
    * read at every clip choice, never set by hand.
    */
-  async wornBody() {
-    const id = this.agent?.agentModel?.activeVRMModel;
+  async wornBody() { return this.bodyOf(this.agent?.agentModel?.activeVRMModel); }
+
+  /** The body of any gallery model (a role's model is filmed on its own body, not the worn one's). */
+  async bodyOf(id) {
     if (!id) return null;
     const manifest = await fs.readFile(path.join(this.vrmDir(), 'manifest.json'), 'utf8').then(JSON.parse).catch(() => []);
     const m = manifest.find(x => x.id === id);
@@ -2132,7 +2650,7 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
   /** A bought profile kit: its banner goes up now when the kit is for the model this agent wears. */
   async kitBannerUse(item) {
     const base = this.productBase(item.variant);
-    if (base !== this.wornBase()) return `It is in my library; its banner goes up when I wear ${item.title.replace(/\s*[—-]\s*.*$/, '') || 'that model'}.`;
+    if (base !== (await this.publicBase())) return `It is in my library; its banner goes up when ${item.title.replace(/\s*[—-]\s*.*$/, '') || 'that model'} is my public model.`;
     return (await this.bannerForModel(base)) || 'It holds no banner I can use.';
   }
 

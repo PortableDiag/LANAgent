@@ -5838,8 +5838,11 @@ Return ONLY a valid JSON object with the extracted parameters, nothing else. If 
   async _aiGenerateImage(data) {
     this._requireAuth();
     this.validateParams(data, { prompt: { required: true, type: 'string' } });
-    const result = await this._apiRequest('post', '/ai/image', {
-      prompt: data.prompt, width: data.width, height: data.height,
+    // MindSwarm renamed /ai/image to /ai/generate-image and takes `size` ("1024x1024"), not width/height (404 since
+    // at least 2026-11-18). Their docs: POST /api/ai/generate-image {prompt, model, size, quality, style}.
+    const size = data.size || (data.width && data.height ? `${data.width}x${data.height}` : undefined);
+    const result = await this._apiRequest('post', '/ai/generate-image', {
+      prompt: String(data.prompt).slice(0, 1000), size, model: data.model,
       style: data.style, quality: data.quality
     });
     return { success: true, data: result.data, message: 'Image generated' };
