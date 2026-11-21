@@ -95,3 +95,17 @@ test('backup keeps settings and /jffs owner-only; reboot and restore wait for a 
   assert.ok(sent.includes('restore:CFGDATA'));
   assert.equal(fsx.readdirSync(p.backupDir).length >= 1, true);
 });
+
+test('a firmware update on Merlin: a backup, then the manual steps (it is not installed online)', async () => {
+  const { default: RouterPlugin } = await import('../../src/api/plugins/router.js');
+  const p = new RouterPlugin({});
+  p.logger = { info() {}, warn() {}, error() {} };
+  let backedUp = 0;
+  p.backup = async () => { backedUp++; return {}; };
+  p.run = async (op) => (op === 'fw-check' ? 'productid=RT-AX86S flag=1 available=3004_388_13_0 current=388.9_2' : '');
+  const r = await p.firmware({ update: true }, {});
+  assert.equal(r.manual, true);
+  assert.equal(backedUp, 1);
+  assert.match(r.result, /RT-AX86U_3004\.388\.13_0/);
+  assert.match(r.result, /Firmware Upgrade → Upload/);
+});

@@ -2,6 +2,11 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.894] - 2026-11-21
+
+### Fixed
+- **A router firmware update gives the real steps.** On Asuswrt-Merlin the router's online upgrade only announces a new version; it does not install it. The agent claimed it was installing when nothing happened. "Update the router firmware" now takes a backup and tells the owner which file to download (with the right build for models that share one) and where to upload it. The agent checks every reservation and setting once the router is back.
+
 ## [2.25.893] - 2026-11-21
 
 ### Fixed

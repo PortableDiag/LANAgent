@@ -31,7 +31,7 @@ case "$op" in
         echo "wifi $i $m rssi=$(wl -i "$i" rssi "$m" 2>/dev/null)"; done; done
     cat /proc/net/arp | awk 'NR>1 && $3!="0x0" {print "arp", $6, $4, $1}' ;;
   security)
-    for k in firmver buildno extendno wl0_auth_mode_x wl1_auth_mode_x wl0_crypto wl1_crypto wl0_mfp wl1_mfp wps_enable \
+    for k in productid firmver buildno extendno wl0_auth_mode_x wl1_auth_mode_x wl0_crypto wl1_crypto wl0_mfp wl1_mfp wps_enable \
       wl0.1_bss_enabled wl1.1_bss_enabled misc_http_x misc_httpsport_x http_enable sshd_enable sshd_pass telnetd_enable \
       upnp_enable vts_enable_x ddns_enable_x fw_enable_x fw_dos_x wan_dns ipv6_service; do echo "$k=$(nvram get $k)"; done
     echo "port_forwards=$(nvram get vts_rulelist | tr '<' '\n' | grep -vc '^$')" ;;
@@ -69,7 +69,7 @@ $m>$rest" "$o $m"; echo "OK replaced $o with $m at ${rest%%>*}" ;;
     echo "OK restored, rebooting" ;;
   fw-check)
     webs_update.sh >/dev/null 2>&1
-    echo "flag=$(nvram get webs_state_flag) available=$(nvram get webs_state_info) current=$(nvram get buildno)_$(nvram get extendno)" ;;
+    echo "productid=$(nvram get productid) flag=$(nvram get webs_state_flag) available=$(nvram get webs_state_info) current=$(nvram get buildno)_$(nvram get extendno)" ;;
   fw-upgrade)  # the firmware's own upgrade (downloads and checks the signed image, flashes, restarts)
     f="$(nvram get webs_state_flag)"; [ "$f" = "1" ] || [ "$f" = "2" ] || { echo "ERR no update available (flag $f)"; exit 3; }
     echo "$(date '+%Y-%m-%d %H:%M:%S') fw-upgrade to $(nvram get webs_state_info)" >> "$LOG"

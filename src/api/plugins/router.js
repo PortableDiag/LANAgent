@@ -90,7 +90,7 @@ export default class RouterPlugin extends BasePlugin {
       { command: 'changes', description: 'The changes the agent made on the router', usage: 'changes({})', examples: ['what did you change on the router'] },
       { command: 'backup', description: 'Back up the router: its settings (as the web UI\'s settings file) and its /jffs files, kept on this machine (the last 14; also taken daily by itself). list: true lists the backups', usage: 'backup({})  // backup({ list: true })', examples: ['back up the router', 'make a router backup', 'list the router backups'] },
       { command: 'restore', description: 'Restore the router\'s settings from a backup (the latest, or a named one), then it restarts. Takes a fresh backup first and asks the owner to confirm', usage: 'restore({ backup: "latest" })', examples: ['restore the router settings from the last backup', 'roll the router back to yesterday\'s backup'] },
-      { command: 'firmware', description: 'Check the router for a firmware update; update: true installs it with the router\'s own signed upgrade (it restarts by itself), after a fresh backup and the owner\'s confirmation', usage: 'firmware({})  // firmware({ update: true })', examples: ['is there a router firmware update', 'update the router firmware', 'upgrade the router'] },
+      { command: 'firmware', description: 'Check the router for a firmware update; update: true takes a backup and gives the steps to install it (Merlin firmware is uploaded by hand in the web UI)', usage: 'firmware({})  // firmware({ update: true })', examples: ['is there a router firmware update', 'update the router firmware', 'upgrade the router'] },
       { command: 'reboot', description: 'Restart the router (the whole network drops for a few minutes). Asks the owner to confirm', usage: 'reboot({})', examples: ['restart the router', 'reboot the router'] }
     ];
   }
@@ -335,13 +335,14 @@ export default class RouterPlugin extends BasePlugin {
       return { success: true, firmware: kv, result: available ? `A router firmware update is available: ${available.replace(/_/g, '.')} (you run ${kv.current}). Say "update the router firmware" to install it.` : `The router's firmware is up to date (${kv.current}).` };
     }
     if (!available) return { success: true, result: `There is no firmware update to install (you run ${kv.current}).` };
-    const ok = this.confirmed('firmware', data, params, { success: true, needsConfirmation: true, result: `This installs router firmware ${available.replace(/_/g, '.')} with the router's own signed upgrade; it restarts by itself and the whole network (me included) is down for about 5 minutes. I take a backup first. Say "yes, update the router firmware" to go ahead (within 5 minutes).` });
-    if (ok !== true) return ok;
-    await this.verifyWrapper();
+    // Merlin builds announce an update but do not install it online: `service start_webs_upgrade` did nothing on
+    // 3004.388.9_2 (2026-11-21; the owner's upload in the web UI installed 388.13). So the owner uploads it; the agent
+    // takes a backup first and checks the router once it is back.
     await this.backup();
-    const r = String(await this.run('fw-upgrade')).trim();
-    if (!r.startsWith('OK')) return { success: false, error: `The router refused it: ${r}` };
-    return this.done(`Installing router firmware ${available.replace(/_/g, '.')}; the router restarts by itself, the network is back in about 5 minutes.`);
+    // Merlin ships some models under a sibling's build (the RT-AX86S runs the RT-AX86U file, Changelog-NG).
+    const model = ({ 'RT-AX86S': 'RT-AX86U' })[kv.productid] || kv.productid || 'your model';
+    const ver = available.replace(/^(\d+)_(\d+)_(\d+)_(\d+)$/, '$1.$2.$3_$4');
+    return { success: true, firmware: kv, manual: true, result: `Router firmware ${ver} is available (you run ${kv.current}). Merlin firmware is installed by hand: download ${model}_${ver} from asuswrt-merlin.net (check its sha256), then upload it in Administration → Firmware Upgrade → Upload. I took a backup just now; tell me when the router is back and I'll check every reservation and setting.` };
   }
 
   async reboot(params) {
