@@ -3,7 +3,7 @@
 import { login, setToken, events, protectedImage, EMBED, EMBED_BACKGROUND, EMBED_LIFT, EMBED_ZOOM } from './lanagent.js';
 import { wearLook } from './look.js';  // LANAgent: AvatarX 0.4.6 looks (linked avatars)
 import { jawDriver } from './jaw.js';  // LANAgent: jaw-bone mouths (Character Creator models)
-import { attach as puppetAttach, connect as puppetConnect } from './bnb-puppet-1.0.0.js';  // LANAgent: live puppeting (Bots & Borgs 0.57)
+import { attach as puppetAttach, connect as puppetConnect } from './bnb-puppet-1.1.0.js';  // LANAgent: live puppeting (Bots & Borgs 0.57; runtime 1.1.0 since 0.60)
 // The page: login, the avatar on stage, chat, talk, settings. The agent's changes arrive on
 // /api/events; a model's own expressions are read at load, since they differ from one to the next.
 import * as THREE from 'three';

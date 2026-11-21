@@ -1964,6 +1964,8 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
       }
       const text = `My body can't do "${rec.request}" the way I wrote it: the store's checks failed (${why}). Ask again in other words and I'll write it differently.`;
       await notify(text);
+      // The store's picture of what went wrong (0.60: each failing check's worst moment from four sides).
+      if (!rec.quiet) await this.sendWorstStill(rec, key).catch(e => this.logger.info(`botsandborgs: no worst still for ${rec.id}: ${e.message}`));
       return { ok: false, text };
     }
     const abs = (u) => (/^https?:/.test(u) ? u : `${BASE}${u.startsWith('/') ? '' : '/'}${u}`);
@@ -2006,6 +2008,18 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     this._animFollowing ||= new Set();
     this._animFollowing.add(next.id);
     return this.followAnim(next, key, d).finally(() => this._animFollowing.delete(next.id));
+  }
+
+  /** A failed solve's worst.png (GET /api/anim/jobs/<id>/worst.png) to the owner on Telegram, captioned with the move. */
+  async sendWorstStill(rec, key) {
+    const r = await (this.http || axios)({ method: 'get', url: `${BASE}/api/anim/jobs/${encodeURIComponent(rec.id)}/worst.png`, responseType: 'arraybuffer', timeout: 60000,
+      headers: { 'User-Agent': this.userAgent(), Authorization: `Bearer ${key}` }, validateStatus: () => true });
+    if (r.status !== 200) return false;
+    const tg = this.agent?.interfaces?.get?.('telegram');
+    if (!tg?.bot?.telegram?.sendPhoto || !tg.authorizedUserId) return false;
+    await tg.bot.telegram.sendPhoto(tg.authorizedUserId, { source: Buffer.from(r.data), filename: 'worst.png' }, { caption: `Where "${String(rec.request).slice(0, 120)}" went wrong (the store's worst moments, four sides)`, disable_notification: true });
+    this.logger.info(`botsandborgs: sent the worst still for ${rec.id}`);
+    return true;
   }
 
   /** Solves a restart left open: followed again (each one once at a time). */

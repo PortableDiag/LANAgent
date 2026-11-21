@@ -2,6 +2,13 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.887] - 2026-11-20
+
+### Added
+- **New moves with legs and fingers (store 0.60).** The scripts the agent writes for the Animation API may now move the hips (a squat, a dip, a turn) and place the feet, and curl single fingers over a hand shape (counting, a peace sign); the script check passes them through.
+- **A failed move shows where it went wrong.** When the store's checks fail a new move, the owner also gets the store's picture of each failing check's worst moment from four sides (`worst.png`), on Telegram, silently.
+- Live puppeting uses the store's runtime 1.1.0 (a palm faces a body direction in any arm pose), sha256-checked and bundled.
+
 ## [2.25.886] - 2026-11-20
 
 ### Added

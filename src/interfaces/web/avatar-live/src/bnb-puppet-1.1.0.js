@@ -1,4 +1,4 @@
-// LANAgent: vendored from https://botsandborgs.com/puppet/bnb-puppet-1.0.0.js (MIT), sha256 d5420aeb93bc06dd827a11dd7be036095b084fe137bdd3ae83e1d2e901f8b2e5.
+// LANAgent: vendored from https://botsandborgs.com/puppet/bnb-puppet-1.1.0.js (MIT), sha256 ee482011d65e1d5f0503a24bb0879f1faf3b4f59791cca55a802cd97f9be30de.
 // bnb-puppet.js: the live-puppeting runtime (Bots & Borgs Realtime Animation API step 4, spec §8a/§8d).
 // MIT License, (c) Bots & Borgs. https://botsandborgs.com/puppet/
 //
@@ -15,7 +15,7 @@
 // Per frame: two-bone IK per arm to its target (elbow pole), the hand kept out of the torso capsule, the wrist straight
 // along the forearm (well inside wrist_max), fingers to the named shape, head/neck and spine spread with limits,
 // expressions + visemes + voice level (the jaw BONE when the rig has one) eased. A bad target is clamped, never thrown.
-export const VERSION = "1.0.0";
+export const VERSION = "1.1.0";
 
 const PARTS = ["hands", "gaze", "head", "lean", "mouth", "face"];
 const KNOWN = new Set(["hands", "point_at", "gaze", "head", "lean", "mood", "expression", "visemes", "level", "pose", "clip",
@@ -188,12 +188,28 @@ export function attach(THREE, vrm, rig, opts = {}) {
     hd.quaternion.slerp(new Q(), k); // the wrist straight along the forearm: 0 deg bend (inside wrist_max)
     handPos[side] = T;
   }
+  // the palm faces a BODY-space direction (as the solver's palm): the hand turns about its own finger axis (the straight
+  // forearm) until its palm normal is as close to it as that axis allows. A roll by name was forearm-relative ("in" and
+  // "forward" were the same 90 deg), so "forward" was only right when the forearm pointed the way the wave's does.
+  const PALM = { down: [0, -1, 0], up: [0, 1, 0], in: [-1, 0, 0], out: [1, 0, 0], forward: [0, 0, 1], back: [0, 0, -1] };
   function palm(side, h, k) {
-    const hd = bone(`${side}Hand`); if (!hd || !h || !h.palm) return;
+    const hd = bone(`${side}Hand`); if (!hd || !h || !h.palm || !PALM[h.palm]) return;
     const sgn = side === "left" ? 1 : -1;
-    const roll = { down: 0, in: 90, up: 180, out: -90, forward: 90, back: -90 }[h.palm];
-    if (roll === undefined) return;
-    hd.quaternion.slerp(new Q().setFromAxisAngle(new V(1, 0, 0), sgn * roll * D), k);
+    hd.updateWorldMatrix(true, false);
+    const wq = hd.getWorldQuaternion(new Q());
+    const axis = new V(sgn, 0, 0).applyQuaternion(wq).normalize();         // normalized rig: fingers along +x (left) / -x (right)
+    const pn = new V(0, -1, 0).applyQuaternion(wq);                         // ... palm down at rest
+    const pw = PALM[h.palm];
+    const w = bodyVec([h.palm === "in" || h.palm === "out" ? sgn * pw[0] : pw[0], pw[1], pw[2]]);
+    w.sub(axis.clone().multiplyScalar(w.dot(axis)));
+    const p = pn.sub(axis.clone().multiplyScalar(pn.dot(axis)));
+    if (w.lengthSq() < 1e-6 || p.lengthSq() < 1e-6) return;               // asked along the forearm itself: keep the roll
+    w.normalize(); p.normalize();
+    const ang = Math.atan2(axis.dot(new V().crossVectors(p, w)), p.dot(w));
+    const wantW = new Q().setFromAxisAngle(axis, ang).multiply(wq);
+    const local = hd.parent.getWorldQuaternion(new Q()).invert().multiply(wantW);
+    hd.quaternion.slerp(local, k);
+    hd.updateWorldMatrix(false, true);
   }
   function fingers(side, k, dt) {
     const h = tgt.hands[side];

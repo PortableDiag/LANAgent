@@ -23,6 +23,14 @@ test('a script is tidied to what the store takes: name, sorted keys from t 0, no
   assert.equal(script.format, 'bnb-motion/1');
 });
 
+test('legs and fingers (store 0.60) pass through the script check', () => {
+  const { script } = parseMotionScript(JSON.stringify({ format: 'bnb-motion/1', name: 'squat', duration: 2, keys: [{ t: 0, hips: { drop: 0.2 }, feet: { left: { at: [0.1, 0, 0] } } }, { t: 1, hands: { right: { shape: 'fist', fingers: { index: 0, middle: 0 } } } }] }));
+  assert.deepEqual(script.keys[0].hips, { drop: 0.2 });
+  assert.deepEqual(script.keys[0].feet, { left: { at: [0.1, 0, 0] } });
+  assert.deepEqual(script.keys[1].hands.right.fingers, { index: 0, middle: 0 });
+  assert.match(motionPrompt('a squat'), /"hips"/);
+});
+
 test('what the store would refuse is caught before a solve is spent', () => {
   assert.match(parseMotionScript('no json').error, /no JSON/);
   assert.match(parseMotionScript(JSON.stringify({ ...WAVE, duration: 45 })).error, /limit is 30/);
