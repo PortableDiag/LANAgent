@@ -2,6 +2,16 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.882] - 2026-11-20
+
+### Fixed
+- A live avatar's pictures keep their folder in the stored name, so two files with the same name in different folders (a sticker and an emoji both called `angry.png`) are kept apart instead of one overwriting the other.
+
+## [2.25.881] - 2026-11-20
+
+### Added
+- **A live avatar's pictures (store 0.56).** Each live pass now brings its model's portraits, stickers, emoji and 2D art (`GET /api/live/<slug>/media`) into a library item of their own ("Racer Blue (live pictures)"), used like bought ones: stickers after a reply, emoji, the portrait. A picture is fetched only when its sha256 is new and dropped when the store stops listing it; while a pass is in its grace week the pictures are kept as they are.
+
 ## [2.25.880] - 2026-11-20
 
 ### Fixed

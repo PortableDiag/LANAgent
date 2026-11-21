@@ -30,6 +30,9 @@ function plugin() {
   p.accountKey = async () => 'bnba_test';
   // The clip library check has its own test; the model tests count only model downloads.
   p.syncLiveClips = async () => null;
+  p.syncLiveMedia = async () => [];
+  p.syncLibrary = async () => [];
+  p.takeNewPacks = async () => [];
   return { p, store };
 }
 
@@ -218,6 +221,7 @@ test('renewal is due in the grace week or 3 days ahead, never twice a day, and b
 test('the live clip library: first listing is remembered, an ETag change fetches the packs again', async () => {
   const { p, store } = plugin();
   delete p.syncLiveClips;
+  p.agent.agentModel.activeVRMModel = 'store-vrm-racer-blue-bundle'; // the pass checked is the worn body's (2119 #533)
   let listing = { packs: [{ variant: 'vrm-emote-animations-1', etag: '"a"' }, { variant: 'vrm-idle-pack', etag: '"b"' }] };
   p.fetchLive = async () => ({ status: 200, headers: {}, data: Buffer.from(JSON.stringify(listing)) });
   let updated = 0;

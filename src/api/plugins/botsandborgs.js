@@ -695,9 +695,64 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     // Store 0.29: the account library is the one sync path for clip and props packs (and every other product).
     await this.syncLibrary().catch(e => this.logger.warn(`botsandborgs: library sync failed: ${e.message}`));
     await this.syncLiveClips(latest).catch(e => this.logger.warn(`botsandborgs: live clip check failed: ${e.message}`));
+    await this.syncLiveMedia(latest).catch(e => this.logger.warn(`botsandborgs: live pictures check failed: ${e.message}`));
     const changed = report.filter(x => x.status === 'updated').length;
     this.logger.info(`botsandborgs: live check: ${report.length} pass${report.length === 1 ? '' : 'es'}, ${changed} updated${report.length ? ` (${report.map(x => `${x.slug} ${x.status}`).join(', ')})` : ''}`);
     return report;
+  }
+
+  /**
+   * A live avatar's pictures (store 0.56, GET /api/live/<slug>/media: portraits, stickers, emoji, 2D art; each with its
+   * sha256): kept in a library item of their own per pass (live-media-<model>), so the agent uses them like bought ones
+   * (stickers after a reply, emoji, its portrait). A file is fetched only when its sha256 is new (If-None-Match, 304
+   * free); one the store no longer lists is dropped. Included while the pass is active (403 renew in grace: kept as is).
+   */
+  async syncLiveMedia(passes) {
+    const out = [];
+    for (const pass of passes.filter(p => p.state !== 'expired' && p.key)) {
+      let key; try { key = decrypt(pass.key); } catch { continue; }
+      const headers = { 'User-Agent': this.userAgent(), 'X-Live-Key': key, Accept: 'application/json' };
+      const r = await this.fetchLive(`${BASE}/api/live/${pass.slug}/media`, headers);
+      if (r.status === 403 || r.status === 404) continue;
+      if (r.status !== 200) { this.logger.info(`botsandborgs: live pictures for ${pass.slug} answered ${r.status || r.error}`); continue; }
+      let d; try { d = JSON.parse(Buffer.from(r.data).toString('utf8')); } catch { continue; }
+      const files = (Array.isArray(d) ? d : d.files || []).filter(f => f && f.name && f.url);
+      const base = this.productBase(pass.slug);
+      const variant = `live-media-${base}`;
+      const dir = path.join(this.libraryDir(), safeName(variant));
+      await fs.mkdir(dir, { recursive: true });
+      const items = await this.libraryItems();
+      const had = items.find(i => i.variant === variant);
+      const old = new Map((had?.files || []).map(f => [f.name, f]));
+      const kindOf = (k, n) => { const x = String(k || '').toLowerCase(); return x.includes('sticker') ? 'sticker' : x.includes('emoji') ? 'emoji' : x.includes('portrait') || x.includes('2d') || x.includes('art') ? 'portrait' : moodOf(n, 'sticker') ? 'sticker' : 'portrait'; };
+      const keep = [];
+      let fetched = 0;
+      for (const f of files) {
+        // The folder stays in the name (Stickers/angry.png and Emoji/angry.png are two files), flattened to one level.
+        const name = String(f.name).split(/[\\/]+/).filter(x => x && x !== '..' && x !== '.').join('__');
+        if (!name) continue;
+        const sha256 = f.sha256 ? String(f.sha256).toLowerCase() : null;
+        const prev = old.get(name);
+        if (prev && sha256 && prev.sha256 === sha256) { keep.push(prev); continue; }
+        const g = await this.fetchLive(/^https?:/.test(f.url) ? f.url : `${BASE}${f.url}`, { 'User-Agent': this.userAgent(), 'X-Live-Key': key, ...(prev?.sha256 ? { 'If-None-Match': `"${prev.sha256}"` } : {}) });
+        if (g.status === 304 && prev) { keep.push(prev); continue; }
+        if (g.status !== 200) { if (prev) keep.push(prev); continue; }
+        const buffer = Buffer.from(g.data);
+        await fs.writeFile(path.join(dir, name), buffer);
+        const kind = kindOf(f.kind, name);
+        const entry = { name, kind, mime: String(g.headers?.['content-type'] || ''), size: buffer.length, sha256: sha256 || crypto.createHash('sha256').update(buffer).digest('hex') };
+        const mood = moodOf(name, kind);
+        if (mood) entry.mood = mood;
+        keep.push(entry);
+        fetched++;
+      }
+      for (const [name] of old) if (!keep.some(k => k.name === name)) await fs.unlink(path.join(dir, name)).catch(() => {});
+      const title = `${(items.find(i => this.productBase(i.variant) === base && i.files.some(x => x.kind === 'vrm'))?.title || base).replace(/\s*[—-]\s*VRM Avatar$/i, '')} (live pictures)`;
+      await this.saveLibraryItem({ variant, title, kind: 'portrait', collection: null, order: null, token: null, at: had?.at || new Date().toISOString(), files: keep, livePass: pass.slug }, { keepPlace: !!had });
+      this.logger.info(`botsandborgs: live pictures for ${pass.slug}: ${keep.length} kept, ${fetched} fetched${keep.length ? ` (${[...new Set(keep.map(k => k.kind))].join(', ')})` : ''}`);
+      out.push({ slug: pass.slug, files: keep.length, fetched });
+    }
+    return out;
   }
 
   /**
