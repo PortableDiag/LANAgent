@@ -2,6 +2,11 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.874] - 2026-11-20
+
+### Added
+- **Saved looks are worn.** A look the owner saved on one of their linked Bots & Borgs avatars (which pieces show, colours by material, shape keys) is now applied to its outfit file, by the store's own spec (shared with AvatarX 0.4.6): a listed piece shows and an unlisted one is hidden (no list = the author's defaults), a colour turns a texture's hue, saturation and lightness or tints a plain colour, a shape key holds its value after every expression update. It is worn wherever the body appears: the live 3D page (the worn body's look comes with its state; a changed look puts the body on again), the videos the agent renders (a role's look, or the look the owner chose for that one person), and AvatarX (the look sent to the lent body).
+
 ## [2.25.873] - 2026-11-20
 
 ### Fixed

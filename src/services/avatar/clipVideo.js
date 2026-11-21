@@ -68,11 +68,12 @@ function pageHtml(methods) {
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import * as V from '/lib/three-vrm.module.js';
 import { attachProps, updateProps } from '/lib/vrm-props.js';
+import { wearLook } from '/lib/vrm-look.js';
 const THREE = window.THREE; THREE.GLTFLoader = GLTFLoader;
 const d = {
 ${methods}
 };
-window.setup = async ({ width, height, fps, seconds, loop, prop, props = [], background, backgroundImage = false, mouth = null, framing = 'full' }) => {
+window.setup = async ({ width, height, fps, seconds, loop, prop, props = [], background, backgroundImage = false, mouth = null, framing = 'full', look = null }) => {
   const r = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
   r.setPixelRatio(1); r.setSize(width, height); document.body.appendChild(r.domElement);
   const scene = new THREE.Scene();
@@ -95,6 +96,8 @@ window.setup = async ({ width, height, fps, seconds, loop, prop, props = [], bac
   if (V.VRMUtils?.removeUnnecessaryJoints) V.VRMUtils.removeUnnecessaryJoints(vrm.scene);
   vrm.scene.traverse(o => { if (o.isMesh) o.frustumCulled = false; });
   scene.add(vrm.scene); d.currentVRM = vrm;
+  // The owner's saved look for this body (linked avatars): pieces, colours, shape keys, on the outfit file.
+  const worn = wearLook(vrm, look);
   const clip = await d.loadVRMA('/clip.vrma');
   if (!clip) throw new Error('the clip did not fit this model');
   const mixer = new THREE.AnimationMixer(vrm.scene);
@@ -182,10 +185,11 @@ window.setup = async ({ width, height, fps, seconds, loop, prop, props = [], bac
     updateProps(placed, action.time, i > 0 ? 1 / fps : 0); // the store's show windows and the props' own animations
     if (canTalk) em.setValue('aa', mouth[i] || 0);
     vrm.update(1 / fps);
+    worn.apply(vrm); // the look's shape keys, again after the expressions
     r.render(scene, cam);
     return r.domElement.toDataURL('image/jpeg', 0.9);
   };
-  return { duration: clip.duration, tracks: clip.tracks.length, pole: poleX, talks: canTalk, framing, props: placed.map(o => o.name) };
+  return { duration: clip.duration, tracks: clip.tracks.length, pole: poleX, talks: canTalk, framing, props: placed.map(o => o.name), look: { colors: worn.colors, morphs: worn.morphs, hidden: worn.hidden } };
 };
 window.ready = true;
 </script></body></html>`;
@@ -237,7 +241,7 @@ export function renderClipVideo(opts) {
 }
 
 async function render({ modelPath, clipPath, loop = false, prop = null, props = null, seconds = null, fps = 24, width = 720, height = 960,
-  background = '#121826', backgroundPath = null, framing = 'full', timeoutMs = 8 * 60 * 1000, launch = null, voice = null } = {}) {
+  background = '#121826', backgroundPath = null, framing = 'full', timeoutMs = 8 * 60 * 1000, launch = null, voice = null, look = null } = {}) {
   const started = Date.now();
   const html = pageHtml(designerMethods(await fs.readFile(path.join(PUBLIC_DIR, 'avatar.html'), 'utf8')));
   const { default: puppeteer } = await import('puppeteer');
@@ -286,7 +290,7 @@ async function render({ modelPath, clipPath, loop = false, prop = null, props = 
     await page.goto(`${HOST}/render.html`, { waitUntil: 'load', timeout: 60000 });
     await page.waitForFunction('window.ready === true', { timeout: 60000 }).catch(() => { throw new Error(`the render page did not start: ${pageErrors[0] || 'no error given'}`); });
     // The clip's length is known only once it is loaded, so the page is set up with a generous span first.
-    const probe = await page.evaluate((o) => window.setup(o), { width, height, fps, seconds: 40, loop, prop, props: pageProps, background, backgroundImage: !!backgroundPath, framing: ['waist', 'head'].includes(framing) ? framing : 'full',
+    const probe = await page.evaluate((o) => window.setup(o), { width, height, fps, seconds: 40, loop, prop, props: pageProps, background, backgroundImage: !!backgroundPath, framing: ['waist', 'head'].includes(framing) ? framing : 'full', look,
       // The voice starts 0.3 s in, so the mouth does too.
       mouth: said?.mouth ? [...new Array(Math.round(VOICE_LEAD_S * fps)).fill(0), ...said.mouth] : null });
     // With a voice-over the video runs at least as long as the voice (the clip holds its last pose, or loops).

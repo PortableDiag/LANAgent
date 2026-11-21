@@ -141,7 +141,8 @@ export async function pushModelToAvatarX(modelId, {
   caFile = process.env.AVATARX_CA_FILE,
   vrmDir = path.join(DATA_PATH, 'vrm-models'),
   fetchFn,
-  link = null
+  link = null,
+  look = null
 } = {}) {
   const call = await connect({ url, keyFile, caFile, fetchFn });
   if (!call) return 'not connected';
@@ -164,6 +165,8 @@ export async function pushModelToAvatarX(modelId, {
     if (!id) throw new Error('AvatarX answered an upload with no id');
     if (same.length) logger.info(`AvatarX: ${name} changed (${bytes.length} bytes); older copies left to remove in AvatarX Settings: ${same.map(a => a.id).join(', ')}`);
   }
+  // The owner's saved look on a lent body (AvatarX 0.4.5+: lent bodies only); sent each time, AvatarX re-wears on change.
+  if (look && link) await call('PATCH', '/agent/v1/state', JSON.stringify({ looks: { [id]: look } })).catch(e => logger.warn(`AvatarX: look not set on ${name}: ${e.message}`));
   if (state.active === id) return 'unchanged';
   await call('PATCH', '/agent/v1/state', JSON.stringify({ active: id }));
   logger.info(`AvatarX: now showing ${name} (${id})`);

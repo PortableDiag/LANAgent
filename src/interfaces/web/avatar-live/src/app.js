@@ -1,6 +1,7 @@
 // LANAgent's live avatar: AvatarX's page (AvatarX 0.3.19, 3ec549c), served by the agent itself. What differs from AvatarX
 // is marked "LANAgent:"; lanagent.js routes the page's calls to /api/avatar-live with the dashboard's login.
 import { login, setToken, events, protectedImage, EMBED, EMBED_BACKGROUND, EMBED_LIFT, EMBED_ZOOM } from './lanagent.js';
+import { wearLook } from './look.js';  // LANAgent: AvatarX 0.4.6 looks (linked avatars)
 // The page: login, the avatar on stage, chat, talk, settings. The agent's changes arrive on
 // /api/events; a model's own expressions are read at load, since they differ from one to the next.
 import * as THREE from 'three';
@@ -198,6 +199,8 @@ function setViewOffset() {
   else camera.clearViewOffset();
 }
 
+let wornLook = null;
+let wornLookKey = 'null';
 async function loadAvatar(id) {
   if (id === vrmId) return;
   vrmId = id;
@@ -225,6 +228,10 @@ async function loadAvatar(id) {
     v.scene.traverse((o) => { o.frustumCulled = false; });
     scene.add(v.scene);
     vrm = v;
+    // LANAgent: a linked body wears the owner's saved look (AvatarX 0.4.6): pieces, colours, shape keys.
+    const look = state?.avatars?.find((a) => a.id === id)?.look ?? null;
+    wornLookKey = JSON.stringify(look);
+    wornLook = wearLook(v, look);
     motion?.props?.dispose();
     motion = new Motion(v);
     motion.props.sync(state?.props);
@@ -240,7 +247,7 @@ async function loadAvatar(id) {
     frameModel();
     applyMood();
     $('load-note').hidden = true;
-    window.__avatar = { ready: true, id, presets: [...presets], lookAt: !!v.lookAt };
+    window.__avatar = { ready: true, id, presets: [...presets], lookAt: !!v.lookAt, look: { colors: wornLook.colors, morphs: wornLook.morphs, pieces: wornLook.pieces, hidden: wornLook.hidden } };
 
   } catch (err) {
     if (ticket !== loading) return;
@@ -361,6 +368,7 @@ function animate() {
       }
     }
     vrm.update(dt);
+    wornLook?.apply(vrm);  // LANAgent: the look's shape keys, again after the expressions
   }
   if (controls && !renderer.xr.isPresenting) controls.update();
   if (!skipDraw) renderer.render(scene, camera);
@@ -396,6 +404,8 @@ function applyState() {
   }));
   $('empty').hidden = !!state.active;
   placeCamera();
+  // LANAgent: the owner changed the look the shown body wears: put it on again with the new one.
+  if (vrm && state.active === vrmId && JSON.stringify(state.avatars?.find((a) => a.id === vrmId)?.look ?? null) !== wornLookKey) vrmId = null;
   loadAvatar(state.active);
   applyMood();
 }

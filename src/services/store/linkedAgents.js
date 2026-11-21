@@ -82,7 +82,10 @@ export function readChoice(d) {
   const m = typeof ref === 'string' ? /^locker:([^/#]+)\/([^#]+)(?:#(.+))?$/.exec(ref) : null;
   if (m) { model = model || m[1]; outfit = outfit || m[2]; look = look || m[3] || null; }
   if (!model) return null;
-  return { model: String(model), outfit: String(outfit || 'default'), look: look ? String(look) : null, fallback: d?.fallback_from || a.fallback_from || null };
+  // The look's own settings ({ colors, morphs, pieces }) when the answer carries them (roles, contacts: 2119 #572).
+  const lk = a.look && typeof a.look === 'object' ? a.look : null;
+  const settings = lk ? { colors: lk.colors || {}, morphs: lk.morphs || {}, pieces: Array.isArray(lk.pieces) ? lk.pieces : null } : null;
+  return { model: String(model), outfit: String(outfit || 'default'), look: look ? String(look) : null, settings, fallback: d?.fallback_from || a.fallback_from || null };
 }
 
 /** The store's ref for a choice: locker:<model>/<outfit>[#<look>]. */

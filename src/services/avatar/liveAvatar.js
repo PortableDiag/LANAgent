@@ -261,7 +261,7 @@ export async function applyPatch(patch, { d = dirs(), known = {}, setActive } = 
 }
 
 /** What the page reads (AvatarX public_state), from the live files. */
-export function publicState({ settings, active, avatarList, clipNames, propList, backgroundNames, agentVoice = null }) {
+export function publicState({ settings, active, avatarList, clipNames, propList, backgroundNames, agentVoice = null, looks = {} }) {
   return {
     active: active || null,
     background: settings.background,
@@ -274,7 +274,8 @@ export function publicState({ settings, active, avatarList, clipNames, propList,
     // and only on a fallback). AvatarX's per-avatar voice choice is deliberately not offered here.
     voice: 'agent',
     voices: [{ name: 'agent', sounds: agentVoice?.speech ? `the agent's own: ${agentVoice.speech}${agentVoice.realtime ? `, talk ${agentVoice.realtime}` : ''}` : "the agent's own" }],
-    avatars: avatarList.map(({ id, name, size }) => ({ id, name, size })),
+    // A linked body's saved look (the owner's, from the store link): the page wears it on the outfit file.
+    avatars: avatarList.map(({ id, name, size }) => ({ id, name, size, ...(looks[id] ? { look: looks[id] } : {}) })),
     backgrounds: [...BACKGROUNDS, ...backgroundNames],
     custom_backgrounds: backgroundNames,
     moods: MOODS,

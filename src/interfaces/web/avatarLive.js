@@ -89,7 +89,7 @@ export function createLiveAvatar(agent, { d = L.dirs() } = {}) {
   const live = {
     d,
     gather,
-    async getState() { return L.publicState({ ...(await gather()), agentVoice: await agentVoice() }); },
+    async getState() { return L.publicState({ ...(await gather()), agentVoice: await agentVoice(), looks: (await store()?.avatarLooks?.().catch(() => ({}))) || {} }); },
     async patch(p) {
       const g = await gather();
       await L.applyPatch(p || {}, { d, setActive, known: { avatars: g.avatarList, backgrounds: g.backgroundNames, animations: g.clipNames, active: g.active } });

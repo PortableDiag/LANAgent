@@ -825,11 +825,21 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
   async modelFor(role, { personId = null } = {}) {
     // A per-contact avatar (linked agents, store 0.51) wins over the role for that one person.
     const own = personId ? await this.contactModel(personId).catch(e => { this.logger.warn(`botsandborgs: contact avatar skipped: ${e.message}`); return null; }) : null;
-    const id = own || resolveRoleModel(await this.avatarRoles(), role, this.agent?.agentModel?.activeVRMModel || null);
+    const id = own?.modelId || resolveRoleModel(await this.avatarRoles(), role, this.agent?.agentModel?.activeVRMModel || null);
     if (!id) return null;
     const manifest = await fs.readFile(path.join(this.vrmDir(), 'manifest.json'), 'utf8').then(JSON.parse).catch(() => []);
     const m = manifest.find(x => x.id === id);
-    return m?.file ? { ...m, role: normalizeRole(role) || 'personal' } : null;
+    if (!m?.file) return null;
+    // The look this body wears for this person or role (linked avatars), applied when the video is rendered.
+    let look = own ? own.look : null;
+    if (!own) {
+      const r = normalizeRole(role) || 'personal';
+      for (const l of (await this.linkState().catch(() => ({ links: [] }))).links) {
+        const x = l.roleLooks?.[r] || (r === 'assistant' ? l.roleLooks?.public : null);
+        if (x?.modelId === id && x.look) { look = x.look; break; }
+      }
+    }
+    return { ...m, role: normalizeRole(role) || 'personal', ...(look ? { look } : {}) };
   }
 
   /** The store product of the public model (its profile kit's banner, its picture). */
@@ -1182,13 +1192,14 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
           try { sha = await this.fetchLinkedOutfit(l.id, o, key, was?.sha256); }
           catch (e) { if (linkEnded(e)) { await this.endLink(l.id, 'ended'); detail = null; break; } this.logger.warn(`botsandborgs: linked ${o.model}/${o.outfit} not fetched: ${e.message}`); continue; }
         }
-        outfits.push({ model: o.model, outfit: o.outfit, name: o.name, sha256: sha, modelId, looks: o.looks.map(x => ({ id: x.id || x.look, name: x.name || x.id })), personalLicense: o.personalLicense });
+        outfits.push({ model: o.model, outfit: o.outfit, name: o.name, sha256: sha, modelId, personalLicense: o.personalLicense,
+          looks: o.looks.map(x => ({ id: x.id || x.look, name: x.name || x.id, colors: x.colors || {}, morphs: x.morphs || {}, pieces: Array.isArray(x.pieces) ? x.pieces : null })) });
       }
       if (!detail) continue;
       // Outfits the owner no longer allows: their copies go.
       for (const [k, o] of had) if (!outfits.some(x => `${x.model}/${x.outfit}` === k)) await this.removeGalleryModel(o.modelId);
       const entry = { id: l.id, owner: l.owner || (detail.link || detail).owner_name || null, status: 'active', outfits, at: new Date().toISOString() };
-      entry.roles = await this.applyLinkRoles(entry, key).catch(e => { this.logger.warn(`botsandborgs: link roles not applied: ${e.message}`); return prev.roles || {}; });
+      entry.roles = await this.applyLinkRoles(entry, key).catch(e => { this.logger.warn(`botsandborgs: link roles not applied: ${e.message}`); entry.roleLooks = prev.roleLooks || {}; return prev.roles || {}; });
       keep.push(entry);
     }
     // A link we had that the store no longer lists is over.
@@ -1230,6 +1241,7 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
    */
   async applyLinkRoles(link, key) {
     const picked = {};
+    const looks = {};
     for (const role of LINK_ROLES) {
       let c;
       try { c = readChoice(await this.api('get', `/api/account/links/${encodeURIComponent(link.id)}/roles/${role}`, { key })); }
@@ -1237,8 +1249,10 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
       if (!c || c.fallback) continue;
       const o = link.outfits.find(x => x.model === c.model && x.outfit === c.outfit);
       if (o) picked[role] = o.modelId;
-      if (c.look) this.logger.info(`botsandborgs: the owner's ${role} pick is look ${c.look} on ${o?.name || c.model}; it is worn as the outfit (looks are not applied yet)`);
+      // A look is worn on its outfit file: pieces shown or hidden, colours, shape keys (the store's spec, 2119 #575).
+      if (o && c.look) looks[role] = { modelId: o.modelId, id: c.look, look: c.settings || this.lookSettings(link, o, c.look) };
     }
+    link.roleLooks = looks;
     const roles = await this.avatarRoles();
     const next = { ...roles };
     let changed = false;
@@ -1249,20 +1263,38 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
       const st = await this.linkState();
       // What it wore before, to go back to when the link ends.
       if (!st.wornBefore && !/^store-linked-/.test(String(worn || ''))) await this.saveLinkState({ ...st, wornBefore: worn });
-      await this.wearGalleryModel(picked.personal);
+      await this.wearGalleryModel(picked.personal, looks.personal?.look || null, link.id);
+    } else if (picked.personal && looks.personal) {
+      // Same body, a new or changed look: AvatarX wears it again.
+      await this.wearGalleryModel(picked.personal, looks.personal.look, link.id);
     }
     return picked;
   }
 
+  /** A look's settings from the link's own list (GET …/links/<id>: outfits[].looks[]), when a role answer had none. */
+  lookSettings(link, outfit, lookId) {
+    const lk = (outfit.looks || []).find(x => x.id === lookId);
+    return lk ? { colors: lk.colors || {}, morphs: lk.morphs || {}, pieces: Array.isArray(lk.pieces) ? lk.pieces : null } : null;
+  }
+
+  /** { modelId: look } for every linked body a role wears with a look; the personal one wins on a shared body. */
+  async avatarLooks() {
+    const out = {};
+    for (const l of (await this.linkState()).links) {
+      for (const r of ['public', 'assistant', 'personal']) { const x = l.roleLooks?.[r]; if (x?.look) out[x.modelId] = x.look; }
+    }
+    return out;
+  }
+
   /** Wear a gallery model by id: the active model and AvatarX. Its picture is left alone (a linked model has none). */
-  async wearGalleryModel(id) {
+  async wearGalleryModel(id, look = null, linkId = null) {
     const { Agent } = await import('../../models/Agent.js');
     await Agent.updateOne({ name: process.env.AGENT_NAME || 'LANAgent' }, { $set: { activeVRMModel: id } });
     if (this.agent?.agentModel) this.agent.agentModel.activeVRMModel = id;
     const { pushModelToAvatarX } = await import('../../services/avatar/avatarx.js');
     // A linked model goes onto AvatarX as a lent body (0.4.5, ?link=), which the agent may take off when the link ends.
-    const link = (await this.linkState()).links.find(l => (l.outfits || []).some(o => o.modelId === id))?.id || null;
-    await pushModelToAvatarX(id, link ? { link } : {}).catch(e => this.logger.warn(`botsandborgs: AvatarX not told: ${e.message}`));
+    const link = linkId || (await this.linkState()).links.find(l => (l.outfits || []).some(o => o.modelId === id))?.id || null;
+    await pushModelToAvatarX(id, { ...(link ? { link } : {}), ...(link && look ? { look } : {}) }).catch(e => this.logger.warn(`botsandborgs: AvatarX not told: ${e.message}`));
     this.logger.info(`botsandborgs: wearing ${id}`);
   }
 
@@ -1349,7 +1381,7 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
       // Only a look chosen for this person: the role fallbacks are already ours (assistant → public → worn).
       if (!c || c.fallback) continue;
       const o = l.outfits.find(x => x.model === c.model && x.outfit === c.outfit);
-      if (o && await this.galleryHas(o.modelId)) return o.modelId;
+      if (o && await this.galleryHas(o.modelId)) return { modelId: o.modelId, look: c.look ? (c.settings || this.lookSettings(l, o, c.look)) : null };
     }
     return null;
   }
@@ -2833,7 +2865,7 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
       const { framingAsked } = await import('../../services/avatar/clipVideo.js');
       const framing = framingAsked(asked);
       if (scene) this.logger.info(`botsandborgs: filming in front of ${path.basename(scene)}${framing !== 'full' ? `, ${framing} framing` : ''}`);
-      const v = await (this.renderVideo || renderClipVideo)({ modelPath: path.join(this.vrmDir(), model.file), clipPath: path.join(this.vrmDir(), 'animations', rel),
+      const v = await (this.renderVideo || renderClipVideo)({ modelPath: path.join(this.vrmDir(), model.file), look: model.look || (await this.avatarLooks().catch(() => ({})))[model.id] || null, clipPath: path.join(this.vrmDir(), 'animations', rel),
         loop: !!entry.loop, prop: entry.prop || null, props: this.propPaths(await this.propsForBody(entry.props, { asked, scene, modelId: model.id })), framing, ...(voice ? { voice } : {}), ...(scene ? { backgroundPath: scene } : {}) });
       const filename = `${String(label).toLowerCase().replace(/[^a-z0-9]+/g, '-')}.mp4`;
       if (/^(me|owner|myself)$/i.test(to)) {
@@ -2898,7 +2930,7 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     const { renderClipVideo } = await import('../../services/avatar/clipVideo.js');
     const voice = audio_b64 ? { audio: Buffer.from(String(audio_b64), 'base64'), format: 'mp3' } : null;
     const how = ['full', 'waist', 'head'].includes(framing) ? framing : 'full';
-    const v = await (this.renderVideo || renderClipVideo)({ modelPath: path.join(this.vrmDir(), model.file), clipPath: path.join(this.vrmDir(), 'animations', rel),
+    const v = await (this.renderVideo || renderClipVideo)({ modelPath: path.join(this.vrmDir(), model.file), look: model.look || (await this.avatarLooks().catch(() => ({})))[model.id] || null, clipPath: path.join(this.vrmDir(), 'animations', rel),
       loop: !!entry.loop, prop: entry.prop || null, props: this.propPaths(await this.propsForBody(entry.props, { asked: String(name) })), framing: how,
       ...(voice ? { voice } : {}), ...(backgroundPath ? { backgroundPath } : {}) });
     this.logger.info(`botsandborgs: rendered a video of ${entry.label || name} (${v.seconds}s) for the avatar API`);
@@ -3007,7 +3039,7 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     if (!tts?.buffer?.length) throw new Error("the voice couldn't be made");
     const scene = await this.backgroundFor('');
     const { renderClipVideo } = await import('../../services/avatar/clipVideo.js');
-    const v = await (this.renderVideo || renderClipVideo)({ modelPath: path.join(this.vrmDir(), model.file), clipPath: path.join(this.vrmDir(), 'animations', clip.file),
+    const v = await (this.renderVideo || renderClipVideo)({ modelPath: path.join(this.vrmDir(), model.file), look: model.look || (await this.avatarLooks().catch(() => ({})))[model.id] || null, clipPath: path.join(this.vrmDir(), 'animations', clip.file),
       loop: true, width, height, voice: { audio: tts.buffer, format: tts.format || 'mp3' }, ...(scene ? { backgroundPath: scene } : {}) });
     return { video: v.video, seconds: v.seconds, cut };
   }

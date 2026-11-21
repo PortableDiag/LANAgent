@@ -31,7 +31,7 @@ test('names, keys and the store\'s answers', () => {
   assert.deepEqual(agentLinks({ as_agent: [{ id: 'lnk_1', status: 'active', owner_name: 'Pat' }] }), [{ id: 'lnk_1', status: 'active', owner: 'Pat' }]);
   const outs = linkOutfits({ models: [{ id: 'rose', name: 'Rose', personal_license: true, outfits: [{ id: 'base', sha256: 'AB', looks: [{ id: 'lk1', name: 'Winter' }] }, { id: 'coat', name: 'Coat', sha256: 'cd' }] }] });
   assert.deepEqual(outs.map(o => [o.model, o.outfit, o.name, o.sha256, o.personalLicense]), [['rose', 'base', 'Rose', 'ab', true], ['rose', 'coat', 'Rose — Coat', 'cd', true]]);
-  assert.deepEqual(readChoice({ ref: 'locker:rose/coat#lk1' }), { model: 'rose', outfit: 'coat', look: 'lk1', fallback: null });
+  assert.deepEqual(readChoice({ ref: 'locker:rose/coat#lk1' }), { model: 'rose', outfit: 'coat', look: 'lk1', settings: null, fallback: null });
   assert.equal(readChoice({ avatar: { model: 'rose', outfit: 'base' }, fallback_from: 'public' }).fallback, 'public');
   assert.equal(readChoice({}), null);
   assert.equal(lockerRef('rose', 'coat', 'lk1'), 'locker:rose/coat#lk1');
@@ -81,7 +81,7 @@ test('the store\'s real example responses (2119 #572) read right', () => {
   assert.deepEqual(agentLinks({ as_agent: [{ id: 'lnk_EXAMPLE', owner: 'acct_OWNER', status: 'revoked' }], as_owner: [] }), [{ id: 'lnk_EXAMPLE', status: 'revoked', owner: 'acct_OWNER' }]);
   // A role that is a look: the look's settings carry no id; the ref does.
   assert.deepEqual(readChoice({ file: 'x', look: { colors: {}, morphs: { Smile: 0.4 }, pieces: null }, model: 'mdl_EXAMPLE', outfit: 'base', ref: 'locker:mdl_EXAMPLE/base#lk_EXAMPLE', role: 'public' }),
-    { model: 'mdl_EXAMPLE', outfit: 'base', look: 'lk_EXAMPLE', fallback: null });
+    { model: 'mdl_EXAMPLE', outfit: 'base', look: 'lk_EXAMPLE', settings: { colors: {}, morphs: { Smile: 0.4 }, pieces: null }, fallback: null });
   assert.equal(readChoice({ fallback_from: 'personal', model: 'mdl_EXAMPLE', outfit: 'base', ref: 'locker:mdl_EXAMPLE/base#lk_EXAMPLE', role: 'public' }).fallback, 'personal');
   assert.equal(readChoice({ contact: { key: 'p_unknown', label: null }, fallback_from: 'contact', model: 'mdl_EXAMPLE', outfit: 'base', ref: 'locker:mdl_EXAMPLE/base', role: 'assistant' }).fallback, 'contact');
 });
@@ -197,7 +197,7 @@ test('per-contact avatars: set by name with our opaque key and a label, read bac
     if (/\/contacts\/.+\/avatar$/.test(route)) return { avatar: { model: 'rose', outfit: 'base' }, fallback_from: 'assistant' };
     throw Object.assign(new Error('no route'), { status: 404 });
   };
-  assert.equal(await t.p.contactModel(jo._id), 'store-linked-lnk-4-rose-base');
+  assert.deepEqual(await t.p.contactModel(jo._id), { modelId: 'store-linked-lnk-4-rose-base', look: { colors: {}, morphs: {}, pieces: null } });
   assert.equal(await t.p.contactModel('someone-else'), null, 'a fallback answer means the roles decide');
 });
 
@@ -234,4 +234,73 @@ test('AvatarX: a lent body is tagged with its link, and only those bodies come o
   const gone = await removeLentAvatars('lnk_1', { url: 'https://ax', keyFile, fetchFn });
   assert.deepEqual(gone, ['lent1']);
   assert.deepEqual(sent.filter(x => x.startsWith('DELETE')), ['DELETE /agent/v1/avatars/lent1']);
+});
+
+test('looks: a role pick that is a look is kept with its settings, worn on AvatarX and served to the 3D page', async () => {
+  const base = vrm('Rose');
+  const evening = { colors: { Body: { hue: 20, light: 1, sat: 1.1 } }, morphs: { Smile: 0.4 }, pieces: null };
+  const t = rig({
+    files: { 'rose/base': base },
+    routes: {
+      'get /api/account/links': { as_agent: [{ id: 'lnk_6', status: 'active' }] },
+      'get /api/account/links/lnk_6': { link: { models: [{ model: 'rose', name: 'Rose', outfits: [{ outfit: 'base', label: 'Base', sha256: sha(base), looks: [{ id: 'lk_1', name: 'Evening', ...evening }] }] }] } },
+      'get /api/account/links/lnk_6/roles/personal': { model: 'rose', outfit: 'base', look: evening, ref: 'locker:rose/base#lk_1', role: 'personal' },
+      'get /api/account/links/lnk_6/roles/assistant': { model: 'rose', outfit: 'base', look: null, ref: 'locker:rose/base', role: 'assistant' }
+    }
+  });
+  const wore = [];
+  t.p.wearGalleryModel = async (id, look, link) => { wore.push({ id, look, link }); t.p.agent.agentModel.activeVRMModel = id; };
+  await t.p.syncLinks();
+  assert.deepEqual(wore, [{ id: 'store-linked-lnk-6-rose-base', look: evening, link: 'lnk_6' }]);
+  assert.deepEqual(await t.p.avatarLooks(), { 'store-linked-lnk-6-rose-base': evening });
+  // A video of the worn body wears the personal look; the assistant pick (same outfit, no look) has none of its own.
+  const personal = await t.p.modelFor('personal');
+  assert.deepEqual(personal.look, evening);
+  const { publicState } = await import('../../src/services/avatar/liveAvatar.js');
+  const st = publicState({ settings: {}, active: 'store-linked-lnk-6-rose-base', avatarList: [{ id: 'store-linked-lnk-6-rose-base', name: 'Rose', size: 1 }, { id: 'mine', name: 'Mine', size: 2 }], clipNames: [], propList: [], backgroundNames: [], looks: await t.p.avatarLooks() });
+  assert.deepEqual(st.avatars[0].look, evening);
+  assert.equal('look' in st.avatars[1], false);
+});
+
+test('looks: a contact\'s look comes with that person\'s video only', async () => {
+  const base = vrm('Rose');
+  const gym = { colors: {}, morphs: {}, pieces: ['Body', 'TankTop'] };
+  const t = rig({
+    files: { 'rose/base': base },
+    routes: {
+      'get /api/account/links': { as_agent: [{ id: 'lnk_7', status: 'active' }] },
+      'get /api/account/links/lnk_7': { link: { models: [{ model: 'rose', outfits: [{ outfit: 'base', sha256: sha(base) }] }] } }
+    }
+  });
+  await t.p.syncLinks();
+  t.p.api = async (method, route) => {
+    if (/\/contacts\/.+\/avatar$/.test(route)) return { contact: { key: 'x', label: 'Jo' }, model: 'rose', outfit: 'base', look: gym, ref: 'locker:rose/base#lk_g' };
+    throw Object.assign(new Error('no route'), { status: 404 });
+  };
+  const m = await t.p.modelFor('assistant', { personId: 'p1' });
+  assert.equal(m.id, 'store-linked-lnk-7-rose-base');
+  assert.deepEqual(m.look, gym);
+});
+
+test('AvatarX: a lent body wearing a look gets it with PATCH looks; the page\'s own avatars never do', async () => {
+  const { pushModelToAvatarX } = await import('../../src/services/avatar/avatarx.js');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ax-'));
+  const keyFile = path.join(dir, 'key'); fs.writeFileSync(keyFile, 'k');
+  fs.writeFileSync(path.join(dir, 'manifest.json'), JSON.stringify([{ id: 'm1', name: 'Rose', file: 'r.vrm' }]));
+  fs.writeFileSync(path.join(dir, 'r.vrm'), vrm('Rose'));
+  const sent = [];
+  const fetchFn = async (url, { method, body }) => {
+    sent.push({ method, url: url.replace('https://ax', ''), body });
+    if (method === 'GET') return { ok: true, status: 200, json: async () => ({ avatars: [], active: 'x' }) };
+    if (method === 'POST') return { ok: true, status: 200, json: async () => ({ avatar: { id: 'lent9' } }) };
+    return { ok: true, status: 200, json: async () => ({}) };
+  };
+  const look = { colors: { Body: { hue: 20 } }, morphs: {}, pieces: null };
+  await pushModelToAvatarX('m1', { url: 'https://ax', keyFile, vrmDir: dir, fetchFn, link: 'lnk_1', look });
+  const patches = sent.filter(x => x.method === 'PATCH').map(x => JSON.parse(x.body));
+  assert.deepEqual(patches[0], { looks: { lent9: look } });
+  assert.deepEqual(patches[1], { active: 'lent9' });
+  sent.length = 0;
+  await pushModelToAvatarX('m1', { url: 'https://ax', keyFile, vrmDir: dir, fetchFn, look });
+  assert.equal(sent.filter(x => x.method === 'PATCH' && /looks/.test(x.body)).length, 0, 'no link, no look');
 });
