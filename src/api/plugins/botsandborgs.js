@@ -255,6 +255,12 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
         examples: ['make yourself an animation of waving with both hands', 'create a new move where you point at the camera and wink', 'animate yourself doing a salute with your left hand', 'make a clip of you shrugging and tilting your head', 'build an animation of you clapping', 'teach your avatar to do a thumbs up with both hands', 'use the bots and borgs animation api to make a bow']
       },
       {
+        command: 'teach',
+        description: 'Ask Bots & Borgs to teach a NEW motion from words, for its catalog (store 0.59): they draft it, check it on three bodies, the store\'s operator approves the film, and it is published in the Taught Motions pack; this agent gets that motion free and it installs by itself. Takes a review (not instant: for a quick private move on this agent\'s own body use animate). list: true shows the requests and where each is',
+        usage: 'teach({ motion: "a slow bow with the right hand on the chest", note: "for greeting viewers" })  // teach({ list: true })',
+        examples: ['teach bots and borgs a moonwalk', 'ask the store to teach a new motion of a slow bow with your hand on your chest', 'get bots and borgs to make a motion of you juggling for their catalog', 'how are your taught motions going', 'what motions have you asked the store to teach']
+      },
+      {
         command: 'puppet',
         description: 'Move this agent\'s 3D body live, right now, on the owner\'s open 3D page (Bots & Borgs live puppeting): a pose (wave, point, thumbs_up, shrug, think, cheer, bow) or a described one ("point at your nose", "put your hand on your chin", "look left"), held until released. release: true hands the body back to its idle',
         usage: 'puppet({ pose: "wave" })  // puppet({ do: "put your right hand on your chin and smile" }), puppet({ release: true })',
@@ -305,6 +311,7 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
         case 'animate': return await this.animate(data);
         case 'link': return await this.linkCommand(data);
         case 'puppet': return await this.puppetCommand(data);
+        case 'teach': return await this.teachCommand(data);
         default: return { success: false, error: `Unknown action ${action}` };
       }
     } catch (e) {
@@ -326,12 +333,12 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
       `"item" (words naming something already owned), "as" ("send", "avatar", "install", "wear", or "video" when it asks for a video of the agent itself), "mood" (the feeling a sticker should show), "kind" (one of: ${KIND_WORDS}), ` +
       '"avoid" (names the request says are taken or not wanted, comma-separated, e.g. "Sentinel" from "Nexus already picked Sentinel"), ' +
       '"motion" (for a new animation: what the body should do, in the request\'s words), ' +
-      '"request" (an email address the request gives for linking to someone\'s account, exactly as written), "accept" (a link code it gives), "contact" (the person a look is for), "look" (the outfit or look named for them), ' +
+      '"note" (for a motion to teach: the feel, speed or purpose the request gives), "request" (an email address the request gives for linking to someone\'s account, exactly as written), "accept" (a link code it gives), "contact" (the person a look is for), "look" (the outfit or look named for them), ' +
       '"say" (for a video: the words the agent speaks over it. Quoted words exactly; when it asks for a voice-over or for the agent to say, explain or talk about something without exact words, write one to three short spoken sentences, in the first person, that fit. For a video to someone other than the person asking, greet them by name and say who you are. ' + videoPerspective(agentName, ownerName) + ') Leave out what is not said. JSON only.',
     { maxTokens: 200, temperature: 0 });
     const raw = String(res?.content || '');
     const j = JSON.parse(raw.slice(raw.indexOf('{'), raw.lastIndexOf('}') + 1) || '{}');
-    return Object.fromEntries(Object.entries(j || {}).filter(([k, v]) => ['query', 'slug', 'variant', 'use', 'to', 'item', 'as', 'mood', 'kind', 'avoid', 'say', 'motion', 'request', 'accept', 'contact', 'look'].includes(k) && v != null && v !== ''));
+    return Object.fromEntries(Object.entries(j || {}).filter(([k, v]) => ['query', 'slug', 'variant', 'use', 'to', 'item', 'as', 'mood', 'kind', 'avoid', 'say', 'motion', 'note', 'request', 'accept', 'contact', 'look'].includes(k) && v != null && v !== ''));
   }
 
   // ── HTTP ────────────────────────────────────────────────────────────────────────────────
@@ -507,6 +514,8 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     if (!key) return { entries: 0, ran: [] };
     // Custom requests (store 0.36) move on the store's side; followed on the same 30-minute beat.
     await this.customTick().catch(e => this.logger.warn(`botsandborgs: custom requests not checked: ${e.message}`));
+    // Taught motions (store 0.59) move on the store's side: followed on the same beat.
+    await this.teachTick().catch(e => this.logger.warn(`botsandborgs: taught motions not checked: ${e.message}`));
     // Animation API solves left open by a restart are picked up again on the same beat.
     await this.animTick().catch(e => this.logger.warn(`botsandborgs: animation solves not checked: ${e.message}`));
     const cursor = await PluginSettings.getCached(this.name, 'feedCursor').catch(() => null);
@@ -1673,6 +1682,69 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
       if (o && await this.galleryHas(o.modelId)) return { modelId: o.modelId, look: c.look ? (c.settings || this.lookSettings(l, o, c.look)) : null };
     }
     return null;
+  }
+
+  // ── Teach a motion (store 0.59) ────────────────────────────────────────────────────────────
+  async teachRequests() {
+    const saved = await PluginSettings.getCached(this.name, 'teach').catch(() => null);
+    return Array.isArray(saved?.requests) ? saved.requests : [];
+  }
+
+  async saveTeachRequests(list) { await PluginSettings.setCached(this.name, 'teach', { requests: list.slice(0, 50) }); }
+
+  /**
+   * Ask the store to teach a motion (POST /api/anim/teach {motion, note?}): drafted, solved on three bodies, approved by
+   * the store's operator, published in the Taught Motions pack, this account's single free. Sending it lets the store
+   * make and sell it (its terms). list: true reads where each one is.
+   */
+  async teachCommand({ motion, note, list, _context, originalInput } = {}) {
+    const key = await this.accountKey();
+    const asked = String(motion || '').replace(/\s+/g, ' ').trim();
+    if (list === true || list === 'true' || !asked) {
+      await this.teachTick().catch(() => {});
+      const mine = await this.teachRequests();
+      if (!mine.length) return { success: true, result: "I haven't asked Bots & Borgs to teach any motions." };
+      return { success: true, requests: mine, result: `Motions I asked Bots & Borgs to teach:\n${mine.map(r => `- "${r.motion}": ${r.status}${r.round ? `, round ${r.round}` : ''}${r.note ? ` (${r.note})` : ''}${r.clip ? `, now my clip "${r.clip}"` : ''}`).join('\n')}` };
+    }
+    let d;
+    try { d = await this.api('post', '/api/anim/teach', { key, body: { motion: asked.slice(0, 300), ...(note ? { note: String(note).slice(0, 1000) } : {}) } }); }
+    catch (e) {
+      if (e.status === 429) return { success: false, error: e.code === 'too_many_open' ? 'Bots & Borgs is already working on three motions for me; I can ask for another once one is done.' : `Bots & Borgs is busy right now (${e.code || 'rate limited'}); try again later.` };
+      throw e;
+    }
+    const t = d.teach || d;
+    if (!t?.id) throw new Error('the store gave no teach id');
+    const mine = await this.teachRequests();
+    mine.unshift({ id: t.id, motion: asked.slice(0, 300), status: t.status || 'new', round: t.round || 0, at: new Date().toISOString() });
+    await this.saveTeachRequests(mine);
+    this.logger.info(`botsandborgs: asked the store to teach "${asked.slice(0, 120)}" (${t.id})`);
+    return { success: true, teach: t.id, result: `Asked Bots & Borgs to teach it ("${asked.slice(0, 120)}"). They draft it, check it on three bodies and the store's operator approves the film; once it's published I get it free and it installs by itself. I'll tell you how it goes.` };
+  }
+
+  /** Follow every open teach request; a change of status is told to the owner, a published one brings its clip. */
+  async teachTick() {
+    const mine = await this.teachRequests();
+    const open = mine.filter(r => !['published', 'parked', 'declined'].includes(r.status));
+    if (!open.length) return [];
+    const key = await this.accountKey();
+    const notify = (text) => this.agent?.notify?.(text);
+    let published = false;
+    for (const r of open) {
+      let d; try { d = await this.api('get', `/api/anim/teach/${encodeURIComponent(r.id)}`, { key }); } catch (e) { this.logger.warn(`botsandborgs: teach ${r.id} not read: ${e.message}`); continue; }
+      const t = d.teach || d;
+      const was = r.status;
+      Object.assign(r, { status: t.status || r.status, round: t.round ?? r.round, note: t.note ? String(t.note).slice(0, 300) : r.note });
+      if (t.result?.clip) Object.assign(r, { clip: t.result.clip, single: t.result.single || null, pack: t.result.pack || null });
+      if (r.status === was) continue;
+      this.logger.info(`botsandborgs: taught motion "${r.motion}" ${was} → ${r.status}`);
+      if (r.status === 'published') { published = true; await notify(`Bots & Borgs taught the motion "${r.motion}"${r.clip ? ` (${r.clip})` : ''}; it's free for me and installing now.`); }
+      else if (r.status === 'review') await notify(`Bots & Borgs drafted "${r.motion}" (round ${r.round || 1}); it is waiting for the store's review.`);
+      else if (['parked', 'declined'].includes(r.status)) await notify(`Bots & Borgs ${r.status} the motion "${r.motion}"${r.note ? `: ${r.note}` : ''}.`);
+    }
+    await this.saveTeachRequests(mine);
+    // The free single comes through the account library.
+    if (published) await this.syncLibrary().catch(e => this.logger.warn(`botsandborgs: library sync after a taught motion failed: ${e.message}`));
+    return open;
   }
 
   // ── Live puppeting (store 0.57) ────────────────────────────────────────────────────────────

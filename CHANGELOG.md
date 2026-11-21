@@ -2,6 +2,11 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.886] - 2026-11-20
+
+### Added
+- **Teach the store a motion (Bots & Borgs 0.59).** "Teach Bots & Borgs a slow bow with the right hand on the chest" asks the store to make a new motion for its catalog (`teach({ motion, note? })`): it is drafted, checked on three bodies and approved by the store's operator, then published in the Taught Motions pack, and this agent's account gets it free, so it installs by itself. The agent follows each request on its 30-minute store check and tells the owner when one is drafted, published, parked or declined; "how are your taught motions going" lists them. (For a quick private move on its own body the agent still uses the Animation API.)
+
 ## [2.25.885] - 2026-11-20
 
 ### Fixed
