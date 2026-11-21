@@ -920,6 +920,20 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     return null;
   }
 
+  /**
+   * The assistant pick's picture for TextX and DialX (the owner, 2026-11-20: those use the assistant or public avatar,
+   * never the personal one): its store picture, else its rendered portrait.
+   */
+  async applyAssistantPicture(id) {
+    const base = this.productBase(id);
+    const item = (await this.libraryItems()).find(i => this.productBase(i.variant) === base && modelPicture(i));
+    const png = item ? await this.pictureBytes(item, modelPicture(item))
+      : await this.modelPortrait(id, await this.roleLook('assistant', id)).catch(e => { this.logger.warn(`botsandborgs: no portrait of ${id}: ${e.message}`); return null; });
+    if (!png) return null;
+    const { applyAssistantAvatar } = await import('../../services/avatar/applyAgentAvatar.js');
+    return applyAssistantAvatar(this.agent, png, { source: `Bots & Borgs, ${await this.modelName(id) || id} (assistant)` });
+  }
+
   async applyPersonalPicture(id) {
     const base = this.productBase(id);
     const item = (await this.libraryItems()).find(i => this.productBase(i.variant) === base && modelPicture(i));
@@ -975,6 +989,7 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
       const next = { ...roles, [r]: null };
       await save(next);
       if (r === 'public') await (await import('../../services/avatar/applyAgentAvatar.js')).clearPersonalAvatar();
+      if (r === 'assistant') await (await import('../../services/avatar/applyAgentAvatar.js')).clearAssistantAvatar();
       const note = r === 'public' && worn ? ` ${await this.applyPublicPicture(worn)}` : '';
       return { success: true, result: `My ${r} avatar is the ${r === 'assistant' ? (next.public ? 'public' : 'worn') : 'worn'} model again (${await this.modelName(resolveRoleModel(next, r, worn))}).${note}`.trim() };
     }
@@ -1013,7 +1028,8 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
       this.logger.info(`botsandborgs: ${r} avatar set to ${got.entry.id}`);
       if (r === 'public' && worn && worn !== got.entry.id) await this.applyPersonalPicture(worn).catch(e => this.logger.warn(`botsandborgs: personal picture not kept: ${e.message}`));
       if (r === 'public' && worn === got.entry.id) await (await import('../../services/avatar/applyAgentAvatar.js')).clearPersonalAvatar();
-      const note = r === 'public' ? ` ${await this.applyPublicPicture(got.entry.id)}` : ' Videos and talking replies I send to other people use it now.';
+      if (r === 'assistant') await this.applyAssistantPicture(got.entry.id).catch(e => this.logger.warn(`botsandborgs: assistant picture not applied: ${e.message}`));
+      const note = r === 'public' ? ` ${await this.applyPublicPicture(got.entry.id)}` : ' Videos and talking replies I send to other people use it now, and TextX and DialX show its picture.';
       return { success: true, result: `${got.entry.name} is my ${r} avatar.${note}`.trim() };
     }
     if (role && !r) return { success: false, error: 'The roles are public, assistant and personal.' };
@@ -1457,11 +1473,11 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     const st = await this.linkState();
     const pics = { ...(st.pictures || {}) };
     let picChanged = false;
-    for (const r of ['public', 'personal']) {
+    for (const r of ['public', 'assistant', 'personal']) {
       if (!picked[r]) continue;
       const key = `${picked[r]}|${JSON.stringify(looks[r]?.look || null)}`;
       if (pics[r] === key) continue;
-      const res = await (r === 'public' ? this.applyPublicPicture(picked[r]) : this.applyPersonalPicture(picked[r]))
+      const res = await (r === 'public' ? this.applyPublicPicture(picked[r]) : r === 'assistant' ? this.applyAssistantPicture(picked[r]) : this.applyPersonalPicture(picked[r]))
         .catch(e => { this.logger.warn(`botsandborgs: ${r} picture not applied: ${e.message}`); return null; });
       if (res) { pics[r] = key; picChanged = true; this.logger.info(`botsandborgs: ${r} picture follows ${picked[r]}${typeof res === 'string' ? `: ${res}` : ''}`); }
     }
@@ -1531,6 +1547,7 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     if (Object.values(pics).some(k => ids.has(String(k).split('|')[0]))) {
       const own = this.agent?.agentModel?.activeVRMModel || null;
       await (await import('../../services/avatar/applyAgentAvatar.js')).clearPersonalAvatar().catch(() => {});
+      await (await import('../../services/avatar/applyAgentAvatar.js')).clearAssistantAvatar().catch(() => {});
       if (own && !ids.has(own)) await this.applyPublicPicture(own).catch(e => this.logger.warn(`botsandborgs: own picture not put back: ${e.message}`));
     }
     await this.saveLinkState({ ...(await this.linkState()), links: st.links.filter(x => x.id !== linkId), wornBefore: ids.has(worn) ? null : st.wornBefore, pictures: {} });

@@ -45,12 +45,14 @@ export function getTextX(agent) {
   const hub = new TextXHub({ store, agent, logger, callStore: mongoCallStore() });
   const transport = createTransport(hub, {
     filesDir: path.join(DATA_PATH, 'textx', 'files'),
-    // Role-based avatars: the apps are the owner's, so they show the personal picture when one is kept apart from the
-    // public one (data/agent/avatar-personal.png); otherwise the one avatar (TextX, 2119 #543).
-    avatarFile: () => {
-      const personal = path.join(DATA_PATH, 'agent', 'avatar-personal.png');
-      if (existsSync(personal)) return personal;
-      return agent?.agentModel?.avatarPath ? path.join(DEPLOY_PATH, agent.agentModel.avatarPath) : null;
+    // Role-based avatars, per app (the owner, 2026-11-20): TextX and DialX act for him toward other people, so they
+    // show the assistant picture (data/agent/avatar-assistant.png), else the public one, never the personal one.
+    // NotifX is his alone: the personal picture when one is kept apart, else the public one.
+    avatarFile: (device) => {
+      const own = (f) => { const p = path.join(DATA_PATH, 'agent', f); return existsSync(p) ? p : null; };
+      const pub = agent?.agentModel?.avatarPath ? path.join(DEPLOY_PATH, agent.agentModel.avatarPath) : null;
+      if (device && isNotifX(device)) return own('avatar-personal.png') || pub;
+      return own('avatar-assistant.png') || pub;
     },
     logger
   });

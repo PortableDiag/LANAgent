@@ -5493,7 +5493,7 @@ class LANAgentDashboard {
                 if (preview) preview.src = '/api/agent/avatar?t=' + ts;
                 const overviewAvatar = document.getElementById('agent-avatar');
                 if (overviewAvatar) {
-                    overviewAvatar.src = '/api/agent/avatar?t=' + ts;
+                    overviewAvatar.src = '/api/agent/avatar?for=personal&t=' + ts;
                     overviewAvatar.style.display = '';
                 }
                 fileInput.value = '';

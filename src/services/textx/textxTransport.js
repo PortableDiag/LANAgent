@@ -61,15 +61,15 @@ export function createTransport(hub, { filesDir, avatarFile = () => null, logger
   };
   // The apps re-fetch at once when this address changes, otherwise only on their own timers, so it carries the
   // picture's version (2026-11-05: a new avatar has to reach TextX, DialX and NotifX straight away).
-  const avatarVersion = () => {
+  const avatarVersion = (device) => {
     try {
-      const file = avatarFile();
+      const file = avatarFile(device);
       return typeof file === 'string' ? Math.floor(statSync(file).mtimeMs).toString(36) : null;
     } catch { return null; }
   };
   hub.avatarUrl = (device) => {
     if (!device.base) return undefined;
-    const v = avatarVersion();
+    const v = avatarVersion(device);
     return `${String(device.base).replace(/\/+$/, '')}/textx/v1/avatar${v ? `?v=${v}` : ''}`;
   };
 
@@ -137,7 +137,7 @@ export function createTransport(hub, { filesDir, avatarFile = () => null, logger
         return { status: 200, headers: { 'content-type': 'application/octet-stream' }, body: sealBytes(device.key, device.kid, A2P, data) };
       }
       if (p === '/textx/v1/avatar' && method === 'GET') {
-        const file = await avatarFile();
+        const file = await avatarFile(device);
         const data = file ? await fs.readFile(file).catch(() => null) : null;
         if (!data) return json(404, { error: 'no avatar' });
         logger.info?.(`TextX: ${device.name} fetched the avatar (${data.length} bytes)`);

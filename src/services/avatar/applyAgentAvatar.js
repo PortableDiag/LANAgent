@@ -263,6 +263,34 @@ export async function applyPersonalAvatar(agent, buffer, { source = 'a personal 
   return { services: { apps: await tellApps().catch(e => `not updated: ${e.message}`) } };
 }
 
+export const ASSISTANT_AVATAR = 'avatar-assistant.png';
+
+/**
+ * The assistant role's picture (what the owner's contacts and his assistant apps show: TextX, DialX), kept apart from
+ * the public avatar.png and the personal one (the owner, 2026-11-20: TextX and DialX use the assistant or public
+ * avatar, never the personal one).
+ */
+export async function applyAssistantAvatar(agent, buffer, { source = 'an assistant picture' } = {}) {
+  const dir = path.join(DATA_PATH, 'agent');
+  await fs.mkdir(dir, { recursive: true });
+  const file = path.join(dir, ASSISTANT_AVATAR);
+  const current = await fs.readFile(file).catch(() => null);
+  const { default: sharp } = await import('sharp');
+  let png = await sharp(buffer).rotate().resize(1024, 1024, { fit: 'cover' }).png({ compressionLevel: 9 }).toBuffer();
+  if (png.length > MAX_AVATAR_BYTES) png = await sharp(png).png({ palette: true, compressionLevel: 9 }).toBuffer();
+  if (current?.equals(png)) return { services: { apps: 'unchanged' } };
+  await fs.writeFile(file, png);
+  logger.info(`Avatar: assistant picture for TextX and DialX from ${source}`);
+  return { services: { apps: await tellApps().catch(e => `not updated: ${e.message}`) } };
+}
+
+/** No separate assistant picture any more: TextX and DialX show the public avatar. */
+export async function clearAssistantAvatar() {
+  const had = await fs.unlink(path.join(DATA_PATH, 'agent', ASSISTANT_AVATAR)).then(() => true).catch(() => false);
+  if (had) await tellApps().catch(() => {});
+  return had;
+}
+
 /** No separate personal picture any more: the apps show the one avatar again. */
 export async function clearPersonalAvatar() {
   const file = path.join(DATA_PATH, 'agent', PERSONAL_AVATAR);

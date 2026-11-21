@@ -2467,7 +2467,13 @@ export class WebInterface {
         }
 
         const projectRoot = path.join(__dirname, '../../..');
-        const fullPath = path.join(projectRoot, avatarPath);
+        let fullPath = path.join(projectRoot, avatarPath);
+        // ?for=personal: what only the owner sees (the dashboard, the playground): the personal picture when one is
+        // kept apart from the public one (role-based avatars).
+        if (req.query.for === 'personal') {
+          const personal = path.join(projectRoot, 'data', 'agent', 'avatar-personal.png');
+          if (fsSync.existsSync(personal)) fullPath = personal;
+        }
 
         if (!fsSync.existsSync(fullPath)) {
           return res.status(404).json({ success: false, error: 'Avatar file not found' });

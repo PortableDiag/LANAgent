@@ -2,6 +2,11 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.879] - 2026-11-20
+
+### Changed
+- **Each place shows the right avatar picture.** TextX and DialX act for the owner toward other people, so they now show the assistant role's picture (else the public one), never the personal one. The personal picture is for what only the owner sees: the dashboard and playground header (`GET /api/agent/avatar?for=personal`), the 3D pages, AvatarX and NotifX. The assistant pick gets its own picture (its store picture, or a portrait rendered from a linked model), set when the owner picks it, cleared with the role or when a link ends. Public profiles keep the public picture.
+
 ## [2.25.878] - 2026-11-20
 
 ### Fixed
