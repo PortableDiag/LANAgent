@@ -345,6 +345,18 @@ export function avatarLiveRouter(agent, live = createLiveAvatar(agent), { auth =
     }
   });
 
+  // Live puppeting (Bots & Borgs 0.57): a viewer token for this page, the owner's own (dashboard login): the "owner"
+  // stream of the body worn now. The account key stays on the server; the token is bound to that one body.
+  r.get('/puppet', async (req, res) => {
+    try {
+      const s = store();
+      const v = s?.puppetViewer ? await s.puppetViewer() : null;
+      if (!v) return res.status(404).json({ error: 'no store body to puppet' });
+      res.setHeader('Cache-Control', 'no-store');
+      res.json(v);
+    } catch (e) { fail(res, e); }
+  });
+
   // A video of one move, as an mp4 (AvatarX POST /agent/v1/video): { name, framing?, background?, audio_b64? }.
   r.post('/video', express.json({ limit: '20mb' }), async (req, res) => {
     try {

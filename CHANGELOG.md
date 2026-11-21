@@ -2,6 +2,21 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.885] - 2026-11-20
+
+### Fixed
+- **A body still being measured for puppeting.** While the store measures a new body's rig (it answers 202), the page is told to come back after the store's `retry_after` and attaches when the rig is ready; it never tries to fetch the rig itself, which the store refuses from a browser on another origin. The agent no longer blocks a minute waiting on it.
+
+## [2.25.884] - 2026-11-20
+
+### Fixed
+- **Live puppeting reaches the page.** The store's rig route refuses a browser on another origin (its CORS preflight fails on the Authorization header), so the live 3D page never attached the runtime. The agent now fetches the rig profile with the viewer token and hands it to the page with the token; only the WebSocket goes from the page to the store.
+
+## [2.25.883] - 2026-11-20
+
+### Added
+- **Live puppeting (Bots & Borgs 0.57).** The agent can move its 3D body live: "point at your nose", "put your hand on your chin", "give me a thumbs up", "look left", or a named pose (wave, point, thumbs up, shrug, think, cheer, bow) are sent as small pose commands over one WebSocket to the store, and the owner's open 3D page solves them on the body every frame (the store measured 32 ms send to screen). `puppet({ pose | do | release })`. The live 3D page bundles the store's runtime (bnb-puppet 1.0.0, MIT, sha256-checked) and watches the stream with a viewer token from the agent (`GET /api/avatar-live/puppet`); the account key never leaves the server. The stream is the owner's own ("owner") on the body worn, which may be the personal avatar, so no other audience is ever given it. The page keeps its own voice-driven mouth.
+
 ## [2.25.882] - 2026-11-20
 
 ### Fixed

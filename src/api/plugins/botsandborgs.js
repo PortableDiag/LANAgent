@@ -255,6 +255,12 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
         examples: ['make yourself an animation of waving with both hands', 'create a new move where you point at the camera and wink', 'animate yourself doing a salute with your left hand', 'make a clip of you shrugging and tilting your head', 'build an animation of you clapping', 'teach your avatar to do a thumbs up with both hands', 'use the bots and borgs animation api to make a bow']
       },
       {
+        command: 'puppet',
+        description: 'Move this agent\'s 3D body live, right now, on the owner\'s open 3D page (Bots & Borgs live puppeting): a pose (wave, point, thumbs_up, shrug, think, cheer, bow) or a described one ("point at your nose", "put your hand on your chin", "look left"), held until released. release: true hands the body back to its idle',
+        usage: 'puppet({ pose: "wave" })  // puppet({ do: "put your right hand on your chin and smile" }), puppet({ release: true })',
+        examples: ['point at your nose', 'put your hand on your chin', 'touch your ear', 'give me a thumbs up live', 'strike a thinking pose', 'look to your left', 'hold your arms up', 'stop posing', 'relax your body']
+      },
+      {
         command: 'link',
         description: 'Linked agents: use avatars someone else owns at Bots & Borgs (the owner\'s own models, outfits and looks), read-only, kept current by the store. request: an email asks that person to link this agent (only the email the owner gives); accept: a one-time code they gave; with no arguments lists the links and what they allow; sync: true fetches them now; leave: a link id ends one. contact + look: show that look to one person ("for Jo use the winter look"), with propose: true to suggest it for the owner to approve',
         usage: 'link({})  // link({ request: "owner@example.com" }), link({ accept: "xxxxxxxx-xxxxxxxx-xxxxxxxx" }), link({ sync: true }), link({ contact: "Jo", look: "winter" }), link({ leave: "lnk_…" })',
@@ -298,6 +304,7 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
         case 'custom': return await this.customCommand(data);
         case 'animate': return await this.animate(data);
         case 'link': return await this.linkCommand(data);
+        case 'puppet': return await this.puppetCommand(data);
         default: return { success: false, error: `Unknown action ${action}` };
       }
     } catch (e) {
@@ -1666,6 +1673,104 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
       if (o && await this.galleryHas(o.modelId)) return { modelId: o.modelId, look: c.look ? (c.settings || this.lookSettings(l, o, c.look)) : null };
     }
     return null;
+  }
+
+  // ── Live puppeting (store 0.57) ────────────────────────────────────────────────────────────
+  /** The store body a gallery model is, for puppeting: a link outfit, a live pass, a store product, or null. */
+  async puppetBody(modelId = this.agent?.agentModel?.activeVRMModel) {
+    if (!modelId) return null;
+    const lo = this.linkedOutfitOf(modelId, await this.linkState().catch(() => ({ links: [] })));
+    if (lo) return { link: lo.link, model: lo.model, outfit: lo.outfit };
+    const base = this.productBase(modelId);
+    if (!/^vrm-/.test(base)) return null;
+    const pass = (await this.livePasses().catch(() => [])).find(p => p.state !== 'expired' && this.productBase(p.slug) === base);
+    return pass ? { live: pass.slug } : { product: base };
+  }
+
+  /**
+   * A viewer token for the owner's own pages (the live 3D page, the app): the "owner" stream of the body worn now, which
+   * may be the personal avatar, so it is never minted for any other audience. Kept until 5 minutes before it ends or
+   * the body changes. Returns { token, ws, rig, expires } or null.
+   */
+  async puppetViewer() {
+    const body = await this.puppetBody();
+    if (!body) return null;
+    const { bodyKey, OWNER_STREAM } = await import('../../services/avatar/puppet.js');
+    const k = bodyKey(body, OWNER_STREAM);
+    let v = this._puppetViewer;
+    if (!v || v.key !== k || Date.parse(v.expires) - Date.now() < 5 * 60000) {
+      const d = await this.api('post', '/api/puppet/tokens', { key: await this.accountKey(), body: { avatar: body, stream: OWNER_STREAM, ttl: 3600 } });
+      if (!d?.token) throw new Error('the store gave no viewer token');
+      const expires = d.expires ? (Number.isFinite(Number(d.expires)) ? new Date(Number(d.expires) * 1000).toISOString() : String(d.expires)) : new Date(Date.now() + 3600000).toISOString();
+      v = this._puppetViewer = { key: k, expires, out: { token: d.token, ws: d.ws, rig: d.rig, expires }, rigData: null };
+      this.logger.info(`botsandborgs: puppet viewer token for ${JSON.stringify(body)} (owner stream), until ${expires}`);
+    }
+    // The rig profile is fetched here and handed over with the token: the store's rig route refuses a browser on another
+    // origin (CORS preflight on the Authorization header, 2026-11-20). While a new file is measured it answers 202:
+    // the page is told to come back (`pending`, `retry_after`), never left to fetch it cross-origin.
+    if (!v.rigData && v.out.rig) {
+      const r = await (this.http || axios)({ method: 'get', url: v.out.rig, headers: { 'User-Agent': this.userAgent(), Authorization: `Bearer ${v.out.token}`, Accept: 'application/json' }, timeout: 30000, validateStatus: () => true });
+      if (r.status === 200) v.rigData = typeof r.data === 'string' ? JSON.parse(r.data) : r.data;
+      else if (r.status === 202) {
+        const d = typeof r.data === 'string' ? JSON.parse(r.data) : r.data || {};
+        if (!v.pendingSince) { v.pendingSince = Date.now(); this.logger.info(`botsandborgs: puppet rig pending: ${d.line || 'being measured'}`); }
+        return { ...v.out, pending: true, retry_after: Number(d.retry_after) || 15 };
+      } else { this.logger.warn(`botsandborgs: puppet rig answered ${r.status}`); return null; }
+      if (v.pendingSince) this.logger.info(`botsandborgs: puppet rig ready after ${Math.round((Date.now() - v.pendingSince) / 1000)} s`);
+    }
+    const out = { ...v.out, rigData: v.rigData };
+    return out;
+  }
+
+  /** Send one live command to the worn body's owner stream (the publisher follows the body). */
+  async puppetSend(cmd) {
+    const body = await this.puppetBody();
+    if (!body) return { sent: false, error: "I'm not wearing a Bots & Borgs body, so there is nothing to puppet." };
+    const { PuppetPublisher, bodyKey, OWNER_STREAM } = await import('../../services/avatar/puppet.js');
+    const k = bodyKey(body, OWNER_STREAM);
+    if (!this._puppet || this._puppetKey !== k || this._puppet.closed) {
+      this._puppet?.close();
+      this._puppet = new (this.PuppetPublisherImpl || PuppetPublisher)({ key: await this.accountKey(), avatar: body, stream: OWNER_STREAM, log: this.logger });
+      this._puppetKey = k;
+    }
+    return { sent: this._puppet.send(cmd), viewers: this._puppet.viewers };
+  }
+
+  /** "point at your nose": a named pose as it is; anything else written as one command by the model. */
+  async puppetCommand({ pose, do: what, release, end, command, _context, originalInput } = {}) {
+    const { POSES } = await import('../../services/avatar/puppet.js');
+    let cmd = null;
+    if (release === true || release === 'true' || end === true || end === 'true') cmd = { release: true };
+    else if (command && typeof command === 'object') cmd = command;
+    else if (pose && POSES.includes(String(pose).toLowerCase().replace(/\s+/g, '_'))) cmd = { pose: String(pose).toLowerCase().replace(/\s+/g, '_'), hold: 6 };
+    else {
+      const asked = String(what || pose || _context?.originalInput || originalInput || '').trim();
+      if (!asked) return { success: false, error: 'What should my body do? A pose (wave, point, thumbs up, shrug, think, cheer, bow) or say it.' };
+      if (/\b(stop|relax|release|let go|normal|reset)\b/i.test(asked) && !/\b(point|touch|hand|arm|look|wave)\b/i.test(asked)) cmd = { release: true };
+      else cmd = await this.writePuppetCommand(asked);
+    }
+    const r = await this.puppetSend(cmd);
+    if (!r.sent) return { success: false, error: r.error || "I couldn't send that pose." };
+    this.logger.info(`botsandborgs: puppet ${JSON.stringify(cmd).slice(0, 200)}`);
+    return { success: true, command: cmd, result: cmd.release ? 'Back to my own idle.' : `Doing it now on my 3D body${r.viewers === 0 ? ' (open my 3D page to see it)' : ''}.` };
+  }
+
+  async writePuppetCommand(asked) {
+    const pm = this.agent?.providerManager;
+    if (!pm?.generateResponse) throw new Error('no model to write the pose with');
+    const { LANDMARKS } = await import('../../services/store/animSolve.js');
+    const prompt = [`Turn this request for a 3D humanoid avatar's live pose into ONE JSON command: "${asked.slice(0, 300)}".`,
+      'Fields (all optional): "pose": wave|point|thumbs_up|shrug|think|cheer|bow; "hands": {"left"|"right": {"at": {"landmark": "<landmark>", "offset": [x,y,z metres; x = the avatar\'s left(+), y up, z forward]}, "shape": "open|relaxed|fist|grip|point|thumbs_up|pump|flat", "palm": "in|out|down|up|forward|back", "elbow": "down|out|back"}};',
+      `"point_at": {"landmark": "<landmark>"}; "gaze": {"camera": true} or {"left": deg} ; "head": {"turn": deg, "bow": deg, "tilt": deg}; "lean": {"forward": deg, "side": deg}; "mood": {"happy"|"sad"|"angry"|"relaxed"|"surprised": 0..1}; "hold": seconds (default 6).`,
+      `Landmarks: ${LANDMARKS.join(', ')}. Keep a hand at least 0.06 m in front of the face or body when touching it. Answer with the JSON only.`].join('\n');
+    const res = await pm.generateResponse(prompt, { maxTokens: 400, temperature: 0.1 });
+    const raw = String(res?.content || '');
+    let cmd; try { cmd = JSON.parse(raw.slice(raw.indexOf('{'), raw.lastIndexOf('}') + 1)); } catch { cmd = null; }
+    const { cleanCommand } = await import('../../services/avatar/puppet.js');
+    const out = cleanCommand(cmd);
+    if (!out) throw new Error("I couldn't turn that into a pose.");
+    if (out.hold == null && !out.release) out.hold = 6;
+    return out;
   }
 
   // ── Animation API (store 0.38+) ───────────────────────────────────────────────────────────

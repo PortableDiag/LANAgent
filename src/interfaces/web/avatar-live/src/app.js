@@ -3,6 +3,7 @@
 import { login, setToken, events, protectedImage, EMBED, EMBED_BACKGROUND, EMBED_LIFT, EMBED_ZOOM } from './lanagent.js';
 import { wearLook } from './look.js';  // LANAgent: AvatarX 0.4.6 looks (linked avatars)
 import { jawDriver } from './jaw.js';  // LANAgent: jaw-bone mouths (Character Creator models)
+import { attach as puppetAttach, connect as puppetConnect } from './bnb-puppet-1.0.0.js';  // LANAgent: live puppeting (Bots & Borgs 0.57)
 // The page: login, the avatar on stage, chat, talk, settings. The agent's changes arrive on
 // /api/events; a model's own expressions are read at load, since they differ from one to the next.
 import * as THREE from 'three';
@@ -202,6 +203,30 @@ function setViewOffset() {
 
 let wornLook = null;
 let jaw = null;
+// LANAgent: live puppeting. The agent streams poses to the "owner" stream of the body worn; this page (the owner's own)
+// watches it with a viewer token from the agent, never the account key.
+let puppet = null;
+let puppetLink = null;
+async function startPuppet(v, id) {
+  try { puppetLink?.close(); } catch {}
+  puppet = null; puppetLink = null;
+  try {
+    const r = await fetch('/api/puppet');
+    if (!r.ok) return;
+    const t = await r.json();
+    // A body new to the store is measured first: come back when it says (never fetch the rig from here: the store's
+    // rig route refuses a browser on another origin; the agent hands it over with the token).
+    if (t.pending || !t.rigData) {
+      if (t.pending) setTimeout(() => { if (vrm === v && vrmId === id && !puppet) startPuppet(v, id); }, Math.max(5, Number(t.retry_after) || 15) * 1000);
+      return;
+    }
+    const rig = t.rigData;
+    if (vrm !== v || vrmId !== id) return;  // another body loaded meanwhile
+    puppet = puppetAttach(THREE, v, rig, { camera, localVoice: true });
+    puppetLink = puppetConnect(t.ws, t.token, puppet, { onEnd: () => { puppet = null; } });
+    window.__puppet = { ready: true };
+  } catch (e) { console.warn('live puppeting off:', e.message); }
+}
 let wornLookKey = 'null';
 async function loadAvatar(id) {
   if (id === vrmId) return;
@@ -235,6 +260,7 @@ async function loadAvatar(id) {
     wornLookKey = JSON.stringify(look);
     wornLook = wearLook(v, look);
     jaw = jawDriver(v);
+    startPuppet(v, id);
     motion?.props?.dispose();
     motion = new Motion(v);
     motion.props.sync(state?.props);
@@ -372,6 +398,7 @@ function animate() {
         la.pitch *= k;
       }
     }
+    puppet?.update(dt);  // LANAgent: live pose commands, after our motion and before the VRM update
     vrm.update(dt);
     wornLook?.apply(vrm);  // LANAgent: the look's shape keys, again after the expressions
   }
