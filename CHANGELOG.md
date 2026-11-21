@@ -2,6 +2,17 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.890] - 2026-11-21
+
+### Added
+- **Router backup, restore, firmware update and restart.** "Back up the router" saves its settings (the web UI's settings file) and its /jffs files on the agent's machine, owner-only, keeping the last 14, and a backup is also taken by itself once a day. "Restore the router from the last backup", "update the router firmware" (the router's own signed upgrade, after "is there a router firmware update") and "restart the router" each say what will happen, take a fresh backup first (restore, update) and go ahead only on the owner's "yes, …" within 5 minutes. The owner is told before the network drops.
+
+## [2.25.889] - 2026-11-21
+
+### Added
+- **The home router's DHCP reservations, by the agent (Asuswrt-Merlin).** "List my DHCP reservations", "which devices have no static IP", "reserve an IP for D4:AD:FC:…", "remove the static IP of the old bulb", and the one a bulb swap needs: "the new bulb replaces the hall light" gives the new device the old one's IP and name (the old one found by its MAC, IP or light name; the new one found by itself as the only new, unreserved smart-light on the network, or asked when there are several). Plus "check my router security": Wi-Fi encryption, WPS, remote admin, SSH, telnet, firewall, UPnP, port forwards and firmware, risky ones flagged.
+- How it is kept safe: the agent reaches the router over SSH (LAN only, key only, host key pinned) and sends only the commands of its wrapper script (`scripts/router/agent-router.sh`, installed at `/jffs/agent/router.sh`), with every MAC, IP and name checked before it is sent. The wrapper writes nothing but the DHCP reservation list and restarts only dnsmasq. Before any change the router's copy of the wrapper must match the repository's byte for byte. Only the owner can ask, each change is logged on the router (`/jffs/agent/changes.log`) and told to the owner. (Merlin has one admin account and its SSH server refused a key limited to one command, so the limit is kept by the agent.) Settings: `ROUTER_SSH_HOST` (default the LAN's default gateway), `ROUTER_SSH_USER` (admin), `ROUTER_SSH_KEY` (`~/.ssh/router_agent`); off without the key.
+
 ## [2.25.888] - 2026-11-21
 
 ### Changed
