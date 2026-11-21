@@ -2,6 +2,11 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.888] - 2026-11-21
+
+### Changed
+- **A video the owner asks for shows his personal avatar** (the owner: "yes unless i ask for it to use another avatar"). "In your assistant avatar" or "public avatar" takes that role, and a model named in the request ("as Racer Blue") is filmed as that model. Videos to anyone else are unchanged: contacts see the assistant avatar (or the one picked for them), everyone else the public one; the personal avatar never goes to anyone but the owner.
+
 ## [2.25.887] - 2026-11-20
 
 ### Added

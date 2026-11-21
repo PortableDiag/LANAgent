@@ -3335,17 +3335,29 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     let role = 'assistant';
     let personId = null;
     const toOwner = !to || /^(me|owner|myself)$/i.test(String(to));
-    // The owner may ask for a video of his personal avatar ("pole dancing in your personal avatar"); only to him.
+    // A video to the owner is his personal avatar (the owner, 2026-11-21: "yes unless i ask for it to use another
+    // avatar"): "in your assistant/public avatar" takes that role, a gallery model named in the request ("as Scientist
+    // Girl") that model. To anyone else the personal one is never used.
+    let namedModel = null;
     if (toOwner) {
-      const personalName = String((await this.modelFor('personal').catch(() => null))?.name || '').split(/\s+[—(-]/)[0].trim().toLowerCase();
-      if (/\b(personal|private)\s+(avatar|model|body|look)\b/i.test(asked) || (personalName.length > 2 && new RegExp(`\\b${personalName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`).test(String(asked).toLowerCase()))) role = 'personal';
+      role = 'personal';
+      const said = String(asked).toLowerCase();
+      const roleAsked = /\b(assistant|public)\s+(avatar|model|body|look)\b/i.exec(asked)?.[1]?.toLowerCase();
+      if (roleAsked) role = roleAsked;
+      else {
+        const manifest = await fs.readFile(path.join(this.vrmDir(), 'manifest.json'), 'utf8').then(JSON.parse).catch(() => []);
+        const nameOf = (m) => String(m.name || '').split(/\s+[—(]|\s+-\s+/)[0].trim().toLowerCase();
+        const hits = manifest.filter(m => m.file && nameOf(m).length > 2 && new RegExp(`\\b${nameOf(m).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`).test(said))
+          .sort((a, b) => (b.id.endsWith('-default') - a.id.endsWith('-default')) || (nameOf(b).length - nameOf(a).length));
+        if (hits[0]) namedModel = hits[0];
+      }
     }
     if (!toOwner) {
       const found = await (await this.peopleDirectory()).byName(String(to)).catch(() => []);
       if (found.length === 1) personId = found[0]._id;
       else if (!found.length) role = 'public';
     }
-    const model = await this.modelFor(role, { personId });
+    const model = namedModel ? { ...namedModel, role: 'named', look: (await this.avatarLooks().catch(() => ({})))[namedModel.id] || undefined } : await this.modelFor(role, { personId });
     if (!model?.file) return { success: false, error: "I'm not wearing a 3D model, so there's nothing to film." };
     if (model.id !== this.agent?.agentModel?.activeVRMModel) this.logger.info(`botsandborgs: filming as ${model.role}: ${model.name || model.id} (to ${to})`);
     const picked = await this.chooseClip({ item, clip, asked, speaking: !!words, modelId: model.id });

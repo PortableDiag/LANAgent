@@ -152,22 +152,24 @@ test('with a voice: 0.3 s lead-in, the line, 0.3 s tail, no longer (2119 #477); 
   assert.equal(framingAsked('send me a video of you dancing'), 'full');
 });
 
-test('who sees which body in a video (2026-11-20): the owner the assistant one, his personal one only when he asks; a contact the assistant; a stranger the public', async () => {
+test('who sees which body in a video (2026-11-21): the owner his personal one unless he names another; a contact the assistant; a stranger the public', async () => {
   const cases = [
-    ['send me a video of you pole dancing', 'me', 'assistant', []],
-    ['send me a video of you pole dancing in your personal avatar', 'me', 'personal', []],
-    ['send me a video of you pole dancing as Rose', 'me', 'personal', []],
-    ['send Jo a video of you pole dancing in your personal avatar', 'Jo', 'assistant', [{ _id: 'p1', name: 'Jo' }]],
-    ['send Sam a video of you pole dancing', 'Sam', 'public', []]
+    ['send me a video of you pole dancing', 'me', 'personal', [], null],
+    ['send me a video of you pole dancing in your assistant avatar', 'me', 'assistant', [], null],
+    ['send me a video of you pole dancing as Racer Blue', 'me', null, [], 'store-racer'],
+    ['send Jo a video of you pole dancing in your personal avatar', 'Jo', 'assistant', [{ _id: 'p1', name: 'Jo' }], null],
+    ['send Sam a video of you pole dancing', 'Sam', 'public', [], null]
   ];
-  for (const [input, to, want, people] of cases) {
+  for (const [input, to, want, people, modelId] of cases) {
     const { p } = rig();
     p._people = { byName: async () => people };
     p.contactModel = async () => null;
     const asked = [];
-    p.modelFor = async (role) => { asked.push(role); return { id: `m-${role}`, name: role === 'personal' ? 'Rose (Neon District) — default' : role, file: 'x.vrm' }; };
-    p.chooseClip = async () => ({ error: 'stop here' });
+    p.modelFor = async (role) => { asked.push(role); return { id: `m-${role}`, name: role, file: 'x.vrm' }; };
+    let filmed = null;
+    p.chooseClip = async (a) => { filmed = a.modelId; return { error: 'stop here' }; };
     await p.sendClipVideo({ asked: input, to, clip: 'pole dance' });
-    assert.equal(asked.at(-1), want, input);
+    if (modelId) assert.equal(filmed, modelId, input);
+    else assert.equal(asked.at(-1), want, input);
   }
 });
