@@ -1032,7 +1032,7 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
       const note = r === 'public' ? ` ${await this.applyPublicPicture(got.entry.id)}` : ' Videos and talking replies I send to other people use it now, and TextX and DialX show its picture.';
       return { success: true, result: `${got.entry.name} is my ${r} avatar.${note}`.trim() };
     }
-    // "Use the GLaDOS avatar for Wayne": a person's name where a role goes is that person's own avatar (per-contact
+    // "Use the GLaDOS avatar for Jo": a person's name where a role goes is that person's own avatar (per-contact
     // avatars on a linked model; it went to the roles and was refused, 2026-11-20).
     if (role && !r && (item || modelId)) return this.setContactLook({ contact: String(role), look: String(item || modelId).replace(/\b(avatar|model|look|the)\b/gi, ' ').trim(), key: await this.accountKey() });
     if (role && !r) return { success: false, error: 'The roles are public, assistant and personal.' };
@@ -1577,7 +1577,7 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     const words = String(look).toLowerCase();
     let hit = null;
     for (const l of st.links.filter(x => x.status === 'active')) {
-      // The model's default outfit first ("use GLaDOS for Wayne" means GLaDOS as she comes, not every piece on).
+      // The model's default outfit first ("use GLaDOS for Jo" means GLaDOS as she comes, not every piece on).
       const outfits = [...l.outfits].sort((a, b) => (b.outfit === 'default') - (a.outfit === 'default'));
       for (const o of outfits) {
         const lk = (o.looks || []).find(x => words.includes(String(x.name || x.id).toLowerCase()));
