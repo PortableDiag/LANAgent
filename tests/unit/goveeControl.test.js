@@ -125,3 +125,9 @@ test('"bright white" is the white AND full brightness; a plain white keeps the b
   assert.equal(r.success, true, r.error);
   assert.equal(t.sent.some(c => c.instance === 'brightness'), false);
 });
+
+test('status by name works without fromAI (the API, other plugins), like control does', async () => {
+  const { p } = rig([{ code: 200, msg: 'success', payload: { capabilities: [{ type: 'devices.capabilities.online', instance: 'online', state: { value: true } }, { type: 'devices.capabilities.on_off', instance: 'powerSwitch', state: { value: 1 } }] } }]);
+  const r = await p.execute({ action: 'status', device: 'Master Toilet' });
+  assert.equal(r.success, true, r.error);
+});

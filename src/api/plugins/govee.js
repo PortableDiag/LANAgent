@@ -442,9 +442,10 @@ export default class GoveePlugin extends BasePlugin {
       device: { required: true, type: 'string' }
     });
 
-    // Resolve device name to ID if this is from AI
+    // A name is resolved on every path, not only from the chat (2026-11-21: "Downstairs Bath Hall 1" asked by name
+    // through the API answered "Device not found or missing SKU"), as controlDevice already does.
     let deviceId = params.device;
-    if (params.fromAI) {
+    if (params.fromAI || !(await this.isDeviceId(params.device))) {
       const resolved = await this.resolveDeviceName(params.device);
       if (!resolved || (Array.isArray(resolved) && resolved.length === 0)) {
         return {
@@ -1696,7 +1697,20 @@ export default class GoveePlugin extends BasePlugin {
     if (!agenda) return;
     agenda.define(LIGHT_SCHEDULE_JOB, async (job) => {
       const d = job.attrs.data || {};
-      const r = await this.execute({ ...d.params, action: d.action, device: d.deviceId || d.deviceName });
+      // A bulb swapped for another under the same name (2026-11-21: the cracked Master Toilet bulb deleted, a spare
+      // renamed to it) has a new id: the schedule goes by the name then, and keeps the new id.
+      let device = d.deviceId || d.deviceName;
+      if (d.deviceId && d.deviceName && !(await this.isDeviceId(d.deviceId).catch(() => true))) {
+        const now = await this.resolveDeviceName(d.deviceName).catch(() => null);
+        const id = Array.isArray(now) ? now[0] : now;
+        if (id) {
+          device = id;
+          job.attrs.data = { ...d, deviceId: id };
+          await job.save?.().catch(() => {});
+          this.logger.info(`Govee schedule for ${d.deviceName}: the light was replaced; now ${id}`);
+        }
+      }
+      const r = await this.execute({ ...d.params, action: d.action, device });
       this.logger.info(`Govee schedule ${d.label || ''} ${d.deviceName}: ${d.action} -> ${r?.success ? 'done' : (r?.error || 'failed')}`);
       // Offline is retried and reported by runSteps; anything else the owner hears about now.
       if (!r?.success && !r?.offline) {

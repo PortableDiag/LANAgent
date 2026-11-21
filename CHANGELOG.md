@@ -2,6 +2,22 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.893] - 2026-11-21
+
+### Fixed
+- **A light schedule follows a replaced bulb.** A schedule kept the bulb's Govee id, so after a bulb was swapped and the new one renamed to the old name, the schedule would have failed on the deleted device. When the stored id is gone, it now finds the light by its name, runs on it and keeps the new id.
+
+## [2.25.892] - 2026-11-21
+
+### Fixed
+- **A light's state can be read by its name from anywhere.** The Govee status read resolved a light's name only when the request came from the chat, so the same question from the API or another plugin failed with "Device not found or missing SKU". It now resolves names on every path, as changing a light already did.
+- The router wrapper logs only what a change was, not the whole reservation list.
+
+## [2.25.891] - 2026-11-21
+
+### Changed
+- A router backup also keeps the DHCP reservations as readable text (`reservations.txt`) beside the router's own encoded settings file, which holds every setting including them.
+
 ## [2.25.890] - 2026-11-21
 
 ### Added

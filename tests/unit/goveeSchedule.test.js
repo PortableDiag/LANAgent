@@ -67,3 +67,16 @@ test('the model\'s schedule shape (time + action + value) is saved too, and can 
   assert.equal(d.success, true);
   assert.equal(saved.length, 0);
 });
+
+test('a schedule whose bulb was replaced (same name, new id) runs on the new one and keeps its id', async () => {
+  const { p, defs } = rig();
+  await p.defineSchedulerJobs();
+  let saved = 0;
+  const job = { attrs: { data: { deviceId: 'OLD', deviceName: 'Master Toilet', action: 'color', params: { color: 'bright white' }, hour: 7, minute: 0 } }, async save() { saved++; } };
+  let ran;
+  p.execute = async (x) => { ran = x; return { success: true }; };
+  await defs['govee-light-schedule'](job);
+  assert.equal(ran.device, 'C1');
+  assert.equal(job.attrs.data.deviceId, 'C1');
+  assert.equal(saved, 1);
+});
