@@ -18,7 +18,7 @@ const PALMS = ['in', 'out', 'down', 'up', 'forward', 'back'];
 const SHAPES = ['open', 'relaxed', 'fist', 'grip', 'point', 'thumbs_up', 'pump', 'flat'];
 const ELBOWS = ['down', 'out', 'back'];
 const TOP = new Set(['format', 'name', 'duration', 'loop', 'keys', 'prop', 'limits']);
-const KEY_FIELDS = new Set(['t', 'hands', 'gaze', 'lean', 'head', 'expression', 'prop_target']);
+const KEY_FIELDS = new Set(['t', 'hands', 'gaze', 'lean', 'head', 'expression', 'prop_target', 'hips', 'feet']);
 
 /** A clip name the store takes: lower case, a-z 0-9 and hyphens, at most 64. "Wave with both hands!" → wave-with-both-hands. */
 export function motionName(text) {
@@ -35,6 +35,8 @@ export function motionPrompt(request, { props = [], error = null, previous = nul
     'Each key: {"t":<seconds; the first key is t 0 and the last at most duration>, and any of:',
     '  "hands": {"left"|"right": {"rest":"hang"} OR {"at":{"landmark":"<landmark>","offset":[x,y,z metres; x = the avatar\'s left(+)/right(-), y up, z forward]},',
     `      "point":[x,y,z direction the forearm points], "palm":"${PALMS.join('|')}", "shape":"${SHAPES.join('|')}", "elbow":"${ELBOWS.join('|')}"}},`,
+    '      a hand may add "fingers": {"thumb"|"index"|"middle"|"ring"|"little": 0 straight..1 curled} over its shape (counting to two: shape fist, fingers {"index":0,"middle":0}),',
+    '  "hips": {"drop": metres -0.05..0.4 (a squat or dip), "shift": [x,z] up to 0.3, "turn"/"roll"/"tilt": deg}, "feet": {"left"|"right": {"at":[x,lift,z] metres from rest, "yaw": deg, "knee":"forward|out"} or {"rest":true}} (held until changed; feet stay planted, so a hips drop bends the knees),',
     '  "gaze": {"camera":true}, "lean": {"forward":deg,"side":deg,"twist":deg}, "head": {"turn":deg,"bow":deg},',
     '  "expression": {"happy"|"angry"|"sad"|"relaxed"|"surprised"|"blink"|"aa"|"ih"|"ou"|"ee"|"oh": 0..1}}.',
     `Landmarks: ${LANDMARKS.join(', ')}, or leftThigh@0.5 / rightThigh@0.5 (0.0 hip .. 1.0 knee).`,
