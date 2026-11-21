@@ -2,6 +2,7 @@
 // is marked "LANAgent:"; lanagent.js routes the page's calls to /api/avatar-live with the dashboard's login.
 import { login, setToken, events, protectedImage, EMBED, EMBED_BACKGROUND, EMBED_LIFT, EMBED_ZOOM } from './lanagent.js';
 import { wearLook } from './look.js';  // LANAgent: AvatarX 0.4.6 looks (linked avatars)
+import { jawDriver } from './jaw.js';  // LANAgent: jaw-bone mouths (Character Creator models)
 // The page: login, the avatar on stage, chat, talk, settings. The agent's changes arrive on
 // /api/events; a model's own expressions are read at load, since they differ from one to the next.
 import * as THREE from 'three';
@@ -200,6 +201,7 @@ function setViewOffset() {
 }
 
 let wornLook = null;
+let jaw = null;
 let wornLookKey = 'null';
 async function loadAvatar(id) {
   if (id === vrmId) return;
@@ -232,6 +234,7 @@ async function loadAvatar(id) {
     const look = state?.avatars?.find((a) => a.id === id)?.look ?? null;
     wornLookKey = JSON.stringify(look);
     wornLook = wearLook(v, look);
+    jaw = jawDriver(v);
     motion?.props?.dispose();
     motion = new Motion(v);
     motion.props.sync(state?.props);
@@ -349,7 +352,9 @@ function animate() {
         if (blinkT >= 0) { blinkT += dt; b = blinkT < 0.07 ? blinkT / 0.07 : Math.max(0, 1 - (blinkT - 0.07) / 0.1); if (blinkT > 0.17) blinkT = -1; }
         em.setValue('blink', b);
       }
-      if (presets.has('aa')) em.setValue('aa', Math.min(1, mouthLevel * 1.1));
+      // LANAgent: a jaw-bone mouth opens with the voice; the skin shape then follows lightly (both at full push the tongue out).
+      if (presets.has('aa')) em.setValue('aa', Math.min(1, mouthLevel * 1.1) * (jaw ? 0.4 : 1));
+      jaw?.set(Math.min(1, mouthLevel * 1.1));
       if (presets.has('ou')) em.setValue('ou', Math.min(0.6, mouthLevel * 0.5 * (0.5 + 0.5 * Math.sin(t * 7))));
       if (presets.has('ih')) em.setValue('ih', Math.min(0.5, mouthLevel * 0.4 * (0.5 + 0.5 * Math.sin(t * 5 + 1))));
     }

@@ -68,6 +68,7 @@ import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import * as V from '/lib/three-vrm.module.js';
 import { attachProps, updateProps } from '/lib/vrm-props.js';
 import { wearLook } from '/lib/vrm-look.js';
+import { jawDriver } from '/lib/vrm-jaw.js';
 const THREE = window.THREE; THREE.GLTFLoader = GLTFLoader;
 const d = {
 ${methods}
@@ -179,10 +180,13 @@ window.setup = async ({ width, height, fps, seconds, loop, prop, props = [], bac
   // A voice-over moves the mouth: "aa" opens with the voice's loudness in each frame (2026-11-11).
   const em = vrm.expressionManager;
   const canTalk = !!(mouth && em && em.getExpression && em.getExpression('aa'));
+  // A rig whose mouth opens by its jaw bone (Character Creator models): the bone moves with the voice too.
+  const jaw = canTalk ? jawDriver(vrm) : null;
   window.frame = (i) => {
     if (i > 0) mixer.update(1 / fps);
     updateProps(placed, action.time, i > 0 ? 1 / fps : 0); // the store's show windows and the props' own animations
-    if (canTalk) em.setValue('aa', mouth[i] || 0);
+    // With a jaw bone doing the opening, the skin shape only follows lightly (both at full push the tongue out).
+    if (canTalk) { em.setValue('aa', (mouth[i] || 0) * (jaw ? 0.4 : 1)); jaw?.set(mouth[i] || 0); }
     vrm.update(1 / fps);
     worn.apply(vrm); // the look's shape keys, again after the expressions
     r.render(scene, cam);

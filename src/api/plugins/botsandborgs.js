@@ -1503,7 +1503,11 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     const key = await this.accountKey();
     this._passesCache = await this.livePasses().catch(() => []);
     const avatar = this.animAvatar();
-    if (!avatar) return { success: false, error: "I'm not wearing a Bots & Borgs model, so the store has no body of mine to solve the move on." };
+    if (!avatar) {
+      // A linked avatar (the owner's own model) has no solve route at the store yet (asked for, 2119 #580).
+      if (/^store-linked-/.test(String(this.agent?.agentModel?.activeVRMModel || ''))) return { success: false, error: "I'm wearing one of your own linked models, and the store can't solve a new move on those yet (asked for). It works on a store model or a live pass." };
+      return { success: false, error: "I'm not wearing a Bots & Borgs model, so the store has no body of mine to solve the move on." };
+    }
     const props = [...new Set((await this.libraryItems()).flatMap(i => i.files.filter(f => f.kind === 'prop').map(f => path.basename(f.name, '.glb').toLowerCase())))];
     let script = await this.writeMotion(request, { name: name ? motionName(name) : null, loop, props });
     let d;

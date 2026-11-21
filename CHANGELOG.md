@@ -2,6 +2,12 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.876] - 2026-11-20
+
+### Fixed
+- **Lips move on jaw-bone models.** On a Character Creator model converted to VRM (a linked "Rose"), the mouth opens by the jaw bone, and the model's `aa` expression only drives a shape key that barely parts the lips, so the mouth stayed shut while the agent talked. A VRM expression cannot move a bone, so on a model with a humanoid `jaw` bone whose `aa` does not move the teeth, the live 3D page and the rendered videos now turn the jaw open with the voice, with the mouth shape following lightly. The opening stays modest (such models' tongues come forward past it) until the store bakes jaw visemes into them, which has been asked for. Models without a jaw bone are unchanged.
+- "Make a new move" while wearing one of the owner's linked models now says the store cannot solve on those yet, instead of "not wearing a Bots & Borgs model".
+
 ## [2.25.875] - 2026-11-20
 
 ### Added

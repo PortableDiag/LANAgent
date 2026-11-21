@@ -95,3 +95,15 @@ test('a look hides unlisted pieces, tints a material and sets a shape key; no lo
     await browser.close();
   }
 });
+
+test('a jaw-bone mouth: the jaw opens with the voice unless the mouth shape moves the teeth itself', async () => {
+  const { jawDriver } = await import('../../src/interfaces/web/public/lib/vrm-jaw.js');
+  const jawNode = { rotation: { x: 0 } };
+  const vrm = (binds) => ({ humanoid: { getNormalizedBoneNode: (n) => (n === 'jaw' ? jawNode : null) }, expressionManager: { getExpression: () => ({ _binds: binds }) } });
+  const d = jawDriver(vrm([{ primitives: [{ name: 'CC_Base_Body' }] }]));
+  d.set(1); assert.ok(Math.abs(jawNode.rotation.x - 0.12) < 1e-9);
+  d.set(0); assert.equal(jawNode.rotation.x, 0);
+  d.set(5); assert.ok(Math.abs(jawNode.rotation.x - 0.12) < 1e-9, 'clamped');
+  assert.equal(jawDriver(vrm([{ primitives: [{ name: 'CC_Base_Teeth' }] }])), null, 'the shape moves the teeth: no bone');
+  assert.equal(jawDriver({ humanoid: { getNormalizedBoneNode: () => null } }), null, 'no jaw bone (VRoid, store models)');
+});
