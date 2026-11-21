@@ -107,7 +107,7 @@ export function livePassList(d) {
 }
 
 /**
- * Whose words are whose in a request for a spoken video (the owner, 2026-11-15: "send a video message to Wayne saying
+ * Whose words are whose in a request for a spoken video (the owner, 2026-11-15: "send a video message to Jo saying
  * you're now able to move and talk" means the AGENT can move and talk, said by the agent in the video, never the owner).
  */
 export function videoPerspective(name, owner) {
@@ -117,7 +117,7 @@ export function videoPerspective(name, owner) {
 }
 
 /**
- * Who a video goes to: the extractor's `to`, else "to Wayne" / "send Wayne a video", else the owner. "Send a video…"
+ * Who a video goes to: the extractor's `to`, else "to Jo" / "send Jo a video", else the owner. "Send a video…"
  * once read the recipient as "a".
  */
 export function videoRecipient(asked = '', to = '') {
@@ -238,9 +238,9 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
       },
       {
         command: 'link',
-        description: 'Linked agents: use avatars someone else owns at Bots & Borgs (the owner\'s own models, outfits and looks), read-only, kept current by the store. request: an email asks that person to link this agent (only the email the owner gives); accept: a one-time code they gave; with no arguments lists the links and what they allow; sync: true fetches them now; leave: a link id ends one. contact + look: show that look to one person ("for Wayne use the winter look"), with propose: true to suggest it for the owner to approve',
-        usage: 'link({})  // link({ request: "owner@example.com" }), link({ accept: "xxxxxxxx-xxxxxxxx-xxxxxxxx" }), link({ sync: true }), link({ contact: "Wayne", look: "winter" }), link({ leave: "lnk_…" })',
-        examples: ['request a bots and borgs link to my account at pat@example.com', 'link yourself to my bots and borgs models', 'accept this bots and borgs link code 1a2b3c4d-5e6f7a8b-9c0d1e2f', 'which of my models can you use', 'what avatars have I linked to you', 'for Wayne use my winter look', 'show Jo the pilot outfit when you send her videos', 'unlink from my bots and borgs account']
+        description: 'Linked agents: use avatars someone else owns at Bots & Borgs (the owner\'s own models, outfits and looks), read-only, kept current by the store. request: an email asks that person to link this agent (only the email the owner gives); accept: a one-time code they gave; with no arguments lists the links and what they allow; sync: true fetches them now; leave: a link id ends one. contact + look: show that look to one person ("for Jo use the winter look"), with propose: true to suggest it for the owner to approve',
+        usage: 'link({})  // link({ request: "owner@example.com" }), link({ accept: "xxxxxxxx-xxxxxxxx-xxxxxxxx" }), link({ sync: true }), link({ contact: "Jo", look: "winter" }), link({ leave: "lnk_…" })',
+        examples: ['request a bots and borgs link to my account at pat@example.com', 'link yourself to my bots and borgs models', 'accept this bots and borgs link code 1a2b3c4d-5e6f7a8b-9c0d1e2f', 'which of my models can you use', 'what avatars have I linked to you', 'for Jo use my winter look', 'show Jo the pilot outfit when you send her videos', 'unlink from my bots and borgs account']
       },
       {
         command: 'orders',
@@ -1158,7 +1158,7 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     const known = new Map(st.links.map(l => [l.id, l]));
     const keep = [];
     for (const l of listed) {
-      if (/ended|revoked|declined/.test(l.status)) { if (known.has(l.id)) await this.endLink(l.id, l.status); continue; }
+      if (/ended|revoked|declined|left/.test(l.status)) { if (known.has(l.id)) await this.endLink(l.id, l.status); continue; }
       if (/pending|requested/.test(l.status)) { keep.push({ ...(known.get(l.id) || {}), id: l.id, owner: l.owner, status: l.status, outfits: known.get(l.id)?.outfits || [] }); continue; }
       let detail;
       try { detail = await this.api('get', `/api/account/links/${encodeURIComponent(l.id)}`, { key }); }
@@ -1179,7 +1179,7 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
       if (!detail) continue;
       // Outfits the owner no longer allows: their copies go.
       for (const [k, o] of had) if (!outfits.some(x => `${x.model}/${x.outfit}` === k)) await this.removeGalleryModel(o.modelId);
-      const entry = { id: l.id, owner: l.owner || detail.owner_name || null, status: 'active', outfits, at: new Date().toISOString() };
+      const entry = { id: l.id, owner: l.owner || (detail.link || detail).owner_name || null, status: 'active', outfits, at: new Date().toISOString() };
       entry.roles = await this.applyLinkRoles(entry, key).catch(e => { this.logger.warn(`botsandborgs: link roles not applied: ${e.message}`); return prev.roles || {}; });
       keep.push(entry);
     }
@@ -1297,7 +1297,7 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
   /** Our opaque key for a person (never their number, email or handle). */
   async contactKeyFor(personId) { return contactKey(personId, await this.contactSecret()); }
 
-  /** "for Wayne use the winter look": the person by name, the outfit or look by words, set (or proposed) on the link. */
+  /** "for Jo use the winter look": the person by name, the outfit or look by words, set (or proposed) on the link. */
   async setContactLook({ contact, look, propose = false, key }) {
     const people = await (await this.peopleDirectory()).byName(String(contact)).catch(() => []);
     if (!people.length) return { success: false, error: `I don't know anyone called ${contact} yet.` };
@@ -2501,9 +2501,9 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     }
     const kind = data.kind && data.kind !== 'avatar' ? data.kind : this.kindAsked(asked);
     if (as === 'stop' || (!as && /\bstop (?:dancing|the (?:dance|animation|clip))\b/i.test(asked))) return this.stopClip();
-    // "Send me a video of you doing the pole dance": film it and send it. "Send a video of yourself to Wayne explaining
+    // "Send me a video of you doing the pole dance": film it and send it. "Send a video of yourself to Jo explaining
     // that you can move and talk now" too: a video of the agent itself, whatever the extractor called it (it once had no
-    // "video" choice and said "send", which would have texted Wayne a picture).
+    // "video" choice and said "send", which would have texted Jo a picture).
     const ofSelf = /\b(?:video|film|clip|recording) of (?:you|yourself)\b|\bfilm yourself\b|\brecord yourself\b|\bvideo (?:message|greeting|note)\b/i.test(asked);
     if (as === 'video' || (ofSelf && (!as || as === 'send')) || ((kind === 'animation' || /\b(dance|dancing|wave|waving|bow|cheer|clap|laugh|dab|rumba|pole)\b/i.test(asked)) && /\b(video|film|clip of you|record(?:ing)?)\b/i.test(asked))) {
       // Quoted words are spoken as written. Anything else is the agent's own line, written from its side: the extractor

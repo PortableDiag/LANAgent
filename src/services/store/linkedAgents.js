@@ -47,7 +47,9 @@ export function agentLinks(d) {
  * personalLicense }]. A model with no outfits list is its own one outfit.
  */
 export function linkOutfits(detail) {
-  const models = Array.isArray(detail?.models) ? detail.models : [];
+  // GET /api/account/links/<id> and POST …/accept answer { link: { models, roles, … } } (2119 #572).
+  const L = detail?.link && typeof detail.link === 'object' ? detail.link : detail;
+  const models = Array.isArray(L?.models) ? L.models : [];
   const out = [];
   for (const m of models) {
     const modelId = m.id || m.model || m.slug;
@@ -56,10 +58,10 @@ export function linkOutfits(detail) {
     for (const o of outfits) {
       out.push({
         model: String(modelId), outfit: String(o.id || o.outfit || o.name || 'default'),
-        name: [m.name || modelId, o.name && o.name !== m.name ? o.name : null].filter(Boolean).join(' — '),
+        name: [m.name || modelId, (o.label || o.name) && (o.label || o.name) !== m.name ? (o.label || o.name) : null].filter(Boolean).join(' — '),
         sha256: o.sha256 ? String(o.sha256).toLowerCase() : null, file: o.file || null,
         looks: Array.isArray(o.looks) ? o.looks : [],
-        personalLicense: m.personal_license === true || o.personal_license === true || detail?.personal_license === true
+        personalLicense: m.personal_license === true || o.personal_license === true || L?.personal_license === true
       });
     }
   }
@@ -76,11 +78,9 @@ export function readChoice(d) {
   let outfit = a.outfit || a.outfit_id || null;
   let look = a.look?.id || a.look_id || (typeof a.look === 'string' ? a.look : null);
   const ref = a.ref || d?.ref;
-  if (!model && typeof ref === 'string') {
-    // "locker:<model>/<outfit>[#<look>]"
-    const m = /^locker:([^/#]+)\/([^#]+)(?:#(.+))?$/.exec(ref);
-    if (m) { model = m[1]; outfit = m[2]; look = look || m[3] || null; }
-  }
+  // "locker:<model>/<outfit>[#<look>]": a role or contact's look comes as its settings with no id; the id is in the ref.
+  const m = typeof ref === 'string' ? /^locker:([^/#]+)\/([^#]+)(?:#(.+))?$/.exec(ref) : null;
+  if (m) { model = model || m[1]; outfit = outfit || m[2]; look = look || m[3] || null; }
   if (!model) return null;
   return { model: String(model), outfit: String(outfit || 'default'), look: look ? String(look) : null, fallback: d?.fallback_from || a.fallback_from || null };
 }

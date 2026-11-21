@@ -73,13 +73,26 @@ function rig({ routes = {}, files = {}, worn = 'store-vrm-racer-blue-bundle' } =
   return { p, store, calls, fetched, told, worns };
 }
 
+test('the store\'s real example responses (2119 #572) read right', () => {
+  const sha0 = '3f9a6c1e' + '0'.repeat(56);
+  const detail = { link: { fallback: 'public', id: 'lnk_EXAMPLE', models: [{ model: 'mdl_EXAMPLE', name: 'Example Avatar', outfits: [{ bytes: 15863136, file: 'https://botsandborgs.com/api/account/links/lnk_EXAMPLE/files/mdl_EXAMPLE/base', label: 'Base', looks: [{ colors: { Body: { hue: 20, light: 1, sat: 1.1 } }, id: 'lk_EXAMPLE', morphs: { Smile: 0.4 }, name: 'Evening', pieces: null, ref: 'locker:mdl_EXAMPLE/base#lk_EXAMPLE' }], outfit: 'base', ready: true, ref: 'locker:mdl_EXAMPLE/base', sha256: sha0 }], personal_license: false }], owner: 'acct_OWNER', read_only: true, roles: { assistant: 'locker:mdl_EXAMPLE/base', public: 'locker:mdl_EXAMPLE/base#lk_EXAMPLE' }, status: 'active' } };
+  const [o] = linkOutfits(detail);
+  assert.deepEqual([o.model, o.outfit, o.name, o.sha256, o.looks[0].name, o.personalLicense], ['mdl_EXAMPLE', 'base', 'Example Avatar — Base', sha0, 'Evening', false]);
+  assert.deepEqual(agentLinks({ as_agent: [{ id: 'lnk_EXAMPLE', owner: 'acct_OWNER', status: 'revoked' }], as_owner: [] }), [{ id: 'lnk_EXAMPLE', status: 'revoked', owner: 'acct_OWNER' }]);
+  // A role that is a look: the look's settings carry no id; the ref does.
+  assert.deepEqual(readChoice({ file: 'x', look: { colors: {}, morphs: { Smile: 0.4 }, pieces: null }, model: 'mdl_EXAMPLE', outfit: 'base', ref: 'locker:mdl_EXAMPLE/base#lk_EXAMPLE', role: 'public' }),
+    { model: 'mdl_EXAMPLE', outfit: 'base', look: 'lk_EXAMPLE', fallback: null });
+  assert.equal(readChoice({ fallback_from: 'personal', model: 'mdl_EXAMPLE', outfit: 'base', ref: 'locker:mdl_EXAMPLE/base#lk_EXAMPLE', role: 'public' }).fallback, 'personal');
+  assert.equal(readChoice({ contact: { key: 'p_unknown', label: null }, fallback_from: 'contact', model: 'mdl_EXAMPLE', outfit: 'base', ref: 'locker:mdl_EXAMPLE/base', role: 'assistant' }).fallback, 'contact');
+});
+
 test('an approved link: outfits installed by sha256, the owner\'s picks applied, a fallback is not a pick', async () => {
   const base = vrm('Rose'); const coat = vrm('Rose coat');
   const t = rig({
     files: { 'rose/base': base, 'rose/coat': coat },
     routes: {
       'get /api/account/links': { as_agent: [{ id: 'lnk_1', status: 'active', owner_name: 'Pat' }] },
-      'get /api/account/links/lnk_1': { models: [{ id: 'rose', name: 'Rose', outfits: [{ id: 'base', sha256: sha(base) }, { id: 'coat', name: 'Coat', sha256: sha(coat) }] }] },
+      'get /api/account/links/lnk_1': { link: { id: 'lnk_1', models: [{ model: 'rose', name: 'Rose', outfits: [{ outfit: 'base', label: 'Rose', sha256: sha(base) }, { outfit: 'coat', label: 'Coat', sha256: sha(coat) }] }] } },
       'get /api/account/links/lnk_1/roles/public': { avatar: { model: 'rose', outfit: 'base' } },
       'get /api/account/links/lnk_1/roles/assistant': { avatar: { model: 'rose', outfit: 'base' }, fallback_from: 'public' },
       'get /api/account/links/lnk_1/roles/personal': { ref: 'locker:rose/coat' }
@@ -161,20 +174,20 @@ test('per-contact avatars: set by name with our opaque key and a label, read bac
   await t.p.syncLinks();
   const { PersonDirectory, memoryPeopleStore } = await import('../../src/services/people/personDirectory.js');
   const dir = new PersonDirectory({ store: memoryPeopleStore(), logger: { info() {}, warn() {} } });
-  const wayne = await dir.resolve({ number: '+15551230000', email: 'wayne@example.com' }, { name: 'Wayne' });
+  const jo = await dir.resolve({ number: '+15551230000', email: 'jo@example.com' }, { name: 'Jo' });
   t.p._people = dir;
-  const r = await t.p.setContactLook({ contact: 'Wayne', look: 'the winter look', key: 'bnba_test' });
+  const r = await t.p.setContactLook({ contact: 'Jo', look: 'the winter look', key: 'bnba_test' });
   assert.equal(r.success, true, r.error);
   const put = t.calls.find(c => c.method === 'put');
-  const ck = await t.p.contactKeyFor(wayne._id);
+  const ck = await t.p.contactKeyFor(jo._id);
   assert.equal(put.route, `/api/account/links/lnk_4/contacts/${ck}`);
-  assert.deepEqual(put.body, { label: 'Wayne', ref: 'locker:rose/base#lk9' });
+  assert.deepEqual(put.body, { label: 'Jo', ref: 'locker:rose/base#lk9' });
   // Nothing sent carries his number, email or our Person id.
   const sent = JSON.stringify(t.calls);
-  assert.ok(!/5551230000|wayne@example\.com/.test(sent));
-  assert.ok(!sent.includes(String(wayne._id)));
+  assert.ok(!/5551230000|jo@example\.com/.test(sent));
+  assert.ok(!sent.includes(String(jo._id)));
   // "Suggest" waits for the owner.
-  await t.p.setContactLook({ contact: 'Wayne', look: 'winter', propose: true, key: 'bnba_test' });
+  await t.p.setContactLook({ contact: 'Jo', look: 'winter', propose: true, key: 'bnba_test' });
   assert.equal(t.calls.filter(c => c.method === 'put').at(-1).body.propose, true);
   assert.match((await t.p.setContactLook({ contact: 'Nobody', look: 'winter', key: 'k' })).error, /don't know anyone called Nobody/);
   // Read back: that person's pick is used; another person (404) falls to the roles.
@@ -184,6 +197,6 @@ test('per-contact avatars: set by name with our opaque key and a label, read bac
     if (/\/contacts\/.+\/avatar$/.test(route)) return { avatar: { model: 'rose', outfit: 'base' }, fallback_from: 'assistant' };
     throw Object.assign(new Error('no route'), { status: 404 });
   };
-  assert.equal(await t.p.contactModel(wayne._id), 'store-linked-lnk-4-rose-base');
+  assert.equal(await t.p.contactModel(jo._id), 'store-linked-lnk-4-rose-base');
   assert.equal(await t.p.contactModel('someone-else'), null, 'a fallback answer means the roles decide');
 });

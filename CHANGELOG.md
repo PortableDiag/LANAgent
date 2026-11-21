@@ -2,11 +2,16 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.872] - 2026-11-20
+
+### Fixed
+- **Linked avatars read the store's real answers.** Checked against the store's example responses: a link's details come wrapped (`{ link: { models, … } }`), so no model would have been found; an outfit's name is its `label`; a role or contact that is a look gives the look's settings without an id, so the id is now read from its `ref`; a link the agent left (`left`) counts as ended like `revoked`.
+
 ## [2.25.871] - 2026-11-20
 
 ### Added
 - **Linked agents: wear someone's own Bots & Borgs avatars.** The owner can let the agent use avatars from their own Bots & Borgs account (their models and outfits), read-only. "Request a Bots & Borgs link to my account at <email>" asks for it (only an address the owner gives); a one-time code works too. Once the owner approves and picks what the agent may use, each outfit is downloaded into the model gallery, checked against its sha256 and kept current by ETag (an unchanged file is never fetched again). The roles the owner chose for this agent are applied: public and assistant set, personal worn (a role the store only filled in from another one changes nothing). "Which of my models can you use" lists the links. The store's feed (approved, changed, ended, a new outfit, a look) syncs them by itself. When a link ends, every copy of the owner's models is deleted, roles that used them are cleared, the agent goes back to the model it wore before, and the owner is told. Saved looks are worn as their outfit for now (their colours and shape keys are not applied yet).
-- **Per-contact avatars.** "For Wayne use my winter look" shows that look to that one person in the videos the agent sends them, and in one-to-one TextX video replies ("suggest" asks the owner to approve it in their account first). The store only ever gets the agent's own opaque key for the person (an HMAC of its contact record, different for every agent) and the name the owner typed: never a phone number, email or handle. Without a pick for that person, the roles decide as before.
+- **Per-contact avatars.** "For Jo use my winter look" shows that look to that one person in the videos the agent sends them, and in one-to-one TextX video replies ("suggest" asks the owner to approve it in their account first). The store only ever gets the agent's own opaque key for the person (an HMAC of its contact record, different for every agent) and the name the owner typed: never a phone number, email or handle. Without a pick for that person, the roles decide as before.
 
 ## [2.25.870] - 2026-11-20
 
@@ -346,7 +351,7 @@ All notable changes to LANAgent will be documented in this file.
 ## [2.25.815] - 2026-11-15
 
 ### Fixed
-- **In a video sent for the owner, "you" means the agent.** "Send a video message to Wayne saying you're now able to move and talk" has the agent say in the video that IT can move and talk now. The owner is spoken of in the third person by first name, never as "I", the same rule texts follow. "Video message" now counts as a video of the agent, and a lowercase name after "to" is the recipient.
+- **In a video sent for the owner, "you" means the agent.** "Send a video message to Jo saying you're now able to move and talk" has the agent say in the video that IT can move and talk now. The owner is spoken of in the third person by first name, never as "I", the same rule texts follow. "Video message" now counts as a video of the agent, and a lowercase name after "to" is the recipient.
 
 ## [2.25.814] - 2026-11-15
 
@@ -357,7 +362,7 @@ All notable changes to LANAgent will be documented in this file.
 ## [2.25.813] - 2026-11-15
 
 ### Fixed
-- **"Send a video of yourself to Wayne explaining that you can move and talk" works.** Three things were wrong. The request could be read as sending a picture: video wasn't one of the choices. The recipient was taken as "a" (from "send a video"). And with no clip named, a random clip was filmed, possibly a dance. Now a video of the agent itself is filmed for the person named. The agent writes the spoken line in its own words, greeting them and saying who it is, and plays its talk loop under it.
+- **"Send a video of yourself to Jo explaining that you can move and talk" works.** Three things were wrong. The request could be read as sending a picture: video wasn't one of the choices. The recipient was taken as "a" (from "send a video"). And with no clip named, a random clip was filmed, possibly a dance. Now a video of the agent itself is filmed for the person named. The agent writes the spoken line in its own words, greeting them and saying who it is, and plays its talk loop under it.
 
 ## [2.25.812] - 2026-11-15
 
@@ -1174,7 +1179,7 @@ Every plugin was tested live; these failed and now work. When a provider is down
 ## [2.25.693] - 2026-10-28
 
 ### Added
-- **"Alice, you and Orbit call Wayne" places one call with both agents on it.** With DialX 0.7.94, a call that names another agent ("you and Orbit", "with Orbit") goes out as `dialx.call_together`: the agents DialX lists join when the callee answers, ALICE opens, and the same approval rules as any call apply. Joint calls are placed now only; a call that names no other agent is unchanged.
+- **"Alice, you and Orbit call Jo" places one call with both agents on it.** With DialX 0.7.94, a call that names another agent ("you and Orbit", "with Orbit") goes out as `dialx.call_together`: the agents DialX lists join when the callee answers, ALICE opens, and the same approval rules as any call apply. Joint calls are placed now only; a call that names no other agent is unchanged.
 
 ## [2.25.692] - 2026-10-28
 
@@ -1316,7 +1321,7 @@ Every plugin was tested live; these failed and now work. When a provider is down
 
 ### Fixed
 - **Auto-replies know the calls already planned with that person.** Jo texted "call me in 10" and the auto-reply answered without knowing ALICE was already calling her at 4:30. A reply now sees the owner's scheduled calls to the sender's number (time and purpose), so it can say so.
-- **A text the agent says about itself says who is writing.** "Text Jo and tell her you just tried to call her" sent "I just tried to call you." from the owner's number, and it read as the owner. When the request has the agent speak about itself ("tell her you…", "introduce yourself") and the text does not name the agent, it now opens "This is ALICE, <owner>'s AI assistant." Requests in the owner's own voice ("tell Sam I love you", "tell Wayne thank you") and quoted text are sent as written.
+- **A text the agent says about itself says who is writing.** "Text Jo and tell her you just tried to call her" sent "I just tried to call you." from the owner's number, and it read as the owner. When the request has the agent speak about itself ("tell her you…", "introduce yourself") and the text does not name the agent, it now opens "This is ALICE, <owner>'s AI assistant." Requests in the owner's own voice ("tell Sam I love you", "tell Jo thank you") and quoted text are sent as written.
 
 ## [2.25.668] - 2026-10-27
 
@@ -1332,7 +1337,7 @@ Every plugin was tested live; these failed and now work. When a provider is down
 
 ### Fixed
 - **A sleeping phone stays connected.** After 30 s of sending nothing on a phone's socket (local or relayed), ALICE sends a data `ping` envelope. The packet wakes the phone and the app answers with a data frame, so the 75 s silence rule no longer drops a phone that only slept. A WS-level ping would not do: NotifX's socket library answers it without the app seeing it.
-- **One auto-reply per burst, and never a text that talks to the owner.** Two texts from Wayne 7 seconds apart got two replies composed at once, and the second, written to the owner ("<owner>, that sounds like the call went far better…"), was texted to Wayne. Auto-replies in a conversation now run one at a time, a message the last reply already covered gets no second reply, and a reply that opens by addressing the owner is sent to the owner as a note instead.
+- **One auto-reply per burst, and never a text that talks to the owner.** Two texts from Jo 7 seconds apart got two replies composed at once, and the second, written to the owner ("<owner>, that sounds like the call went far better…"), was texted to Jo. Auto-replies in a conversation now run one at a time, a message the last reply already covered gets no second reply, and a reply that opens by addressing the owner is sent to the owner as a note instead.
 - **The hourly self-update holds during the owner's own phone calls.** Its quiet check (`productionQuiet.js`) counted only ALICE's own DialX calls, so a push could restart ALICE in the middle of a call the owner placed or answered: the gap 2.25.662 closed for the deploy scripts. It now holds while DialX reports any call state but idle, and for 2 minutes after a call ends.
 
 ## [2.25.665] - 2026-10-26
@@ -1372,7 +1377,7 @@ Every plugin was tested live; these failed and now work. When a provider is down
 
 ### Fixed
 - **The call voice no longer says its thinking out loud.** On a call with Mom it said "Alright, let me think about how to say that back to you warmly" and "Let me wrap up with a quick goodbye". Every call mode and talk mode now tell it to say only what it would say to the person.
-- **The voice never makes up a task, and confirms before acting.** In talk mode, after reading the owner's Wayne thread aloud, the voice sent "Later today, call Wayne and survey him" to the agent on its own, which scheduled a follow-up the owner never asked for. Talk mode and the owner's call voice now ask the agent only for what the owner said, never turn something they read into a request, and say back any call, text, send, schedule or change and wait for the owner's yes. Tested against the live model: reading a text that mentions a call schedules nothing (3/3), and "call Mom" is confirmed first (3/3).
+- **The voice never makes up a task, and confirms before acting.** In talk mode, after reading the owner's Jo thread aloud, the voice sent "Later today, call Jo and survey him" to the agent on its own, which scheduled a follow-up the owner never asked for. Talk mode and the owner's call voice now ask the agent only for what the owner said, never turn something they read into a request, and say back any call, text, send, schedule or change and wait for the owner's yes. Tested against the live model: reading a text that mentions a call schedules nothing (3/3), and "call Mom" is confirmed first (3/3).
 - **A long voicemail stays in the agent's voice.** A voicemail message in the agent's voice came to 334 KB, over DialX's 256 KB limit, and the call fell back to the phone's robot voice. An oversized clip is now re-encoded as mono speech at 32 kbps (24 if needed) first; a 60-second clip fits at 240 KB.
 - **A call the phone never reports ending is closed and the owner is told.** DialX crashed as a call reached voicemail (call 51), no end report came, and the owner never heard how it went. A call with no end report by the call limit plus 90 s is now closed as lost, with "the phone stopped reporting on it". DialX 0.7.71's `dialx_stopped` end (a call the dialer stopped during) is told the same way, with an offer to call again.
 
@@ -1883,7 +1888,7 @@ Every plugin was tested live; these failed and now work. When a provider is down
 ### Added
 - **Voicemail through DialX.** With "Read voicemail" on for ALICE in DialX:
   - Each new voicemail reaches you with who called, how long it was and what they said. ALICE never acts on what the caller said.
-  - Ask "any new voicemails", "what did Wayne say in his voicemail", "mark all voicemails read" or "delete the voicemail from that spam number". You confirm each delete on the phone.
+  - Ask "any new voicemails", "what did Jo say in his voicemail", "mark all voicemails read" or "delete the voicemail from that spam number". You confirm each delete on the phone.
   - With "Listen to voicemail audio" also on, "send me the voicemail from Mom" sends you the recording.
 
 ### Fixed
@@ -1899,11 +1904,11 @@ Every plugin was tested live; these failed and now work. When a provider is down
 ## [2.25.573] - 2026-10-22
 
 ### Added
-- **ALICE can make phone calls through DialX.** Say "call Wayne and tell him happy birthday at 5pm" and ALICE asks DialX, the dialer app, to place the call. You approve it once on the phone. At 5 PM the phone plays a short AI disclosure and ALICE's opening, then ALICE talks with Wayne, one or two sentences at a time, until the call is done. Afterwards you get the transcript.
+- **ALICE can make phone calls through DialX.** Say "call Jo and tell him happy birthday at 5pm" and ALICE asks DialX, the dialer app, to place the call. You approve it once on the phone. At 5 PM the phone plays a short AI disclosure and ALICE's opening, then ALICE talks with Jo, one or two sentences at a time, until the call is done. Afterwards you get the transcript.
   - Only contacts you approved for ALICE in DialX can be called, and only you can ask for a call.
   - What the other person says is treated as data: ALICE never agrees to anything for you or takes any action because they ask.
   - DialX pairs like TextX: Settings → TextX → Pair a phone, then scan the code in DialX.
-  - You can also ask "what calls are scheduled", "cancel the call to Wayne", "who can you call", "who called me today" and "any spam calls today".
+  - You can also ask "what calls are scheduled", "cancel the call to Jo", "who can you call", "who called me today" and "any spam calls today".
 - **A setting for how ALICE sounds on calls** (Settings → TextX → Phone calls):
   - Her own voice (default, the fast Ara voice), or the phone's voice.
   - Her voice has a safe fallback: if it fails, is slower than the wait you set (default 5 s) or can't be played, that line is spoken by the phone instead, so the call never stalls.
@@ -1947,15 +1952,15 @@ Every plugin was tested live; these failed and now work. When a provider is down
 ## [2.25.568] - 2026-10-21
 
 ### Fixed
-- **A job you give ALICE for someone outlasts the first text.** "Tell Wayne the first step is signing up at openrouter.ai, and walk him through it one step at a time" sent the first step, but the rest of the job was not kept anywhere, so when Wayne answered, the auto-reply had no idea it was coaching him. ALICE now keeps the ongoing part as a note on that person, and the auto-reply follows it.
+- **A job you give ALICE for someone outlasts the first text.** "Tell Jo the first step is signing up at openrouter.ai, and walk him through it one step at a time" sent the first step, but the rest of the job was not kept anywhere, so when Jo answered, the auto-reply had no idea it was coaching him. ALICE now keeps the ongoing part as a note on that person, and the auto-reply follows it.
 - **Texts ALICE sends while working through a longer request know what you asked.** Before, a text sent partway through such a request saw an empty request: it could not tell whom "him" meant, and it never saw your wording.
 
 ## [2.25.567] - 2026-10-21
 
 ### Fixed
-- **"Ok, ask him" now uses the conversation.** A short follow-up such as "ask him" or "text her back" is rewritten from the last few messages into the full request ("text Wayne and ask whether he got Orbit's long text") before ALICE acts on it. Before, ALICE saw only "ask him", tried to text someone called "him", and asked what the text should say.
+- **"Ok, ask him" now uses the conversation.** A short follow-up such as "ask him" or "text her back" is rewritten from the last few messages into the full request ("text Jo and ask whether he got Orbit's long text") before ALICE acts on it. Before, ALICE saw only "ask him", tried to text someone called "him", and asked what the text should say.
 - **ALICE writes the question itself when you only say who to ask.** If you name the person but not the words, ALICE writes the text from what you were just discussing, instead of asking what to say.
-- **Questions about a conversation get an answer.** "Check if Wayne got that text" now gets a sentence or two back ("it shows as sent at 16:20; no reply yet"). Before, ALICE pasted the last 20 messages, about 4,000 characters, and read them out by voice without answering. "Read me the Wayne thread" still shows the messages.
+- **Questions about a conversation get an answer.** "Check if Jo got that text" now gets a sentence or two back ("it shows as sent at 16:20; no reply yet"). Before, ALICE pasted the last 20 messages, about 4,000 characters, and read them out by voice without answering. "Read me the Jo thread" still shows the messages.
 
 ## [2.25.566] - 2026-10-21
 
@@ -1989,14 +1994,14 @@ Every plugin was tested live; these failed and now work. When a provider is down
 ## [2.25.561] - 2026-10-20
 
 ### Fixed
-- **"Send it to Wayne as a GIF" uses the file you just sent.** ALICE now treats a file you sent in the last few minutes as part of your next request, so "it" means that file. Before, ALICE didn't know a file was there, went looking for a different GIF, and that GIF got lost on the way. Every step of a multi-step request now gets your words and your file.
+- **"Send it to Jo as a GIF" uses the file you just sent.** ALICE now treats a file you sent in the last few minutes as part of your next request, so "it" means that file. Before, ALICE didn't know a file was there, went looking for a different GIF, and that GIF got lost on the way. Every step of a multi-step request now gets your words and your file.
 - **"As a GIF" turns your video into one.** A video you attach is converted to an animated GIF when you ask for a GIF, and sent as the video if converting fails.
-- **Texts ALICE writes for you follow your notes for that person.** When you ask ALICE to write the text ("with some text that suits it"), it follows what you told it about that contact, like talking to Wayne in the style of Aperture Science. Words you dictate are still sent exactly as you wrote them.
+- **Texts ALICE writes for you follow your notes for that person.** When you ask ALICE to write the text ("with some text that suits it"), it follows what you told it about that contact, like talking to Jo in the style of Aperture Science. Words you dictate are still sent exactly as you wrote them.
 
 ## [2.25.560] - 2026-10-20
 
 ### Fixed
-- **"Send Wayne a GIF" sends the GIF.** ALICE found a GIF and passed its link along, but the texting step only sent the words. Picture, GIF and video links now go with the text as an MMS.
+- **"Send Jo a GIF" sends the GIF.** ALICE found a GIF and passed its link along, but the texting step only sent the words. Picture, GIF and video links now go with the text as an MMS.
 
 ## [2.25.559] - 2026-10-20
 
@@ -2011,12 +2016,12 @@ Every plugin was tested live; these failed and now work. When a provider is down
 ## [2.25.557] - 2026-10-20
 
 ### Fixed
-- **Questions about your data are looked up, not guessed.** A short question right after a chat ("what are the latest messages in the Wayne convo?") was answered from the chat alone, with made-up content. Questions about messages, emails, files, logs and the like now go to the tools, and the chat reply is told never to make up what a tool would look up.
+- **Questions about your data are looked up, not guessed.** A short question right after a chat ("what are the latest messages in the Jo convo?") was answered from the chat alone, with made-up content. Questions about messages, emails, files, logs and the like now go to the tools, and the chat reply is told never to make up what a tool would look up.
 
 ## [2.25.556] - 2026-10-20
 
 ### Fixed
-- **"Remind Wayne via text message that…" sends a text.** It was taken as a request to watch Wayne's conversation, and the owner got a permissions error instead of the text. A request to send someone a text now always sends one; "let me know when Sam replies" still watches.
+- **"Remind Jo via text message that…" sends a text.** It was taken as a request to watch Jo's conversation, and the owner got a permissions error instead of the text. A request to send someone a text now always sends one; "let me know when Sam replies" still watches.
 
 ## [2.25.555] - 2026-10-20
 
@@ -2113,8 +2118,8 @@ Every plugin was tested live; these failed and now work. When a provider is down
 
 ### Fixed
 - **Answers knew nothing of the conversation they were in.** `getConversationContext()` read conversation Memory documents that are never written, so it returned nothing on every call. The general answer, the plugin chain, "remember that…" and the follow-up URL lookup all ran with no idea what was just said. Asked "did you really send him my instruction?" right after a text went out, the agent answered blind and denied what it had sent. It now returns the live conversation (the agent's own replies and what its actions reported), with the last 6 hours of the transcript as a fallback. The general answer is told to answer "what did you do/send" from that conversation, quoting it, and to say so when it can't see it rather than guess.
-- **"Ask Wayne if…" texts are written as messages, not pasted instructions.** A request like "ask Wayne via text if he needs help… gotta sell him on yourself ;)" went to Wayne word for word, including the aside. The parameter extractor now gets per-command rules (a new `hint` on plugin commands). For TextX send and schedule: quoted words are sent exactly; a described message is written to the recipient directly ("Do you need any help…?"); anything said to the agent about the message is followed, never sent.
-- "What did you send Wayne" goes to reading the conversation; it was matched to watching it.
+- **"Ask Jo if…" texts are written as messages, not pasted instructions.** A request like "ask Jo via text if he needs help… gotta sell him on yourself ;)" went to Jo word for word, including the aside. The parameter extractor now gets per-command rules (a new `hint` on plugin commands). For TextX send and schedule: quoted words are sent exactly; a described message is written to the recipient directly ("Do you need any help…?"); anything said to the agent about the message is followed, never sent.
+- "What did you send Jo" goes to reading the conversation; it was matched to watching it.
 
 ## [2.25.541] - 2026-10-19
 
@@ -2124,7 +2129,7 @@ Every plugin was tested live; these failed and now work. When a provider is down
 ## [2.25.540] - 2026-10-19
 
 ### Changed
-- **Messages for you from a text reach you in TextX and on Telegram.** When someone in a shared conversation asks the agent to tell you, ask you, remind you or alert you about something, or the text otherwise needs you, the note now goes to your conversation with the agent in TextX and to Telegram. Before, it went to only one of them. If one channel fails, the other still delivers. The note is written to you directly ("Wayne asks you to call him…") and passes the message on in full. The agent no longer guesses where you are ("he's still asleep") in its reply to the sender.
+- **Messages for you from a text reach you in TextX and on Telegram.** When someone in a shared conversation asks the agent to tell you, ask you, remind you or alert you about something, or the text otherwise needs you, the note now goes to your conversation with the agent in TextX and to Telegram. Before, it went to only one of them. If one channel fails, the other still delivers. The note is written to you directly ("Jo asks you to call him…") and passes the message on in full. The agent no longer guesses where you are ("he's still asleep") in its reply to the sender.
 
 ## [2.25.539] - 2026-10-19
 
@@ -2176,7 +2181,7 @@ Every plugin was tested live; these failed and now work. When a provider is down
 ## [2.25.530] - 2026-10-19
 
 ### Fixed
-- **Texting from Telegram when TextX is closed on the phone.** "Send Wayne a text…" from Telegram failed with "The phone didn't answer": with TextX closed the phone checks in only every 15 minutes, but the agent waited 45 seconds for the contact lookup, and a send expired after 5 minutes. When the phone isn't connected, the agent now answers at once, finishes the request when the phone checks in (up to 20 minutes), and reports the outcome as a notification. A failed TextX action now logs its reason.
+- **Texting from Telegram when TextX is closed on the phone.** "Send Jo a text…" from Telegram failed with "The phone didn't answer": with TextX closed the phone checks in only every 15 minutes, but the agent waited 45 seconds for the contact lookup, and a send expired after 5 minutes. When the phone isn't connected, the agent now answers at once, finishes the request when the phone checks in (up to 20 minutes), and reports the outcome as a notification. A failed TextX action now logs its reason.
 
 ## [2.25.529] - 2026-10-18
 
