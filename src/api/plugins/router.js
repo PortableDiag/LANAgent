@@ -278,17 +278,20 @@ export default class RouterPlugin extends BasePlugin {
     const settings = await this.run('backup-nvram', [], { binary: true });
     if (!settings?.length) throw new Error('the router gave an empty settings file');
     const jffs = await this.run('backup-jffs', [], { binary: true }).catch(() => null);
+    // The reservations as readable text too (the settings file is the router's own encoded format).
+    const reservations = await this.run('reservations').catch(() => '');
     const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
     const dir = path.join(this.backupRoot(), stamp);
     await fs.mkdir(dir, { recursive: true, mode: 0o700 });
     await fs.writeFile(path.join(dir, 'settings.cfg'), settings, { mode: 0o600 });
     if (jffs?.length) await fs.writeFile(path.join(dir, 'jffs.tgz'), jffs, { mode: 0o600 });
+    if (reservations) await fs.writeFile(path.join(dir, 'reservations.txt'), reservations, { mode: 0o600 });
     const fw = (await this.run('security').catch(() => '')).match(/buildno=(\S+)[\s\S]*extendno=(\S+)/);
     await fs.writeFile(path.join(dir, 'about.json'), JSON.stringify({ at: new Date().toISOString(), firmware: fw ? `${fw[1]}_${fw[2]}` : null, settingsBytes: settings.length, jffsBytes: jffs?.length || 0 }, null, 2), { mode: 0o600 });
     const all = (await fs.readdir(this.backupRoot()).catch(() => [])).sort();
     for (const old of all.slice(0, Math.max(0, all.length - KEEP_BACKUPS))) await fs.rm(path.join(this.backupRoot(), old), { recursive: true, force: true });
     this.logger.info(`router: backup ${stamp} (settings ${settings.length} B, jffs ${jffs?.length || 0} B)`);
-    return { success: true, backup: stamp, result: `Router backed up (${stamp}): settings ${Math.round(settings.length / 1024)} KB${jffs?.length ? `, /jffs ${Math.round(jffs.length / 1024)} KB` : ''}. I keep the last ${KEEP_BACKUPS}.` };
+    return { success: true, backup: stamp, result: `Router backed up (${stamp}): settings ${Math.round(settings.length / 1024)} KB (every setting, the DHCP reservations included)${reservations ? `, ${parseReservations(reservations).length} reservations also as text` : ''}${jffs?.length ? `, /jffs ${Math.round(jffs.length / 1024)} KB` : ''}. I keep the last ${KEEP_BACKUPS}.` };
   }
 
   async listBackups() {

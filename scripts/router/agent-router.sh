@@ -16,11 +16,11 @@ ip_ok() { echo "$1" | grep -Eq "^${LANRE}\.([2-9]|[1-9][0-9]|1[0-9][0-9]|2[0-4][
 name_ok() { echo "$1" | grep -Eq '^[A-Za-z0-9._-]{0,32}$'; }
 list() { nvram get dhcp_staticlist | tr '<' '\n' | grep -v '^$'; }
 lock() { mkdir /tmp/agent-router.lock 2>/dev/null || { echo "ERR busy"; exit 1; }; trap 'rmdir /tmp/agent-router.lock' EXIT; }
-save() {  # $1 = new list (one entry per line, no '<')
+save() {  # $1 = new list (one entry per line, no '<'), $2 = what changed (for the log)
   new="$(echo "$1" | grep -v '^$' | sed 's/^/</' | tr -d '\n')"
   nvram set dhcp_staticlist="$new"; nvram commit
   service restart_dnsmasq >/dev/null 2>&1
-  echo "$(date '+%Y-%m-%d %H:%M:%S') $op $*" >> "$LOG"
+  echo "$(date '+%Y-%m-%d %H:%M:%S') $op ${2:-}" >> "$LOG"
 }
 case "$op" in
   reservations) list | awk -F'>' '{print $1, $2, $4}' ;;
