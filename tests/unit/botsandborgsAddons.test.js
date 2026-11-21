@@ -70,7 +70,7 @@ test('a kit for a model it does not wear waits; product bases line up across var
   assert.equal(p.wornBase(), 'vrm-racer-blue');
   for (const v of ['vrm-racer-blue-kit', 'vrm-racer-blue-voice', 'vrm-racer-blue-live30', 'store-vrm-racer-blue-bundle']) assert.equal(p.productBase(v), 'vrm-racer-blue', v);
   const r = await p.kitBannerUse({ variant: 'vrm-aa-core-kit', title: 'Core — VRM Avatar: Profile kit', files: [] });
-  assert.match(r, /when I wear Core/);
+  assert.match(r, /when Core is my public model/);
   assert.equal(await p.bannerForModel('vrm-aa-core'), '');
 });
 
@@ -271,7 +271,10 @@ test('unquoted words are never spoken as copied: the agent writes its own line; 
   p.voiceLine = async () => 'I can move and talk now!';
   await p.useOwned({ say: 'youre now able to move and talk', _extracted: ['say'], _context: { originalInput: 'send me a video message saying youre now able to move and talk' } });
   assert.equal(call.say, 'I can move and talk now!');
+  // The texting rule (2026-11-20): quotes alone are the agent's to word; quotes AND "verbatim" are exact.
   await p.useOwned({ say: 'whatever', _context: { originalInput: 'send me a video of yourself saying "hi everyone"' } });
+  assert.equal(call.say, 'I can move and talk now!');
+  await p.useOwned({ say: 'whatever', _context: { originalInput: 'send me a video of yourself saying "hi everyone" verbatim' } });
   assert.equal(call.say, 'hi everyone');
 });
 

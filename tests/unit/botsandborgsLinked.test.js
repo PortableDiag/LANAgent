@@ -387,3 +387,14 @@ test('linkFitProps: placements mapped by prop then clip are read too', async () 
   const out = linkFitProps({ placements: { mug: { 'mug-sip-idle': { bone: 'rightHand', position: [0, 0, 0] } } } }, 'abc');
   assert.deepEqual(out, [{ prop: 'mug', fitted: true, fitted_for_sha256: 'abc', clips: [{ clip: 'mug-sip-idle', placements: { standard: { bone: 'rightHand', position: [0, 0, 0] } } }] }]);
 });
+
+test('"use the glados avatar for Jo" reaches the roles with a person as the role: it sets that person\'s avatar', async () => {
+  const t = rig();
+  let got = null;
+  t.p.setContactLook = async (a) => { got = a; return { success: true, result: 'ok' }; };
+  const r = await t.p.rolesCommand({ role: 'Jo', item: 'glados avatar' });
+  assert.equal(r.success, true);
+  assert.equal(got.contact, 'Jo');
+  assert.equal(got.look, 'glados');
+  assert.match((await t.p.rolesCommand({ role: 'Jo' })).error, /roles are public, assistant and personal/);
+});

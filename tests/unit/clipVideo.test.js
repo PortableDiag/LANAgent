@@ -88,7 +88,7 @@ test('a voice-over: the agent\'s own TTS goes to the render, and the caption car
   const { p, videos, renders } = rig();
   const spoken = [];
   p.agent.ttsService = { generateSpeech: async (t) => { spoken.push(t); return { buffer: Buffer.from('mp3data'), format: 'mp3' }; } };
-  const r = await p.execute({ action: 'use', wait: true, _context: { originalInput: 'send me a video of you doing the pole dance and saying "hi everyone, it\'s me"' } });
+  const r = await p.execute({ action: 'use', wait: true, _context: { originalInput: 'send me a video of you doing the pole dance and saying "hi everyone, it\'s me" verbatim' } });
   assert.equal(r.success, true, r.error);
   assert.deepEqual(spoken, ["hi everyone, it's me"]);
   assert.equal(renders[0].voice.format, 'mp3');
@@ -116,7 +116,24 @@ test('the mouth opens with the voice\'s loudness and shuts in silence', () => {
   assert.ok(mouth.slice(10).every(v => v === 0));
 });
 
-test('quoted words are the voice-over, verbatim', () => {
+test('the texting rule for a voice-over: exact only when quoted AND "verbatim"; anything else the agent writes (2026-11-20)', async () => {
+  // The owner's "Send Jo a video message explaining you have a new avatar": the router put the words in `say`, and they
+  // were spoken as given. Now the agent writes its own line; nothing from the request is copied.
+  for (const [input, say] of [['Send Jo a video message explaining you have a new avatar', 'explaining you have a new avatar'],
+    ['send me a video of you saying "I have a new avatar"', undefined]]) {
+    const { p } = rig();
+    const asked = [];
+    p.agent.providerManager = { generateResponse: async (prompt) => { asked.push(prompt); return { content: 'Hi Jo, I am ALICE. I have a brand new look!' }; } };
+    const spoken = [];
+    p.agent.ttsService = { generateSpeech: async (txt) => { spoken.push(txt); return { buffer: Buffer.from('mp3'), format: 'mp3' }; } };
+    const r = await p.execute({ action: 'use', as: 'video', to: 'me', wait: true, fromAI: true, ...(say ? { say } : {}), _context: { originalInput: input } });
+    assert.equal(r.success, true, r.error);
+    assert.deepEqual(spoken, ['Hi Jo, I am ALICE. I have a brand new look!'], input);
+    assert.equal(asked.length, 1);
+  }
+});
+
+test('quoted words are found for the voice-over', () => {
   assert.equal(quotedWords('wave and say "Hi Lizzy!"'), 'Hi Lizzy!');
   assert.equal(quotedWords("wave saying 'good morning'"), 'good morning');
   assert.equal(quotedWords('wave at me'), '');
@@ -133,4 +150,24 @@ test('with a voice: 0.3 s lead-in, the line, 0.3 s tail, no longer (2119 #477); 
   assert.equal(framingAsked('send me a video of you waving, waist up'), 'waist');
   assert.equal(framingAsked('a close-up video of you saying hi'), 'head');
   assert.equal(framingAsked('send me a video of you dancing'), 'full');
+});
+
+test('who sees which body in a video (2026-11-20): the owner the assistant one, his personal one only when he asks; a contact the assistant; a stranger the public', async () => {
+  const cases = [
+    ['send me a video of you pole dancing', 'me', 'assistant', []],
+    ['send me a video of you pole dancing in your personal avatar', 'me', 'personal', []],
+    ['send me a video of you pole dancing as Rose', 'me', 'personal', []],
+    ['send Jo a video of you pole dancing in your personal avatar', 'Jo', 'assistant', [{ _id: 'p1', name: 'Jo' }]],
+    ['send Sam a video of you pole dancing', 'Sam', 'public', []]
+  ];
+  for (const [input, to, want, people] of cases) {
+    const { p } = rig();
+    p._people = { byName: async () => people };
+    p.contactModel = async () => null;
+    const asked = [];
+    p.modelFor = async (role) => { asked.push(role); return { id: `m-${role}`, name: role === 'personal' ? 'Rose (Neon District) — default' : role, file: 'x.vrm' }; };
+    p.chooseClip = async () => ({ error: 'stop here' });
+    await p.sendClipVideo({ asked: input, to, clip: 'pole dance' });
+    assert.equal(asked.at(-1), want, input);
+  }
 });

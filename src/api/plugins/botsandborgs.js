@@ -4,7 +4,7 @@ import crypto from 'node:crypto';
 import path from 'path';
 import { PluginSettings } from '../../models/PluginSettings.js';
 import { encrypt, decrypt } from '../../utils/encryption.js';
-import { ROLES, normalizeRole, roleForRecipient, resolveRoleModel, modelsInUse, autoFillRoles } from '../../services/avatar/avatarRoles.js';
+import { ROLES, normalizeRole, resolveRoleModel, modelsInUse, autoFillRoles } from '../../services/avatar/avatarRoles.js';
 import fs from 'node:fs/promises';
 import { DATA_PATH } from '../../utils/paths.js';
 import { propsFor, variantKind, livePass, applyClipManifest, unpack, installVrm, addToManifest, readVrmInfo, readVrmaInfo, clipLabel, clipLoops, clipGesture, writeStoreAnimations, safeName, toStickerWebp, moodOf, portraitFromPreview } from '../../services/store/assetLibrary.js';
@@ -238,7 +238,7 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
       },
       {
         command: 'roles',
-        description: 'Role-based avatars: a different owned 3D model per role. public = the profile pictures everyone sees (Telegram, X, MindSwarm, Gravatar, Trellis, on-chain); assistant = videos and talking replies sent to other people for the owner; personal = what only the owner sees (the 3D pages, AvatarX, the apps, videos to the owner; the worn model). With no arguments lists them; role + item sets one; clear: role empties it (it falls back: assistant to public, public to the worn model); auto: true fills empty slots from what the store says each model suits',
+        description: 'Role-based avatars: a different owned 3D model per role, or for one person (role: a contact\'s name, item: the model or look they see). public = the profile pictures everyone sees (Telegram, X, MindSwarm, Gravatar, Trellis, on-chain); assistant = videos and talking replies sent to other people for the owner; personal = what only the owner sees (the 3D pages, AvatarX, the apps, videos to the owner; the worn model). With no arguments lists them; role + item sets one; clear: role empties it (it falls back: assistant to public, public to the worn model); auto: true fills empty slots from what the store says each model suits',
         usage: 'roles({})  // roles({ role: "public", item: "racer blue" }), roles({ clear: "assistant" }), roles({ auto: true })',
         examples: ['which avatar do you use for what', 'use racer blue as your public avatar', 'use pilot white when you send videos to people', 'wear the frog for me privately', 'stop using a separate assistant avatar', 'set up your avatar roles yourself']
       },
@@ -1032,6 +1032,9 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
       const note = r === 'public' ? ` ${await this.applyPublicPicture(got.entry.id)}` : ' Videos and talking replies I send to other people use it now, and TextX and DialX show its picture.';
       return { success: true, result: `${got.entry.name} is my ${r} avatar.${note}`.trim() };
     }
+    // "Use the GLaDOS avatar for Wayne": a person's name where a role goes is that person's own avatar (per-contact
+    // avatars on a linked model; it went to the roles and was refused, 2026-11-20).
+    if (role && !r && (item || modelId)) return this.setContactLook({ contact: String(role), look: String(item || modelId).replace(/\b(avatar|model|look|the)\b/gi, ' ').trim(), key: await this.accountKey() });
     if (role && !r) return { success: false, error: 'The roles are public, assistant and personal.' };
     const line = async (x) => {
       const id = resolveRoleModel(roles, x, worn);
@@ -1574,7 +1577,9 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     const words = String(look).toLowerCase();
     let hit = null;
     for (const l of st.links.filter(x => x.status === 'active')) {
-      for (const o of l.outfits) {
+      // The model's default outfit first ("use GLaDOS for Wayne" means GLaDOS as she comes, not every piece on).
+      const outfits = [...l.outfits].sort((a, b) => (b.outfit === 'default') - (a.outfit === 'default'));
+      for (const o of outfits) {
         const lk = (o.looks || []).find(x => words.includes(String(x.name || x.id).toLowerCase()));
         if (lk || words.includes(String(o.name).toLowerCase()) || String(o.name).toLowerCase().split(/\W+/).some(w => w.length > 3 && words.includes(w))) { hit = { l, o, lk }; break; }
       }
@@ -2785,9 +2790,14 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
       // Quoted words are spoken as written. Anything else is the agent's own line, written from its side: the extractor
       // copied "youre now able to move and talk" straight into the video (2026-11-15), which is the owner's wording, not
       // what the agent says about itself.
-      const given = (data.say || data.voiceover) && !(data._extracted || []).some(k => k === 'say' || k === 'voiceover') ? String(data.say || data.voiceover) : '';
-      const wantsSpeech = !!(data.say || data.voiceover) || /\b(explain|explaining|say|saying|tell|telling|talk(?:ing)? about|introduc|announc|letting (?:him|her|them) know)\w*/i.test(asked);
-      let say = quotedWords(asked) || given;
+      // The texting rule (the owner, 2026-11-20, as for texts since 2.25.744): words are spoken exactly only when they
+      // are quoted AND the request says "verbatim". Anything else, quoted or not, the agent writes itself. A `say` taken
+      // from a request (by any extractor: the router's carried "explaining you have a new avatar" straight into a video
+      // to a contact) is never copied; only a caller with no request (the API) gives its own line.
+      const exact = /\bverbatim\b/i.test(asked) ? quotedWords(asked) : '';
+      const given = !asked.trim() && (data.say || data.voiceover) ? String(data.say || data.voiceover) : '';
+      const wantsSpeech = !!(data.say || data.voiceover) || !!quotedWords(asked) || /\b(explain|explaining|say|saying|tell|telling|talk(?:ing)? about|introduc|announc|letting (?:him|her|them) know)\w*/i.test(asked);
+      let say = exact || given;
       if (!say && wantsSpeech) {
         say = await this.voiceLine(asked, videoRecipient(asked, data.to)).catch(() => '') || '';
         // Asked to speak and no line could be written: say so, never a silent video.
@@ -3057,7 +3067,10 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     // A voice-over (the owner, 2026-11-11): the agent's own voice speaking over the clip, with its mouth moving to it.
     const words = String(say || '').trim().slice(0, 600);
     // A motion pack for the model it wears has this reaction ready-made: sent at once, no render (store 0.20).
-    if (!words && /^(me|owner|myself)$/i.test(to)) {
+    // A ready-made reaction is made for the worn model: only when that is also the assistant one (videos never show the
+    // personal body, the owner 2026-11-20).
+    const wornIsAssistant = (await this.modelFor('assistant').catch(() => null))?.id === this.agent?.agentModel?.activeVRMModel;
+    if (!words && /^(me|owner|myself)$/i.test(to) && wornIsAssistant) {
       const ready = await this.readyClip(`${clip || ''} ${item || ''} ${asked}`);
       if (ready) {
         const tg = this.agent?.interfaces?.get?.('telegram');
@@ -3068,13 +3081,23 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
         }
       }
     }
-    // Role-based avatars: the owner sees the personal (worn) model, anyone else the assistant one, or the avatar the
-    // owner picked for that one person (linked agents' per-contact avatars).
-    const role = roleForRecipient(to);
+    // Role-based avatars: every video is the assistant model, the owner's too (the owner, 2026-11-20: the personal one
+    // is his private, adult/entertainment mode, only on the app, the web UI and AvatarX), or the avatar the owner
+    // picked for that one person (linked agents' per-contact avatars).
+    // The owner (2026-11-20): only he ever sees the personal avatar, and never in anything sent; his contacts see the
+    // assistant one (or the one he picked for that person), anyone else the public one.
+    let role = 'assistant';
     let personId = null;
-    if (role !== 'personal' && to) {
+    const toOwner = !to || /^(me|owner|myself)$/i.test(String(to));
+    // The owner may ask for a video of his personal avatar ("pole dancing in your personal avatar"); only to him.
+    if (toOwner) {
+      const personalName = String((await this.modelFor('personal').catch(() => null))?.name || '').split(/\s+[—(-]/)[0].trim().toLowerCase();
+      if (/\b(personal|private)\s+(avatar|model|body|look)\b/i.test(asked) || (personalName.length > 2 && new RegExp(`\\b${personalName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`).test(String(asked).toLowerCase()))) role = 'personal';
+    }
+    if (!toOwner) {
       const found = await (await this.peopleDirectory()).byName(String(to)).catch(() => []);
       if (found.length === 1) personId = found[0]._id;
+      else if (!found.length) role = 'public';
     }
     const model = await this.modelFor(role, { personId });
     if (!model?.file) return { success: false, error: "I'm not wearing a 3D model, so there's nothing to film." };
@@ -3148,14 +3171,14 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
    * A video of one move on the worn body, returned not sent (AvatarX's POST /agent/v1/video, the live avatar's
    * /api/avatar-live/video): { name, framing?: full|waist|head, backgroundPath?, audio_b64? } → { video, seconds }.
    */
-  async renderMoveVideo({ name, framing = 'full', backgroundPath = null, audio_b64 = null } = {}) {
+  async renderMoveVideo({ name, framing = 'full', backgroundPath = null, audio_b64 = null, role = 'assistant' } = {}) {
     if (!name) throw Object.assign(new Error('name the move'), { status: 400 });
     const picked = await this.chooseClip({ clip: String(name).replace(/[_-]+/g, ' '), asked: String(name), speaking: !!audio_b64 });
     if (picked.error) throw Object.assign(new Error(picked.error), { status: 400 });
     const { entry, rel } = picked;
-    const worn = this.agent?.agentModel?.activeVRMModel;
-    const manifest = await fs.readFile(path.join(this.vrmDir(), 'manifest.json'), 'utf8').then(JSON.parse).catch(() => []);
-    const model = manifest.find(m => m.id === worn);
+    // A video goes out to wherever it is sent, so never the personal model (only the owner sees that one, never in
+    // anything sent: 2026-11-20): public when asked for, else the assistant one.
+    const model = await this.modelFor(normalizeRole(role) === 'public' ? 'public' : 'assistant');
     if (!model?.file) throw Object.assign(new Error('no 3D model is worn'), { status: 409 });
     const { renderClipVideo } = await import('../../services/avatar/clipVideo.js');
     const voice = audio_b64 ? { audio: Buffer.from(String(audio_b64), 'base64'), format: 'mp3' } : null;

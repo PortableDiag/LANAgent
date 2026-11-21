@@ -2,6 +2,15 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.880] - 2026-11-20
+
+### Fixed
+- **A video message says what it was asked to, in the agent's own words.** "Send Jo a video message explaining you have a new avatar" spoke the words "explaining you have a new avatar": the request's own wording, carried into the voice-over by the router's parameter extraction. Videos now follow the texting rule: words are spoken exactly only when they are quoted and the request says "verbatim"; anything else, quoted or not, the agent writes itself (to that person, in the first person). A line passed straight to the API with no request is still spoken as given.
+- **"Use the GLaDOS avatar for Jo" sets Jo's avatar.** It went to the roles with "Jo" as the role and was refused; a person's name where a role goes now sets that person's avatar (per-contact avatars), the model's default outfit first.
+
+### Changed
+- **Only the owner ever sees the personal avatar.** Videos are filmed on the assistant model for the owner and his contacts (or the avatar he picked for that person), and on the public model for anyone who is not a contact. The personal model is used only for a video to the owner that asks for it ("in your personal avatar", or by its name), and the 3D page's video API no longer offers it. TextX, DialX and NotifX all show the assistant picture (else the public one); the personal picture is for the LANAgent app, the web UI and AvatarX.
+
 ## [2.25.879] - 2026-11-20
 
 ### Changed
