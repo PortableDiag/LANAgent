@@ -866,10 +866,49 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
   }
 
   /** The worn (personal) model's picture to the owner's apps only, kept apart from the public picture. */
+  /**
+   * A portrait of a gallery model that came without one (a linked avatar from the owner's own store account), rendered
+   * from the model with its look on, kept per model + look so it is made once. Returns a PNG buffer, or null.
+   */
+  async modelPortrait(id, look = null) {
+    const manifest = await fs.readFile(path.join(this.vrmDir(), 'manifest.json'), 'utf8').then(JSON.parse).catch(() => []);
+    const m = manifest.find(x => x.id === id);
+    if (!m?.file) return null;
+    const modelPath = path.join(this.vrmDir(), m.file);
+    const st = await fs.stat(modelPath).catch(() => null);
+    if (!st) return null;
+    const tag = crypto.createHash('sha256').update(`${id}|${st.size}|${st.mtimeMs}|${JSON.stringify(look || null)}`).digest('hex').slice(0, 12);
+    const dir = this.portraitRoot || path.join(DATA_PATH, 'agent', 'portraits');
+    const file = path.join(dir, `${safeName(id)}-${tag}.png`);
+    const kept = await fs.readFile(file).catch(() => null);
+    if (kept) return kept;
+    const { renderPortrait } = await import('../../services/avatar/clipVideo.js');
+    const png = await (this.renderPortraitFn || renderPortrait)({ modelPath, look });
+    await fs.mkdir(dir, { recursive: true });
+    await fs.writeFile(file, png);
+    this.logger.info(`botsandborgs: rendered a portrait of ${m.name || id}${look ? ' (with its look)' : ''}`);
+    return png;
+  }
+
+  /** The look a role wears on a linked body, or null. */
+  async roleLook(role, id) {
+    for (const l of (await this.linkState().catch(() => ({ links: [] }))).links) {
+      const x = l.roleLooks?.[role];
+      if (x?.modelId === id && x.look) return x.look;
+    }
+    return null;
+  }
+
   async applyPersonalPicture(id) {
     const base = this.productBase(id);
     const item = (await this.libraryItems()).find(i => this.productBase(i.variant) === base && modelPicture(i));
-    if (!item) return null;
+    if (!item) {
+      // No store picture (a linked avatar): its rendered portrait, so the apps show the body the owner sees.
+      const png = await this.modelPortrait(id, await this.roleLook('personal', id)).catch(e => { this.logger.warn(`botsandborgs: no portrait of ${id}: ${e.message}`); return null; });
+      if (!png) return null;
+      const { applyAgentAvatar } = await import('../../services/avatar/applyAgentAvatar.js');
+      return applyAgentAvatar(this.agent, png, { source: `Bots & Borgs link, ${await this.modelName(id) || id} (personal)`, personal: true });
+    }
     const { applyAgentAvatar } = await import('../../services/avatar/applyAgentAvatar.js');
     return applyAgentAvatar(this.agent, await this.pictureBytes(item, modelPicture(item)), { source: `Bots & Borgs, ${item.variant} (personal)`, personal: true });
   }
@@ -878,7 +917,15 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
   async applyPublicPicture(id) {
     const base = this.productBase(id);
     const item = (await this.libraryItems()).find(i => this.productBase(i.variant) === base && modelPicture(i));
-    if (!item) return 'It has no picture, so the public profiles keep theirs.';
+    if (!item) {
+      // No store picture (a linked avatar): its portrait, rendered from the model, so the profiles follow the body.
+      const png = await this.modelPortrait(id, await this.roleLook('public', id)).catch(e => { this.logger.warn(`botsandborgs: no portrait of ${id}: ${e.message}`); return null; });
+      if (!png) return 'It has no picture, so the public profiles keep theirs.';
+      const { applyAgentAvatar, describeAvatarServices } = await import('../../services/avatar/applyAgentAvatar.js');
+      const applied = await applyAgentAvatar(this.agent, png,
+        { source: `Bots & Borgs link, ${await this.modelName(id) || id} (public)`, only: ['telegram', 'mindswarm', 'twitter', 'gravatar', 'trellis', 'identity'] });
+      return describeAvatarServices(applied.services);
+    }
     const { applyAgentAvatar, describeAvatarServices } = await import('../../services/avatar/applyAgentAvatar.js');
     const applied = await applyAgentAvatar(this.agent, await this.pictureBytes(item, modelPicture(item)),
       { source: `Bots & Borgs, ${item.variant} (public)`, variant: item.variant, only: ['telegram', 'mindswarm', 'twitter', 'gravatar', 'trellis', 'identity'] });
@@ -1109,7 +1156,7 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
   // ── Linked agents (store 0.51) ─────────────────────────────────────────────────────────────
   async linkState() {
     const saved = await PluginSettings.getCached(this.name, 'links').catch(() => null);
-    return { links: Array.isArray(saved?.links) ? saved.links : [], secret: saved?.secret || null, wornBefore: saved?.wornBefore || null };
+    return { ...(saved || {}), links: Array.isArray(saved?.links) ? saved.links : [], secret: saved?.secret || null, wornBefore: saved?.wornBefore || null, pictures: saved?.pictures || {} };
   }
 
   async saveLinkState(st) { await PluginSettings.setCached(this.name, 'links', st); }
@@ -1268,6 +1315,21 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
       // Same body, a new or changed look: AvatarX wears it again.
       await this.wearGalleryModel(picked.personal, looks.personal.look, link.id);
     }
+    // The pictures follow the bodies (the owner's rule: a picture never disagrees with the model): public profiles get
+    // the public pick's portrait, the owner's apps the personal one's. Only when the pick or its look changed, so a
+    // sync never pays for a new on-chain identity with the same picture.
+    const st = await this.linkState();
+    const pics = { ...(st.pictures || {}) };
+    let picChanged = false;
+    for (const r of ['public', 'personal']) {
+      if (!picked[r]) continue;
+      const key = `${picked[r]}|${JSON.stringify(looks[r]?.look || null)}`;
+      if (pics[r] === key) continue;
+      const res = await (r === 'public' ? this.applyPublicPicture(picked[r]) : this.applyPersonalPicture(picked[r]))
+        .catch(e => { this.logger.warn(`botsandborgs: ${r} picture not applied: ${e.message}`); return null; });
+      if (res) { pics[r] = key; picChanged = true; this.logger.info(`botsandborgs: ${r} picture follows ${picked[r]}${typeof res === 'string' ? `: ${res}` : ''}`); }
+    }
+    if (picChanged) await this.saveLinkState({ ...(await this.linkState()), pictures: pics });
     return picked;
   }
 
@@ -1328,7 +1390,14 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     if (next.public !== roles.public || next.assistant !== roles.assistant) { await this.saveSettings({ avatarRoles: next }); await this.pushRolesToStore().catch(() => {}); }
     const worn = this.agent?.agentModel?.activeVRMModel || null;
     if (ids.has(worn) && st.wornBefore) await this.wearGalleryModel(st.wornBefore).catch(e => this.logger.warn(`botsandborgs: could not wear ${st.wornBefore} again: ${e.message}`));
-    await this.saveLinkState({ ...st, links: st.links.filter(x => x.id !== linkId), wornBefore: ids.has(worn) ? null : st.wornBefore });
+    // Pictures made from their models go too: the profiles and apps show the agent's own model again.
+    const pics = st.pictures || {};
+    if (Object.values(pics).some(k => ids.has(String(k).split('|')[0]))) {
+      const own = this.agent?.agentModel?.activeVRMModel || null;
+      await (await import('../../services/avatar/applyAgentAvatar.js')).clearPersonalAvatar().catch(() => {});
+      if (own && !ids.has(own)) await this.applyPublicPicture(own).catch(e => this.logger.warn(`botsandborgs: own picture not put back: ${e.message}`));
+    }
+    await this.saveLinkState({ ...(await this.linkState()), links: st.links.filter(x => x.id !== linkId), wornBefore: ids.has(worn) ? null : st.wornBefore, pictures: {} });
     this.logger.info(`botsandborgs: link ${linkId} ${why}; deleted ${ids.size} linked model(s)`);
     if (l) await this.agent?.notify?.(`The Bots & Borgs link to ${l.owner || 'another account'} has ended (${why}); I deleted my copies of their models${ids.has(worn) ? ' and went back to my own' : ''}.`);
   }

@@ -2,6 +2,14 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.875] - 2026-11-20
+
+### Added
+- **Pictures follow linked avatars.** A linked avatar from the owner's own store account comes without a picture, so the profile pictures kept showing the old model while the 3D body changed. The agent now renders a head-and-shoulders portrait from the model itself (arms down, facing the camera, a light smile, its saved look on) and uses it: the public pick's portrait on the public profiles (Telegram, X, MindSwarm, Gravatar, Trellis, the on-chain identity), the personal pick's in the owner's apps. A portrait is rendered once per model and look and kept; a picture is applied only when a pick or its look changes, so a sync never pays for an on-chain update with the same picture. When the link ends, the agent's own pictures come back.
+
+### Fixed
+- **Videos of large models.** The video renderer handed the model to its headless browser through request interception, which cannot carry a large file: a 157 MB linked avatar failed with "Invalid array length", so no video of most linked models could be made. The model now streams from a local server on 127.0.0.1 (random port and path, open only during the render), and the render page is served from that origin.
+
 ## [2.25.874] - 2026-11-20
 
 ### Added

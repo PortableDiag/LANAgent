@@ -15,7 +15,6 @@ import { fileURLToPath } from 'url';
 import { logger } from '../../utils/logger.js';
 
 const PUBLIC_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), '../../interfaces/web/public');
-const HOST = 'http://clip.render';
 const METHODS = ['_getBone', 'loadVRMA', '_fitPoleSpot'];
 
 /** The named methods of the designer's class, as text, from avatar.html. Throws when one is missing. */
@@ -92,7 +91,7 @@ window.setup = async ({ width, height, fps, seconds, loop, prop, props = [], bac
   const floor = new THREE.Mesh(new THREE.CircleGeometry(0.9, 48), new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.06 }));
   floor.rotation.x = -Math.PI / 2; floor.position.y = 0.001; scene.add(floor);
   const l = new GLTFLoader(); l.register(p => new V.VRMLoaderPlugin(p));
-  const vrm = (await l.loadAsync('/model.vrm')).userData.vrm;
+  const vrm = (await l.loadAsync(window.MODEL_URL || '/model.vrm')).userData.vrm;
   if (V.VRMUtils?.removeUnnecessaryJoints) V.VRMUtils.removeUnnecessaryJoints(vrm.scene);
   vrm.scene.traverse(o => { if (o.isMesh) o.frustumCulled = false; });
   scene.add(vrm.scene); d.currentVRM = vrm;
@@ -228,6 +227,27 @@ export function envelopeFromPcm(pcm, rate, fps) {
 }
 
 const MIME = { '.js': 'text/javascript', '.vrm': 'model/gltf-binary', '.vrma': 'model/gltf-binary', '.glb': 'model/gltf-binary', '.html': 'text/html', '.jpg': 'image/jpeg' };
+
+/**
+ * The model file over a local HTTP server, streamed. Puppeteer's request interception cannot answer with a large body
+ * (a 157 MB linked avatar failed with "RangeError: Invalid array length", 2026-11-20): every model goes this way.
+ * Returns { url, close }. Listens on 127.0.0.1 only, on a random port and a random path.
+ */
+async function serveModel(file) {
+  const http = await import('node:http');
+  const { createReadStream } = await import('node:fs');
+  const secret = `/m-${Math.random().toString(36).slice(2)}.vrm`;
+  const server = http.createServer((req, res) => {
+    if (req.url !== secret) { res.writeHead(404); return res.end(); }
+    fs.stat(file).then((st) => {
+      res.writeHead(200, { 'Content-Type': 'model/gltf-binary', 'Content-Length': st.size, 'Access-Control-Allow-Origin': '*' });
+      createReadStream(file).pipe(res);
+    }).catch(() => { res.writeHead(404); res.end(); });
+  });
+  await new Promise((ok) => server.listen(0, '127.0.0.1', ok));
+  const origin = `http://127.0.0.1:${server.address().port}`;
+  return { url: `${origin}${secret}`, origin, path: secret, close: () => new Promise((ok) => server.close(() => ok())) };
+}
 let busy = Promise.resolve();
 
 /**
@@ -263,17 +283,20 @@ async function render({ modelPath, clipPath, loop = false, prop = null, props = 
     said = await voiceEnvelope(audioFile, fps);
   }
   const timer = setTimeout(() => browser.close().catch(() => {}), timeoutMs);
+  const model = await serveModel(modelPath);
   try {
     const page = await browser.newPage();
     await page.setViewport({ width, height });
     await page.setRequestInterception(true);
     page.on('request', async (req) => {
       const u = new URL(req.url());
-      if (u.origin !== HOST) return req.abort();
+      // The page is on the model server's own origin (same-origin: Chrome blocks a page reaching loopback from elsewhere);
+      // the model streams from it, everything else is answered here.
+      if (u.origin !== model.origin) return req.abort();
+      if (u.pathname === model.path) return req.continue();
       try {
         let body;
         if (u.pathname === '/render.html') body = Buffer.from(html);
-        else if (u.pathname === '/model.vrm') body = await fs.readFile(modelPath);
         else if (u.pathname === '/clip.vrma') body = await fs.readFile(clipPath);
         else if (u.pathname === '/background.jpg' && backgroundPath) body = await fs.readFile(backgroundPath);
         else if (/^\/prop\/\d+\.glb$/.test(u.pathname) && propFiles[Number(u.pathname.slice(6, -4))]) body = await fs.readFile(propFiles[Number(u.pathname.slice(6, -4))]);
@@ -287,7 +310,8 @@ async function render({ modelPath, clipPath, loop = false, prop = null, props = 
     });
     const pageErrors = [];
     page.on('pageerror', e => pageErrors.push(e.message));
-    await page.goto(`${HOST}/render.html`, { waitUntil: 'load', timeout: 60000 });
+    await page.goto(`${model.origin}/render.html`, { waitUntil: 'load', timeout: 60000 });
+    await page.evaluate((u) => { window.MODEL_URL = u; }, model.url);
     await page.waitForFunction('window.ready === true', { timeout: 60000 }).catch(() => { throw new Error(`the render page did not start: ${pageErrors[0] || 'no error given'}`); });
     // The clip's length is known only once it is loaded, so the page is set up with a generous span first.
     const probe = await page.evaluate((o) => window.setup(o), { width, height, fps, seconds: 40, loop, prop, props: pageProps, background, backgroundImage: !!backgroundPath, framing: ['waist', 'head'].includes(framing) ? framing : 'full', look,
@@ -315,7 +339,108 @@ async function render({ modelPath, clipPath, loop = false, prop = null, props = 
     return { video, ...facts };
   } finally {
     clearTimeout(timer);
+    await model.close().catch(() => {});
     await browser.close().catch(() => {});
     await fs.rm(tmp, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
+/**
+ * A head-and-shoulders portrait of a model, rendered here (the same three.js and three-vrm as the videos): arms down,
+ * facing the camera with a light smile, the owner's saved look on (linked avatars). For a model that came without a
+ * picture (a linked avatar from the owner's own store account), so the profile pictures can follow the body.
+ * Returns a square PNG buffer.
+ */
+export function renderPortrait(opts) {
+  const run = busy.then(() => portrait(opts));
+  busy = run.catch(() => {});
+  return run;
+}
+
+const PORTRAIT_HTML = `<!doctype html><html><head><meta charset="utf-8"><style>html,body{margin:0;background:#000}</style></head><body>
+<script src="/lib/three.r183.min.js"></script>
+<script type="importmap">{ "imports": { "three": "/lib/three.r183.module.js", "three/addons/": "/lib/addons/" } }</script>
+<script type="module">
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import * as V from '/lib/three-vrm.module.js';
+import { wearLook } from '/lib/vrm-look.js';
+const THREE = window.THREE;
+window.portrait = async ({ size, background, look }) => {
+  const r = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
+  r.setPixelRatio(1); r.setSize(size, size); r.outputColorSpace = THREE.SRGBColorSpace; document.body.appendChild(r.domElement);
+  const scene = new THREE.Scene();
+  scene.background = new THREE.Color(background);
+  scene.add(new THREE.HemisphereLight(0xffffff, 0x3a4050, 2.2));
+  const key = new THREE.DirectionalLight(0xffffff, 2.4); key.position.set(0.8, 2.2, 2.5); scene.add(key);
+  const rim = new THREE.DirectionalLight(0x9fc4ff, 1.0); rim.position.set(-2, 2, -2); scene.add(rim);
+  const l = new GLTFLoader(); l.register(p => new V.VRMLoaderPlugin(p));
+  const vrm = (await l.loadAsync(window.MODEL_URL || '/model.vrm')).userData.vrm;
+  if (V.VRMUtils?.rotateVRM0) V.VRMUtils.rotateVRM0(vrm);
+  vrm.scene.traverse(o => { if (o.isMesh) o.frustumCulled = false; });
+  scene.add(vrm.scene);
+  const worn = wearLook(vrm, look);
+  // Arms down (out of the T-pose) and a light smile.
+  const bone = (n) => vrm.humanoid?.getNormalizedBoneNode(n);
+  if (bone('leftUpperArm')) bone('leftUpperArm').rotation.z = -1.2;
+  if (bone('rightUpperArm')) bone('rightUpperArm').rotation.z = 1.2;
+  vrm.expressionManager?.setValue('happy', 0.25);
+  vrm.update(0); worn.apply(vrm); vrm.scene.updateMatrixWorld(true);
+  const p = (n) => vrm.humanoid?.getRawBoneNode(n)?.getWorldPosition(new THREE.Vector3());
+  const head = p('head') || new THREE.Vector3(0, 1.5, 0);
+  const neck = p('neck') || head.clone().add(new THREE.Vector3(0, -0.1, 0));
+  // Frame from the collarbones to just above the head, square.
+  const top = head.y + 0.22, bottom = neck.y - 0.1;
+  const h = top - bottom, cy = (top + bottom) / 2;
+  const cam = new THREE.PerspectiveCamera(30, 1, 0.01, 100);
+  const dist = (h / 2) / Math.tan((30 * Math.PI / 180) / 2);
+  cam.position.set(head.x, cy, head.z + dist); cam.lookAt(head.x, cy, head.z);
+  if (vrm.lookAt) { const t = new THREE.Object3D(); t.position.copy(cam.position); scene.add(t); vrm.lookAt.target = t; }
+  vrm.update(0); worn.apply(vrm);
+  r.render(scene, cam);
+  return r.domElement.toDataURL('image/png');
+};
+window.ready = true;
+</script></body></html>`;
+
+async function portrait({ modelPath, look = null, size = 1024, background = '#1b2333', timeoutMs = 3 * 60 * 1000, launch = null } = {}) {
+  const { default: puppeteer } = await import('puppeteer');
+  const browser = await (launch || ((o) => puppeteer.launch(o)))({
+    headless: 'new',
+    args: ['--no-sandbox', '--disable-dev-shm-usage', '--use-gl=angle', '--use-angle=swiftshader-webgl', '--enable-unsafe-swiftshader', '--ignore-gpu-blocklist', `--window-size=${size},${size}`]
+  });
+  const timer = setTimeout(() => browser.close().catch(() => {}), timeoutMs);
+  const model = await serveModel(modelPath);
+  try {
+    const page = await browser.newPage();
+    await page.setViewport({ width: size, height: size });
+    await page.setRequestInterception(true);
+    page.on('request', async (req) => {
+      const u = new URL(req.url());
+      // The page is on the model server's own origin (same-origin: Chrome blocks a page reaching loopback from elsewhere);
+      // the model streams from it, everything else is answered here.
+      if (u.origin !== model.origin) return req.abort();
+      if (u.pathname === model.path) return req.continue();
+      try {
+        let body;
+        if (u.pathname === '/portrait.html') body = Buffer.from(PORTRAIT_HTML);
+        else if (u.pathname.startsWith('/lib/')) {
+          const file = path.join(PUBLIC_DIR, path.normalize(u.pathname).replace(/^(\.\.[/\\])+/, ''));
+          if (!file.startsWith(path.join(PUBLIC_DIR, 'lib'))) return req.respond({ status: 404, body: '' });
+          body = await fs.readFile(file);
+        } else return req.respond({ status: 404, body: '' });
+        req.respond({ status: 200, contentType: MIME[path.extname(u.pathname)] || 'application/octet-stream', body });
+      } catch { req.respond({ status: 404, body: '' }); }
+    });
+    const pageErrors = [];
+    page.on('pageerror', e => pageErrors.push(e.message));
+    await page.goto(`${model.origin}/portrait.html`, { waitUntil: 'load', timeout: 60000 });
+    await page.evaluate((u) => { window.MODEL_URL = u; }, model.url);
+    await page.waitForFunction('window.ready === true', { timeout: 60000 }).catch(() => { throw new Error(`the portrait page did not start: ${pageErrors[0] || 'no error given'}`); });
+    const url = await page.evaluate((o) => window.portrait(o), { size, background, look });
+    return Buffer.from(url.slice(url.indexOf(',') + 1), 'base64');
+  } finally {
+    clearTimeout(timer);
+    await model.close().catch(() => {});
+    await browser.close().catch(() => {});
   }
 }

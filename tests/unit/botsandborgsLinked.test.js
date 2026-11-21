@@ -304,3 +304,33 @@ test('AvatarX: a lent body wearing a look gets it with PATCH looks; the page\'s 
   await pushModelToAvatarX('m1', { url: 'https://ax', keyFile, vrmDir: dir, fetchFn, look });
   assert.equal(sent.filter(x => x.method === 'PATCH' && /looks/.test(x.body)).length, 0, 'no link, no look');
 });
+
+test('pictures follow linked picks: public and personal portraits rendered once, applied only on a change', async () => {
+  const base = vrm('Rose'); const coat = vrm('Rose coat');
+  const t = rig({
+    files: { 'rose/base': base, 'rose/coat': coat },
+    routes: {
+      'get /api/account/links': { as_agent: [{ id: 'lnk_8', status: 'active' }] },
+      'get /api/account/links/lnk_8': { link: { models: [{ model: 'rose', name: 'Rose', outfits: [{ outfit: 'base', sha256: sha(base) }, { outfit: 'coat', sha256: sha(coat) }] }] } },
+      'get /api/account/links/lnk_8/roles/public': { model: 'rose', outfit: 'base', ref: 'locker:rose/base', look: null },
+      'get /api/account/links/lnk_8/roles/personal': { model: 'rose', outfit: 'coat', ref: 'locker:rose/coat', look: null }
+    }
+  });
+  t.p.portraitRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'portraits-'));
+  const renders = [];
+  t.p.renderPortraitFn = async ({ modelPath, look }) => { renders.push(path.basename(modelPath)); return Buffer.from(`png-${renders.length}`); };
+  const applied = [];
+  // The real appliers, with the last step (every service) recorded instead of run.
+  t.p.applyPublicPicture = async function (id) { const png = await this.modelPortrait(id, await this.roleLook('public', id)); applied.push(['public', id, String(png)]); return 'ok'; };
+  t.p.applyPersonalPicture = async function (id) { const png = await this.modelPortrait(id, await this.roleLook('personal', id)); applied.push(['personal', id, String(png)]); return {}; };
+  await t.p.syncLinks();
+  assert.deepEqual(applied.map(a => a.slice(0, 2)), [['public', 'store-linked-lnk-8-rose-base'], ['personal', 'store-linked-lnk-8-rose-coat']]);
+  assert.equal(renders.length, 2);
+  // A second sync with the same picks applies nothing and renders nothing.
+  await t.p.syncLinks();
+  assert.equal(applied.length, 2);
+  assert.equal(renders.length, 2);
+  // The portrait is kept: asked again, it is read, not rendered.
+  assert.equal(String(await t.p.modelPortrait('store-linked-lnk-8-rose-base')), 'png-1');
+  assert.equal(renders.length, 2);
+});
