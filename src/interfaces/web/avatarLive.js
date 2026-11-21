@@ -64,6 +64,14 @@ export function createLiveAvatar(agent, { d = L.dirs() } = {}) {
     const [settings, active, avatarList, clipMap, propList, bgMap] = await Promise.all([
       L.readSettings(d), activeId(), L.avatars(d), L.clips(d), L.props(d), storeScenes().then(s => L.customBackgrounds(d, s))
     ]);
+    // Clips the store fitted to the body showing (its fitted packs, same clip names) play instead of the pack's.
+    try {
+      const fittedClips = await store()?.fittedClips?.(active);
+      for (const [name, file] of fittedClips || []) {
+        if (clipMap.has(name)) clipMap.set(name, file);
+        else if (clipMap.has(`bnb-${name}`)) clipMap.set(`bnb-${name}`, file);
+      }
+    } catch {}
     // Props the store fitted to the body showing (store 0.28) take the pack placements' place for it.
     let fitted = propList;
     try {
@@ -200,7 +208,13 @@ export function avatarLiveRouter(agent, live = createLiveAvatar(agent), { auth =
 
   // --- motions ---
   r.get('/animations/:name/file', async (req, res) => {
-    const file = (await L.clips(d)).get(req.params.name);
+    let file = (await L.clips(d)).get(req.params.name);
+    // The body showing plays its fitted version (the store solved it on that body), same name.
+    try {
+      const fitted = await store()?.fittedClips?.(await activeId());
+      const own = fitted?.get(req.params.name) || fitted?.get(String(req.params.name).replace(/^bnb-/, ''));
+      if (file && own) file = own;
+    } catch {}
     if (!file) return res.status(404).json({ error: 'no such clip' });
     sendFile(res, file, 'application/octet-stream');
   });

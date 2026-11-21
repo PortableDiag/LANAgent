@@ -94,7 +94,9 @@ export function readJob(d) {
   const id = typeof d?.job === 'string' ? d.job : j.id || j.job || null;
   const status = String(j.status || (d?.cached ? 'passed' : 'queued'));
   const link = (v) => (typeof v === 'string' ? v : v?.url || null);
-  return { id, status, report: j.report || d?.report || null, vrma: link(j.vrma || d?.vrma), preview: link(j.preview || d?.preview), reason: j.reason || j.error || null };
+  const report = j.report || d?.report || null;
+  // A job the solver never finished says why in its report (`{error: "timeout"}`, 2026-11-20).
+  return { id, status, report, vrma: link(j.vrma || d?.vrma), preview: link(j.preview || d?.preview), reason: j.reason || j.error || report?.error || report?.reason || null };
 }
 
 /**

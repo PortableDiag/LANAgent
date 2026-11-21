@@ -39,6 +39,7 @@ test('names, tags, job replies and failed checks', () => {
   assert.deepEqual(readJob({ job: 'aj_1', poll: '/api/anim/jobs/aj_1' }), { id: 'aj_1', status: 'queued', report: null, vrma: null, preview: null, reason: null });
   assert.equal(readJob({ job: { id: 'aj_2', status: 'passed', vrma: { url: '/v' } } }).vrma, '/v');
   assert.equal(readJob({ id: 'aj_3', status: 'failed', report: [] }).status, 'failed');
+  assert.equal(readJob({ job: { id: 'aj_4', status: 'failed', report: { error: 'timeout', status: 'failed' } } }).reason, 'timeout');
   assert.equal(reportFailures({ checks: [{ name: 'wrist_bend', pass: false, value: 52, limit: 40, unit: '°' }, { name: 'seam', pass: true }] }), 'wrist bend 52° (limit 40°)');
   assert.equal(reportFailures(null), '');
   // The store's own shape (3910 #1929).

@@ -334,3 +334,56 @@ test('pictures follow linked picks: public and personal portraits rendered once,
   assert.equal(String(await t.p.modelPortrait('store-linked-lnk-8-rose-base')), 'png-1');
   assert.equal(renders.length, 2);
 });
+
+test('linked fits (store 0.53): status per body, unsupported props left off, fitted placements, fitted clips by ETag, solves on the link', async () => {
+  const { default: JSZip } = await import('jszip');
+  const base = vrm('Rose');
+  const vrma = glb({ extensions: { VRMC_vrm_animation: { humanoid: { humanBones: {} } } } });
+  const z = new JSZip(); z.file('heart-hands.vrma', vrma);
+  const pack = await z.generateAsync({ type: 'nodebuffer' });
+  const t = rig({
+    files: { 'rose/base': base },
+    routes: {
+      'get /api/account/links': { as_agent: [{ id: 'lnk_9', status: 'active' }] },
+      'get /api/account/links/lnk_9': { link: { models: [{ model: 'rose', name: 'Rose', outfits: [{ outfit: 'base', sha256: sha(base) }] }] } },
+      'get /api/account/links/lnk_9/roles/personal': { model: 'rose', outfit: 'base', ref: 'locker:rose/base', look: null },
+      'get /api/account/links/lnk_9/fit/rose/base': { fitted_for_sha256: sha(base), body_class: 'slim', job: null,
+        props: { mug: { state: 'unsupported', reason: 'it goes 18 mm into the body' }, phone: { state: 'fitted', clips: [{ clip: 'phone-call-loop', placements: { standard: { bone: 'rightHand', position: [0, 0.1, 0], rotation: [0, 0, 0] } } }] } },
+        packs: { 'vrm-emote-animations-1': 'fitted' },
+        clips: [{ pack: 'vrm-emote-animations-1', etag: '"e1"' }] }
+    }
+  });
+  t.p.wearGalleryModel = async (id) => { t.p.agent.agentModel.activeVRMModel = id; };
+  const clipFetches = [];
+  const fileHttp = t.p.http;
+  t.p.http = async (req) => {
+    if (/\/clips\//.test(req.url)) { clipFetches.push(req.headers['If-None-Match'] || null); return req.headers['If-None-Match'] === '"e1"' ? { status: 304, data: Buffer.alloc(0), headers: {} } : { status: 200, data: pack, headers: { etag: '"e1"', 'content-type': 'application/zip' } }; }
+    return fileHttp(req);
+  };
+  await t.p.syncLinks();
+  const id = 'store-linked-lnk-9-rose-base';
+  assert.equal(t.p.agent.agentModel.activeVRMModel, id);
+  // The mug is refused on this body (its .vrm sha256 is the fitted one), with the store's reason.
+  const off = await t.p.unsupportedProps(id);
+  assert.equal(off.get('mug'), 'it goes 18 mm into the body');
+  // The phone's placement solved on this body reaches the 3D page.
+  const lp = (await PluginSettings.getCached('botsandborgs', 'liveProps')).props.find(p => p.prop === 'phone');
+  assert.equal(lp.fitted, true); assert.equal(lp.fitted_for_sha256, sha(base)); assert.equal(lp.clips[0].placements.standard.bone, 'rightHand');
+  // The fitted clip pack is unpacked for this body and played on it; another body plays the pack's own.
+  const fitted = await t.p.clipFileFor(id, 'store/vrm-emote-animations-1/heart-hands.vrma');
+  assert.match(fitted, /animations\/fitted\/linked-lnk-9-rose-base\/vrm-emote-animations-1\/heart-hands\.vrma$/);
+  assert.ok(fs.existsSync(fitted));
+  assert.match(await t.p.clipFileFor('store-vrm-racer-blue-bundle', 'store/vrm-emote-animations-1/heart-hands.vrma'), /animations\/store\/vrm-emote-animations-1\/heart-hands\.vrma$/);
+  // Unchanged pack: not fetched again (same ETag listed).
+  await t.p.syncLinks();
+  assert.equal(clipFetches.length, 1);
+  // A new move on this body goes to the Animation API as the link.
+  t.p._linkCache = await t.p.linkState();
+  assert.deepEqual(t.p.animAvatar(), { link: 'lnk_9', model: 'rose', outfit: 'base' });
+});
+
+test('linkFitProps: placements mapped by prop then clip are read too', async () => {
+  const { linkFitProps } = await import('../../src/api/plugins/botsandborgs.js');
+  const out = linkFitProps({ placements: { mug: { 'mug-sip-idle': { bone: 'rightHand', position: [0, 0, 0] } } } }, 'abc');
+  assert.deepEqual(out, [{ prop: 'mug', fitted: true, fitted_for_sha256: 'abc', clips: [{ clip: 'mug-sip-idle', placements: { standard: { bone: 'rightHand', position: [0, 0, 0] } } }] }]);
+});

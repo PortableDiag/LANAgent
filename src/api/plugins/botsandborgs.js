@@ -163,6 +163,24 @@ export function clipsByTags(pool, words, usesOf = () => []) {
   return best ? scored.filter(x => x.score === best).map(x => x.p) : [];
 }
 
+/**
+ * A linked body's fit (the fit-only shape) as the live-pass /props list avatarLive.applyFits reads: each prop with
+ * `fitted`, `fitted_for_sha256` and its clips' placements. Props may carry their clips, or `placements` may map
+ * prop → clip → placement.
+ */
+export function linkFitProps(f, sha256) {
+  const props = fitEntries(f?.props, 'prop');
+  const byProp = f?.placements && typeof f.placements === 'object' && !Array.isArray(f.placements) ? f.placements : {};
+  const names = new Set([...props.map(p => p.prop), ...Object.keys(byProp)]);
+  return [...names].filter(Boolean).map((name) => {
+    const p = props.find(x => x.prop === name) || {};
+    let clips = Array.isArray(p.clips) ? p.clips : [];
+    const pl = byProp[name];
+    if (!clips.length && pl && typeof pl === 'object') clips = Object.entries(pl).map(([clip, at]) => ({ clip, placements: { standard: at } }));
+    return { prop: name, fitted: p.state ? p.state === 'fitted' : clips.length > 0, fitted_for_sha256: sha256, clips };
+  });
+}
+
 export default class BotsAndBorgsPlugin extends BasePlugin {
   constructor(agent) {
     super(agent);
@@ -516,6 +534,9 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     // Linked agents (store 0.51): an approved, changed or ended link, a new outfit version or a look.
     if ([...kinds].some(k => /^link_/.test(k) || k === 'look' || k === 'model')) {
       ran.push('links'); await this.syncLinks().catch(e => this.logger.warn(`botsandborgs: linked models not synced: ${e.message}`));
+    }
+    if ((kinds.has('fit') || kinds.has('fit_failed')) && !ran.includes('links') && (await this.linkState()).links.length) {
+      ran.push('links'); await this.syncLinks().catch(e => this.logger.warn(`botsandborgs: linked fits not synced: ${e.message}`));
     }
     if (kinds.has('fit') || kinds.has('fit_failed')) {
       const pass = this.wornPass(await this.livePasses());
@@ -1202,6 +1223,119 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     return { success: true, links: done.links, result: done.summary };
   }
 
+  /** { link, model, outfit } when a gallery id is one of a link's outfits, else null. */
+  linkedOutfitOf(id, st = null) {
+    if (!id || !/^store-linked-/.test(String(id))) return null;
+    for (const l of (st || {}).links || []) {
+      const o = (l.outfits || []).find(x => x.modelId === id);
+      if (o) return { link: l.id, model: o.model, outfit: o.outfit, modelId: o.modelId };
+    }
+    return null;
+  }
+
+  /** The linked bodies this agent uses now: the worn one and the roles' (their fits matter). */
+  async linkedBodiesInUse(link) {
+    const roles = await this.avatarRoles();
+    const ids = new Set([this.agent?.agentModel?.activeVRMModel, roles.public, roles.assistant, ...Object.values(link.roles || {})].filter(Boolean));
+    return (link.outfits || []).filter(o => ids.has(o.modelId));
+  }
+
+  /**
+   * The store's fits for each linked body in use (store 0.53, GET /api/account/links/<id>/fit/<model>/<outfit>, the
+   * fit-only shape): the status per prop and pack (an unsupported prop is left off that body), the fitted prop
+   * placements, and the fitted clip packs (fetched by ETag into animations/fitted/<body>/, played on that body).
+   */
+  async syncLinkFits(link, key) {
+    const bodies = await this.linkedBodiesInUse(link);
+    if (!bodies.length) return [];
+    const worn = this.agent?.agentModel?.activeVRMModel || null;
+    const all = (await PluginSettings.getCached(this.name, 'liveFits').catch(() => null))?.bySlug || {};
+    const out = [];
+    for (const o of bodies) {
+      let d;
+      try { d = await this.api('get', `/api/account/links/${encodeURIComponent(link.id)}/fit/${encodeURIComponent(o.model)}/${encodeURIComponent(o.outfit)}`, { key }); }
+      catch (e) { if (linkEnded(e)) throw e; if (e.status !== 404) this.logger.warn(`botsandborgs: fit for ${o.name} not read: ${e.message}`); continue; }
+      const f = d?.fit || d || {};
+      const props = fitEntries(f.props, 'prop');
+      // `unsupported` (+ reason) may come as its own list: each is a prop not to attach to this body.
+      for (const u of fitEntries(f.unsupported, 'prop')) {
+        const name = u.prop || u.name;
+        const at = props.find(p => p.prop === name);
+        if (at) Object.assign(at, { state: 'unsupported', reason: at.reason || u.reason, line: at.line || u.line });
+        else props.push({ ...u, prop: name, state: 'unsupported' });
+      }
+      const fit = { slug: o.modelId, product: null, checkedAt: new Date().toISOString(), vrm_sha256: f.fitted_for_sha256 || f.vrm_sha256 || null,
+        body_class: f.body_class || null, job: f.job || null, last_fit: f.last_fit || null, props, packs: fitEntries(f.packs, 'pack'), placements: f.placements || null, link: link.id };
+      all[this.productBase(o.modelId)] = fit;
+      if (o.modelId === worn) {
+        await PluginSettings.setCached(this.name, 'liveFit', fit);
+        // Fitted placements for the 3D page (avatarLive applyFits reads liveProps), in the live-pass shape.
+        await PluginSettings.setCached(this.name, 'liveProps', { slug: o.modelId, checkedAt: fit.checkedAt, props: linkFitProps(f, fit.vrm_sha256) });
+      }
+      const clips = await this.syncFittedClips(link, o, f, key).catch(e => { this.logger.warn(`botsandborgs: fitted clips for ${o.name} not fetched: ${e.message}`); return 0; });
+      const count = (st) => props.filter(p => p.state === st).length;
+      this.logger.info(`botsandborgs: linked fit for ${o.name} (${fit.body_class || 'body ?'}${fit.job ? `, job ${fit.job.state || fit.job.status || 'queued'}` : ''}): props ${props.length} — ${count('fitted')} fitted, ${count('unsupported')} unsupported; ${clips} fitted clip pack(s) | fields ${Object.keys(f).join(', ')}`);
+      out.push(fit);
+    }
+    await PluginSettings.setCached(this.name, 'liveFits', { bySlug: all });
+    return out;
+  }
+
+  /** A body's fitted clip packs, each fetched by its ETag and unpacked under animations/fitted/<body>/<pack>/. */
+  async syncFittedClips(link, o, f, key) {
+    const list = Array.isArray(f.clips) ? f.clips : f.clips && typeof f.clips === 'object' ? Object.entries(f.clips).map(([pack, v]) => ({ pack, ...(typeof v === 'object' ? v : { url: v }) })) : [];
+    if (!list.length) return 0;
+    const root = path.join(this.vrmDir(), 'animations', 'fitted', safeName(this.productBase(o.modelId)));
+    const indexFile = path.join(root, 'index.json');
+    const index = await fs.readFile(indexFile, 'utf8').then(JSON.parse).catch(() => ({}));
+    let n = 0;
+    for (const c of list) {
+      const pack = String(c.pack || c.name || c.id || '');
+      if (!pack) continue;
+      const url = c.url || `${BASE}/api/account/links/${encodeURIComponent(link.id)}/fit/${encodeURIComponent(o.model)}/${encodeURIComponent(o.outfit)}/clips/${encodeURIComponent(pack)}`;
+      const had = index[pack];
+      if (had?.etag && c.etag && had.etag === String(c.etag)) { n++; continue; }
+      const headers = { 'User-Agent': this.userAgent(), Authorization: `Bearer ${key}`, ...(had?.etag ? { 'If-None-Match': had.etag } : {}) };
+      const r = await (this.http || axios)({ method: 'get', url: /^https?:/.test(url) ? url : `${BASE}${url}`, responseType: 'arraybuffer', timeout: 180000, headers, validateStatus: () => true });
+      if (r.status === 304) { n++; continue; }
+      if (r.status === 404) continue; // play the pack as made
+      if (r.status !== 200) throw new Error(`${pack}: the store answered ${r.status}`);
+      const dir = path.join(root, safeName(pack));
+      await fs.rm(dir, { recursive: true, force: true });
+      await fs.mkdir(dir, { recursive: true });
+      const files = [];
+      for (const x of await unpack(Buffer.from(r.data), { type: String(r.headers?.['content-type'] || ''), kind: 'animation', filename: `${pack}.zip` })) {
+        if (x.kind !== 'animation') continue;
+        await fs.writeFile(path.join(dir, path.basename(x.name)), x.buffer);
+        files.push(path.basename(x.name));
+      }
+      index[pack] = { etag: String(r.headers?.etag || c.etag || ''), files, at: new Date().toISOString() };
+      n++;
+    }
+    await fs.mkdir(root, { recursive: true });
+    await fs.writeFile(indexFile, JSON.stringify(index, null, 2));
+    return n;
+  }
+
+  /** { clip name → fitted file } for one body (its fitted packs), so that body plays the clips solved on it. */
+  async fittedClips(modelId) {
+    if (!modelId) return new Map();
+    const root = path.join(this.vrmDir(), 'animations', 'fitted', safeName(this.productBase(modelId)));
+    const index = await fs.readFile(path.join(root, 'index.json'), 'utf8').then(JSON.parse).catch(() => null);
+    const map = new Map();
+    if (!index) return map;
+    const { avatarxClipName } = await import('../../services/avatar/avatarx.js');
+    for (const [pack, v] of Object.entries(index)) for (const f of v.files || []) map.set(avatarxClipName(f), path.join(root, safeName(pack), f));
+    return map;
+  }
+
+  /** The clip file to play on this body: its fitted version when the store fitted one, else the pack's. */
+  async clipFileFor(modelId, rel) {
+    const { avatarxClipName } = await import('../../services/avatar/avatarx.js');
+    const fitted = (await this.fittedClips(modelId).catch(() => new Map())).get(avatarxClipName(rel));
+    return fitted || path.join(this.vrmDir(), 'animations', rel);
+  }
+
   /**
    * Fetch every link and what it allows: each outfit's file (by its sha256 ETag) into the model gallery, and the
    * roles the owner picked for this agent applied. An ended link's copies are deleted. Returns { links, summary }.
@@ -1247,6 +1381,8 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
       for (const [k, o] of had) if (!outfits.some(x => `${x.model}/${x.outfit}` === k)) await this.removeGalleryModel(o.modelId);
       const entry = { id: l.id, owner: l.owner || (detail.link || detail).owner_name || null, status: 'active', outfits, at: new Date().toISOString() };
       entry.roles = await this.applyLinkRoles(entry, key).catch(e => { this.logger.warn(`botsandborgs: link roles not applied: ${e.message}`); entry.roleLooks = prev.roleLooks || {}; return prev.roles || {}; });
+      entry.fitClips = prev.fitClips || {};
+      await this.syncLinkFits(entry, key).catch(e => this.logger.warn(`botsandborgs: linked fits not read: ${e.message}`));
       keep.push(entry);
     }
     // A link we had that the store no longer lists is over.
@@ -1469,6 +1605,9 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
 
   /** The avatar to solve on: the worn model's live pass ({ live }), else the store product it is ({ product }). */
   animAvatar() {
+    // One of the owner's own models, linked (store 0.53: {link, model, outfit}, no upload, no size cap).
+    const lo = this.linkedOutfitOf(this.agent?.agentModel?.activeVRMModel, this._linkCache);
+    if (lo) return { link: lo.link, model: lo.model, outfit: lo.outfit };
     const pass = this.wornPass(this._passesCache || []);
     if (pass) return { live: pass.slug };
     const base = this.wornBase();
@@ -1502,6 +1641,7 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     if (!request) return { success: false, error: 'What should the move be? Say what my body does, e.g. "wave with both hands".' };
     const key = await this.accountKey();
     this._passesCache = await this.livePasses().catch(() => []);
+    this._linkCache = await this.linkState().catch(() => ({ links: [] }));
     const avatar = this.animAvatar();
     if (!avatar) {
       // A linked avatar (the owner's own model) has no solve route at the store yet (asked for, 2119 #580).
@@ -2938,7 +3078,7 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
       const { framingAsked } = await import('../../services/avatar/clipVideo.js');
       const framing = framingAsked(asked);
       if (scene) this.logger.info(`botsandborgs: filming in front of ${path.basename(scene)}${framing !== 'full' ? `, ${framing} framing` : ''}`);
-      const v = await (this.renderVideo || renderClipVideo)({ modelPath: path.join(this.vrmDir(), model.file), look: model.look || (await this.avatarLooks().catch(() => ({})))[model.id] || null, clipPath: path.join(this.vrmDir(), 'animations', rel),
+      const v = await (this.renderVideo || renderClipVideo)({ modelPath: path.join(this.vrmDir(), model.file), look: model.look || (await this.avatarLooks().catch(() => ({})))[model.id] || null, clipPath: await this.clipFileFor(model.id, rel),
         loop: !!entry.loop, prop: entry.prop || null, props: this.propPaths(await this.propsForBody(entry.props, { asked, scene, modelId: model.id })), framing, ...(voice ? { voice } : {}), ...(scene ? { backgroundPath: scene } : {}) });
       const filename = `${String(label).toLowerCase().replace(/[^a-z0-9]+/g, '-')}.mp4`;
       if (/^(me|owner|myself)$/i.test(to)) {
@@ -3003,7 +3143,7 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     const { renderClipVideo } = await import('../../services/avatar/clipVideo.js');
     const voice = audio_b64 ? { audio: Buffer.from(String(audio_b64), 'base64'), format: 'mp3' } : null;
     const how = ['full', 'waist', 'head'].includes(framing) ? framing : 'full';
-    const v = await (this.renderVideo || renderClipVideo)({ modelPath: path.join(this.vrmDir(), model.file), look: model.look || (await this.avatarLooks().catch(() => ({})))[model.id] || null, clipPath: path.join(this.vrmDir(), 'animations', rel),
+    const v = await (this.renderVideo || renderClipVideo)({ modelPath: path.join(this.vrmDir(), model.file), look: model.look || (await this.avatarLooks().catch(() => ({})))[model.id] || null, clipPath: await this.clipFileFor(model.id, rel),
       loop: !!entry.loop, prop: entry.prop || null, props: this.propPaths(await this.propsForBody(entry.props, { asked: String(name) })), framing: how,
       ...(voice ? { voice } : {}), ...(backgroundPath ? { backgroundPath } : {}) });
     this.logger.info(`botsandborgs: rendered a video of ${entry.label || name} (${v.seconds}s) for the avatar API`);
@@ -3112,7 +3252,7 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     if (!tts?.buffer?.length) throw new Error("the voice couldn't be made");
     const scene = await this.backgroundFor('');
     const { renderClipVideo } = await import('../../services/avatar/clipVideo.js');
-    const v = await (this.renderVideo || renderClipVideo)({ modelPath: path.join(this.vrmDir(), model.file), look: model.look || (await this.avatarLooks().catch(() => ({})))[model.id] || null, clipPath: path.join(this.vrmDir(), 'animations', clip.file),
+    const v = await (this.renderVideo || renderClipVideo)({ modelPath: path.join(this.vrmDir(), model.file), look: model.look || (await this.avatarLooks().catch(() => ({})))[model.id] || null, clipPath: await this.clipFileFor(model.id, clip.file),
       loop: true, width, height, voice: { audio: tts.buffer, format: tts.format || 'mp3' }, ...(scene ? { backgroundPath: scene } : {}) });
     return { video: v.video, seconds: v.seconds, cut };
   }

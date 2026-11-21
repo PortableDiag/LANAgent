@@ -2,6 +2,19 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.878] - 2026-11-20
+
+### Fixed
+- **A solve the store never finished says why.** The Animation API reports a timed-out job as `{"error": "timeout"}`; the agent read only failed checks and said "no reason given". The error is now the reason (the first solve on a linked avatar timed out while the store's workers restarted; its rewrite passed in under two minutes).
+
+## [2.25.877] - 2026-11-20
+
+### Added
+- **Fits and new moves on linked avatars (store 0.53).** For each of the owner's linked models the agent uses (the one it wears and the roles' picks), the store's fit for that body is read: a prop the store says does not fit is left off it (with the store's reason when asked for it), prop placements solved on that body are used on the 3D page, and the fitted clip packs (hands that meet, touches that land, re-solved on that body under the same clip names) are fetched by ETag and played on that body, on the 3D page and in its videos. A new move asked for while wearing a linked model is solved on that model by the Animation API (`{link, model, outfit}`, no upload or size limit). A store fit entry in the feed re-reads them.
+
+### Fixed
+- Videos and the 3D page play a body's fitted clip when one exists, instead of always the pack's.
+
 ## [2.25.876] - 2026-11-20
 
 ### Fixed
