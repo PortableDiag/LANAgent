@@ -1128,9 +1128,9 @@ export class TextXHub {
    * voice = the reply spoken, no text; both = text and audio in one send (one against the
    * phone's 6/hour cap). Audio that cannot be made goes as text, and `voiceError` says why.
    */
-  async replyArgs(device, threadId, text, mode, extra = {}, { maxSeconds = null, forms = null } = {}) {
+  async replyArgs(device, threadId, text, mode, extra = {}, { maxSeconds = null, forms = null, personId = null } = {}) {
     const asText = { thread_id: threadId, text, ...extra };
-    if (Array.isArray(forms)) return this.replyWithForms(device, threadId, text, forms, extra, { maxSeconds });
+    if (Array.isArray(forms)) return this.replyWithForms(device, threadId, text, forms, extra, { maxSeconds, personId });
     if (mode === 'text') return { args: asText, mode };
     // Video (TextX 0.4.93): the worn 3D model speaking the reply. If it can't be made: voice, then text, in the same send.
     if (mode === 'video') {
@@ -1138,7 +1138,7 @@ export class TextXHub {
         const store = this.agent?.apiManager?.apis?.get?.('botsandborgs');
         const plugin = store?.instance || store;
         if (!plugin?.talkingVideo) throw new Error('this agent has no 3D avatar video');
-        const v = await plugin.talkingVideo(text, { maxSeconds: maxSeconds || 20 });
+        const v = await plugin.talkingVideo(text, { maxSeconds: maxSeconds || 20, personId });
         // The full text goes too when only part of it was spoken; TextX sends it as SMS before the MMS.
         const attachments = [{ name: 'reply.mp4', mime: 'video/mp4', data_b64: v.video.toString('base64') }];
         this.logger.info?.(`TextX: video reply ${v.seconds.toFixed(1)} s, ${Math.round(v.video.length / 1024)} KB${v.cut ? ' (spoken part only; full text sent too)' : ''}`);
@@ -1171,7 +1171,7 @@ export class TextXHub {
    * TextX 0.4.94: every ticked form in ONE send_sms (text, reply.m4a, reply.mp4; TextX sends them as separate messages).
    * A video that can't be made becomes a voice note; anything that fails leaves at least the text.
    */
-  async replyWithForms(device, threadId, text, forms, extra = {}, { maxSeconds = null } = {}) {
+  async replyWithForms(device, threadId, text, forms, extra = {}, { maxSeconds = null, personId = null } = {}) {
     const want = formsOf(forms);
     const attachments = [];
     const sent = [];
@@ -1181,7 +1181,7 @@ export class TextXHub {
         const store = this.agent?.apiManager?.apis?.get?.('botsandborgs');
         const plugin = store?.instance || store;
         if (!plugin?.talkingVideo) throw new Error('this agent has no 3D avatar video');
-        const v = await plugin.talkingVideo(text, { maxSeconds: maxSeconds || 20 });
+        const v = await plugin.talkingVideo(text, { maxSeconds: maxSeconds || 20, personId });
         cut = !!v.cut;
         attachments.push({ name: 'reply.mp4', mime: 'video/mp4', data_b64: v.video.toString('base64') });
         sent.push('video');
@@ -1538,7 +1538,8 @@ export class TextXHub {
     if (forOwner && !invite) await this.tellOwner(device, forOwner, title, { urgent: true }); // someone asks for the owner
     // The conversation's reply mode, as the owner set it. Both agents may answer in one conversation
     // (the owner's call, DialX 4293 #142); TextX 0.4.45 caps the sends and keeps one card per person.
-    const reply = await this.replyArgs(device, threadId, text, mode, { auto: true }, { maxSeconds, forms });
+    // A one-to-one reply may carry the avatar the owner picked for this person (Bots & Borgs per-contact avatars).
+    const reply = await this.replyArgs(device, threadId, text, mode, { auto: true }, { maxSeconds, forms, personId: !group && person?._id ? person._id : null });
     const how = TextXHub.howSent(reply);
     const report = (r) => quietRefusal(r) ? this.logger.info?.(`TextX: auto-reply in "${title}" not sent: ${r.error.code}`) : this.deliver(device, 'message', {
       text: r?.ok && (r.result?.status === 'sent') ? `Replied to "${title}"${how}: "${text}"`

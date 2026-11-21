@@ -2,6 +2,12 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.871] - 2026-11-20
+
+### Added
+- **Linked agents: wear someone's own Bots & Borgs avatars.** The owner can let the agent use avatars from their own Bots & Borgs account (their models and outfits), read-only. "Request a Bots & Borgs link to my account at <email>" asks for it (only an address the owner gives); a one-time code works too. Once the owner approves and picks what the agent may use, each outfit is downloaded into the model gallery, checked against its sha256 and kept current by ETag (an unchanged file is never fetched again). The roles the owner chose for this agent are applied: public and assistant set, personal worn (a role the store only filled in from another one changes nothing). "Which of my models can you use" lists the links. The store's feed (approved, changed, ended, a new outfit, a look) syncs them by itself. When a link ends, every copy of the owner's models is deleted, roles that used them are cleared, the agent goes back to the model it wore before, and the owner is told. Saved looks are worn as their outfit for now (their colours and shape keys are not applied yet).
+- **Per-contact avatars.** "For Wayne use my winter look" shows that look to that one person in the videos the agent sends them, and in one-to-one TextX video replies ("suggest" asks the owner to approve it in their account first). The store only ever gets the agent's own opaque key for the person (an HMAC of its contact record, different for every agent) and the name the owner typed: never a phone number, email or handle. Without a pick for that person, the roles decide as before.
+
 ## [2.25.870] - 2026-11-20
 
 ### Fixed

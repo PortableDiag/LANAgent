@@ -10,6 +10,7 @@ import { DATA_PATH } from '../../utils/paths.js';
 import { propsFor, variantKind, livePass, applyClipManifest, unpack, installVrm, addToManifest, readVrmInfo, readVrmaInfo, clipLabel, clipLoops, clipGesture, writeStoreAnimations, safeName, toStickerWebp, moodOf, portraitFromPreview } from '../../services/store/assetLibrary.js';
 import { moodChoices, chooseSticker, stickerCouldFit, wallpaperFor } from '../../services/store/selfUse.js';
 import { motionPrompt, parseMotionScript, readJob, reportFailures, motionTags, motionName } from '../../services/store/animSolve.js';
+import { LINK_ROLES, linkedVariant, linkedModelId, linkedPrefix, contactKey, agentLinks, linkOutfits, readChoice, lockerRef, sha256, linkEnded } from '../../services/store/linkedAgents.js';
 
 /**
  * Bots & Borgs (botsandborgs.com): a store of digital assets (avatars, icons, wallpapers, emoji, VRM models,
@@ -236,6 +237,12 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
         examples: ['make yourself an animation of waving with both hands', 'create a new move where you point at the camera and wink', 'animate yourself doing a salute with your left hand', 'make a clip of you shrugging and tilting your head', 'build an animation of you clapping', 'teach your avatar to do a thumbs up with both hands', 'use the bots and borgs animation api to make a bow']
       },
       {
+        command: 'link',
+        description: 'Linked agents: use avatars someone else owns at Bots & Borgs (the owner\'s own models, outfits and looks), read-only, kept current by the store. request: an email asks that person to link this agent (only the email the owner gives); accept: a one-time code they gave; with no arguments lists the links and what they allow; sync: true fetches them now; leave: a link id ends one. contact + look: show that look to one person ("for Wayne use the winter look"), with propose: true to suggest it for the owner to approve',
+        usage: 'link({})  // link({ request: "owner@example.com" }), link({ accept: "xxxxxxxx-xxxxxxxx-xxxxxxxx" }), link({ sync: true }), link({ contact: "Wayne", look: "winter" }), link({ leave: "lnk_…" })',
+        examples: ['request a bots and borgs link to my account at pat@example.com', 'link yourself to my bots and borgs models', 'accept this bots and borgs link code 1a2b3c4d-5e6f7a8b-9c0d1e2f', 'which of my models can you use', 'what avatars have I linked to you', 'for Wayne use my winter look', 'show Jo the pilot outfit when you send her videos', 'unlink from my bots and borgs account']
+      },
+      {
         command: 'orders',
         description: 'The agent\'s Bots & Borgs orders and what this week\'s budget has left',
         usage: 'orders({})',
@@ -272,6 +279,7 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
         case 'roles': return await this.rolesCommand(data);
         case 'custom': return await this.customCommand(data);
         case 'animate': return await this.animate(data);
+        case 'link': return await this.linkCommand(data);
         default: return { success: false, error: `Unknown action ${action}` };
       }
     } catch (e) {
@@ -293,11 +301,12 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
       `"item" (words naming something already owned), "as" ("send", "avatar", "install", "wear", or "video" when it asks for a video of the agent itself), "mood" (the feeling a sticker should show), "kind" (one of: ${KIND_WORDS}), ` +
       '"avoid" (names the request says are taken or not wanted, comma-separated, e.g. "Sentinel" from "Nexus already picked Sentinel"), ' +
       '"motion" (for a new animation: what the body should do, in the request\'s words), ' +
+      '"request" (an email address the request gives for linking to someone\'s account, exactly as written), "accept" (a link code it gives), "contact" (the person a look is for), "look" (the outfit or look named for them), ' +
       '"say" (for a video: the words the agent speaks over it. Quoted words exactly; when it asks for a voice-over or for the agent to say, explain or talk about something without exact words, write one to three short spoken sentences, in the first person, that fit. For a video to someone other than the person asking, greet them by name and say who you are. ' + videoPerspective(agentName, ownerName) + ') Leave out what is not said. JSON only.',
     { maxTokens: 200, temperature: 0 });
     const raw = String(res?.content || '');
     const j = JSON.parse(raw.slice(raw.indexOf('{'), raw.lastIndexOf('}') + 1) || '{}');
-    return Object.fromEntries(Object.entries(j || {}).filter(([k, v]) => ['query', 'slug', 'variant', 'use', 'to', 'item', 'as', 'mood', 'kind', 'avoid', 'say', 'motion'].includes(k) && v != null && v !== ''));
+    return Object.fromEntries(Object.entries(j || {}).filter(([k, v]) => ['query', 'slug', 'variant', 'use', 'to', 'item', 'as', 'mood', 'kind', 'avoid', 'say', 'motion', 'request', 'accept', 'contact', 'look'].includes(k) && v != null && v !== ''));
   }
 
   // ── HTTP ────────────────────────────────────────────────────────────────────────────────
@@ -503,6 +512,10 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     // appear") run the library sync. syncLive above already runs it.
     else if ([...kinds].some(k => !['fit', 'fit_failed'].includes(k))) {
       ran.push('library'); await this.syncLibrary().catch(e => this.logger.warn(`botsandborgs: library sync failed: ${e.message}`));
+    }
+    // Linked agents (store 0.51): an approved, changed or ended link, a new outfit version or a look.
+    if ([...kinds].some(k => /^link_/.test(k) || k === 'look' || k === 'model')) {
+      ran.push('links'); await this.syncLinks().catch(e => this.logger.warn(`botsandborgs: linked models not synced: ${e.message}`));
     }
     if (kinds.has('fit') || kinds.has('fit_failed')) {
       const pass = this.wornPass(await this.livePasses());
@@ -809,8 +822,10 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
   }
 
   /** The gallery entry a role films with: { id, file, name, role } or null. */
-  async modelFor(role) {
-    const id = resolveRoleModel(await this.avatarRoles(), role, this.agent?.agentModel?.activeVRMModel || null);
+  async modelFor(role, { personId = null } = {}) {
+    // A per-contact avatar (linked agents, store 0.51) wins over the role for that one person.
+    const own = personId ? await this.contactModel(personId).catch(e => { this.logger.warn(`botsandborgs: contact avatar skipped: ${e.message}`); return null; }) : null;
+    const id = own || resolveRoleModel(await this.avatarRoles(), role, this.agent?.agentModel?.activeVRMModel || null);
     if (!id) return null;
     const manifest = await fs.readFile(path.join(this.vrmDir(), 'manifest.json'), 'utf8').then(JSON.parse).catch(() => []);
     const m = manifest.find(x => x.id === id);
@@ -1079,6 +1094,250 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     const item = await this.ingest({ order: null, variant, downloads: [{ buffer: Buffer.from(res.data), type: String(res.headers?.['content-type'] || ''), filename: name }] });
     const clips = (item?.files || []).filter(f => f.kind === 'animation').map(f => f.label || f.name);
     return clips.length ? `New: ${clips.join(', ')}.` : '';
+  }
+
+  // ── Linked agents (store 0.51) ─────────────────────────────────────────────────────────────
+  async linkState() {
+    const saved = await PluginSettings.getCached(this.name, 'links').catch(() => null);
+    return { links: Array.isArray(saved?.links) ? saved.links : [], secret: saved?.secret || null, wornBefore: saved?.wornBefore || null };
+  }
+
+  async saveLinkState(st) { await PluginSettings.setCached(this.name, 'links', st); }
+
+  /** The secret our contact keys are made with (kept encrypted); made once. */
+  async contactSecret() {
+    const st = await this.linkState();
+    if (st.secret) { try { return decrypt(st.secret); } catch { /* remade below */ } }
+    const raw = crypto.randomBytes(32).toString('hex');
+    await this.saveLinkState({ ...st, secret: encrypt(raw) });
+    return raw;
+  }
+
+  async linkCommand({ request, accept, list, sync, leave, contact, look, propose, _context } = {}) {
+    const key = await this.accountKey();
+    if (request) {
+      const email = String(request).trim();
+      // Only the address the owner gave: never guessed, never taken from a contact (the store, 2119 #566).
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return { success: false, error: 'Which email is the Bots & Borgs account under? Give me the address and I will ask it to link me.' };
+      const name = this.agent?.config?.name || process.env.AGENT_NAME || 'LANAgent';
+      await this.api('post', '/api/account/links/request', { key, body: { owner_email: email, name, note: `${name} asks to use your avatars, read-only (LANAgent).` } });
+      this.logger.info('botsandborgs: link requested (owner email given by the owner)');
+      return { success: true, result: 'Asked. The account owner gets a request in their Bots & Borgs account and by email; once they approve it and pick what I may use, I fetch those models by myself.' };
+    }
+    if (accept) {
+      const code = String(accept).trim();
+      const d = await this.api('post', '/api/account/links/accept', { key, body: { code } });
+      this.logger.info(`botsandborgs: link code accepted (${(d?.link?.id || d?.id || '?')})`);
+      const done = await this.syncLinks();
+      return { success: true, result: `Linked. ${done.summary}` };
+    }
+    if (leave) {
+      const st = await this.linkState();
+      const l = st.links.find(x => x.id === String(leave)) || (st.links.length === 1 && (leave === true || leave === 'true') ? st.links[0] : null);
+      if (!l) return { success: false, error: 'Which link? Say "which of my models can you use" to see them.' };
+      await this.api('delete', `/api/account/links/${encodeURIComponent(l.id)}`, { key }).catch(e => { if (!linkEnded(e) && e.status !== 404) throw e; });
+      await this.endLink(l.id, 'left');
+      return { success: true, result: `Unlinked, and I deleted my copies of ${l.owner ? `${l.owner}'s` : 'their'} models.` };
+    }
+    if (contact && look) return this.setContactLook({ contact, look, propose: propose === true || propose === 'true', key });
+    // List (and sync, which is the same read): what each link allows now.
+    const done = await this.syncLinks();
+    return { success: true, links: done.links, result: done.summary };
+  }
+
+  /**
+   * Fetch every link and what it allows: each outfit's file (by its sha256 ETag) into the model gallery, and the
+   * roles the owner picked for this agent applied. An ended link's copies are deleted. Returns { links, summary }.
+   */
+  async syncLinks() {
+    const key = await this.accountKey();
+    const st = await this.linkState();
+    let listed;
+    try { listed = agentLinks(await this.api('get', '/api/account/links', { key })); }
+    catch (e) { if (e.status === 404) return { links: [], summary: 'This store has no linked agents yet.' }; throw e; }
+    const known = new Map(st.links.map(l => [l.id, l]));
+    const keep = [];
+    for (const l of listed) {
+      if (/ended|revoked|declined/.test(l.status)) { if (known.has(l.id)) await this.endLink(l.id, l.status); continue; }
+      if (/pending|requested/.test(l.status)) { keep.push({ ...(known.get(l.id) || {}), id: l.id, owner: l.owner, status: l.status, outfits: known.get(l.id)?.outfits || [] }); continue; }
+      let detail;
+      try { detail = await this.api('get', `/api/account/links/${encodeURIComponent(l.id)}`, { key }); }
+      catch (e) { if (linkEnded(e)) { await this.endLink(l.id, 'ended'); continue; } throw e; }
+      const prev = known.get(l.id) || {};
+      const had = new Map((prev.outfits || []).map(o => [`${o.model}/${o.outfit}`, o]));
+      const outfits = [];
+      for (const o of linkOutfits(detail)) {
+        const was = had.get(`${o.model}/${o.outfit}`);
+        const modelId = linkedModelId(l.id, o.model, o.outfit);
+        let sha = was?.sha256 || null;
+        if (!was || !o.sha256 || was.sha256 !== o.sha256 || !(await this.galleryHas(modelId))) {
+          try { sha = await this.fetchLinkedOutfit(l.id, o, key, was?.sha256); }
+          catch (e) { if (linkEnded(e)) { await this.endLink(l.id, 'ended'); detail = null; break; } this.logger.warn(`botsandborgs: linked ${o.model}/${o.outfit} not fetched: ${e.message}`); continue; }
+        }
+        outfits.push({ model: o.model, outfit: o.outfit, name: o.name, sha256: sha, modelId, looks: o.looks.map(x => ({ id: x.id || x.look, name: x.name || x.id })), personalLicense: o.personalLicense });
+      }
+      if (!detail) continue;
+      // Outfits the owner no longer allows: their copies go.
+      for (const [k, o] of had) if (!outfits.some(x => `${x.model}/${x.outfit}` === k)) await this.removeGalleryModel(o.modelId);
+      const entry = { id: l.id, owner: l.owner || detail.owner_name || null, status: 'active', outfits, at: new Date().toISOString() };
+      entry.roles = await this.applyLinkRoles(entry, key).catch(e => { this.logger.warn(`botsandborgs: link roles not applied: ${e.message}`); return prev.roles || {}; });
+      keep.push(entry);
+    }
+    // A link we had that the store no longer lists is over.
+    for (const l of st.links) if (!listed.some(x => x.id === l.id)) await this.endLink(l.id, 'gone');
+    const now = await this.linkState();
+    await this.saveLinkState({ ...now, links: keep });
+    const active = keep.filter(l => l.status === 'active');
+    const lines = keep.map(l => l.status !== 'active' ? `- ${l.owner || l.id}: ${l.status}, waiting for them to approve`
+      : `- ${l.owner || l.id}: ${l.outfits.map(o => `${o.name}${o.personalLicense ? ' (personal licence)' : ''}`).join(', ') || 'no models allowed yet'}${Object.keys(l.roles || {}).length ? `; roles ${Object.entries(l.roles).map(([r, id]) => `${r} = ${l.outfits.find(o => o.modelId === id)?.name || id}`).join(', ')}` : ''}`);
+    this.logger.info(`botsandborgs: linked agents: ${keep.length} link(s), ${active.reduce((n, l) => n + l.outfits.length, 0)} outfit(s)`);
+    return { links: keep, summary: keep.length ? `My links to other people's Bots & Borgs avatars:\n${lines.join('\n')}` : "I'm not linked to anyone's Bots & Borgs avatars." };
+  }
+
+  async galleryHas(id) {
+    const manifest = await fs.readFile(path.join(this.vrmDir(), 'manifest.json'), 'utf8').then(JSON.parse).catch(() => []);
+    return manifest.some(m => m.id === id && m.file);
+  }
+
+  /** One outfit's .vrm: fetched by ETag (= its sha256), checked, installed in the gallery. Returns its sha256. */
+  async fetchLinkedOutfit(linkId, o, key, etag = null) {
+    const url = `${BASE}/api/account/links/${encodeURIComponent(linkId)}/files/${encodeURIComponent(o.model)}/${encodeURIComponent(o.outfit)}`;
+    const headers = { 'User-Agent': this.userAgent(), Authorization: `Bearer ${key}`, ...(etag ? { 'If-None-Match': `"${etag}"` } : {}) };
+    const r = await (this.http || axios)({ method: 'get', url, responseType: 'arraybuffer', timeout: 180000, headers, validateStatus: () => true });
+    if (r.status === 304) return etag;
+    if (r.status === 403) { let code = ''; try { code = JSON.parse(Buffer.from(r.data).toString()).code; } catch { /* body not JSON */ } throw Object.assign(new Error(`403 ${code}`), { status: 403, code }); }
+    if (r.status !== 200) throw new Error(`the store answered ${r.status}`);
+    const buffer = Buffer.from(r.data);
+    const got = sha256(buffer);
+    if (o.sha256 && got !== o.sha256) throw new Error(`the file's sha256 ${got.slice(0, 12)} is not the listed ${o.sha256.slice(0, 12)}`);
+    readVrmInfo(buffer);
+    const entry = await installVrm(buffer, { variant: linkedVariant(linkId, o.model, o.outfit), name: o.name, description: 'Linked from its owner\'s Bots & Borgs account (read-only)' }, this.vrmDir());
+    this.logger.info(`botsandborgs: linked model ${o.name} installed as ${entry.id} (${entry.sizeMB} MB)`);
+    return got;
+  }
+
+  /**
+   * The roles the owner picked for this agent on the link (GET …/roles/<role>): public and assistant set here, personal
+   * worn. A role answered from another one (`fallback_from`) is not a pick and changes nothing. Returns { role: modelId }.
+   */
+  async applyLinkRoles(link, key) {
+    const picked = {};
+    for (const role of LINK_ROLES) {
+      let c;
+      try { c = readChoice(await this.api('get', `/api/account/links/${encodeURIComponent(link.id)}/roles/${role}`, { key })); }
+      catch (e) { if (e.status === 404) continue; throw e; }
+      if (!c || c.fallback) continue;
+      const o = link.outfits.find(x => x.model === c.model && x.outfit === c.outfit);
+      if (o) picked[role] = o.modelId;
+      if (c.look) this.logger.info(`botsandborgs: the owner's ${role} pick is look ${c.look} on ${o?.name || c.model}; it is worn as the outfit (looks are not applied yet)`);
+    }
+    const roles = await this.avatarRoles();
+    const next = { ...roles };
+    let changed = false;
+    for (const r of ['public', 'assistant']) if (picked[r] && roles[r] !== picked[r]) { next[r] = picked[r]; changed = true; }
+    if (changed) { await this.saveSettings({ avatarRoles: next }); await this.pushRolesToStore().catch(() => {}); this.logger.info(`botsandborgs: roles from the link: ${Object.entries(picked).map(([r, id]) => `${r} = ${id}`).join(', ')}`); }
+    const worn = this.agent?.agentModel?.activeVRMModel || null;
+    if (picked.personal && worn !== picked.personal) {
+      const st = await this.linkState();
+      // What it wore before, to go back to when the link ends.
+      if (!st.wornBefore && !/^store-linked-/.test(String(worn || ''))) await this.saveLinkState({ ...st, wornBefore: worn });
+      await this.wearGalleryModel(picked.personal);
+    }
+    return picked;
+  }
+
+  /** Wear a gallery model by id: the active model and AvatarX. Its picture is left alone (a linked model has none). */
+  async wearGalleryModel(id) {
+    const { Agent } = await import('../../models/Agent.js');
+    await Agent.updateOne({ name: process.env.AGENT_NAME || 'LANAgent' }, { $set: { activeVRMModel: id } });
+    if (this.agent?.agentModel) this.agent.agentModel.activeVRMModel = id;
+    const { pushModelToAvatarX } = await import('../../services/avatar/avatarx.js');
+    await pushModelToAvatarX(id).catch(e => this.logger.warn(`botsandborgs: AvatarX not told: ${e.message}`));
+    this.logger.info(`botsandborgs: wearing ${id}`);
+  }
+
+  async removeGalleryModel(id) {
+    if (!id) return;
+    const file = path.join(this.vrmDir(), 'manifest.json');
+    let list; try { list = JSON.parse(await fs.readFile(file, 'utf8')); } catch { return; }
+    const m = list.find(x => x.id === id);
+    if (!m) return;
+    await fs.unlink(path.join(this.vrmDir(), m.file)).catch(() => {});
+    await fs.writeFile(file, JSON.stringify(list.filter(x => x.id !== id), null, 2));
+    this.logger.info(`botsandborgs: deleted the linked model ${id}`);
+  }
+
+  /** A link is over: delete every copy of its models, clear roles that used them, and wear what was worn before. */
+  async endLink(linkId, why = 'ended') {
+    const st = await this.linkState();
+    const l = st.links.find(x => x.id === linkId);
+    const ids = new Set((l?.outfits || []).map(o => o.modelId));
+    const prefix = linkedPrefix(linkId);
+    const manifest = await fs.readFile(path.join(this.vrmDir(), 'manifest.json'), 'utf8').then(JSON.parse).catch(() => []);
+    for (const m of manifest) if (m.id.startsWith(prefix)) ids.add(m.id);
+    for (const id of ids) await this.removeGalleryModel(id);
+    const roles = await this.avatarRoles();
+    const next = { ...roles };
+    for (const r of ['public', 'assistant']) if (ids.has(roles[r])) next[r] = null;
+    if (next.public !== roles.public || next.assistant !== roles.assistant) { await this.saveSettings({ avatarRoles: next }); await this.pushRolesToStore().catch(() => {}); }
+    const worn = this.agent?.agentModel?.activeVRMModel || null;
+    if (ids.has(worn) && st.wornBefore) await this.wearGalleryModel(st.wornBefore).catch(e => this.logger.warn(`botsandborgs: could not wear ${st.wornBefore} again: ${e.message}`));
+    await this.saveLinkState({ ...st, links: st.links.filter(x => x.id !== linkId), wornBefore: ids.has(worn) ? null : st.wornBefore });
+    this.logger.info(`botsandborgs: link ${linkId} ${why}; deleted ${ids.size} linked model(s)`);
+    if (l) await this.agent?.notify?.(`The Bots & Borgs link to ${l.owner || 'another account'} has ended (${why}); I deleted my copies of their models${ids.has(worn) ? ' and went back to my own' : ''}.`);
+  }
+
+  /** The shared person directory (tests set `_people`). */
+  async peopleDirectory() {
+    if (this._people) return this._people;
+    const { getPersonDirectory } = await import('../../services/people/personDirectory.js');
+    return getPersonDirectory(this.logger);
+  }
+
+  /** Our opaque key for a person (never their number, email or handle). */
+  async contactKeyFor(personId) { return contactKey(personId, await this.contactSecret()); }
+
+  /** "for Wayne use the winter look": the person by name, the outfit or look by words, set (or proposed) on the link. */
+  async setContactLook({ contact, look, propose = false, key }) {
+    const people = await (await this.peopleDirectory()).byName(String(contact)).catch(() => []);
+    if (!people.length) return { success: false, error: `I don't know anyone called ${contact} yet.` };
+    if (people.length > 1) return { success: false, error: `I know ${people.length} people called ${contact}; say which one (their full name).` };
+    const st = await this.linkState();
+    const words = String(look).toLowerCase();
+    let hit = null;
+    for (const l of st.links.filter(x => x.status === 'active')) {
+      for (const o of l.outfits) {
+        const lk = (o.looks || []).find(x => words.includes(String(x.name || x.id).toLowerCase()));
+        if (lk || words.includes(String(o.name).toLowerCase()) || String(o.name).toLowerCase().split(/\W+/).some(w => w.length > 3 && words.includes(w))) { hit = { l, o, lk }; break; }
+      }
+      if (hit) break;
+    }
+    if (!hit) return { success: false, error: `None of the linked models or looks is called "${look}". Say "which of my models can you use" to see them.` };
+    const ck = await this.contactKeyFor(people[0]._id);
+    const label = people[0].name || String(contact);
+    await this.api('put', `/api/account/links/${encodeURIComponent(hit.l.id)}/contacts/${encodeURIComponent(ck)}`, { key, body: { label, ref: lockerRef(hit.o.model, hit.o.outfit, hit.lk?.id || null), ...(propose ? { propose: true } : {}) } });
+    this.logger.info(`botsandborgs: ${propose ? 'proposed' : 'set'} a contact avatar (${hit.o.name}${hit.lk ? `, look ${hit.lk.name}` : ''})`);
+    return { success: true, result: propose ? `Suggested ${hit.lk?.name || hit.o.name} for ${label}; it is used once you approve it in your Bots & Borgs account.` : `${label} sees ${hit.lk?.name || hit.o.name} from now on in the videos I send them.` };
+  }
+
+  /** The gallery model a person should see (their per-contact avatar), or null to use the roles. */
+  async contactModel(personId) {
+    if (!personId) return null;
+    const st = await this.linkState();
+    const active = st.links.filter(l => l.status === 'active' && l.outfits?.length);
+    if (!active.length) return null;
+    const key = await this.accountKey();
+    const ck = await this.contactKeyFor(personId);
+    for (const l of active) {
+      let c;
+      try { c = readChoice(await this.api('get', `/api/account/links/${encodeURIComponent(l.id)}/contacts/${encodeURIComponent(ck)}/avatar`, { key })); }
+      catch (e) { if (linkEnded(e)) { await this.endLink(l.id, 'ended'); continue; } if (e.status === 404) continue; this.logger.warn(`botsandborgs: contact avatar not read: ${e.message}`); continue; }
+      // Only a look chosen for this person: the role fallbacks are already ours (assistant → public → worn).
+      if (!c || c.fallback) continue;
+      const o = l.outfits.find(x => x.model === c.model && x.outfit === c.outfit);
+      if (o && await this.galleryHas(o.modelId)) return o.modelId;
+    }
+    return null;
   }
 
   // ── Animation API (store 0.38+) ───────────────────────────────────────────────────────────
@@ -2533,8 +2792,15 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
         }
       }
     }
-    // Role-based avatars: the owner sees the personal (worn) model, anyone else the assistant one.
-    const model = await this.modelFor(roleForRecipient(to));
+    // Role-based avatars: the owner sees the personal (worn) model, anyone else the assistant one, or the avatar the
+    // owner picked for that one person (linked agents' per-contact avatars).
+    const role = roleForRecipient(to);
+    let personId = null;
+    if (role !== 'personal' && to) {
+      const found = await (await this.peopleDirectory()).byName(String(to)).catch(() => []);
+      if (found.length === 1) personId = found[0]._id;
+    }
+    const model = await this.modelFor(role, { personId });
     if (!model?.file) return { success: false, error: "I'm not wearing a 3D model, so there's nothing to film." };
     if (model.id !== this.agent?.agentModel?.activeVRMModel) this.logger.info(`botsandborgs: filming as ${model.role}: ${model.name || model.id} (to ${to})`);
     const picked = await this.chooseClip({ item, clip, asked, speaking: !!words, modelId: model.id });
@@ -2711,11 +2977,11 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
    * background scene (TextX 0.4.93 video replies). Throws when there is no model, clip or voice.
    * Returns { video, seconds, cut } (cut: only the first part was spoken).
    */
-  async talkingVideo(text, { maxSeconds = 20, width = 480, height = 640, role = 'assistant' } = {}) {
+  async talkingVideo(text, { maxSeconds = 20, width = 480, height = 640, role = 'assistant', personId = null } = {}) {
     const { spoken, cut } = BotsAndBorgsPlugin.spokenPart(text, maxSeconds);
     if (!spoken) throw new Error('nothing to say');
     // A talking reply goes to a contact (TextX reply forms), so it is the assistant model (TextX, 2119 #543).
-    const model = await this.modelFor(role);
+    const model = await this.modelFor(role, { personId });
     if (!model?.file) throw new Error("I'm not wearing a 3D model");
     const listed = await fs.readFile(path.join(this.vrmDir(), 'animations', 'store.json'), 'utf8').then(JSON.parse).catch(() => []);
     // clips.json marks the clips made to play under speech (while_talking, calm): the talk loop first (store 0.22).
