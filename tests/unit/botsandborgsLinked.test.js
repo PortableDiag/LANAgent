@@ -200,3 +200,38 @@ test('per-contact avatars: set by name with our opaque key and a label, read bac
   assert.equal(await t.p.contactModel(jo._id), 'store-linked-lnk-4-rose-base');
   assert.equal(await t.p.contactModel('someone-else'), null, 'a fallback answer means the roles decide');
 });
+
+test('two syncs at once share one run: nothing is downloaded twice (2026-11-20, 5 GB twice)', async () => {
+  const base = vrm('Rose');
+  const t = rig({
+    files: { 'rose/base': base },
+    routes: {
+      'get /api/account/links': { as_agent: [{ id: 'lnk_5', status: 'active' }] },
+      'get /api/account/links/lnk_5': { link: { models: [{ model: 'rose', outfits: [{ outfit: 'base', sha256: sha(base) }] }] } }
+    }
+  });
+  const [a, b] = await Promise.all([t.p.syncLinks(), t.p.syncLinks()]);
+  assert.equal(a, b);
+  assert.equal(t.fetched.length, 1);
+});
+
+test('AvatarX: a lent body is tagged with its link, and only those bodies come off at unlink', async () => {
+  const { pushModelToAvatarX, removeLentAvatars } = await import('../../src/services/avatar/avatarx.js');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ax-'));
+  const keyFile = path.join(dir, 'key'); fs.writeFileSync(keyFile, 'k');
+  fs.writeFileSync(path.join(dir, 'manifest.json'), JSON.stringify([{ id: 'store-linked-lnk-1-rose-base', name: 'Rose', file: 'r.vrm' }]));
+  fs.writeFileSync(path.join(dir, 'r.vrm'), vrm('Rose'));
+  const sent = [];
+  const fetchFn = async (url, { method }) => {
+    sent.push(`${method} ${url.replace('https://ax', '')}`);
+    if (method === 'GET') return { ok: true, status: 200, json: async () => ({ avatars: [{ id: 'mine', name: 'Racer' }, { id: 'lent1', name: 'Rose', size: 1, link: 'lnk_1' }, { id: 'lent2', name: 'Other', link: 'lnk_2' }], active: 'mine' }) };
+    if (method === 'POST') return { ok: true, status: 200, json: async () => ({ avatar: { id: 'lent9' } }) };
+    return { ok: true, status: 200, json: async () => ({}) };
+  };
+  await pushModelToAvatarX('store-linked-lnk-1-rose-base', { url: 'https://ax', keyFile, vrmDir: dir, fetchFn, link: 'lnk_1' });
+  assert.ok(sent.some(x => /^POST \/agent\/v1\/avatars\?name=Rose&link=lnk_1$/.test(x)), sent.join('\n'));
+  sent.length = 0;
+  const gone = await removeLentAvatars('lnk_1', { url: 'https://ax', keyFile, fetchFn });
+  assert.deepEqual(gone, ['lent1']);
+  assert.deepEqual(sent.filter(x => x.startsWith('DELETE')), ['DELETE /agent/v1/avatars/lent1']);
+});

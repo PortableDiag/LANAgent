@@ -140,7 +140,8 @@ export async function pushModelToAvatarX(modelId, {
   keyFile = process.env.AVATARX_AGENT_KEY_FILE,
   caFile = process.env.AVATARX_CA_FILE,
   vrmDir = path.join(DATA_PATH, 'vrm-models'),
-  fetchFn
+  fetchFn,
+  link = null
 } = {}) {
   const call = await connect({ url, keyFile, caFile, fetchFn });
   if (!call) return 'not connected';
@@ -157,7 +158,8 @@ export async function pushModelToAvatarX(modelId, {
   const same = (state.avatars || []).filter(a => a.name === name);
   let id = same.find(a => a.size == null || Number(a.size) === bytes.length)?.id;
   if (!id) {
-    const up = await call('POST', `/agent/v1/avatars?name=${encodeURIComponent(name)}`, bytes, 'application/octet-stream');
+    // A body lent through a store link (AvatarX 0.4.5): tagged, so the agent may remove it when the owner unlinks.
+    const up = await call('POST', `/agent/v1/avatars?name=${encodeURIComponent(name)}${link ? `&link=${encodeURIComponent(link)}` : ''}`, bytes, 'application/octet-stream');
     id = up.avatar?.id;
     if (!id) throw new Error('AvatarX answered an upload with no id');
     if (same.length) logger.info(`AvatarX: ${name} changed (${bytes.length} bytes); older copies left to remove in AvatarX Settings: ${same.map(a => a.id).join(', ')}`);
@@ -166,4 +168,21 @@ export async function pushModelToAvatarX(modelId, {
   await call('PATCH', '/agent/v1/state', JSON.stringify({ active: id }));
   logger.info(`AvatarX: now showing ${name} (${id})`);
   return 'updated';
+}
+
+/**
+ * Take every body lent through one store link off AvatarX (0.4.5: the agent key may DELETE only a lent body). Returns
+ * the ids removed, or 'not connected'.
+ */
+export async function removeLentAvatars(linkId, opts = {}) {
+  const call = await connect(opts);
+  if (!call) return 'not connected';
+  const state = await call('GET', '/agent/v1/state');
+  const lent = (state.avatars || []).filter(a => a.link && a.link === linkId);
+  const done = [];
+  for (const a of lent) {
+    try { await call('DELETE', `/agent/v1/avatars/${encodeURIComponent(a.id)}`); done.push(a.id); }
+    catch (e) { logger.warn(`AvatarX: lent body ${a.id} not removed: ${e.message}`); }
+  }
+  return done;
 }

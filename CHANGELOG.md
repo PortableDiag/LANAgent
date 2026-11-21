@@ -2,6 +2,14 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.873] - 2026-11-20
+
+### Fixed
+- **Linked avatars download once.** The store's "link approved" entry and the owner's "check the links" arrived within a minute and each ran a full sync, so every outfit (5 GB for the first link) was downloaded twice. Syncs now run one at a time, and a second request waits for the running one. Link, look and contact feed entries no longer also start a clip-library sync.
+
+### Added
+- **Lent bodies on AvatarX (0.4.5).** A linked model the agent wears goes onto AvatarX tagged with its link (`?link=`), and when the link ends those bodies are taken off AvatarX along with the agent's own copies. The page's own avatars are never touched.
+
 ## [2.25.872] - 2026-11-20
 
 ### Fixed

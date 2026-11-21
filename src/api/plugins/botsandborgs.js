@@ -510,7 +510,7 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     if (kinds.has('model') || kinds.has('rollback')) { ran.push('live'); await this.syncLive().catch(e => this.logger.warn(`botsandborgs: live check failed: ${e.message}`)); }
     // Library kinds (fix, art, new_clip, new_prop, placement, update) and any kind the store adds later ("new kinds may
     // appear") run the library sync. syncLive above already runs it.
-    else if ([...kinds].some(k => !['fit', 'fit_failed'].includes(k))) {
+    else if ([...kinds].some(k => !['fit', 'fit_failed', 'look', 'contact'].includes(k) && !/^link_/.test(k))) {
       ran.push('library'); await this.syncLibrary().catch(e => this.logger.warn(`botsandborgs: library sync failed: ${e.message}`));
     }
     // Linked agents (store 0.51): an approved, changed or ended link, a new outfit version or a look.
@@ -1150,6 +1150,14 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
    * roles the owner picked for this agent applied. An ended link's copies are deleted. Returns { links, summary }.
    */
   async syncLinks() {
+    // One sync at a time: the feed's link_approved and an owner's "check the links" both arrived within a minute and
+    // each downloaded all 29 outfits (5 GB) on 2026-11-20. A second caller waits for the running one.
+    if (this._linkSync) return this._linkSync;
+    this._linkSync = this.syncLinksOnce().finally(() => { this._linkSync = null; });
+    return this._linkSync;
+  }
+
+  async syncLinksOnce() {
     const key = await this.accountKey();
     const st = await this.linkState();
     let listed;
@@ -1252,7 +1260,9 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     await Agent.updateOne({ name: process.env.AGENT_NAME || 'LANAgent' }, { $set: { activeVRMModel: id } });
     if (this.agent?.agentModel) this.agent.agentModel.activeVRMModel = id;
     const { pushModelToAvatarX } = await import('../../services/avatar/avatarx.js');
-    await pushModelToAvatarX(id).catch(e => this.logger.warn(`botsandborgs: AvatarX not told: ${e.message}`));
+    // A linked model goes onto AvatarX as a lent body (0.4.5, ?link=), which the agent may take off when the link ends.
+    const link = (await this.linkState()).links.find(l => (l.outfits || []).some(o => o.modelId === id))?.id || null;
+    await pushModelToAvatarX(id, link ? { link } : {}).catch(e => this.logger.warn(`botsandborgs: AvatarX not told: ${e.message}`));
     this.logger.info(`botsandborgs: wearing ${id}`);
   }
 
@@ -1276,6 +1286,10 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     const manifest = await fs.readFile(path.join(this.vrmDir(), 'manifest.json'), 'utf8').then(JSON.parse).catch(() => []);
     for (const m of manifest) if (m.id.startsWith(prefix)) ids.add(m.id);
     for (const id of ids) await this.removeGalleryModel(id);
+    // Their bodies on AvatarX (lent, tagged with this link) come off too.
+    const { removeLentAvatars } = await import('../../services/avatar/avatarx.js');
+    await removeLentAvatars(linkId).then(n => { if (Array.isArray(n) && n.length) this.logger.info(`botsandborgs: AvatarX: took off ${n.length} lent bod${n.length === 1 ? 'y' : 'ies'}`); })
+      .catch(e => this.logger.warn(`botsandborgs: AvatarX lent bodies not removed: ${e.message}`));
     const roles = await this.avatarRoles();
     const next = { ...roles };
     for (const r of ['public', 'assistant']) if (ids.has(roles[r])) next[r] = null;
