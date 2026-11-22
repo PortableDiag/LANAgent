@@ -2,6 +2,17 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.896] - 2026-11-21
+
+### Fixed
+- **Turning UPnP off on the router turns it off.** The router's real switch is per internet connection; changing only the general setting left the UPnP service running. The security check read that same general setting, so it reported UPnP as off while it was still on. Both now use the per-connection switch too.
+
+## [2.25.895] - 2026-11-21
+
+### Added
+- **Router port forwards and UPnP.** The owner can list the router's port forwards, remove one by name or all of them, and turn UPnP on or off. Each change checks the router script and takes a backup first.
+- The first build of these read the rule name from the wrong argument and refused every change; nothing on the router was touched.
+
 ## [2.25.894] - 2026-11-21
 
 ### Fixed

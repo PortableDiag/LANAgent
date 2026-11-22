@@ -33,7 +33,7 @@ case "$op" in
   security)
     for k in productid firmver buildno extendno wl0_auth_mode_x wl1_auth_mode_x wl0_crypto wl1_crypto wl0_mfp wl1_mfp wps_enable \
       wl0.1_bss_enabled wl1.1_bss_enabled misc_http_x misc_httpsport_x http_enable sshd_enable sshd_pass telnetd_enable \
-      upnp_enable vts_enable_x ddns_enable_x fw_enable_x fw_dos_x wan_dns ipv6_service; do echo "$k=$(nvram get $k)"; done
+      upnp_enable wan0_upnp_enable vts_enable_x ddns_enable_x fw_enable_x fw_dos_x wan_dns ipv6_service; do echo "$k=$(nvram get $k)"; done
     echo "port_forwards=$(nvram get vts_rulelist | tr '<' '\n' | grep -vc '^$')" ;;
   add)   # add MAC IP [NAME]
     m="$(up "${1:-}")"; ip="${2:-}"; n="${3:-}"
@@ -57,6 +57,23 @@ $m>$ip>>$n" "$m $ip $n"; echo "OK added $m $ip $n" ;;
     save "$(echo "$L" | grep -vi "^$o>")
 $m>$rest" "$o $m"; echo "OK replaced $o with $m at ${rest%%>*}" ;;
   changes) tail -n 50 "$LOG" 2>/dev/null ;;
+  forwards) nvram get vts_rulelist | tr '<' '\n' | grep -v '^$' | awk -F'>' '{print $1, $2, $3, $4, $5}' ;;
+  unforward)  # unforward NAME|all: remove a port forward rule (all: every rule, and port forwarding off)
+    name_ok "${1:-}" && [ -n "${1:-}" ] || { echo "ERR name"; exit 2; }; lock
+    if [ "$1" = "all" ]; then nvram set vts_rulelist=""; nvram set vts_enable_x=0
+    else
+      cur="$(nvram get vts_rulelist | tr '<' '\n' | grep -v '^$')"
+      echo "$cur" | grep -q "^$1>" || { echo "ERR no rule $1"; exit 3; }
+      nvram set vts_rulelist="$(echo "$cur" | grep -v "^$1>" | sed 's/^/</' | tr -d '\n')"
+    fi
+    nvram commit; service restart_firewall >/dev/null 2>&1
+    echo "$(date '+%Y-%m-%d %H:%M:%S') unforward $1" >> "$LOG"; echo OK ;;
+  upnp)  # upnp on|off
+    lock; case "${1:-}" in on) v=1 ;; off) v=0 ;; *) echo "ERR on|off"; exit 2 ;; esac
+    # The web UI's switch is per WAN (wan0_upnp_enable); upnp_enable alone leaves miniupnpd running.
+    nvram set upnp_enable=$v; for k in wan_upnp_enable wan0_upnp_enable wan1_upnp_enable; do nvram set $k=$v; done
+    nvram commit; service restart_upnp >/dev/null 2>&1
+    echo "$(date '+%Y-%m-%d %H:%M:%S') upnp $1" >> "$LOG"; echo OK ;;
   backup-nvram)  # the settings, as the web UI's Save setting file (restorable on this model)
     nvram save /tmp/agent-backup.cfg >/dev/null 2>&1 && cat /tmp/agent-backup.cfg; rm -f /tmp/agent-backup.cfg
     echo "$(date '+%Y-%m-%d %H:%M:%S') backup-nvram" >> "$LOG" ;;

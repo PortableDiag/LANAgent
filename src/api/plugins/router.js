@@ -67,7 +67,9 @@ export function judgeSecurity(kv) {
   add(v('sshd_enable') === '2' && v('sshd_pass') === '0', `SSH: ${v('sshd_enable') === '2' ? 'LAN only' : v('sshd_enable') === '1' ? 'LAN AND WAN' : 'off'}, ${v('sshd_pass') === '0' ? 'keys only' : 'passwords allowed'}`);
   add(v('telnetd_enable') === '0', `Telnet ${v('telnetd_enable') === '0' ? 'off' : 'ON'}`);
   add(v('fw_enable_x') === '1', `Firewall ${v('fw_enable_x') === '1' ? 'on' : 'OFF'}`);
-  add(v('upnp_enable') === '0', `UPnP ${v('upnp_enable') === '0' ? 'off' : 'on (devices can open ports by themselves)'}`);
+  // The web UI's switch is per WAN: upnp_enable=0 alone left miniupnpd running (2026-11-21).
+  const upnpOff = v('upnp_enable') === '0' && (v('wan0_upnp_enable') || '0') === '0';
+  add(upnpOff, `UPnP ${upnpOff ? 'off' : 'on (devices can open ports by themselves)'}`);
   const pf = Number(v('port_forwards') || 0);
   add(pf === 0, `${pf} port forward${pf === 1 ? '' : 's'} open to the internet${pf ? ' (check each is still needed)' : ''}`);
   return out;
@@ -87,6 +89,9 @@ export default class RouterPlugin extends BasePlugin {
       { command: 'unreserve', description: 'Remove a device\'s DHCP reservation, by MAC, IP or light name', usage: 'unreserve({ device: "192.168.1.131" })', examples: ['remove the static ip for 192.168.1.131', 'delete the dhcp reservation of the old bulb'] },
       { command: 'replace', description: 'A replacement device takes over an old one\'s reservation (same IP and name): the old one by MAC, IP or light name; the new one by MAC, or found by itself (the one new unreserved smart-light on the network)', usage: 'replace({ old: "Hall Light", new: "auto" })', examples: ['the new bulb replaces the hall light', 'swap the light bulb in the router', 'give the new bulb the old bulb\'s ip'] },
       { command: 'security', description: 'Check the router\'s security settings (Wi-Fi encryption, WPS, remote admin, SSH, UPnP, port forwards, firmware)', usage: 'security({})', examples: ['check my router security', 'is my wifi secure', 'audit the router'] },
+      { command: 'forwards', description: 'List the router\'s port forwards (internet port to a device on the network)', usage: 'forwards({})', examples: ['list the port forwards', 'what ports are open to the internet'] },
+      { command: 'unforward', description: 'Remove a port forward by its name; name: "all" removes every one and turns port forwarding off. Backs up first', usage: 'unforward({ name: "Camera" })  // unforward({ name: "all" })', examples: ['remove the camera port forward', 'remove all port forwards'] },
+      { command: 'upnp', description: 'Turn UPnP on or off (on lets devices open internet ports by themselves). Backs up first', usage: 'upnp({ enabled: false })', examples: ['turn off upnp', 'disable upnp'] },
       { command: 'changes', description: 'The changes the agent made on the router', usage: 'changes({})', examples: ['what did you change on the router'] },
       { command: 'backup', description: 'Back up the router: its settings (as the web UI\'s settings file) and its /jffs files, kept on this machine (the last 14; also taken daily by itself). list: true lists the backups', usage: 'backup({})  // backup({ list: true })', examples: ['back up the router', 'make a router backup', 'list the router backups'] },
       { command: 'restore', description: 'Restore the router\'s settings from a backup (the latest, or a named one), then it restarts. Takes a fresh backup first and asks the owner to confirm', usage: 'restore({ backup: "latest" })', examples: ['restore the router settings from the last backup', 'roll the router back to yesterday\'s backup'] },
@@ -106,7 +111,7 @@ export default class RouterPlugin extends BasePlugin {
 
   /** One wrapper command over SSH. Only `op` from the wrapper's list and checked tokens are ever sent. */
   async run(op, args = [], { input = null, binary = false } = {}) {
-    const ops = ['reservations', 'leases', 'clients', 'security', 'changes', 'add', 'remove', 'replace', 'backup-nvram', 'backup-jffs', 'restore', 'fw-check', 'fw-upgrade', 'reboot'];
+    const ops = ['reservations', 'leases', 'clients', 'security', 'changes', 'add', 'remove', 'replace', 'backup-nvram', 'backup-jffs', 'restore', 'fw-check', 'fw-upgrade', 'reboot', 'forwards', 'unforward', 'upnp'];
     if (!ops.includes(op)) throw new Error(`not a router command: ${op}`);
     for (const a of args) if (!/^[A-Za-z0-9.:_-]{1,40}$/.test(String(a))) throw new Error(`refused a router argument: ${a}`);
     await fs.access(this.keyFile).catch(() => { throw new Error('the router key is not set up on this machine'); });
@@ -180,6 +185,9 @@ export default class RouterPlugin extends BasePlugin {
         case 'restore': return await this.restore(data, params);
         case 'firmware': return await this.firmware(data, params);
         case 'reboot': return await this.reboot(params);
+        case 'forwards': return await this.forwards();
+        case 'unforward': return await this.unforward(data);
+        case 'upnp': return await this.upnp(data);
         default: return { success: false, error: `Unknown action ${action}` };
       }
     } catch (e) {
@@ -343,6 +351,35 @@ export default class RouterPlugin extends BasePlugin {
     const model = ({ 'RT-AX86S': 'RT-AX86U' })[kv.productid] || kv.productid || 'your model';
     const ver = available.replace(/^(\d+)_(\d+)_(\d+)_(\d+)$/, '$1.$2.$3_$4');
     return { success: true, firmware: kv, manual: true, result: `Router firmware ${ver} is available (you run ${kv.current}). Merlin firmware is installed by hand: download ${model}_${ver} from asuswrt-merlin.net (check its sha256), then upload it in Administration → Firmware Upgrade → Upload. I took a backup just now; tell me when the router is back and I'll check every reservation and setting.` };
+  }
+
+  async forwards() {
+    const rules = String(await this.run('forwards')).trim().split('\n').filter(Boolean)
+      .map(l => { const [name, ext, ip, port, proto] = l.split(' '); return { name, ext, ip, port: port || ext, proto }; });
+    if (!rules.length) return { success: true, forwards: [], result: 'No ports are forwarded from the internet.' };
+    return { success: true, forwards: rules, result: `${rules.length} port forward${rules.length === 1 ? '' : 's'}:\n` + rules.map(r => `${r.name}: internet ${r.proto} ${r.ext} → ${r.ip}:${r.port}`).join('\n') };
+  }
+
+  async unforward(data) {
+    const name = String(data.name || data.rule || '').trim();
+    if (!name) return { success: false, error: 'Which port forward? Give its name, or "all".' };
+    await this.verifyWrapper();
+    await this.backup();
+    const out = String(await this.run('unforward', [name])).trim();
+    if (/^ERR no rule/.test(out)) return { success: false, error: `There is no port forward named ${name}.` };
+    if (!/OK$/.test(out)) return { success: false, error: `The router did not take it: ${out}` };
+    return { success: true, result: name === 'all' ? 'Removed every port forward and turned port forwarding off (backed up first).' : `Removed the port forward ${name} (backed up first).` };
+  }
+
+  async upnp(data) {
+    const v = data.enabled ?? data.state ?? data.value;
+    const on = v === true || /^(true|on|1|enable)/i.test(String(v));
+    if (v === undefined) return { success: false, error: 'Turn UPnP on or off?' };
+    await this.verifyWrapper();
+    await this.backup();
+    const out = String(await this.run('upnp', [on ? 'on' : 'off'])).trim();
+    if (!/OK$/.test(out)) return { success: false, error: `The router did not take it: ${out}` };
+    return { success: true, result: on ? 'UPnP is on: devices can open internet ports by themselves.' : 'UPnP is off: no device can open an internet port by itself now (backed up first).' };
   }
 
   async reboot(params) {

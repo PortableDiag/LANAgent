@@ -109,3 +109,30 @@ test('a firmware update on Merlin: a backup, then the manual steps (it is not in
   assert.match(r.result, /RT-AX86U_3004\.388\.13_0/);
   assert.match(r.result, /Firmware Upgrade → Upload/);
 });
+
+test('port forwards are listed; removing them and turning UPnP off back up first and check the wrapper', async () => {
+  const { default: RouterPlugin } = await import('../../src/api/plugins/router.js');
+  const p = new RouterPlugin({});
+  p.logger = { info() {}, warn() {}, error() {} };
+  const order = [];
+  p.verifyWrapper = async () => { order.push('verify'); };
+  p.backup = async () => { order.push('backup'); return {}; };
+  p.run = async (op, args = []) => { order.push([op, ...args].join(' ')); return op === 'forwards' ? 'Camera 8091 192.168.1.20 8091 TCP\n' : 'OK'; };
+  const list = await p.forwards();
+  assert.match(list.result, /Camera: internet TCP 8091 → 192\.168\.1\.20:8091/);
+  order.length = 0;
+  assert.equal((await p.unforward({ name: 'all' })).success, true);
+  assert.deepEqual(order, ['verify', 'backup', 'unforward all']);
+  order.length = 0;
+  assert.equal((await p.upnp({ enabled: false })).success, true);
+  assert.deepEqual(order, ['verify', 'backup', 'upnp off']);
+  assert.equal((await p.upnp({})).success, false);
+});
+
+test('UPnP counts as off only when the per-WAN switch is off too (upnp_enable alone leaves the daemon running)', async () => {
+  const { judgeSecurity } = await import('../../src/api/plugins/router.js');
+  const base = { firmver: '3.0.0.4', buildno: '388.13', extendno: '0', wl0_auth_mode_x: 'psk2sae', wl1_auth_mode_x: 'sae', wps_enable: '0', misc_http_x: '0', sshd_enable: '2', sshd_pass: '0', telnetd_enable: '0', fw_enable_x: '1', port_forwards: '0' };
+  const text = (kv) => JSON.stringify(judgeSecurity(kv));
+  assert.match(text({ ...base, upnp_enable: '0', wan0_upnp_enable: '1' }), /UPnP on/);
+  assert.match(text({ ...base, upnp_enable: '0', wan0_upnp_enable: '0' }), /UPnP off/);
+});
