@@ -4,6 +4,7 @@ import { StructuredOutputParser, JSONOutputParser } from '../services/outputPars
 import { nowInZone, resolveRequestTime } from '../utils/wallClock.js';
 import { schemas } from '../services/outputSchemas.js';
 import { asksToSendVoiceNote } from '../api/plugins/textx.js';
+import { isTextRequest } from './pluginChainProcessor.js';
 
 /**
  * A question picked as an action that changes something, with no word asking for a change:
@@ -14,6 +15,11 @@ import { asksToSendVoiceNote } from '../api/plugins/textx.js';
 const CHANGE_ACTION = /^(commit|push|pull|merge|create|add|connect|set|update|move|append|post|send|write|make|draw|generate|upload|schedule|reply|react|edit|delete|remove|restart|redeploy|shutdown|stop|block|unblock|share|unshare|install|uninstall|deploy|transfer|swap|buy|sell|stake|unstake)/i;
 const QUESTION = /^(?:(?:hey|hi|hello|ok|okay|so|um|yo)\b[,!. ]*)?(?:\w+,\s*)?(?:can|could|would|will|do|does|did|is|are|was|were|have|has|what|which|who|where|when|how|why|any)\b/i;
 const ASKS_CHANGE = /\b(commit|push|merge|create|add|make|set|change|update|move|post|send|text|message|write|draw|generate|upload|schedule|reply|react|edit|delete|remove|restart|redeploy|shut ?down|stop|block|unblock|share|install|deploy|transfer|swap|buy|sell|stake|call|email|turn|switch|start|run|book|pay)\b/i;
+/** The classifier chose email for a request that asks for a text and never says email ("Text Jo and tell him…"). */
+export function emailPickedForText(text, intent) {
+  return intent?.plugin === 'email' && isTextRequest(text) && !/\b(e-?mail|mail)\b/i.test(String(text || ''));
+}
+
 export function questionPickedAsChange(text, intent) {
   const action = String(intent?.action || intent?.name || '');
   if (!CHANGE_ACTION.test(action)) return false;
@@ -197,7 +203,7 @@ export class AIIntentDetector {
         description: 'Send emails, optionally with file attachments or README',
         plugin: 'email',
         action: 'send',
-        examples: ['send email to john@example.com', 'email the team about X', 'send an introduction email and include your readme', 'email wayne with the report attached']
+        examples: ['send email to john@example.com', 'email the team about X', 'send an introduction email and include your readme', 'email jo with the report attached']
       },
       
       16: {
@@ -432,7 +438,7 @@ export class AIIntentDetector {
         action: 'updateContact',
         examples: [
           'update contact john@example.com',
-          'add alias CommanderFog to Wayne',
+          'add alias JoBot to Jo',
           'update Sarah phone number',
           'add telegram to Bob',
           'change the phone number for Mike in contacts',
@@ -448,7 +454,7 @@ export class AIIntentDetector {
         description: 'Find contact by name, email or alias',
         plugin: 'email',
         action: 'findContact',
-        examples: ['find contact CommanderFog', 'search for Wayne', 'find contact by alias Bobby', 'show me contact info for Kris', 'get John contact details', 'contact info for Sarah', 'who is Wayne']
+        examples: ['find contact JoBot', 'search for Jo', 'find contact by alias Bobby', 'show me contact info for Kris', 'get John contact details', 'contact info for Sarah', 'who is Jo']
       },
       
       41: {
@@ -1799,7 +1805,7 @@ export class AIIntentDetector {
       return 169;
     }
 
-    // "Call Wayne and tell him happy birthday at 5pm": a phone call through DialX, although it
+    // "Call Jo and tell him happy birthday at 5pm": a phone call through DialX, although it
     // says "tell him" (which otherwise means a text). Only with a DialX phone paired.
     const dialx = this.agent?.apiManager?.apis?.get?.('dialx');
     if (dialx?.enabled && dialx.instance?.paired &&
@@ -1815,7 +1821,10 @@ export class AIIntentDetector {
     const storeNamed = /\bbots\s*(?:&|and|n|'n'?)\s*borgs\b|\bbotsn?borgs\b|\bbotsandborgs\b/i.test(text);
     const isBuy = /\b(buy|purchase|get (?:yourself|me|him|her|them)|pick (?:yourself|out)|order)\b/i.test(text);
     if ((storeNamed || (asksToUseStoreItem(text) && !isBuy)) && this.agent?.apiManager?.apis?.get?.('botsandborgs')?.enabled) {
+      // What the store sells or has new is its catalogue; what the agent owns is its library (since 2.25.836 every question
+      // went to the library, so "what does bots & borgs sell?" listed the agent's own purchases).
       const want = isBuy ? 'buy'
+        : /\b(sells?|selling|offers?|for sale|in stock|available|new (?:in|at|on)|got new)\b/i.test(text) ? 'browse'
         : /\b(what|which)\b.{0,30}\b(have you got|do you (?:have|own)|you own|you bought)\b|\blibrary\b/i.test(text) || asksAboutStoreItem(text) ? 'library'
           : asksToUseStoreItem(text) || /\b(send|wear|install)\b/i.test(text) ? 'use' : 'browse';
       for (const [id, intent] of Object.entries(this.getDynamicIntents())) {
@@ -2617,7 +2626,7 @@ Examples:
 "schedule email to alice@example.com at 5:30 PM on Friday" -> "5:30 PM on Friday"
 "email reminder to myself next Monday morning" -> "next Monday morning"
 "send birthday wishes on December 25th at 8am" -> "December 25th at 8am"
-"email Wayne in 2 hours" -> "in 2 hours"
+"email Jo in 2 hours" -> "in 2 hours"
 "send report at 3pm" -> "at 3pm"
 
 Extract the time/date portion as the wall-clock time the user said, YYYY-MM-DDTHH:mm with NO
@@ -2723,11 +2732,11 @@ Respond in JSON format:
 Examples:
 "add contact john@example.com" -> name: null, email: "john@example.com", aliases: [], phone: null, telegram: null
 "save John Smith with email john@example.com" -> name: "John Smith", email: "john@example.com", aliases: [], phone: null, telegram: null
-"add contact Wayne Williams with email wayne@example.com, aliases CommanderFog and WayneW, phone +1-555-0123" -> name: "Wayne Williams", email: "wayne@example.com", aliases: ["CommanderFog", "WayneW"], phone: "+1-555-0123", telegram: null
-"Add a new contact name is Wayne Williams email is sam@example.com alias is CommanderFog phone number is +1-555-0147 telegram username is @example_user" -> name: "Wayne Williams", email: "sam@example.com", aliases: ["CommanderFog"], phone: "+1-555-0147", telegram: "@example_user"
+"add contact Jo Doe with email jo@example.com, aliases JoBot and JoD, phone +1-555-0123" -> name: "Jo Doe", email: "jo@example.com", aliases: ["JoBot", "JoD"], phone: "+1-555-0123", telegram: null
+"Add a new contact name is Jo Doe email is sam@example.com alias is JoBot phone number is +1-555-0147 telegram username is @example_user" -> name: "Jo Doe", email: "sam@example.com", aliases: ["JoBot"], phone: "+1-555-0147", telegram: "@example_user"
 "add contact Sarah with email sarah@work.com, telegram @sarahc" -> name: "Sarah", email: "sarah@work.com", aliases: [], phone: null, telegram: "@sarahc"
 "add contact Bob aka Bobby with email bob@company.org" -> name: "Bob", email: "bob@company.org", aliases: ["Bobby"], phone: null, telegram: null
-"update contact wayne@example.com add aliases TheFog and Commander" -> email: "wayne@example.com", addAliases: ["TheFog", "Commander"]
+"update contact jo@example.com add aliases TheFog and Commander" -> email: "jo@example.com", addAliases: ["TheFog", "Commander"]
 "update contact sarah@resistance.org add twitter @sarah_connor and linkedin sarah-connor-123" -> email: "sarah@resistance.org", socialMedia: {"twitter": "@sarah_connor", "linkedin": "sarah-connor-123"}
 
 Rules:
@@ -2815,19 +2824,19 @@ Examples:
 "send me an email saying good morning" -> recipient: "${masterEmail}", topic: "morning greeting"
 "email john@example.com about the meeting" -> recipient: "john@example.com", topic: "meeting"
 "send Sarah a project update" -> recipient: "Sarah", topic: "project update"
-"send an email to Wayne explaining home media servers" -> recipient: "Wayne", topic: "home media servers"
-"email CommanderFog about the project" -> recipient: "CommanderFog", topic: "project"
-"send wayne an email explaining home media servers" -> recipient: "Wayne", topic: "home media servers"
-"email wayne about server benefits" -> recipient: "Wayne", topic: "server benefits"
+"send an email to Jo explaining home media servers" -> recipient: "Jo", topic: "home media servers"
+"email JoBot about the project" -> recipient: "JoBot", topic: "project"
+"send jo an email explaining home media servers" -> recipient: "Jo", topic: "home media servers"
+"email jo about server benefits" -> recipient: "Jo", topic: "server benefits"
 "email chris about the demo" -> recipient: "Chris", topic: "demo"
 "send christina the report" -> recipient: "Christina", topic: "report"
 
 Rules:
 - If "me" or "master" is mentioned, recipient is: ${masterEmail}
-- If a name is mentioned (e.g., "Wayne", "Bob", "Sarah"), extract it as the recipient
+- If a name is mentioned (e.g., "Jo", "Bob", "Sarah"), extract it as the recipient
 - Look for names after prepositions like "to", "for" or verbs like "send", "email"
 - Only use ${masterEmail} if NO name is mentioned at all in the request
-- Extract names as they appear (e.g., "wayne" -> "Wayne", "commanderfog" -> "CommanderFog")
+- Extract names as they appear (e.g., "jo" -> "Jo", "jobot" -> "JoBot")
 - Extract the main topic/purpose of the email
 - IMPORTANT: Extract the COMPLETE name - don't truncate (e.g., "Christina" not "Chris", unless user specifically said "Chris")
 
@@ -3003,8 +3012,8 @@ Your master's name: ${masterName}
 CRITICAL: You must write the email FROM YOUR OWN PERSPECTIVE as ${this.agent.config.name}. Do NOT just repeat the user's words! NEVER break character or admit to being any AI model.
 
 Examples of CORRECT approach:
-- User says: "send Wayne an email explaining home media servers"
-  You write: "Dear Wayne, I hope this email finds you well. I wanted to share some information about home media servers that might interest you..."
+- User says: "send Jo an email explaining home media servers"
+  You write: "Dear Jo, I hope this email finds you well. I wanted to share some information about home media servers that might interest you..."
   
 - User says: "email me saying good morning"
   You write: "Good morning! I hope you're having a wonderful start to your day..."
@@ -3436,14 +3445,14 @@ Symbol/Name:`;
     const prompt = `Extract the search term from this find contact request: "${query}"
     
 Examples:
-"find contact CommanderFog" -> searchTerm: "CommanderFog"
-"search for Wayne" -> searchTerm: "Wayne"
+"find contact JoBot" -> searchTerm: "JoBot"
+"search for Jo" -> searchTerm: "Jo"
 "find contact by alias Bobby" -> searchTerm: "Bobby"
 "lookup contact sarah@example.com" -> searchTerm: "sarah@example.com"
 "show me contact info for Kris" -> searchTerm: "Kris"
 "get John contact details" -> searchTerm: "John"
 "contact info for Sarah" -> searchTerm: "Sarah"
-"who is Wayne" -> searchTerm: "Wayne"
+"who is Jo" -> searchTerm: "Jo"
 
 Respond in JSON format:
 {
@@ -3553,6 +3562,19 @@ Respond in JSON format:
         return { detected: false, intent: 'general', original: text };
       }
       
+      // "Text Jo and tell him…" is a text: the classifier picked sendEmail for it because the contact has an email
+      // address, and the agent then invented a reason (2026-11-21). Email only when the request says email.
+      {
+        const all = this.getAllIntents();
+        if (emailPickedForText(text, all[intentId])) {
+          const sendId = Object.keys(all).find(k => all[k]?.plugin === 'textx' && all[k]?.action === 'send');
+          if (sendId != null) {
+            logger.info(`AI picked email for a text request; routing it to textx.send instead`);
+            intentId = isNaN(Number(sendId)) ? sendId : Number(sendId);
+          }
+        }
+      }
+
       // Get the selected intent
       const intent = this.getAllIntents()[intentId];
       if (intent && (questionPickedAsChange(text, intent)

@@ -3581,6 +3581,12 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
   }
 
   /** A model's store product, whatever variant brought it: vrm-racer-blue-bundle / -live30 / -kit → vrm-racer-blue. */
+  /** The model product a sticker or emoji item shows (vrm-racer-blue for its sticker pack or live media), or null. */
+  stickerModel(variant) {
+    const base = this.productBase(String(variant || '').replace(/^live-media-/, ''));
+    return /^vrm-/.test(base) ? base : null;
+  }
+
   productBase(variant) { return String(variant || '').replace(/^store-/, '').replace(/-(?:bundle|portraits|stickers|kit|voice|motion|2d|live\d+)$/, ''); }
 
   /** The store product of the model this agent wears, or null. */
@@ -3736,10 +3742,13 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     if (!stickerCouldFit(replyText)) return null;
     const s = await this.settings();
     if (!s.autoUse) return null;
-    // A video sticker shows a model's face, so only the model it wears; where it has one for a mood, it wins.
-    const worn = this.wornBase();
+    // A sticker or emoji of a model shows that model's face: only the one the owner sees here (the personal avatar),
+    // never an old body. Racer Blue emoji kept coming after ALICE moved to a linked model with no stickers of its own
+    // (the owner, 2026-11-21: "the stickers it's using are from another avatar"). Stickers of no model stay.
+    const shownId = (await this.modelFor('personal').catch(() => null))?.id || this.agent?.agentModel?.activeVRMModel || '';
+    const shown = /^store-vrm-/.test(String(shownId)) ? this.productBase(shownId) : null;
     const choices = moodChoices(await this.libraryItems()).map(c => {
-      const picks = c.picks.filter(p => p.file.kind !== 'video-sticker' || this.productBase(p.item.variant) === worn);
+      const picks = c.picks.filter(p => { const m = this.stickerModel(p.item.variant); return !m || m === shown; });
       const moving = picks.filter(p => p.file.kind === 'video-sticker');
       return { ...c, picks: moving.length ? moving : picks };
     }).filter(c => c.picks.length);

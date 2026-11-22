@@ -2,6 +2,13 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.897] - 2026-11-21
+
+### Fixed
+- **"Text <name>…" sends a text, not an email.** When the request matched another plugin first, the AI classifier could pick email for a contact who has an email address. A request that opens by asking for a text now goes to TextX unless it says email.
+- **Stickers show the avatar the owner sees.** Stickers and emoji of a model went out for any model ever bought, so an old body's stickers kept coming after the agent changed to a linked model that has none. Only the model the owner sees (the personal avatar) is used now; stickers of no model are unaffected.
+- **"What does the store sell?" browses the store.** Since 2.25.836 a question naming the store listed the agent's own purchases.
+
 ## [2.25.896] - 2026-11-21
 
 ### Fixed

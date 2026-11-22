@@ -147,6 +147,27 @@ test('only the worn model\'s video stickers go out unasked, and they win over st
   assert.deepEqual(sent, ['sticker.webm']);
 });
 
+test('wearing a linked model with no stickers: no other model\'s stickers or emoji go out; a model-free one still can', async () => {
+  const sent = [];
+  const agent = { agentModel: { activeVRMModel: 'store-linked-lnk-1-rose-base' }, providerManager: { generateAux: async () => ({}) },
+    interfaces: new Map([['telegram', { bot: { telegram: { sendSticker: async (chat, st) => sent.push(st.filename) } } }]]) };
+  const { p, store } = plugin(agent);
+  p.modelFor = async () => ({ id: 'store-linked-lnk-1-rose-base' });
+  for (const [v, n] of [['live-media-vrm-racer-blue', 'png512 thumbs up.png'], ['emoji-party-pack', 'party.png']]) {
+    fs.mkdirSync(path.join(p.libraryRoot, v), { recursive: true }); fs.writeFileSync(path.join(p.libraryRoot, v, n), 'png');
+  }
+  store.library = { items: [
+    { variant: 'live-media-vrm-racer-blue', title: 'Racer Blue live media', kind: 'emoji', files: [{ name: 'png512 thumbs up.png', kind: 'emoji', mood: 'thumbs up' }] }] };
+  let asked = 0;
+  p.askStickerModel = async () => { asked++; return '1'; };
+  assert.equal(await p.autoSticker({ userText: 'thanks', replyText: 'Any time!', chatId: 1 }), null);
+  assert.equal(asked, 0, 'no choice offered: the only emoji shows another body');
+  assert.deepEqual(sent, []);
+  assert.equal(p.stickerModel('live-media-vrm-racer-blue'), 'vrm-racer-blue');
+  assert.equal(p.stickerModel('vrm-racer-blue-stickers'), 'vrm-racer-blue');
+  assert.equal(p.stickerModel('emoji-party-pack'), null);
+});
+
 test('a ready-made reaction clip is found for the worn model only; a background is picked by name', async () => {
   const { p, store } = plugin({ agentModel: { activeVRMModel: 'store-vrm-racer-blue-bundle' } });
   store.library = { items: [
