@@ -246,7 +246,7 @@ export default class TextXPlugin extends BasePlugin {
     super(agent);
     this.name = 'textx';
     this.version = '1.0.0';
-    this.description = "Text people from the user's own phone number through the TextX SMS app: send or schedule texts (the user confirms each on the phone), read and search conversations the user shared, look up contacts, and watch a conversation for replies";
+    this.description = "Text people from the user's own phone number through the TextX SMS app: send or schedule texts (a text to an approved contact goes at once, with no confirmation; only a number the phone has not approved waits for the user to tap Send there), read and search conversations the user shared, look up contacts, and watch a conversation for replies";
     this.timeout = 150000;
     this.commands = [
       {
@@ -258,7 +258,7 @@ export default class TextXPlugin extends BasePlugin {
       },
       {
         command: 'schedule',
-        description: 'Schedule an SMS for later (the user confirms on the phone). `at` is an ISO-8601 time; repeat is optional {every:"day"|"weekdays"|"week"|"month"|"year"}',
+        description: 'Schedule an SMS for later (no confirmation for an approved contact). `at` is an ISO-8601 time; repeat is optional {every:"day"|"weekdays"|"week"|"month"|"year"}',
         usage: 'schedule({ to: "Dad", text: "Happy birthday!", at: "2026-11-02T09:00:00-05:00" })',
         hint: messageTextRule(),
         examples: ['schedule a text to dad for tomorrow at 9 saying happy birthday', 'text Alex every friday at 5 to remind them about the game']

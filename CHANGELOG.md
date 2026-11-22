@@ -2,6 +2,11 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.898] - 2026-11-21
+
+### Fixed
+- **The agent no longer thinks every text needs the owner's tap.** The TextX plugin's description said the user confirms each text on the phone, so the agent gave that as a reason to email instead. A text to an approved contact goes at once; only a number the phone has not approved waits for a tap.
+
 ## [2.25.897] - 2026-11-21
 
 ### Fixed
