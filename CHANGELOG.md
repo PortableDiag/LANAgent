@@ -2,6 +2,13 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.899] - 2026-11-21
+
+### Fixed
+- **"Call <name> and explain…" places a call.** A call request that also named the store matched the store's video action, so the agent sent a video of itself holding a phone instead of calling. A request that opens by asking for a call now goes to DialX.
+- **"Did you call <name> yet?" checks the phone.** It reads the recent calls instead of guessing.
+- **No tool markup in answers.** A general answer that tried to write a plugin call (`<plugin name=…>`) sent that markup to the owner; it is removed now, and the answer says it was not checked.
+
 ## [2.25.898] - 2026-11-21
 
 ### Fixed

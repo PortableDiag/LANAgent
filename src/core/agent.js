@@ -17,7 +17,7 @@ import { APIManager } from "../api/core/apiManager.js";
 import { IntentDetector } from "./intentDetector.js";
 import { AIIntentDetector } from "./aiIntentDetector.js";
 import { vectorIntentDetector } from "./vectorIntentDetector.js";
-import { PluginChainProcessor, isTextRequest } from "./pluginChainProcessor.js";
+import { PluginChainProcessor, isTextRequest, isOnePhoneCall } from "./pluginChainProcessor.js";
 // EmailAutoReply functionality moved to background tasks
 import { SelfModificationService } from '../services/selfModification.js';
 import { TaskReminderService } from '../services/taskReminders.js';
@@ -1341,6 +1341,14 @@ If answering needs information that is not in the conversation above (messages, 
               intentResult = null;
             }
 
+            // "Call Jo and explain how you use botsnborgs…" matched botsandborgs.use on the store words and sent him a
+            // video of a phone call instead of calling (2026-11-21). A request that opens by asking for a call is a call;
+            // the AI classifier's DialX hint routes it.
+            if (intentResult && intentResult.plugin !== 'dialx' && isOnePhoneCall(input)) {
+              logger.info(`Call request matched ${intentResult.plugin}.${intentResult.action}: using the AI classifier`);
+              intentResult = null;
+            }
+
             // Override: If vector matched a non-schedule Govee intent but input contains
             // schedule-related temporal phrases, fall through to the AI two-step classifier
             // which has better contextual understanding of schedule vs. immediate commands.
@@ -1646,6 +1654,13 @@ If answering needs information that is not in the conversation above (messages, 
                   temperature: 0.7,
                   systemPrompt: this.getSystemPrompt()
                 });
+              }
+              // A general answer has no tools: markup like <plugin name="dialx"><action>… was sent to the owner as the answer
+              // (2026-11-21). Say plainly that it was not checked instead.
+              if (/<plugin\s+name=|<action>/i.test(queryResponse?.content || '')) {
+                const kept = String(queryResponse.content).replace(/<plugin\b[\s\S]*?(<\/plugin>|$)/gi, '').replace(/<\/?(action|params)>[^<]*/gi, '').trim();
+                logger.warn('General answer carried tool markup; removed it');
+                queryResponse = { ...queryResponse, content: `${kept ? `${kept}\n\n` : ''}I couldn't look that up from here. Ask me again and I'll check it directly.`.trim() };
               }
               const response_content = { type: 'text', content: queryResponse.content };
               await this.memoryManager.storeConversation(context.userId, input, queryResponse.content, context);

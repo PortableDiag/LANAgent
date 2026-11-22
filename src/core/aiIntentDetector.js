@@ -1805,6 +1805,15 @@ export class AIIntentDetector {
       return 169;
     }
 
+    const dialx0 = () => this.agent?.apiManager?.apis?.get?.('dialx');
+    // "Did you call Jo yet?" asks what happened: the phone's recent calls, not a new call and not a guess
+    // (2026-11-21: answered with tool markup it could not run).
+    if (dialx0()?.enabled && /\b(did|have|has)\s+(?:you|it|\w+)\s+(?:already\s+|actually\s+)?(?:called|call|phoned|rung|rang)\s+(?!me\b)\w+|\bwhether\s+you\s+(?:called|phoned)\b/i.test(t)) {
+      for (const [id, intent] of Object.entries(this.getDynamicIntents())) {
+        if (intent.plugin === 'dialx' && intent.action === 'recents') return parseInt(id);
+      }
+    }
+
     // "Call Jo and tell him happy birthday at 5pm": a phone call through DialX, although it
     // says "tell him" (which otherwise means a text). Only with a DialX phone paired.
     const dialx = this.agent?.apiManager?.apis?.get?.('dialx');
