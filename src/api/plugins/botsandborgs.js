@@ -181,6 +181,17 @@ export function linkFitProps(f, sha256) {
   });
 }
 
+/**
+ * A fit job in words. Only a claimed job is being fitted; a queued one waits, and its minutes are a guess from the
+ * queue (the store said so, 3910 #2631), so it gets its place and no time.
+ */
+export function fitJobLine(job) {
+  if (!job) return '';
+  const state = String(job.state || job.status || '').toLowerCase();
+  if (state === 'queued') return ` It is waiting for the store to fit it${job.position != null ? ` (position ${job.position})` : ''}.`;
+  return ` The store is fitting it now${job.eta_seconds > 0 ? `, about ${Math.max(1, Math.round(job.eta_seconds / 60))} min` : ''}.`;
+}
+
 export default class BotsAndBorgsPlugin extends BasePlugin {
   constructor(agent) {
     super(agent);
@@ -2135,7 +2146,7 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
       if (!f) return { success: true, result: "I have no fit status from Bots & Borgs yet; it comes with my live pass's next check." };
       const off = await this.unsupportedProps();
       const lines = f.props.map(p => `- ${p.prop}: ${p.line || p.state}${p.state === 'unsupported' && p.fix ? ` (would work with: ${p.fix})` : ''}`);
-      const job = f.job ? ` The store is fitting it now${f.job.eta_seconds ? `, about ${Math.max(1, Math.round(f.job.eta_seconds / 60))} min` : ''}${f.job.position != null ? ` (position ${f.job.position})` : ''}.` : '';
+      const job = fitJobLine(f.job);
       return { success: true, fit: f, result: `How the store's props fit my body${f.body_class ? ` (${f.body_class})` : ''}:\n${lines.join('\n') || '- nothing listed yet'}${off.size ? `\nI won't use ${[...off.keys()].join(', ')} on this body.` : ''}${job}` };
     }
     if (renew) {

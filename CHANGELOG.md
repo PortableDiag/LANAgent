@@ -2,6 +2,11 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.903] - 2026-11-22
+
+### Fixed
+- **A queued fit is called waiting.** Asked about its avatar's fit, the agent said the store was "fitting it now" with a time, even while the job was still in the queue.
+
 ## [2.25.902] - 2026-11-22
 
 ### Fixed
