@@ -2,6 +2,11 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.911] - 2026-11-23
+
+### Fixed
+- **A video says its line, not a description of itself.** A line quoted for the owner's own video is spoken as written; it used to be reworded into "I'm doing the dance while saying…" with the owner's name first. A line the agent writes itself never mentions the move or the video, is checked, and is asked for again if it does. Videos to other people keep the texting rule: exact words need quotes and "verbatim".
+
 ## [2.25.910] - 2026-11-23
 
 ### Added

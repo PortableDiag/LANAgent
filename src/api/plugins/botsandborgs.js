@@ -89,6 +89,18 @@ export function quotedWords(text) {
   return m ? (m[1] || m[2]).trim() : '';
 }
 
+/** The line a request quotes to be SPOKEN (`saying "…"`), not any quoted words (a clip's name in quotes is not a line). */
+export function spokenQuote(text) {
+  const t = String(text || '');
+  const m = /\b(?:say|says|saying|said|speak|speaking|shout(?:ing)?|yell(?:ing)?|announc(?:e|ing)|tell(?:ing)? (?:me|him|her|them|us|everyone)|the (?:line|words))\b[\s,:]*(?:that |this |the line |out loud )?[:,]?\s*(?:["“]([^"”]{2,600})["”]|'([^']{2,600})'(?=\s|$|[.,!?]))/i.exec(t);
+  return m ? (m[1] || m[2]).trim() : '';
+}
+
+/** Whether a spoken line describes the video instead of saying its line ("I'm doing the cabbage patch while saying …"). */
+export function narratesVideo(line) {
+  return /\bI(?:'m| am|’m)\s+(?:here\s+)?(?:now\s+|just\s+|currently\s+)?(?:doing|dancing|performing|filming|recording|making|sending|busting|showing|hitting|bringing you|waving|saying)\b|\bwhile (?:saying|doing|dancing|I)\b|\b(?:in|for) this video\b|\bwatch me\b|\bhere(?:'s| is|’s) (?:me|my) (?:doing|dance|video)/i.test(String(line || ''));
+}
+
 /** A live VRM URL without its query: the store puts the pass key in `vrm_url`, and the key is sent as a header instead. */
 export function liveUrl(url, slug) {
   const u = String(url || '').split(/[?#]/)[0];
@@ -3231,7 +3243,11 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
       // are quoted AND the request says "verbatim". Anything else, quoted or not, the agent writes itself. A `say` taken
       // from a request (by any extractor: the router's carried "explaining you have a new avatar" straight into a video
       // to a contact) is never copied; only a caller with no request (the API) gives its own line.
-      const exact = /\bverbatim\b/i.test(asked) ? quotedWords(asked) : '';
+      // A line quoted for the owner's OWN video is the line, as written (the owner, 2026-11-23: `saying "Hi Ho silver…"`
+      // came back as "Pat, I'm doing the cabbage patch while saying…"; "it should have just said the line"). To
+      // anyone else the texting rule stands: exact needs quotes and "verbatim".
+      const forOwnerVideo = /^(me|owner|myself)$/i.test(videoRecipient(asked, data.to));
+      const exact = /\bverbatim\b/i.test(asked) ? quotedWords(asked) : forOwnerVideo ? spokenQuote(asked) : '';
       const given = !asked.trim() && (data.say || data.voiceover) ? String(data.say || data.voiceover) : '';
       const wantsSpeech = !!(data.say || data.voiceover) || !!quotedWords(asked) || /\b(explain|explaining|say|saying|tell|telling|talk(?:ing)? about|introduc|announc|letting (?:him|her|them) know)\w*/i.test(asked);
       let say = exact || given;
@@ -3726,12 +3742,28 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     const name = this.agent?.config?.name || process.env.AGENT_NAME || 'the assistant';
     const owner = process.env.OWNER_NAME ? String(process.env.OWNER_NAME).split(/\s+/)[0] : 'my owner';
     const forOwner = /^(me|owner|myself)$/i.test(to);
-    const res = await pm.generateResponse(`You are ${name}, ${owner}'s AI assistant, recording a short video of your 3D avatar speaking. ` +
-      `The request: "${String(asked).slice(0, 400)}". Write what you say in the video: one to three short spoken sentences in the first person, ` +
-      `${forOwner ? `talking to ${owner}` : `talking to ${to}: greet them by name and say you are ${owner}'s AI assistant`}, saying what the request describes in your own words. ` +
+    const quoted = spokenQuote(asked);
+    const prompt = `You are ${name}, ${owner}'s AI assistant, recording a short video of your 3D avatar speaking. ` +
+      `The request: "${String(asked).slice(0, 400)}". Write only the words you SAY in the video: one to three short spoken sentences in the first person, ` +
+      `${forOwner ? `heard by ${owner}; do not open with a name or a greeting unless the request asks for one` : `talking to ${to}: greet them by name and say you are ${owner}'s AI assistant`}, ` +
+      `${quoted ? `saying this in your own words and nothing else: "${quoted.slice(0, 300)}". ` : 'saying what the request wants said, in your own words. '}` +
+      'The request may also name a dance, a move, an avatar, a background or a camera: that is what is SEEN. Never mention or describe it, the video, or what you are doing. ' +
       `${videoPerspective(name, owner)} ` +
-      'Under 40 words, no emoji, links or stage directions. Reply with the words only.', { maxTokens: 120, temperature: 0.5 });
-    return String(res?.content || '').trim().replace(/^(["'])([\s\S]*)\1$/, '$2').slice(0, 400);
+      'Under 40 words, no emoji, links or stage directions. Reply with the words only.';
+    const ask = async (extra = '') => String((await pm.generateResponse(prompt + extra, { maxTokens: 120, temperature: 0.5 }))?.content || '').trim().replace(/^(["'])([\s\S]*)\1$/, '$2').slice(0, 400);
+    let line = await ask();
+    if (narratesVideo(line)) {
+      this.logger.info('botsandborgs: the spoken line described the video; asked again');
+      line = await ask(`\n\nYou wrote: "${line}". That describes the video. Say only the words, as if nobody could see it.`);
+    }
+    // Still describing: those sentences go (and with nothing left there is no video, never a narrated one).
+    if (narratesVideo(line)) line = line.split(/(?<=[.!?])\s+/).filter(x => !narratesVideo(x)).join(' ').trim() || (forOwner ? quoted : '');
+    if (forOwner && !/\b(?:greet|say (?:hi|hello)|my name|by name)\b/i.test(asked)) {
+      const opened = new RegExp(`^(?:hi|hey|hello)?[ ,]*${owner.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*[,!:]\\s*`, 'i');
+      const bare = line.replace(opened, '');
+      if (bare) line = bare.charAt(0).toUpperCase() + bare.slice(1);
+    }
+    return line;
   }
 
   /** The part of a reply that fits in `maxSeconds` of speech (about 2.6 words a second), cut at a sentence. */

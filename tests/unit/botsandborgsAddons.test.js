@@ -292,9 +292,16 @@ test('unquoted words are never spoken as copied: the agent writes its own line; 
   p.voiceLine = async () => 'I can move and talk now!';
   await p.useOwned({ say: 'youre now able to move and talk', _extracted: ['say'], _context: { originalInput: 'send me a video message saying youre now able to move and talk' } });
   assert.equal(call.say, 'I can move and talk now!');
-  // The texting rule (2026-11-20): quotes alone are the agent's to word; quotes AND "verbatim" are exact.
+  // A line quoted for the owner's own video is the line (2026-11-23). To anyone else the texting rule (2026-11-20) stands:
+  // quotes alone are the agent's to word; quotes AND "verbatim" are exact.
   await p.useOwned({ say: 'whatever', _context: { originalInput: 'send me a video of yourself saying "hi everyone"' } });
-  assert.equal(call.say, 'I can move and talk now!');
+  assert.equal(call.say, 'hi everyone');
+  await p.useOwned({ say: 'whatever', _context: { originalInput: 'Sent me a video of you doing the cabbage patch while saying "Hi Ho silver, Pat is a goober"' } });
+  assert.equal(call.say, 'Hi Ho silver, Pat is a goober'); assert.equal(call.to, 'me');
+  await p.useOwned({ say: 'whatever', _context: { originalInput: 'send Jo a video of yourself saying "hi everyone"' } });
+  assert.equal(call.say, 'I can move and talk now!'); assert.equal(call.to, 'Jo');
+  await p.useOwned({ say: 'whatever', _context: { originalInput: 'send me a video of you doing the "cabbage patch" saying hello in your own way' } });
+  assert.equal(call.say, 'I can move and talk now!', "a clip's name in quotes is not the line");
   await p.useOwned({ say: 'whatever', _context: { originalInput: 'send me a video of yourself saying "hi everyone" verbatim' } });
   assert.equal(call.say, 'hi everyone');
 });
@@ -311,4 +318,26 @@ test('a say given directly (API) is spoken as given; asked to speak with no line
   const r = await p.useOwned({ _context: { originalInput: 'send me a video message saying you can dance' } });
   assert.equal(call, null);
   assert.match(r.error, /couldn't write what to say/);
+});
+
+// The owner, 2026-11-23: "she put my name in it first and then described her actions, it should have just said the line".
+test('a written line never describes the video or opens with the owner\'s name', async () => {
+  const { narratesVideo, spokenQuote } = await import('../../src/api/plugins/botsandborgs.js');
+  for (const bad of ["Charlie, I'm doing the cabbage patch while saying hi ho silver, Pat is a goober.", 'I am dancing for you!', "Watch me go!", 'In this video I say hello.', "I’m now performing the rumba."]) assert.equal(narratesVideo(bad), true, bad);
+  for (const ok of ['Hi ho silver, Pat is a goober!', 'I can move and talk now!', "I'm so happy it is Monday.", 'Good morning, the coffee is ready.']) assert.equal(narratesVideo(ok), false, ok);
+  assert.equal(spokenQuote('do the "cabbage patch"'), ''); assert.equal(spokenQuote('saying: “good night”'), 'good night'); assert.equal(spokenQuote("and say 'hello there'"), 'hello there');
+  const was = process.env.OWNER_NAME; process.env.OWNER_NAME = 'Charlie Example';
+  try {
+    const { p } = plugin({ agentModel: {} });
+    const replies = ["Charlie, I'm doing the rumba while saying you are great.", 'Charlie, you are great!']; const prompts = [];
+    p.agent.providerManager = { generateResponse: async (q) => { prompts.push(q); return { content: replies.shift() }; } };
+    assert.equal(await p.voiceLine('send me a video of you doing the rumba and tell me I am great', 'me'), 'You are great!');
+    assert.equal(prompts.length, 2); assert.match(prompts[0], /Never mention or describe it/); assert.match(prompts[1], /describes the video/);
+    p.agent.providerManager = { generateResponse: async () => ({ content: "I'm doing the rumba. You are great!" }) };
+    assert.equal(await p.voiceLine('video of you doing the rumba telling me I am great', 'me'), 'You are great!');
+    p.agent.providerManager = { generateResponse: async () => ({ content: "I'm doing the rumba." }) };
+    assert.equal(await p.voiceLine('video of you doing the rumba telling me I am great', 'me'), '', 'nothing left: no narrated video');
+    p.agent.providerManager = { generateResponse: async () => ({ content: "Hi Jo, this is ALICE, Charlie's AI assistant. Happy Monday!" }) };
+    assert.match(await p.voiceLine('send Jo a video saying happy monday', 'Jo'), /^Hi Jo, this is ALICE/);
+  } finally { if (was === undefined) delete process.env.OWNER_NAME; else process.env.OWNER_NAME = was; }
 });
