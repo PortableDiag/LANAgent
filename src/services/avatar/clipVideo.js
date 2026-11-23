@@ -116,10 +116,31 @@ window.setup = async ({ width, height, fps, seconds, loop, prop, props = [], bac
   let setRoot = null, limits = null, facing = 0;
   if (set) {
     const mark = (set.marks || []).find(m => m.id === (set.mark || 'main')) || (set.marks || [])[0] || { position: [0, 0, 0], facing_deg: 0 };
-    const model = (await l.loadAsync('/set.glb')).scene;
-    setRoot = new THREE.Group(); setRoot.add(model);
-    model.position.set(-(mark.position?.[0] || 0), -(mark.position?.[1] || 0) - (set.floor_y || 0), -(mark.position?.[2] || 0));
-    setRoot.rotation.y = -THREE.MathUtils.degToRad(mark.facing_deg || 0);
+    setRoot = new THREE.Group();
+    if (set.kind === 'equirect') {
+      // A 360 picture, its lower half laid on the floor under the feet (as three.js's GroundedSkybox does): taken from
+      // eye_height_m, flat out to ground_radius_m. front_deg: the image yaw (0 = center column, + = right) behind the body.
+      const tex = await new THREE.TextureLoader().loadAsync('/set.img');
+      tex.colorSpace = THREE.SRGBColorSpace; tex.anisotropy = 4;
+      const eye = Math.min(Math.max(Number(set.eye_height_m) || 1.5, 0.3), 5), R = Math.min(Math.max(Number(set.ground_radius_m) || 12, 4), 40);
+      const geo = new THREE.SphereGeometry(R, 128, 96); geo.scale(1, 1, -1);
+      const at = geo.getAttribute('position'), q = new THREE.Vector3(), y1 = -eye * 1.5;
+      for (let i = 0; i < at.count; i++) {
+        q.fromBufferAttribute(at, i);
+        if (q.y >= 0) continue;
+        q.multiplyScalar(q.y < y1 ? -eye / q.y : 1 - (q.y * q.y) / (3 * y1 * y1)); q.toArray(at.array, 3 * i);
+      }
+      const dome = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ map: tex, depthWrite: false }));
+      dome.position.y = eye; dome.renderOrder = -1;
+      // The picture's center column sits at -Z (behind the body) after a quarter turn; front_deg turns it from there.
+      dome.rotation.y = THREE.MathUtils.degToRad(90 + (Number(set.front_deg) || 0));
+      setRoot.add(dome);
+    } else {
+      const model = (await l.loadAsync('/set.glb')).scene;
+      model.position.set(-(mark.position?.[0] || 0), -(mark.position?.[1] || 0) - (set.floor_y || 0), -(mark.position?.[2] || 0));
+      setRoot.add(model);
+      setRoot.rotation.y = -THREE.MathUtils.degToRad(mark.facing_deg || 0);
+    }
     scene.add(setRoot); limits = set.camera?.[mark.id] || null; facing = Number(mark.facing_deg) || 0;
   } else if (camera && backgroundImage) limits = { arc_deg: [-35, 35] }; // past this the picture's edges show
   camera = moveWithin(camera, limits?.arc_deg);
@@ -378,7 +399,7 @@ async function render({ modelPath, clipPath, loop = false, prop = null, props = 
         let body;
         if (u.pathname === '/render.html') body = Buffer.from(html);
         else if (u.pathname === '/clip.vrma') body = await fs.readFile(clipPath);
-        else if (u.pathname === '/set.glb' && setPath) body = await fs.readFile(setPath);
+        else if ((u.pathname === '/set.glb' || u.pathname === '/set.img') && setPath) body = await fs.readFile(setPath);
         else if (u.pathname === '/background.jpg' && backgroundPath) body = await fs.readFile(backgroundPath);
         else if (/^\/prop\/\d+\.glb$/.test(u.pathname) && propFiles[Number(u.pathname.slice(6, -4))]) body = await fs.readFile(propFiles[Number(u.pathname.slice(6, -4))]);
         else if (u.pathname.startsWith('/lib/')) {

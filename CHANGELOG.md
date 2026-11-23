@@ -2,6 +2,11 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.907] - 2026-11-23
+
+### Added
+- The video renderer loads 360 scenes (`bnb-set/1`, `kind: equirect`): the picture's lower half is laid on the floor under the feet, and `front_deg` says what stands behind the body. None is sold yet.
+
 ## [2.25.906] - 2026-11-23
 
 ### Added
