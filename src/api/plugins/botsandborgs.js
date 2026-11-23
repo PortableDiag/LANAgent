@@ -103,8 +103,8 @@ export function greetingIn(text, opening = '') {
 }
 
 /**
- * A line for the owner without the owner's name at its start (2026-11-23): "Charles, you are great" loses the name, and a
- * greeting keeps its word ("Hello, Charles! …" is "Hello! …") when one was asked for, else goes with the name.
+ * A line for the owner without the owner's name at its start (2026-11-23): "Pat, you are great" loses the name, and a
+ * greeting keeps its word ("Hello, Pat! …" is "Hello! …") when one was asked for, else goes with the name.
  */
 export function withoutOwnerName(line, owner, asked = '') {
   if (/\b(?:my name|by name)\b/i.test(asked)) return line;
