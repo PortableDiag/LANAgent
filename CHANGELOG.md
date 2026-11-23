@@ -2,6 +2,12 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.906] - 2026-11-23
+
+### Added
+- **The camera moves in the agent's videos, when asked.** "Pan the camera left to right", "a side shot", "all the way around", "zoom in", "low angle", "crane shot". The shot pulls back so the whole routine stays in frame, and the body casts a shadow on the floor. With a background named in the request the picture stands on a curved wall and the camera stays within 35 degrees; with none it is a plain studio floor. Without such words videos are as before.
+- The renderer can load a 3D set (`bnb-set/1`) and play camera moves as data (`bnb-camera/1`), agreed with Bots & Borgs; none is sold yet.
+
 ## [2.25.905] - 2026-11-23
 
 ### Added

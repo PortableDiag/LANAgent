@@ -3466,12 +3466,17 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
         if (!tts?.buffer?.length) throw new Error("I couldn't make the voice-over");
         voice = { audio: tts.buffer, format: tts.format || 'mp3' };
       }
-      const scene = await this.backgroundFor(asked);
       const { framingAsked } = await import('../../services/avatar/clipVideo.js');
+      const { cameraAsked } = await import('../../services/avatar/cameraMoves.js');
       const framing = framingAsked(asked);
+      // "Pan left to right", "a side shot": the camera moves (the owner, 2026-11-22). A picture stands on a curved wall
+      // then, so only one named in the request is used, and its wide copy; else a plain studio floor.
+      const camera = framing === 'full' ? cameraAsked(asked) : null;
+      const scene = await this.backgroundFor(asked, camera ? { namedOnly: true, wide: true } : {});
+      if (camera) this.logger.info(`botsandborgs: filming with the camera move ${camera.id}`);
       if (scene) this.logger.info(`botsandborgs: filming in front of ${path.basename(scene)}${framing !== 'full' ? `, ${framing} framing` : ''}`);
       const v = await (this.renderVideo || renderClipVideo)({ modelPath: path.join(this.vrmDir(), model.file), look: model.look || (await this.avatarLooks().catch(() => ({})))[model.id] || null, clipPath: await this.clipFileFor(model.id, rel),
-        loop: !!entry.loop, prop: entry.prop || null, props: this.propPaths(await this.propsForBody(entry.props, { asked, scene, modelId: model.id })), framing, ...(voice ? { voice } : {}), ...(scene ? { backgroundPath: scene } : {}) });
+        loop: !!entry.loop, prop: entry.prop || null, props: this.propPaths(await this.propsForBody(entry.props, { asked, scene, modelId: model.id })), framing, ...(camera ? { camera } : {}), ...(voice ? { voice } : {}), ...(scene ? { backgroundPath: scene } : {}) });
       const filename = `${String(label).toLowerCase().replace(/[^a-z0-9]+/g, '-')}.mp4`;
       if (/^(me|owner|myself)$/i.test(to)) {
         const tg = this.agent?.interfaces?.get?.('telegram');
@@ -3664,12 +3669,14 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
   }
 
   /** An owned background scene for a portrait video: the one named in the request, else today's. Path or null. */
-  async backgroundFor(asked = '') {
+  async backgroundFor(asked = '', { namedOnly = false, wide = false } = {}) {
     const items = (await this.libraryItems()).filter(i => i.files.some(f => f.kind === 'background'));
-    const phone = items.flatMap(item => item.files.filter(f => f.kind === 'background' && f.format !== 'desktop').map(file => ({ item, file })));
+    const wideFile = (f) => f.format === 'desktop' || /1920x1080/.test(f.name);
+    const phone = items.flatMap(item => item.files.filter(f => f.kind === 'background' && (wide ? wideFile(f) : f.format !== 'desktop')).map(file => ({ item, file })));
     if (!phone.length) return null;
-    const scene = (f) => f.name.replace(/\s*\d{3,4}x\d{3,4}\.[a-z]+$/i, '').replace(/^phone\s+/i, '').toLowerCase();
+    const scene = (f) => f.name.replace(/\s*\d{3,4}x\d{3,4}\.[a-z]+$/i, '').replace(/^(?:phone|desktop)\s+/i, '').toLowerCase();
     const named = phone.find(p => { const n = scene(p.file); return n.length >= 3 && String(asked).toLowerCase().includes(n); });
+    if (!named && namedOnly) return null;
     const pick = named || phone[Math.floor(Date.now() / 86400000) % phone.length];
     return path.join(this.libraryDir(), safeName(pick.item.variant), pick.file.name);
   }

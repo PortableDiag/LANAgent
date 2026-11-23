@@ -13,6 +13,7 @@ import path from 'path';
 import { spawn } from 'child_process';
 import { fileURLToPath } from 'url';
 import { logger } from '../../utils/logger.js';
+import { moveProblem } from '../../interfaces/web/public/lib/bnb-camera.js';
 
 const PUBLIC_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), '../../interfaces/web/public');
 const METHODS = ['_getBone', 'loadVRMA', '_fitPoleSpot'];
@@ -69,33 +70,87 @@ import * as V from '/lib/three-vrm.module.js';
 import { attachProps, updateProps } from '/lib/vrm-props.js';
 import { wearLook } from '/lib/vrm-look.js';
 import { jawDriver } from '/lib/vrm-jaw.js';
+import { moveAt, viewFor, hiddenAt, pullFor, moveWithin } from '/lib/bnb-camera.js';
 const THREE = window.THREE; THREE.GLTFLoader = GLTFLoader;
 const d = {
 ${methods}
 };
-window.setup = async ({ width, height, fps, seconds, loop, prop, props = [], background, backgroundImage = false, mouth = null, framing = 'full', look = null }) => {
+window.setup = async ({ width, height, fps, seconds, loop, prop, props = [], background, backgroundImage = false, mouth = null, framing = 'full', look = null, camera = null, set = null }) => {
   const r = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
   r.setPixelRatio(1); r.setSize(width, height); document.body.appendChild(r.domElement);
   const scene = new THREE.Scene();
   scene.background = new THREE.Color(background);
   // A background scene (Bots & Borgs backgrounds): cover the frame, cropped to its shape, never stretched.
-  if (backgroundImage) {
+  // With a moving camera a picture pinned to the screen looks like a turntable in front of a wall that never moves: it
+  // goes on a curved wall behind the body instead (below).
+  if (backgroundImage && !set && !camera) {
     const tex = await new THREE.TextureLoader().loadAsync('/background.jpg');
     tex.colorSpace = THREE.SRGBColorSpace;
     const ia = tex.image.width / tex.image.height, va = width / height;
     if (ia > va) { tex.repeat.set(va / ia, 1); tex.offset.set((1 - va / ia) / 2, 0); } else { tex.repeat.set(1, ia / va); tex.offset.set(0, (1 - ia / va) / 2); }
     scene.background = tex;
   }
-  scene.add(new THREE.HemisphereLight(0xffffff, 0x3a4050, 2.2));
-  const key = new THREE.DirectionalLight(0xffffff, 2.2); key.position.set(1.2, 2.5, 2.5); scene.add(key);
-  const rim = new THREE.DirectionalLight(0x9fc4ff, 1.2); rim.position.set(-2, 2, -2); scene.add(rim);
+  let key;
+  if (set && Array.isArray(set.lights) && set.lights.length) {
+    // The set's own lights for the body (its own light is baked).
+    for (const l of set.lights.slice(0, 6)) {
+      const color = new THREE.Color(/^#[0-9a-f]{6}$/i.test(l.color || '') ? l.color : '#ffffff');
+      const power = Math.min(Math.max(Number(l.intensity) || 1, 0), 10);
+      if (l.type === 'ambient') scene.add(new THREE.AmbientLight(color, power));
+      else if (l.type === 'directional' && Array.isArray(l.from)) { const dl = new THREE.DirectionalLight(color, power); dl.position.set(...l.from.map(Number)); scene.add(dl); key ||= dl; }
+    }
+  } else scene.add(new THREE.HemisphereLight(0xffffff, 0x3a4050, 2.2));
+  if (!key) { key = new THREE.DirectionalLight(0xffffff, 2.2); key.position.set(1.2, 2.5, 2.5); scene.add(key); }
+  if (!set) { const rim = new THREE.DirectionalLight(0x9fc4ff, 1.2); rim.position.set(-2, 2, -2); scene.add(rim); }
   const floor = new THREE.Mesh(new THREE.CircleGeometry(0.9, 48), new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.06 }));
-  floor.rotation.x = -Math.PI / 2; floor.position.y = 0.001; scene.add(floor);
+  floor.rotation.x = -Math.PI / 2; floor.position.y = 0.001; if (!set && !camera) scene.add(floor);
   const l = new GLTFLoader(); l.register(p => new V.VRMLoaderPlugin(p));
   const vrm = (await l.loadAsync(window.MODEL_URL || '/model.vrm')).userData.vrm;
   if (V.VRMUtils?.removeUnnecessaryJoints) V.VRMUtils.removeUnnecessaryJoints(vrm.scene);
   vrm.scene.traverse(o => { if (o.isMesh) o.frustumCulled = false; });
   scene.add(vrm.scene); d.currentVRM = vrm;
+  vrm.update(0); vrm.scene.updateMatrixWorld(true);
+  // Rest height (floor to the top of the head): the head bone sits at about 0.88 of it.
+  const restHeight = Math.max((vrm.humanoid.getRawBoneNode('head')?.getWorldPosition(new THREE.Vector3()).y || 1.5) / 0.88, 0.2);
+  // A 3D set: its main mark is put under the body, so the body, its clips and its props stay where they always are.
+  let setRoot = null, limits = null, facing = 0;
+  if (set) {
+    const mark = (set.marks || []).find(m => m.id === (set.mark || 'main')) || (set.marks || [])[0] || { position: [0, 0, 0], facing_deg: 0 };
+    const model = (await l.loadAsync('/set.glb')).scene;
+    setRoot = new THREE.Group(); setRoot.add(model);
+    model.position.set(-(mark.position?.[0] || 0), -(mark.position?.[1] || 0) - (set.floor_y || 0), -(mark.position?.[2] || 0));
+    setRoot.rotation.y = -THREE.MathUtils.degToRad(mark.facing_deg || 0);
+    scene.add(setRoot); limits = set.camera?.[mark.id] || null; facing = Number(mark.facing_deg) || 0;
+  } else if (camera && backgroundImage) limits = { arc_deg: [-35, 35] }; // past this the picture's edges show
+  camera = moveWithin(camera, limits?.arc_deg);
+  // The floor a moving camera sees: the body's shadow on it, and a plain floor under it when there is no set.
+  if (set || camera) {
+    r.shadowMap.enabled = true;
+    vrm.scene.traverse(o => { if (o.isMesh) o.castShadow = true; });
+    key.castShadow = true; key.shadow.mapSize.set(1024, 1024); key.shadow.bias = -0.0006;
+    Object.assign(key.shadow.camera, { left: -1.6, right: 1.6, top: 2.4, bottom: -1.2, near: 0.1, far: 12 }); key.shadow.camera.updateProjectionMatrix();
+    const shade = new THREE.Mesh(new THREE.PlaneGeometry(5, 5), new THREE.ShadowMaterial({ opacity: 0.42 }));
+    shade.rotation.x = -Math.PI / 2; shade.position.y = 0.006; shade.receiveShadow = true; scene.add(shade);
+    if (!set) {
+      let ground = new THREE.Color(background).lerp(new THREE.Color('#ffffff'), 0.08);
+      if (backgroundImage) {
+        const tex = await new THREE.TextureLoader().loadAsync('/background.jpg'); tex.colorSpace = THREE.SRGBColorSpace;
+        const cv = document.createElement('canvas'); cv.width = 16; cv.height = 4; const g = cv.getContext('2d');
+        g.drawImage(tex.image, 0, tex.image.height * 0.93, tex.image.width, tex.image.height * 0.07, 0, 0, 16, 4);
+        const px = g.getImageData(0, 0, 16, 4).data; let q = [0, 0, 0];
+        for (let i = 0; i < px.length; i += 4) for (let j = 0; j < 3; j++) q[j] += px[i + j];
+        ground = new THREE.Color().setRGB(...q.map(n => n / (px.length / 4) / 255), THREE.SRGBColorSpace);
+        // The picture on a curved wall behind the body, as wide as a +-60 degree pan sees (a 16:9 picture fits).
+        const R = 4.2, arc = THREE.MathUtils.degToRad(150), h = (R * arc) / (tex.image.width / tex.image.height);
+        tex.wrapS = THREE.RepeatWrapping; tex.repeat.x = -1;
+        const wall = new THREE.Mesh(new THREE.CylinderGeometry(R, R, h, 64, 1, true, Math.PI - arc / 2, arc), new THREE.MeshBasicMaterial({ map: tex, side: THREE.BackSide }));
+        wall.position.y = h / 2 - 0.35; scene.add(wall);
+        scene.background = ground.clone().multiplyScalar(0.5);
+      }
+      const ground3d = new THREE.Mesh(new THREE.CircleGeometry(backgroundImage ? 4.2 : 12, 64), new THREE.MeshBasicMaterial({ color: ground }));
+      ground3d.rotation.x = -Math.PI / 2; ground3d.position.y = -0.002; scene.add(ground3d);
+    }
+  }
   // The owner's saved look for this body (linked avatars): pieces, colours, shape keys, on the outfit file.
   const worn = wearLook(vrm, look);
   const clip = await d.loadVRMA('/clip.vrma');
@@ -173,6 +228,23 @@ window.setup = async ({ width, height, fps, seconds, loop, prop, props = [], bac
     off.y += s.y * 0.45;
     cam.position.copy(lookAt).add(off); cam.lookAt(lookAt);
   }
+  // A moving camera: the whole move pulls back until the body's whole routine stays in frame, inside the set's limits.
+  let pull = 1, shotLength = 1;
+  const moving = camera && framing === 'full';
+  const setCamera = (t) => {
+    const w = viewFor(moveAt(camera, t), restHeight, { pull, limits });
+    cam.fov = w.fov; cam.updateProjectionMatrix();
+    cam.position.set(w.x, w.y, w.z); cam.lookAt(0, w.lookY, 0);
+    return w.yaw;
+  };
+  if (moving) {
+    const corners = []; for (const x of [box.min.x, box.max.x]) for (const y of [0, box.max.y]) for (const z of [box.min.z, box.max.z]) corners.push([x, y, z]);
+    pull = pullFor(camera, restHeight, corners, width / height, { limits });
+  }
+  const hides = (set?.hide || []).map(h => ({ range: h.when_camera_deg, nodes: (h.nodes || []).map(n => setRoot.getObjectByName(n)).filter(Boolean) }));
+  const showSet = (yaw) => { for (const o of new Set(hides.flatMap(h => h.nodes))) o.visible = !hides.some(h => h.nodes.includes(o) && hiddenAt(h.range, yaw + facing)); }; // hide ranges are in the set's own yaw
+  if (set && !moving) showSet(THREE.MathUtils.radToDeg(Math.atan2(cam.position.x, cam.position.z)));
+  window.shot = (frames) => { shotLength = Math.max(1, frames - 1); };
   // Settle the hair at the first pose, then play.
   mixer.setTime(0);
   for (let i = 0; i < 90; i++) vrm.update(1 / 60);
@@ -189,10 +261,11 @@ window.setup = async ({ width, height, fps, seconds, loop, prop, props = [], bac
     if (canTalk) { em.setValue('aa', (mouth[i] || 0) * (jaw ? 0.4 : 1)); jaw?.set(mouth[i] || 0); }
     vrm.update(1 / fps);
     worn.apply(vrm); // the look's shape keys, again after the expressions
+    if (moving) { const yaw = setCamera(i / shotLength); if (set) showSet(yaw); }
     r.render(scene, cam);
     return r.domElement.toDataURL('image/jpeg', 0.9);
   };
-  return { duration: clip.duration, tracks: clip.tracks.length, pole: poleX, talks: canTalk, framing, props: placed.map(o => o.name), look: { colors: worn.colors, morphs: worn.morphs, hidden: worn.hidden } };
+  return { duration: clip.duration, tracks: clip.tracks.length, pole: poleX, talks: canTalk, framing, pull, restHeight, camera: moving ? camera.id : null, set: !!set, props: placed.map(o => o.name), look: { colors: worn.colors, morphs: worn.morphs, hidden: worn.hidden } };
 };
 window.ready = true;
 </script></body></html>`;
@@ -252,6 +325,9 @@ async function serveModel(file) {
   const origin = `http://127.0.0.1:${server.address().port}`;
   return { url: `${origin}${secret}`, origin, path: secret, close: () => new Promise((ok) => server.close(() => ok())) };
 }
+/** A set with no move asked: the body held in front view, sized for a room. */
+const FRONT = { format: 'bnb-camera/1', id: 'front', keys: [{ t: 0, yaw: 0, height: 0.62, distance: 2.8, look: 0.55, fov: 30 }] };
+
 let busy = Promise.resolve();
 
 /**
@@ -265,7 +341,7 @@ export function renderClipVideo(opts) {
 }
 
 async function render({ modelPath, clipPath, loop = false, prop = null, props = null, seconds = null, fps = 24, width = 720, height = 960,
-  background = '#121826', backgroundPath = null, framing = 'full', timeoutMs = 8 * 60 * 1000, launch = null, voice = null, look = null } = {}) {
+  background = '#121826', backgroundPath = null, framing = 'full', timeoutMs = 8 * 60 * 1000, launch = null, voice = null, look = null, camera = null, setPath = null, setSpec = null } = {}) {
   const started = Date.now();
   const html = pageHtml(designerMethods(await fs.readFile(path.join(PUBLIC_DIR, 'avatar.html'), 'utf8')));
   const { default: puppeteer } = await import('puppeteer');
@@ -302,6 +378,7 @@ async function render({ modelPath, clipPath, loop = false, prop = null, props = 
         let body;
         if (u.pathname === '/render.html') body = Buffer.from(html);
         else if (u.pathname === '/clip.vrma') body = await fs.readFile(clipPath);
+        else if (u.pathname === '/set.glb' && setPath) body = await fs.readFile(setPath);
         else if (u.pathname === '/background.jpg' && backgroundPath) body = await fs.readFile(backgroundPath);
         else if (/^\/prop\/\d+\.glb$/.test(u.pathname) && propFiles[Number(u.pathname.slice(6, -4))]) body = await fs.readFile(propFiles[Number(u.pathname.slice(6, -4))]);
         else if (u.pathname.startsWith('/lib/')) {
@@ -319,25 +396,29 @@ async function render({ modelPath, clipPath, loop = false, prop = null, props = 
     await page.waitForFunction('window.ready === true', { timeout: 60000 }).catch(() => { throw new Error(`the render page did not start: ${pageErrors[0] || 'no error given'}`); });
     // The clip's length is known only once it is loaded, so the page is set up with a generous span first.
     const probe = await page.evaluate((o) => window.setup(o), { width, height, fps, seconds: 40, loop, prop, props: pageProps, background, backgroundImage: !!backgroundPath, framing: ['waist', 'head'].includes(framing) ? framing : 'full', look,
+      camera: camera && !moveProblem(camera) ? camera : setPath && setSpec ? FRONT : null, set: setPath && setSpec ? setSpec : null,
       // The voice starts 0.3 s in, so the mouth does too.
       mouth: said?.mouth ? [...new Array(Math.round(VOICE_LEAD_S * fps)).fill(0), ...said.mouth] : null });
     // With a voice-over the video runs at least as long as the voice (the clip holds its last pose, or loops).
     const total = said ? spokenSeconds(probe.duration, loop, said.seconds) : videoSeconds(probe.duration, loop, { seconds });
     const frames = Math.max(1, Math.round(total * fps));
+    await page.evaluate((n) => window.shot(n), frames);
     const audioArgs = audioFile ? ['-itsoffset', String(VOICE_LEAD_S), '-i', audioFile, '-map', '0:v', '-map', '1:a', '-c:a', 'aac', '-b:a', '128k'] : [];
     const ff = spawn('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-y', '-f', 'image2pipe', '-framerate', String(fps), '-c:v', 'mjpeg', '-i', '-',
       ...audioArgs, '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '22', '-pix_fmt', 'yuv420p', '-movflags', '+faststart', ...(audioFile ? [] : ['-an']), out], { stdio: ['pipe', 'ignore', 'pipe'] });
     let ffErr = '';
     ff.stderr.on('data', (b) => { ffErr += b; });
     const done = new Promise((resolve, reject) => ff.on('close', (code) => (code === 0 ? resolve() : reject(new Error(`ffmpeg: ${ffErr.trim() || `exit ${code}`}`)))));
+    const drawing = Date.now();
     for (let i = 0; i < frames; i++) {
       const url = await page.evaluate((n) => window.frame(n), i);
       if (!ff.stdin.write(Buffer.from(url.slice(url.indexOf(',') + 1), 'base64'))) await new Promise(r => ff.stdin.once('drain', r));
     }
+    const drawMs = Date.now() - drawing;
     ff.stdin.end();
     await done;
     const video = await fs.readFile(out);
-    const facts = { seconds: +(frames / fps).toFixed(2), frames, fps, width, height, bytes: video.length, pole: probe.pole, props: probe.props || [], ms: Date.now() - started, voice: !!said, lipSync: !!probe.talks };
+    const facts = { seconds: +(frames / fps).toFixed(2), frames, fps, width, height, bytes: video.length, pole: probe.pole, props: probe.props || [], ms: Date.now() - started, frameMs: +(drawMs / frames).toFixed(1), camera: probe.camera || null, pull: +probe.pull.toFixed(2), set: !!probe.set, voice: !!said, lipSync: !!probe.talks };
     if (pageProps.length && facts.props.length < pageProps.length) logger.warn(`Clip video: ${facts.props.length} of ${pageProps.length} props shown on ${path.basename(clipPath)}`);
     logger.info(`Clip video: ${path.basename(clipPath)} on ${path.basename(modelPath)}${facts.props.length ? ` with ${facts.props.join(', ')}` : ''}, ${facts.seconds}s, ${frames} frames, ${(video.length / 1048576).toFixed(1)} MB in ${(facts.ms / 1000).toFixed(0)}s`);
     return { video, ...facts };
