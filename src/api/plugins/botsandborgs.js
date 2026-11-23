@@ -7,7 +7,7 @@ import { encrypt, decrypt } from '../../utils/encryption.js';
 import { ROLES, normalizeRole, resolveRoleModel, modelsInUse, autoFillRoles } from '../../services/avatar/avatarRoles.js';
 import fs from 'node:fs/promises';
 import { DATA_PATH } from '../../utils/paths.js';
-import { propsFor, variantKind, livePass, applyClipManifest, unpack, installVrm, addToManifest, readVrmInfo, readVrmaInfo, clipLabel, clipLoops, clipGesture, writeStoreAnimations, safeName, toStickerWebp, moodOf, portraitFromPreview } from '../../services/store/assetLibrary.js';
+import { propsFor, notOnBody, variantKind, livePass, applyClipManifest, unpack, installVrm, addToManifest, readVrmInfo, readVrmaInfo, clipLabel, clipLoops, clipGesture, writeStoreAnimations, safeName, toStickerWebp, moodOf, portraitFromPreview } from '../../services/store/assetLibrary.js';
 import { moodChoices, chooseSticker, stickerCouldFit, wallpaperFor } from '../../services/store/selfUse.js';
 import { motionPrompt, parseMotionScript, readJob, reportFailures, motionTags, motionName } from '../../services/store/animSolve.js';
 import { LINK_ROLES, linkedVariant, linkedModelId, linkedPrefix, contactKey, agentLinks, linkOutfits, readChoice, lockerRef, sha256, linkEnded } from '../../services/store/linkedAgents.js';
@@ -926,19 +926,73 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
    * Returns a Map name -> owner line.
    */
   async unsupportedProps(modelId = null) {
+    const fit = await this.currentFit(modelId);
+    if (!fit) return new Map();
+    return new Map(fit.props.filter(p => p.state === 'unsupported' && p.self_fit !== true).map(p => [String(p.prop).toLowerCase(), p.line || p.reason || 'it does not fit this body']));
+  }
+
+  /** The store's fit status about exactly this body (its file's sha256), or null. */
+  async currentFit(modelId = null) {
     const id = modelId || this.agent?.agentModel?.activeVRMModel;
     const slug = this.productBase(id);
     // Fits are kept per model (role-based avatars film several); liveFit is the worn one's, kept for older saves.
     const fits = (await PluginSettings.getCached(this.name, 'liveFits').catch(() => null))?.bySlug || {};
     const fit = fits[slug] || await PluginSettings.getCached(this.name, 'liveFit').catch(() => null);
-    if (!fit?.vrm_sha256 || !fit.props?.length) return new Map();
-    if (this.productBase(fit.slug) !== slug) return new Map();
+    if (!fit?.vrm_sha256 || !fit.props?.length) return null;
+    if (this.productBase(fit.slug) !== slug) return null;
     const manifest = await fs.readFile(path.join(this.vrmDir(), 'manifest.json'), 'utf8').then(JSON.parse).catch(() => []);
     const worn = manifest.find(m => m.id === id);
-    if (!worn?.file) return new Map();
+    if (!worn?.file) return null;
     const { fileSha256 } = await import('../../services/avatar/liveAvatar.js');
-    if ((await fileSha256(path.join(this.vrmDir(), path.basename(worn.file)))) !== fit.vrm_sha256) return new Map();
-    return new Map(fit.props.filter(p => p.state === 'unsupported' && p.self_fit !== true).map(p => [String(p.prop).toLowerCase(), p.line || p.reason || 'it does not fit this body']));
+    return (await fileSha256(path.join(this.vrmDir(), path.basename(worn.file)))) === fit.vrm_sha256 ? fit : null;
+  }
+
+  /**
+   * The store's name of a body, as a pack's `unsupported_on` lists it ("racer-blue"; 3910 #3205): a store model by its
+   * product; a linked one only when its file is the same as a store model's here. Any other body has none.
+   */
+  async bodyName(modelId = null) {
+    const id = String(modelId || this.agent?.agentModel?.activeVRMModel || '');
+    const base = this.productBase(id);
+    if (/^vrm-/.test(base)) return base.slice(4).toLowerCase();
+    if (!/^linked-/.test(base)) return null;
+    const manifest = await fs.readFile(path.join(this.vrmDir(), 'manifest.json'), 'utf8').then(JSON.parse).catch(() => []);
+    const mine = manifest.find(m => m.id === id);
+    const stores = manifest.filter(m => m.file && /^store-vrm-/.test(m.id));
+    if (!mine?.file || !stores.length) return null;
+    const { fileSha256 } = await import('../../services/avatar/liveAvatar.js');
+    const at = (m) => path.join(this.vrmDir(), path.basename(m.file));
+    const size = (m) => fs.stat(at(m)).then(x => x.size).catch(() => -1);
+    const own = await size(mine);
+    for (const m of stores) if ((await size(m)) === own && own > 0 && (await fileSha256(at(m))) === (await fileSha256(at(mine)))) return this.productBase(m.id).slice(4).toLowerCase();
+    return null;
+  }
+
+  /** Why each of a clip's props is not for this body by its pack's own list: Map(prop -> reason). A fitted prop is allowed. */
+  async packRefuses(props, modelId = null) {
+    const out = new Map();
+    if (!(props || []).some(p => p.unsupported_on?.length)) return out;
+    const body = await this.bodyName(modelId).catch(() => null);
+    if (!body) return out;
+    const fit = await this.currentFit(modelId).catch(() => null);
+    const state = new Map((fit?.props || []).map(p => [String(p.prop).toLowerCase(), p.state]));
+    for (const p of props) {
+      const reason = notOnBody(p, body), name = String(p.prop).toLowerCase();
+      if (reason && state.get(name) !== 'fitted') out.set(name, reason);
+    }
+    return out;
+  }
+
+  /** packRefuses for every listed clip of this body: Map(clip file as store.json names it -> Map(prop -> reason)). */
+  async packRefusedClips(modelId = null) {
+    const listed = await fs.readFile(path.join(this.vrmDir(), 'animations', 'store.json'), 'utf8').then(JSON.parse).catch(() => []);
+    const out = new Map();
+    for (const c of listed) {
+      if (!(c.props || []).some(p => p.unsupported_on?.length)) continue;
+      const r = await this.packRefuses(c.props, modelId);
+      if (r.size) out.set(c.file, r);
+    }
+    return out;
   }
 
   /** A pack's clips that need a prop to make sense: Map(lowercased clip file name -> [prop]) from its clips.json
@@ -968,7 +1022,8 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
   /** A clip's props for this body: the store's unsupported ones taken out. */
   async propsForBody(props, opts) {
     const off = await this.unsupportedProps(opts?.modelId).catch(() => new Map());
-    return propsFor(props, opts).filter(p => !off.has(String(p.prop).toLowerCase()));
+    const not = await this.packRefuses(props, opts?.modelId).catch(() => new Map());
+    return propsFor(props, opts).filter(p => !off.has(String(p.prop).toLowerCase()) && !not.has(String(p.prop).toLowerCase()));
   }
 
   /** The live pass of the model worn now (by product), or null when it wears no store model with a pass. */
@@ -3327,11 +3382,13 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     // refused for this body would hold air (the store, llms.txt). Left out; asked for by name or purpose, the answer is
     // the store's reason (Racer Blue 2026-11-19: mug "goes 3 mm into the body").
     const off = await this.unsupportedProps(modelId).catch(() => new Map());
-    if (off.size) {
+    const packOff = await this.packRefusedClips(modelId).catch(() => new Map());
+    if (off.size || packOff.size) {
       const need = new Map();
+      const packOf = (p) => packOff.get(`store/${safeName(p.item.variant)}/${p.file.name}`);
       const needsOff = async (p) => {
         if (!need.has(p.item.variant)) need.set(p.item.variant, await this.requiredProps(p.item.variant));
-        return (need.get(p.item.variant).get(p.file.name.toLowerCase()) || []).find(n => off.has(n)) || null;
+        return (need.get(p.item.variant).get(p.file.name.toLowerCase()) || []).find(n => off.has(n) || packOf(p)?.has(n)) || null;
       };
       const marks = await Promise.all(pool.map(needsOff));
       const blocked = pool.filter((_, i) => marks[i]);
@@ -3343,7 +3400,7 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
         const meant = blocked.find(p => byName(p) || clipsByTags([p], asks, () => []).length);
         if (meant && !pool.some(p => byName(p) || clipsByTags([p], asks, () => []).length)) {
           const prop = await needsOff(meant);
-          return { error: `I can't do ${meant.file.label} on the body I'm wearing: ${off.get(prop)}.` };
+          return { error: `I can't do ${meant.file.label} on the body I'm wearing: ${off.get(prop) || packOf(meant)?.get(prop)}.` };
         }
         if (!pool.length) return { error: 'None of my clips suits the body I am wearing.' };
       }

@@ -2,6 +2,11 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.909] - 2026-11-23
+
+### Added
+- **A props pack's own "not on these bodies" list is obeyed** (Bots & Borgs `unsupported_on`): until the store has fitted a body, a prop its pack rules out is not shown on it, and a clip that cannot work without that prop is refused with the pack's reason. The store's fit status still goes first.
+
 ## [2.25.908] - 2026-11-23
 
 ### Fixed

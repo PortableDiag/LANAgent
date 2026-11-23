@@ -89,6 +89,16 @@ export function createLiveAvatar(agent, { d = L.dirs() } = {}) {
       // Store 0.30: a prop that cannot fit this body is not attached to it (unless the store allows a self-fit: the pole).
       const off = await store()?.unsupportedProps?.();
       if (off?.size) fitted = fitted.filter(p => !off.has(p.prop || p.name));
+      // and, with no fit, by the pack's own "not on these bodies" per clip (3910 #3205).
+      const packOff = await store()?.packRefusedClips?.(active);
+      if (packOff?.size) {
+        const { avatarxClipName } = await import('../../services/avatar/avatarx.js');
+        const byClip = new Map([...packOff].map(([file, r]) => [avatarxClipName(file), r]));
+        fitted = fitted.map(p => {
+          const clips = Object.fromEntries(Object.entries(p.clips || {}).filter(([c]) => !byClip.get(c)?.has(String(p.prop || p.name).toLowerCase())));
+          return Object.keys(clips).length === Object.keys(p.clips || {}).length ? p : { ...p, clips };
+        }).filter(p => Object.keys(p.clips || {}).length || !p.prop);
+      }
     } catch {}
     return { settings, active, avatarList, clipMap, propList: fitted, bgMap, clipNames: [...clipMap.keys()].sort(), backgroundNames: [...bgMap.keys()] };
   }

@@ -400,6 +400,11 @@ export function propAttachments(manifest, { fit = 'standard', fileFor = (f) => f
       if (Number.isFinite(scale) && scale > 0 && scale !== 1) one.scale = scale;
       const refHips = Number(a.ref_hips ?? p.ref_hips);
       if ((a.scale_with ?? p.scale_with) === 'body' && Number.isFinite(refHips) && refHips > 0.1) Object.assign(one, { scale_with: 'body', ref_hips: refHips });
+      // The pack's own "not on these bodies" for this clip (3910 #3205): [{ bodies: [store names without vrm-], clips, reason }].
+      const not = (Array.isArray(p.unsupported_on) ? p.unsupported_on : [])
+        .filter(e => Array.isArray(e?.bodies) && Array.isArray(e.clips) && e.clips.some(c => clipKey(c) === key))
+        .map(e => ({ bodies: e.bodies.map(b => String(b).toLowerCase().replace(/^vrm-/, '')), reason: String(e.reason || 'it does not fit this body').slice(0, 200) }));
+      if (not.length) one.unsupported_on = not;
       byClip.get(key).push(one);
     }
   }
@@ -450,6 +455,12 @@ export const PROPS_ON_REQUEST = ['mic'];
 const ON_REQUEST_WORDS = { mic: /\b(mic|mike|microphone|podcast|on air|stage|sing|singing|karaoke|studio|booth|broadcast)\b/i };
 // A `when: "performance"` prop: a stand-up bit, a song, hosting a show (the owner's rule: never for ordinary talking).
 const WHEN_WORDS = { performance: /\b(perform\w*|stand[- ]?up|comedy|sing|singing|song|karaoke|host\w*|stage|concert|podcast|on air|broadcast|mic|mike|microphone|studio|booth)\b/i };
+
+/** Why a pack says this prop placement is not for a body (its store name without vrm-), or null. The first match wins. */
+export function notOnBody(prop, body) {
+  if (!body) return null;
+  return (prop?.unsupported_on || []).find(e => e.bodies.includes(String(body).toLowerCase()))?.reason || null;
+}
 
 /** A clip's props for one request: on-request props only when the request or the scene asks for them. */
 export function propsFor(props, { asked = '', scene = '' } = {}) {
