@@ -568,6 +568,11 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
   async initialize() {
     import('../../services/avatar/avatarx.js').then(({ setBlockedSource, setBodyNameSource }) => { setBlockedSource((id) => this.clipsNotFor(id)); setBodyNameSource((id) => this.bodyName(id)); }).catch(() => {});
     const tick = () => this.liveTick().catch(e => this.logger.warn(`botsandborgs: live check failed: ${e.message}`));
+    // The clip list is written by this code: after an update it is written again, or what the new code keeps (a prop's
+    // times) waits for the next pack (2026-11-23).
+    this._relist = setTimeout(() => this.libraryItems().then(items => (items.some(i => i.files?.some(f => f.kind === 'animation' || f.kind === 'prop')) ? this.publishAnimations() : null))
+      .catch(e => this.logger.warn(`botsandborgs: clips not relisted: ${e.message}`)), 90 * 1000);
+    this._relist.unref?.();
     this._liveFirst = setTimeout(tick, LIVE_FIRST_SYNC_MS);
     this._liveTimer = setInterval(tick, LIVE_SYNC_MS);
     this._feedTimer = setInterval(() => this.feedBeat(), FEED_POLL_MS);
@@ -590,7 +595,7 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
   }
 
   async cleanup() {
-    clearTimeout(this._liveFirst); clearInterval(this._liveTimer); clearInterval(this._feedTimer);
+    clearTimeout(this._liveFirst); clearTimeout(this._relist); clearInterval(this._liveTimer); clearInterval(this._feedTimer);
   }
 
   /**
@@ -3486,7 +3491,16 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     const listedEarly = await fs.readFile(path.join(this.vrmDir(), 'animations', 'store.json'), 'utf8').then(JSON.parse).catch(() => []);
     const usesByFile = new Map(listedEarly.filter(c => c?.uses?.length).map(c => [c.file, c.uses]));
     const tagged = clipsByTags(pool, words, (p) => usesByFile.get(`store/${safeName(p.item.variant)}/${p.file.name}`) || []);
-    const fits = named.length ? named : specific ? [] : tagged.length ? tagged : purpose ? pool.filter(p => p.file.gesture === purpose) : underSpeech;
+    // Neither an exact name nor a plain gesture: the move is found by meaning, over the list as it is now ("the party
+    // whistleblower thing" is Party Horn Toot; the owner, 2026-11-23). So a new pack needs no new words anywhere.
+    const meant = named.length || specific || (purpose && purpose !== 'dance') || (purpose === 'dance' && !this.moveContent(words.replace(/\bdanc\w*/g, ' '))) ? null
+      : await this.pickByMeaning(pool, words, new Map(listedEarly.filter(c => c?.file).map(c => [c.file, c]))).catch(() => null);
+    if (meant === 'none' && !speaking && !clip) {
+      const offer = await this.storeOffer(this.moveContent(words) || words).catch(() => '');
+      return { error: `I have no move for that yet.${offer ? ` ${offer}` : ''}` };
+    }
+    const byMeaning = meant && meant !== 'none' ? [meant] : [];
+    const fits = named.length ? named : specific ? [] : byMeaning.length ? byMeaning : (meant !== 'none' && tagged.length) ? tagged : purpose ? pool.filter(p => p.file.gesture === purpose) : underSpeech;
     let choice = (fits.length ? fits : pool)[Math.floor(Math.random() * (fits.length ? fits : pool).length)];
     // A dance with a "Facing Away" version is shown that way: the owner (2026-11-15) on Booty Shake, "otherwise the
     // user can't see it". Facing the camera only when asked to.
@@ -3505,6 +3519,47 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     const listed = await fs.readFile(path.join(this.vrmDir(), 'animations', 'store.json'), 'utf8').then(JSON.parse).catch(() => []);
     const entry = listed.find(c => c.file === rel) || { file: rel, label: choice.file.label, loop: !!choice.file.loop };
     return { choice, entry, rel };
+  }
+
+  /** The words of a request that could name a move: what is left without the asking itself. '' when nothing is. */
+  moveContent(words) {
+    const to = videoRecipient(String(words || '')); // whom it is for is not a move
+    const said = to === 'me' ? String(words || '') : String(words || '').replace(new RegExp(`\\b${to.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'gi'), ' ');
+    return said.toLowerCase().replace(/[^\p{L}\p{N} '-]+/gu, ' ')
+      .replace(/\b(?:alice|please|pls|can|could|would|will|you|your|yourself|send|sent|me|us|him|her|them|to|for|a|an|the|and|with|of|in|on|it|that|this|my|one|another|quick|short|little|video|videos|message|greeting|note|clip|film|record|make|show|do|doing|using|use|using|play|have|having|get|want|just|now|then|while|as|avatar|assistant|public|personal|model|body|yourself|something|some|thing|animation|move|emote|gesture|telegram|text)\b/g, ' ')
+      .replace(/\b(?:pan|camera|left|right|zoom|side|shot|angle|front|background)\w*\b/g, ' ').replace(/\s+/g, ' ').trim();
+  }
+
+  /**
+   * The owned move a request means, by the list as it stands (names, tags, props): the pool entry, 'none' when it names a
+   * move that is not there, or null when it names no move or no model answered. Replayed 2026-11-23: 24 of 25 of the
+   * owner's kind of wording right, about 2 s each (gpt-5.6-luna).
+   */
+  async pickByMeaning(pool, words, listed = new Map()) {
+    const content = this.moveContent(words);
+    const pm = this.agent?.providerManager;
+    if (!content || !pm?.generateResponse || pool.length < 2) return null;
+    const key = `${pool.length}:${pool.map(p => p.file.name).join('|').length}:${words}`;
+    if (this._meant?.key === key) return this._meant.value;
+    const onRouter = pm.providerNameOf?.(await pm.getCurrentProvider?.().catch?.(() => null)) === 'openrouter';
+    if (!onRouter && !pm.generateAux) return null;
+    const rows = pool.map((p, n) => {
+      const props = [...new Set((listed.get(`store/${safeName(p.item.variant)}/${p.file.name}`)?.props || []).filter(x => !x.onRequest).map(x => String(x.prop).replace(/[_-]/g, ' ')))];
+      return `${n + 1}. ${p.file.label || p.file.name}${props.length ? ` [with ${props.join(', ')}]` : ''}${p.file.tags?.length ? `: ${p.file.tags.slice(0, 8).join(', ')}` : ''}`;
+    });
+    const prompt = `These are the moves a 3D avatar can do:\n${rows.join('\n')}\n\nThe request: "${String(words).slice(0, 300)}"\n\nWhich ONE move does the request ask to see? ` +
+      'People use their own words (a "noisemaker" is a party horn). Judge only the move, not words to be spoken. If it names no move at all, answer 0. If it names one that is not in the list, answer -1. Reply with the number only.';
+    let timer;
+    const r = await Promise.race([
+      onRouter ? pm.generateResponse(prompt, { maxTokens: 60, temperature: 0, noReasoning: true, model: process.env.BOTSANDBORGS_STICKER_MODEL || 'openai/gpt-5.6-luna' }) : pm.generateAux(prompt, { maxTokens: 20, temperature: 0, auxTask: 'move-by-meaning' }),
+      new Promise((_, no) => { timer = setTimeout(() => no(new Error('timed out')), 12000); })
+    ]).catch(e => { this.logger.warn(`botsandborgs: move by meaning: ${e.message}`); return null; }).finally(() => clearTimeout(timer));
+    const n = Number(/-?\d+/.exec(String(r?.content ?? ''))?.[0] ?? NaN);
+    if (!Number.isInteger(n) || n < -1 || n > pool.length) return null;
+    const value = n === 0 ? null : n === -1 ? 'none' : pool[n - 1];
+    this.logger.info(`botsandborgs: "${content.slice(0, 60)}" means ${value === 'none' ? 'a move not owned' : value ? value.file.label : 'no move'}`);
+    this._meant = { key, value };
+    return value;
   }
 
   /**

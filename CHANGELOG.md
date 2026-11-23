@@ -2,6 +2,27 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.921] - 2026-11-23
+
+### Fixed
+- The list of owned clips is written again after every start, so what an update changes in it is there at once instead of with the next pack.
+
+## [2.25.920] - 2026-11-23
+
+### Fixed
+- **A prop's own movement plays when it should.** A party horn unrolled as the clip began and lay rolled up at the mouth; a pack's times (`prop_anim.at`) are kept now and reach videos, the 3D pages and AvatarX. Videos show and hide props at their times too.
+
+## [2.25.919] - 2026-11-23
+
+### Added
+- **A move is found by what you mean.** "The party whistleblower thing" is the Party Horn Toot: when no move is named exactly, a quick model picks it from the list as it is at that moment, names, tags and props, so anything newly bought is understood at once. A move the agent does not have is said (with the store's offer), not swapped for a random one.
+
+## [2.25.918] - 2026-11-23
+
+### Added
+- **Videos and portraits are drawn on the graphics chip** when the machine has one Chrome can use, and on the CPU if that fails for any reason (`CLIP_VIDEO_GPU=off` never, `on` always tries). A 3-second video of a heavy model went from 36 to 60 seconds to 7.
+- **Heavy models draw lighter** (over 250,000 triangles): drawn at twice the size instead of edge smoothing, textures over 2048 px halved and only very dense hair thinned, for the video only. The model file is never changed, and light models are drawn as before.
+
 ## [2.25.917] - 2026-11-23
 
 ### Fixed

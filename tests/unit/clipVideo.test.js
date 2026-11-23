@@ -116,11 +116,11 @@ test('the mouth opens with the voice\'s loudness and shuts in silence', () => {
   assert.ok(mouth.slice(10).every(v => v === 0));
 });
 
-test('the texting rule for a voice-over: exact only when quoted AND "verbatim"; anything else the agent writes (2026-11-20)', async () => {
+test("a voice-over: the owner's quoted line is said as written (2026-11-23); anything unquoted the agent writes", async () => {
   // The owner's "Send Jo a video message explaining you have a new avatar": the router put the words in `say`, and they
-  // were spoken as given. Now the agent writes its own line; nothing from the request is copied.
-  for (const [input, say] of [['Send Jo a video message explaining you have a new avatar', 'explaining you have a new avatar'],
-    ['send me a video of you saying "I have a new avatar"', undefined]]) {
+  // were spoken as given. Now the agent writes its own line; nothing unquoted from the request is copied.
+  for (const [input, say, line, calls] of [['Send Jo a video message explaining you have a new avatar', 'explaining you have a new avatar', 'Hi Jo, I am ALICE. I have a brand new look!', 1],
+    ['send me a video of you saying "I have a new avatar"', undefined, 'I have a new avatar', 0]]) {
     const { p } = rig();
     const asked = [];
     p.agent.providerManager = { generateResponse: async (prompt) => { asked.push(prompt); return { content: 'Hi Jo, I am ALICE. I have a brand new look!' }; } };
@@ -128,8 +128,8 @@ test('the texting rule for a voice-over: exact only when quoted AND "verbatim"; 
     p.agent.ttsService = { generateSpeech: async (txt) => { spoken.push(txt); return { buffer: Buffer.from('mp3'), format: 'mp3' }; } };
     const r = await p.execute({ action: 'use', as: 'video', to: 'me', wait: true, fromAI: true, ...(say ? { say } : {}), _context: { originalInput: input } });
     assert.equal(r.success, true, r.error);
-    assert.deepEqual(spoken, ['Hi Jo, I am ALICE. I have a brand new look!'], input);
-    assert.equal(asked.length, 1);
+    assert.deepEqual(spoken, [line], input);
+    assert.equal(asked.length, calls);
   }
 });
 

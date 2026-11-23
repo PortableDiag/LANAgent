@@ -8,6 +8,7 @@
  * which the store's licence allows ("streams, videos").
  */
 import fs from 'fs/promises';
+import { readdirSync } from 'fs';
 import os from 'os';
 import path from 'path';
 import { spawn } from 'child_process';
@@ -75,9 +76,43 @@ const THREE = window.THREE; THREE.GLTFLoader = GLTFLoader;
 const d = {
 ${methods}
 };
-window.setup = async ({ width, height, fps, seconds, loop, prop, props = [], background, backgroundImage = false, mouth = null, framing = 'full', look = null, camera = null, set = null }) => {
-  const r = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
-  r.setPixelRatio(1); r.setSize(width, height); document.body.appendChild(r.domElement);
+/**
+ * A heavy model made lighter for this video only (its file is never touched): textures over 2048 px are halved, which a
+ * 720 x 960 video can't show, and only a mesh over 100,000 triangles (hair) is thinned to 30%, in a full-length shot. Body
+ * and clothes stay whole: thinned to 15% the stockings tore at the knee. Skin, shapes and pieces are kept.
+ */
+async function lighten(root, framing) {
+  const out = { before: 0, after: 0, textures: 0 };
+  const seen = new Map(), jobs = [];
+  root.traverse(o => { for (const m of o.isMesh ? [].concat(o.material) : []) for (const k in m) {
+    const t = m[k], img = t?.isTexture ? t.source?.data : null;
+    if (!img || !(Math.max(img.width, img.height) > 2048) || seen.has(t.source)) { if (img && seen.has(t.source)) seen.get(t.source).add(t); continue; }
+    seen.set(t.source, new Set([t])); const k2 = 2048 / Math.max(img.width, img.height);
+    // premultiplyAlpha none: hair keeps the color under its transparent parts.
+    jobs.push(createImageBitmap(img, { resizeWidth: Math.round(img.width * k2), resizeHeight: Math.round(img.height * k2), resizeQuality: 'high', premultiplyAlpha: 'none', colorSpaceConversion: 'none' })
+      .then(b => { t.source.data = b; out.textures++; for (const x of seen.get(t.source)) x.needsUpdate = true; }).catch(() => {}));
+  } });
+  await Promise.all(jobs);
+  let MS = null;
+  if (framing === 'full') { try { ({ MeshoptSimplifier: MS } = await import('/lib/meshopt-simplifier.module.js')); await MS.ready; if (!MS.supported) MS = null; } catch { MS = null; } }
+  root.traverse(o => {
+    const ix = o.isMesh ? o.geometry.index : null; if (!ix) return;
+    out.before += ix.count / 3;
+    if (!MS || ix.count < 300000 || o.geometry.groups.length > 1) { out.after += ix.count / 3; return; }
+    const pos = o.geometry.attributes.position, p = new Float32Array(pos.count * 3);
+    for (let i = 0; i < pos.count; i++) { p[3 * i] = pos.getX(i); p[3 * i + 1] = pos.getY(i); p[3 * i + 2] = pos.getZ(i); }
+    const [thin] = MS.simplify(new Uint32Array(ix.array), p, 3, Math.floor(ix.count * 0.3 / 3) * 3, 0.01);
+    if (thin.length >= 3000) { o.geometry.setIndex(new THREE.BufferAttribute(new Uint32Array(thin), 1)); o.geometry.setDrawRange(0, Infinity); }
+    out.after += o.geometry.index.count / 3;
+  });
+  return out;
+}
+window.setup = async ({ width, height, fps, seconds, loop, prop, props = [], background, backgroundImage = false, mouth = null, framing = 'full', look = null, camera = null, set = null, heavy = false }) => {
+  // A heavy model (the owner's Maid, 882,000 triangles): the renderer's own edge smoothing cost more than half of each
+  // frame on a CPU, so it is drawn at twice the size and scaled down, which looks the same (2026-11-23).
+  const r = new THREE.WebGLRenderer({ antialias: !heavy, preserveDrawingBuffer: true });
+  const small = heavy ? Object.assign(document.createElement('canvas'), { width, height }) : null;
+  r.setPixelRatio(heavy ? 2 : 1); r.setSize(width, height); document.body.appendChild(r.domElement);
   const scene = new THREE.Scene();
   scene.background = new THREE.Color(background);
   // A background scene (Bots & Borgs backgrounds): cover the frame, cropped to its shape, never stretched.
@@ -119,6 +154,7 @@ window.setup = async ({ width, height, fps, seconds, loop, prop, props = [], bac
   if (V.VRMUtils?.removeUnnecessaryJoints) V.VRMUtils.removeUnnecessaryJoints(vrm.scene);
   vrm.scene.traverse(o => { if (o.isMesh) o.frustumCulled = false; });
   scene.add(vrm.scene); d.currentVRM = vrm;
+  const lighter = heavy ? await lighten(vrm.scene, framing) : null;
   vrm.update(0); vrm.scene.updateMatrixWorld(true);
   // Rest height (floor to the top of the head): the head bone sits at about 0.88 of it.
   const restHeight = Math.max((vrm.humanoid.getRawBoneNode('head')?.getWorldPosition(new THREE.Vector3()).y || 1.5) / 0.88, 0.2);
@@ -295,9 +331,12 @@ window.setup = async ({ width, height, fps, seconds, loop, prop, props = [], bac
     worn.apply(vrm); // the look's shape keys, again after the expressions
     if (moving) { const yaw = setCamera(i / shotLength); if (set) showSet(yaw); }
     r.render(scene, cam);
-    return r.domElement.toDataURL('image/jpeg', 0.9);
+    if (!small) return r.domElement.toDataURL('image/jpeg', 0.9);
+    const g2 = small.getContext('2d'); g2.imageSmoothingQuality = 'high';
+    g2.drawImage(r.domElement, 0, 0, width, height);
+    return small.toDataURL('image/jpeg', 0.9);
   };
-  return { duration: clip.duration, tracks: clip.tracks.length, pole: poleX, talks: canTalk, framing, pull, restHeight, camera: moving ? camera.id : null, set: !!set, props: placed.map(o => o.name), look: { colors: worn.colors, morphs: worn.morphs, hidden: worn.hidden } };
+  return { duration: clip.duration, lighter, tracks: clip.tracks.length, pole: poleX, talks: canTalk, framing, pull, restHeight, camera: moving ? camera.id : null, set: !!set, props: placed.map(o => o.name), look: { colors: worn.colors, morphs: worn.morphs, hidden: worn.hidden } };
 };
 window.ready = true;
 </script></body></html>`;
@@ -359,6 +398,55 @@ async function serveModel(file) {
     // Chrome keeps its connection open, and close() waits for it: every video and portrait came about 55 s late (2026-11-23).
     close: () => new Promise((ok) => { server.close(() => ok()); server.closeAllConnections?.(); }) };
 }
+/** Chrome's flags: the graphics chip when there is one, else drawing on the CPU. */
+export function chromeArgs(gpu, width, height) {
+  return ['--no-sandbox', '--disable-dev-shm-usage', '--use-gl=angle', ...(gpu ? ['--use-angle=gl-egl', '--enable-gpu'] : ['--use-angle=swiftshader-webgl', '--enable-unsafe-swiftshader']),
+    '--ignore-gpu-blocklist', `--window-size=${width},${height}`];
+}
+const GPU_TIMEOUT_MS = 150000;
+let gpuOffUntil = 0;
+
+/** Whether this machine has a graphics chip Chrome may use. CLIP_VIDEO_GPU=off never, =on always tries. */
+export function hasGpu() {
+  const want = String(process.env.CLIP_VIDEO_GPU || 'auto').toLowerCase();
+  if (want === 'off' || want === 'false' || want === '0') return false;
+  if (want === 'on') return true;
+  try { return readdirSync('/dev/dri').some(f => /^renderD\d+$/.test(f)); } catch { return false; }
+}
+
+/**
+ * A render on the graphics chip, and on the CPU if that fails for any reason (2026-11-23: on ALICE's Radeon a 3 s video of
+ * a heavy model takes 7 s, on its CPU 36 to 60). After a failure the chip is left alone for half an hour.
+ */
+export async function onBestRenderer(what, run, { available = hasGpu, now = Date.now } = {}) {
+  if (now() < gpuOffUntil || !available()) return run(false);
+  try { return await run(true); } catch (e) {
+    gpuOffUntil = now() + 30 * 60 * 1000;
+    logger.warn(`Clip video: the graphics chip failed a ${what} (${String(e.message).slice(0, 160)}); drawing on the CPU`);
+    return run(false);
+  }
+}
+/** Test hook. */
+export function _resetGpu() { gpuOffUntil = 0; }
+
+/** The triangles of a .vrm, read from its header only (no model is loaded). 0 when it can't be read. */
+export async function modelTriangles(file) {
+  let h;
+  try {
+    h = await fs.open(file, 'r');
+    const head = Buffer.alloc(20); await h.read(head, 0, 20, 0);
+    if (head.toString('latin1', 0, 4) !== 'glTF') return 0;
+    const len = head.readUInt32LE(12); if (len > 64 * 1048576) return 0;
+    const j = Buffer.alloc(len); await h.read(j, 0, len, 20);
+    const g = JSON.parse(j.toString('utf8'));
+    let n = 0;
+    for (const m of g.meshes || []) for (const p of m.primitives || []) n += (p.indices != null ? g.accessors[p.indices].count : g.accessors[p.attributes.POSITION].count) / 3;
+    return Math.round(n);
+  } catch { return 0; } finally { await h?.close().catch(() => {}); }
+}
+/** From here the renderer draws a model the heavy way. Racer Blue has 49,000, Scientist Girl 111,000, the Maid 882,000. */
+const HEAVY_TRIANGLES = 250000;
+
 /** A set with no move asked: the body held in front view, sized for a room. */
 const FRONT = { format: 'bnb-camera/1', id: 'front', keys: [{ t: 0, yaw: 0, height: 0.62, distance: 2.8, look: 0.55, fov: 30 }] };
 
@@ -369,24 +457,26 @@ let busy = Promise.resolve();
  * One render at a time; a second waits for the first.
  */
 export function renderClipVideo(opts) {
-  const run = busy.then(() => render(opts));
+  const run = busy.then(() => onBestRenderer('video', (gpu) => render({ ...opts, gpu, ...(gpu ? { timeoutMs: Math.min(opts?.timeoutMs || Infinity, GPU_TIMEOUT_MS) } : {}) })));
   busy = run.catch(() => {});
   return run;
 }
 
 async function render({ modelPath, clipPath, loop = false, prop = null, props = null, seconds = null, fps = 24, width = 720, height = 960,
-  background = '#121826', backgroundPath = null, framing = 'full', timeoutMs = 8 * 60 * 1000, launch = null, voice = null, look = null, camera = null, setPath = null, setSpec = null } = {}) {
+  background = '#121826', backgroundPath = null, framing = 'full', timeoutMs = 8 * 60 * 1000, launch = null, voice = null, look = null, camera = null, setPath = null, setSpec = null, gpu = false } = {}) {
   const started = Date.now();
   const html = pageHtml(designerMethods(await fs.readFile(path.join(PUBLIC_DIR, 'avatar.html'), 'utf8')));
   const { default: puppeteer } = await import('puppeteer');
   const browser = await (launch || ((o) => puppeteer.launch(o)))({
     headless: 'new',
-    args: ['--no-sandbox', '--disable-dev-shm-usage', '--use-gl=angle', '--use-angle=swiftshader-webgl', '--enable-unsafe-swiftshader', '--ignore-gpu-blocklist', `--window-size=${width},${height}`]
+    args: chromeArgs(gpu, width, height)
   });
   // Props by absolute path ({ ..., path }): the page asks for /prop/<n>.glb, never a path of its own choosing.
   const propList = (Array.isArray(props) ? props : []).filter(p => p && typeof p.path === 'string');
   const propFiles = propList.map(p => p.path);
-  const pageProps = propList.map((p, i) => ({ prop: p.prop, bone: p.bone, position: p.position, rotation: p.rotation, scale: p.scale, scale_with: p.scale_with, ref_hips: p.ref_hips, url: `/prop/${i}.glb` }));
+  const pageProps = propList.map((p, i) => ({ prop: p.prop, bone: p.bone, position: p.position, rotation: p.rotation, scale: p.scale, scale_with: p.scale_with, ref_hips: p.ref_hips,
+    // When it shows and its own movement (a party horn unrolls): left out, a prop stood still in every video.
+    show: p.show, prop_loop: p.prop_loop, prop_anim: p.prop_anim, url: `/prop/${i}.glb` }));
   const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'clip-video-'));
   const out = path.join(tmp, 'clip.mp4');
   // A voice-over: the audio as a file for ffmpeg, its length, and how open the mouth is in each frame.
@@ -398,6 +488,7 @@ async function render({ modelPath, clipPath, loop = false, prop = null, props = 
   }
   const timer = setTimeout(() => browser.close().catch(() => {}), timeoutMs);
   const model = await serveModel(modelPath);
+  const heavy = (await modelTriangles(modelPath)) >= HEAVY_TRIANGLES;
   try {
     const page = await browser.newPage();
     await page.setViewport({ width, height });
@@ -428,9 +519,13 @@ async function render({ modelPath, clipPath, loop = false, prop = null, props = 
     await page.goto(`${model.origin}/render.html`, { waitUntil: 'load', timeout: 60000 });
     await page.evaluate((u) => { window.MODEL_URL = u; }, model.url);
     await page.waitForFunction('window.ready === true', { timeout: 60000 }).catch(() => { throw new Error(`the render page did not start: ${pageErrors[0] || 'no error given'}`); });
+    const chip = await page.evaluate(() => { const c = document.createElement('canvas'), g = c.getContext('webgl2') || c.getContext('webgl'); const e = g?.getExtension('WEBGL_debug_renderer_info'); return g ? String(g.getParameter(e ? e.UNMASKED_RENDERER_WEBGL : g.RENDERER)) : ''; }).catch(() => '');
+    const onGpu = !!gpu && !!chip && !/swiftshader|llvmpipe|softpipe/i.test(chip);
+    // Asked for the chip and got a software one: that is the CPU path, drawn the way it is tuned for.
+    if (gpu && !onGpu) throw new Error(`no graphics chip for Chrome (${chip || 'no WebGL'})`);
     // The clip's length is known only once it is loaded, so the page is set up with a generous span first.
     const probe = await page.evaluate((o) => window.setup(o), { width, height, fps, seconds: 40, loop, prop, props: pageProps, background, backgroundImage: !!backgroundPath, framing: ['waist', 'head'].includes(framing) ? framing : 'full', look,
-      camera: camera && !moveProblem(camera) ? camera : setPath && setSpec ? FRONT : null, set: setPath && setSpec ? setSpec : null,
+      camera: camera && !moveProblem(camera) ? camera : setPath && setSpec ? FRONT : null, set: setPath && setSpec ? setSpec : null, heavy,
       // The voice starts 0.3 s in, so the mouth does too.
       mouth: said?.mouth ? [...new Array(Math.round(VOICE_LEAD_S * fps)).fill(0), ...said.mouth] : null });
     // With a voice-over the video runs at least as long as the voice (the clip holds its last pose, or loops).
@@ -452,9 +547,9 @@ async function render({ modelPath, clipPath, loop = false, prop = null, props = 
     ff.stdin.end();
     await done;
     const video = await fs.readFile(out);
-    const facts = { seconds: +(frames / fps).toFixed(2), frames, fps, width, height, bytes: video.length, pole: probe.pole, props: probe.props || [], ms: Date.now() - started, frameMs: +(drawMs / frames).toFixed(1), camera: probe.camera || null, pull: +probe.pull.toFixed(2), set: !!probe.set, voice: !!said, lipSync: !!probe.talks };
+    const facts = { seconds: +(frames / fps).toFixed(2), frames, fps, width, height, bytes: video.length, pole: probe.pole, props: probe.props || [], ms: Date.now() - started, frameMs: +(drawMs / frames).toFixed(1), camera: probe.camera || null, pull: +probe.pull.toFixed(2), set: !!probe.set, gpu: onGpu, ...(probe.lighter ? { lighter: probe.lighter } : {}), voice: !!said, lipSync: !!probe.talks };
     if (pageProps.length && facts.props.length < pageProps.length) logger.warn(`Clip video: ${facts.props.length} of ${pageProps.length} props shown on ${path.basename(clipPath)}`);
-    logger.info(`Clip video: ${path.basename(clipPath)} on ${path.basename(modelPath)}${facts.props.length ? ` with ${facts.props.join(', ')}` : ''}, ${facts.seconds}s, ${frames} frames, ${(video.length / 1048576).toFixed(1)} MB in ${(facts.ms / 1000).toFixed(0)}s`);
+    logger.info(`Clip video: ${path.basename(clipPath)} on ${path.basename(modelPath)}${facts.props.length ? ` with ${facts.props.join(', ')}` : ''}, ${facts.seconds}s, ${frames} frames, ${(video.length / 1048576).toFixed(1)} MB in ${(facts.ms / 1000).toFixed(0)}s${onGpu ? ' on the graphics chip' : ''}`);
     return { video, ...facts };
   } finally {
     clearTimeout(timer);
@@ -471,7 +566,7 @@ async function render({ modelPath, clipPath, loop = false, prop = null, props = 
  * Returns a square PNG buffer.
  */
 export function renderPortrait(opts) {
-  const run = busy.then(() => portrait(opts));
+  const run = busy.then(() => onBestRenderer('portrait', (gpu) => portrait({ ...opts, gpu, ...(gpu ? { timeoutMs: 60000 } : {}) })));
   busy = run.catch(() => {});
   return run;
 }
@@ -521,11 +616,11 @@ window.portrait = async ({ size, background, look }) => {
 window.ready = true;
 </script></body></html>`;
 
-async function portrait({ modelPath, look = null, size = 1024, background = '#1b2333', timeoutMs = 3 * 60 * 1000, launch = null } = {}) {
+async function portrait({ modelPath, look = null, size = 1024, background = '#1b2333', timeoutMs = 3 * 60 * 1000, launch = null, gpu = false } = {}) {
   const { default: puppeteer } = await import('puppeteer');
   const browser = await (launch || ((o) => puppeteer.launch(o)))({
     headless: 'new',
-    args: ['--no-sandbox', '--disable-dev-shm-usage', '--use-gl=angle', '--use-angle=swiftshader-webgl', '--enable-unsafe-swiftshader', '--ignore-gpu-blocklist', `--window-size=${size},${size}`]
+    args: chromeArgs(gpu, size, size)
   });
   const timer = setTimeout(() => browser.close().catch(() => {}), timeoutMs);
   const model = await serveModel(modelPath);

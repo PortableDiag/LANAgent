@@ -211,3 +211,17 @@ test('the store listing marks the mic on-request and AvatarX never gets it', asy
   const a = await avatarxStub({ props: [] });
   assert.deepEqual(await pushPropsToAvatarX(out, vrm, a.opts), ['phone']);
 });
+
+// The owner's party horn (2026-11-23): it unrolled when the clip began and lay rolled up at the mouth. `at` says when.
+test("a prop's own movement plays at its times, again on each loop, and `at` reaches the pages and AvatarX", async () => {
+  const { startsAt, updateProps } = await import('../../src/interfaces/web/public/lib/vrm-props.js');
+  assert.equal(startsAt([1, 2], 0.96, 1), true); assert.equal(startsAt([1, 2], 1, 1.04), false); assert.equal(startsAt([1, 2], 1.98, 2.02), true);
+  assert.equal(startsAt([1, 2], 3.98, 0.02), false, 'looped, nothing there'); assert.equal(startsAt([0.01], 3.98, 0.02), true); assert.equal(startsAt([3.99], 3.98, 0.02), true);
+  assert.equal(startsAt([0], null, 0), true); assert.equal(startsAt([1], null, 0), false); assert.equal(startsAt([1], null, 3), false, 'joined late: not played out of time');
+  let plays = 0; const o = { userData: { at: [1, 2], clipAt: null, action: { reset() {}, play() { plays++; }, paused: true }, mixer: { update() {} } } };
+  for (let i = 0; i <= 8 * 24; i++) updateProps([o], (i / 24) % 4, 1 / 24);
+  assert.equal(plays, 4, 'two puffs on each of two passes'); assert.equal(o.userData.action.paused, false);
+  const at = propAttachments({ props: [{ prop: 'party_horn', file: 'h.glb', clips: { 'party-horn-toot': { standard: { bone: 'rightHand', position: [0, 0, 0], rotation: [0, 0, 0], prop_anim: { name: 'unroll', at: [1, 2] } } },
+    x: { standard: { bone: 'rightHand', position: [0, 0, 0], rotation: [0, 0, 0], prop_anim: { name: 'unroll', at: ['a'] } } } } }] });
+  assert.deepEqual(at.get('party-horn-toot')[0].prop_anim, { name: 'unroll', at: [1, 2] }); assert.deepEqual(at.get('x')[0].prop_anim, { name: 'unroll' });
+});

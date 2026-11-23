@@ -112,6 +112,10 @@ export async function attachProps({ GLTFLoader, vrm, props, base = '/vrm-models/
       if (!p.prop_loop) { action.setLoop(LoopOnce, 1); action.clampWhenFinished = true; }
       action.play();
       holder.userData.mixer = mixer;
+      // `prop_anim.at`: when in the clip it plays (a party horn unrolls at the puffs, not when the clip starts). Until
+      // then it waits in its first pose (2026-11-23).
+      const at = !p.prop_loop && Array.isArray(p.prop_anim?.at) ? p.prop_anim.at.filter(n => typeof n === 'number' && Number.isFinite(n) && n >= 0) : [];
+      if (at.length) { mixer.update(0); action.paused = true; Object.assign(holder.userData, { at, action, clipAt: null }); }
     } else if (typeof animName === 'string' && !anim) warn(`Prop ${p.prop || p.file}: no animation called ${animName}`);
     if (holder.userData.show) holder.visible = visibleAt(holder.userData.show, 0);
     parent.add(holder);
@@ -127,8 +131,19 @@ export async function attachProps({ GLTFLoader, vrm, props, base = '/vrm-models/
 export function updateProps(placed, clipTime, dt) {
   for (const o of placed || []) {
     if (o?.userData?.show) o.visible = visibleAt(o.userData.show, clipTime);
-    if (o?.userData?.mixer && o.visible !== false && dt > 0) o.userData.mixer.update(dt);
+    const u = o?.userData;
+    if (u?.at) {
+      if (startsAt(u.at, u.clipAt, clipTime)) { u.action.reset(); u.action.paused = false; u.action.play(); }
+      u.clipAt = clipTime;
+    }
+    if (u?.mixer && o.visible !== false && dt > 0) u.mixer.update(dt);
   }
+}
+
+/** Whether one of `at` falls between the last time and this one (seconds into the clip); a clip that looped has wrapped. */
+export function startsAt(at, before, now) {
+  if (before == null) return at.some(t => t <= now && now - t < 0.1);
+  return now >= before ? at.some(t => t > before && t <= now) : at.some(t => t > before || t <= now);
 }
 
 /** Remove placed props. The loaded files stay cached (clones share them), so nothing is disposed here. */

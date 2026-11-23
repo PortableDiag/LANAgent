@@ -393,7 +393,7 @@ export function propAttachments(manifest, { fit = 'standard', fileFor = (f) => f
       // Store 2119 #539: shown only in a window of the clip, and the prop's own animation (looped or once).
       const show = a.show ?? p.show;
       if (Array.isArray(show) && show.length === 2 && show.every(n => Number.isFinite(n)) && show[1] > show[0]) one.show = show;
-      for (const k of ['prop_loop', 'prop_anim']) { const v = a[k] ?? p[k]; if (v) one[k] = typeof v === 'string' ? v : v.name ? { name: String(v.name) } : undefined; }
+      for (const k of ['prop_loop', 'prop_anim']) { const v = a[k] ?? p[k]; if (v) one[k] = typeof v === 'string' ? v : v.name ? { name: String(v.name), ...(Array.isArray(v.at) && v.at.length && v.at.every(n => Number.isFinite(n) && n >= 0) ? { at: v.at.slice(0, 20) } : {}) } : undefined; }
       // Optional: a size factor, and scaling with the body (AvatarX 0.3.17, 2951 #206): scale_with "body" + ref_hips =
       // the standing hip height (m) of the body it was built on. The placement's own value wins over the prop's.
       const scale = Number(a.scale ?? p.scale);
