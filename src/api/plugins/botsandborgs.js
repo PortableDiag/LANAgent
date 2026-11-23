@@ -181,6 +181,19 @@ export function linkFitProps(f, sha256) {
   });
 }
 
+/** A clip by its index stem: file or label, case, "broad", spaces and underscores aside. */
+export const clipStem = (s) => String(s || '').split('/').pop().toLowerCase().replace(/\.vrma$/, '').replace(/^broad[ /]+/, '').trim().replace(/[\s_]+/g, '-');
+
+/**
+ * The store's `not_for_this_avatar` (0.69: a pass's clip list names clips its avatar must not play, "this avatar is not
+ * made to dance") as { reason, clips: [stem] }, or null when it names none.
+ */
+export function notForAvatar(answer) {
+  const n = answer && !Array.isArray(answer) ? answer.not_for_this_avatar : null;
+  const clips = [...new Set((Array.isArray(n?.clips) ? n.clips : []).map(c => clipStem(typeof c === 'string' ? c : c?.clip || c?.file || c?.name)).filter(Boolean))];
+  return clips.length ? { reason: String(n.reason || 'the store says this avatar does not do that').slice(0, 300), clips } : null;
+}
+
 /**
  * A fit job in words. Only a claimed job is being fitted; a queued one waits, and its minutes are a guess from the
  * queue (the store said so, 3910 #2631), so it gets its place and no time.
@@ -795,6 +808,8 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
       if (other.slug === this.wornPass(passes)?.slug) continue;
       let k; try { k = decrypt(other.key); } catch { continue; }
       await this.syncLiveProps(other, k).catch(e => this.logger.warn(`botsandborgs: live props for ${other.slug} failed: ${e.message}`));
+      const a = await this.fetchLive(`${BASE}/api/live/${other.slug}/clips`, { 'User-Agent': this.userAgent(), 'X-Live-Key': k, Accept: 'application/json' }).catch(() => null);
+      if (a?.status === 200) { try { await this.keepNotForAvatar(other.slug, JSON.parse(Buffer.from(a.data).toString('utf8'))); } catch { /* not JSON: what is saved stands */ } }
     }
     const pass = this.wornPass(passes);
     if (!pass) return null;
@@ -803,6 +818,7 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     const r = await this.fetchLive(`${BASE}/api/live/${pass.slug}/clips`, { 'User-Agent': this.userAgent(), 'X-Live-Key': key, Accept: 'application/json' });
     if (r.status !== 200) { if (r.status !== 404) this.logger.info(`botsandborgs: live clips answered ${r.status || r.error}`); return null; }
     let d; try { d = JSON.parse(Buffer.from(r.data).toString('utf8')); } catch { return null; }
+    await this.keepNotForAvatar(pass.slug, d);
     const list = Array.isArray(d) ? d : d.packs || d.clips || d.items || [];
     const tag = list.map(x => `${x.variant || x.slug || x.pack || x.name || '?'}=${x.etag || x.ETag || ''}`).sort().join('|');
     const saved = await PluginSettings.getCached(this.name, 'liveClips').catch(() => null);
@@ -851,6 +867,26 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     const count = (s) => fit.props.filter(p => p.state === s).length;
     this.logger.info(`botsandborgs: fit status (${fit.body_class || 'body ?'}): props ${fit.props.length} — ${['fitted', 'pending', 'unsupported', 'standard'].map(s => `${count(s)} ${s}`).join(', ')}${fit.job ? `; job ${fit.job.state || ''} position ${fit.job.position ?? '?'}` : ''}${fit.props[0] ? ` (fields: ${Object.keys(fit.props[0]).join(', ')})` : ''}`);
     return fit;
+  }
+
+  /** Keep (or clear) what a pass's clip list says is not for its avatar. An answer without the field clears it. */
+  async keepNotForAvatar(slug, answer) {
+    const saved = (await PluginSettings.getCached(this.name, 'notForAvatar').catch(() => null)) || {};
+    const base = this.productBase(slug);
+    const n = notForAvatar(answer);
+    if (JSON.stringify(saved[base] || null) === JSON.stringify(n)) return;
+    const next = { ...saved };
+    if (n) next[base] = n; else delete next[base];
+    await PluginSettings.setCached(this.name, 'notForAvatar', next);
+    this.logger.info(n ? `botsandborgs: ${n.clips.length} clips are not for ${base}: ${n.reason}` : `botsandborgs: every clip may play on ${base} again`);
+  }
+
+  /** The clips the store says this body must not play, from any pack: { reason, clips: Set(stem) }, or null. */
+  async clipsNotFor(modelId = null) {
+    const id = modelId || this.agent?.agentModel?.activeVRMModel;
+    if (!id) return null;
+    const n = ((await PluginSettings.getCached(this.name, 'notForAvatar').catch(() => null)) || {})[this.productBase(id)];
+    return n?.clips?.length ? { reason: n.reason, clips: new Set(n.clips) } : null;
   }
 
   /**
@@ -3205,6 +3241,22 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
       pool = fits;
       if (!pool.length) return { error: 'None of my clips suits the body I am wearing.' };
     }
+    // Clips the store says this body must not play (0.69: a shark does not dance), whichever pack they came from. Asked
+    // for one, or for any dance, the answer is the store's reason, never an offer to buy one.
+    const not = await this.clipsNotFor(modelId).catch(() => null);
+    if (not) {
+      const refused = pool.filter(p => not.clips.has(clipStem(p.file.name)) || not.clips.has(clipStem(p.file.label)));
+      if (refused.length) {
+        pool = pool.filter(p => !refused.includes(p));
+        const asks = `${clip || ''} ${asked}`.toLowerCase();
+        const w = ` ${asks.replace(/[-_]+/g, ' ').replace(/\s+/g, ' ')} `;
+        const byName = (p) => p.file.label && w.includes(` ${String(p.file.label).toLowerCase().replace(/[-_]+/g, ' ')} `);
+        const about = clipGesture(clip || asked);
+        const meant = (p) => byName(p) || (about && p.file.gesture === about) || clipsByTags([p], asks, () => []).length > 0;
+        if (refused.some(byName) ? !pool.some(byName) : refused.some(meant) && !pool.some(meant)) return { error: `I can't do that one: ${not.reason}.`.replace(/\.\.$/, '.') };
+        if (!pool.length) return { error: 'None of my clips suits the body I am wearing.' };
+      }
+    }
     // A clip made around a prop (clips.json props[].need "required": the mug sip, the book read) whose prop the store
     // refused for this body would hold air (the store, llms.txt). Left out; asked for by name or purpose, the answer is
     // the store's reason (Racer Blue 2026-11-19: mug "goes 3 mm into the body").
@@ -3264,6 +3316,8 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     }
     if (!fits.length && (clip || purpose || specific)) {
       const wanted = specific ? specific[0] : clip || purpose;
+      // Never offered for sale to a body the store says must not do it.
+      if (not && (not.clips.has(clipStem(wanted)) || (clip && not.clips.has(clipStem(clip))))) return { error: `I can't do that one: ${not.reason}.`.replace(/\.\.$/, '.') };
       const offer = await this.storeOffer(wanted).catch(() => '');
       return { error: `I have no ${wanted} clip. Mine: ${[...new Set(pool.map(p => p.file.label))].join(', ')}.${offer ? ` ${offer}` : ''}` };
     }

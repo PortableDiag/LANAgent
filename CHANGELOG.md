@@ -2,6 +2,11 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.904] - 2026-11-22
+
+### Added
+- **Clips the store says an avatar must not play are refused on it** (Bots & Borgs 0.69, `not_for_this_avatar`): some animal avatars are not made to dance. The agent says the store's reason, whichever pack the clip came from, and never offers to buy one. Other bodies are unaffected.
+
 ## [2.25.903] - 2026-11-22
 
 ### Fixed

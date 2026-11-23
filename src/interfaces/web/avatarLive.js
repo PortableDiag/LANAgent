@@ -72,6 +72,14 @@ export function createLiveAvatar(agent, { d = L.dirs() } = {}) {
         else if (clipMap.has(`bnb-${name}`)) clipMap.set(`bnb-${name}`, file);
       }
     } catch {}
+    // Clips the store says this body must not play (0.69) are not offered on it.
+    try {
+      const not = await store()?.clipsNotFor?.(active);
+      if (not) {
+        const { clipStem } = await import('../../api/plugins/botsandborgs.js');
+        for (const name of [...clipMap.keys()]) if (not.clips.has(clipStem(name)) || not.clips.has(clipStem(name.replace(/^bnb-/, '')))) clipMap.delete(name);
+      }
+    } catch {}
     // Props the store fitted to the body showing (store 0.28) take the pack placements' place for it.
     let fitted = propList;
     try {
