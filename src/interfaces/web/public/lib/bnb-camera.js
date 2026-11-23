@@ -102,3 +102,14 @@ export function pullFor(m, H, corners, aspect, { limits = null, margin = 1.08, s
   for (let i = 0; i < 18; i++) { const mid = (lo + hi) / 2; if (fits(mid)) hi = mid; else lo = mid; }
   return hi;
 }
+
+/**
+ * Where a 360 set's light stands, as a unit direction from the body in the set's frame. at_deg = [image yaw, height]:
+ * image yaw as front_deg (0 = the center column, + = right in the image); world yaw = 180 - (image yaw - front_deg).
+ * null when it is not two numbers.
+ */
+export function lightAt(at, frontDeg = 0) {
+  if (!Array.isArray(at) || at.length !== 2 || !at.every(Number.isFinite)) return null;
+  const y = (180 - (at[0] - (Number(frontDeg) || 0))) * Math.PI / 180, h = Math.min(Math.max(at[1], -90), 90) * Math.PI / 180;
+  return [Math.sin(y) * Math.cos(h), Math.sin(h), Math.cos(y) * Math.cos(h)];
+}

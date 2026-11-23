@@ -2,6 +2,15 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.908] - 2026-11-23
+
+### Fixed
+- **An avatar picked in the store shows within about a minute.** The agent checked the store every 30 minutes (and each restart started the wait over), then downloaded every changed outfit before wearing the new one. It now checks every minute, downloads the pick first and wears it at once. A restart in the middle no longer loses the change.
+- **Videos and portraits no longer arrive a minute late.** After each render the clean-up waited about 64 seconds for an idle connection to time out.
+
+### Added
+- Lights on 360 scenes (`bnb-set/1` `at_deg`): the body and its shadow match the picture's sun.
+
 ## [2.25.907] - 2026-11-23
 
 ### Added

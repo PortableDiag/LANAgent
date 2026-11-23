@@ -70,7 +70,7 @@ import * as V from '/lib/three-vrm.module.js';
 import { attachProps, updateProps } from '/lib/vrm-props.js';
 import { wearLook } from '/lib/vrm-look.js';
 import { jawDriver } from '/lib/vrm-jaw.js';
-import { moveAt, viewFor, hiddenAt, pullFor, moveWithin } from '/lib/bnb-camera.js';
+import { moveAt, viewFor, hiddenAt, pullFor, moveWithin, lightAt } from '/lib/bnb-camera.js';
 const THREE = window.THREE; THREE.GLTFLoader = GLTFLoader;
 const d = {
 ${methods}
@@ -93,11 +93,21 @@ window.setup = async ({ width, height, fps, seconds, loop, prop, props = [], bac
   let key;
   if (set && Array.isArray(set.lights) && set.lights.length) {
     // The set's own lights for the body (its own light is baked).
-    for (const l of set.lights.slice(0, 6)) {
+    const setMark = (set.marks || []).find(m => m.id === (set.mark || 'main')) || (set.marks || [])[0];
+    const turn = -THREE.MathUtils.degToRad(Number(setMark?.facing_deg) || 0); // the set turns under the body, its lights with it
+    for (const l of set.lights.slice(0, 8)) {
       const color = new THREE.Color(/^#[0-9a-f]{6}$/i.test(l.color || '') ? l.color : '#ffffff');
-      const power = Math.min(Math.max(Number(l.intensity) || 1, 0), 10);
+      const power = Math.min(Math.max(l.intensity == null ? 1 : Number(l.intensity) || 0, 0), 20);
       if (l.type === 'ambient') scene.add(new THREE.AmbientLight(color, power));
-      else if (l.type === 'directional' && Array.isArray(l.from)) { const dl = new THREE.DirectionalLight(color, power); dl.position.set(...l.from.map(Number)); scene.add(dl); key ||= dl; }
+      else if (l.type === 'directional') {
+        const at = set.kind === 'equirect' ? lightAt(l.at_deg, set.front_deg) : Array.isArray(l.from) && l.from.length === 3 ? l.from.map(Number) : null;
+        if (!at || !at.every(Number.isFinite)) continue;
+        const dl = new THREE.DirectionalLight(color, power);
+        dl.position.set(...at).normalize().multiplyScalar(5).applyAxisAngle(new THREE.Vector3(0, 1, 0), turn);
+        // A sun near the horizon would throw a shadow ten meters long, past the floor that shows it: kept at 28 degrees.
+        if (dl.position.y < 5 * Math.sin(0.49)) { const f = Math.hypot(dl.position.x, dl.position.z) || 1e-6, k = 5 * Math.cos(0.49) / f; dl.position.set(dl.position.x * k, 5 * Math.sin(0.49), dl.position.z * k); }
+        scene.add(dl); key ||= dl;
+      }
     }
   } else scene.add(new THREE.HemisphereLight(0xffffff, 0x3a4050, 2.2));
   if (!key) { key = new THREE.DirectionalLight(0xffffff, 2.2); key.position.set(1.2, 2.5, 2.5); scene.add(key); }
@@ -135,6 +145,7 @@ window.setup = async ({ width, height, fps, seconds, loop, prop, props = [], bac
       // The picture's center column sits at -Z (behind the body) after a quarter turn; front_deg turns it from there.
       dome.rotation.y = THREE.MathUtils.degToRad(90 + (Number(set.front_deg) || 0));
       setRoot.add(dome);
+      setRoot.rotation.y = -THREE.MathUtils.degToRad(mark.facing_deg || 0);
     } else {
       const model = (await l.loadAsync('/set.glb')).scene;
       model.position.set(-(mark.position?.[0] || 0), -(mark.position?.[1] || 0) - (set.floor_y || 0), -(mark.position?.[2] || 0));
@@ -149,8 +160,8 @@ window.setup = async ({ width, height, fps, seconds, loop, prop, props = [], bac
     r.shadowMap.enabled = true;
     vrm.scene.traverse(o => { if (o.isMesh) o.castShadow = true; });
     key.castShadow = true; key.shadow.mapSize.set(1024, 1024); key.shadow.bias = -0.0006;
-    Object.assign(key.shadow.camera, { left: -1.6, right: 1.6, top: 2.4, bottom: -1.2, near: 0.1, far: 12 }); key.shadow.camera.updateProjectionMatrix();
-    const shade = new THREE.Mesh(new THREE.PlaneGeometry(5, 5), new THREE.ShadowMaterial({ opacity: 0.42 }));
+    Object.assign(key.shadow.camera, { left: -2.4, right: 2.4, top: 2.6, bottom: -2.4, near: 0.1, far: 14 }); key.shadow.camera.updateProjectionMatrix();
+    const shade = new THREE.Mesh(new THREE.PlaneGeometry(9, 9), new THREE.ShadowMaterial({ opacity: 0.42 }));
     shade.rotation.x = -Math.PI / 2; shade.position.y = 0.006; shade.receiveShadow = true; scene.add(shade);
     if (!set) {
       let ground = new THREE.Color(background).lerp(new THREE.Color('#ffffff'), 0.08);
@@ -344,7 +355,9 @@ async function serveModel(file) {
   });
   await new Promise((ok) => server.listen(0, '127.0.0.1', ok));
   const origin = `http://127.0.0.1:${server.address().port}`;
-  return { url: `${origin}${secret}`, origin, path: secret, close: () => new Promise((ok) => server.close(() => ok())) };
+  return { url: `${origin}${secret}`, origin, path: secret,
+    // Chrome keeps its connection open, and close() waits for it: every video and portrait came about 55 s late (2026-11-23).
+    close: () => new Promise((ok) => { server.close(() => ok()); server.closeAllConnections?.(); }) };
 }
 /** A set with no move asked: the body held in front view, sized for a room. */
 const FRONT = { format: 'bnb-camera/1', id: 'front', keys: [{ t: 0, yaw: 0, height: 0.62, distance: 2.8, look: 0.55, fov: 30 }] };
@@ -445,8 +458,8 @@ async function render({ modelPath, clipPath, loop = false, prop = null, props = 
     return { video, ...facts };
   } finally {
     clearTimeout(timer);
-    await model.close().catch(() => {});
     await browser.close().catch(() => {});
+    await model.close().catch(() => {});
     await fs.rm(tmp, { recursive: true, force: true }).catch(() => {});
   }
 }
@@ -546,7 +559,7 @@ async function portrait({ modelPath, look = null, size = 1024, background = '#1b
     return Buffer.from(url.slice(url.indexOf(',') + 1), 'base64');
   } finally {
     clearTimeout(timer);
-    await model.close().catch(() => {});
     await browser.close().catch(() => {});
+    await model.close().catch(() => {});
   }
 }

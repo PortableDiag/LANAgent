@@ -55,7 +55,10 @@ const LIVE_RENEW_AHEAD_MS = 3 * 24 * 3600 * 1000;
 // and a key gets 40 full downloads a day (botsandborgs.com/llms.txt, "Live avatars").
 const LIVE_SYNC_MS = Number(process.env.BOTSANDBORGS_LIVE_SYNC_MS) || 6 * 3600 * 1000;
 // Store 0.31 update feed (GET /api/account/feed): a cheap cursor poll between the 6 h checks, acting on what changed.
-const FEED_POLL_MS = Number(process.env.BOTSANDBORGS_FEED_MS) || 30 * 60 * 1000;
+// Every minute: an avatar the owner picks in the store shows within about one (the owner, 2026-11-23: "it should be
+// almost instant"). It was every 30 minutes, and each restart started the wait over. One small GET when nothing is new.
+const FEED_POLL_MS = Number(process.env.BOTSANDBORGS_FEED_MS) || 60 * 1000;
+const SLOW_BEAT_MS = 30 * 60 * 1000;
 const LIVE_FIRST_SYNC_MS = 3 * 60 * 1000;
 const AUTO_STICKER_EVERY_MS = Number(process.env.BOTSANDBORGS_STICKER_EVERY_MS) || 20 * 60 * 1000;
 const AUTO_STICKER_ASK_EVERY_MS = 60 * 1000;
@@ -519,8 +522,23 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     const tick = () => this.liveTick().catch(e => this.logger.warn(`botsandborgs: live check failed: ${e.message}`));
     this._liveFirst = setTimeout(tick, LIVE_FIRST_SYNC_MS);
     this._liveTimer = setInterval(tick, LIVE_SYNC_MS);
-    this._feedTimer = setInterval(() => this.feedTick().catch(e => this.logger.warn(`botsandborgs: update feed failed: ${e.message}`)), FEED_POLL_MS);
+    this._feedTimer = setInterval(() => this.feedBeat(), FEED_POLL_MS);
     this._liveFirst.unref?.(); this._liveTimer.unref?.(); this._feedTimer.unref?.();
+  }
+
+  /** One poll of the feed at a time; a store that stays unreachable is logged once, not every minute. */
+  async feedBeat() {
+    if (this._feedBusy) return null;
+    this._feedBusy = true;
+    try {
+      const r = await this.feedTick();
+      if (this._feedDown) { this._feedDown = false; this.logger.info('botsandborgs: update feed answers again'); }
+      return r;
+    } catch (e) {
+      if (!this._feedDown) this.logger.warn(`botsandborgs: update feed failed: ${e.message}`);
+      this._feedDown = true;
+      return null;
+    } finally { this._feedBusy = false; }
   }
 
   async cleanup() {
@@ -537,12 +555,15 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
   async feedTick({ maxPages = 5 } = {}) {
     const key = await this.accountKey().catch(() => null);
     if (!key) return { entries: 0, ran: [] };
-    // Custom requests (store 0.36) move on the store's side; followed on the same 30-minute beat.
-    await this.customTick().catch(e => this.logger.warn(`botsandborgs: custom requests not checked: ${e.message}`));
-    // Taught motions (store 0.59) move on the store's side: followed on the same beat.
-    await this.teachTick().catch(e => this.logger.warn(`botsandborgs: taught motions not checked: ${e.message}`));
-    // Animation API solves left open by a restart are picked up again on the same beat.
-    await this.animTick().catch(e => this.logger.warn(`botsandborgs: animation solves not checked: ${e.message}`));
+    if (Date.now() - (this._slowBeatAt || 0) >= SLOW_BEAT_MS) {
+      this._slowBeatAt = Date.now();
+      // Custom requests (store 0.36) move on the store's side; followed on a 30-minute beat.
+      await this.customTick().catch(e => this.logger.warn(`botsandborgs: custom requests not checked: ${e.message}`));
+      // Taught motions (store 0.59) move on the store's side: followed on the same beat.
+      await this.teachTick().catch(e => this.logger.warn(`botsandborgs: taught motions not checked: ${e.message}`));
+      // Animation API solves left open by a restart are picked up again on the same beat.
+      await this.animTick().catch(e => this.logger.warn(`botsandborgs: animation solves not checked: ${e.message}`));
+    }
     const cursor = await PluginSettings.getCached(this.name, 'feedCursor').catch(() => null);
     const entries = [];
     let since = cursor?.since ?? null;
@@ -556,12 +577,14 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
       if (d?.next_since != null) since = d.next_since;
       if (!d?.more) break;
     }
-    if (since != null) await PluginSettings.setCached(this.name, 'feedCursor', { since, at: new Date().toISOString() });
+    // Kept only once what it brought is done: a restart in the middle reads it again.
+    const keepCursor = async () => { if (since != null && since !== cursor?.since) await PluginSettings.setCached(this.name, 'feedCursor', { since, at: new Date().toISOString() }); };
     if (cursor?.since == null) {
+      await keepCursor();
       this.logger.info(`botsandborgs: update feed: first read, ${entries.length} past entr${entries.length === 1 ? 'y' : 'ies'} taken as seen`);
       return { entries: 0, ran: [], first: true };
     }
-    if (!entries.length) return { entries: 0, ran: [] };
+    if (!entries.length) { await keepCursor(); return { entries: 0, ran: [] }; }
     for (const e of entries) this.logger.info(`botsandborgs: feed ${e.kind || '?'} ${e.product || ''}: ${String(e.text || e.title || '').slice(0, 200)}`);
     const kinds = new Set(entries.map(e => String(e.kind || 'update')));
     const ran = [];
@@ -587,6 +610,7 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
         if (k) await this.syncLiveProps(pass, k).catch(e => this.logger.warn(`botsandborgs: live props not read: ${e.message}`));
       }
     }
+    await keepCursor();
     this.logger.info(`botsandborgs: update feed: ${entries.length} new entr${entries.length === 1 ? 'y' : 'ies'} (${[...kinds].join(', ')}); ran ${ran.join(', ') || 'nothing'}`);
     return { entries: entries.length, ran };
   }
@@ -1525,7 +1549,12 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
       const prev = known.get(l.id) || {};
       const had = new Map((prev.outfits || []).map(o => [`${o.model}/${o.outfit}`, o]));
       const outfits = [];
-      for (const o of linkOutfits(detail)) {
+      // What the owner picked comes first, and the body is worn the moment its file is here: a new avatar waits for
+      // nobody else's download (2026-11-23: it waited for every changed outfit, then for nothing it needed).
+      const picks = await this.linkPicks(l.id, key);
+      const at = (o) => { const n = picks.findIndex(c => c.model === o.model && c.outfit === o.outfit); return n < 0 ? picks.length : n; };
+      const order = linkOutfits(detail).map((o, n) => ({ o, n })).sort((x, y) => at(x.o) - at(y.o) || x.n - y.n).map(x => x.o);
+      for (const o of order) {
         const was = had.get(`${o.model}/${o.outfit}`);
         const modelId = linkedModelId(l.id, o.model, o.outfit);
         let sha = was?.sha256 || null;
@@ -1535,8 +1564,14 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
         }
         outfits.push({ model: o.model, outfit: o.outfit, name: o.name, sha256: sha, modelId, personalLicense: o.personalLicense,
           looks: o.looks.map(x => ({ id: x.id || x.look, name: x.name || x.id, colors: x.colors || {}, morphs: x.morphs || {}, pieces: Array.isArray(x.pieces) ? x.pieces : null })) });
+        const pick = picks.find(c => c.role === 'personal');
+        if (pick && pick.model === o.model && pick.outfit === o.outfit) {
+          await this.wearPickEarly({ id: l.id, outfits }, pick).catch(e => this.logger.warn(`botsandborgs: ${o.name} not worn yet: ${e.message}`));
+        }
       }
       if (!detail) continue;
+      const listedAt = (x) => linkOutfits(detail).findIndex(o => o.model === x.model && o.outfit === x.outfit);
+      outfits.sort((x, y) => listedAt(x) - listedAt(y)); // the store's order again
       // Outfits the owner no longer allows: their copies go.
       for (const [k, o] of had) if (!outfits.some(x => `${x.model}/${x.outfit}` === k)) await this.removeGalleryModel(o.modelId);
       const entry = { id: l.id, owner: l.owner || (detail.link || detail).owner_name || null, status: 'active', outfits, at: new Date().toISOString() };
@@ -1554,6 +1589,28 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
       : `- ${l.owner || l.id}: ${l.outfits.map(o => `${o.name}${o.personalLicense ? ' (personal licence)' : ''}`).join(', ') || 'no models allowed yet'}${Object.keys(l.roles || {}).length ? `; roles ${Object.entries(l.roles).map(([r, id]) => `${r} = ${l.outfits.find(o => o.modelId === id)?.name || id}`).join(', ')}` : ''}`);
     this.logger.info(`botsandborgs: linked agents: ${keep.length} link(s), ${active.reduce((n, l) => n + l.outfits.length, 0)} outfit(s)`);
     return { links: keep, summary: keep.length ? `My links to other people's Bots & Borgs avatars:\n${lines.join('\n')}` : "I'm not linked to anyone's Bots & Borgs avatars." };
+  }
+
+  /** What the owner picked for this agent on a link, personal first: [{ role, model, outfit, look, settings }]. [] when unreadable. */
+  async linkPicks(linkId, key) {
+    const out = [];
+    for (const role of ['personal', ...LINK_ROLES.filter(r => r !== 'personal')]) {
+      const c = await this.api('get', `/api/account/links/${encodeURIComponent(linkId)}/roles/${role}`, { key }).then(readChoice).catch(() => null);
+      if (c && !c.fallback) out.push({ role, ...c });
+    }
+    return out;
+  }
+
+  /** The personal pick, worn as soon as its file is in the gallery. applyLinkRoles does the rest (roles, pictures). */
+  async wearPickEarly(link, pick) {
+    const o = link.outfits.find(x => x.model === pick.model && x.outfit === pick.outfit);
+    const worn = this.agent?.agentModel?.activeVRMModel || null;
+    if (!o || worn === o.modelId) return;
+    const st = await this.linkState();
+    if (!st.wornBefore && !/^store-linked-/.test(String(worn || ''))) await this.saveLinkState({ ...st, wornBefore: worn });
+    const look = pick.look ? pick.settings || this.lookSettings(link, o, pick.look) : null;
+    await this.wearGalleryModel(o.modelId, look, link.id);
+    this._wornEarly = o.modelId; // its picture is still to come (applyLinkRoles)
   }
 
   async galleryHas(id) {
@@ -1604,13 +1661,15 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     const worn = this.agent?.agentModel?.activeVRMModel || null;
     // Worn again after something else was worn: that other model put its own picture in the owner's apps, so the
     // personal picture is applied again even though the link's pick never changed (Core's stayed on 2026-11-22).
-    const reworn = !!(picked.personal && worn !== picked.personal);
+    const reworn = !!(picked.personal && (worn !== picked.personal || this._wornEarly === picked.personal));
+    const early = this._wornEarly === picked.personal;
+    this._wornEarly = null;
     if (picked.personal && worn !== picked.personal) {
       const st = await this.linkState();
       // What it wore before, to go back to when the link ends.
       if (!st.wornBefore && !/^store-linked-/.test(String(worn || ''))) await this.saveLinkState({ ...st, wornBefore: worn });
       await this.wearGalleryModel(picked.personal, looks.personal?.look || null, link.id);
-    } else if (picked.personal && looks.personal) {
+    } else if (picked.personal && looks.personal && !early) {
       // Same body, a new or changed look: AvatarX wears it again.
       await this.wearGalleryModel(picked.personal, looks.personal.look, link.id);
     }

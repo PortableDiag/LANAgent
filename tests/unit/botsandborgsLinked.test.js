@@ -431,3 +431,25 @@ test('"use the glados avatar for Jo" reaches the roles with a person as the role
   assert.equal(got.look, 'glados');
   assert.match((await t.p.rolesCommand({ role: 'Jo' })).error, /roles are public, assistant and personal/);
 });
+
+test('a new pick is downloaded first and worn before the other outfits (2026-11-23), its picture still follows', async () => {
+  const a = vrm('Aaa'), b = vrm('Bbb'), pick = vrm('Maid');
+  const t = rig({
+    files: { 'a/base': a, 'b/base': b, 'maid/base': pick },
+    routes: {
+      'get /api/account/links': { as_agent: [{ id: 'lnk_12', status: 'active' }] },
+      'get /api/account/links/lnk_12': { link: { models: [['a', a], ['b', b], ['maid', pick]].map(([m, f]) => ({ model: m, name: m, outfits: [{ outfit: 'base', sha256: sha(f) }] })) } },
+      'get /api/account/links/lnk_12/roles/personal': { model: 'maid', outfit: 'base', ref: 'locker:maid/base', look: null }
+    }
+  });
+  const order = [];
+  const http = t.p.http;
+  t.p.http = async (req) => { order.push(`get ${req.url.split('/files/')[1]}`); return http(req); };
+  t.p.wearGalleryModel = async (id) => { order.push(`wear ${id}`); t.p.agent.agentModel.activeVRMModel = id; };
+  const pictures = [];
+  t.p.applyPersonalPicture = async (id) => { pictures.push(id); return {}; };
+  await t.p.syncLinks();
+  assert.deepEqual(order, ['get maid/base', 'wear store-linked-lnk-12-maid-base', 'get a/base', 'get b/base']);
+  assert.deepEqual(pictures, ['store-linked-lnk-12-maid-base']);
+  assert.deepEqual((await t.p.linkState()).links[0].outfits.map(o => o.model), ['a', 'b', 'maid'], "kept in the store's order");
+});

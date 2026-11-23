@@ -1,7 +1,7 @@
 // Moving camera for the agent's videos (bnb-camera/1, the owner 2026-11-22: "pan the camera from left to right").
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { moveProblem, moveAt, viewFor, hiddenAt, pullFor, moveWithin } from '../../src/interfaces/web/public/lib/bnb-camera.js';
+import { moveProblem, moveAt, viewFor, hiddenAt, pullFor, moveWithin, lightAt } from '../../src/interfaces/web/public/lib/bnb-camera.js';
 import { CAMERA_MOVES, cameraAsked } from '../../src/services/avatar/cameraMoves.js';
 import { framingAsked } from '../../src/services/avatar/clipVideo.js';
 
@@ -59,4 +59,14 @@ test('the words that ask for a camera move, and the ones that do not', () => {
   for (const t of ['send me a video of you doing the roger rabbit', 'film yourself doing the cabbage patch', 'video of you from the waist up saying hi',
     'make a video of you holding a frying pan', 'video of you with your hands on the left side of your hips', 'send Pat a video of you doing the pole dance']) assert.equal(id(t), null, t);
   assert.equal(framingAsked('pan left to right'), 'full');
+});
+
+test('a 360 light stands where the picture shows it: world yaw = 180 - (image yaw - front_deg)', () => {
+  const near = (a, b) => a.forEach((n, i) => assert.ok(Math.abs(n - b[i]) < 1e-9, `${a} vs ${b}`));
+  near(lightAt([0, 0], 0), [0, 0, -1]);        // the center column is behind the body
+  near(lightAt([90, 0], 0), [1, 0, 0]);        // right in the image is the avatar's left (+X)
+  near(lightAt([-90, 0], 0), [-1, 0, 0]);
+  near(lightAt([150, 0], -30), [0, 0, 1]);     // the snow field's sun: in front of the body
+  near(lightAt([10, 90], 45), [0, 1, 0]);
+  for (const bad of [null, [1], ['a', 2], [NaN, 0]]) assert.equal(lightAt(bad, 0), null);
 });
