@@ -7,7 +7,7 @@ import { encrypt, decrypt } from '../../utils/encryption.js';
 import { ROLES, normalizeRole, resolveRoleModel, modelsInUse, autoFillRoles } from '../../services/avatar/avatarRoles.js';
 import fs from 'node:fs/promises';
 import { DATA_PATH } from '../../utils/paths.js';
-import { propsFor, notOnBody, variantKind, livePass, applyClipManifest, unpack, installVrm, addToManifest, readVrmInfo, readVrmaInfo, clipLabel, clipLoops, clipGesture, writeStoreAnimations, safeName, toStickerWebp, moodOf, portraitFromPreview } from '../../services/store/assetLibrary.js';
+import { propsFor, notOnBody, seatFor, variantKind, livePass, applyClipManifest, unpack, installVrm, addToManifest, readVrmInfo, readVrmaInfo, clipLabel, clipLoops, clipGesture, writeStoreAnimations, safeName, toStickerWebp, moodOf, portraitFromPreview } from '../../services/store/assetLibrary.js';
 import { moodChoices, chooseSticker, stickerCouldFit, wallpaperFor } from '../../services/store/selfUse.js';
 import { motionPrompt, parseMotionScript, readJob, reportFailures, motionTags, motionName } from '../../services/store/animSolve.js';
 import { LINK_ROLES, linkedVariant, linkedModelId, linkedPrefix, contactKey, agentLinks, linkOutfits, readChoice, lockerRef, sha256, linkEnded } from '../../services/store/linkedAgents.js';
@@ -518,7 +518,7 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
 
   // ── live passes ──────────────────────────────────────────────────────────────────────
   async initialize() {
-    import('../../services/avatar/avatarx.js').then(({ setBlockedSource }) => setBlockedSource((id) => this.clipsNotFor(id))).catch(() => {});
+    import('../../services/avatar/avatarx.js').then(({ setBlockedSource, setBodyNameSource }) => { setBlockedSource((id) => this.clipsNotFor(id)); setBodyNameSource((id) => this.bodyName(id)); }).catch(() => {});
     const tick = () => this.liveTick().catch(e => this.logger.warn(`botsandborgs: live check failed: ${e.message}`));
     this._liveFirst = setTimeout(tick, LIVE_FIRST_SYNC_MS);
     this._liveTimer = setInterval(tick, LIVE_SYNC_MS);
@@ -1023,7 +1023,8 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
   async propsForBody(props, opts) {
     const off = await this.unsupportedProps(opts?.modelId).catch(() => new Map());
     const not = await this.packRefuses(props, opts?.modelId).catch(() => new Map());
-    return propsFor(props, opts).filter(p => !off.has(String(p.prop).toLowerCase()) && !not.has(String(p.prop).toLowerCase()));
+    const body = (props || []).some(p => p.families?.length) ? await this.bodyName(opts?.modelId).catch(() => null) : null;
+    return propsFor(props, opts).filter(p => !off.has(String(p.prop).toLowerCase()) && !not.has(String(p.prop).toLowerCase())).map(p => seatFor(p, body));
   }
 
   /** The live pass of the model worn now (by product), or null when it wears no store model with a pass. */

@@ -91,7 +91,8 @@ export async function pushPropsToAvatarX(listed, vrmDir, opts = {}) {
       let name = base;
       for (const [k, v] of byProp) if (v.prop === base && v.file === file) name = k;
       if (byProp.has(base) && byProp.get(base).file !== file && name === base) name = `${base}-${path.basename(file, '.glb')}`.slice(0, 60);
-      if (!byProp.has(name)) byProp.set(name, { prop: base, file, clips: {} });
+      if (!byProp.has(name)) byProp.set(name, { prop: base, file, clips: {}, not: new Map(), families: p.families || [] });
+      if (p.unsupported_on?.length) byProp.get(name).not.set(avatarxClipName(c.file), p.unsupported_on);
       const at = { bone: p.bone, position: p.position, rotation: p.rotation };
       for (const k of ['scale', 'scale_with', 'ref_hips', 'show', 'prop_loop', 'prop_anim']) if (p[k] != null) at[k] = p[k];
       byProp.get(name).clips[avatarxClipName(c.file)] = at;
@@ -117,7 +118,22 @@ export async function pushPropsToAvatarX(listed, vrmDir, opts = {}) {
       const clipsThere = there?.clips || {};
       const changed = Object.keys(want.clips).length !== Object.keys(clipsThere).length
         || Object.entries(want.clips).some(([k, v]) => !same(v, clipsThere[k]));
-      if (!there || changed) await call('POST', `/agent/v1/props?name=${encodeURIComponent(name)}`, JSON.stringify({ clips: want.clips }));
+      // Which bodies it is not for, and the seat and build of a family of bodies (AvatarX 0.4.15).
+      const not = unsupportedList(want.not);
+      const families = Object.fromEntries(want.families.map(({ name: n, ...f }) => [n, f]));
+      const sort = (l) => JSON.stringify((l || []).map(e => [[...e.bodies].sort(), [...(e.clips || [])].sort(), e.reason || '']).sort());
+      const seats = (f) => JSON.stringify(Object.entries(f || {}).map(([n, x]) => [n, [...(x.bodies || [])].sort(), x.bone, x.position, x.rotation, x.scale ?? 1, x.file ? avatarxClipName(String(x.file).replace(/\.glb$/i, '')) : null]).sort());
+      const more = sort(not) !== sort(there?.unsupported) || seats(families) !== seats(there?.families);
+      const builds = new Set(want.families.map(f => f.file).filter(Boolean));
+      for (const b of builds) {
+        const build = await fs.readFile(path.join(path.dirname(want.file), b));
+        if (String(there?.files?.[avatarxClipName(b.replace(/\.glb$/i, ''))] || '').startsWith(`${build.length}-`)) continue;
+        await call('POST', `/agent/v1/props?name=${encodeURIComponent(name)}&file=${encodeURIComponent(b)}`, build, 'application/octet-stream');
+      }
+      if (!there || changed || more) {
+        const full = { clips: want.clips, ...(not.length ? { unsupported_on: not } : {}), ...(want.families.length ? { families } : {}) };
+        await call('POST', `/agent/v1/props?name=${encodeURIComponent(name)}`, JSON.stringify(full));
+      }
       done.push(name);
     } catch (e) {
       logger.warn(`AvatarX: prop ${name} not given: ${e.message}`);
@@ -138,6 +154,29 @@ export async function playOnAvatarX(name, opts = {}) {
 /** Who knows which clips a model must not play: async (modelId) => { reason, clips: iterable of stems } | null (the store plugin). */
 let blockedFor = null;
 export function setBlockedSource(fn) { blockedFor = fn; }
+
+/** Who knows a model's store name ("racer-blue"), by which AvatarX picks a prop's seat: async (modelId) => name | null. */
+let bodyNameOf = null;
+export function setBodyNameSource(fn) { bodyNameOf = fn; }
+
+/** AvatarX (0.4.13+) matches a pack's bodies by the avatar's store name: told when it has none or another. */
+async function sendBodyName(call, id, modelId, state) {
+  if (!bodyNameOf || !id) return;
+  const name = await Promise.resolve(bodyNameOf(modelId)).catch(() => null);
+  if (!name || (state?.avatars || []).find(a => a.id === id)?.store === name) return;
+  await call('PATCH', '/agent/v1/state', JSON.stringify({ stores: { [id]: name } })).catch(e => logger.warn(`AvatarX: store name not set on ${id}: ${e.message}`));
+}
+
+/** A prop's `unsupported_on` as AvatarX takes it, its clips gathered by bodies and reason. */
+export function unsupportedList(byClip) {
+  const out = new Map();
+  for (const [clip, list] of byClip) for (const e of list || []) {
+    const k = JSON.stringify([e.bodies, e.reason]);
+    if (!out.has(k)) out.set(k, { bodies: e.bodies, clips: [], reason: e.reason });
+    out.get(k).clips.push(clip);
+  }
+  return [...out.values()];
+}
 
 /** The blocked entry AvatarX wants for a body: the clip names it plays them under, and the reason; null lifts it. */
 export function blockedEntry(not) {
@@ -211,6 +250,7 @@ export async function pushModelToAvatarX(modelId, {
   }
   // The owner's saved look on a lent body (AvatarX 0.4.5+: lent bodies only); sent each time, AvatarX re-wears on change.
   if (look && link) await call('PATCH', '/agent/v1/state', JSON.stringify({ looks: { [id]: look } })).catch(e => logger.warn(`AvatarX: look not set on ${name}: ${e.message}`));
+  await sendBodyName(call, id, modelId, state);
   await sendBlocked(call, id, modelId, state); // before it shows
   if (state.active === id) return 'unchanged';
   await call('PATCH', '/agent/v1/state', JSON.stringify({ active: id }));

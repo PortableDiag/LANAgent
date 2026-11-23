@@ -19,6 +19,7 @@ import fsSync from 'fs';
 import path from 'path';
 import { DATA_PATH } from '../../utils/paths.js';
 import { avatarxClipName } from './avatarx.js';
+import { seatFor } from '../store/assetLibrary.js';
 
 export const BACKGROUNDS = ['nebula', 'dusk', 'studio', 'black'];
 export const MOODS = ['neutral', 'happy', 'angry', 'sad', 'relaxed', 'surprised'];
@@ -113,10 +114,11 @@ const stamp = (st) => `${st.size}-${Math.round(st.mtimeMs)}`;
  * The props, in the form AvatarX's page reads ({ name, rev, clips, fits }), each with the .glb it loads.
  * Store props come from store.json (the clip each one goes with); on-request props (the mic) stay off, as on AvatarX.
  */
-export async function props(d = dirs()) {
+export async function props(d = dirs(), body = null) {
   const byProp = new Map();
   for (const c of await readJson(path.join(d.vrm, 'animations', 'store.json'), [])) {
-    for (const p of (c?.props || []).filter(x => !x.onRequest)) {
+    for (const listed of (c?.props || []).filter(x => !x.onRequest)) {
+      const p = seatFor(listed, body); // the worn body's family seat and build (the pack's attach.json)
       const base = avatarxClipName(p.prop || p.file);
       const glb = path.join(d.vrm, String(p.file || ''));
       if (!base || !glb.startsWith(path.join(d.vrm, 'props') + path.sep)) continue;

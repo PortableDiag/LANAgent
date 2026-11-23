@@ -405,6 +405,13 @@ export function propAttachments(manifest, { fit = 'standard', fileFor = (f) => f
         .filter(e => Array.isArray(e?.bodies) && Array.isArray(e.clips) && e.clips.some(c => clipKey(c) === key))
         .map(e => ({ bodies: e.bodies.map(b => String(b).toLowerCase().replace(/^vrm-/, '')), reason: String(e.reason || 'it does not fit this body').slice(0, 200) }));
       if (not.length) one.unsupported_on = not;
+      // Where the prop sits on a family of bodies (hand size, hair), and the build of it they wear, whatever the clip.
+      const seats = Object.entries(p.families && typeof p.families === 'object' && !Array.isArray(p.families) ? p.families : {})
+        .filter(([, f]) => Array.isArray(f?.bodies) && f.bodies.length && typeof f.bone === 'string' && triple(f.position) && triple(f.rotation))
+        .map(([name, f]) => ({ name: name.slice(0, 64), bodies: f.bodies.map(b => String(b).toLowerCase().replace(/^vrm-/, '')), bone: f.bone, position: f.position, rotation: f.rotation,
+          ...(typeof f.file === 'string' && /^[\w.-]+\.glb$/i.test(path.basename(f.file)) ? { file: path.basename(f.file) } : {}),
+          ...(Number.isFinite(Number(f.scale)) && Number(f.scale) > 0 && Number(f.scale) !== 1 ? { scale: Number(f.scale) } : {}) }));
+      if (seats.length) one.families = seats;
       byClip.get(key).push(one);
     }
   }
@@ -439,8 +446,19 @@ async function storeProps(items, libraryDir, vrmDir, warn = () => {}) {
           if (!(await fs.readFile(to).then(b => b.equals(bytes)).catch(() => false))) await writeAtomic(to, bytes);
           copied.add(name);
         }
+        // The builds its families wear come along; a seat whose build is not in the pack is left out.
+        const families = [];
+        for (const f of a.families || []) {
+          if (!f.file) { families.push(f); continue; }
+          const build = have.get(f.file.toLowerCase());
+          const bytes = build && await fs.readFile(path.join(libraryDir, variant, build)).catch(() => null);
+          if (!bytes) { warn(`${item.variant}: attach.json names ${f.file} for ${f.name}, not in the pack`); continue; }
+          if (!copied.has(build)) { await fs.mkdir(dest, { recursive: true }); await writeAtomic(path.join(dest, build), bytes); copied.add(build); }
+          families.push({ ...f, file: build });
+        }
+        const { families: _f, ...kept } = a;
         if (!all.has(key)) all.set(key, []);
-        all.get(key).push({ ...a, file: `props/${variant}/${name}`, variant: item.variant });
+        all.get(key).push({ ...kept, ...(families.length ? { families } : {}), file: `props/${variant}/${name}`, variant: item.variant });
       }
     }
   }
@@ -460,6 +478,15 @@ const WHEN_WORDS = { performance: /\b(perform\w*|stand[- ]?up|comedy|sing|singin
 export function notOnBody(prop, body) {
   if (!body) return null;
   return (prop?.unsupported_on || []).find(e => e.bodies.includes(String(body).toLowerCase()))?.reason || null;
+}
+
+/** A prop placement as this body wears it: its family's seat and build when the pack names one, else as listed. */
+export function seatFor(prop, body) {
+  const f = body ? (prop?.families || []).find(x => x.bodies.includes(String(body).toLowerCase())) : null;
+  if (!f) return prop;
+  const { scale, scale_with, ref_hips, ...rest } = prop; // the seat's own size, as the pack says
+  return { ...rest, bone: f.bone, position: f.position, rotation: f.rotation, ...(f.scale ? { scale: f.scale } : {}),
+    ...(f.file ? { file: path.posix.join(path.posix.dirname(String(prop.file)), f.file) } : {}) };
 }
 
 /** A clip's props for one request: on-request props only when the request or the scene asks for them. */

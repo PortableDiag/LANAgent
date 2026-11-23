@@ -2,6 +2,12 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.910] - 2026-11-23
+
+### Added
+- **Props sit where a body's family says** (Bots & Borgs `families`): the seat and the build of a prop for a group of bodies (hand size, hair), in videos and on the live page.
+- **AvatarX knows too** (0.4.15): it gets each prop's "not on these bodies" list, the family seats and builds, and the worn body's store name.
+
 ## [2.25.909] - 2026-11-23
 
 ### Added

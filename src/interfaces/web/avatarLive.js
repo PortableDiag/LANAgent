@@ -61,8 +61,9 @@ export function createLiveAvatar(agent, { d = L.dirs() } = {}) {
   }
 
   async function gather() {
+    const body = await store()?.bodyName?.(await activeId()).catch?.(() => null) || null;
     const [settings, active, avatarList, clipMap, propList, bgMap] = await Promise.all([
-      L.readSettings(d), activeId(), L.avatars(d), L.clips(d), L.props(d), storeScenes().then(s => L.customBackgrounds(d, s))
+      L.readSettings(d), activeId(), L.avatars(d), L.clips(d), L.props(d, body), storeScenes().then(s => L.customBackgrounds(d, s))
     ]);
     // Clips the store fitted to the body showing (its fitted packs, same clip names) play instead of the pack's.
     try {
