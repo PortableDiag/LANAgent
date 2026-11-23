@@ -17,7 +17,7 @@ import { APIManager } from "../api/core/apiManager.js";
 import { IntentDetector } from "./intentDetector.js";
 import { AIIntentDetector } from "./aiIntentDetector.js";
 import { vectorIntentDetector } from "./vectorIntentDetector.js";
-import { PluginChainProcessor, isTextRequest, isOnePhoneCall } from "./pluginChainProcessor.js";
+import { PluginChainProcessor, isTextRequest, isOnePhoneCall, isOneAvatarVideo, avatarVideoIntent } from "./pluginChainProcessor.js";
 // EmailAutoReply functionality moved to background tasks
 import { SelfModificationService } from '../services/selfModification.js';
 import { TaskReminderService } from '../services/taskReminders.js';
@@ -1203,7 +1203,7 @@ export class Agent extends EventEmitter {
           // "Call me" right after ALICE asked "Which one?" was answered from the chat as a reply to that question,
           // and nothing rang (2026-10-31 21:55). Asking to be called is always a new instruction.
           const callsOwner = /^(?:(?:hey|ok|okay)\s+)?(?:[a-z]+[,:]?\s+)?(?:please\s+)?(?:(?:can|could|would|will)\s+you\s+)?(?:(?:call|ring|phone)\s+me|give\s+me\s+a\s+(?:call|ring))\b/i.test(input.trim());
-          let looksLikeFollowUp = isShort && (hasFollowUpSignals || isQuestion || weAsked) && noStrongIntent && !asksForData && !callsOwner;
+          let looksLikeFollowUp = isShort && (hasFollowUpSignals || isQuestion || weAsked) && noStrongIntent && !asksForData && !callsOwner && !isOneAvatarVideo(input);
 
           // "Text him back", "send her that", "ask him": a person known only from the chat. The
           // router reads the message alone, so it would text "him". Spell the request out first.
@@ -1317,6 +1317,14 @@ If answering needs information that is not in the conversation above (messages, 
         }
       } catch (err) {
         logger.warn('Light command check failed:', err.message);
+      }
+
+      // A video of the agent itself is one action, read here with no model in the way (the owner, 2026-11-23, twice in a
+      // day): not the avatar worn, not a planner's new animation plus a text, not an extraction that came back empty.
+      const ownVideo = intentResult ? null : avatarVideoIntent(input, { store: !!this.apiManager?.getPlugin?.('botsandborgs') });
+      if (ownVideo) {
+        logger.info('Video of itself read directly: botsandborgs.use as video');
+        intentResult = ownVideo;
       }
 
       if (!intentResult && this.vectorIntentDetector && this.vectorIntentDetector.enabled) {

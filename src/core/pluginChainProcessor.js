@@ -55,6 +55,20 @@ export function isOneStorePurchase(input) {
 }
 
 /**
+ * "Send Jo a video message saying how you're sorry I missed her call…": the agent itself, speaking, in a video. The words
+ * "of you" are not needed: it scored 0.53 on the router, the planner split it into a NEW custom animation plus a TEXT, and
+ * Jo got a text (2026-11-23). A video that is somebody else's ("the video", "a video of the cat", a file) is not this.
+ */
+export function isVideoMessage(input) {
+  const t = stripAgentAddress(input).replace(/^(please|pls|can you|could you|now|go ahead and)\s+/i, '');
+  if (/\b(?:that|this|the|my|our|his|her|their|your last|last|attached|previous|same)\s+video\b/i.test(t) && !/\bvideo (?:message|note|greeting)\b/i.test(t)) return false;
+  const verb = '(?:send|sent|make|record|film|shoot|create|do|give|text|message|leave|get)';
+  const message = new RegExp(`^${verb}\\b[^.?!]{0,60}?\\b(?:a|an|another|one more|quick|short|little)?\\s*video\\s+(?:message|note|greeting|reply|selfie|card|apology|thank[- ]you|hello|shout[- ]?out)\\b`, 'i');
+  const spoken = new RegExp(`^${verb}\\b[^.?!]{0,60}?\\b(?:a|an|another|quick|short)\\s+(?:quick |short |little |funny |nice )?video\\b(?!\\s+(?:of|about|from|link|call|file|clip|tutorial|game)\\b)[^.?!]{0,40}?\\b(?:saying|telling|explaining|wishing|asking|reminding|thanking|apologi[sz]ing|congratulating|letting|that says|to say|where you)\\b`, 'i');
+  return message.test(t) || spoken.test(t);
+}
+
+/**
  * "Send me a video of you doing X", "film yourself doing the rumba and send it to Jo": the agent films its OWN 3D body
  * (botsandborgs use, as video), one step that also sends it. The planner read "film … and send" as a web search plus a
  * download and fetched YouTube instead (2026-11-15, "film yourself doing the phone call loop and send it to me").
@@ -67,8 +81,15 @@ export function isOneAvatarVideo(input) {
   // the agent's own body. Without it the planner split it into voice.speak + a MindSwarm image (2026-11-18).
   const ofSelf = /\b(video|clip|recording|film|movie)(?:\s+(?:message|note|greeting|selfie|reply|card))?\s+of\s+you(?:rself)?\b/i.test(t)
     || /\b(film|record|video)\s+yourself\b/i.test(t)
-    || /\byourself\s+(doing|dancing|waving|saying|on the phone|drinking|sipping|sitting|typing|reading|\w+ing)\b/i.test(t);
+    || /\byourself\s+(doing|dancing|waving|saying|on the phone|drinking|sipping|sitting|typing|reading|\w+ing)\b/i.test(t)
+    || isVideoMessage(t);
   return ofSelf && !/\b(then|after that|afterwards|and also)\b.*\b(email|post|tweet|schedule|call)\b/i.test(t);
+}
+
+/** The intent for a video of the agent itself, read with no model, or null. Every router asks this first. */
+export function avatarVideoIntent(input, { store = true } = {}) {
+  if (!store || !isOneAvatarVideo(input)) return null;
+  return { detected: true, intent: 'botsandborgs_use', plugin: 'botsandborgs', action: 'use', parameters: { as: 'video', originalInput: input, fromAI: true }, confidence: 1, source: 'avatar-video' };
 }
 
 /**

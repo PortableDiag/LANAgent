@@ -2,6 +2,23 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.917] - 2026-11-23
+
+### Fixed
+- **A spoken video keeps moving.** With no move named, a short gesture could be picked under a long line and its last pose held still; a looping talk clip is used now.
+
+## [2.25.916] - 2026-11-23
+
+### Fixed
+- Every router reads a video request the same way: the AI classifier, the follow-up check and the routing dry run too.
+
+## [2.25.915] - 2026-11-23
+
+### Fixed
+- **"Send Jo a video message saying…" sends a video.** It was split by the planner into a new custom animation and a text. A video of the agent itself is now read directly, before any router, planner or extraction: it films its own body, speaks the line and sends it.
+- **The words to be spoken never choose the move.** "Sorry I missed her call" no longer picks a phone-call clip or a camera.
+- **"One of us" stays "us", and "you're sorry" is the agent's own feeling** in a spoken line.
+
 ## [2.25.914] - 2026-11-23
 
 ### Fixed

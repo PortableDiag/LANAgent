@@ -117,6 +117,18 @@ export function withoutOwnerName(line, owner, asked = '') {
   return bare ? bare.charAt(0).toUpperCase() + bare.slice(1) : line;
 }
 
+/**
+ * A video request without the words to be SPOKEN, so "saying sorry I missed her call" never picks a phone-call move or a
+ * camera: quotes and what follows a saying verb go, a "while dancing" after them stays.
+ */
+export function moveWords(asked) {
+  const t = String(asked || '').replace(/["“][^"”]*["”]/g, ' ');
+  const m = /\b(?:saying|says|say|telling|tell|explaining|explain|wishing|wish|asking|ask|reminding|remind|thanking|apologi[sz]ing|congratulating|letting|announcing|that says|to say)\b/i.exec(t);
+  if (!m) return t;
+  const after = /\b(?:while|as you|and then|then)\s+(?:you(?:'re| are)?\s+)?\w+ing\b.*$|\bin front of\b.*$|\bin (?:the|your|a)\s+[\w ]{2,30}(?:avatar|model|room|studio|background)\b.*$/i.exec(t.slice(m.index));
+  return `${t.slice(0, m.index)} ${after ? after[0] : ''}`.trim();
+}
+
 /** Whether a spoken line describes the video instead of saying its line ("I'm doing the cabbage patch while saying …"). */
 export function narratesVideo(line) {
   return /\bI(?:'m| am|’m)\s+(?:here\s+)?(?:now\s+|just\s+|currently\s+)?(?:doing|dancing|performing|filming|recording|making|sending|busting|showing|hitting|bringing you|waving|saying)\b|\b(?:just |here I am,? )?waving (?:hello|hi|at|to)\b|\bassistant avatar\b|\bwhile (?:saying|doing|dancing|I)\b|\b(?:in|for) this video\b|\bwatch me\b|\bhere(?:'s| is|’s) (?:me|my) (?:doing|dance|video)/i.test(String(line || ''));
@@ -149,7 +161,9 @@ export function livePassList(d) {
 export function videoPerspective(name, owner) {
   return `In the request, "you", "your" and "yourself" mean you, ${name}, the AI assistant: "saying you're now able to move and talk" ` +
     `is about you, so in the video you say "I can move and talk now". ${owner}'s own "I", "me" and "my" in the request mean ${owner}: ` +
-    `speak of ${owner} in the third person by first name, never as "I", and never claim ${owner} can do what the request says you can do.`;
+    `speak of ${owner} in the third person by first name, never as "I", and never claim ${owner} can do what the request says you can do. ` +
+    `"You're sorry", "you miss her", "you hope" are YOUR feelings: you say "I'm sorry", "I hope". "We", "us" and "our" mean ${owner} and you together: ` +
+    `keep them ("one of us will call you today"), never "one of you". Example: "saying how you're sorry I missed her call and that one of us will call" is "I'm sorry ${owner} missed your call. One of us will call you."`;
 }
 
 /**
@@ -161,7 +175,8 @@ export function videoRecipient(asked = '', to = '') {
   if (to && !generic.test(String(to).trim())) return String(to).trim();
   if (/^(me|myself|owner)$/i.test(String(to || '').trim()) || /\b(?:send|show|give) me\b|\bto me\b/i.test(asked)) return 'me';
   const named = /\bto ([A-Z][\w'-]+(?: [A-Z][\w'-]+)?)/.exec(asked) ||
-    /\b(?:video(?: message| greeting| note)?|clip|recording|message) to (?!me\b|myself\b|you\b|yourself\b|the\b|a\b|my\b)([A-Za-z][\w'-]+)/i.exec(asked) || /\b(?:send|text|show|give) (?!me\b|a\b|an\b|the\b|my\b|your\b|yourself\b|it\b|this\b|that\b)([A-Za-z][\w'-]+) (?:a|an|the|my|your) (?:video|clip|recording)\b/i.exec(asked);
+    /\b(?:video(?: message| greeting| note)?|clip|recording|message) to (?!me\b|myself\b|you\b|yourself\b|the\b|a\b|my\b)([A-Za-z][\w'-]+)/i.exec(asked) || /\b(?:send|sent|text|message|show|give|leave|record|make|get) (?!me\b|a\b|an\b|the\b|my\b|your\b|yourself\b|it\b|this\b|that\b)([A-Za-z][\w'-]+) (?:a|an|the|my|your|another) (?:quick |short |little |funny |nice )?(?:video|clip|recording)\b/i.exec(asked) ||
+    /\bvideo(?: message| greeting| note| reply)? for (?!me\b|myself\b|you\b|yourself\b|the\b|a\b|my\b|his\b|her\b|our\b)([A-Za-z][\w'-]+)/i.exec(asked);
   return named ? named[1] : 'me';
 }
 
@@ -3459,8 +3474,12 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     // A named dance ("do the can-can") is that dance or a plain no, never some other dance; "dance for me" is any.
     const specific = /pole|rumba|belly|can.?can|cabbage|running man|roger|go.?go|booty|twerk|samba|ballet|hip.?hop|dab/i.exec(`${clip || ''} ${asked}`);
     // Speaking with no move named: the clip made to play under speech (clips.json while_talking, calm), never a random dance.
-    const underSpeech = speaking ? (pool.filter(p => p.file.whileTalking && (p.file.tags || []).includes('talk')).length
-      ? pool.filter(p => p.file.whileTalking && (p.file.tags || []).includes('talk')) : pool.filter(p => p.file.whileTalking && (p.file.energy || 'calm') === 'calm')) : [];
+// It loops: a 1.6 s accent under a 9 s line stood still for 7 of them (the owner's video to a contact, 2026-11-23).
+    const calmTalk = speaking ? pool.filter(p => p.file.whileTalking && ((p.file.tags || []).includes('talk') || (p.file.energy || 'calm') === 'calm')) : [];
+    const longTalk = calmTalk.filter(p => p.file.loop && (p.file.tags || []).includes('talk') && Number(p.file.seconds || 99) >= 4);
+    const loopTalk = calmTalk.filter(p => p.file.loop);
+    const talkTagged = calmTalk.filter(p => (p.file.tags || []).includes('talk'));
+    const underSpeech = longTalk.length ? longTalk : talkTagged.some(p => p.file.loop) ? talkTagged.filter(p => p.file.loop) : loopTalk.length ? loopTalk : calmTalk;
     // What the clip is about, by its tags: "a video of you drinking coffee and saying good morning" is Mug Sip Idle (tags
     // mug, coffee, drink, sip), not a talking clip with no cup (the owner, 2026-11-16, twice). A tag counts as a word or a
     // word's start ("drink" in "drinking"); words that say nothing about the move don't count.
@@ -3608,7 +3627,8 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     const model = namedModel ? { ...namedModel, role: 'named', look: (await this.avatarLooks().catch(() => ({})))[namedModel.id] || undefined } : await this.modelFor(role, { personId });
     if (!model?.file) return { success: false, error: "I'm not wearing a 3D model, so there's nothing to film." };
     if (model.id !== this.agent?.agentModel?.activeVRMModel) this.logger.info(`botsandborgs: filming as ${model.role}: ${model.name || model.id} (to ${to})`);
-    const picked = await this.chooseClip({ item, clip, asked, speaking: !!words, modelId: model.id });
+    const moves = words ? moveWords(asked) : asked;
+    const picked = await this.chooseClip({ item, clip, asked: moves, speaking: !!words, modelId: model.id });
     if (picked.error) return { success: false, error: picked.error };
     const { choice, entry, rel } = picked;
     const label = entry.label || choice.file.label;
@@ -3622,10 +3642,10 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
       }
       const { framingAsked } = await import('../../services/avatar/clipVideo.js');
       const { cameraAsked } = await import('../../services/avatar/cameraMoves.js');
-      const framing = framingAsked(asked);
+      const framing = framingAsked(moves);
       // "Pan left to right", "a side shot": the camera moves (the owner, 2026-11-22). A picture stands on a curved wall
       // then, so only one named in the request is used, and its wide copy; else a plain studio floor.
-      const camera = framing === 'full' ? cameraAsked(asked) : null;
+      const camera = framing === 'full' ? cameraAsked(moves) : null;
       const scene = await this.backgroundFor(asked, camera ? { namedOnly: true, wide: true } : {});
       if (camera) this.logger.info(`botsandborgs: filming with the camera move ${camera.id}`);
       if (scene) this.logger.info(`botsandborgs: filming in front of ${path.basename(scene)}${framing !== 'full' ? `, ${framing} framing` : ''}`);
@@ -3795,6 +3815,8 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     }
     // Nobody wrote a clean one: a plain greeting the request named, then what was left of a line, then the owner's own quote.
     if (!line) line = greetingIn(asked, forOwner ? '' : `Hi ${to}, this is ${name}, ${owner}'s AI assistant. `) || part || (forOwner ? quoted : '');
+    // "One of us" stays us, whoever wrote the line (4 models of 6 made it "one of you", 2026-11-23).
+    if (/\b(?:one|either|both|some|neither) of us\b/i.test(asked)) line = line.replace(/\b(one|either|both|some|neither) of (?:you|them)\b/gi, '$1 of us');
     if (forOwner && line) line = withoutOwnerName(line, owner, asked);
     // The greeting asked for is in it, whatever was written around it ("saying hello" once came out as "It's wonderful
     // to see you", 2026-11-23).

@@ -5,7 +5,7 @@
 
 import { authenticateToken } from './auth.js';
 import { logger } from '../../utils/logger.js';
-import { isTextRequest } from '../../core/pluginChainProcessor.js';
+import { isTextRequest, avatarVideoIntent } from '../../core/pluginChainProcessor.js';
 
 /**
  * Setup comprehensive testing routes for LANAgent API endpoints
@@ -67,7 +67,10 @@ export function setupTestingRoutes(app, agent) {
       if (!text) return res.status(400).json({ success: false, error: 'text is required' });
       const context = { userId: 'intent-check', interface: 'web', dryRun: true };
       let via = 'vector';
-      let intent = agent.vectorIntentDetector?.enabled ? await agent.vectorIntentDetector.detectIntent(text, context).catch(() => null) : null;
+      // The router's own first look, before any model.
+      let intent = avatarVideoIntent(text, { store: !!agent.apiManager?.getPlugin?.('botsandborgs') });
+      if (intent) via = 'direct';
+      intent ||= agent.vectorIntentDetector?.enabled ? await agent.vectorIntentDetector.detectIntent(text, context).catch(() => null) : null;
       // The router's own override: a request that opens by asking for a text never keeps a non-TextX
       // vector match. Without it this dry run reported dialx.voicePreview for "Alice text Wayne…".
       if (intent && intent.plugin !== 'textx' && isTextRequest(text)) intent = null;

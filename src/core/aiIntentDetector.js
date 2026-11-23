@@ -4,7 +4,7 @@ import { StructuredOutputParser, JSONOutputParser } from '../services/outputPars
 import { nowInZone, resolveRequestTime } from '../utils/wallClock.js';
 import { schemas } from '../services/outputSchemas.js';
 import { asksToSendVoiceNote } from '../api/plugins/textx.js';
-import { isTextRequest } from './pluginChainProcessor.js';
+import { isTextRequest, avatarVideoIntent } from './pluginChainProcessor.js';
 
 /**
  * A question picked as an action that changes something, with no word asking for a change:
@@ -3503,6 +3503,9 @@ Respond in JSON format:
   async detect(text, context = {}) {
     try {
       logger.info(`AI intent detection for: "${text}"`);
+      // A video of the agent itself is never a text (2026-11-23: this classifier read "send Jo a video message" as one).
+      const ownVideo = avatarVideoIntent(text, { store: !!this.agent?.apiManager?.getPlugin?.('botsandborgs') });
+      if (ownVideo) return ownVideo;
       
       // Quick check for URLs first
       const hasURL = this.detectURL(text);
