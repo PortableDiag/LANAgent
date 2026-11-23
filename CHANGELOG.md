@@ -2,6 +2,12 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.922] - 2026-11-23
+
+### Fixed
+- **Whom a video is for is read from the asking, not from what is said.** "Saying welcome back to <a town>" no longer looks for a contact by that name.
+- **"Asking, can you …" is spoken.** Asking, wishing, thanking, inviting and the like now always give the video its words, and a question put to the listener keeps "you" for the listener.
+
 ## [2.25.921] - 2026-11-23
 
 ### Fixed

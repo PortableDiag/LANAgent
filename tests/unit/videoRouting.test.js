@@ -47,3 +47,21 @@ test('the AI classifier answers it before any model, and only with the store plu
   const { avatarVideoIntent } = await import('../../src/core/pluginChainProcessor.js');
   assert.equal(avatarVideoIntent(YES[0], { store: false }), null); assert.equal(avatarVideoIntent(NO[0]), null);
 });
+
+// The owner's evening of 2026-11-23: "Welcome back to Springfield" looked for a contact called Springfield; "asking, can you do the
+// roger rabbit" was filmed silent.
+test('whom a video is for is read from the asking, not from what is said', async () => {
+  const { videoRecipient: who, asksForWords, moveWords, spokenQuote } = await import('../../src/api/plugins/botsandborgs.js');
+  for (const [t, to] of [['Send Jo a video message saying Welcome back to Springfield and that her garden missed her.', 'Jo'],
+    ['Send a video message to Jo of you doing the roger rabbit and asking,  can you do the roger rabbit .', 'Jo'],
+    ['Send Jo a video message saying she should send me her pictures', 'Jo'], ['send Jo a video saying it was nice of her to talk to me', 'Jo'],
+    ['send Jo a video of you dancing to Thriller', 'Jo'], ['send me a video of you dancing to Thriller', 'me'], ['make a video of you dancing to Thriller', 'me'],
+    ['make a video saying welcome back to Springfield', 'me'], ['make a video saying hello to Jo', 'Jo'], ['make a video saying happy birthday and send it to Jo', 'Jo'],
+    ['film yourself doing the rumba and send it to Jo', 'Jo'], ['make a video of you saying "welcome back" to Jo', 'Jo'], ['make a video of you saying "welcome to Springfield"', 'me'],
+    ['send me a video of you using the party whistleblower thing and saying "Welcome back to town"', 'me'], ['make me a quick video saying good night', 'me'],
+    ['Send Mary Ann a video message wishing her luck', 'Mary Ann'], ['make a video saying hi and send it to me', 'me'], ['send a video to jo saying hi', 'jo']]) assert.equal(who(t), to, t);
+  for (const t of ['of you doing the roger rabbit and asking,  can you do the roger rabbit .', 'a video message inviting her to dinner', 'a video thanking Jo', 'a video message wishing him luck']) assert.equal(asksForWords(t), true, t);
+  for (const t of ['send me a video of you dancing', 'a video of you waving at the camera']) assert.equal(asksForWords(t), false, t);
+  assert.match(moveWords('a video of you doing the roger rabbit and asking, can you do the moonwalk'), /roger rabbit and$/);
+  assert.equal(spokenQuote('a video of you asking "can you do this?"'), 'can you do this?');
+});

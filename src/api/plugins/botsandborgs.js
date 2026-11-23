@@ -92,7 +92,7 @@ export function quotedWords(text) {
 /** The line a request quotes to be SPOKEN (`saying "…"`), not any quoted words (a clip's name in quotes is not a line). */
 export function spokenQuote(text) {
   const t = String(text || '');
-  const m = /\b(?:say|says|saying|said|speak|speaking|shout(?:ing)?|yell(?:ing)?|announc(?:e|ing)|tell(?:ing)? (?:me|him|her|them|us|everyone)|the (?:line|words))\b[\s,:]*(?:that |this |the line |out loud )?[:,]?\s*(?:["“]([^"”]{2,600})["”]|'([^']{2,600})'(?=\s|$|[.,!?]))/i.exec(t);
+  const m = /\b(?:say|says|saying|said|speak|speaking|shout(?:ing)?|yell(?:ing)?|announc(?:e|ing)|tell(?:ing)? (?:me|him|her|them|us|everyone)|ask(?:ing)?(?: (?:me|him|her|them|us|everyone))?|the (?:line|words))\b[\s,:]*(?:that |this |the line |out loud )?[:,]?\s*(?:["“]([^"”]{2,600})["”]|'([^']{2,600})'(?=\s|$|[.,!?]))/i.exec(t);
   return m ? (m[1] || m[2]).trim() : '';
 }
 
@@ -117,13 +117,21 @@ export function withoutOwnerName(line, owner, asked = '') {
   return bare ? bare.charAt(0).toUpperCase() + bare.slice(1) : line;
 }
 
+/** The verb that starts what a video SAYS. One list for whom it goes to, which move it shows and whether it speaks. */
+const SAYING = /\b(?:saying|says|say|telling|tell|explaining|explain|wishing|wish|asking|ask|reminding|remind|thanking|apologi[sz]ing|congratulating|letting|announcing|inviting|warning|that says|to say)\b/i;
+/** Whether a video request asks for words: "asking, can you do the roger rabbit" was filmed silent (2026-11-23). */
+export function asksForWords(asked) {
+  const t = String(asked || '');
+  return !!quotedWords(t) || SAYING.test(t) || /\b(?:talk(?:ing)? about|introduc|announc)\w*/i.test(t);
+}
+
 /**
  * A video request without the words to be SPOKEN, so "saying sorry I missed her call" never picks a phone-call move or a
  * camera: quotes and what follows a saying verb go, a "while dancing" after them stays.
  */
 export function moveWords(asked) {
   const t = String(asked || '').replace(/["“][^"”]*["”]/g, ' ');
-  const m = /\b(?:saying|says|say|telling|tell|explaining|explain|wishing|wish|asking|ask|reminding|remind|thanking|apologi[sz]ing|congratulating|letting|announcing|that says|to say)\b/i.exec(t);
+  const m = SAYING.exec(t);
   if (!m) return t;
   const after = /\b(?:while|as you|and then|then)\s+(?:you(?:'re| are)?\s+)?\w+ing\b.*$|\bin front of\b.*$|\bin (?:the|your|a)\s+[\w ]{2,30}(?:avatar|model|room|studio|background)\b.*$/i.exec(t.slice(m.index));
   return `${t.slice(0, m.index)} ${after ? after[0] : ''}`.trim();
@@ -173,11 +181,25 @@ export function videoPerspective(name, owner) {
 export function videoRecipient(asked = '', to = '') {
   const generic = /^(a|an|the|it|this|that|me|myself|owner|you|yourself|my|your)$/i;
   if (to && !generic.test(String(to).trim())) return String(to).trim();
-  if (/^(me|myself|owner)$/i.test(String(to || '').trim()) || /\b(?:send|show|give) me\b|\bto me\b/i.test(asked)) return 'me';
-  const named = /\bto ([A-Z][\w'-]+(?: [A-Z][\w'-]+)?)/.exec(asked) ||
-    /\b(?:video(?: message| greeting| note)?|clip|recording|message) to (?!me\b|myself\b|you\b|yourself\b|the\b|a\b|my\b)([A-Za-z][\w'-]+)/i.exec(asked) || /\b(?:send|sent|text|message|show|give|leave|record|make|get) (?!me\b|a\b|an\b|the\b|my\b|your\b|yourself\b|it\b|this\b|that\b)([A-Za-z][\w'-]+) (?:a|an|the|my|your|another) (?:quick |short |little |funny |nice )?(?:video|clip|recording)\b/i.exec(asked) ||
-    /\bvideo(?: message| greeting| note| reply)? for (?!me\b|myself\b|you\b|yourself\b|the\b|a\b|my\b|his\b|her\b|our\b)([A-Za-z][\w'-]+)/i.exec(asked);
-  return named ? named[1] : 'me';
+  if (/^(me|myself|owner)$/i.test(String(to || '').trim())) return 'me';
+  // Whom it is for stands in the asking, not in what is said: "saying Welcome back to Springfield" went looking for a contact
+  // called Springfield (2026-11-23). The words after a saying verb count only as "… hello to Jo" or "… and send it to Jo".
+  const text = String(asked).replace(/["“][^"”]*["”]/g, ' "" ');
+  const cut = SAYING.exec(text);
+  const frame = cut ? text.slice(0, cut.index) : text;
+  const rest = cut ? text.slice(cut.index) : '';
+  const video = '(?:video|clip|recording)';
+  const named = new RegExp(`\\b(?:send|sent|text|message|show|give|leave|record|make|get) (?!me\\b|a\\b|an\\b|the\\b|my\\b|your\\b|yourself\\b|it\\b|this\\b|that\\b)([A-Za-z][\\w'-]+(?: [A-Z][\\w'-]+)?) (?:a|an|the|my|your|another) (?:quick |short |little |funny |nice )?${video}\\b`, 'i').exec(frame)
+    || (/\b(?:send|show|give|make|get|record|leave|text) me\b|\bto me\b/i.test(frame) ? ['me', 'me'] : null)
+    || /\b(?:video(?: message| greeting| note)?|clip|recording|message) to (?!me\b|myself\b|you\b|yourself\b|the\b|a\b|my\b)([A-Za-z][\w'-]+(?: [A-Z][\w'-]+)?)/i.exec(frame)
+    || /\bvideo(?: message| greeting| note| reply)? for (?!me\b|myself\b|you\b|yourself\b|the\b|a\b|my\b|his\b|her\b|our\b)([A-Za-z][\w'-]+)/i.exec(frame)
+    // "dancing to Thriller", "back to Springfield" are not people.
+    || /(?<!\b(?:danc\w+|groov\w+|mov\w+|sing\w*|listen\w*|back|going|welcome|trip|driv\w+|fly\w*|travel\w*|walk\w*)\s)\bto ([A-Z][\w'-]+(?: [A-Z][\w'-]+)?)/.exec(frame)
+    || /\b(?:and|then) (?:send|text|give) (?:it|this|that)(?: over)? to (?!me\b|myself\b|you\b|the\b|a\b)([A-Za-z][\w'-]+(?: [A-Z][\w'-]+)?)/i.exec(rest)
+    || (/\b(?:and|then) (?:send|text|give) (?:it|this|that)(?: over)? to me\b|\b(?:and|then) (?:send|text|give) me\b/i.test(rest) ? ['me', 'me'] : null)
+    || /(?:\b(?:hello|hi|hey|thanks|thank you|goodbye|bye|congratulations|congrats|good (?:morning|night|afternoon|evening)|happy \w+|merry christmas)|"")\s+to ([A-Z][\w'-]+(?: [A-Z][\w'-]+)?)/.exec(rest);
+  // A second word belongs to the name only with a capital ("Mary Ann", not "Jo of").
+  return named ? named[1].replace(/ [a-z].*$/, '') : 'me';
 }
 
 
@@ -3290,7 +3312,7 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
       const forOwnerVideo = /^(me|owner|myself)$/i.test(videoRecipient(asked, data.to));
       const exact = /\bverbatim\b/i.test(asked) ? quotedWords(asked) : forOwnerVideo ? spokenQuote(asked) : '';
       const given = !asked.trim() && (data.say || data.voiceover) ? String(data.say || data.voiceover) : '';
-      const wantsSpeech = !!(data.say || data.voiceover) || !!quotedWords(asked) || /\b(explain|explaining|say|saying|tell|telling|talk(?:ing)? about|introduc|announc|letting (?:him|her|them) know)\w*/i.test(asked);
+      const wantsSpeech = !!(data.say || data.voiceover) || asksForWords(asked);
       let say = exact || given;
       if (!say && wantsSpeech) {
         say = await this.voiceLine(asked, videoRecipient(asked, data.to)).catch(() => '') || '';
@@ -3845,6 +3867,9 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
       `${quoted ? `saying this in your own words and nothing else: "${quoted.slice(0, 300)}". ` : 'saying what the request wants said, in your own words. '}` +
       'The request may also name a dance, a move, an avatar, a background or a camera: that is what is SEEN. Never mention or describe it, the video, or what you are doing. ' +
       `${videoPerspective(name, owner)} ` +
+      `${forOwner ? `But this video is heard by ${owner} and nobody else: say "you" for ${owner}'s "I" and "me", never the name ("asking if I can do that" is "Can you do that?"). ` : ''}` +
+      // "asking, can you do the roger rabbit": a question put to the listener keeps "you" for the listener.
+      `${/\bask(?:ing)?\b/i.test(asked) ? `The request has you ASK something: ask that question of ${forOwner ? owner : to}, where "you" in the question is ${forOwner ? owner : to}. A dance or move named inside the question is part of it and is said. ` : ''}` +
       'Under 40 words, no emoji, links or stage directions. Reply with the words only.';
     // Each writer in turn until one says the line and only the line (replayed 2026-11-23 on "waving and saying hello":
     // gpt-5.6-luna right 4 of 4 in under 2 s; the main model without its thinking described the wave 8 of 8, and with it
