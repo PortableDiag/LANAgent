@@ -2,6 +2,23 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.914] - 2026-11-23
+
+### Fixed
+- **A greeting asked for in a video is always said.** "Saying hello" came out without the hello, because the greeting was cut along with the owner's name. Only the name goes now, and a missing greeting is added.
+
+## [2.25.913] - 2026-11-23
+
+### Fixed
+- **A video's line is written by the model that gets it right.** On OpenRouter the quick model writes it first (right every time in a replay, in under 2 seconds); the main and small models follow only if it fails. Each line is checked, and a greeting the request names is said if every model describes the video instead.
+
+## [2.25.912] - 2026-11-23
+
+### Fixed
+- **An empty answer moves to another model.** On OpenRouter a model could spend its whole budget thinking and answer nothing; that went on as if it were an answer ("I couldn't write what to say in the video", an empty parameter extraction). It now counts as a failure, streamed replies included.
+- **A video's spoken line is never lost.** It is written without the long thinking, then by a different model, and a plain greeting the request names ("saying hello") is said if both fail.
+- **A slow text goes to a better quick model.** When wording a text takes over 15 seconds, the small model that mixed up whose video it was is now the last resort.
+
 ## [2.25.911] - 2026-11-23
 
 ### Fixed

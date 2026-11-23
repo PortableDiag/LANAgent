@@ -71,3 +71,28 @@ test('a long generation keeps room to finish', () => {
   assert.ok(p._firstTryMs(8000) > 150000);
   assert.ok(p._firstTryMs(8000) <= p._generationTimeoutMs(8000));
 });
+
+// The owner's "waving and saying hello" video, 2026-11-23: the model thought for 4000 tokens and said nothing, and the
+// empty answer went on as if it were one.
+test('an answer with no words moves to another model; a tool call or the other model being empty too does not loop', async () => {
+  for (const content of ['', '   ', null]) {
+    const { p, calls } = rig([]); let n = 0; const create = p.client.chat.completions.create;
+    p.client.chat.completions.create = async (a, b) => (n++ === 0 ? (calls.push({ model: a.model }), { model: a.model, choices: [{ message: { content }, finish_reason: 'length' }], usage: { completion_tokens: 4000 } }) : create(a, b));
+    assert.equal((await p.generateResponse('hi', { maxTokens: 120 })).content, 'from other/model');
+    assert.deepEqual(calls.map(c => c.model), ['main/model', 'other/model']);
+  }
+  const t = rig([]); t.p.client.chat.completions.create = async (a) => { t.calls.push({ model: a.model }); return { model: a.model, choices: [{ message: { content: null, tool_calls: [{ id: 'x' }] } }], usage: {} }; };
+  await t.p.generateResponse('hi', { maxTokens: 120 }); assert.equal(t.calls.length, 1);
+  const e = rig([]); e.p.client.chat.completions.create = async (a) => { e.calls.push({ model: a.model }); return { model: a.model, choices: [{ message: { content: '' }, finish_reason: 'length' }], usage: {} }; };
+  assert.equal((await e.p.generateResponse('hi', { maxTokens: 120 })).content, ''); assert.equal(e.calls.length, 2);
+});
+
+test('noReasoning turns thinking off only where the model allows it', async () => {
+  const { p } = rig([]);
+  p.catalog = new Map([['main/model', { supportsReasoning: true, reasoningOptional: true, inputModalities: [] }], ['must/think', { supportsReasoning: true, reasoningOptional: false, inputModalities: [] }]]);
+  const off = p._buildParams('hi', { maxTokens: 120, noReasoning: true }).params;
+  assert.deepEqual(off.reasoning, { enabled: false }); assert.equal(off.max_tokens, 120);
+  const must = p._buildParams('hi', { maxTokens: 120, noReasoning: true, model: 'must/think' }).params;
+  assert.equal(must.reasoning, undefined); assert.equal(must.max_tokens, 4000);
+  assert.equal(p._buildParams('hi', { maxTokens: 120 }).params.max_tokens, 4000, 'every other call keeps its thinking');
+});

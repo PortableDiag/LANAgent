@@ -96,9 +96,30 @@ export function spokenQuote(text) {
   return m ? (m[1] || m[2]).trim() : '';
 }
 
+/** The plain greeting a request asks to be said ("saying hello", "say good morning"), as a spoken line, or ''. */
+export function greetingIn(text, opening = '') {
+  const m = /\b(?:say|says|saying|wish(?:ing)?)\s+(?:me |him |her |them |us |everyone )?(?:a )?(hello|hi|hey|good (?:morning|afternoon|evening|night)|goodbye|bye|thank you|thanks|happy (?:birthday|new year|holidays|monday|tuesday|wednesday|thursday|friday|saturday|sunday)|merry christmas|welcome)\b/i.exec(String(text || ''));
+  return m ? `${opening}${m[1].charAt(0).toUpperCase()}${m[1].slice(1).toLowerCase()}!` : '';
+}
+
+/**
+ * A line for the owner without the owner's name at its start (2026-11-23): "Charles, you are great" loses the name, and a
+ * greeting keeps its word ("Hello, Charles! …" is "Hello! …") when one was asked for, else goes with the name.
+ */
+export function withoutOwnerName(line, owner, asked = '') {
+  if (/\b(?:my name|by name)\b/i.test(asked)) return line;
+  const name = String(owner).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const hi = '(?:hi there|hello there|hi|hey|hello|good (?:morning|afternoon|evening|night))';
+  const greets = !!greetingIn(asked) || /\bgreet/i.test(asked);
+  const bare = greets
+    ? line.replace(new RegExp(`^(${hi})[ ,]+${name}\\b`, 'i'), '$1').replace(new RegExp(`^${name}\\s*[,!:]\\s*`, 'i'), '')
+    : line.replace(new RegExp(`^(?:${hi})?[ ,]*${name}\\s*[,!:]\\s*`, 'i'), '');
+  return bare ? bare.charAt(0).toUpperCase() + bare.slice(1) : line;
+}
+
 /** Whether a spoken line describes the video instead of saying its line ("I'm doing the cabbage patch while saying …"). */
 export function narratesVideo(line) {
-  return /\bI(?:'m| am|’m)\s+(?:here\s+)?(?:now\s+|just\s+|currently\s+)?(?:doing|dancing|performing|filming|recording|making|sending|busting|showing|hitting|bringing you|waving|saying)\b|\bwhile (?:saying|doing|dancing|I)\b|\b(?:in|for) this video\b|\bwatch me\b|\bhere(?:'s| is|’s) (?:me|my) (?:doing|dance|video)/i.test(String(line || ''));
+  return /\bI(?:'m| am|’m)\s+(?:here\s+)?(?:now\s+|just\s+|currently\s+)?(?:doing|dancing|performing|filming|recording|making|sending|busting|showing|hitting|bringing you|waving|saying)\b|\b(?:just |here I am,? )?waving (?:hello|hi|at|to)\b|\bassistant avatar\b|\bwhile (?:saying|doing|dancing|I)\b|\b(?:in|for) this video\b|\bwatch me\b|\bhere(?:'s| is|’s) (?:me|my) (?:doing|dance|video)/i.test(String(line || ''));
 }
 
 /** A live VRM URL without its query: the store puts the pass key in `vrm_url`, and the key is sent as a header instead. */
@@ -3750,18 +3771,38 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
       'The request may also name a dance, a move, an avatar, a background or a camera: that is what is SEEN. Never mention or describe it, the video, or what you are doing. ' +
       `${videoPerspective(name, owner)} ` +
       'Under 40 words, no emoji, links or stage directions. Reply with the words only.';
-    const ask = async (extra = '') => String((await pm.generateResponse(prompt + extra, { maxTokens: 120, temperature: 0.5 }))?.content || '').trim().replace(/^(["'])([\s\S]*)\1$/, '$2').slice(0, 400);
-    let line = await ask();
-    if (narratesVideo(line)) {
-      this.logger.info('botsandborgs: the spoken line described the video; asked again');
-      line = await ask(`\n\nYou wrote: "${line}". That describes the video. Say only the words, as if nobody could see it.`);
+    // Each writer in turn until one says the line and only the line (replayed 2026-11-23 on "waving and saying hello":
+    // gpt-5.6-luna right 4 of 4 in under 2 s; the main model without its thinking described the wave 8 of 8, and with it
+    // took 4 to 25 s and once said nothing). A line is never lost to one empty, slow or narrating model.
+    const within = (call, ms) => { let t; return Promise.race([call().finally(() => clearTimeout(t)), new Promise((_, no) => { t = setTimeout(() => no(new Error(`no answer in ${ms} ms`)), ms); })]); };
+    const words = (r) => String(r?.content || '').trim().replace(/^(["'])([\s\S]*)\1$/, '$2').slice(0, 400);
+    const opts = { maxTokens: 160, temperature: 0.5 };
+    const onOpenRouter = pm.providerNameOf?.(await pm.getCurrentProvider?.().catch?.(() => null)) === 'openrouter';
+    const writers = [
+      ...(onOpenRouter ? [{ name: 'quick', ms: 15000, ask: (q) => pm.generateResponse(q, { ...opts, noReasoning: true, model: process.env.BOTSANDBORGS_STICKER_MODEL || 'openai/gpt-5.6-luna' }) }] : []),
+      { name: 'main', ms: 30000, ask: (q) => pm.generateResponse(q, opts) },
+      ...(pm.generateAux ? [{ name: 'aux', ms: 15000, ask: (q) => pm.generateAux(q, { ...opts, auxTask: 'video-line' }) }] : [])
+    ];
+    let line = '', part = '', narrated = '';
+    for (const w of writers) {
+      const got = await within(() => w.ask(narrated ? `${prompt}\n\nNot this: "${narrated}". It describes the video. Say only the words, as if nobody could see it.` : prompt), w.ms)
+        .then(words).catch(e => { this.logger.warn(`botsandborgs: spoken line (${w.name}): ${e.message}`); return ''; });
+      if (!got) { this.logger.info(`botsandborgs: spoken line (${w.name}): nothing; asking another model`); continue; }
+      if (!narratesVideo(got)) { line = got; break; }
+      this.logger.info(`botsandborgs: spoken line (${w.name}) described the video: "${got.slice(0, 120)}"; asking another model`);
+      narrated = got;
+      part ||= got.split(/(?<=[.!?])\s+/).filter(x => !narratesVideo(x)).join(' ').trim();
     }
-    // Still describing: those sentences go (and with nothing left there is no video, never a narrated one).
-    if (narratesVideo(line)) line = line.split(/(?<=[.!?])\s+/).filter(x => !narratesVideo(x)).join(' ').trim() || (forOwner ? quoted : '');
-    if (forOwner && !/\b(?:greet|say (?:hi|hello)|my name|by name)\b/i.test(asked)) {
-      const opened = new RegExp(`^(?:hi|hey|hello)?[ ,]*${owner.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*[,!:]\\s*`, 'i');
-      const bare = line.replace(opened, '');
-      if (bare) line = bare.charAt(0).toUpperCase() + bare.slice(1);
+    // Nobody wrote a clean one: a plain greeting the request named, then what was left of a line, then the owner's own quote.
+    if (!line) line = greetingIn(asked, forOwner ? '' : `Hi ${to}, this is ${name}, ${owner}'s AI assistant. `) || part || (forOwner ? quoted : '');
+    if (forOwner && line) line = withoutOwnerName(line, owner, asked);
+    // The greeting asked for is in it, whatever was written around it ("saying hello" once came out as "It's wonderful
+    // to see you", 2026-11-23).
+    const greeting = greetingIn(asked);
+    if (line && greeting) {
+      const word = greeting.slice(0, -1).toLowerCase();
+      const same = /^(hello|hi|hey)$/.test(word) ? /\b(?:hello|hi|hey)\b/i : /^(thank you|thanks)$/.test(word) ? /\b(?:thank you|thanks)\b/i : /^(goodbye|bye)$/.test(word) ? /\b(?:goodbye|bye)\b/i : new RegExp(`\\b${word}\\b`, 'i');
+      if (!same.test(line)) line = forOwner ? `${greeting} ${line}` : `${line} ${greeting}`;
     }
     return line;
   }

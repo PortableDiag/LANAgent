@@ -330,7 +330,7 @@ test('a written line never describes the video or opens with the owner\'s name',
   try {
     const { p } = plugin({ agentModel: {} });
     const replies = ["Charlie, I'm doing the rumba while saying you are great.", 'Charlie, you are great!']; const prompts = [];
-    p.agent.providerManager = { generateResponse: async (q) => { prompts.push(q); return { content: replies.shift() }; } };
+    p.agent.providerManager = { generateResponse: async (q) => { prompts.push(q); return { content: replies.shift() }; }, generateAux: async (q) => { prompts.push(q); return { content: replies.shift() }; } };
     assert.equal(await p.voiceLine('send me a video of you doing the rumba and tell me I am great', 'me'), 'You are great!');
     assert.equal(prompts.length, 2); assert.match(prompts[0], /Never mention or describe it/); assert.match(prompts[1], /describes the video/);
     p.agent.providerManager = { generateResponse: async () => ({ content: "I'm doing the rumba. You are great!" }) };
@@ -339,5 +339,48 @@ test('a written line never describes the video or opens with the owner\'s name',
     assert.equal(await p.voiceLine('video of you doing the rumba telling me I am great', 'me'), '', 'nothing left: no narrated video');
     p.agent.providerManager = { generateResponse: async () => ({ content: "Hi Jo, this is ALICE, Charlie's AI assistant. Happy Monday!" }) };
     assert.match(await p.voiceLine('send Jo a video saying happy monday', 'Jo'), /^Hi Jo, this is ALICE/);
+  } finally { if (was === undefined) delete process.env.OWNER_NAME; else process.env.OWNER_NAME = was; }
+});
+
+test('a spoken line is never lost to one empty, slow or failing model; a plain greeting is the last resort', async () => {
+  const { greetingIn, narratesVideo } = await import('../../src/api/plugins/botsandborgs.js');
+  assert.equal(greetingIn('Send me a video of you in your assistant avatar waving and saying hello'), 'Hello!');
+  assert.equal(greetingIn('video of you wishing me a happy birthday'), 'Happy birthday!'); assert.equal(greetingIn('a video of you dancing'), '');
+  for (const bad of ['Hello! Just waving hello to brighten your day.', "Hi from my assistant avatar!"]) assert.equal(narratesVideo(bad), true, bad);
+  const asked = 'Send me a video of you in your assistant avatar waving and saying hello';
+  const { p } = plugin({ agentModel: {} }); const seen = [];
+  const pm = (answers) => { const ask = async (_q, o) => { seen.push(o.model || o.auxTask || 'main'); const a = answers.shift(); if (a instanceof Error) throw a; return { content: a ?? '' }; };
+    return { getCurrentProvider: async () => ({}), providerNameOf: () => 'openrouter', generateResponse: ask, generateAux: ask }; };
+  p.agent.providerManager = pm(['Hello there!']); assert.equal(await p.voiceLine(asked, 'me'), 'Hello there!'); assert.deepEqual(seen, ['openai/gpt-5.6-luna']);
+  seen.length = 0; p.agent.providerManager = pm(['', 'Hello there!']);
+  assert.equal(await p.voiceLine(asked, 'me'), 'Hello there!'); assert.deepEqual(seen, ['openai/gpt-5.6-luna', 'main']);
+  p.agent.providerManager = pm([new Error('down'), 'Hi!']); assert.equal(await p.voiceLine(asked, 'me'), 'Hi!');
+  // What the live run did: every model described the wave. The greeting asked for is said, not a failure.
+  p.agent.providerManager = pm(['Hey there! Just waving hello to brighten your day.', 'Here I am, waving hello to you!', "I'm waving at you from my assistant avatar."]);
+  assert.equal(await p.voiceLine(asked, 'me'), 'Hello!');
+  seen.length = 0; p.agent.providerManager = pm(['', '', '']); assert.equal(await p.voiceLine(asked, 'me'), 'Hello!'); assert.equal(seen.length, 3);
+  p.agent.providerManager = pm([new Error('a'), new Error('b'), new Error('c')]); assert.match(await p.voiceLine('send Jo a video saying good morning', 'Jo'), /^Hi Jo, this is .*AI assistant\. Good morning!$/);
+});
+
+// What the owner got after the first repair: "It's wonderful to see you.", with no hello in it.
+test('a greeting asked for is always said; only the owner\'s name goes', async () => {
+  const { withoutOwnerName } = await import('../../src/api/plugins/botsandborgs.js');
+  const hello = 'Send me a video of you in your assistant avatar waving and saying hello';
+  assert.equal(withoutOwnerName('Hello, Pat! It’s wonderful to see you.', 'Pat', hello), 'Hello! It’s wonderful to see you.');
+  assert.equal(withoutOwnerName('Hi Pat, good to see you.', 'Pat', hello), 'Hi, good to see you.');
+  assert.equal(withoutOwnerName('Pat, hello!', 'Pat', hello), 'Hello!');
+  assert.equal(withoutOwnerName('Pat, you are great!', 'Pat', 'tell me I am great'), 'You are great!');
+  assert.equal(withoutOwnerName('Hello, Pat! You are great!', 'Pat', 'tell me I am great'), 'You are great!');
+  assert.equal(withoutOwnerName('Hello, Pat!', 'Pat', 'say hello and my name'), 'Hello, Pat!');
+  assert.equal(withoutOwnerName('Patience is a virtue.', 'Pat', hello), 'Patience is a virtue.');
+  const was = process.env.OWNER_NAME; process.env.OWNER_NAME = 'Pat Example';
+  try {
+    const { p } = plugin({ agentModel: {} });
+    const say = async (asked, out, to = 'me') => { p.agent.providerManager = { generateResponse: async () => ({ content: out }) }; return p.voiceLine(asked, to); };
+    assert.equal(await say(hello, 'Hello, Pat! It’s wonderful to see you.'), 'Hello! It’s wonderful to see you.');
+    assert.equal(await say(hello, 'It’s wonderful to see you.'), 'Hello! It’s wonderful to see you.');
+    assert.equal(await say(hello, 'Hey there! Great to see you.'), 'Hey there! Great to see you.');
+    assert.equal(await say('a video of you wishing me a happy birthday', 'Have the best day!'), 'Happy birthday! Have the best day!');
+    assert.equal(await say('send Jo a video saying good morning', "Hi Jo, this is ALICE, Pat's AI assistant.", 'Jo'), "Hi Jo, this is ALICE, Pat's AI assistant. Good morning!");
   } finally { if (was === undefined) delete process.env.OWNER_NAME; else process.env.OWNER_NAME = was; }
 });

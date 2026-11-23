@@ -314,7 +314,9 @@ export class OpenRouterProvider extends BaseProvider {
             contextLength: m.context_length || m.top_provider?.context_length || null,
             inputModalities: m.architecture?.input_modalities || [],
             supportsReasoning: Array.isArray(m.supported_parameters) &&
-              m.supported_parameters.includes("reasoning")
+              m.supported_parameters.includes("reasoning"),
+            // Whether thinking can be turned off for a short call (options.noReasoning).
+            reasoningOptional: m.reasoning?.mandatory === false
           });
         }
 
@@ -380,6 +382,17 @@ export class OpenRouterProvider extends BaseProvider {
   }
 
   /**
+   * A 200 with no words and no tool call is a failure, not an answer: the model spent its whole budget thinking (15 of
+   * 481 calls in a day, 2026-11-23: "I couldn't write what to say in the video"). Another model is asked.
+   */
+  _assertSomeAnswer(completion, model) {
+    const c = completion?.choices?.[0];
+    const said = typeof c?.message?.content === 'string' ? c.message.content.trim() : c?.message?.content;
+    if (said || c?.message?.tool_calls?.length) return;
+    throw new Error(`${model} gave an empty answer (${c?.finish_reason || 'no reason'}, ${completion?.usage?.completion_tokens ?? '?'} tokens)`);
+  }
+
+  /**
    * Metrics payload for one completion. Uses the cost OpenRouter actually
    * billed when it reported one, so spend is measured rather than estimated.
    */
@@ -417,7 +430,11 @@ export class OpenRouterProvider extends BaseProvider {
       ...options.additionalParams
     };
 
-    if (this._isReasoningModel(model)) {
+    // A one-line answer needs no long thinking: with it, "hello" took 4 to 25 s and 450 to 4000 tokens, and sometimes
+    // nothing came out (2026-11-23). Only where the model allows it off; anything else keeps the room to think in.
+    if (options.noReasoning && this.catalog.get(model)?.reasoningOptional && params.reasoning === undefined) {
+      params.reasoning = { enabled: false };
+    } else if (this._isReasoningModel(model)) {
       params.max_tokens = Math.max(params.max_tokens, 4000);
     }
 
@@ -473,7 +490,7 @@ export class OpenRouterProvider extends BaseProvider {
   /** A failure another model could survive: a stall, a dropped connection, a busy or broken upstream. */
   _isDrop(error) {
     if (isConnectionError(error) || error?.constructor?.name === 'APIConnectionTimeoutError') return true;
-    if (/timed out|returned no choices/i.test(error?.message || '')) return true;
+    if (/timed out|returned no choices|gave an empty answer/i.test(error?.message || '')) return true;
     const status = Number(error?.status);
     return status === 408 || status === 429 || (status >= 500 && status < 600);
   }
@@ -505,6 +522,7 @@ export class OpenRouterProvider extends BaseProvider {
       try {
         completion = await create(params, this._firstTryMs(params.max_tokens));
         this._assertUsableCompletion(completion, model);
+        this._assertSomeAnswer(completion, model);
       } catch (error) {
         const next = this._nextModel(error, model);
         if (!next) throw error;
@@ -605,6 +623,16 @@ export class OpenRouterProvider extends BaseProvider {
       const responseTime = Date.now() - startTime;
       await this.updateMetrics(responseTime, this._usagePayload({ usage, model: servedModel }, model));
 
+      // Nothing was said: the same as an empty answer above, so another model writes it.
+      if (!fullContent.trim() && !options.signal?.aborted) {
+        const next = model !== this.zdrFallbackModel ? this.zdrFallbackModel : this.models.chat;
+        if (next && next !== model) {
+          logger.warn(`OpenRouter: ${model} streamed an empty answer; using ${next}`);
+          const again = await this.generateResponse(prompt, { ...options, model: next });
+          if (again.content && onChunk) { try { await onChunk(again.content, again.content); } catch { /* ignore callback errors */ } }
+          return again;
+        }
+      }
       return { content: fullContent, model: servedModel, usage, provider: this.name };
     } catch (error) {
       // Stopped by the user (Telegram Stop button): hand back what was written so far.

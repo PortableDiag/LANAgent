@@ -37,6 +37,14 @@ export async function wordWithin(pm, prompt, options, {
   } catch (e) {
     if (!/^no answer in /.test(e.message) || !pm.generateAux) throw e;
     logger?.warn?.(`textx send: wording ${e.message}; asking the fast model`);
+    // The small aux model got whose video it was wrong ("his hi ho secret video", 2026-11-23): on OpenRouter a better
+    // quick one writes it, and the aux model only if that misses too.
+    const provider = await pm.getCurrentProvider?.().catch?.(() => null);
+    if (pm.providerNameOf?.(provider) === 'openrouter') {
+      const quick = process.env.BOTSANDBORGS_STICKER_MODEL || 'openai/gpt-5.6-luna';
+      const r = await within(() => pm.generateResponse(prompt, { ...options, model: quick, noReasoning: true }), auxMs).catch(() => null);
+      if (r?.content?.trim?.()) return r;
+    }
     return within(() => pm.generateAux(prompt, { ...options, auxTask: 'text-wording' }), auxMs);
   }
 }
