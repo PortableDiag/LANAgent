@@ -515,6 +515,7 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
 
   // ── live passes ──────────────────────────────────────────────────────────────────────
   async initialize() {
+    import('../../services/avatar/avatarx.js').then(({ setBlockedSource }) => setBlockedSource((id) => this.clipsNotFor(id))).catch(() => {});
     const tick = () => this.liveTick().catch(e => this.logger.warn(`botsandborgs: live check failed: ${e.message}`));
     this._liveFirst = setTimeout(tick, LIVE_FIRST_SYNC_MS);
     this._liveTimer = setInterval(tick, LIVE_SYNC_MS);
@@ -879,6 +880,12 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     if (n) next[base] = n; else delete next[base];
     await PluginSettings.setCached(this.name, 'notForAvatar', next);
     this.logger.info(n ? `botsandborgs: ${n.clips.length} clips are not for ${base}: ${n.reason}` : `botsandborgs: every clip may play on ${base} again`);
+    // AvatarX's own buttons refuse them too (0.4.14), on the body it already has.
+    const worn = this.agent?.agentModel?.activeVRMModel;
+    if (worn && this.productBase(worn) === base) {
+      const { pushBlockedToAvatarX } = await import('../../services/avatar/avatarx.js');
+      await pushBlockedToAvatarX(worn).catch(e => this.logger.warn(`botsandborgs: AvatarX not told what is blocked: ${e.message}`));
+    }
   }
 
   /** The clips the store says this body must not play, from any pack: { reason, clips: Set(stem) }, or null. */

@@ -2,6 +2,11 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.905] - 2026-11-23
+
+### Added
+- **AvatarX refuses them too.** The clips the store says an avatar must not play are sent to AvatarX (0.4.14+) for that body, so its own buttons refuse them with the reason. The list is lifted when the store drops it.
+
 ## [2.25.904] - 2026-11-22
 
 ### Added

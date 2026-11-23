@@ -135,6 +135,50 @@ export async function playOnAvatarX(name, opts = {}) {
   return 'played';
 }
 
+/** Who knows which clips a model must not play: async (modelId) => { reason, clips: iterable of stems } | null (the store plugin). */
+let blockedFor = null;
+export function setBlockedSource(fn) { blockedFor = fn; }
+
+/** The blocked entry AvatarX wants for a body: the clip names it plays them under, and the reason; null lifts it. */
+export function blockedEntry(not) {
+  const stems = [...(not?.clips || [])];
+  if (!stems.length) return null;
+  // A name's spaces are underscores in AvatarX and hyphens in the store's stems: both are named.
+  const clips = [...new Set(stems.flatMap(s => [avatarxClipName(s), avatarxClipName(s).replace(/-/g, '_'), avatarxClipName(s).replace(/-(\d+)$/, '_$1')]))];
+  return { clips, reason: String(not.reason || '').slice(0, 500) };
+}
+
+/**
+ * Tell AvatarX (0.4.14) which clips a body must not play. Sent when there is a list, or to lift one it was given; an
+ * older AvatarX refuses the field, which is logged and changes nothing else.
+ */
+async function sendBlocked(call, id, modelId, state) {
+  if (!blockedFor || !id) return;
+  const want = blockedEntry(await Promise.resolve(blockedFor(modelId)).catch(() => null));
+  const held = (state?.avatars || []).find(a => a.id === id)?.blocked || null;
+  if (!want && !blockedSent.has(id) && !held) return;
+  if (blockedSent.get(id) === JSON.stringify(want)) return;
+  try {
+    await call('PATCH', '/agent/v1/state', JSON.stringify({ blocked: { [id]: want } }));
+    blockedSent.set(id, JSON.stringify(want));
+    logger.info(want ? `AvatarX: ${want.clips.length} clip names blocked on ${id}: ${want.reason}` : `AvatarX: no clips blocked on ${id} any more`);
+  } catch (e) { logger.warn(`AvatarX: blocked clips not set on ${id}: ${e.message}`); }
+}
+const blockedSent = new Map();
+
+/** The blocked list of one gallery model, for a body AvatarX already has (by name and size). Returns its id, or null. */
+export async function pushBlockedToAvatarX(modelId, { vrmDir = path.join(DATA_PATH, 'vrm-models'), ...opts } = {}) {
+  const call = await connect(opts);
+  if (!call) return null;
+  const model = JSON.parse(await fs.readFile(path.join(vrmDir, 'manifest.json'), 'utf8')).find(m => m.id === modelId);
+  if (!model?.file) return null;
+  const { size } = await fs.stat(path.join(vrmDir, model.file));
+  const state = await call('GET', '/agent/v1/state');
+  const id = (state.avatars || []).find(a => a.name === (model.name || modelId) && (a.size == null || Number(a.size) === size))?.id || null;
+  await sendBlocked(call, id, modelId, state);
+  return id;
+}
+
 export async function pushModelToAvatarX(modelId, {
   url = process.env.AVATARX_URL,
   keyFile = process.env.AVATARX_AGENT_KEY_FILE,
@@ -167,6 +211,7 @@ export async function pushModelToAvatarX(modelId, {
   }
   // The owner's saved look on a lent body (AvatarX 0.4.5+: lent bodies only); sent each time, AvatarX re-wears on change.
   if (look && link) await call('PATCH', '/agent/v1/state', JSON.stringify({ looks: { [id]: look } })).catch(e => logger.warn(`AvatarX: look not set on ${name}: ${e.message}`));
+  await sendBlocked(call, id, modelId, state); // before it shows
   if (state.active === id) return 'unchanged';
   await call('PATCH', '/agent/v1/state', JSON.stringify({ active: id }));
   logger.info(`AvatarX: now showing ${name} (${id})`);
