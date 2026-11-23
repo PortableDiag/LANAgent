@@ -2,6 +2,21 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.902] - 2026-11-22
+
+### Fixed
+- **A clip the store stops fitting plays as made again.** On a linked avatar, a fitted pack that was withdrawn (answered 404, or gone from a settled list) kept playing its old fitted files. They are removed now, a changed pack is replaced whole, and a failed download keeps what is already there.
+
+## [2.25.901] - 2026-11-22
+
+### Fixed
+- **The owner's apps show the model it wears again.** When a linked avatar was worn again after another model, its picture was skipped because it had been applied once before, so the apps kept the other model's picture. Wearing the linked pick again now brings its picture back too.
+
+## [2.25.900] - 2026-11-22
+
+### Fixed
+- **A video "in the assistant avatar" films, and never changes the avatar.** "Send me a video of you in the assistant avatar doing <dance>" read the word "avatar" as a request to wear a model when the parameter extraction came back empty, so the agent switched its 3D model instead of filming. A request for a video of itself now always films, in the avatar it names.
+
 ## [2.25.899] - 2026-11-21
 
 ### Fixed

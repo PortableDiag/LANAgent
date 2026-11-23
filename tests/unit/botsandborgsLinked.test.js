@@ -333,6 +333,11 @@ test('pictures follow linked picks: public and personal portraits rendered once,
   // The portrait is kept: asked again, it is read, not rendered.
   assert.equal(String(await t.p.modelPortrait('store-linked-lnk-8-rose-base')), 'png-1');
   assert.equal(renders.length, 2);
+  // Another model was worn in between (it put its own picture in the apps): the link wears its pick again, and the
+  // personal picture comes back with it, the same pick or not (Core's picture stayed on 2026-11-22).
+  t.p.agent.agentModel = { ...(t.p.agent.agentModel || {}), activeVRMModel: 'store-vrm-aa-core' };
+  await t.p.syncLinks();
+  assert.deepEqual(applied.slice(2).map(a => a.slice(0, 2)), [['personal', 'store-linked-lnk-8-rose-coat']]);
 });
 
 test('linked fits (store 0.53): status per body, unsupported props left off, fitted placements, fitted clips by ETag, solves on the link', async () => {
@@ -377,6 +382,34 @@ test('linked fits (store 0.53): status per body, unsupported props left off, fit
   // Unchanged pack: not fetched again (same ETag listed).
   await t.p.syncLinks();
   assert.equal(clipFetches.length, 1);
+  // The store holds clips back (2026-11-22). One clip gone from a changed pack plays as made; a pack answered 404, or
+  // gone from a settled list, plays as made whole; a failed download or a running job keeps what is here.
+  const rel = (c) => `store/vrm-emote-animations-1/${c}.vrma`;
+  const isFitted = async (c) => /animations\/fitted\//.test(await t.p.clipFileFor(id, rel(c)));
+  const outfit = { modelId: id, model: 'rose', outfit: 'base', name: 'Rose' };
+  const zipOf = async (...names) => { const q = new JSZip(); for (const k of names) q.file(`${k}.vrma`, vrma); return q.generateAsync({ type: 'nodebuffer' }); };
+  let answer;
+  const runSync = (f) => t.p.syncFittedClips({ id: 'lnk_9' }, outfit, f, 'k');
+  const listedPack = (etag) => ({ job: null, clips: [{ pack: 'vrm-emote-animations-1', etag }] });
+  const ok = async (...names) => ({ status: 200, data: await zipOf(...names), headers: { etag: answer, 'content-type': 'application/zip' } });
+  let reply;
+  t.p.http = async () => reply;
+  answer = '"e2"'; reply = await ok('heart-hands', 'wave'); await runSync(listedPack('"e2"'));
+  assert.deepEqual([await isFitted('heart-hands'), await isFitted('wave')], [true, true]);
+  answer = '"e3"'; reply = await ok('wave'); await runSync(listedPack('"e3"'));
+  assert.deepEqual([await isFitted('heart-hands'), await isFitted('wave')], [false, true]);
+  reply = { status: 500, data: Buffer.alloc(0), headers: {} };
+  await assert.rejects(runSync(listedPack('"e4"')));
+  assert.equal(await isFitted('wave'), true);
+  reply = { status: 404, data: Buffer.alloc(0), headers: {} }; await runSync(listedPack('"e4"'));
+  assert.equal(await isFitted('wave'), false);
+  answer = '"e5"'; reply = await ok('wave'); await runSync(listedPack('"e5"'));
+  assert.equal(await isFitted('wave'), true);
+  reply = { status: 404, data: Buffer.alloc(0), headers: {} };
+  await runSync({ job: { state: 'queued' }, clips: [{ pack: 'vrm-other', etag: '"x"' }] });
+  assert.equal(await isFitted('wave'), true);
+  await runSync({ job: null, clips: [{ pack: 'vrm-other', etag: '"x"' }] });
+  assert.equal(await isFitted('wave'), false);
   // A new move on this body goes to the Animation API as the link.
   t.p._linkCache = await t.p.linkState();
   assert.deepEqual(t.p.animAvatar(), { link: 'lnk_9', model: 'rose', outfit: 'base' });

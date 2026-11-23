@@ -1378,32 +1378,48 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     const root = path.join(this.vrmDir(), 'animations', 'fitted', safeName(this.productBase(o.modelId)));
     const indexFile = path.join(root, 'index.json');
     const index = await fs.readFile(indexFile, 'utf8').then(JSON.parse).catch(() => ({}));
+    const save = async () => { await fs.mkdir(root, { recursive: true }); await fs.writeFile(indexFile, JSON.stringify(index, null, 2)); };
+    // A pack the store no longer serves fitted (a 404, or gone from the list) plays as made: its old fitted files go.
+    const drop = async (pack) => {
+      if (!index[pack]) return;
+      delete index[pack];
+      await save();
+      await fs.rm(path.join(root, safeName(pack)), { recursive: true, force: true });
+      this.logger.info(`botsandborgs: ${pack} plays as made on ${o.name} again (no fitted pack)`);
+    };
     let n = 0;
+    const listed = new Set();
     for (const c of list) {
       const pack = String(c.pack || c.name || c.id || '');
       if (!pack) continue;
+      listed.add(pack);
       const url = c.url || `${BASE}/api/account/links/${encodeURIComponent(link.id)}/fit/${encodeURIComponent(o.model)}/${encodeURIComponent(o.outfit)}/clips/${encodeURIComponent(pack)}`;
       const had = index[pack];
       if (had?.etag && c.etag && had.etag === String(c.etag)) { n++; continue; }
       const headers = { 'User-Agent': this.userAgent(), Authorization: `Bearer ${key}`, ...(had?.etag ? { 'If-None-Match': had.etag } : {}) };
       const r = await (this.http || axios)({ method: 'get', url: /^https?:/.test(url) ? url : `${BASE}${url}`, responseType: 'arraybuffer', timeout: 180000, headers, validateStatus: () => true });
       if (r.status === 304) { n++; continue; }
-      if (r.status === 404) continue; // play the pack as made
+      if (r.status === 404) { await drop(pack); continue; }
       if (r.status !== 200) throw new Error(`${pack}: the store answered ${r.status}`);
+      // Unpacked before the old folder goes, so a bad download never costs the fits already here. The folder is replaced
+      // whole and indexed at once: a clip missing from the new pack plays as made, and the index never names a gone file.
+      const entries = await unpack(Buffer.from(r.data), { type: String(r.headers?.['content-type'] || ''), kind: 'animation', filename: `${pack}.zip` });
       const dir = path.join(root, safeName(pack));
       await fs.rm(dir, { recursive: true, force: true });
       await fs.mkdir(dir, { recursive: true });
       const files = [];
-      for (const x of await unpack(Buffer.from(r.data), { type: String(r.headers?.['content-type'] || ''), kind: 'animation', filename: `${pack}.zip` })) {
+      for (const x of entries) {
         if (x.kind !== 'animation') continue;
         await fs.writeFile(path.join(dir, path.basename(x.name)), x.buffer);
         files.push(path.basename(x.name));
       }
       index[pack] = { etag: String(r.headers?.etag || c.etag || ''), files, at: new Date().toISOString() };
+      await save();
       n++;
     }
-    await fs.mkdir(root, { recursive: true });
-    await fs.writeFile(indexFile, JSON.stringify(index, null, 2));
+    // While a fit job runs, the list may be short for a moment: only a settled one says what is gone.
+    if (listed.size && !f.job) for (const pack of Object.keys(index)) if (!listed.has(pack)) await drop(pack);
+    await save();
     return n;
   }
 
@@ -1532,6 +1548,9 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     for (const r of ['public', 'assistant']) if (picked[r] && roles[r] !== picked[r]) { next[r] = picked[r]; changed = true; }
     if (changed) { await this.saveSettings({ avatarRoles: next }); await this.pushRolesToStore().catch(() => {}); this.logger.info(`botsandborgs: roles from the link: ${Object.entries(picked).map(([r, id]) => `${r} = ${id}`).join(', ')}`); }
     const worn = this.agent?.agentModel?.activeVRMModel || null;
+    // Worn again after something else was worn: that other model put its own picture in the owner's apps, so the
+    // personal picture is applied again even though the link's pick never changed (Core's stayed on 2026-11-22).
+    const reworn = !!(picked.personal && worn !== picked.personal);
     if (picked.personal && worn !== picked.personal) {
       const st = await this.linkState();
       // What it wore before, to go back to when the link ends.
@@ -1550,7 +1569,7 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     for (const r of ['public', 'assistant', 'personal']) {
       if (!picked[r]) continue;
       const key = `${picked[r]}|${JSON.stringify(looks[r]?.look || null)}`;
-      if (pics[r] === key) continue;
+      if (pics[r] === key && !(r === 'personal' && reworn)) continue;
       const res = await (r === 'public' ? this.applyPublicPicture(picked[r]) : r === 'assistant' ? this.applyAssistantPicture(picked[r]) : this.applyPersonalPicture(picked[r]))
         .catch(e => { this.logger.warn(`botsandborgs: ${r} picture not applied: ${e.message}`); return null; });
       if (res) { pics[r] = key; picChanged = true; this.logger.info(`botsandborgs: ${r} picture follows ${picked[r]}${typeof res === 'string' ? `: ${res}` : ''}`); }
@@ -3023,7 +3042,11 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     if (/^(film|filming|record|recording|movie|clip|vid|videos?)$/.test(as)) as = 'video';
     // "Re-apply/equip the Sentinel avatar", "update your profile picture": becoming it, never a send that asks "Who
     // should I send it to?" (DELTA 2026-11-06, twice). A model is worn, which brings its picture; a picture is applied.
-    if (!as && !data.to && /\b(avatars?|equip|apply|re-?apply|put on|profile (?:pic(?:ture)?|photo|image)|pfp|look like|go back to|turn (?:back )?into|(?:switch|change)(?: back)? (?:in)?to)\b/i.test(asked)) {
+    // A video of itself names the avatar to FILM IN ("a video of you in the assistant avatar doing the roger rabbit"),
+    // never one to wear: with an empty extraction that word wore Core instead (2026-11-22).
+    const ofSelf = /\b(?:video|film|clip|recording) of (?:you|yourself)\b|\bfilm yourself\b|\brecord yourself\b|\bvideo (?:message|greeting|note)\b/i.test(asked);
+    const videoAsked = ofSelf || /\b(?:video|film|filming|record(?:ing)?)\b/i.test(asked);
+    if (!as && !data.to && !videoAsked && /\b(avatars?|equip|apply|re-?apply|put on|profile (?:pic(?:ture)?|photo|image)|pfp|look like|go back to|turn (?:back )?into|(?:switch|change)(?: back)? (?:in)?to)\b/i.test(asked)) {
       as = (await this.pickOwned({ item, kind: 'vrm', kinds: ['vrm'] })) ? 'wear' : 'avatar';
     }
     const kind = data.kind && data.kind !== 'avatar' ? data.kind : this.kindAsked(asked);
@@ -3031,8 +3054,7 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     // "Send me a video of you doing the pole dance": film it and send it. "Send a video of yourself to Jo explaining
     // that you can move and talk now" too: a video of the agent itself, whatever the extractor called it (it once had no
     // "video" choice and said "send", which would have texted Jo a picture).
-    const ofSelf = /\b(?:video|film|clip|recording) of (?:you|yourself)\b|\bfilm yourself\b|\brecord yourself\b|\bvideo (?:message|greeting|note)\b/i.test(asked);
-    if (as === 'video' || (ofSelf && (!as || as === 'send')) || ((kind === 'animation' || /\b(dance|dancing|wave|waving|bow|cheer|clap|laugh|dab|rumba|pole)\b/i.test(asked)) && /\b(video|film|clip of you|record(?:ing)?)\b/i.test(asked))) {
+    if (as === 'video' || (ofSelf && (!as || ['send', 'avatar', 'wear'].includes(as))) || ((kind === 'animation' || /\b(dance|dancing|wave|waving|bow|cheer|clap|laugh|dab|rumba|pole)\b/i.test(asked)) && /\b(video|film|clip of you|record(?:ing)?)\b/i.test(asked))) {
       // Quoted words are spoken as written. Anything else is the agent's own line, written from its side: the extractor
       // copied "youre now able to move and talk" straight into the video (2026-11-15), which is the owner's wording, not
       // what the agent says about itself.
