@@ -18,6 +18,7 @@
  * call.ended are unchanged.
  */
 
+import { nameAsSpoken } from '../spokenName.js';
 import { resultText } from '../../interfaces/web/openaiCompat.js';
 import { fileDevReport } from '../devReports.js';
 
@@ -271,7 +272,7 @@ export async function realtimeVoiceAudio(text, { voice = REALTIME_VOICE, env = p
     const res = await f('https://api.openai.com/v1/audio/speech', {
       method: 'POST',
       headers: { Authorization: `Bearer ${env.OPENAI_API_KEY}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model: 'gpt-4o-mini-tts', voice, input: String(text).slice(0, 2000), response_format: 'mp3',
+      body: JSON.stringify({ model: 'gpt-4o-mini-tts', voice, input: nameAsSpoken(String(text)).slice(0, 2000), response_format: 'mp3',
         instructions: 'Warm, friendly and natural, like a person on the phone.' })
     });
     if (!res.ok) return null;

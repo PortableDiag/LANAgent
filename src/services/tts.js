@@ -2,6 +2,7 @@ import { logger } from '../utils/logger.js';
 import OpenAI from 'openai';
 import { InferenceClient } from '@huggingface/inference';
 import { kokoroSpeech, kokoroAvailable, isKokoroVoice } from './kokoroTts.js';
+import { nameAsSpoken } from './spokenName.js';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -165,6 +166,7 @@ export class TTSService {
     if (!text || text.trim().length === 0) {
       throw new Error('Text input is required');
     }
+    text = nameAsSpoken(text, this.agent?.config?.name || process.env.AGENT_NAME);
 
     // Get voice settings from agent model
     const voiceSettings = await this.getVoiceSettings();

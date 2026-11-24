@@ -2,6 +2,11 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.923] - 2026-11-23
+
+### Changed
+- **A name written in capitals is spoken as a word.** The voice is given "Alice" for "ALICE", in videos, voice messages and the phone disclosure; everything written keeps the name as it is. `AGENT_NAME_SPOKEN` sets any other spoken form.
+
 ## [2.25.922] - 2026-11-23
 
 ### Fixed
