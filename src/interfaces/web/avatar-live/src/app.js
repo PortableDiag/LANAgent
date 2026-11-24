@@ -1,6 +1,7 @@
 // LANAgent's live avatar: AvatarX's page (AvatarX 0.3.19, 3ec549c), served by the agent itself. What differs from AvatarX
 // is marked "LANAgent:"; lanagent.js routes the page's calls to /api/avatar-live with the dashboard's login.
 import { login, setToken, events, protectedImage, EMBED, EMBED_BACKGROUND, EMBED_LIFT, EMBED_ZOOM } from './lanagent.js';
+import { lighten, capTextures, textureBudget, loadStarted, loadHeld } from './lite.js';  // LANAgent: AvatarX 0.4.17
 import { wearLook } from './look.js';  // LANAgent: AvatarX 0.4.6 looks (linked avatars)
 import { jawDriver } from './jaw.js';  // LANAgent: jaw-bone mouths (Character Creator models)
 import { attach as puppetAttach, connect as puppetConnect } from './bnb-puppet-1.1.0.js';  // LANAgent: live puppeting (Bots & Borgs 0.57; runtime 1.1.0 since 0.60)
@@ -242,10 +243,21 @@ async function loadAvatar(id) {
   $('load-note').textContent = 'Loading the avatar…';
   const loader = new GLTFLoader();
   loader.register((p) => new VRMLoaderPlugin(p));
+  // LANAgent: a big body is loaded light, as AvatarX 0.4.17 does. A device that did not survive it last time gets a lighter one.
+  const failed = RENDER ? 0 : loadStarted(id);
   try {
-    const gltf = await loader.loadAsync(`/api/avatars/${id}/file`, (ev) => {
+    const file = new THREE.FileLoader().setResponseType('arraybuffer');
+    let raw = await file.loadAsync(`/api/avatars/${id}/file`, (ev) => {
       if (ticket === loading && ev.total) $('load-note').textContent = `Loading the avatar… ${Math.round(ev.loaded / ev.total * 100)}%`;
     });
+    if (ticket !== loading) return;
+    const lite = lighten(raw, { look: state?.avatars?.find((a) => a.id === id)?.look, budget: textureBudget({ render: !!RENDER }) / 2 ** failed });
+    raw = null;
+    window.__lite = { id, failed, ...lite.info };
+    loader.register(capTextures(lite.caps));
+    const parsing = loader.parseAsync(lite.data, '');
+    lite.data = null;
+    const gltf = await parsing;
     if (ticket !== loading) { VRMUtils.deepDispose(gltf.scene); return; }
     const v = gltf.userData.vrm;
     if (!v) throw new Error('this file has no VRM data');
@@ -276,6 +288,7 @@ async function loadAvatar(id) {
     frameModel();
     applyMood();
     $('load-note').hidden = true;
+    if (!RENDER) setTimeout(() => { if (vrmId === id) loadHeld(id, failed); }, 30000);
     window.__avatar = { ready: true, id, presets: [...presets], lookAt: !!v.lookAt, look: { colors: wornLook.colors, morphs: wornLook.morphs, pieces: wornLook.pieces, hidden: wornLook.hidden } };
 
   } catch (err) {

@@ -231,7 +231,8 @@ export async function pushModelToAvatarX(modelId, {
   vrmDir = path.join(DATA_PATH, 'vrm-models'),
   fetchFn,
   link = null,
-  look = null
+  look = null,
+  clearLook = false // the owner picked the plain outfit: a look left on this lent body comes off (AvatarX takes null, 2119 #612)
 } = {}) {
   const call = await connect({ url, keyFile, caFile, fetchFn });
   if (!call) return 'not connected';
@@ -260,6 +261,7 @@ export async function pushModelToAvatarX(modelId, {
   // every sync sent it again for a look that had not changed (8 times in 40 minutes, 2026-11-23).
   const holds = (state.avatars || []).find(a => a.id === id)?.look ?? null;
   if (look && link && !sameLook(holds, look)) await call('PATCH', '/agent/v1/state', JSON.stringify({ looks: { [id]: look } })).catch(e => logger.warn(`AvatarX: look not set on ${name}: ${e.message}`));
+  else if (!look && clearLook && link && holds) await call('PATCH', '/agent/v1/state', JSON.stringify({ looks: { [id]: null } })).catch(e => logger.warn(`AvatarX: look not taken off ${name}: ${e.message}`));
   await sendBodyName(call, id, modelId, state);
   await sendBlocked(call, id, modelId, state); // before it shows
   if (state.active === id) return 'unchanged';

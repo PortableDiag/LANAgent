@@ -2,6 +2,12 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.926] - 2026-11-23
+
+### Fixed
+- **The live avatar page loads a big body light** (AvatarX 0.4.17's loader): only the shape keys in use, no hidden pieces, textures fitted to the device. A 197 MB body took gigabytes in the page and phones closed the app. A load the app did not survive gets half the memory the next time. The file itself is never changed.
+- Picking a linked outfit without a look takes off the look it wore before.
+
 ## [2.25.925] - 2026-11-23
 
 ### Fixed

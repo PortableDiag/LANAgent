@@ -1741,7 +1741,7 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     const st = await this.linkState();
     if (!st.wornBefore && !/^store-linked-/.test(String(worn || ''))) await this.saveLinkState({ ...st, wornBefore: worn });
     const look = pick.look ? pick.settings || this.lookSettings(link, o, pick.look) : null;
-    await this.wearGalleryModel(o.modelId, look, link.id);
+    await this.wearGalleryModel(o.modelId, look, link.id, { plain: !pick.look });
     this._wornEarly = o.modelId; // its picture is still to come (applyLinkRoles)
   }
 
@@ -1800,10 +1800,14 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
       const st = await this.linkState();
       // What it wore before, to go back to when the link ends.
       if (!st.wornBefore && !/^store-linked-/.test(String(worn || ''))) await this.saveLinkState({ ...st, wornBefore: worn });
-      await this.wearGalleryModel(picked.personal, looks.personal?.look || null, link.id);
+      await this.wearGalleryModel(picked.personal, looks.personal?.look || null, link.id, { plain: !looks.personal });
     } else if (picked.personal && looks.personal && !early) {
       // Same body, a new or changed look: AvatarX wears it again.
       await this.wearGalleryModel(picked.personal, looks.personal.look, link.id);
+    } else if (picked.personal && !looks.personal && !early) {
+      // Same body, the look taken off it since the last sync (the saved state is still the last sync's here).
+      const before = (await this.linkState()).links.find(x => x.id === link.id)?.roleLooks?.personal;
+      if (before?.modelId === picked.personal) await this.wearGalleryModel(picked.personal, null, link.id, { plain: true });
     }
     // The pictures follow the bodies (the owner's rule: a picture never disagrees with the model): public profiles get
     // the public pick's portrait, the owner's apps the personal one's. Only when the pick or its look changed, so a
@@ -1839,14 +1843,14 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
   }
 
   /** Wear a gallery model by id: the active model and AvatarX. Its picture is left alone (a linked model has none). */
-  async wearGalleryModel(id, look = null, linkId = null) {
+  async wearGalleryModel(id, look = null, linkId = null, { plain = false } = {}) {
     const { Agent } = await import('../../models/Agent.js');
     await Agent.updateOne({ name: process.env.AGENT_NAME || 'LANAgent' }, { $set: { activeVRMModel: id } });
     if (this.agent?.agentModel) this.agent.agentModel.activeVRMModel = id;
     const { pushModelToAvatarX } = await import('../../services/avatar/avatarx.js');
     // A linked model goes onto AvatarX as a lent body (0.4.5, ?link=), which the agent may take off when the link ends.
     const link = linkId || (await this.linkState()).links.find(l => (l.outfits || []).some(o => o.modelId === id))?.id || null;
-    await pushModelToAvatarX(id, { ...(link ? { link } : {}), ...(link && look ? { look } : {}) }).catch(e => this.logger.warn(`botsandborgs: AvatarX not told: ${e.message}`));
+    await pushModelToAvatarX(id, { ...(link ? { link } : {}), ...(link && look ? { look } : {}), ...(link && plain ? { clearLook: true } : {}) }).catch(e => this.logger.warn(`botsandborgs: AvatarX not told: ${e.message}`));
     this.logger.info(`botsandborgs: wearing ${id}`);
   }
 

@@ -313,6 +313,10 @@ test('AvatarX: a lent body wearing a look gets it with PATCH looks; the page\'s 
   assert.deepEqual(await again({ pieces: null, morphs: {}, colors: { Body: { hue: 20 } } }), ['unchanged', 0, 0]);
   assert.deepEqual(await again({ pieces: ['hair'], morphs: {}, colors: { Body: { hue: 20 } } }), ['unchanged', 1, 0]);
   assert.deepEqual(await again(undefined), ['unchanged', 1, 0]);
+  // The plain outfit was picked: a look left on it comes off, once; a wear that says nothing of looks leaves it.
+  const plain = async (l, clearLook) => { sent.length = 0; await pushModelToAvatarX('m1', { url: 'https://ax', keyFile, vrmDir: dir, fetchFn: held(l), link: 'lnk_1', ...(clearLook ? { clearLook } : {}) }); return sent.filter(x => /looks/.test(x.body || '')).map(x => JSON.parse(x.body)); };
+  assert.deepEqual(await plain(look, true), [{ looks: { lent9: null } }]);
+  assert.deepEqual(await plain(undefined, true), []); assert.deepEqual(await plain(null, true), []); assert.deepEqual(await plain(look, false), []);
 });
 
 test('pictures follow linked picks: public and personal portraits rendered once, applied only on a change', async () => {
