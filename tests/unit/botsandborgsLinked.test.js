@@ -467,3 +467,30 @@ test('a new pick is downloaded first and worn before the other outfits (2026-11-
   assert.deepEqual(pictures, ['store-linked-lnk-12-maid-base']);
   assert.deepEqual((await t.p.linkState()).links[0].outfits.map(o => o.model), ['a', 'b', 'maid'], "kept in the store's order");
 });
+
+// 2026-11-24: a new file of the worn body reached AvatarX only because a look was worn on it.
+test('the worn outfit without a look: an updated file, or a look taken off, is worn again; nothing changed is not', async () => {
+  const one = vrm('Rose'), two = vrm('Rose two');
+  const look = { colors: {}, morphs: { Smile: 1 }, pieces: null };
+  const files = { 'rose/base': one };
+  const routes = {
+    'get /api/account/links': { as_agent: [{ id: 'lnk_77', status: 'active' }] },
+    'get /api/account/links/lnk_77': { link: { models: [{ model: 'rose', name: 'Rose', outfits: [{ outfit: 'base', sha256: sha(one) }] }] } },
+    'get /api/account/links/lnk_77/roles/personal': { model: 'rose', outfit: 'base', ref: 'locker:rose/base', look: null }
+  };
+  const t = rig({ files, routes });
+  const wore = [];
+  t.p.wearGalleryModel = async (id, l, link, o) => { wore.push([l, !!o?.plain]); t.p.agent.agentModel.activeVRMModel = id; };
+  t.p.applyPersonalPicture = async () => null;
+  await t.p.syncLinks(); assert.deepEqual(wore, [[null, true]]);
+  await t.p.syncLinks(); assert.equal(wore.length, 1, 'nothing changed');
+  files['rose/base'] = two; routes['get /api/account/links/lnk_77'].link.models[0].outfits[0].sha256 = sha(two);
+  await t.p.syncLinks(); assert.deepEqual(wore.slice(1), [[null, true]], 'a new file');
+  await t.p.syncLinks(); assert.equal(wore.length, 2);
+  routes['get /api/account/links/lnk_77/roles/personal'] = { model: 'rose', outfit: 'base', look, ref: 'locker:rose/base#lk_1' };
+  await t.p.syncLinks(); assert.deepEqual(wore.at(-1), [look, false]);
+  routes['get /api/account/links/lnk_77/roles/personal'] = { model: 'rose', outfit: 'base', ref: 'locker:rose/base', look: null };
+  const n = wore.length;
+  await t.p.syncLinks(); assert.deepEqual(wore.slice(n), [[null, true]], 'the look came off');
+  await t.p.syncLinks(); assert.equal(wore.length, n + 1);
+});

@@ -1805,9 +1805,12 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
       // Same body, a new or changed look: AvatarX wears it again.
       await this.wearGalleryModel(picked.personal, looks.personal.look, link.id);
     } else if (picked.personal && !looks.personal && !early) {
-      // Same body, the look taken off it since the last sync (the saved state is still the last sync's here).
-      const before = (await this.linkState()).links.find(x => x.id === link.id)?.roleLooks?.personal;
-      if (before?.modelId === picked.personal) await this.wearGalleryModel(picked.personal, null, link.id, { plain: true });
+      // Same body, but since the last sync the look came off it or its file was updated: AvatarX gets that too (the saved
+      // state is still the last sync's here). With a look the branch above does this.
+      const last = (await this.linkState()).links.find(x => x.id === link.id);
+      const shaOf = (l) => l?.outfits?.find(x => x.modelId === picked.personal)?.sha256;
+      const updated = !!shaOf(last) && shaOf(last) !== shaOf(link);
+      if (updated || last?.roleLooks?.personal?.modelId === picked.personal) await this.wearGalleryModel(picked.personal, null, link.id, { plain: true });
     }
     // The pictures follow the bodies (the owner's rule: a picture never disagrees with the model): public profiles get
     // the public pick's portrait, the owner's apps the personal one's. Only when the pick or its look changed, so a

@@ -2,6 +2,11 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.927] - 2026-11-24
+
+### Fixed
+- A new version of the worn linked outfit reaches AvatarX when no look is worn on it, too.
+
 ## [2.25.926] - 2026-11-23
 
 ### Fixed
