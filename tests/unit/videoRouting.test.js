@@ -59,6 +59,8 @@ test('whom a video is for is read from the asking, not from what is said', async
     ['make a video saying welcome back to Springfield', 'me'], ['make a video saying hello to Jo', 'Jo'], ['make a video saying happy birthday and send it to Jo', 'Jo'],
     ['film yourself doing the rumba and send it to Jo', 'Jo'], ['make a video of you saying "welcome back" to Jo', 'Jo'], ['make a video of you saying "welcome to Springfield"', 'me'],
     ['send me a video of you using the party whistleblower thing and saying "Welcome back to town"', 'me'], ['make me a quick video saying good night', 'me'],
+    ['Send Jo a  video of you doing the cabbage patch while asking can you do the cabbage patch dance', 'Jo'], ['Send  Jo\na video message  saying hi', 'Jo'], ['send  me a  video of you dancing', 'me'],
+    ['Send a video  message  to  Jo saying hi', 'Jo'], ['make a video saying hello  to  Jo', 'Jo'], ['make a video saying "hi"  to Jo', 'Jo'],
     ['Send Mary Ann a video message wishing her luck', 'Mary Ann'], ['make a video saying hi and send it to me', 'me'], ['send a video to jo saying hi', 'jo']]) assert.equal(who(t), to, t);
   for (const t of ['of you doing the roger rabbit and asking,  can you do the roger rabbit .', 'a video message inviting her to dinner', 'a video thanking Jo', 'a video message wishing him luck']) assert.equal(asksForWords(t), true, t);
   for (const t of ['send me a video of you dancing', 'a video of you waving at the camera']) assert.equal(asksForWords(t), false, t);

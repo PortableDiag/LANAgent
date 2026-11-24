@@ -184,7 +184,8 @@ export function videoRecipient(asked = '', to = '') {
   if (/^(me|myself|owner)$/i.test(String(to || '').trim())) return 'me';
   // Whom it is for stands in the asking, not in what is said: "saying Welcome back to Springfield" went looking for a contact
   // called Springfield (2026-11-23). The words after a saying verb count only as "… hello to Jo" or "… and send it to Jo".
-  const text = String(asked).replace(/["“][^"”]*["”]/g, ' "" ');
+  // A phone types "a  video" with two spaces; single-space patterns missed the name and it came to the owner (2026-11-23).
+  const text = String(asked).replace(/["“][^"”]*["”]/g, ' "" ').replace(/\s+/g, ' ').trim();
   const cut = SAYING.exec(text);
   const frame = cut ? text.slice(0, cut.index) : text;
   const rest = cut ? text.slice(cut.index) : '';

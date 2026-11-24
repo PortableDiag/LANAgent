@@ -2,6 +2,11 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.924] - 2026-11-23
+
+### Fixed
+- A video request with a double space in it ("Send Jo a  video…") still goes to the person it names.
+
 ## [2.25.923] - 2026-11-23
 
 ### Changed
