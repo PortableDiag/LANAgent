@@ -2,6 +2,11 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.925] - 2026-11-23
+
+### Fixed
+- **A look that has not changed is not put on again.** Every change on a linked account (another model's file, say) sent the worn look to AvatarX once more. A body's file is also no longer read whole just to learn its size.
+
 ## [2.25.924] - 2026-11-23
 
 ### Fixed

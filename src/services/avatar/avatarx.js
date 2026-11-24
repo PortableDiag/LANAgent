@@ -218,6 +218,12 @@ export async function pushBlockedToAvatarX(modelId, { vrmDir = path.join(DATA_PA
   return id;
 }
 
+/** Are two looks the same, whatever order their keys come in? */
+export function sameLook(a, b) {
+  const sorted = (v) => (Array.isArray(v) ? v.map(sorted) : v && typeof v === 'object' ? Object.fromEntries(Object.keys(v).sort().map(k => [k, sorted(v[k])])) : v);
+  return !!a && !!b && JSON.stringify(sorted(a)) === JSON.stringify(sorted(b));
+}
+
 export async function pushModelToAvatarX(modelId, {
   url = process.env.AVATARX_URL,
   keyFile = process.env.AVATARX_AGENT_KEY_FILE,
@@ -238,18 +244,22 @@ export async function pushModelToAvatarX(modelId, {
   // Same name AND same size is the same file. A store fix keeps the name and changes the bytes (Racer Blue's hair,
   // 2026-11-08): then the new file goes up and is shown. The agent's key can't delete, so the old copy stays in
   // AvatarX's list (Settings) until the owner removes it; the log says which.
-  const bytes = await fs.readFile(path.join(vrmDir, model.file));
+  // Only its size is needed unless it goes up: a linked body is 200 to 900 MB, and this runs on every sync.
+  const { size } = await fs.stat(path.join(vrmDir, model.file));
   const same = (state.avatars || []).filter(a => a.name === name);
-  let id = same.find(a => a.size == null || Number(a.size) === bytes.length)?.id;
+  let id = same.find(a => a.size == null || Number(a.size) === size)?.id;
   if (!id) {
     // A body lent through a store link (AvatarX 0.4.5): tagged, so the agent may remove it when the owner unlinks.
+    const bytes = await fs.readFile(path.join(vrmDir, model.file));
     const up = await call('POST', `/agent/v1/avatars?name=${encodeURIComponent(name)}${link ? `&link=${encodeURIComponent(link)}` : ''}`, bytes, 'application/octet-stream');
     id = up.avatar?.id;
     if (!id) throw new Error('AvatarX answered an upload with no id');
-    if (same.length) logger.info(`AvatarX: ${name} changed (${bytes.length} bytes); older copies left to remove in AvatarX Settings: ${same.map(a => a.id).join(', ')}`);
+    if (same.length) logger.info(`AvatarX: ${name} changed (${size} bytes); older copies left to remove in AvatarX Settings: ${same.map(a => a.id).join(', ')}`);
   }
-  // The owner's saved look on a lent body (AvatarX 0.4.5+: lent bodies only); sent each time, AvatarX re-wears on change.
-  if (look && link) await call('PATCH', '/agent/v1/state', JSON.stringify({ looks: { [id]: look } })).catch(e => logger.warn(`AvatarX: look not set on ${name}: ${e.message}`));
+  // The owner's saved look on a lent body (AvatarX 0.4.5+: lent bodies only), sent only when AvatarX holds another one:
+  // every sync sent it again for a look that had not changed (8 times in 40 minutes, 2026-11-23).
+  const holds = (state.avatars || []).find(a => a.id === id)?.look ?? null;
+  if (look && link && !sameLook(holds, look)) await call('PATCH', '/agent/v1/state', JSON.stringify({ looks: { [id]: look } })).catch(e => logger.warn(`AvatarX: look not set on ${name}: ${e.message}`));
   await sendBodyName(call, id, modelId, state);
   await sendBlocked(call, id, modelId, state); // before it shows
   if (state.active === id) return 'unchanged';

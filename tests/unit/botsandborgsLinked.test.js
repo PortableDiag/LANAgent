@@ -303,6 +303,16 @@ test('AvatarX: a lent body wearing a look gets it with PATCH looks; the page\'s 
   sent.length = 0;
   await pushModelToAvatarX('m1', { url: 'https://ax', keyFile, vrmDir: dir, fetchFn, look });
   assert.equal(sent.filter(x => x.method === 'PATCH' && /looks/.test(x.body)).length, 0, 'no link, no look');
+  // A look AvatarX already holds is not sent again: each sync put the 197 MB body on anew (2026-11-23). A changed one is.
+  const size = fs.statSync(path.join(dir, 'r.vrm')).size;
+  const held = (l) => async (url, { method, body }) => {
+    sent.push({ method, body });
+    return { ok: true, status: 200, json: async () => (method === 'GET' ? { avatars: [{ id: 'lent9', name: 'Rose', size, look: l }], active: 'lent9' } : {}) };
+  };
+  const again = async (l) => { sent.length = 0; const r = await pushModelToAvatarX('m1', { url: 'https://ax', keyFile, vrmDir: dir, fetchFn: held(l), link: 'lnk_1', look }); return [r, sent.filter(x => /looks/.test(x.body || '')).length, sent.filter(x => x.method === 'POST').length]; };
+  assert.deepEqual(await again({ pieces: null, morphs: {}, colors: { Body: { hue: 20 } } }), ['unchanged', 0, 0]);
+  assert.deepEqual(await again({ pieces: ['hair'], morphs: {}, colors: { Body: { hue: 20 } } }), ['unchanged', 1, 0]);
+  assert.deepEqual(await again(undefined), ['unchanged', 1, 0]);
 });
 
 test('pictures follow linked picks: public and personal portraits rendered once, applied only on a change', async () => {
