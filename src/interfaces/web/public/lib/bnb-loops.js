@@ -12,6 +12,9 @@ export function goodLoop(l) {
   if (l.type === 'frames') return Number.isInteger(l.count) && num(l.count, 2, 32) && num(l.fps, 1, 12) && Number.isInteger(l.cols) && num(l.cols, 1, 32) && num(l.du, -1, 1) && num(l.dv, -1, 1);
   if (l.type === 'pulse') return num(l.min, 0, 1.5) && num(l.max, 0, 1.5) && num(l.period_s, 0.5, 20) && num(l.phase ?? 0, 0, 1);
   if (l.type === 'sway') return Array.isArray(l.axis) && l.axis.length === 3 && l.axis.every(n => num(n, -1, 1)) && num(l.amount_m, 0, 0.3) && num(l.period_s, 0.5, 20) && num(l.phase ?? 0, 0, 1);
+  // A light that turns about a point (3910 #6275).
+  if (l.type === 'swing') return Array.isArray(l.pivot) && l.pivot.length === 3 && l.pivot.every(n => num(n, -100, 100)) && Array.isArray(l.axis) && l.axis.length === 3 && l.axis.every(n => num(n, -1, 1)) && Math.abs(Math.hypot(...l.axis) - 1) < 0.02
+    && num(l.angle_deg, 0, 25) && l.angle_deg > 0 && num(l.period_s, 3, 20) && num(l.phase ?? 0, 0, 1);
   return false;
 }
 
@@ -28,19 +31,48 @@ export function pulseAt(l, t) { return l.min + (l.max - l.min) * (0.5 - 0.5 * Ma
 /** The move of a "sway" at `t`: [x, y, z] in meters. */
 export function swayAt(l, t) { const s = l.amount_m * Math.sin(2 * Math.PI * (t / l.period_s + (l.phase ?? 0))); return l.axis.map(a => a * s); }
 
+/** The turn of a "swing" at `t`, in radians. */
+export function swingAt(l, t) { return l.angle_deg * Math.PI / 180 * Math.sin(2 * Math.PI * (t / l.period_s + (l.phase ?? 0))); }
+
+/** A point turned by `a` radians about an axis of length 1 through `pivot`. */
+export function turnAbout([x, y, z], [px, py, pz], [ax, ay, az], a) {
+  const vx = x - px, vy = y - py, vz = z - pz, c = Math.cos(a), s = Math.sin(a), d = (ax * vx + ay * vy + az * vz) * (1 - c);
+  return [px + vx * c + (ay * vz - az * vy) * s + ax * d, py + vy * c + (az * vx - ax * vz) * s + ay * d, pz + vz * c + (ax * vy - ay * vx) * s + az * d];
+}
+
 /**
  * Make a loaded set's loops ready: each node's material (and, for frames, its texture) becomes its own, the picture itself
  * stays shared. Returns { count, at(t) }: call at(t) before each frame is drawn.
  */
 export function applyLoops(root, loops) {
-  const acts = [];
+  const acts = [], moving = new Map();
+  let played = 0;
   for (const l of (Array.isArray(loops) ? loops : []).slice(0, 16)) {
     if (!goodLoop(l)) continue;
     const node = root.getObjectByName(l.node);
     if (!node) continue;
-    if (l.type === 'sway') {
-      const base = node.position.clone();
-      acts.push((t) => { const [x, y, z] = swayAt(l, t); node.position.set(base.x + x, base.y + y, base.z + z); });
+    if (l.type === 'sway' || l.type === 'swing') {
+      // All that moves one node together: turned first, then moved. One swing a node.
+      const m = moving.get(node) || { base: [node.position.x, node.position.y, node.position.z], turned: node.quaternion?.clone?.() || null, sways: [], swing: null };
+      if (l.type === 'swing' && (m.swing || !m.turned)) continue;
+      if (l.type === 'sway') m.sways.push(l);
+      else {
+        // The pivot is in the set's own coordinates: here it is in the node's parent's.
+        const at = [...l.pivot];
+        for (let o = node.parent; o && o.parent && o.parent !== root; o = o.parent) { at[0] -= o.position.x; at[1] -= o.position.y; at[2] -= o.position.z; }
+        m.swing = { l, at, axis: { x: l.axis[0], y: l.axis[1], z: l.axis[2] }, q: node.quaternion.clone() };
+      }
+      if (!moving.has(node)) {
+        moving.set(node, m);
+        acts.push((t) => {
+          let pos = m.base;
+          if (m.swing) { const a = swingAt(m.swing.l, t); pos = turnAbout(pos, m.swing.at, m.swing.l.axis, a); node.quaternion.copy(m.swing.q.setFromAxisAngle(m.swing.axis, a)).multiply(m.turned); }
+          let [x, y, z] = pos;
+          for (const w of m.sways) { const [dx, dy, dz] = swayAt(w, t); x += dx; y += dy; z += dz; }
+          node.position.set(x, y, z);
+        });
+      }
+      played++;
       continue;
     }
     const mats = [];
@@ -51,11 +83,26 @@ export function applyLoops(root, loops) {
     });
     if (l.type === 'frames') {
       const maps = mats.map((m) => { if (!m.map) return null; m.map = m.map.clone(); m.map.needsUpdate = true; return { tex: m.map, u: m.map.offset.x, v: m.map.offset.y }; }).filter(Boolean);
-      if (maps.length) acts.push((t) => { const [u, v] = framesAt(l, t); for (const x of maps) x.tex.offset.set(x.u + u, x.v + v); });
+      if (maps.length && ++played) acts.push((t) => { const [u, v] = framesAt(l, t); for (const x of maps) x.tex.offset.set(x.u + u, x.v + v); });
     } else {
       const colors = mats.filter(m => m.color).map(m => ({ c: m.color, r: m.color.r, g: m.color.g, b: m.color.b }));
-      if (colors.length) acts.push((t) => { const f = pulseAt(l, t); for (const x of colors) x.c.setRGB(x.r * f, x.g * f, x.b * f); });
+      if (colors.length && ++played) acts.push((t) => { const f = pulseAt(l, t); for (const x of colors) x.c.setRGB(x.r * f, x.g * f, x.b * f); });
     }
   }
-  return { count: acts.length, at(t) { for (const a of acts) a(t); } };
+  return { count: played, at(t) { for (const a of acts) a(t); } };
+}
+
+/**
+ * A set's light beams (`beams`: node names): drawn after everything else, never hiding what is behind them, throwing no
+ * shadow. Returns how many there are. A node that is not see-through is left as it is.
+ */
+export function readyBeams(root, names) {
+  let n = 0;
+  for (const name of (Array.isArray(names) ? names : []).slice(0, 8)) {
+    root.getObjectByName(name)?.traverse((o) => {
+      if (!o.isMesh || !o.material?.transparent) return;
+      o.material.depthWrite = false; o.renderOrder = 10; o.castShadow = false; o.receiveShadow = false; n++;
+    });
+  }
+  return n;
 }

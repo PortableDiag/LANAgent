@@ -69,7 +69,7 @@ function pageHtml(methods) {
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import * as V from '/lib/three-vrm.module.js';
 import { attachProps, updateProps } from '/lib/vrm-props.js';
-import { applyLoops } from '/lib/bnb-loops.js';
+import { applyLoops, readyBeams } from '/lib/bnb-loops.js';
 import { wearLook } from '/lib/vrm-look.js';
 import { jawDriver } from '/lib/vrm-jaw.js';
 import { moveAt, viewFor, hiddenAt, pullFor, moveWithin, lightAt } from '/lib/bnb-camera.js';
@@ -197,7 +197,7 @@ window.setup = async ({ width, height, fps, seconds, loop, prop, props = [], bac
       setRoot.add(model);
       setRoot.rotation.y = -THREE.MathUtils.degToRad(mark.facing_deg || 0);
     }
-    scene.add(setRoot); setLoops = applyLoops(setRoot, set.loops); limits = set.camera?.[mark.id] || null; facing = Number(mark.facing_deg) || 0;
+    scene.add(setRoot); setLoops = applyLoops(setRoot, set.loops); readyBeams(setRoot, set.beams); limits = set.camera?.[mark.id] || null; facing = Number(mark.facing_deg) || 0;
   } else if (camera && backgroundImage) limits = { arc_deg: [-35, 35] }; // past this the picture's edges show
   camera = moveWithin(camera, limits?.arc_deg);
   // The floor a moving camera sees: the body's shadow on it, and a plain floor under it when there is no set.

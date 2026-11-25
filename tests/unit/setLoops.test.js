@@ -37,3 +37,23 @@ test('applied: each node gets its own material, the shared one is left alone; a 
   assert.equal(applyLoops(root, Array.from({ length: 20 }, () => ({ node: 'stick', type: 'sway', axis: [0, 1, 0], amount_m: 0.1, period_s: 4 }))).count, 16);
   assert.equal(applyLoops(root, undefined).count, 0);
 });
+
+test('swing: a turn about a pivot, with a sway after it; out of range stays still; one a node (3910 #6275)', async () => {
+  const { swingAt, turnAbout, readyBeams } = await import('../../src/interfaces/web/public/lib/bnb-loops.js');
+  const l = { node: 'beam', type: 'swing', pivot: [0, 3, 0], axis: [0, 0, 1], angle_deg: 20, period_s: 4, phase: 0 };
+  assert.ok(goodLoop(l)); for (const bad of [{ ...l, angle_deg: 30 }, { ...l, angle_deg: 0 }, { ...l, axis: [0, 0, 2] }, { ...l, axis: [1, 0, 1] }, { ...l, period_s: 1 }, { ...l, pivot: [0, 0] }]) assert.equal(goodLoop(bad), false);
+  assert.equal(swingAt(l, 0), 0); assert.ok(Math.abs(swingAt(l, 1) - 20 * Math.PI / 180) < 1e-9);
+  const r = turnAbout([1, 3, 0], [0, 3, 0], [0, 0, 1], Math.PI / 2); assert.ok(Math.hypot(r[0], r[1] - 4, r[2]) < 1e-9);
+  const vm = await import('node:vm'); const fsp = await import('node:fs');
+  const ctx = { console, performance, self: {}, window: {}, document: {}, navigator: {} }; ctx.globalThis = ctx; vm.createContext(ctx);
+  vm.runInContext(fsp.readFileSync(new URL('../../src/interfaces/web/public/lib/three.r183.min.js', import.meta.url), 'utf8'), ctx);
+  const THREE = ctx.THREE || ctx.self.THREE || ctx.window.THREE;
+  const root = new THREE.Group(), scene = new THREE.Group(), holder = new THREE.Group(), beam = new THREE.Mesh(new THREE.BufferGeometry(), new THREE.MeshBasicMaterial({ transparent: true }));
+  beam.name = 'beam'; scene.position.set(5, 0, 0); holder.position.set(0, 1, 0); beam.position.set(0, 2, 0); root.add(scene); scene.add(holder); holder.add(beam);
+  const a = applyLoops(root, [l, { ...l, pivot: [9, 9, 9] }, { node: 'beam', type: 'sway', axis: [1, 0, 0], amount_m: 0.1, period_s: 4 }]); assert.equal(a.count, 2, 'a second swing is not played');
+  a.at(1); root.updateMatrixWorld(true);
+  assert.ok(Math.abs(beam.position.x - 0.1) < 1e-9 && Math.abs(beam.position.y - 2) < 1e-9, 'hung at its pivot: turned in place, then moved');
+  const tip = new THREE.Vector3(0, -2, 0).applyMatrix4(beam.matrixWorld); const want = turnAbout([0, 1, 0], [0, 3, 0], [0, 0, 1], 20 * Math.PI / 180); assert.ok(Math.hypot(tip.x - (5 + want[0] + 0.1), tip.y - want[1], tip.z - want[2]) < 1e-9, 'the far end is where the formula says, in the set');
+  a.at(0); assert.ok(Math.abs(beam.quaternion.w - 1) < 1e-12, 'back at rest');
+  assert.equal(readyBeams(root, ['beam', 'gone']), 1); assert.equal(beam.material.depthWrite, false); assert.equal(beam.renderOrder, 10); beam.material.transparent = false; assert.equal(readyBeams(root, ['beam']), 0);
+});

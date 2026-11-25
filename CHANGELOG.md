@@ -2,6 +2,11 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.944] - 2026-11-25
+
+### Added
+- Sets may have light beams that swing (`swing` loops, `beams`): soft, see-through, drawn after everything else.
+
 ## [2.25.943] - 2026-11-25
 
 ### Fixed
