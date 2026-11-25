@@ -101,3 +101,19 @@ test('AvatarX gets a length it takes, and its answer is passed on', async () => 
     assert.equal(sent.seconds, want); assert.equal(got.seconds, want);
   }
 });
+
+// Said by voice, 2026-11-24 22:34: "do the twerk dance" did a plain Dance.
+test('"do the twerk dance" is Twerk 2; a described dance is found by meaning, one it lacks is said; plain dancing needs no model', async () => {
+  assert.deepEqual(moveRequest('do the twerk dance', { labels: ['Dance', 'Twerk 2', 'Can Can'] }), { kind: 'named', label: 'Twerk 2' });
+  assert.deepEqual(moveRequest('dab', { labels: ['Dab'] }), { kind: 'named', label: 'Dab' });
+  const { p, pages } = rig(); const lib = await p.libraryItems();
+  lib[0].files.push({ kind: 'animation', name: 'twerk-2.vrma', label: 'Twerk 2', tags: [], gesture: 'dance', loop: true, seconds: 16.2 }, { kind: 'animation', name: 'dance.vrma', label: 'Dance', tags: [], gesture: 'dance', loop: true, seconds: 4 });
+  let asked = 0, answer = '0';
+  p.agent.providerManager = { getCurrentProvider: async () => ({}), providerNameOf: () => 'openrouter', generateResponse: async () => { asked++; return { content: answer }; } };
+  await p.moveByWords('do the twerk dance'); assert.equal(pages.at(-1).label, 'Twerk 2');
+  for (const t of ['dance for me', 'can you dance?', "let's see you dance", 'show me some dances']) { await p.moveByWords(t); }
+  assert.equal(asked, 0);
+  answer = '2'; await p.moveByWords('do that dance where you sway your hips'); assert.equal(asked, 1); assert.equal(pages.at(-1).label, 'Groove');
+  answer = '-1'; assert.match(await p.moveByWords('do the moonwalk dance'), /^I have no move for that yet/);
+  assert.equal((await p.chooseClip({ asked: 'do the twerk', clip: null })).choice.file.label, 'Twerk 2');
+});

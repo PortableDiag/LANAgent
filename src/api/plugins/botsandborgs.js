@@ -5,7 +5,7 @@ import path from 'path';
 import { PluginSettings } from '../../models/PluginSettings.js';
 import { encrypt, decrypt } from '../../utils/encryption.js';
 import { ROLES, normalizeRole, resolveRoleModel, modelsInUse, autoFillRoles } from '../../services/avatar/avatarRoles.js';
-import { flatWords, moveRequest, secondsAsked } from '../../services/avatar/moveRequest.js';
+import { flatWords, moveRequest, secondsAsked, spokenLabel } from '../../services/avatar/moveRequest.js';
 import fs from 'node:fs/promises';
 import { DATA_PATH } from '../../utils/paths.js';
 import { propsFor, notOnBody, seatFor, variantKind, livePass, applyClipManifest, unpack, installVrm, addToManifest, readVrmInfo, readVrmaInfo, clipLabel, clipLoops, clipGesture, writeStoreAnimations, safeName, toStickerWebp, moodOf, portraitFromPreview } from '../../services/store/assetLibrary.js';
@@ -3504,7 +3504,13 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     // Punctuation too: "the Roger Rabbit." is the Roger Rabbit ("I have no Roger clip", 2026-11-24).
     const flat = flatWords;
     const said = flat(`${words} ${isGenericItem(item) ? '' : item || ''}`);
-    const hits = pool.filter(p => { const l = flat(p.file.label); return l.trim() && said.includes(l); });
+    let hits = pool.filter(p => { const l = flat(p.file.label); return l.trim() && said.includes(l); });
+    // "Twerk 2" is the twerk when nothing is called just that; and the clip called "Dance" is not "the twerk dance".
+    if (!hits.some(p => !/^dance$/i.test(p.file.label || ''))) {
+      const spoken = pool.filter(p => / \d+ $/.test(flat(p.file.label)) && spokenLabel(p.file.label).trim().length > 3 && said.includes(spokenLabel(p.file.label)) && !/^(?:talk|idle|walk|work|listen)\b/i.test(p.file.label));
+      if (spoken.length) hits = spoken;
+      else if (hits.length && this.moveContent(asked.replace(/\bdanc\w*/gi, ' '))) hits = [];
+    }
     const longest = Math.max(0, ...hits.map(p => flat(p.file.label).length));
     const named = hits.filter(p => flat(p.file.label).length === longest);
     const purpose = clipGesture(clip || asked);
@@ -3561,7 +3567,7 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     const to = videoRecipient(String(words || '')); // whom it is for is not a move
     const said = to === 'me' ? String(words || '') : String(words || '').replace(new RegExp(`\\b${to.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'gi'), ' ');
     return said.toLowerCase().replace(/[^\p{L}\p{N} '-]+/gu, ' ')
-      .replace(/\b(?:alice|please|pls|can|could|would|will|you|your|yourself|send|sent|me|us|him|her|them|to|for|a|an|the|and|with|of|in|on|it|that|this|my|one|another|quick|short|little|video|videos|message|greeting|note|clip|film|record|make|show|do|doing|using|use|using|play|have|having|get|want|just|now|then|while|as|avatar|assistant|public|personal|model|body|yourself|something|some|thing|animation|move|emote|gesture|telegram|text)\b/g, ' ')
+      .replace(/\b(?:alice|please|pls|can|could|would|will|you|your|yourself|send|sent|me|us|him|her|them|to|for|a|an|the|and|with|of|in|on|it|that|this|my|one|another|quick|short|little|video|videos|message|greeting|note|clip|film|record|make|show|do|doing|using|use|using|play|have|having|get|want|just|now|then|while|as|avatar|assistant|public|personal|model|body|yourself|something|some|thing|animation|move|moves|emote|gesture|telegram|text|let's|let|see|want|wants|they|owner|asked|asks|i|we|like|ok|okay|hey|now|is|so|well|yes|bit|quick|again|longer|seconds|second|minute|minutes|\d+)\b/g, ' ')
       .replace(/\b(?:pan|camera|left|right|zoom|side|shot|angle|front|background)\w*\b/g, ' ').replace(/\s+/g, ' ').trim();
   }
 
@@ -3712,7 +3718,7 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     }
     const r = ask.kind === 'named' ? await this.playClip({ clip: ask.label, asked: text, seconds: ask.seconds })
       : ask.kind === 'again' ? await this.playClip({ clip: recent.label, seconds: ask.seconds })
-        : await this.playClip({ clip: 'dance', asked: ask.kind === 'another' ? 'dance' : text, seconds: ask.seconds, avoid: recent?.label || null });
+        : await this.playClip({ ...(ask.kind === 'another' || !this.moveContent(text.replace(/\bdanc\w*/gi, ' ')) ? { clip: 'dance' } : {}), asked: ask.kind === 'another' ? 'dance' : text, seconds: ask.seconds, avoid: recent?.label || null });
     if (!r.success) return r.error;
     return r.avatarx === 'played' || r.pages ? `Doing the ${r.clip}.` : r.result;
   }

@@ -2,6 +2,11 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.930] - 2026-11-24
+
+### Fixed
+- "Do the twerk dance" is Twerk 2, not the clip called "Dance": a name's trailing number need not be said, and a dance that is described is found by what is meant.
+
 ## [2.25.929] - 2026-11-24
 
 ### Fixed

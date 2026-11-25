@@ -8,6 +8,9 @@
 /** Words as they compare: lower case, no punctuation, single spaces, padded. */
 export const flatWords = (t) => ` ${String(t || '').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim()} `;
 
+/** A move's name as people say it: "Twerk 2" is "twerk" ("do the twerk dance" did a plain Dance, 2026-11-24). */
+export const spokenLabel = (label) => flatWords(label).replace(/ \d+ $/, ' ');
+
 /** How long a move was asked for, in seconds, or null: "for 10 to 15 seconds" 15, "a minute" 60, "longer" 30. */
 export function secondsAsked(text) {
   const t = String(text || '').toLowerCase();
@@ -38,7 +41,7 @@ export function moveRequest(text, { labels = [], recent = null } = {}) {
   if (/ (?:what|which|how many) (?:other |kind of |kinds of |sort of )?(?:dances?|moves|dance moves|animations) /.test(said) || / (?:list|name|tell me) (?:all )?(?:your|the|of your) (?:dances|moves|dance moves) /.test(said)
     || / what can you (?:dance|do as a dance) /.test(said)) return out({ kind: 'list' });
   if (/ do (?:you|i|we) (?:know|own|have|like) /.test(said) && !/ (?:can|could|please|show) /.test(said)) return null;
-  const named = labels.map(l => ({ l, f: flatWords(l) })).filter(x => x.f.trim().length > 2 && said.includes(x.f))
+  const named = labels.map(l => ({ l, f: said.includes(flatWords(l)) ? flatWords(l) : spokenLabel(l) })).filter(x => x.f.trim().length > 2 && said.includes(x.f))
     // A one-word name is also an ordinary word ("jump", "wave"): only right after its verb. "Dance" is any dance.
     .filter(x => x.f.trim().includes(' ') ? new RegExp(` ${VERB} `).test(said) || said.replace(x.f, ' ').trim().split(' ').filter(Boolean).length <= 3
       : x.f.trim() !== 'dance' && (said === x.f || new RegExp(` (?:do|perform|show|play|try|hit|bust out|give) (?:me |us )?(?:a |an |the |your |that |some )?${x.f.trim()} `).test(said)))
