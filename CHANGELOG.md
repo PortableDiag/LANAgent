@@ -2,6 +2,11 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.939] - 2026-11-25
+
+### Fixed
+- A pack or set another seat of the plan already has costs no download, so it no longer waits for one.
+
 ## [2.25.938] - 2026-11-25
 
 ### Added

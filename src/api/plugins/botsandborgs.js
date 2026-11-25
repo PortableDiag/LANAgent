@@ -3115,7 +3115,10 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     const plan = await this.plan(key);
     if (!plan || !['active', 'trialing'].includes(plan.status)) return [];
     let left = Number(plan.downloads_left ?? plan.downloads?.left ?? 0) - keep;
-    if (!(left > 0)) return [];
+    // Already downloaded on this plan this period, by this agent or another seat: having it again costs no download
+    // (Pop Concert Stage waited a turn on ALICE because DELTA had taken it, 2026-11-25).
+    const claimed = new Set(plan.downloads?.products || []);
+    if (!(left > 0) && !claimed.size) return [];
     const catalog = await this.api('get', '/api/catalog').catch(() => null);
     const owned = new Set((await this.libraryItems()).map(i => i.variant));
     const want = (catalog?.products || []).filter(p => collections.includes(p.collection))
@@ -3124,10 +3127,10 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
       .filter(v => v && !owned.has(v));
     const taken = [];
     for (const variant of want) {
-      if (left <= 0) break;
+      if (left <= 0 && !claimed.has(variant)) continue;
       // confirm: a covered pack costs nothing, and autoTake refuses anything that would (see buy).
       const r = await this.buy({ variant, use: 'keep', autoTake: true, confirm: true }).catch(e => ({ success: false, error: e.message }));
-      if (r?.success) { taken.push(variant); left--; this.logger.info(`botsandborgs: took ${variant} under All-Access`); }
+      if (r?.success) { taken.push(variant); if (!claimed.has(variant)) left--; this.logger.info(`botsandborgs: took ${variant} under All-Access`); }
       else this.logger.info(`botsandborgs: ${variant} not taken: ${r?.error || r?.result || 'no answer'}`);
     }
     if (taken.some(v => /^set-/.test(v))) await this.pushSets().catch(e => this.logger.warn(`botsandborgs: AvatarX sets not added: ${e.message}`));
