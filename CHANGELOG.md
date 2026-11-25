@@ -2,6 +2,12 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.931] - 2026-11-25
+
+### Fixed
+- **"A nice dim color other than white" is never white.** A colour ruled out is not set, a colour left to the agent is picked (not the last one again), "dim" or a percentage goes with it, and "pick another color" means the light just used.
+- A "no" in conversation is a head shake, never a booty shake.
+
 ## [2.25.930] - 2026-11-24
 
 ### Fixed

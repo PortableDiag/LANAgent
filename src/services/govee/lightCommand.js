@@ -9,7 +9,7 @@
 
 const GENERIC = new Set(['light', 'lights', 'lamp', 'lamps', 'bulb', 'bulbs', 'the', 'my', 'led', 'strip', 'strips', 'smart']);
 const WHITES = ['bright white', 'warm white', 'cool white', 'cold white', 'soft white', 'neutral white', 'daylight'];
-const NOT_NOW = /\b(at night|tonight|tomorrow|morning|evening|every|daily|schedule|timer|in \d+\s*(min|minute|hour|second|sec)s?|at \d{1,2}(:\d{2})?\s*(am|pm)?|when|until|if|after|before)\b/i;
+const NOT_NOW = /\b(at night|tonight|tomorrow|morning|evening|every|daily|schedule|timer|in \d+\s*(min|minute|hour|second|sec)s?|at \d{1,2}(?!\d|\s*(?:%|percent))(:\d{2})?\s*(am|pm)?|when|until|if|after|before)\b/i;
 const QUESTION = /\?\s*$|^(alice[, ]+)?(what|which|is|are|why|how|does|do|did|can you tell|tell me)\b/i;
 
 const words = (s) => String(s).toLowerCase().match(/[a-z0-9]+/g) || [];
@@ -35,14 +35,28 @@ function mentionsOther(text, names, except) {
   return names.some(n => n !== except && words(n).some(w => w.length >= 4 && !GENERIC.has(w) && tw.has(w)));
 }
 
-/** What to do with the light: one action, or null when there is none or more than one. */
-export function findSetting(text, colorNames = []) {
-  const t = String(text).toLowerCase();
+/** Colours picked from when the owner leaves the choice to the agent, soft ones first. */
+const PICKS = ['amber', 'purple', 'gold', 'indigo', 'turquoise', 'orange', 'magenta', 'pink', 'violet', 'blue', 'cyan', 'green', 'red'];
+const NOT_THIS = /\b(?:other than|besides|except(?: for)?|anything but|but not|instead of|rather than|no more|not)\s+(?:a\s+|the\s+|just\s+)?/;
+
+/**
+ * What to do with the light: one action (a colour may carry a brightness), or null when there is none or more than one.
+ * "A nice dim color other than White" set white (2026-11-25): a colour ruled out is never the one set, and a colour left
+ * to the agent is picked, never the one it picked last.
+ */
+export function findSetting(text, colorNames = [], { avoid = null, random = Math.random } = {}) {
+  let t = String(text).toLowerCase();
+  const esc = (c) => c.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const all = [...new Set([...WHITES, 'white', ...colorNames.map(c => String(c).toLowerCase())])].sort((a, b) => b.length - a.length);
+  const out = [];
+  const ruled = new RegExp(`${NOT_THIS.source}(${all.map(esc).join('|')})\\b(?:\\s*(?:,|or|and|nor)\\s*(?:${all.map(esc).join('|')})\\b)*`, 'g');
+  t = t.replace(ruled, (m) => { for (const c of all) if (new RegExp(`\\b${esc(c)}\\b`).test(m)) out.push(c); return ' '; });
+  const open = out.length > 0 || /\b(?:a|an|some|another|any|different|other|random|new|nice|pretty|cool|fun|soft)\b[^.!?]{0,25}\bcolou?rs?\b|\b(?:pick|choose|change|switch)\b[^.!?]{0,25}\bcolou?r\b/.test(t);
   const found = [];
   const pct = t.match(/\b(\d{1,3})\s*(%|percent)/);
   if (pct) found.push({ action: 'brightness', params: { level: Math.max(1, Math.min(100, parseInt(pct[1], 10))) } });
   else if (/\b(full brightness|brightest|max(imum)? brightness)\b/.test(t)) found.push({ action: 'brightness', params: { level: 100 } });
-  else if (/\b(dim it|dim the|dimmer|dim)\b/.test(t) && !/\bwhite\b/.test(t)) found.push({ action: 'brightness', params: { level: 20 } });
+  else if (/\b(dim it|dim the|dimmer|dim)\b/.test(t)) found.push({ action: 'brightness', params: { level: 20 } });
 
   const kelvin = t.match(/\b(\d{4})\s*k(elvin)?\b/);
   const white = WHITES.find(w => t.includes(w));
@@ -51,7 +65,15 @@ export function findSetting(text, colorNames = []) {
   else {
     const color = colorNames.filter(c => new RegExp(`\\b${c.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`).test(t)).sort((a, b) => b.length - a.length)[0];
     if (color && !(color === 'light' || color === 'off')) found.push({ action: 'color', params: { color } });
+    else if (open) {
+      const can = PICKS.filter(c => colorNames.some(n => String(n).toLowerCase() === c) && !out.includes(c));
+      const fresh = can.filter(c => c !== avoid);
+      const from = (fresh.length ? fresh : can).slice(0, 6);
+      if (from.length) found.push({ action: 'color', params: { color: from[Math.floor(random() * from.length)] } });
+    }
   }
+  // "A dim red", "blue at 30%": one colour and how bright, sent together.
+  if (found.length === 2 && found[0].action === 'brightness') return { action: found[1].action, params: { ...found[1].params, alsoBrightness: found[0].params.level } };
 
   const off = /\b(turn|switch|shut|put|flip|kill)\b[^.!?]*\boff\b|\boff\s*[.!]*$|\blights? out\b/.test(t);
   const on = /\b(turn|switch|put|flip)\b[^.!?]*\bon\b|\bon\s*[.!]*$/.test(t);
@@ -62,16 +84,16 @@ export function findSetting(text, colorNames = []) {
 }
 
 /** { device, action, params } for a plain one-light, one-setting command, else null. */
-export function parseLightCommand(text, deviceNames, colorNames = [], { recentDevice = null } = {}) {
+export function parseLightCommand(text, deviceNames, colorNames = [], { recentDevice = null, recentColor = null } = {}) {
   if (!text || !deviceNames?.length) return null;
   const s = String(text).trim();
   if (s.length > 160 || QUESTION.test(s) || NOT_NOW.test(s)) return null;
   if (/\b(and then|then|also)\b/i.test(s)) return null;
   // "Turn the bathroom light on" right after a Master Toilet command: no device is named, so it is that one
   // (2026-11-11: it became device "second time to turn the fucking bathroom", the thermometer).
-  const device = findDevice(s, deviceNames) || (recentDevice && /\b(light|lights|lamp|bulb|it)\b/i.test(s) && !mentionsOther(s, deviceNames, recentDevice) ? recentDevice : null);
+  const device = findDevice(s, deviceNames) || (recentDevice && /\b(light|lights|lamp|bulb|it|colou?rs?)\b/i.test(s) && !mentionsOther(s, deviceNames, recentDevice) ? recentDevice : null);
   if (!device) return null;
-  const setting = findSetting(s, colorNames);
+  const setting = findSetting(s, colorNames, { avoid: recentColor });
   if (!setting) return null;
   return { device, action: setting.action, params: { device, ...setting.params } };
 }

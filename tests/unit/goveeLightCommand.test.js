@@ -56,3 +56,23 @@ test('2026-11-11 follow-ups: pushes repeat, "prove it" reads back, an unnamed li
   assert.equal(parseLightCommand('turn the kitchen bar light on', names, [], { recentDevice: 'Master Toilet' }).device, 'Kitchen Bar 1');
   assert.equal(parseLightCommand('turn the bathroom light on', names, []), null);
 });
+
+// 2026-11-25, 00:02 to 00:05: "a nice dim color" only dimmed, "pick a color other than White" found no light, and
+// "a nice dim color other than White" set WHITE.
+test('a colour ruled out is never set; one left to the agent is picked, dim with it, on the light just used', async () => {
+  const { parseLightCommand, findSetting } = await import('../../src/services/govee/lightCommand.js');
+  const names = ['Master Toilet', 'TVBars', 'Kitchen Bar 1'], colors = ['red', 'blue', 'white', 'amber', 'purple', 'pink', 'green', 'warm white'];
+  const picked = (t, o) => parseLightCommand(t, names, colors, o);
+  for (let i = 0; i < 30; i++) {
+    const a = picked('Make the Master Toilet light a nice dim color other than White'); assert.equal(a.action, 'color'); assert.notEqual(a.params.color, 'white'); assert.ok(colors.includes(a.params.color)); assert.equal(a.params.alsoBrightness, 20);
+    const b = picked('Pick a color other than White', { recentDevice: 'Master Toilet', recentColor: 'amber' }); assert.equal(b.device, 'Master Toilet'); assert.ok(!['white', 'amber'].includes(b.params.color));
+    const c = picked('Make the Master Toilet light a nice dim color'); assert.equal(c.action, 'color'); assert.equal(c.params.alsoBrightness, 20);
+    assert.ok(!['white', 'red', 'blue'].includes(picked('make the toilet light a color, not white or red or blue').params.color));
+  }
+  assert.equal(picked('Pick a color other than White'), null, 'no light was just used');
+  assert.deepEqual(picked('make the toilet light a dim red').params, { device: 'Master Toilet', color: 'red', alsoBrightness: 20 });
+  assert.deepEqual(picked('toilet light blue at 30%').params, { device: 'Master Toilet', color: 'blue', alsoBrightness: 30 });
+  assert.deepEqual(picked('make the toilet light blue, not white').params, { device: 'Master Toilet', color: 'blue' });
+  assert.deepEqual(findSetting('make it white', colors), { action: 'color', params: { color: 'white' } });
+  assert.deepEqual(findSetting('dim the toilet light', colors), { action: 'brightness', params: { level: 20 } });
+});

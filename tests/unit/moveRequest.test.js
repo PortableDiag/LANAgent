@@ -117,3 +117,9 @@ test('"do the twerk dance" is Twerk 2; a described dance is found by meaning, on
   answer = '-1'; assert.match(await p.moveByWords('do the moonwalk dance'), /^I have no move for that yet/);
   assert.equal((await p.chooseClip({ asked: 'do the twerk', clip: null })).choice.file.label, 'Twerk 2');
 });
+
+test('a head shake is never a booty shake', async () => {
+  const { emotesHeld } = await import('../../src/services/avatar/autoEmote.js');
+  assert.deepEqual(emotesHeld(['booty-shake', 'maracas-shake', 'bnb-booty-shake', 'booty-shake-facing-away']), []);
+  for (const n of ['emote-shake', 'shake_head', 'bnb-shake', 'emote-head-shake']) assert.equal(emotesHeld([n])[0]?.key, 'shake_head', n);
+});

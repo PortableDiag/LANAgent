@@ -1312,7 +1312,7 @@ If answering needs information that is not in the conversation above (messages, 
           const colors = Object.keys(GoveeEnhancements.colorNames || {});
           // "Every morning at 7am make the Master Toilet light bright white" is a schedule on the real scheduler (2026-11-11).
           const timed = parseLightSchedule(input, names, colors);
-          const light = timed ? null : parseLightCommand(input, names, colors, { recentDevice: recentLight?.name });
+          const light = timed ? null : parseLightCommand(input, names, colors, { recentDevice: recentLight?.name, recentColor: recentLight ? govee.lastColor : null });
           if (timed) {
             logger.info(`Light schedule read directly: ${timed.action} ${JSON.stringify(timed.params)} cron ${timed.cron}`);
             const { device, ...lightParams } = timed.params;

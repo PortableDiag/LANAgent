@@ -38,7 +38,8 @@ export function emotesHeld(held = []) {
   const out = [];
   for (const name of held) {
     const base = String(name).replace(/^bnb-/, '').replace(/^emote-/, '');
-    const alias = base === 'shake' || base.endsWith('-shake') ? 'shake_head' : null;
+    // The head's shake only: "booty-shake" and "maracas-shake" end the same way, and a "no" came out as one (2026-11-25).
+    const alias = /^(?:head-)?shake(?:-head)?$/.test(base) ? 'shake_head' : null;
     const key = alias || Object.keys(EMOTES).find(k => base === k || base.endsWith(`-${k}`));
     if (key && !out.some(e => e.key === key)) out.push({ name, key, means: EMOTES[key] });
   }

@@ -860,6 +860,7 @@ export default class GoveePlugin extends BasePlugin {
 
   async setColor(params) {
     this.logger.info(`setColor called with params: ${JSON.stringify(params)}`);
+    if (params.color) this.lastColor = String(params.color).toLowerCase();
     
     // First check if this is actually a temperature request
     if (params.color && !params.r) {
@@ -872,7 +873,7 @@ export default class GoveePlugin extends BasePlugin {
           kelvin: temperature,
           fromAI: params.fromAI,
           // "bright white", "bright daylight": the word asks for full brightness too.
-          ...(/\bbright\b/i.test(params.color) ? { alsoBrightness: 100 } : {})
+          ...(Number.isFinite(params.alsoBrightness) ? { alsoBrightness: params.alsoBrightness } : /\bbright\b/i.test(params.color) ? { alsoBrightness: 100 } : {})
         });
       }
       
@@ -900,7 +901,8 @@ export default class GoveePlugin extends BasePlugin {
       device: params.device,
       capability: 'devices.capabilities.color_setting',
       value: colorValue,
-      fromAI: params.fromAI
+      fromAI: params.fromAI,
+      ...(Number.isFinite(params.alsoBrightness) ? { alsoBrightness: params.alsoBrightness } : {})
     });
   }
 
