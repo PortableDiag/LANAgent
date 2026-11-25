@@ -6,7 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import express from 'express';
-import { createStageRouter, stageAllowed } from '../../src/interfaces/web/stage.js';
+import { createStageRouter, stageAllowed, startStageTls } from '../../src/interfaces/web/stage.js';
 import BotsAndBorgsPlugin from '../../src/api/plugins/botsandborgs.js';
 import { PluginSettings } from '../../src/models/PluginSettings.js';
 
@@ -53,4 +53,16 @@ test('only with the key, only what the state names, ETags; off with no key made'
     for (const bad of [sha('clip Pole-Dance.vrma'), '..%2Fmanifest.json', 'manifest.json']) assert.equal((await fetch(`${base}/files/${bad}`, { headers: H })).status, 404, bad);
     assert.equal((await fetch(`${base}/state`, { method: 'POST', headers: H })).status, 404, 'read only');
   } finally { srv.close(); srv.closeAllConnections?.(); }
+});
+
+test('over its own TLS port; plain http only from this machine; no certificate, no port', async () => {
+  const { execFileSync } = await import('node:child_process'); const https = (await import('node:https')).default;
+  const { p, dir } = rig(); const keyFile = path.join(dir, 'key.sha256'); fs.writeFileSync(keyFile, sha(KEY));
+  assert.equal(await startStageTls(null, { dir, port: 0 }), null);
+  execFileSync('openssl', ['req', '-x509', '-newkey', 'ec', '-pkeyopt', 'ec_paramgen_curve:prime256v1', '-nodes', '-keyout', path.join(dir, 'tls-key.pem'), '-out', path.join(dir, 'tls-cert.pem'), '-days', '2', '-subj', '/CN=stage'], { stdio: 'ignore' });
+  const srv = await startStageTls(null, { dir, port: 0, keyFile, store: () => p });
+  const get = (headers) => new Promise((res, rej) => https.get({ port: srv.address().port, path: '/stage/v1/state', headers, rejectUnauthorized: false }, (r) => { r.resume(); r.on('end', () => res(r.statusCode)); }).on('error', rej));
+  try { assert.equal(await get({ Authorization: `Bearer ${KEY}` }), 200); assert.equal(await get({}), 401); } finally { srv.close(); srv.closeAllConnections?.(); }
+  const router = createStageRouter(null, { keyFile, store: () => p }); const mw = router.stack[0].handle; const ask = async (socket) => { let code = 0, passed = false; await mw({ socket, headers: { authorization: `Bearer ${KEY}` } }, { setHeader() {}, status(c) { code = c; return { json() {} }; } }, () => { passed = true; }); return passed || code; };
+  assert.equal(await ask({ remoteAddress: '192.0.2.7' }), 403); assert.equal(await ask({ remoteAddress: '::ffff:127.0.0.1' }), true); assert.equal(await ask({ remoteAddress: '192.0.2.7', encrypted: true }), true);
 });

@@ -2,6 +2,11 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.942] - 2026-11-25
+
+### Changed
+- The stage answers over TLS only, on its own port (`STAGE_TLS_PORT`, 8796) with the certificate in `data/stage/`, or from the machine itself.
+
 ## [2.25.941] - 2026-11-25
 
 ### Added

@@ -41,7 +41,7 @@ import deviceAliasRoutes from './deviceAliasRoutes.js';
 import mqttRoutes from './mqtt.js';
 import mcpRoutes from './mcp.js';
 import { createOpenAICompatRouter } from './openaiCompat.js';
-import { createStageRouter } from './stage.js';
+import { createStageRouter, startStageTls } from './stage.js';
 import { createTextXPhoneRouter, createTextXAdminRouter } from './textx.js';
 import { getTextX } from '../../services/textx/index.js';
 import { getMCPServer } from '../../services/mcp/mcpServer.js';
@@ -317,6 +317,7 @@ export class WebInterface {
 
     // The body, its dances and its set for a program that draws it (Gapless); read only, its own key
     this.app.use('/stage/v1', createStageRouter(this.agent));
+    startStageTls(this.agent).then(s => { this.stageServer = s; });
 
     // TextX SMS app: this agent as a conversation on the phone (docs/TEXTX.md)
     this.app.use('/textx/v1', createTextXPhoneRouter(this.agent));
