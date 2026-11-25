@@ -60,6 +60,8 @@ const LIVE_SYNC_MS = Number(process.env.BOTSANDBORGS_LIVE_SYNC_MS) || 6 * 3600 *
 // almost instant"). It was every 30 minutes, and each restart started the wait over. One small GET when nothing is new.
 const FEED_POLL_MS = Number(process.env.BOTSANDBORGS_FEED_MS) || 60 * 1000;
 const SLOW_BEAT_MS = 30 * 60 * 1000;
+// New products are not in the account's feed: looked for on their own, or a new set waited up to six hours (2026-11-25).
+const NEW_PACKS_MS = Number(process.env.BOTSANDBORGS_NEW_MS) || 15 * 60 * 1000;
 const LIVE_FIRST_SYNC_MS = 3 * 60 * 1000;
 const AUTO_STICKER_EVERY_MS = Number(process.env.BOTSANDBORGS_STICKER_EVERY_MS) || 20 * 60 * 1000;
 const AUTO_STICKER_ASK_EVERY_MS = 60 * 1000;
@@ -600,7 +602,8 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     this._liveFirst = setTimeout(tick, LIVE_FIRST_SYNC_MS);
     this._liveTimer = setInterval(tick, LIVE_SYNC_MS);
     this._feedTimer = setInterval(() => this.feedBeat(), FEED_POLL_MS);
-    this._liveFirst.unref?.(); this._liveTimer.unref?.(); this._feedTimer.unref?.();
+    this._newTimer = setInterval(() => this.takeNewPacks().catch(e => this.logger.warn(`botsandborgs: new packs not taken: ${e.message}`)), NEW_PACKS_MS);
+    this._liveFirst.unref?.(); this._liveTimer.unref?.(); this._feedTimer.unref?.(); this._newTimer.unref?.();
   }
 
   /** One poll of the feed at a time; a store that stays unreachable is logged once, not every minute. */
@@ -619,7 +622,7 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
   }
 
   async cleanup() {
-    clearTimeout(this._liveFirst); clearTimeout(this._relist); clearInterval(this._liveTimer); clearInterval(this._feedTimer);
+    clearTimeout(this._liveFirst); clearTimeout(this._relist); clearInterval(this._liveTimer); clearInterval(this._feedTimer); clearInterval(this._newTimer);
   }
 
   /**
@@ -3098,7 +3101,14 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
    * plan's downloads left this period, keeping 3 for the owner's own asks. Never spends money: a pack the plan does
    * not cover (any price above $0) is left alone. Returns the variants taken.
    */
-  async takeNewPacks({ collections = ['animations', 'props', 'sets'], keep = 3 } = {}) {
+  async takeNewPacks(opts = {}) {
+    // One at a time: the six-hourly run and the quarter-hourly one never take the same pack twice.
+    if (this._takingNew) return this._takingNew;
+    this._takingNew = this.takeNewPacksNow(opts).finally(() => { this._takingNew = null; });
+    return this._takingNew;
+  }
+
+  async takeNewPacksNow({ collections = ['animations', 'props', 'sets'], keep = 3 } = {}) {
     const key = await this.accountKey().catch(() => null);
     if (!key) return [];
     const plan = await this.plan(key);

@@ -2,6 +2,11 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.934] - 2026-11-25
+
+### Changed
+- New packs and sets covered by All-Access are looked for every 15 minutes instead of every six hours.
+
 ## [2.25.933] - 2026-11-25
 
 ### Added
