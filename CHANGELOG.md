@@ -2,6 +2,21 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.929] - 2026-11-24
+
+### Fixed
+- A move asked for longer than AvatarX takes (two minutes) is sent as two minutes instead of being refused.
+
+## [2.25.928] - 2026-11-24
+
+### Added
+- **In front of the body, a dance asked for is done at once.** On AvatarX and the live avatar page, "do the Roger Rabbit", "can you dance?", "try another", "again" and "for 15 seconds" are read with no model in between; "what dances can you do?" names them. Whoever answers there knows what the body can really do, and never claims a move that was not played.
+- **A looping move goes on for about 15 seconds**, or as long as was asked, in whole passes.
+
+### Fixed
+- **No emote cuts a dance.** The automatic body language (a salute, a nod) waits until the move is over; the face still follows the reply.
+- "The Roger Rabbit." with a full stop is the Roger Rabbit, and "can you do it?" is answered yes.
+
 ## [2.25.927] - 2026-11-24
 
 ### Fixed

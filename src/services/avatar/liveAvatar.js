@@ -436,7 +436,7 @@ export function liveCaller(live) {
     const json = typeof body === 'string' ? JSON.parse(body || '{}') : (body || {});
     if (method === 'GET' && route === '/agent/v1/state') return live.getState();
     if (method === 'PATCH' && route === '/agent/v1/state') return live.patch(json);
-    if (method === 'POST' && route === '/agent/v1/gesture') return live.gesture(json.name);
+    if (method === 'POST' && route === '/agent/v1/gesture') return live.gesture(json.name, json.seconds);
     if (method === 'POST' && route === '/agent/v1/expression') return live.expression(json.name, json.seconds);
     throw new Error(`the live avatar has no ${method} ${route}`);
   };

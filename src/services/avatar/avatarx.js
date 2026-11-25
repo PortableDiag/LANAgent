@@ -142,12 +142,16 @@ export async function pushPropsToAvatarX(listed, vrmDir, opts = {}) {
   return done;
 }
 
-/** Play a gesture or an owned clip on AvatarX now. Returns 'played', or 'not connected'. */
-export async function playOnAvatarX(name, opts = {}) {
+/**
+ * Play a gesture or an owned clip on AvatarX now, for `seconds` when given (a looping clip, whole passes). Returns
+ * 'played', or 'not connected'; `onAnswer` gets AvatarX's answer, which names `seconds` when it took them (0.4.18; 0.5 to 120, else it refuses).
+ */
+export async function playOnAvatarX(name, { seconds = null, onAnswer = null, ...opts } = {}) {
   const call = await connect(opts);
   if (!call) return 'not connected';
-  await call('POST', '/agent/v1/gesture', JSON.stringify({ name }));
-  logger.info(`AvatarX: played ${name}`);
+  const r = await call('POST', '/agent/v1/gesture', JSON.stringify({ name, ...(seconds ? { seconds: Math.min(120, Math.max(0.5, Math.round(seconds * 100) / 100)) } : {}) }));
+  onAnswer?.(r);
+  logger.info(`AvatarX: played ${name}${seconds ? ` for ${Math.round(seconds)} s` : ''}`);
   return 'played';
 }
 

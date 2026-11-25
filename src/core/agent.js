@@ -1060,6 +1060,21 @@ export class Agent extends EventEmitter {
       });
       if (resumed) return resumed;
 
+      // In front of the body (AvatarX, the live avatar page): a dance or a move asked for is done, before anything routes,
+      // plans or answers for it (the owner, 2026-11-24: five turns for one Roger Rabbit).
+      if (context.interface === 'avatar' || /avatarx/i.test(String(context.userId || ''))) {
+        try {
+          const entry = this.apiManager?.apis?.get?.('botsandborgs');
+          const store = entry?.enabled === false ? null : (entry?.instance || entry);
+          const content = await store?.moveByWords?.(input);
+          if (content) {
+            await this.memoryManager?.storeConversation(context.userId, input, content, context);
+            return { type: 'text', content };
+          }
+          context.bodyBrief = await store?.bodyBrief?.();
+        } catch (err) { logger.warn(`Move request not read: ${err.message}`); }
+      }
+
       // Small talk ("you there?", "hello", "say hi", "thanks") went through intent routing and a memory search:
       // "You there?" took 26 s on 2026-10-26. Answered here from the live conversation, in a second or two.
       if (SMALL_TALK.test(input.trim()) && this.providerManager?.generateResponse) {
@@ -4162,6 +4177,10 @@ Return ONLY a valid JSON object with the extracted parameters, nothing else.`;
       if (context.trellis?.recent) {
         systemPrompt += `This request came from a shared Trellis channel (card ${context.trellis.card}). Recent messages there, oldest first — earlier requests to you and your own earlier replies are in here:\n${String(context.trellis.recent).slice(-4000)}\n\n`;
       }
+
+      // On screen: what the body can really do, so it is neither denied nor made up ("switching to the Robot dance now",
+      // with no such dance and nothing played, 2026-11-23).
+      if (context.bodyBrief) systemPrompt += `${context.bodyBrief} To do one, the owner only has to ask for it by name. You are not doing a move unless an action just reported it: never say you are.\n\n`;
 
       // Skills (SKILL.md procedures) that match the question
       if (skillsText) {

@@ -130,13 +130,14 @@ export function createLiveAvatar(agent, { d = L.dirs() } = {}) {
       return { ok: true, name, seconds: s };
     },
     /** Plays a move on every open live page (the name resolved the AvatarX way). Returns the name played. */
-    async gesture(name) {
+    async gesture(name, seconds = null) {
       const g = await gather();
       const move = L.resolveMove(name, g.clipNames);
       if (!move) throw Object.assign(new Error(`no move called ${name}`), { status: 400 });
-      L.broadcast({ type: 'gesture', name: move });
+      const s = Number(seconds) > 0 ? Math.min(150, Math.max(0.5, Number(seconds))) : null;
+      L.broadcast({ type: 'gesture', name: move, ...(s ? { seconds: s } : {}) });
       logger.info(`Live avatar: gesture ${move}`);
-      return { ok: true, name: move };
+      return { ok: true, name: move, ...(s ? { seconds: s } : {}) };
     },
     activeId,
     setActive,
@@ -184,7 +185,7 @@ export function avatarLiveRouter(agent, live = createLiveAvatar(agent), { auth =
 
   r.get('/state', async (req, res) => { try { res.json(await live.getState()); } catch (e) { fail(res, e); } });
   r.patch('/state', express.json(), async (req, res) => { try { res.json(await live.patch(req.body)); } catch (e) { fail(res, e); } });
-  r.post('/gesture', express.json(), async (req, res) => { try { res.json(await live.gesture(req.body?.name)); } catch (e) { fail(res, e); } });
+  r.post('/gesture', express.json(), async (req, res) => { try { res.json(await live.gesture(req.body?.name, req.body?.seconds)); } catch (e) { fail(res, e); } });
   r.post('/expression', express.json(), async (req, res) => { try { res.json(await live.expression(req.body?.name, req.body?.seconds)); } catch (e) { fail(res, e); } });
 
   // Live changes, as server-sent events. The page reads them with fetch (a header carries the login).

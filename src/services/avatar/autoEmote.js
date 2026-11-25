@@ -81,7 +81,7 @@ let askedAt = 0;
  * After a reply: move the body. `call` is AvatarX's agent API (avatarxCaller in avatarx.js); `generate` the model.
  * Returns { emote, mood } as applied, or null when nothing was done.
  */
-export async function autoEmote({ userText, replyText, generate, call, agentName, now = Date.now() }) {
+export async function autoEmote({ userText, replyText, generate, call, agentName, now = Date.now(), moving = () => false }) {
   if (!call || !generate || !emoteCouldFit(replyText)) return null;
   if (now - askedAt < ASK_EVERY_MS) return null;
   askedAt = now;
@@ -89,8 +89,11 @@ export async function autoEmote({ userText, replyText, generate, call, agentName
   // An owned clip before AvatarX's built-in head move of the same meaning (Set Two's emote-nod over the coded nod).
   const emotes = emotesHeld([...(state.animations || []), ...(state.gestures || [])]);
   const moods = state.moods || [];
-  const { emote, mood } = await chooseEmote({ generate, emotes, moods, userText, replyText, agentName });
+  let { emote, mood } = await chooseEmote({ generate, emotes, moods, userText, replyText, agentName });
   if (mood && mood !== state.mood) await call('PATCH', '/agent/v1/state', JSON.stringify({ mood }));
+  // Asked again after the model: a dance that began meanwhile is never cut by an emote (a salute ended every Roger
+  // Rabbit after 3 s, the owner 2026-11-24). The face still follows the reply.
+  if (emote && moving()) emote = null;
   if (emote) await call('POST', '/agent/v1/gesture', JSON.stringify({ name: emote }));
   if (!emote && (!mood || mood === state.mood)) return null;
   logger.info(`AvatarX: emote ${emote || 'none'}, face ${mood || state.mood}`);

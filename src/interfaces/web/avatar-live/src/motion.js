@@ -469,12 +469,13 @@ export class Motion {
     return Math.hypot(c[0] - body.x, c[1] - body.z) < 0.15 ? [start.x, start.z] : c;
   }
 
-  async playClip(name) {
+  // LANAgent: seconds: repeat whole passes for at least that long (a 4.8 s dance is over before it is seen).
+  async playClip(name, seconds) {
     const clip = await this.boneClip(name);
     if (POLE_CLIP.test(name) && !this.poleAt.has(name)) this.poleAt.set(name, this.polePoint(clip));
     const at = this.poleAt.get(name);
     if (at) this.pole.position.set(at[0], 1.5, at[1]);
-    this.clip = { sample: sampler(clip, this.vrm.scene), fresh: true, t: 0, duration: clip.duration, name, pole: !!at };
+    this.clip = { sample: sampler(clip, this.vrm.scene), fresh: true, t: 0, duration: clip.duration, total: Math.max(1, seconds > 0 ? Math.ceil(Math.min(seconds, 150) / clip.duration - 0.05) : 1) * clip.duration, name, pole: !!at };
     this.gesture = null;
     this.fidget = null;  // a fidget begun just before would otherwise play over the clip
   }
@@ -523,29 +524,30 @@ export class Motion {
     if (this.clip) {
       const c = this.clip;
       if (c.fresh) c.fresh = false; else c.t += dt;  // its first frame starts at 0: the frame that prepared it was long
-      const w = smooth(c.t / 0.5) * smooth((c.duration - c.t) / 0.6);
+      const w = smooth(c.t / 0.5) * smooth((c.total - c.t) / 0.6);
       const keep = [];
       for (const b of Object.keys(this.hum?.humanBones || {})) {
         const n = this.node(b);
         if (n) keep.push([b, n, n.quaternion.clone()]);
       }
       const hipsBefore = hips?.position.clone();
-      c.sample(Math.min(c.t, c.duration));
+      c.at = c.t >= c.total ? c.duration : c.total > c.duration ? c.t % c.duration : c.t;
+      c.sample(c.at);
       for (const [b, n, restQ] of keep) {
         n.quaternion.copy(restQ.slerp(n.quaternion, w));
         this.touched.add(b);
       }
       if (hips && hipsBefore) hips.position.lerpVectors(hipsBefore, hips.position, w);
-      if (c.t >= c.duration) this.clip = null;
+      if (c.t >= c.total) this.clip = null;
     }
-    const clipWeight = this.clip ? smooth(this.clip.t / 0.5) * smooth((this.clip.duration - this.clip.t) / 0.6) : 0;
+    const clipWeight = this.clip ? smooth(this.clip.t / 0.5) * smooth((this.clip.total - this.clip.t) / 0.6) : 0;
     // Props follow whichever clip shows most: a clip, else the talk loop, else the standing loop.
     // A video (propsClipOnly) shows a prop only with its own move: a loop fading in at the end of a
     // spoken line made the mic pop in for a moment (owner, 2026-11-15).
     const active = [];
     // LANAgent: each clip's own time goes along, for the store's `show` windows (2119 #539), and the frame's dt for a
     // prop's own animation.
-    if (this.clip) active.push({ name: this.clip.name, weight: clipWeight, t: this.clip.t });
+    if (this.clip) active.push({ name: this.clip.name, weight: clipWeight, t: this.clip.at ?? this.clip.t });
     if (!this.propsClipOnly && this.talkName && this.talkSample) active.push({ name: this.talkName, weight: this.talkW, t: this.talkT });
     if (!this.propsClipOnly && this.idleOn && this.idleName) active.push({ name: this.idleName, weight: 1 - clipWeight - this.talkW, t: this.idleT });
     try { this.props.update(active, dt); } catch (err) { /* a prop never stops the body */ }

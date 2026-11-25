@@ -511,11 +511,12 @@ function pickIdle() {
   if (!motion || motion.idleName === (state?.idle || '')) return;
   motion.useIdle(state?.idle || '').catch((err) => addMsg('error', `That idle did not play: ${err.message}`));
 }
-function playGesture(name) {
+// LANAgent: `seconds` repeats a looping clip, whole passes, with no fade between them.
+function playGesture(name, seconds) {
   window.__lastGesture = name;
   if (!motion) return;
   if (motion.play(name)) return;
-  motion.playClip(name).catch((err) => { report('motion_failed', `${name}: ${err.message}`); addMsg('error', `That motion did not play: ${err.message}`); });
+  motion.playClip(name, seconds).catch((err) => { report('motion_failed', `${name}: ${err.message}`); addMsg('error', `That motion did not play: ${err.message}`); });
 }
 function fill(sel, items, value) {
   sel.replaceChildren(...items.map((x) => { const o = document.createElement('option'); o.value = x; o.textContent = x; return o; }));
@@ -598,7 +599,7 @@ function connectEvents() {
       applyMood();
       window.__lastExpression = e.name;
     }
-    if (e.type === 'gesture') playGesture(e.name);
+    if (e.type === 'gesture') playGesture(e.name, e.seconds);
   } });
 }
 
@@ -956,7 +957,7 @@ window.lanagentAvatar = {
   thinking(on) { thinking = !!on; },
   // Text arriving without a voice: the mouth moves softly for a moment, as on the page's own chat.
   texting(ms = 600) { textMouthUntil = performance.now() + Math.min(10000, Number(ms) || 600); },
-  gesture(name) { if (name) playGesture(String(name)); },
+  gesture(name, seconds) { if (name) playGesture(String(name), Number(seconds) || undefined); },
   mood(name, seconds = 4) { if (!name) return; moodHold = { name: String(name), until: performance.now() + Number(seconds) * 1000 }; applyMood(); },
   ready() { return !!window.__avatar?.ready; },
 };

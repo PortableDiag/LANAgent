@@ -5,6 +5,7 @@ import path from 'path';
 import { PluginSettings } from '../../models/PluginSettings.js';
 import { encrypt, decrypt } from '../../utils/encryption.js';
 import { ROLES, normalizeRole, resolveRoleModel, modelsInUse, autoFillRoles } from '../../services/avatar/avatarRoles.js';
+import { flatWords, moveRequest, secondsAsked } from '../../services/avatar/moveRequest.js';
 import fs from 'node:fs/promises';
 import { DATA_PATH } from '../../utils/paths.js';
 import { propsFor, notOnBody, seatFor, variantKind, livePass, applyClipManifest, unpack, installVrm, addToManifest, readVrmInfo, readVrmaInfo, clipLabel, clipLoops, clipGesture, writeStoreAnimations, safeName, toStickerWebp, moodOf, portraitFromPreview } from '../../services/store/assetLibrary.js';
@@ -3429,7 +3430,7 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
 
   /** Play an owned clip on the agent's 3D body: by name ("rumba"), by what it is for ("wave", "dance"), or any one. */
   /** Which owned clip a request means: { choice, entry, rel } or { error }. */
-  async chooseClip({ item, clip, asked = '', speaking = false, modelId = null }) {
+  async chooseClip({ item, clip, asked = '', speaking = false, modelId = null, avoid = null }) {
     // A loop's companions (-in / -out / -once, store 0.30.2) are part of their loop, never a move of their own.
     let pool = (await this.libraryItems()).flatMap(i => i.files.filter(f => f.kind === 'animation' && f.bodyFit !== 'broad' && !f.role).map(f => ({ item: i, file: f })));
     // A clip the Animation API solved for one body (item.solvedFor) is fitted to that body only.
@@ -3500,8 +3501,9 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     const words = `${clip || ''} ${asked}`.toLowerCase();
     // The most specific name wins: "do the pole dance" names both "Dance" and "Pole Dance" (live 2026-11-08: it did Dance).
     // Spaces and hyphens are the same ("can-can", "running man").
-    const flat = (t) => ` ${String(t || '').toLowerCase().replace(/[-_]+/g, ' ').replace(/\s+/g, ' ').trim()} `;
-    const said = flat(words);
+    // Punctuation too: "the Roger Rabbit." is the Roger Rabbit ("I have no Roger clip", 2026-11-24).
+    const flat = flatWords;
+    const said = flat(`${words} ${isGenericItem(item) ? '' : item || ''}`);
     const hits = pool.filter(p => { const l = flat(p.file.label); return l.trim() && said.includes(l); });
     const longest = Math.max(0, ...hits.map(p => flat(p.file.label).length));
     const named = hits.filter(p => flat(p.file.label).length === longest);
@@ -3531,7 +3533,10 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     }
     const byMeaning = meant && meant !== 'none' ? [meant] : [];
     const fits = named.length ? named : specific ? [] : byMeaning.length ? byMeaning : (meant !== 'none' && tagged.length) ? tagged : purpose ? pool.filter(p => p.file.gesture === purpose) : underSpeech;
-    let choice = (fits.length ? fits : pool)[Math.floor(Math.random() * (fits.length ? fits : pool).length)];
+    let from = fits.length ? fits : pool;
+    // "Another one": not the one just done.
+    if (avoid && from.some(p => p.file.label !== avoid)) from = from.filter(p => p.file.label !== avoid);
+    let choice = from[Math.floor(Math.random() * from.length)];
     // A dance with a "Facing Away" version is shown that way: the owner (2026-11-15) on Booty Shake, "otherwise the
     // user can't see it". Facing the camera only when asked to.
     if (choice && !/facing away/i.test(choice.file.label || '') && !/\b(fac(?:e|es|ing) (?:me|forward|the camera|front)|from the front)\b/i.test(`${clip || ''} ${asked}`)) {
@@ -3625,7 +3630,12 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     const words = String(data.clip || data.query || data.tag || data._context?.originalInput || data.originalInput || '').slice(0, 60);
     const found = await this.findClips(words, { limit: 5 });
     if (!found.length) return { success: true, clips: [], result: `Bots & Borgs has no clip for "${words}".` };
-    const lines = found.map(c => `- ${c.name}: ${c.owned ? 'I own it' : this.clipPrice(c)}`);
+    // "Can you do the Roger Rabbit?" is a yes, not a list of the loop's companion files (2026-11-24).
+    const asksFor = flatWords(words).trim();
+    const mine = found.find(c => c.owned && flatWords(c.name).trim() && (flatWords(asksFor).includes(flatWords(c.name)) || flatWords(c.name).trim() === asksFor));
+    if (mine) return { success: true, clips: found, result: `Yes, I can do the ${mine.name}. Say "do the ${mine.name}" and I will.` };
+    const part = (c) => / (?:in|out|once)$/i.test(c.name) && found.some(x => x !== c && x.name.toLowerCase() === c.name.replace(/ (?:in|out|once)$/i, '').toLowerCase());
+    const lines = found.filter(c => !part(c)).map(c => `- ${c.name}: ${c.owned ? 'I own it' : this.clipPrice(c)}`);
     return { success: true, clips: found, result: `Bots & Borgs clips for "${words}":\n${lines.join('\n')}` };
   }
 
@@ -3636,24 +3646,89 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
       .filter(p => p.path.startsWith(root) && p.path.endsWith('.glb'));
   }
 
-  async playClip({ item, clip, asked = '' }) {
-    const picked = await this.chooseClip({ item, clip, asked });
+  async playClip({ item, clip, asked = '', seconds = null, avoid = null }) {
+    const picked = await this.chooseClip({ item, clip, asked, avoid });
     if (picked.error) return { success: false, error: picked.error };
     const { choice, entry, rel } = picked;
+    // How long: a looping move goes on for about 15 s (a 4.8 s Roger Rabbit was over before it was seen, the owner
+    // 2026-11-24), or as long as was asked; whole passes. Anything else plays once.
+    const one = Number(entry.seconds || choice.file.seconds) || null;
+    const want = seconds || secondsAsked(asked) || (entry.loop ? 15 : null);
+    const total = entry.loop && one && want ? Math.max(1, Math.ceil(want / one - 0.05)) * one : null;
+    // While it moves, no emote takes the body (autoEmote): a salute ended every dance after 3 s.
+    this._move = { label: choice.file.label, at: Date.now(), until: Date.now() + ((total || one || 6) + 2) * 1000 };
+    clearTimeout(this._moveTimer);
     // Everywhere its body is: every open playground or designer page (no AvatarX needed), and AvatarX when it has one.
     const shown = await this.propsForBody(entry.props, { asked: `${clip || ''} ${asked}` });
-    const pages = await this.playOnPages({ file: entry.file, label: entry.label, loop: !!entry.loop, prop: entry.prop || null, ...(shown.length ? { props: shown } : {}) });
+    const pages = await this.playOnPages({ file: entry.file, label: entry.label, loop: !!entry.loop, prop: entry.prop || null, ...(total ? { seconds: total } : {}), ...(shown.length ? { props: shown } : {}) });
     const { playOnAvatarX, pushClipsToAvatarX } = await import('../../services/avatar/avatarx.js');
     let avatarx = 'not connected';
     try {
       const [name] = await pushClipsToAvatarX([{ file: path.join(this.vrmDir(), 'animations', rel) }]).then(r => (Array.isArray(r) ? r : []));
-      if (name) avatarx = await playOnAvatarX(name);
+      if (name) {
+        let took = null;
+        avatarx = await playOnAvatarX(name, total ? { seconds: total, onAnswer: (r) => { took = r; } } : {});
+        // An AvatarX that plays a clip once (before it takes `seconds`): played again as each pass ends.
+        if (avatarx === 'played' && total > one && !(Number(took?.seconds) > 0)) this.repeatOnAvatarX(name, one, total, playOnAvatarX);
+      }
     } catch (e) { this.logger.warn(`botsandborgs: AvatarX did not play ${choice.file.label}: ${e.message}`); avatarx = 'failed'; }
     const places = [pages ? `in my 3D playground${pages > 1 ? ` (${pages} pages open)` : ''}` : null, avatarx === 'played' ? 'in AvatarX' : null].filter(Boolean);
     this.logger.info(`botsandborgs: playing ${choice.file.label} on ${pages} page(s), AvatarX ${avatarx}`);
     if (!places.length && avatarx === 'failed') return { success: false, error: `I couldn't play ${choice.file.label}: AvatarX refused it and no 3D page is open.`, clip: choice.file.label };
     return { success: true, clip: choice.file.label, pages, avatarx,
       result: places.length ? `Doing ${choice.file.label} now, ${places.join(' and ')}.` : `${choice.file.label} is ready, but my 3D body isn't open anywhere: open the 3D playground (or AvatarX) and ask again.` };
+  }
+
+  /** Play a clip on AvatarX again at the end of each pass until `total` seconds, unless another move began. */
+  repeatOnAvatarX(name, one, total, play) {
+    const move = this._move;
+    let done = one;
+    const next = () => {
+      if (this._move !== move || done >= total - one / 10) return;
+      done += one;
+      Promise.resolve(play(name)).catch(e => this.logger.warn(`botsandborgs: AvatarX did not repeat ${name}: ${e.message}`));
+      this._moveTimer = setTimeout(next, one * 1000);
+      this._moveTimer.unref?.();
+    };
+    this._moveTimer = setTimeout(next, one * 1000);
+    this._moveTimer.unref?.();
+  }
+
+  /**
+   * A move asked for where the owner sees the body (AvatarX, the live page): played at once, with no model in between.
+   * Returns the words to answer with, or null when the message is not such a request.
+   */
+  async moveByWords(text) {
+    const files = (await this.libraryItems()).flatMap(i => i.files.filter(f => f.kind === 'animation' && f.bodyFit !== 'broad' && !f.role && !f.whileTalking));
+    const labels = [...new Set(files.map(f => f.label).filter(Boolean))];
+    if (!labels.length) return null;
+    const recent = this._move && Date.now() - this._move.at < 5 * 60 * 1000 ? this._move : null;
+    const ask = moveRequest(text, { labels, recent });
+    if (!ask) return null;
+    this.logger.info(`botsandborgs: a move read directly: ${JSON.stringify(ask)}`);
+    if (ask.kind === 'list') {
+      const dances = this.danceLabels(files);
+      return dances.length ? `I can do ${dances.length > 1 ? `${dances.slice(0, -1).join(', ')} and ${dances.at(-1)}` : dances[0]}. Which one?` : "I don't own a dance yet.";
+    }
+    const r = ask.kind === 'named' ? await this.playClip({ clip: ask.label, asked: text, seconds: ask.seconds })
+      : ask.kind === 'again' ? await this.playClip({ clip: recent.label, seconds: ask.seconds })
+        : await this.playClip({ clip: 'dance', asked: ask.kind === 'another' ? 'dance' : text, seconds: ask.seconds, avoid: recent?.label || null });
+    if (!r.success) return r.error;
+    return r.avatarx === 'played' || r.pages ? `Doing the ${r.clip}.` : r.result;
+  }
+
+  /** The dances among these clips, by name, each once. */
+  danceLabels(files) {
+    return [...new Set(files.filter(f => f.gesture === 'dance' && f.label && !/^dance$/i.test(f.label)).map(f => f.label.replace(/ facing away$/i, '')))].slice(0, 24);
+  }
+
+  /** One line about this body for whoever answers in front of it: what it can really do. '' when it owns no moves. */
+  async bodyBrief() {
+    const files = (await this.libraryItems().catch(() => [])).flatMap(i => i.files.filter(f => f.kind === 'animation' && f.bodyFit !== 'broad' && !f.role && !f.whileTalking));
+    const dances = this.danceLabels(files);
+    const moves = [...new Set(files.filter(f => f.gesture !== 'dance' && f.label && !/idle|loop|accent|talk|listen/i.test(f.label)).map(f => f.label))].slice(0, 24);
+    if (!dances.length && !moves.length) return '';
+    return 'You are on screen in your own 3D body, and it really moves.' + (dances.length ? ` Dances you can do: ${dances.join(', ')}.` : '') + (moves.length ? ` Other moves: ${moves.join(', ')}.` : '');
   }
 
   /**
@@ -3775,7 +3850,7 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
         const { avatarxClipName } = await import('../../services/avatar/avatarx.js');
         let name = avatarxClipName(clip.file);
         if (!(await clips()).has(name) && (await clips()).has(`bnb-${name}`)) name = `bnb-${name}`;
-        broadcast({ type: 'gesture', name, fromPages: true });
+        broadcast({ type: 'gesture', name, ...(clip.seconds ? { seconds: clip.seconds } : {}), fromPages: true });
       }).catch(e => this.logger.warn(`botsandborgs: live pages not told: ${e.message}`));
     }
     const web = this.agent?.interfaces?.get?.('web');
@@ -4190,7 +4265,7 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     const pm = this.agent?.providerManager;
     if (!call || !pm?.generateResponse) return null;
     const { autoEmote } = await import('../../services/avatar/autoEmote.js');
-    return autoEmote({ userText, replyText, call, agentName: process.env.AGENT_NAME || 'The assistant',
+    return autoEmote({ userText, replyText, call, moving: () => Date.now() < (this._move?.until || 0), agentName: process.env.AGENT_NAME || 'The assistant',
       generate: (prompt) => this.askEmoteModel(pm, prompt) });
   }
 
