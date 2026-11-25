@@ -164,24 +164,26 @@ window.setup = async ({ width, height, fps, seconds, loop, prop, props = [], bac
     const mark = (set.marks || []).find(m => m.id === (set.mark || 'main')) || (set.marks || [])[0] || { position: [0, 0, 0], facing_deg: 0 };
     setRoot = new THREE.Group();
     if (set.kind === 'equirect') {
-      // A 360 picture, its lower half laid on the floor under the feet (as three.js's GroundedSkybox does): taken from
-      // eye_height_m, flat out to ground_radius_m. front_deg: the image yaw (0 = center column, + = right) behind the body.
+      // A 360 picture: floor flat out to ground_radius_m, then a half sphere of that same radius around the mark, projected
+      // from eye_height_m, so what stands upright in it stays upright (AvatarX 0.4.20's panorama, MIT; the store's own
+      // checking page, 3910 #5943). front_deg: the image column (0 = center, + = right) behind the body, at -Z.
       const tex = await new THREE.TextureLoader().loadAsync('/set.img');
       tex.colorSpace = THREE.SRGBColorSpace; tex.anisotropy = 4;
-      const eye = Math.min(Math.max(Number(set.eye_height_m) || 1.5, 0.3), 5), flat = Math.min(Math.max(Number(set.ground_radius_m) || 12, 4), 40);
-      // ground_radius_m is how far the floor stays flat (the store, 3910 #5946); this shape is flat to two thirds of its sphere.
-      const R = 1.5 * Math.hypot(eye, flat);
-      const geo = new THREE.SphereGeometry(R, 128, 96); geo.scale(1, 1, -1);
-      const at = geo.getAttribute('position'), q = new THREE.Vector3(), y1 = -eye * 1.5;
-      for (let i = 0; i < at.count; i++) {
-        q.fromBufferAttribute(at, i);
-        if (q.y >= 0) continue;
-        q.multiplyScalar(q.y < y1 ? -eye / q.y : 1 - (q.y * q.y) / (3 * y1 * y1)); q.toArray(at.array, 3 * i);
+      const eye = Math.min(Math.max(Number(set.eye_height_m) || 1.5, 0.3), 5), R = Math.min(Math.max(Number(set.ground_radius_m) || 12, 2), 45), front = Number(set.front_deg) || 0;
+      const rim = Math.atan2(eye, R), rows = [], pos = [], uv = [], idx = [], cols = 192;
+      for (let n = 0; n <= 64; n++) rows.push(Math.PI / 2 - (Math.PI / 2 + rim) * n / 64);
+      for (let n = 1; n <= 64; n++) rows.push(-Math.atan2(eye, R * (1 - n / 64)));
+      for (const up of rows) for (let c = 0; c <= cols; c++) {
+        const a = (c / cols - 0.5) * 2 * Math.PI - THREE.MathUtils.degToRad(front), dy = Math.sin(up), dx = Math.sin(a) * Math.cos(up), dz = -Math.cos(a) * Math.cos(up);
+        const t = up < -rim - 1e-9 ? eye / -dy : -eye * dy + Math.sqrt(Math.max(0, eye * eye * dy * dy - eye * eye + R * R));
+        pos.push(dx * t, Math.max(0, eye + dy * t), dz * t); uv.push(c / cols, 0.5 + up / Math.PI);
       }
-      const dome = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ map: tex, depthWrite: false }));
-      dome.position.y = eye; dome.renderOrder = -1;
-      // The picture's center column sits at -Z (behind the body) after a quarter turn; front_deg turns it from there.
-      dome.rotation.y = THREE.MathUtils.degToRad(90 + (Number(set.front_deg) || 0));
+      const w = cols + 1;
+      for (let y = 0; y < rows.length - 1; y++) for (let c = 0; c < cols; c++) { const k = y * w + c; idx.push(k, k + w, k + 1, k + 1, k + w, k + w + 1); }
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3)); geo.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2)); geo.setIndex(idx);
+      const dome = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ map: tex, side: THREE.DoubleSide, depthWrite: false }));
+      dome.renderOrder = -1; dome.frustumCulled = false;
       setRoot.add(dome);
       setRoot.rotation.y = -THREE.MathUtils.degToRad(mark.facing_deg || 0);
     } else {

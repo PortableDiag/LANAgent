@@ -2,6 +2,11 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.937] - 2026-11-25
+
+### Changed
+- A 360 set is drawn as AvatarX and the store draw it: the floor flat as far as the set says, then a half sphere, so what stands upright in the picture stays upright as the camera circles.
+
 ## [2.25.936] - 2026-11-25
 
 ### Fixed
