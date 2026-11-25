@@ -2,6 +2,11 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.941] - 2026-11-25
+
+### Added
+- **The stage** (`GET /stage/v1/state`, `/stage/v1/files/<sha256>`): a program on the owner's own machines that draws the agent's body dancing (Gapless) reads the body worn now, its look, the dances that suit it and the set it stands in. Read only, with its own key; off until one is made (`data/stage/key.sha256`). A lent body says so.
+
 ## [2.25.940] - 2026-11-25
 
 ### Fixed

@@ -3741,6 +3741,59 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     return place ? `${place} ${did}` : did;
   }
 
+  /**
+   * What the stage shows (interfaces/web/stage.js): { state, files: Map(sha256 -> path) }, or null with no body on. The
+   * dances are the looping ones that suit the body worn now, in its own fitted version where the store made one; none
+   * that needs a prop, and not the pole.
+   */
+  async stageState() {
+    const id = this.agent?.agentModel?.activeVRMModel;
+    const manifest = await fs.readFile(path.join(this.vrmDir(), 'manifest.json'), 'utf8').then(JSON.parse).catch(() => []);
+    const model = manifest.find(m => m.id === id && m.file);
+    if (!model) return null;
+    const files = new Map();
+    const add = async (file) => {
+      const st = await fs.stat(file);
+      const key = `${file}:${st.size}:${st.mtimeMs}`;
+      this._stageSha ||= new Map();
+      if (!this._stageSha.has(key)) this._stageSha.set(key, crypto.createHash('sha256').update(await fs.readFile(file)).digest('hex'));
+      const sha256 = this._stageSha.get(key);
+      files.set(sha256, file);
+      return { sha256, url: `/stage/v1/files/${sha256}` };
+    };
+    const lent = /^store-linked-/.test(id);
+    const avatar = { ...(await add(path.join(this.vrmDir(), model.file))), lent, expires: null };
+    const body = await this.bodyOf(id).catch(() => null);
+    const not = await this.clipsNotFor(id).catch(() => null);
+    const fitted = await this.fittedClips(id).catch(() => new Map());
+    const { avatarxClipName } = await import('../../services/avatar/avatarx.js');
+    const dances = [];
+    for (const item of await this.libraryItems()) {
+      if (item.solvedFor && item.solvedFor !== id) continue;
+      const need = await this.requiredProps(item.variant).catch(() => new Map());
+      for (const f of item.files) {
+        if (f.kind !== 'animation' || f.gesture !== 'dance' || !f.loop || f.role || f.bodyFit === 'broad' || /\bpole\b/i.test(f.label || '')) continue;
+        if (f.bodies === 'female' && body !== 'female') continue;
+        if (not && (not.clips.has(clipStem(f.name)) || not.clips.has(clipStem(f.label)))) continue;
+        if ((need.get(String(f.name).toLowerCase()) || []).length) continue;
+        const rel = `store/${safeName(item.variant)}/${f.name}`;
+        const own = fitted.get(avatarxClipName(rel));
+        const at = await add(own || path.join(this.vrmDir(), 'animations', rel)).catch(() => null);
+        if (!at) continue;
+        const energy = { calm: 0.3, normal: 0.6, high: 0.9 }[f.energy];
+        dances.push({ clip: avatarxClipName(rel), title: f.label, ...at, seconds: Number(f.seconds) || null, loop: true, ...(f.faces ? { faces: f.faces } : {}), ...(energy ? { energy } : {}), ...(own && lent ? { lent: true, expires: null } : {}) });
+      }
+    }
+    dances.sort((a, b) => a.clip.localeCompare(b.clip));
+    // The set it stands in on AvatarX, when it stands in one.
+    let set = null;
+    const bg = await Promise.race([import('../../services/avatar/avatarx.js').then(m => m.avatarxCaller()).then(c => c?.('GET', '/agent/v1/state')).then(s => s?.background).catch(() => null), new Promise(r => setTimeout(r, 2500, null).unref?.())]);
+    const owned = bg ? (await this.ownedSets().catch(() => [])).find(s => s.spec.id === bg) : null;
+    if (owned) set = { ...(await add(owned.mediaPath)), kind: owned.spec.kind === 'equirect' ? 'panorama' : 'glb', spec: owned.spec };
+    const look = (await this.avatarLooks().catch(() => ({})))[id] || null;
+    return { state: { v: 1, agent: process.env.AGENT_NAME || 'LANAgent', avatar, look, dances, set, choreography: null }, files };
+  }
+
   /** The dances among these clips, by name, each once. */
   danceLabels(files) {
     return [...new Set(files.filter(f => f.gesture === 'dance' && f.label && !/^dance$/i.test(f.label)).map(f => f.label.replace(/ facing away$/i, '')))].slice(0, 24);
