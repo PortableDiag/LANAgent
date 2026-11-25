@@ -140,9 +140,13 @@ window.setup = async ({ width, height, fps, seconds, loop, prop, props = [], bac
         if (!at || !at.every(Number.isFinite)) continue;
         const dl = new THREE.DirectionalLight(color, power);
         dl.position.set(...at).normalize().multiplyScalar(5).applyAxisAngle(new THREE.Vector3(0, 1, 0), turn);
-        // A sun near the horizon would throw a shadow ten meters long, past the floor that shows it: kept at 28 degrees.
-        if (dl.position.y < 5 * Math.sin(0.49)) { const f = Math.hypot(dl.position.x, dl.position.z) || 1e-6, k = 5 * Math.cos(0.49) / f; dl.position.set(dl.position.x * k, 5 * Math.sin(0.49), dl.position.z * k); }
-        scene.add(dl); key ||= dl;
+        scene.add(dl);
+        if (!key) {
+          key = dl;
+          // A sun near the horizon would throw a shadow ten meters long, past the floor that shows it: the shadow comes from
+          // a light of no strength at 28 degrees, and the body is lit from where the sun is (the store, 3910 #6088).
+          if (dl.position.y < 5 * Math.sin(0.49)) { const f = Math.hypot(dl.position.x, dl.position.z) || 1e-6, k = 5 * Math.cos(0.49) / f; key = new THREE.DirectionalLight(0xffffff, 0.0001); key.position.set(dl.position.x * k, 5 * Math.sin(0.49), dl.position.z * k); scene.add(key); }
+        }
       }
     }
   } else scene.add(new THREE.HemisphereLight(0xffffff, 0x3a4050, 2.2));

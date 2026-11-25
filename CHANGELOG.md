@@ -2,6 +2,11 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.940] - 2026-11-25
+
+### Fixed
+- In a set with a low sun the body is lit from where the sun is; only its shadow is kept short enough to stay on the floor.
+
 ## [2.25.939] - 2026-11-25
 
 ### Fixed
