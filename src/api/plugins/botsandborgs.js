@@ -8,7 +8,7 @@ import { ROLES, normalizeRole, resolveRoleModel, modelsInUse, autoFillRoles } fr
 import { flatWords, moveRequest, secondsAsked, spokenLabel } from '../../services/avatar/moveRequest.js';
 import fs from 'node:fs/promises';
 import { DATA_PATH } from '../../utils/paths.js';
-import { propsFor, notOnBody, seatFor, variantKind, livePass, applyClipManifest, unpack, installVrm, addToManifest, readVrmInfo, readVrmaInfo, clipLabel, clipLoops, clipGesture, writeStoreAnimations, safeName, toStickerWebp, moodOf, portraitFromPreview } from '../../services/store/assetLibrary.js';
+import { propsFor, notOnBody, seatFor, variantKind, livePass, applyClipManifest, unpack, installVrm, addToManifest, readVrmInfo, readVrmaInfo, clipLabel, clipLoops, clipGesture, writeStoreAnimations, safeName, toStickerWebp, moodOf, portraitFromPreview, readSetSpec, setNamed } from '../../services/store/assetLibrary.js';
 import { moodChoices, chooseSticker, stickerCouldFit, wallpaperFor } from '../../services/store/selfUse.js';
 import { motionPrompt, parseMotionScript, readJob, reportFailures, motionTags, motionName } from '../../services/store/animSolve.js';
 import { LINK_ROLES, linkedVariant, linkedModelId, linkedPrefix, contactKey, agentLinks, linkOutfits, readChoice, lockerRef, sha256, linkEnded } from '../../services/store/linkedAgents.js';
@@ -3093,12 +3093,12 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
   }
 
   /**
-   * Every animation and props pack in the store that this agent does not own, taken at no cost under an active
+   * Every animation pack, props pack and 3D set in the store that this agent does not own, taken at no cost under an active
    * All-Access plan (its own or a seat on another). Whole packs only, never a single clip a pack holds; up to the
    * plan's downloads left this period, keeping 3 for the owner's own asks. Never spends money: a pack the plan does
    * not cover (any price above $0) is left alone. Returns the variants taken.
    */
-  async takeNewPacks({ collections = ['animations', 'props'], keep = 3 } = {}) {
+  async takeNewPacks({ collections = ['animations', 'props', 'sets'], keep = 3 } = {}) {
     const key = await this.accountKey().catch(() => null);
     if (!key) return [];
     const plan = await this.plan(key);
@@ -3812,11 +3812,14 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
       // "Pan left to right", "a side shot": the camera moves (the owner, 2026-11-22). A picture stands on a curved wall
       // then, so only one named in the request is used, and its wide copy; else a plain studio floor.
       const camera = framing === 'full' ? cameraAsked(moves) : null;
-      const scene = await this.backgroundFor(asked, camera ? { namedOnly: true, wide: true } : {});
+      // A 3D set or a 360 named in the request (store 0.77) is where it is filmed; else a background picture.
+      const set = await this.setFor(moves, { speaking: !!words });
+      if (set) this.logger.info(`botsandborgs: filming in the set ${set.setSpec.title || set.setSpec.id}`);
+      const scene = set ? null : await this.backgroundFor(asked, camera ? { namedOnly: true, wide: true } : {});
       if (camera) this.logger.info(`botsandborgs: filming with the camera move ${camera.id}`);
       if (scene) this.logger.info(`botsandborgs: filming in front of ${path.basename(scene)}${framing !== 'full' ? `, ${framing} framing` : ''}`);
       const v = await (this.renderVideo || renderClipVideo)({ modelPath: path.join(this.vrmDir(), model.file), look: model.look || (await this.avatarLooks().catch(() => ({})))[model.id] || null, clipPath: await this.clipFileFor(model.id, rel),
-        loop: !!entry.loop, prop: entry.prop || null, props: this.propPaths(await this.propsForBody(entry.props, { asked, scene, modelId: model.id })), framing, ...(camera ? { camera } : {}), ...(voice ? { voice } : {}), ...(scene ? { backgroundPath: scene } : {}) });
+        loop: !!entry.loop, prop: entry.prop || null, props: this.propPaths(await this.propsForBody(entry.props, { asked, scene, modelId: model.id })), framing, ...(camera ? { camera } : {}), ...(voice ? { voice } : {}), ...(set || {}), ...(scene ? { backgroundPath: scene } : {}) });
       const filename = `${String(label).toLowerCase().replace(/[^a-z0-9]+/g, '-')}.mp4`;
       if (/^(me|owner|myself)$/i.test(to)) {
         const tg = this.agent?.interfaces?.get?.('telegram');
@@ -4060,6 +4063,40 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     if (!named && namedOnly) return null;
     const pick = named || phone[Math.floor(Date.now() / 86400000) % phone.length];
     return path.join(this.libraryDir(), safeName(pick.item.variant), pick.file.name);
+  }
+
+  /** The owned sets: [{ item, spec, mediaPath }]. A spec whose media is missing or is not the file it names is left out. */
+  async ownedSets() {
+    const out = [];
+    for (const item of await this.libraryItems()) {
+      if (!item.files.some(f => f.kind === 'set-spec')) continue;
+      const dir = path.join(this.libraryDir(), safeName(item.variant));
+      for (const f of item.files.filter(x => x.kind === 'set-spec')) {
+        const spec = readSetSpec(await fs.readFile(path.join(dir, f.name), 'utf8').catch(() => ''));
+        const media = spec && item.files.find(x => x.kind === 'set-media' && x.name === safeName(spec.file));
+        if (!media) continue;
+        const mediaPath = path.join(dir, media.name);
+        if (spec.sha256) {
+          const st = await fs.stat(mediaPath).catch(() => null);
+          const key = `${mediaPath}:${st?.mtimeMs}:${spec.sha256}`;
+          this._setSha ||= new Map();
+          if (!this._setSha.has(key)) this._setSha.set(key, crypto.createHash('sha256').update(await fs.readFile(mediaPath).catch(() => Buffer.alloc(0))).digest('hex') === String(spec.sha256).toLowerCase());
+          if (!this._setSha.get(key)) { this.logger.warn(`botsandborgs: the set ${spec.id || f.name} is not used: ${media.name} is not the file it names`); continue; }
+        }
+        out.push({ item, spec, mediaPath });
+      }
+    }
+    return out;
+  }
+
+  /** The set a video request names, with the mark to stand on, or null. */
+  async setFor(asked, { speaking = false } = {}) {
+    const found = setNamed(asked, await this.ownedSets().catch(e => { this.logger.warn(`botsandborgs: sets not read: ${e.message}`); return []; }));
+    if (!found) return null;
+    const marks = Array.isArray(found.spec.marks) ? found.spec.marks : [];
+    const main = marks.find(m => m.id === 'main') || marks[0];
+    const talk = speaking && main && !(main.use || []).includes('talk') ? marks.find(m => (m.use || []).includes('talk')) : null;
+    return { setPath: found.mediaPath, setSpec: talk ? { ...found.spec, mark: talk.id } : found.spec };
   }
 
   /** A model's store product, whatever variant brought it: vrm-racer-blue-bundle / -live30 / -kit → vrm-racer-blue. */

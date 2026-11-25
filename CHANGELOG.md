@@ -2,6 +2,11 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.933] - 2026-11-25
+
+### Added
+- **3D sets and 360s from the store.** A set (bnb-set/1) is taken under All-Access like a pack, and a video is filmed in the one it names: "a video of you dancing on the Sunset Beach", "in the cozy room in the evening". A media file that is not the one its spec names is never used.
+
 ## [2.25.932] - 2026-11-25
 
 ### Fixed

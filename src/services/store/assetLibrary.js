@@ -83,6 +83,8 @@ export function variantKind(variant, collection = '') {
   if (collection === 'sounds' || /^call-sounds(?:-|$)/.test(id)) return 'sound';
   // Store 0.20: empty scenes to stand the avatar in (AvatarX pages, avatar videos), desktop + phone.
   if (collection === 'backgrounds' || /^bg-/.test(id)) return 'background';
+  // 3D sets and 360s to film in (bnb-set/1, 3910 #5837).
+  if (collection === 'sets' || /^set-/.test(id)) return 'set';
   // Props (VRM Props Pack 1, 2119 #494): .glb objects for clips that mime one. Before the vrm- rule, or a props pack
   // would install as a model.
   if (collection === 'props' || /^vrm-props?(?:-|$)/.test(id) || /-props?(?:-pack)?(?:-\d+)?$/.test(id)) return 'prop';
@@ -103,6 +105,8 @@ export function fileKind(filename, kind = 'portrait') {
   const ext = path.extname(n);
   if (ext === '.vrm') return 'vrm';
   if (ext === '.vrma') return 'animation';
+  // A set: its spec (set.json, or day.set.json and evening.set.json over one mesh) and the mesh or 360 picture it names.
+  if (kind === 'set') return /(^|\/)(?:[\w-]+\.)?set\.json$/.test(n) ? 'set-spec' : /\.(txt|md|pdf)$/.test(n) ? 'document' : /preview|thumbnail|contact.?sheet/.test(n) ? 'preview' : /\.(glb|jpe?g|png|webp)$/.test(n) ? 'set-media' : null;
   // A prop's model; only a props pack holds them (a stray .glb elsewhere is not a prop).
   if (ext === '.glb') return kind === 'prop' ? 'prop' : null;
   if (/(^|\/)attach\.json$/.test(n)) return kind === 'prop' ? 'prop-manifest' : null;
@@ -586,4 +590,36 @@ export async function portraitFromPreview(buffer) {
   return sharp(buffer).rotate().extract({ left, top: up, width: w, height: h })
     .extend({ left: Math.floor(padX / 2), right: Math.ceil(padX / 2), top: Math.floor(padY / 2), bottom: Math.ceil(padY / 2), background: { r: bg[0], g: bg[1], b: bg[2] } })
     .png().toBuffer();
+}
+
+/** A set's spec (bnb-set/1) when it is one this renderer can film in, else null. */
+export function readSetSpec(json) {
+  let s; try { s = typeof json === 'string' ? JSON.parse(json) : json; } catch { return null; }
+  if (!s || s.format !== 'bnb-set/1' || !['mesh', 'equirect'].includes(s.kind) || !s.file || typeof s.file !== 'string') return null;
+  const ext = path.extname(s.file).toLowerCase();
+  if (s.kind === 'mesh' ? ext !== '.glb' : !['.jpg', '.jpeg', '.png', '.webp'].includes(ext)) return null;
+  return s;
+}
+
+// Words of a set's title that say nothing about which set it is.
+const SET_PLAIN = new Set(['360', 'set', 'scene', 'the', 'and', 'room', 'day', 'night', 'evening', 'place', 'field', 'final']);
+const setWords = (t) => String(t || '').toLowerCase().replace(/cosy/g, 'cozy').match(/[a-z0-9]+/g) || [];
+
+/**
+ * The set a request names ("dancing on the Sunset Beach", "in the cozy room in the evening"), or null. Its whole title, or
+ * a telling word of it or of its tags after in / on / at. Of two that fit alike (day and evening) the one whose other
+ * words are said, else the first.
+ */
+export function setNamed(asked, sets) {
+  const said = ` ${setWords(asked).join(' ')} `;
+  const scored = sets.map((x) => {
+    const title = setWords(x.spec.title || x.spec.id);
+    const bare = title.filter(w => w !== '360' && w !== 'set').join(' ');
+    const telling = [...new Set([...title, ...(Array.isArray(x.spec.tags) ? x.spec.tags.flatMap(setWords) : [])])].filter(w => w.length >= 4 && !SET_PLAIN.has(w));
+    const whole = bare && said.includes(` ${bare} `) ? 100 : 0;
+    const at = telling.filter(w => new RegExp(` (?:in|on|at|inside|into|onto|from|with|behind)(?: [a-z0-9]+){0,3} ${w} `).test(said)).length;
+    const rest = title.filter(w => ['day', 'night', 'evening'].includes(w) && said.includes(` ${w} `)).length;
+    return { x, score: whole || at ? whole + at * 10 + rest : 0 };
+  }).filter(s => s.score).sort((a, b) => b.score - a.score);
+  return scored[0]?.x || null;
 }
