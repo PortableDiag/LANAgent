@@ -121,3 +121,27 @@ export function isLightComplaint(text) {
   if (/^\s*(why|how come|what)\b/i.test(s)) return false;
   return COMPLAINT.test(s);
 }
+
+/**
+ * A question about the lights' schedules: { device } (null: all of them), or null when it is not one. "Do you have any
+ * schedules for that light?" took 30 s and was answered from the chat, not from the schedules (2026-11-25).
+ */
+export function scheduleQuestion(text, deviceNames = [], recentDevice = null) {
+  const s = String(text || '').trim();
+  if (s.length > 160 || !/\bschedul(?:e|es|ed)\b/i.test(s)) return null;
+  if (/\b(?:delete|cancel|remove|clear|add|create|set up|make|change|move|stop|turn|update|disable|enable|meeting|email|calendar|post|task|reminder|job|call)\b/i.test(s)) return null;
+  if (!/\?\s*$/.test(s) && !/^(?:alice[, ]+)?(?:do|does|are|is|what|which|any|list|show|check|when)\b/i.test(s)) return null;
+  const device = findDevice(s, deviceNames);
+  if (device && device !== 'all') return { device };
+  if (!/\b(?:lights?|lamps?|bulbs?|govee)\b/i.test(s)) return null;
+  if (recentDevice && /\b(?:that|this|the) (?:light|lamp|bulb)\b/i.test(s)) return { device: recentDevice };
+  return { device: null };
+}
+
+/** The schedules as listSchedules gives them, in words. */
+export function schedulesInWords(schedules, device = null) {
+  const list = (schedules || []).filter(x => !x.disabled);
+  if (!list.length) return device ? `There is no schedule for ${device}.` : 'There are no light schedules.';
+  const does = (x) => x.action === 'power' ? `turns ${x.settings?.state || 'on'}` : x.settings?.color ? `set to ${x.settings.color}` : x.settings?.level ? `set to ${x.settings.level}%` : x.settings?.kelvin ? `set to ${x.settings.kelvin}K white` : x.settings?.scene ? `scene ${x.settings.scene}` : x.action;
+  return `${list.length === 1 ? 'One schedule' : `${list.length} schedules`}:\n${list.map(x => `- ${x.deviceName}: ${does(x)}, ${x.when}`).join('\n')}`;
+}

@@ -54,7 +54,7 @@ import { BackgroundReview } from '../services/skills/backgroundReview.js';
 import { getUserProfile } from '../services/skills/userProfile.js';
 import { Curator, scheduleCurator } from '../services/skills/curator.js';
 import { looksMultiStep } from './multiStep.js';
-import { parseLightCommand, isLightComplaint, isLightCheck, findDevice } from '../services/govee/lightCommand.js';
+import { parseLightCommand, isLightComplaint, isLightCheck, findDevice, scheduleQuestion, schedulesInWords } from '../services/govee/lightCommand.js';
 import { parseLightSchedule } from '../services/govee/lightSchedule.js';
 import { GoveeEnhancements } from '../api/plugins/govee-enhancements.js';
 
@@ -1198,6 +1198,21 @@ export class Agent extends EventEmitter {
       // A complaint about the light just changed ("no, it didn't, still dark") is a command to redo it, not chat: the
       // follow-up model below spent 18 s before it reached the light (2026-11-10).
       const recentLight = this.apiManager?.getPlugin?.('govee')?.recentCommand?.() || null;
+      // A question about the lights' schedules is answered from the schedules themselves, at once.
+      try {
+        const govee = this.apiManager?.getPlugin?.('govee');
+        const names = govee?.deviceCache && /\bschedul/i.test(input) ? Array.from(govee.deviceCache.values()).map(d => d.deviceName).filter(Boolean) : [];
+        const asked = names.length ? scheduleQuestion(input, names, recentLight?.name) : null;
+        if (asked) {
+          const r = await govee.listSchedules(asked.device ? { device: asked.device } : {});
+          if (r?.success) {
+            logger.info(`Light schedules read directly (${asked.device || 'all'}): ${r.count}`);
+            const content = schedulesInWords(r.schedules, asked.device);
+            await this.memoryManager?.storeConversation(userId, input, content, context);
+            return { type: 'text', content };
+          }
+        }
+      } catch (err) { logger.warn(`Light schedules not read: ${err.message}`); }
       const lightComplaint = !!recentLight && (isLightComplaint(input) || isLightCheck(input)
         // "Toilet now NOW": the light just used, named again with nothing else to do, is a push to redo it.
         || (input.length < 40 && findDevice(input, [recentLight.name]) === recentLight.name && !/\b(off|on|dim|%|white|red|blue|green)\b/i.test(input)));

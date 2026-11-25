@@ -76,3 +76,14 @@ test('a colour ruled out is never set; one left to the agent is picked, dim with
   assert.deepEqual(findSetting('make it white', colors), { action: 'color', params: { color: 'white' } });
   assert.deepEqual(findSetting('dim the toilet light', colors), { action: 'brightness', params: { level: 20 } });
 });
+
+test('a question about light schedules is read from the schedules; anything else is not one', async () => {
+  const { scheduleQuestion, schedulesInWords } = await import('../../src/services/govee/lightCommand.js');
+  const names = ['Master Toilet', 'TVBars'];
+  assert.deepEqual(scheduleQuestion('Do you have any schedules for that light?', names, 'Master Toilet'), { device: 'Master Toilet' });
+  assert.deepEqual(scheduleQuestion('Is there a schedule for the toilet?', names), { device: 'Master Toilet' });
+  assert.deepEqual(scheduleQuestion('what light schedules do I have', names), { device: null });
+  for (const t of ['Every morning at 7am make the Master Toilet light bright White', 'delete the schedule for the toilet light', 'what is on my schedule today?', 'do you have any schedules for that?', 'cancel the light schedule', 'what meetings are scheduled?']) assert.equal(scheduleQuestion(t, names, 'Master Toilet'), null, t);
+  assert.equal(schedulesInWords([{ deviceName: 'Master Toilet', action: 'color', settings: { color: 'bright white' }, when: 'every day at 7:00 AM' }], 'Master Toilet'), 'One schedule:\n- Master Toilet: set to bright white, every day at 7:00 AM');
+  assert.equal(schedulesInWords([], 'Master Toilet'), 'There is no schedule for Master Toilet.');
+});

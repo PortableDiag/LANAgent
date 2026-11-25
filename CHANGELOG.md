@@ -2,6 +2,11 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.932] - 2026-11-25
+
+### Fixed
+- "Do you have any schedules for that light?" is answered at once, from the schedules themselves, never from what was said earlier.
+
 ## [2.25.931] - 2026-11-25
 
 ### Fixed
