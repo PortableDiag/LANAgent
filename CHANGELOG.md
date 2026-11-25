@@ -2,6 +2,11 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.938] - 2026-11-25
+
+### Added
+- **Sets that move.** A set's `loops` play in videos: screens that change picture, lights that breathe, things that sway.
+
 ## [2.25.937] - 2026-11-25
 
 ### Changed

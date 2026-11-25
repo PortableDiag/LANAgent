@@ -69,6 +69,7 @@ function pageHtml(methods) {
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import * as V from '/lib/three-vrm.module.js';
 import { attachProps, updateProps } from '/lib/vrm-props.js';
+import { applyLoops } from '/lib/bnb-loops.js';
 import { wearLook } from '/lib/vrm-look.js';
 import { jawDriver } from '/lib/vrm-jaw.js';
 import { moveAt, viewFor, hiddenAt, pullFor, moveWithin, lightAt } from '/lib/bnb-camera.js';
@@ -159,7 +160,7 @@ window.setup = async ({ width, height, fps, seconds, loop, prop, props = [], bac
   // Rest height (floor to the top of the head): the head bone sits at about 0.88 of it.
   const restHeight = Math.max((vrm.humanoid.getRawBoneNode('head')?.getWorldPosition(new THREE.Vector3()).y || 1.5) / 0.88, 0.2);
   // A 3D set: its main mark is put under the body, so the body, its clips and its props stay where they always are.
-  let setRoot = null, limits = null, facing = 0;
+  let setRoot = null, limits = null, facing = 0, setLoops = null; // setLoops: its moving screens and lights
   if (set) {
     const mark = (set.marks || []).find(m => m.id === (set.mark || 'main')) || (set.marks || [])[0] || { position: [0, 0, 0], facing_deg: 0 };
     setRoot = new THREE.Group();
@@ -192,7 +193,7 @@ window.setup = async ({ width, height, fps, seconds, loop, prop, props = [], bac
       setRoot.add(model);
       setRoot.rotation.y = -THREE.MathUtils.degToRad(mark.facing_deg || 0);
     }
-    scene.add(setRoot); limits = set.camera?.[mark.id] || null; facing = Number(mark.facing_deg) || 0;
+    scene.add(setRoot); setLoops = applyLoops(setRoot, set.loops); limits = set.camera?.[mark.id] || null; facing = Number(mark.facing_deg) || 0;
   } else if (camera && backgroundImage) limits = { arc_deg: [-35, 35] }; // past this the picture's edges show
   camera = moveWithin(camera, limits?.arc_deg);
   // The floor a moving camera sees: the body's shadow on it, and a plain floor under it when there is no set.
@@ -328,6 +329,7 @@ window.setup = async ({ width, height, fps, seconds, loop, prop, props = [], bac
   const jaw = canTalk ? jawDriver(vrm) : null;
   window.frame = (i) => {
     if (i > 0) mixer.update(1 / fps);
+    setLoops?.at(i / fps);
     updateProps(placed, action.time, i > 0 ? 1 / fps : 0); // the store's show windows and the props' own animations
     // With a jaw bone doing the opening, the skin shape only follows lightly (both at full push the tongue out).
     if (canTalk) { em.setValue('aa', (mouth[i] || 0) * (jaw ? 0.4 : 1)); jaw?.set(mouth[i] || 0); }
