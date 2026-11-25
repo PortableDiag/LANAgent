@@ -2,6 +2,11 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.943] - 2026-11-25
+
+### Fixed
+- With many sets, each is what its words say: a title counts more than a tag ("the cozy room" is the Cozy Room), short words work beside another ("tea room", "red planet"), and "under the aurora" is a place.
+
 ## [2.25.942] - 2026-11-25
 
 ### Changed

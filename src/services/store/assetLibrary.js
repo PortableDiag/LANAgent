@@ -601,25 +601,30 @@ export function readSetSpec(json) {
   return s;
 }
 
-// Words of a set's title that say nothing about which set it is.
-const SET_PLAIN = new Set(['360', 'set', 'scene', 'the', 'and', 'room', 'day', 'night', 'evening', 'place', 'field', 'final']);
+// Words that say nothing about which set it is, whether in its title or its tags.
+const SET_PLAIN = new Set(['360', 'set', 'scene', 'the', 'and', 'room', 'day', 'night', 'evening', 'place', 'field', 'final', 'dance', 'talk', 'indoor', 'outdoor', 'wood', 'calm', 'nature', 'water']);
 const setWords = (t) => String(t || '').toLowerCase().replace(/cosy/g, 'cozy').match(/[a-z0-9]+/g) || [];
+const SET_AT = '(?:in|on|at|inside|into|onto|from|with|behind|under|beneath|by|near|through)';
 
 /**
  * The set a request names ("dancing on the Sunset Beach", "in the cozy room in the evening"), or null. Its whole title, or
- * a telling word of it or of its tags after in / on / at. Of two that fit alike (day and evening) the one whose other
- * words are said, else the first.
+ * a telling word of it after in / on / at; a tag counts too, but less than a title ("the cozy room" is the Cozy Room, not
+ * the Attic Loft that is tagged cozy, 2026-11-25). Of two that fit alike the one whose other words are said, else the first.
  */
 export function setNamed(asked, sets) {
   const said = ` ${setWords(asked).join(' ')} `;
+  const has = (w) => said.includes(` ${w} `) || (w.length > 3 && said.includes(` ${w}s `));
+  const at = (w) => new RegExp(` ${SET_AT}(?: [a-z0-9]+){0,3} ${w}s? `).test(said);
   const scored = sets.map((x) => {
     const title = setWords(x.spec.title || x.spec.id);
-    const bare = title.filter(w => w !== '360' && w !== 'set').join(' ');
-    const telling = [...new Set([...title, ...(Array.isArray(x.spec.tags) ? x.spec.tags.flatMap(setWords) : [])])].filter(w => w.length >= 4 && !SET_PLAIN.has(w));
-    const whole = bare && said.includes(` ${bare} `) ? 100 : 0;
-    const at = telling.filter(w => new RegExp(` (?:in|on|at|inside|into|onto|from|with|behind)(?: [a-z0-9]+){0,3} ${w} `).test(said)).length;
-    const rest = title.filter(w => ['day', 'night', 'evening'].includes(w) && said.includes(` ${w} `)).length;
-    return { x, score: whole || at ? whole + at * 10 + rest : 0 };
+    const bare = title.filter(w => w !== '360' && w !== 'set' && w !== 'the').join(' ');
+    const heard = title.filter(has);
+    // A short word ("red", "tea") is a place only beside another word of the same title ("red planet", "tea room").
+    const words = [...new Set(title)].filter(w => !SET_PLAIN.has(w) && w.length >= 3 && at(w) && (w.length >= 4 || heard.length >= 2));
+    const tags = [...new Set(Array.isArray(x.spec.tags) ? x.spec.tags.flatMap(setWords) : [])].filter(w => !SET_PLAIN.has(w) && w.length >= 3 && !title.includes(w) && at(w));
+    const whole = bare && has(bare) ? 100 : 0;
+    const score = whole || words.length || tags.length ? whole + words.length * 10 + tags.length * 3 + heard.length * 2 : 0;
+    return { x, score };
   }).filter(s => s.score).sort((a, b) => b.score - a.score);
   return scored[0]?.x || null;
 }
