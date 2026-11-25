@@ -168,7 +168,9 @@ window.setup = async ({ width, height, fps, seconds, loop, prop, props = [], bac
       // eye_height_m, flat out to ground_radius_m. front_deg: the image yaw (0 = center column, + = right) behind the body.
       const tex = await new THREE.TextureLoader().loadAsync('/set.img');
       tex.colorSpace = THREE.SRGBColorSpace; tex.anisotropy = 4;
-      const eye = Math.min(Math.max(Number(set.eye_height_m) || 1.5, 0.3), 5), R = Math.min(Math.max(Number(set.ground_radius_m) || 12, 4), 40);
+      const eye = Math.min(Math.max(Number(set.eye_height_m) || 1.5, 0.3), 5), flat = Math.min(Math.max(Number(set.ground_radius_m) || 12, 4), 40);
+      // ground_radius_m is how far the floor stays flat (the store, 3910 #5946); this shape is flat to two thirds of its sphere.
+      const R = 1.5 * Math.hypot(eye, flat);
       const geo = new THREE.SphereGeometry(R, 128, 96); geo.scale(1, 1, -1);
       const at = geo.getAttribute('position'), q = new THREE.Vector3(), y1 = -eye * 1.5;
       for (let i = 0; i < at.count; i++) {

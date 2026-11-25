@@ -51,3 +51,25 @@ test('an owned set is found with its media checked, the mark suits a spoken vide
   assert.equal(path.basename(got.setPath), 'b.jpg'); assert.equal(got.setSpec.id, 'sunset-beach-360'); assert.equal(got.backgroundPath, undefined); assert.equal(asked, 0);
   await p.sendClipVideo({ asked: 'send me a video of you doing the rumba', to: 'me', wait: true }); assert.equal(got.setPath, undefined); assert.equal(got.backgroundPath, '/bg.jpg');
 });
+
+test('sets go to AvatarX as stored zips, once; an older AvatarX gets none', async () => {
+  const { pushSetsToAvatarX, backgroundOnAvatarX } = await import('../../src/services/avatar/avatarx.js');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'axs-')); const keyFile = path.join(dir, 'k'); fs.writeFileSync(keyFile, 'k'); const media = path.join(dir, 'b.jpg'); fs.writeFileSync(media, 'a picture');
+  const sets = [{ spec: spec('sunset-beach-360', 'Sunset Beach 360', 'b.jpg', { sha256: sha(Buffer.from('a picture')) }), mediaPath: media }];
+  let held = []; const sent = [];
+  const fetchFn = async (u, o) => { if (o.method === 'GET') return { ok: true, status: 200, json: async () => ({ sets: held, backgrounds: ['nebula'], background: 'nebula' }) }; sent.push({ m: o.method, u: String(u), body: o.body }); return { ok: true, status: 200, json: async () => ({}) }; };
+  const opts = { url: 'https://ax', keyFile, fetchFn };
+  const first = await pushSetsToAvatarX(sets, opts); assert.deepEqual(Object.keys(first), ['sunset-beach-360']); assert.equal(sent.length, 1);
+  const { default: JSZip } = await import('jszip'); const z = await JSZip.loadAsync(sent[0].body); assert.deepEqual(Object.keys(z.files).sort(), ['b.jpg', 'set.json']); assert.equal(JSON.parse(await z.file('set.json').async('string')).id, 'sunset-beach-360');
+  assert.equal(Buffer.from(sent[0].body).readUInt16LE(8), 0, 'stored, not deflated');
+  held = [{ id: 'sunset-beach-360' }]; await pushSetsToAvatarX(sets, { ...opts, sent: first }); assert.equal(sent.length, 1, 'not again');
+  await pushSetsToAvatarX([{ ...sets[0], spec: { ...sets[0].spec, camera: { main: { arc_deg: [-36, 36] } } } }], { ...opts, sent: first }); assert.equal(sent.length, 2, 'a new version');
+  held = undefined; assert.equal(await pushSetsToAvatarX(sets, opts), 'unsupported');
+  held = [{ id: 'sunset-beach-360' }]; assert.deepEqual(await backgroundOnAvatarX('sunset-beach-360', opts), { before: 'nebula' }); assert.equal(JSON.parse(sent.at(-1).body).background, 'sunset-beach-360'); assert.equal(await backgroundOnAvatarX('moon', opts), null);
+});
+
+test('where the body is asked to be', async () => {
+  const { placeRequest } = await import('../../src/services/avatar/moveRequest.js');
+  for (const [t, w] of [['go to the beach', 'go'], ['put yourself in the cozy room', 'go'], ['change the background to the desert', 'go'], ['do the rumba on the rooftop', 'go'], ["let's go to the snow", 'go'], ['go back to your normal background', 'leave'], ['leave the beach', 'leave'],
+    ['send me a video of you on the beach', null], ['I went swimming', null], ['what is the weather', null], ['remind me to go to the beach tomorrow', null]]) assert.equal(placeRequest(t), w, t);
+});

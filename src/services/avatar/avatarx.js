@@ -290,3 +290,41 @@ export async function removeLentAvatars(linkId, opts = {}) {
   }
   return done;
 }
+
+/**
+ * Give AvatarX (0.4.19+, POST /agent/v1/sets) the 3D sets this agent owns, each as its zip (stored entries): one more
+ * background there. sets: [{ spec, mediaPath }]; `sent` = what was given before ({ id: key }), so a set goes up again only
+ * when AvatarX lacks it or it changed. Returns the new `sent`, 'not connected', or 'unsupported' (an older AvatarX).
+ */
+export async function pushSetsToAvatarX(sets, { sent = {}, ...opts } = {}) {
+  const call = await connect(opts);
+  if (!call) return 'not connected';
+  const state = await call('GET', '/agent/v1/state');
+  if (!Array.isArray(state.sets)) return 'unsupported';
+  const there = new Set(state.sets.map(s => s.id));
+  const out = {};
+  for (const { spec, mediaPath } of sets) {
+    const key = `${spec.sha256 || ''}:${JSON.stringify(spec).length}:${JSON.stringify(spec.lights || null).length}:${JSON.stringify(spec.camera || null)}`;
+    if (there.has(spec.id) && sent[spec.id] === key) { out[spec.id] = key; continue; }
+    try {
+      const { default: JSZip } = await import('jszip');
+      const zip = new JSZip();
+      zip.file('set.json', JSON.stringify(spec));
+      zip.file(spec.file, await fs.readFile(mediaPath));
+      await call('POST', '/agent/v1/sets', await zip.generateAsync({ type: 'nodebuffer', compression: 'STORE' }), 'application/zip');
+      out[spec.id] = key;
+      logger.info(`AvatarX: added the set ${spec.title || spec.id}`);
+    } catch (e) { logger.warn(`AvatarX: the set ${spec.id} not given: ${e.message}`); }
+  }
+  return out;
+}
+
+/** Stand the body in a background or set AvatarX holds. Returns { before } (what it showed), or null when it lacks it. */
+export async function backgroundOnAvatarX(name, opts = {}) {
+  const call = await connect(opts);
+  if (!call) return null;
+  const state = await call('GET', '/agent/v1/state');
+  if (!(state.backgrounds || []).includes(name) && !(state.sets || []).some(s => s.id === name)) return null;
+  if (state.background !== name) await call('PATCH', '/agent/v1/state', JSON.stringify({ background: name }));
+  return { before: state.background };
+}

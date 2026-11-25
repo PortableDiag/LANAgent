@@ -28,6 +28,20 @@ const ELSEWHERE = /https?:|\b(?:videos?|film|record|gif|text|texts|email|e-mail|
 const VERB = '(?:do|doing|dance|dancing|perform|performing|play|playing|run|running|show|showing|start|starting|try|trying|hit|bust out|loop|looping|repeat|engage|trigger|see|give|keep)';
 
 /**
+ * Whether a message asks the body to BE somewhere ("go to the beach", "put yourself in the cozy room", "change the
+ * background to the desert", "dance on the rooftop"): 'go', 'leave' ("go back to your normal background"), or null. Which
+ * place is for the caller, who knows the sets.
+ */
+export function placeRequest(text) {
+  const raw = String(text || '').trim();
+  if (!raw || raw.length > 300 || ELSEWHERE.test(raw.replace(/\btonight\b|\bphone\b/gi, ' '))) return null;
+  const said = flatWords(raw);
+  if (/ (?:leave|go back|get out of|back to|return to|normal|usual|regular|old|default|original) .*(?:background|scene|place|beach|room|desert|snow|stage|studio|rooftop|set|normal|home) | (?:remove|clear|get rid of) .*(?:background|scene|set) | go back $| go home $/.test(said)) return 'leave';
+  if (/ (?:go|take|put|stand|move|change|switch|set|be|bring|teleport|head|come|step|use|show|travel|let s|get|jump|dance|dancing|do|perform) .*(?:to|in|on|at|into|onto|inside) /.test(said)) return 'go';
+  return null;
+}
+
+/**
  * What a message asks this body to do: { kind: 'named', label } | { kind: 'dance' } | { kind: 'another' } | { kind: 'again' }
  * | { kind: 'list' } | null, with `seconds` when a length was asked. `labels` are the moves it owns now, `recent` the last
  * move played here within a few minutes ({ label }), so "try another" and "again" mean something.

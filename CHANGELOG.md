@@ -2,6 +2,16 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.936] - 2026-11-25
+
+### Fixed
+- The floor of a 360 stays flat as far as its set says (it was flat to two thirds of that, and straight lines bowed near the feet).
+
+## [2.25.935] - 2026-11-25
+
+### Added
+- **The body stands in the owned sets on AvatarX** (0.4.19): they are given to it as they arrive, and "go to the beach", "dance on the rooftop" or "go back to your normal background" is done at once where the body is seen.
+
 ## [2.25.934] - 2026-11-25
 
 ### Changed

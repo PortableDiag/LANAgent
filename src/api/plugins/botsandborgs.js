@@ -5,7 +5,7 @@ import path from 'path';
 import { PluginSettings } from '../../models/PluginSettings.js';
 import { encrypt, decrypt } from '../../utils/encryption.js';
 import { ROLES, normalizeRole, resolveRoleModel, modelsInUse, autoFillRoles } from '../../services/avatar/avatarRoles.js';
-import { flatWords, moveRequest, secondsAsked, spokenLabel } from '../../services/avatar/moveRequest.js';
+import { flatWords, moveRequest, placeRequest, secondsAsked, spokenLabel } from '../../services/avatar/moveRequest.js';
 import fs from 'node:fs/promises';
 import { DATA_PATH } from '../../utils/paths.js';
 import { propsFor, notOnBody, seatFor, variantKind, livePass, applyClipManifest, unpack, installVrm, addToManifest, readVrmInfo, readVrmaInfo, clipLabel, clipLoops, clipGesture, writeStoreAnimations, safeName, toStickerWebp, moodOf, portraitFromPreview, readSetSpec, setNamed } from '../../services/store/assetLibrary.js';
@@ -3091,6 +3091,7 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     await PluginSettings.setCached(this.name, 'libraryEtags', { etags });
     if (d.next_since != null) await PluginSettings.setCached(this.name, 'libraryCursor', { since: d.next_since, at: new Date().toISOString() });
     if (fixedClips.length) await this.afterClipFixes(fixedClips);
+    if (report.some(x => /^set-/.test(x.variant || ''))) await this.pushSets().catch(e => this.logger.warn(`botsandborgs: AvatarX sets not added: ${e.message}`));
     this.logger.info(`botsandborgs: library sync: ${listed.length} listed${q ? ' since the last check' : ''}, ${report.length} changed${first ? ' (first sync: what is here was taken as current)' : ''}`);
     return report;
   }
@@ -3129,6 +3130,7 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
       if (r?.success) { taken.push(variant); left--; this.logger.info(`botsandborgs: took ${variant} under All-Access`); }
       else this.logger.info(`botsandborgs: ${variant} not taken: ${r?.error || r?.result || 'no answer'}`);
     }
+    if (taken.some(v => /^set-/.test(v))) await this.pushSets().catch(e => this.logger.warn(`botsandborgs: AvatarX sets not added: ${e.message}`));
     if (taken.length) {
       const tg = this.agent?.interfaces?.get?.('telegram');
       await tg?.sendNotification?.(`New from Bots & Borgs, taken under All-Access: ${taken.join(', ')}.`)?.catch?.(() => {});
@@ -3428,6 +3430,7 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     const pushed = await pushClipsToAvatarX(listed.map(c => ({ file: path.join(this.vrmDir(), 'animations', c.file) })))
       .catch(e => { this.logger.warn(`botsandborgs: AvatarX clips not added: ${e.message}`); return null; });
     if (Array.isArray(pushed)) this.logger.info(`botsandborgs: AvatarX holds ${pushed.length} bought clips`);
+    await this.pushSets().catch(e => this.logger.warn(`botsandborgs: AvatarX sets not added: ${e.message}`));
     if (withProps) {
       const { pushPropsToAvatarX } = await import('../../services/avatar/avatarx.js');
       const props = await pushPropsToAvatarX(listed, this.vrmDir())
@@ -3719,8 +3722,9 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     const labels = [...new Set(files.map(f => f.label).filter(Boolean))];
     if (!labels.length) return null;
     const recent = this._move && Date.now() - this._move.at < 5 * 60 * 1000 ? this._move : null;
+    const place = await this.placeByWords(text).catch(e => { this.logger.warn(`botsandborgs: place not read: ${e.message}`); return null; });
     const ask = moveRequest(text, { labels, recent });
-    if (!ask) return null;
+    if (!ask) return place;
     this.logger.info(`botsandborgs: a move read directly: ${JSON.stringify(ask)}`);
     if (ask.kind === 'list') {
       const dances = this.danceLabels(files);
@@ -3730,7 +3734,8 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
       : ask.kind === 'again' ? await this.playClip({ clip: recent.label, seconds: ask.seconds })
         : await this.playClip({ ...(ask.kind === 'another' || !this.moveContent(text.replace(/\bdanc\w*/gi, ' ')) ? { clip: 'dance' } : {}), asked: ask.kind === 'another' ? 'dance' : text, seconds: ask.seconds, avoid: recent?.label || null });
     if (!r.success) return r.error;
-    return r.avatarx === 'played' || r.pages ? `Doing the ${r.clip}.` : r.result;
+    const did = r.avatarx === 'played' || r.pages ? `Doing the ${r.clip}.` : r.result;
+    return place ? `${place} ${did}` : did;
   }
 
   /** The dances among these clips, by name, each once. */
@@ -3743,8 +3748,9 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     const files = (await this.libraryItems().catch(() => [])).flatMap(i => i.files.filter(f => f.kind === 'animation' && f.bodyFit !== 'broad' && !f.role && !f.whileTalking));
     const dances = this.danceLabels(files);
     const moves = [...new Set(files.filter(f => f.gesture !== 'dance' && f.label && !/idle|loop|accent|talk|listen/i.test(f.label)).map(f => f.label))].slice(0, 24);
-    if (!dances.length && !moves.length) return '';
-    return 'You are on screen in your own 3D body, and it really moves.' + (dances.length ? ` Dances you can do: ${dances.join(', ')}.` : '') + (moves.length ? ` Other moves: ${moves.join(', ')}.` : '');
+    const places = [...new Set((await this.ownedSets().catch(() => [])).map(x => String(x.spec.title || x.spec.id).replace(/ 360$/, '')))];
+    if (!dances.length && !moves.length && !places.length) return '';
+    return 'You are on screen in your own 3D body, and it really moves.' + (dances.length ? ` Dances you can do: ${dances.join(', ')}.` : '') + (moves.length ? ` Other moves: ${moves.join(', ')}.` : '') + (places.length ? ` Places you can stand in: ${places.join('; ')}.` : '');
   }
 
   /**
@@ -4097,6 +4103,46 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
       }
     }
     return out;
+  }
+
+  /** The owned sets on AvatarX, each once and again only when it changed. */
+  async pushSets() {
+    const sets = await this.ownedSets();
+    if (!sets.length) return null;
+    const { pushSetsToAvatarX } = await import('../../services/avatar/avatarx.js');
+    const sent = (await PluginSettings.getCached(this.name, 'avatarxSets').catch(() => null))?.sent || {};
+    const now = await pushSetsToAvatarX(sets, { sent });
+    if (typeof now === 'object') {
+      if (JSON.stringify(now) !== JSON.stringify(sent)) await PluginSettings.setCached(this.name, 'avatarxSets', { sent: now });
+      this.logger.info(`botsandborgs: AvatarX holds ${Object.keys(now).length} sets`);
+    }
+    return now;
+  }
+
+  /**
+   * "Go to the beach", "dance on the rooftop", "go back to your normal background", said where the body is seen: AvatarX
+   * stands it there. Returns the words for it ('On the Sunset Beach.'), or null.
+   */
+  async placeByWords(text) {
+    const ask = placeRequest(text);
+    if (!ask) return null;
+    const { backgroundOnAvatarX } = await import('../../services/avatar/avatarx.js');
+    const sets = await this.ownedSets();
+    if (!sets.length) return null;
+    const kept = (await PluginSettings.getCached(this.name, 'avatarxBackground').catch(() => null)) || {};
+    const isSet = (n) => sets.some(x => x.spec.id === n);
+    const found = setNamed(String(text).replace(/\bto\b/gi, 'in'), sets);
+    if (ask === 'leave' && !(found && /\bback to\b/i.test(text))) {
+      const r = kept.before ? await backgroundOnAvatarX(kept.before).catch(() => null) : null;
+      return r && isSet(r.before) ? 'Back where I was.' : null;
+    }
+    if (!found) return null;
+    const r = await backgroundOnAvatarX(found.spec.id).catch(e => { this.logger.warn(`botsandborgs: AvatarX did not change the set: ${e.message}`); return null; });
+    if (!r) return null;
+    // Where it stood before the first set, to go back to.
+    if (r.before && !isSet(r.before)) await PluginSettings.setCached(this.name, 'avatarxBackground', { before: r.before });
+    this.logger.info(`botsandborgs: standing in ${found.spec.title || found.spec.id} on AvatarX`);
+    return `In the ${String(found.spec.title || found.spec.id).replace(/ 360$/, '')} now.`;
   }
 
   /** The set a video request names, with the mark to stand on, or null. */
