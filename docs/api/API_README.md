@@ -11246,3 +11246,14 @@ curl -X POST http://localhost:3000/api/plugin \
 ---
 
 This API provides comprehensive control over your LANAgent instance, enabling automation, monitoring, and integration with external services through a robust, secure, and well-documented interface.
+
+## The stage (2.25.941)
+
+Read only, for a program on the owner's own machines that draws the agent's body (Gapless). Over TLS on its own port (8796, `STAGE_TLS_PORT`; certificate `data/stage/tls-key.pem` + `tls-cert.pem`), or plain from the machine itself. `Authorization: Bearer <stage key>`; the agent keeps only the key's sha256 in `data/stage/key.sha256` (no file: everything answers 401).
+
+| Route | |
+|---|---|
+| `GET /stage/v1/state` | `{v, agent, avatar: {sha256, url, lent, expires}, look, dances: [{clip, title, sha256, url, seconds, loop, faces?, energy?, lent?, expires?}], set: {sha256, url, kind: glb or panorama, spec} or null, sets: [{id, title, kind: glb or 360, sha256, url, bytes, lent, expires, spec}], choreography: null}`; ETag / 304 |
+| `GET /stage/v1/files/<sha256>` | a file the state names now; ETag = its sha256; 404 otherwise |
+
+`lent: true` is a body (or a clip fitted to it) lent through the owner's Bots & Borgs link: drawn, never kept.
