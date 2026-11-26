@@ -44,10 +44,15 @@ export function turnAbout([x, y, z], [px, py, pz], [ax, ay, az], a) {
  * Make a loaded set's loops ready: each node's material (and, for frames, its texture) becomes its own, the picture itself
  * stays shared. Returns { count, at(t) }: call at(t) before each frame is drawn.
  */
-export function applyLoops(root, loops) {
+export function applyLoops(root, loops, beams = []) {
   const acts = [], moving = new Map();
   let played = 0;
-  for (const l of (Array.isArray(loops) ? loops : []).slice(0, 16)) {
+  // At most 16 loops, and the swings of up to 8 beams besides, listed last (the store's format, 2119 #676).
+  const beamSet = new Set((Array.isArray(beams) ? beams : []).slice(0, 8));
+  const all = Array.isArray(loops) ? loops : [];
+  const plain = all.filter(l => !(l?.type === 'swing' && beamSet.has(l?.node))).slice(0, 16);
+  const beamSwings = all.filter(l => l?.type === 'swing' && beamSet.has(l?.node)).slice(0, 8);
+  for (const l of [...plain, ...beamSwings]) {
     if (!goodLoop(l)) continue;
     const node = root.getObjectByName(l.node);
     if (!node) continue;

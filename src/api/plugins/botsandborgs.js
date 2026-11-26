@@ -3792,10 +3792,20 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     // The set it stands in on AvatarX, when it stands in one.
     let set = null;
     const bg = await Promise.race([import('../../services/avatar/avatarx.js').then(m => m.avatarxCaller()).then(c => c?.('GET', '/agent/v1/state')).then(s => s?.background).catch(() => null), new Promise(r => setTimeout(r, 2500, null).unref?.())]);
-    const owned = bg ? (await this.ownedSets().catch(() => [])).find(s => s.spec.id === bg) : null;
+    const allSets = await this.ownedSets().catch(() => []);
+    const owned = bg ? allSets.find(s => s.spec.id === bg) : null;
     if (owned) set = { ...(await add(owned.mediaPath)), kind: owned.spec.kind === 'equirect' ? 'panorama' : 'glb', spec: owned.spec };
+    // Every set it owns, for the owner to pick from in the player (Gapless 2119 #664). Bought, never lent.
+    const sets = [];
+    for (const s of allSets) {
+      const at = await add(s.mediaPath).catch(() => null);
+      if (!at) continue;
+      const { size } = await fs.stat(s.mediaPath);
+      sets.push({ id: s.spec.id, title: s.spec.title || s.spec.id, kind: s.spec.kind === 'equirect' ? '360' : 'glb', ...at, bytes: size, lent: false, expires: null, spec: s.spec });
+    }
+    sets.sort((a, b) => a.title.localeCompare(b.title));
     const look = (await this.avatarLooks().catch(() => ({})))[id] || null;
-    return { state: { v: 1, agent: process.env.AGENT_NAME || 'LANAgent', avatar, look, dances, set, choreography: null }, files };
+    return { state: { v: 1, agent: process.env.AGENT_NAME || 'LANAgent', avatar, look, dances, set, sets, choreography: null }, files };
   }
 
   /** The dances among these clips, by name, each once. */

@@ -31,7 +31,12 @@ test('the state: the body worn, its look, and only the dances that suit it', asy
   const { p, dir } = rig(); const { state, files } = await p.stageState();
   assert.deepEqual(state.avatar, { sha256: sha('the body'), url: `/stage/v1/files/${sha('the body')}`, lent: true, expires: null }); assert.deepEqual(state.look, { pieces: ['hair'] });
   assert.deepEqual(state.dances.map(d => d.clip), ['booty', 'groove']); assert.equal(state.dances[1].energy, 0.9); assert.equal(state.dances[1].lent, undefined);
-  assert.equal(state.set, null); assert.equal(state.choreography, null); assert.equal(files.size, 3);
+  assert.equal(state.set, null); assert.equal(state.choreography, null); assert.equal(files.size, 3); assert.deepEqual(state.sets, []);
+  fs.writeFileSync(path.join(dir, 'b.jpg'), 'a beach'); fs.writeFileSync(path.join(dir, 'r.glb'), 'a room');
+  p.ownedSets = async () => [{ spec: { id: 'beach', title: 'Sunset Beach 360', kind: 'equirect', file: 'b.jpg' }, mediaPath: path.join(dir, 'b.jpg') }, { spec: { id: 'attic', title: 'Attic Loft', kind: 'mesh', file: 'r.glb' }, mediaPath: path.join(dir, 'r.glb') }];
+  const w = await p.stageState();
+  assert.deepEqual(w.state.sets.map(x => [x.id, x.kind, x.bytes, x.lent, x.sha256 === sha(x.id === 'beach' ? 'a beach' : 'a room'), x.url.endsWith(x.sha256), x.spec.id]), [['attic', 'glb', 6, false, true, true, 'attic'], ['beach', '360', 7, false, true, true, 'beach']]);
+  assert.equal(w.files.get(sha('a room')), path.join(dir, 'r.glb'));
   const male = rig({ body: 'male', id: 'store-vrm-x' }); const m = await male.p.stageState(); assert.deepEqual(m.state.dances.map(d => d.clip), ['groove']); assert.equal(m.state.avatar.lent, false);
   const own = path.join(dir, 'fitted.vrma'); fs.writeFileSync(own, 'fitted'); p.fittedClips = async () => new Map([['groove', own]]);
   const g = (await p.stageState()).state.dances.find(d => d.clip === 'groove'); assert.equal(g.sha256, sha('fitted')); assert.equal(g.lent, true);

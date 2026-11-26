@@ -2,6 +2,16 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.947] - 2026-11-25
+
+### Fixed
+- A set's beams swing even when it has 16 other moving parts (the format allows 16 and up to 8 beam swings besides; the player stopped at 16 in all).
+
+## [2.25.946] - 2026-11-25
+
+### Added
+- The stage lists every set the agent owns (`sets`), so the player can let the owner pick where it dances.
+
 ## [2.25.945] - 2026-11-25
 
 ### Fixed

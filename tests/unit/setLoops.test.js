@@ -57,3 +57,15 @@ test('swing: a turn about a pivot, with a sway after it; out of range stays stil
   a.at(0); assert.ok(Math.abs(beam.quaternion.w - 1) < 1e-12, 'back at rest');
   assert.equal(readyBeams(root, ['beam', 'gone']), 1); assert.equal(beam.material.depthWrite, false); assert.equal(beam.renderOrder, 10); beam.material.transparent = false; assert.equal(readyBeams(root, ['beam']), 0);
 });
+
+test('16 loops and the swings of up to 8 beams besides (2119 #676)', async () => {
+  const { applyLoops } = await import('../../src/interfaces/web/public/lib/bnb-loops.js');
+  const nodes = new Map(); const mk = (name) => { const n = { name, position: { x: 0, y: 0, z: 0, clone() { return { ...this }; }, set(x, y, z) { Object.assign(this, { x, y, z }); } }, quaternion: { clone() { return { setFromAxisAngle() { return this; }, multiply() { return this; } }; }, copy() { return { multiply() {} }; } }, traverse(f) { f(this); } }; nodes.set(name, n); return n; };
+  const root = { getObjectByName: (n) => nodes.get(n) || mk(n) };
+  const sway = (i) => ({ node: `s${i}`, type: 'sway', axis: [0, 1, 0], amount_m: 0.1, period_s: 2 });
+  const swing = (n) => ({ node: n, type: 'swing', pivot: [0, 3, 0], axis: [0, 0, 1], angle_deg: 10, period_s: 4 });
+  const loops = [...Array.from({ length: 16 }, (_, i) => sway(i)), ...Array.from({ length: 9 }, (_, i) => swing(`b${i}`))];
+  assert.equal(applyLoops(root, loops, Array.from({ length: 9 }, (_, i) => `b${i}`)).count, 24, '16 and 8 beams');
+  assert.equal(applyLoops(root, loops, []).count, 16, 'not beams: 16 in all');
+  assert.equal(applyLoops(root, [...Array.from({ length: 20 }, (_, i) => sway(i))], ['s0']).count, 16);
+});
