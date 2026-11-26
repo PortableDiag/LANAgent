@@ -2,6 +2,11 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.945] - 2026-11-25
+
+### Fixed
+- A lent body's fitted clips are read again every hour, so a fit the store puts back without a feed entry still arrives (a bad Can-Can stayed 20 minutes after it was fixed).
+
 ## [2.25.944] - 2026-11-25
 
 ### Added

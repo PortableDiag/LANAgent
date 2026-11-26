@@ -62,6 +62,8 @@ const FEED_POLL_MS = Number(process.env.BOTSANDBORGS_FEED_MS) || 60 * 1000;
 const SLOW_BEAT_MS = 30 * 60 * 1000;
 // New products are not in the account's feed: looked for on their own, or a new set waited up to six hours (2026-11-25).
 const NEW_PACKS_MS = Number(process.env.BOTSANDBORGS_NEW_MS) || 15 * 60 * 1000;
+// A lent body's fits are read again this often even with no feed entry: a put-back came with none (Can-Can, 2026-11-25).
+const LINK_FITS_MS = Number(process.env.BOTSANDBORGS_LINK_FITS_MS) || 60 * 60 * 1000;
 const LIVE_FIRST_SYNC_MS = 3 * 60 * 1000;
 const AUTO_STICKER_EVERY_MS = Number(process.env.BOTSANDBORGS_STICKER_EVERY_MS) || 20 * 60 * 1000;
 const AUTO_STICKER_ASK_EVERY_MS = 60 * 1000;
@@ -602,6 +604,8 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
     this._liveFirst = setTimeout(tick, LIVE_FIRST_SYNC_MS);
     this._liveTimer = setInterval(tick, LIVE_SYNC_MS);
     this._feedTimer = setInterval(() => this.feedBeat(), FEED_POLL_MS);
+    this._linkTimer = setInterval(() => this.linkState().then(st => (st.links.some(l => l.status === 'active') ? this.syncLinks() : null)).catch(e => this.logger.warn(`botsandborgs: linked fits not synced: ${e.message}`)), LINK_FITS_MS);
+    this._linkTimer.unref?.();
     this._newTimer = setInterval(() => this.takeNewPacks().catch(e => this.logger.warn(`botsandborgs: new packs not taken: ${e.message}`)), NEW_PACKS_MS);
     this._liveFirst.unref?.(); this._liveTimer.unref?.(); this._feedTimer.unref?.(); this._newTimer.unref?.();
   }
@@ -622,7 +626,7 @@ export default class BotsAndBorgsPlugin extends BasePlugin {
   }
 
   async cleanup() {
-    clearTimeout(this._liveFirst); clearTimeout(this._relist); clearInterval(this._liveTimer); clearInterval(this._feedTimer); clearInterval(this._newTimer);
+    clearTimeout(this._liveFirst); clearTimeout(this._relist); clearInterval(this._liveTimer); clearInterval(this._feedTimer); clearInterval(this._newTimer); clearInterval(this._linkTimer);
   }
 
   /**
