@@ -2,6 +2,11 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.950] - 2026-11-26
+
+### Documentation
+- Feature progress for 2.25.866-949, the stage in the API collection, session report.
+
 ## [2.25.949] - 2026-11-26
 
 ### Changed

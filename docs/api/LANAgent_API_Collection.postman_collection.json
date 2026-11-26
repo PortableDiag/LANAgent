@@ -2,9 +2,9 @@
   "info": {
     "_postman_id": "9b5edc66-ea34-4329-a9d5-baca5366e76d",
     "name": "LANAgent API Collection",
-    "description": "LANAgent API v2.25.149 — Stale Chromium singleton locks are now actually cleared before browser launches: the cleaner used existsSync, which follows symlinks, so the always-dangling SingletonLock symlink was reported absent and browser-tier scraping stayed wedged after any unclean shutdown. Detection now uses lstat; a running browser is never evicted. No HTTP surface change.",
+    "description": "LANAgent API v2.25.948 — GET /stage/v1/state and /stage/v1/files/<sha256> (Bearer stage key, TLS port 8796 or loopback only): the worn body, look, dances, set and every owned set (sets[]) for a program that draws the agent dancing (Gapless, Lull). Keys: one hash per program in data/stage/key.sha256; the owner gets Lull's by saying \"pair with Lull\" (QR on Telegram).\n\nLANAgent API v2.25.149 — Stale Chromium singleton locks are now actually cleared before browser launches: the cleaner used existsSync, which follows symlinks, so the always-dangling SingletonLock symlink was reported absent and browser-tier scraping stayed wedged after any unclean shutdown. Detection now uses lstat; a running browser is never evicted. No HTTP surface change.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
-    "version": "2.25.819"
+    "version": "2.25.950"
   },
   "auth": {
     "type": "bearer",
