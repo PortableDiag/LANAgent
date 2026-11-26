@@ -9,7 +9,8 @@
  * Over TLS only (its own port, STAGE_TLS_PORT or 8796, with the certificate in data/stage/tls-*.pem), or from this machine:
  * the key and a lent body never go over plain http.
  *
- * Off until a key was made (data/stage/key.sha256 holds only its hash). A lent body (the owner's Bots & Borgs link) says
+ * Off until a key was made (data/stage/key.sha256 holds only hashes: one line per program, `<hash>` or `<program> <hash>`;
+ * Lull's line is made by pairing, see lullPairing). A lent body (the owner's Bots & Borgs link) says
  * `lent: true`: to be drawn, never kept.
  */
 import express from 'express';
@@ -20,6 +21,7 @@ import path from 'path';
 import https from 'https';
 import { DATA_PATH } from '../../utils/paths.js';
 import { logger } from '../../utils/logger.js';
+import os from 'os';
 
 const TYPES = { '.vrm': 'model/gltf-binary', '.vrma': 'model/gltf-binary', '.glb': 'model/gltf-binary', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png', '.webp': 'image/webp' };
 export const stageKeyFile = () => path.join(DATA_PATH, 'stage', 'key.sha256');
@@ -27,10 +29,56 @@ export const stageKeyFile = () => path.join(DATA_PATH, 'stage', 'key.sha256');
 /** Whether this request carries the stage key. False when there is none. */
 export async function stageAllowed(header, keyFile = stageKeyFile()) {
   const m = /^Bearer\s+(\S{20,200})$/.exec(String(header || ''));
-  const want = (await fs.readFile(keyFile, 'utf8').catch(() => '')).trim().toLowerCase();
-  if (!m || !/^[0-9a-f]{64}$/.test(want)) return false;
-  return crypto.timingSafeEqual(crypto.createHash('sha256').update(m[1]).digest(), Buffer.from(want, 'hex'));
+  const wants = keyLines(await fs.readFile(keyFile, 'utf8').catch(() => '')).map(l => l.hash);
+  if (!m || !wants.length) return false;
+  const got = crypto.createHash('sha256').update(m[1]).digest();
+  return wants.some(w => crypto.timingSafeEqual(got, Buffer.from(w, 'hex')));
 }
+
+/** The key file's lines: [{ program, hash }], program '' for a bare hash (the first key, Gapless's). */
+function keyLines(text) {
+  return String(text).split('\n').map(l => l.trim().toLowerCase().split(/\s+/)).map(w => w.length === 1 ? { program: '', hash: w[0] } : { program: w[0], hash: w[1] })
+    .filter(l => /^[0-9a-f]{64}$/.test(l.hash || ''));
+}
+
+/** The address a phone on the LAN reaches the stage at: STAGE_PUBLIC_URL, else this machine's first private IPv4. */
+export function stagePageUrl(port = Number(process.env.STAGE_TLS_PORT) || 8796) {
+  if (process.env.STAGE_PUBLIC_URL) return process.env.STAGE_PUBLIC_URL.replace(/\/+$/, '');
+  const ips = Object.values(os.networkInterfaces()).flat().filter(a => a && a.family === 'IPv4' && !a.internal).map(a => a.address);
+  // A home LAN first (192.168), never a container bridge (172.17/18) or a tunnel (the WireGuard 10.8, a VPN's 100.64).
+  const lan = ips.find(a => /^192\.168\./.test(a)) || ips.find(a => /^10\./.test(a) && !/^10\.8\./.test(a)) || null;
+  return lan ? `https://${lan}:${port}` : null;
+}
+
+/**
+ * Pairing Lull (the owner's phone player) with this agent's stage: a new key for Lull only (any key Lull had before stops; the
+ * other programs' keys stay), and the link Lull reads from its QR code (Lull 1.20, README "Agents dancing"):
+ *   lull-stage:<page>#name=<agent>&key=<url-encoded key>&pin=<the certificate's sha256, 64 hex>
+ *   https://updates.procomputation.com/lull/pair#name=..&key=..&url=<url-encoded page>&pin=..   (the same, tappable)
+ * The key is in the fragment and only its hash stays here.
+ */
+export async function lullPairing({ name = 'agent', dir = path.join(DATA_PATH, 'stage'), url = stagePageUrl() } = {}) {
+  const pem = await fs.readFile(path.join(dir, 'tls-cert.pem'), 'utf8').catch(() => null);
+  if (!pem) throw new Error('the stage has no certificate yet');
+  if (!url) throw new Error('no address for the stage');
+  const pin = crypto.createHash('sha256').update(new crypto.X509Certificate(pem).raw).digest('hex');
+  const key = crypto.randomBytes(32).toString('base64url');
+  const file = path.join(dir, 'key.sha256');
+  const kept = keyLines(await fs.readFile(file, 'utf8').catch(() => '')).filter(l => l.program !== 'lull');
+  const lines = [...kept.map(l => (l.program ? `${l.program} ${l.hash}` : l.hash)), `lull ${crypto.createHash('sha256').update(key).digest('hex')}`];
+  await fs.writeFile(file, lines.join('\n') + '\n', { mode: 0o600 });
+  const agent = String(name).toLowerCase().replace(/[^a-z0-9_-]+/g, '-');
+  const fields = `name=${encodeURIComponent(agent)}&key=${encodeURIComponent(key)}`;
+  return {
+    link: `lull-stage:${url}#${fields}&pin=${pin}`,
+    // The tappable form (chats and mail don't make lull-stage: clickable): Lull is the verified app for it (2119 #683).
+    linkHttps: `https://updates.procomputation.com/lull/pair#${fields}&url=${encodeURIComponent(url)}&pin=${pin}`,
+    url, pin
+  };
+}
+
+/** "pair with Lull", "Lull QR code", "dance in Lull", "connect Lull to you". */
+export const LULL_PAIR = /\b(?:pair|link|connect|hook\s*up|add|set\s*up|qr|code)\b[\s\S]{0,40}\blull\b|\blull\b[\s\S]{0,40}\b(?:pair(?:ing)?|qr|code|link|connect)\b|\bdance\s+(?:in|on)\s+lull\b/i;
 
 export function createStageRouter(agent, { keyFile = stageKeyFile(), store = () => { const e = agent?.apiManager?.apis?.get?.('botsandborgs'); return e?.enabled === false ? null : (e?.instance || e || null); } } = {}) {
   const r = express.Router();

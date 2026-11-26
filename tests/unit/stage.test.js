@@ -6,6 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import express from 'express';
+import { execFileSync } from 'node:child_process';
 import { createStageRouter, stageAllowed, startStageTls } from '../../src/interfaces/web/stage.js';
 import BotsAndBorgsPlugin from '../../src/api/plugins/botsandborgs.js';
 import { PluginSettings } from '../../src/models/PluginSettings.js';
@@ -70,4 +71,30 @@ test('over its own TLS port; plain http only from this machine; no certificate, 
   try { assert.equal(await get({ Authorization: `Bearer ${KEY}` }), 200); assert.equal(await get({}), 401); } finally { srv.close(); srv.closeAllConnections?.(); }
   const router = createStageRouter(null, { keyFile, store: () => p }); const mw = router.stack[0].handle; const ask = async (socket) => { let code = 0, passed = false; await mw({ socket, headers: { authorization: `Bearer ${KEY}` } }, { setHeader() {}, status(c) { code = c; return { json() {} }; } }, () => { passed = true; }); return passed || code; };
   assert.equal(await ask({ remoteAddress: '192.0.2.7' }), 403); assert.equal(await ask({ remoteAddress: '::ffff:127.0.0.1' }), true); assert.equal(await ask({ remoteAddress: '192.0.2.7', encrypted: true }), true);
+});
+
+test('pairing Lull: a key of its own beside the others, the link Lull 1.20 reads', async () => {
+  const { lullPairing, LULL_PAIR } = await import('../../src/interfaces/web/stage.js');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'stage-lull-'));
+  execFileSync('openssl', ['req', '-x509', '-newkey', 'ec', '-pkeyopt', 'ec_paramgen_curve:prime256v1', '-nodes', '-keyout', path.join(dir, 'tls-key.pem'), '-out', path.join(dir, 'tls-cert.pem'), '-days', '2', '-subj', '/CN=stage'], { stdio: 'ignore' });
+  const file = path.join(dir, 'key.sha256');
+  fs.writeFileSync(file, sha(KEY) + '\n');
+  const first = await lullPairing({ name: 'ALICE', dir, url: 'https://10.0.0.5:8796' });
+  const m = /^lull-stage:https:\/\/10\.0\.0\.5:8796#name=alice&key=([^&]+)&pin=([0-9a-f]{64})$/.exec(first.link);
+  assert.ok(m, first.link);
+  const pin = crypto.createHash('sha256').update(new crypto.X509Certificate(fs.readFileSync(path.join(dir, 'tls-cert.pem'))).raw).digest('hex');
+  assert.equal(m[2], pin);
+  const key1 = decodeURIComponent(m[1]);
+  assert.equal(first.linkHttps, `https://updates.procomputation.com/lull/pair#name=alice&key=${m[1]}&url=${encodeURIComponent('https://10.0.0.5:8796')}&pin=${pin}`);
+  assert.equal(await stageAllowed(`Bearer ${key1}`, file), true, 'Lull in');
+  assert.equal(await stageAllowed(`Bearer ${KEY}`, file), true, 'Gapless still in');
+  assert.ok(!fs.readFileSync(file, 'utf8').includes(key1), 'only the hash is kept');
+  const second = await lullPairing({ name: 'ALICE', dir, url: 'https://10.0.0.5:8796' });
+  const key2 = decodeURIComponent(/key=([^&]+)/.exec(second.link)[1]);
+  assert.equal(await stageAllowed(`Bearer ${key1}`, file), false, 'the old Lull code stops');
+  assert.equal(await stageAllowed(`Bearer ${key2}`, file), true);
+  assert.equal(await stageAllowed(`Bearer ${KEY}`, file), true);
+  assert.equal(fs.readFileSync(file, 'utf8').trim().split('\n').length, 2);
+  for (const s of ['pair with Lull', 'can you pair alice to lull', 'give me your Lull QR code', 'dance in Lull', 'connect to the lull app', 'lull pairing code please']) assert.ok(LULL_PAIR.test(s), s);
+  for (const s of ['there was a lull in the music', 'play something calm']) assert.ok(!LULL_PAIR.test(s), s);
 });

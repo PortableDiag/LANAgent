@@ -57,6 +57,7 @@ import { looksMultiStep } from './multiStep.js';
 import { parseLightCommand, isLightComplaint, isLightCheck, findDevice, scheduleQuestion, schedulesInWords } from '../services/govee/lightCommand.js';
 import { parseLightSchedule } from '../services/govee/lightSchedule.js';
 import { GoveeEnhancements } from '../api/plugins/govee-enhancements.js';
+import { lullPairing, LULL_PAIR } from '../interfaces/web/stage.js';
 
 const execAsync = promisify(exec);
 const __filename = fileURLToPath(import.meta.url);
@@ -1026,6 +1027,29 @@ export class Agent extends EventEmitter {
     }
   }
 
+  /** A new Lull pairing code, as a QR and its link, to the owner's Telegram. Returns what to say. */
+  async _pairLull(context = {}) {
+    if (context.trellis || context.interface === 'trellis') return 'A Lull pairing code holds a key, so I only send it to your Telegram. Ask me there or in the dashboard.';
+    const tg = this.interfaces?.get?.('telegram');
+    if (!tg?.bot?.telegram?.sendPhoto || !tg.authorizedUserId) return 'I can make a Lull pairing code, but Telegram is not connected, and that is the only place I send it.';
+    try {
+      const { linkHttps } = await lullPairing({ name: this.config?.name || 'agent' });
+      const QRCode = (await import('qrcode')).default;
+      const png = await QRCode.toBuffer(linkHttps, { margin: 2, width: 480 });
+      const esc = (t) => t.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+      await tg.bot.telegram.sendPhoto(tg.authorizedUserId, { source: png, filename: 'lull-pairing.png' }, {
+        caption: 'Pair Lull with me. On the phone with Lull: tap <a href="' + esc(linkHttps) + '">Pair with Lull</a>. ' +
+          'From another screen: scan this code with the phone camera, or in Lull: Dancers, Add agent, Scan its code.\n\nA new code replaces any earlier one.',
+        parse_mode: 'HTML'
+      });
+      logger.info('Lull: new pairing code sent to the owner on Telegram');
+      return context.interface === 'telegram' ? 'Here is my Lull pairing code: tap Pair with Lull on the phone that has Lull, or scan the code.' : 'I sent my Lull pairing code to your Telegram: tap Pair with Lull there on the phone that has Lull, or scan the code.';
+    } catch (err) {
+      logger.warn(`Lull pairing: ${err.message}`);
+      return `I could not make a Lull pairing code: ${err.message}.`;
+    }
+  }
+
   async processNaturalLanguage(input, context = {}, systemPrompt = null) {
     // Anyone who is not the operator gets a model reply and nothing else: this router runs
     // plugins, and the guest path's restrictions used to be ignored here.
@@ -1059,6 +1083,14 @@ export class Agent extends EventEmitter {
         render: (text, result, ctx, query) => this.renderReasoningResult(text, result, ctx, query)
       });
       if (resumed) return resumed;
+
+      // "Pair with Lull": the owner's phone player reads this agent's stage from a QR code. The code holds a key, so it goes to
+      // the owner's Telegram only, never into a shared channel (Lull 1.20, Trellis card 5180).
+      if (LULL_PAIR.test(input)) {
+        const content = await this._pairLull(context);
+        await this.memoryManager?.storeConversation(context.userId, input, content, context);
+        return { type: 'text', content };
+      }
 
       // In front of the body (AvatarX, the live avatar page): a dance or a move asked for is done, before anything routes,
       // plans or answers for it (the owner, 2026-11-24: five turns for one Roger Rabbit).

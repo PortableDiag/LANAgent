@@ -2,6 +2,16 @@
 
 All notable changes to LANAgent will be documented in this file.
 
+## [2.25.949] - 2026-11-26
+
+### Changed
+- The Lull pairing code and link are the tappable https form, so one tap on the phone opens Lull.
+
+## [2.25.948] - 2026-11-26
+
+### Added
+- "Pair with Lull": the agent sends the owner, on Telegram only, a QR code and `lull-stage:` link that lets the Lull music player draw it dancing. Lull gets a key of its own beside the others; a new code replaces the last.
+
 ## [2.25.947] - 2026-11-25
 
 ### Fixed
